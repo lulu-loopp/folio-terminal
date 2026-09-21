@@ -916,6 +916,32 @@ pub fn thread_mouse_capture() -> Option<NativeWindow> {
     None
 }
 
+/// **Let the system translate touch into the mouse** — and off Windows there
+/// is nothing to let (N, a harmless no-op; owner ruling 2026-09-21).
+///
+/// On Windows this undoes a registration winit makes and hands four messages
+/// back to `DefWindowProc`, because that registration switches the system's own
+/// gesture engine off for the window. Neither half has a subject here.
+///
+/// **macOS never took the engine away.** A trackpad's clicks, drags and
+/// two-finger scrolling arrive as ordinary `NSEvent` mouse and scroll-wheel
+/// events, which winit already delivers as `CursorMoved`, `MouseInput` and
+/// `MouseWheel` — the very events this program has always read — and a Mac with
+/// a touch screen does not exist. So there is nothing to unregister, nothing to
+/// route around, and no ticket behind this: it is not deferred work, it is work
+/// the platform does.
+///
+/// The `report` is dropped for that reason rather than kept: it says *a touch
+/// arrived and was handed over*, and a host that hands nothing over would be
+/// reporting a road it has not got.
+pub fn let_the_system_translate_touch(
+    window: NativeWindow,
+    report: Box<dyn Fn()>,
+) -> Result<(), String> {
+    let _ = (window, report);
+    Ok(())
+}
+
 /// Whether this window is iconic. `isMiniaturized`; M1-3.
 ///
 /// **`false` and not a refusal**, because the type has no empty answer and the

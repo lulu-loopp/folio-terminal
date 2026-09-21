@@ -11,6 +11,12 @@ All notable changes to Folio are recorded here. The format follows
 - In the Markdown preview, a paragraph turns into its source when the gesture
   ends, not while a selection is being drawn across it.
 
+### Fixed
+
+- Touch input — a touch screen, or a remote-desktop tool that sends touch — now
+  works as it does in other Windows programs: tap, drag to scroll, press and
+  hold for the menu.
+
 ## 0.4.3-preview — 2026-09-21
 
 ### Added
