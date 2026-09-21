@@ -11,6 +11,10 @@ All notable changes to Folio are recorded here. The format follows
 - In the Markdown preview, a paragraph turns into its source when the gesture
   ends, not while a selection is being drawn across it.
 
+### Fixed
+
+- A printed path with spaces in it is a link when the file is there.
+
 ## 0.4.3-preview — 2026-09-21
 
 ### Added

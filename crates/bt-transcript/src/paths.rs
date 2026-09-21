@@ -744,22 +744,52 @@ fn is_windows_drive_absolute(text: &str) -> bool {
         && matches!(bytes[2], b'\\' | b'/')
 }
 
+/// **How many readings of one unquoted token the caller can choose between** — §7.30, the
+/// 2026-09-21 entry.
+///
+/// A space is a seam like any other: the token is read across it and offers the shorter reading
+/// behind it, and *which* reading is real is settled by asking the disk longest first. That is one
+/// rule, and this is the one question a caller has to answer before it may be given the readings —
+/// **can it arbitrate?** — because the readings of a token with spaces in it are not held apart by
+/// anything else on the line. Two readings of `D:\a.png and D:\b.png` both end in `.png`.
+///
+/// It is not a knob on where a token stops. Both settings read the same boundary table, the same
+/// prose seams and the same quoting; the only thing they disagree about is whether a space behind a
+/// name is a place the reading may continue past.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenSpaces {
+    /// The caller asks the disk about every reading and promises **at most one** of them —
+    /// [`PrintedPathLinks::links_in`], whose walk is one token, one answer. It gets the spaces.
+    ReadAcross,
+    /// The caller has no arbitrator: it admits a reading on that reading's own evidence and
+    /// decorates every one it admits, so two admissible readings of one token would be two
+    /// decorations laid over the same text. It gets the token's own end, which is what it has
+    /// always got. `bt_term::inline_image`'s picture scan is that caller — its evidence is an
+    /// extension allowlist, and an allowlist is a filter and not a judge.
+    StopAt,
+}
+
 /// Allocation-light lexical candidate scan for the event thread. It recognizes only drive-rooted
 /// Windows paths. Unquoted paths open at a token boundary ([`candidate_start_boundary`]) and close
-/// at whitespace or a closing delimiter ([`is_path_terminator_char`]); quoted paths may contain
+/// at a terminator ([`is_path_terminator_char`]) — which for a [`TokenSpaces::ReadAcross`] caller
+/// is a terminator that is not a space ([`token_end_across_spaces`]); quoted paths may contain
 /// whitespace and any delimiter, and must have a closing quote. Existence, file kind, size and
 /// content format are nobody's business here.
 ///
 /// One unquoted token may come back as **several candidates sharing a start** — its whole self
-/// first, then one shorter reading for every prose seam it carries (§7.30). They are readings of
-/// one token and not several references: whoever goes to the disk asks about the longest of them
-/// first and stops at the first that is there.
-pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> {
+/// first, then one shorter reading for every prose seam it carries and one for every space it was
+/// read across (§7.30). They are readings of one token and not several references: whoever goes to
+/// the disk asks about the longest of them first and stops at the first that is there.
+pub fn detect_absolute_path_candidates(
+    text: &str,
+    spaces: TokenSpaces,
+) -> Vec<PrintedPathCandidate> {
     detect_rooted_candidates(
         text,
         PrintedPathSpelling::Absolute,
         &absolute_candidate_opens_at,
         &|path| is_local_absolute_path(Path::new(path)),
+        spaces,
     )
 }
 
@@ -785,6 +815,9 @@ pub fn detect_foreign_path_candidates(
         PrintedPathSpelling::Foreign,
         &foreign_candidate_opens_at,
         &|path| namespace.to_local_path(path).is_some(),
+        // One caller, and it is the one that arbitrates: this spelling is read by the printed-path
+        // chain alone (`PrintedPathLinks::candidates_in`), never by the picture scan.
+        TokenSpaces::ReadAcross,
     )
 }
 
@@ -805,13 +838,15 @@ pub fn detect_foreign_path_candidates(
 /// signature spelled twice is a signature that can drift once.
 type RootedOpensAt = dyn Fn(&str, &[u8], usize, bool) -> bool;
 
-/// The walk both rooted scans are: find where a token opens, take its extent (quoted or not),
-/// release its prose tail, offer §7.30's shorter readings, and keep the ones `rooted` accepts.
+/// The walk both rooted scans are: find where a token opens, take its extent (quoted or not, and
+/// across the spaces a filename may hold), release its prose tail, offer §7.30's shorter readings,
+/// and keep the ones `rooted` accepts.
 fn detect_rooted_candidates(
     text: &str,
     spelling: PrintedPathSpelling,
     opens_at: &RootedOpensAt,
     rooted: &dyn Fn(&str) -> bool,
+    spaces: TokenSpaces,
 ) -> Vec<PrintedPathCandidate> {
     let bytes = text.as_bytes();
     let mut candidates = Vec::new();
@@ -839,23 +874,22 @@ fn detect_rooted_candidates(
             cursor += 1;
             continue;
         };
-        // Quoting is a declaration of extent, so nothing inside quotes is prose to be released —
-        // and, for the same reason, nothing inside them is prose to be cut at either (§7.30).
-        let end = if quoted {
-            token
+        // A quoted token offers no shorter form and no wider one: its quotes declared its extent,
+        // so nothing inside them is prose to be released and nothing inside them is prose to be cut
+        // at either (§7.30) — and a space inside them was always part of the name.
+        let forms = if quoted {
+            vec![token]
         } else {
-            release_prose_tail(text, start, token)
+            // §7.30 (owner report 2026-09-21). A space ends a token, and a filename may hold one —
+            // `C:\Program Files\…`, `…\验收 next85\中文 说明.md` — so a caller that can arbitrate
+            // between readings is given the ones the spaces open ([`TokenSpaces`]).
+            let (extent, crossed) = match spaces {
+                TokenSpaces::ReadAcross => token_end_across_spaces(text, token),
+                TokenSpaces::StopAt => (token, Vec::new()),
+            };
+            rooted_token_readings(text, start, extent, &crossed)
         };
-        let token_text = &text[start..end];
-        // A quoted token offers no shorter form: its quotes declared its extent. An unquoted one is
-        // searched whole — a drive prefix is as rare as an anchor, so this walk happens once per
-        // prefix and [`prose_seam_ends`] answers "no seams" at the cost of the walk itself.
-        let seams = if quoted {
-            Vec::new()
-        } else {
-            prose_seam_ends(token_text, token_text.len())
-        };
-        for form_end in std::iter::once(end).chain(seams.into_iter().map(|offset| start + offset)) {
+        for form_end in forms {
             let (path_length, location) = split_printed_location(&text[start..form_end]);
             let path_byte_end = start + path_length;
             if rooted(&text[start..path_byte_end]) {
@@ -868,6 +902,10 @@ fn detect_rooted_candidates(
                 });
             }
         }
+        // The cursor moves past the token's **own** end and not past the extent read across the
+        // spaces behind it: what stands behind a space is the next word, and the next word may open
+        // a reference of its own. `D:\a C:\b` offers the reading `D:\a C:\b` — the disk denies it —
+        // and still opens `C:\b`, which skipping the extent would swallow.
         cursor = if quoted {
             token.saturating_add(1)
         } else {
@@ -1545,6 +1583,92 @@ fn token_end(text: &str, start: usize) -> usize {
         .char_indices()
         .find(|(_, character)| is_path_terminator_char(*character))
         .map_or(text.len(), |(offset, _)| start + offset)
+}
+
+/// How many spaces one unquoted rooted token may be read across — §7.30 (owner report
+/// 2026-09-21).
+///
+/// **The cap is the cost, stated in questions.** Every space crossed is one more reading of the
+/// same token, and every reading is one more name the disk may be asked about, so this number *is*
+/// the budget: a rooted token costs at most four verdict requests beyond the ones it already cost,
+/// and a line holding *k* rooted tokens at most `4k`. Nothing about the shape of the text bounds
+/// it — `see D:\a b.md for details` reads on into the sentence exactly as far as into a folder
+/// name, because no rule short of the disk can tell the two apart — so the bound has to be a
+/// number, and a number is what this is.
+///
+/// **Four, because four is what the everyday names cost.** `C:\Program Files\Common Files\x.dll`
+/// crosses two; `…\验收 next85\中文 说明.md`, the line this came from, crosses two; the OneDrive
+/// folder a work account gets — `C:\Users\alice\OneDrive - Example State University\notes.md` — crosses
+/// four, and it is the widest everyday shape there is. A name wider than that can still be quoted,
+/// which is the appeal every other bound in this module offers.
+const MAX_PATH_SPACES: usize = 4;
+
+/// Where an unquoted token ends once the spaces a filename may hold are read across, and the byte
+/// offset of every space it crossed, ascending — §7.30 (owner report 2026-09-21).
+///
+/// `token` is where [`token_end`] already stopped. The walk continues past it **only** over a
+/// single space with a path character behind it, and hands the next stretch back to [`token_end`],
+/// so every other terminator ends the extent exactly where it always did: a tab, a bracket of
+/// either half, a backtick, a second space, or the end of the row. That is the whole of the bound
+/// besides [`MAX_PATH_SPACES`] — nothing here reads what the words behind the space *say*, because
+/// `Files` and `for` are the same word to a lexer and the disk is what tells them apart (§7.1.5j
+/// ③, unmoved: a reading nobody holds is not a link).
+///
+/// A run of two or more spaces stops it because no reading could be admitted past one anyway:
+/// Win32 normalizes the trailing blanks off a component before the filesystem is ever asked, so a
+/// name spelled with a double space is a name asked about under a different name — the same fact
+/// [`is_sentence_stop`] reads about the trailing dot.
+fn token_end_across_spaces(text: &str, token: usize) -> (usize, Vec<usize>) {
+    let mut end = token;
+    let mut crossed = Vec::new();
+    while crossed.len() < MAX_PATH_SPACES {
+        let Some(behind) = text[end..].strip_prefix(' ') else {
+            break;
+        };
+        if !behind.starts_with(is_path_tail_char) {
+            break;
+        }
+        crossed.push(end);
+        end = token_end(text, end + 1);
+    }
+    (end, crossed)
+}
+
+/// Every reading one unquoted rooted token offers, longest first — §7.30, with the spaces of the
+/// 2026-09-21 entry in it.
+///
+/// One walk per **boundary**, and the boundaries are the extent's own end together with every
+/// space it was read across. Each of them is a place where a name has stopped, so each is released
+/// and cut by exactly the functions the token's own end is released and cut by — and that is the
+/// point rather than a convenience: §7.30's 2026-09-05 arm reads a sentence stop as a seam on the
+/// evidence that *nothing stands behind it*, and a space is that evidence as surely as the end of a
+/// row. Without a walk per boundary, `see D:\x\a.md. and more` would stop offering `D:\x\a.md` the
+/// moment the token was read past the stop.
+///
+/// **What it costs, stated in questions.** With no space crossed this is one walk and the readings
+/// are the ones this token has always offered, byte for byte. With the bound full it is five, so a
+/// rooted token carrying no prose seam — which is nearly every one — offers five readings and costs
+/// at most four verdict requests beyond what it cost before, and a line holding *k* rooted tokens
+/// at most `4k`.
+fn rooted_token_readings(text: &str, start: usize, extent: usize, spaces: &[usize]) -> Vec<usize> {
+    let mut forms = Vec::new();
+    for boundary in std::iter::once(extent).chain(spaces.iter().rev().copied()) {
+        let end = release_prose_tail(text, start, boundary);
+        let reading = &text[start..end];
+        forms.push(end);
+        forms.extend(
+            prose_seam_ends(reading, reading.len())
+                .into_iter()
+                .map(|offset| start + offset),
+        );
+    }
+    // One descending list, because a space and a prose seam are two witnesses of the same kind and
+    // the ruling is one order over all of them: longest first, the disk arbitrating. Two boundaries
+    // can offer the same reading — a stop standing in front of a space is cut by both — and a
+    // reading offered twice would be one wasted question.
+    forms.sort_unstable_by(|left, right| right.cmp(left));
+    forms.dedup();
+    forms
 }
 
 /// Where the path stops inside one reference, and the `:line[:col]` that follows it.
@@ -2981,7 +3105,7 @@ impl PrintedPathLinks {
     /// Every candidate one text offers, in reading order — the one scan both the single-line pass
     /// and the rejoin read, so the two can never disagree about where a reference stops.
     fn candidates_in(&self, text: &str) -> Vec<PrintedPathCandidate> {
-        let mut candidates = detect_absolute_path_candidates(text);
+        let mut candidates = detect_absolute_path_candidates(text, TokenSpaces::ReadAcross);
         candidates.extend(detect_foreign_path_candidates(text, &self.namespace));
         if self.working_directory.is_some() {
             candidates.extend(detect_relative_path_candidates(text, &|_| true));
@@ -3051,7 +3175,7 @@ mod tests {
 
     /// Every candidate one line offers, as `(text, spelling)` pairs in reading order.
     fn candidates(text: &str) -> Vec<(&str, PrintedPathSpelling)> {
-        let mut found = detect_absolute_path_candidates(text);
+        let mut found = detect_absolute_path_candidates(text, TokenSpaces::ReadAcross);
         found.extend(detect_relative_path_candidates(text, &|_| true));
         found.extend(detect_file_uri_candidates(text));
         found.sort_by_key(|candidate| candidate.byte_start);
@@ -3068,9 +3192,32 @@ mod tests {
             .collect::<Vec<_>>()
     }
 
+    /// The readings one line's **rooted** tokens offer, in the order the disk is asked about them.
+    ///
+    /// The rooted scan alone, because that is the one this asks about: a bare relative reference
+    /// standing behind a space on the same line opens a candidate of its own, and it would be
+    /// reported here as though it were another reading of the same token.
+    fn rooted_readings(text: &str) -> Vec<&str> {
+        detect_absolute_path_candidates(text, TokenSpaces::ReadAcross)
+            .into_iter()
+            .map(|candidate| candidate.reference_text(text))
+            .collect()
+    }
+
+    /// The same, for the spelling a pane's own shell roots a path with.
+    fn foreign_readings<'line>(
+        namespace: &PrintedPathNamespace,
+        text: &'line str,
+    ) -> Vec<&'line str> {
+        detect_foreign_path_candidates(text, namespace)
+            .into_iter()
+            .map(|candidate| candidate.reference_text(text))
+            .collect()
+    }
+
     /// Every candidate as `(path text, location)` — the two halves a located reference splits into.
     fn located(text: &str) -> Vec<(&str, Option<PrintedPathLocation>)> {
-        let mut found = detect_absolute_path_candidates(text);
+        let mut found = detect_absolute_path_candidates(text, TokenSpaces::ReadAcross);
         found.extend(detect_relative_path_candidates(text, &|_| true));
         found.extend(detect_file_uri_candidates(text));
         found.sort_by_key(|candidate| candidate.byte_start);
@@ -3093,15 +3240,19 @@ mod tests {
         );
     }
 
-    /// Boundary table rows 3 and 4. A space is the ordinary end of an unquoted token, and quoting is
-    /// the one declaration of extent that lets a path carry one.
+    /// Boundary table rows 3 and 4, **as the 2026-09-21 entry leaves them**: quoting is still the
+    /// one declaration of extent, and unquoted the space is now a **seam** rather than the end of
+    /// the story — the token is read across it and offers the shorter reading behind it.
     #[test]
     fn a_space_belongs_to_a_path_only_inside_quotes() {
         assert_eq!(spans("\"D:\\a b\\c.md\""), ["D:\\a b\\c.md"]);
-        // Unquoted, the same characters are two references and not one, which is the honest
-        // reading: the space ended a drive-rooted token, and what follows it is a perfectly
-        // well-formed relative name. Neither of them exists, so neither becomes a link.
-        assert_eq!(spans("D:\\a b\\c.md"), ["D:\\a", "b\\c.md"]);
+        // Unquoted, the same characters offer the whole name first, then the reading the space
+        // used to be the whole of — and, as before, the relative name lying across the tail of it.
+        // Which of them is a link is the disk's to say and nobody else's.
+        assert_eq!(
+            spans("D:\\a b\\c.md"),
+            ["D:\\a b\\c.md", "D:\\a", "b\\c.md"]
+        );
     }
 
     /// Boundary table rows 5 and 6: a closing delimiter ends the token, in either width.
@@ -3314,7 +3465,11 @@ mod tests {
         assert_eq!(
             linked_in(
                 &msys(),
-                &[("C:\\Users\\alice\\notes\\a.md", true)],
+                &[
+                    ("C:\\Users\\alice\\notes\\a.md", true),
+                    ("C:\\Users\\alice\\notes\\a.md:12 for", false),
+                    ("C:\\Users\\alice\\notes\\a.md:12 for it", false),
+                ],
                 "see ~/notes/a.md:12 for it",
             ),
             ["~/notes/a.md:12 → file:///C:/Users/alice/notes/a.md#L12"]
@@ -3554,11 +3709,18 @@ mod tests {
     fn a_prompts_own_host_colon_is_not_a_binding_colon() {
         // The prompt's `$` is §7.30's sentence stop at the end of a token, so the disk is asked
         // about `D:\Demo$` before `D:\Demo` — the ruling's own longest-first order, unchanged by
-        // which colon stands in front of the name.
+        // which colon stands in front of the name. The command the person typed behind the prompt
+        // is read too, because a space is a seam and not a wall (2026-09-21), and it is the disk
+        // that says a directory is not called `Demo$ ls -la`.
         assert_eq!(
             linked_in(
                 &wsl(),
-                &[("D:\\Demo", true), ("D:\\Demo$", false)],
+                &[
+                    ("D:\\Demo", true),
+                    ("D:\\Demo$", false),
+                    ("D:\\Demo$ ls", false),
+                    ("D:\\Demo$ ls -la", false),
+                ],
                 "alice@HOST:/mnt/d/Demo$ ls -la",
             ),
             ["/mnt/d/Demo → file:///D:/Demo"]
@@ -5032,28 +5194,46 @@ mod tests {
     }
 
     /// Group A rows 3 and 4: an opening quote of **any** script declares an extent, so a candidate
-    /// that stopped at a space *inside* one has not reached the end of what was quoted.
+    /// that stopped at a space *inside* one has not reached the end of what was quoted — and since
+    /// the 2026-09-21 entry the reading that *does* reach it is offered, so the dangerous prefix is
+    /// refused **and** the name the quote declared is the link.
     ///
-    /// The gate is about the space, not about the quote character: `“D:\x\a.md”` stops at the
-    /// closing quote itself and is an ordinary, complete reference, which is why the second half of
-    /// this row is asserted beside the first.
+    /// The refusal is about the space, not about the quote character: `“D:\x\a.md”` stops at the
+    /// closing quote itself and is an ordinary, complete reference, which is why the last row here
+    /// is asserted beside the first.
     #[test]
     fn a_candidate_cut_by_a_space_inside_an_opening_quote_is_not_drawn() {
-        // The scenario list's fixture: the dangerous prefix and the whole script both exist.
+        // The scenario list's fixture: the dangerous prefix and the whole script both exist, and
+        // the reading carrying the closing quote does not.
         let links = ledger(
             "D:\\case",
             &[
                 ("D:\\Program", true),
                 ("D:\\Program Files\\Tool\\run.ps1", true),
+                ("D:\\Program Files\\Tool\\run.ps1'", false),
                 ("D:\\x\\a.md", true),
             ],
         );
+        let script = "file:///D:/Program%20Files/Tool/run.ps1".to_owned();
         assert_eq!(
             linked(&links, "'D:\\Program Files\\Tool\\run.ps1'", None),
-            []
+            [("D:\\Program Files\\Tool\\run.ps1", script.clone())],
+            "the extent the quote declared is read, and `D:\\Program` is never what is promised"
         );
         assert_eq!(
             linked(&links, "“D:\\Program Files\\Tool\\run.ps1”", None),
+            [("D:\\Program Files\\Tool\\run.ps1", script)],
+            "a full-width quote closes the same extent, and its closing half ends the token"
+        );
+        // The refusal itself, where no reading can reach the closing quote: a name spelled with
+        // more spaces than the bound carries is one this window still declines to guess at, and
+        // the prefix is not offered in its place.
+        assert_eq!(
+            linked(
+                &ledger("D:\\case", &[("D:\\Program", true)]),
+                "'D:\\Program Files A B C D\\run.ps1'",
+                None
+            ),
             []
         );
         assert_eq!(
@@ -5252,8 +5432,9 @@ mod tests {
                 ("D:\\a b\\c.md", true),
             ],
         );
-        // Rows 1, 2, 10, 11, 13, 15, 16, 18, 20 and 23: the reference runs to the end of the line,
-        // so at the edge it is pressed down and inside the row it is untouched.
+        // Rows 1, 2, 10, 11, 13, 15, 16, 18, 20 and 23, and row 4 since the 2026-09-21 entry: the
+        // reference runs to the end of the line, so at the edge it is pressed down and inside the
+        // row it is untouched.
         for line in [
             "D:\\Developer\\folio-terminal\\README.md",
             "D:/Developer/folio-terminal/README.md",
@@ -5265,6 +5446,7 @@ mod tests {
             "docs/a.md:13",
             "C:\\12",
             "  docs/plans/x/plan.md",
+            "D:\\a b\\c.md",
         ] {
             assert_eq!(
                 linked(&links, line, None).len(),
@@ -5298,10 +5480,10 @@ mod tests {
             );
             assert_eq!(linked(&links, line, last_cell_of(line)).len(), 1);
         }
-        // Rows 4, 8, 9, 14, 19 and 21 had no link at either placement and still have none: a gate
-        // that presses candidates down cannot turn "nothing" into one.
+        // Rows 8, 9, 14, 19 and 21 had no link at either placement and still have none: a gate
+        // that presses candidates down cannot turn "nothing" into one. (Row 4 left this list on
+        // 2026-09-21, when the space became a seam and the name behind it a reading.)
         for line in [
-            "D:\\a b\\c.md",
             "中文D:\\x\\a.md",
             "README",
             "file://server/share/a.md",
@@ -5313,30 +5495,29 @@ mod tests {
         }
     }
 
-    /// Scenario 1 and 2 — **a conflict, recorded rather than worked around.**
+    /// Scenario 1 and 2 — **the conflict this module recorded, and the entry that settled it**
+    /// (owner report 2026-09-21).
     ///
-    /// `At D:\Program Files\Tool\run.ps1:12 char:3` cuts at the space and leaves `D:\Program`,
-    /// which on a great many machines is a real directory; the same shape comes out of `npm ERR!
-    /// path …`. The scenario list wants no link at all, and this window still draws one.
+    /// `At D:\Program Files\Tool\run.ps1:12 char:3` cut at the space and left `D:\Program`, which
+    /// on a great many machines is a real directory; the same shape comes out of `npm ERR! path …`.
+    /// The scenario list wanted no link at all, and this window drew that one.
     ///
-    /// It is not fixed here because every lexical rule that would fix it contradicts a ruling this
-    /// module already carries. Boundary table row 4 settles that an unquoted space ends a token and
-    /// that what follows it is a reference of its own, so "a candidate followed by a space and more
-    /// path-shaped text is suspect" would darken every `ls`-style line that prints two real paths
-    /// side by side. The discriminating fact is semantic and not lexical — `D:\Program` is a
-    /// *directory* and the reference continues into it — and reading it means probing the longer
-    /// candidates as well, which is disk work this slice is explicitly not allowed to add
-    /// (§7.1.5j's probe budget). Rows 3 and 4 of the same group *are* fixed, because an opening
-    /// quote is a declaration of extent and gives the evidence a bare space cannot.
+    /// It stood unfixed because the discriminating fact is not lexical — `D:\Program` is a
+    /// *directory* and the reference continues into it — and reading it meant probing the longer
+    /// candidates as well, which the probe budget of the day forbade on the window thread. Audit 3
+    /// C-2 moved the verdict onto a worker and the 2026-09-21 entry spent what that bought: the
+    /// longer readings are asked, the disk answers, and the name the reader is looking at is the
+    /// link. The scenario asked for no link because the only link on offer was the wrong one; what
+    /// it gets is the right one.
     #[test]
-    #[ignore = "§7.1.5k conflict: an unquoted space-cut prefix needs either a rule that contradicts \
-                boundary table row 4 or extra disk probes the budget forbids; see the doc comment"]
     fn an_unquoted_path_cut_at_a_space_does_not_link_its_prefix() {
         let links = ledger(
             "D:\\case",
             &[
                 ("D:\\Program", true),
                 ("D:\\Program Files\\Tool\\run.ps1", true),
+                // The longest reading's own name, with `char:3` read as its location (§7.1.5j ⑨).
+                ("D:\\Program Files\\Tool\\run.ps1:12 char", false),
                 ("D:\\Program Files\\nodejs\\node_modules\\x", true),
             ],
         );
@@ -5346,7 +5527,11 @@ mod tests {
                 "At D:\\Program Files\\Tool\\run.ps1:12 char:3",
                 None
             ),
-            []
+            [(
+                "D:\\Program Files\\Tool\\run.ps1:12",
+                "file:///D:/Program%20Files/Tool/run.ps1#L12".to_owned()
+            )],
+            "PowerShell's own error line names a file at a line, and that is what it points at"
         );
         assert_eq!(
             linked(
@@ -5354,7 +5539,11 @@ mod tests {
                 "npm ERR! path D:\\Program Files\\nodejs\\node_modules\\x",
                 None
             ),
-            []
+            [(
+                "D:\\Program Files\\nodejs\\node_modules\\x",
+                "file:///D:/Program%20Files/nodejs/node_modules/x".to_owned()
+            )],
+            "and npm's names the whole path it printed, not the drive's `Program` folder"
         );
     }
 
@@ -6533,6 +6722,120 @@ mod tests {
         assert!(!spans("see docs/.").contains(&"docs/"));
     }
 
+    /// PIN (owner report 2026-09-21, on the 0.4.3 candidate) — **a printed path may hold spaces,
+    /// and the disk still says which reading is real.**
+    ///
+    /// The line was `D:\Developer\trace\验收 next85\中文 说明.md`, printed by an agent into a pane
+    /// standing beside the file. It wore no mark and the pointer went straight through it, while
+    /// the same tree spelled without spaces was an ordinary link. Nothing to do with the Chinese:
+    /// [`token_end`] stopped at the first space, `D:\Developer\trace\验收` is not a name on that
+    /// disk, and so the row never offered a second reading to be arbitrated. `C:\Program Files\…`
+    /// and a work account's `…\OneDrive - Example State University\…` are the same shape, in ASCII.
+    ///
+    /// **No second mechanism, and that is the whole of the fix.** A space is read exactly as a
+    /// prose seam is — one shorter reading of one token, offered behind the longer ones, settled by
+    /// the disk (§7.30 ①②) — so the order, the "promise nothing while a longer reading is
+    /// unanswered" rule and the existence licence (§7.1.5j ③) all hold here unaltered. What the
+    /// lexer gained is a reading; what says whether it is a file is what always said so.
+    ///
+    /// MUTATION: take [`token_end_across_spaces`] back out of [`detect_rooted_candidates`] — every
+    /// assertion here goes red with one reading where there should be three or four, which is the
+    /// defect itself.
+    #[test]
+    fn a_bare_path_is_read_across_the_spaces_a_filename_may_hold() {
+        // The owner's own line: the whole spelling is the first reading, and each space behind it
+        // is one shorter reading, longest first.
+        assert_eq!(
+            rooted_readings("D:\\Developer\\trace\\验收 next85\\中文 说明.md"),
+            [
+                "D:\\Developer\\trace\\验收 next85\\中文 说明.md",
+                "D:\\Developer\\trace\\验收 next85\\中文",
+                "D:\\Developer\\trace\\验收",
+            ]
+        );
+        // The prose behind a real name is read as far as the bound reaches, because no rule short
+        // of the disk tells `Files` from `for` — and the disk is what refuses the two long ones.
+        assert_eq!(
+            rooted_readings("see D:\\a b.md for details"),
+            [
+                "D:\\a b.md for details",
+                "D:\\a b.md for",
+                "D:\\a b.md",
+                "D:\\a",
+            ]
+        );
+        // Three spaces, one name.
+        assert_eq!(
+            rooted_readings("D:\\a b\\c d\\e f.md"),
+            [
+                "D:\\a b\\c d\\e f.md",
+                "D:\\a b\\c d\\e",
+                "D:\\a b\\c",
+                "D:\\a",
+            ]
+        );
+        // The spelling a pane's own shell roots a path with reads the same way, because a space is
+        // a property of the name and not of the machine that roots it (T-3).
+        assert_eq!(
+            foreign_readings(&msys(), "/d/Demo/My Documents/x.md"),
+            ["/d/Demo/My Documents/x.md", "/d/Demo/My"]
+        );
+        assert_eq!(
+            foreign_readings(&wsl(), "~/My Documents/x.md"),
+            ["~/My Documents/x.md", "~/My"]
+        );
+        // A quoted token is untouched: its quotes declared its extent before any of this, and it
+        // has admitted spaces since the scan was written.
+        assert_eq!(rooted_readings("\"D:\\a b.md\" then"), ["D:\\a b.md"]);
+    }
+
+    /// §7.30 (owner report 2026-09-21) — **the bound is a count of spaces, and that count is what
+    /// the extra readings cost.**
+    ///
+    /// Four, one question each: a rooted token costs at most four verdict requests beyond what it
+    /// cost before, and a line holding *k* rooted tokens at most `4k`. The number is
+    /// [`MAX_PATH_SPACES`] and the reason it has to be a number rather than a shape is the
+    /// assertion above — the words behind a space say nothing a lexer can read, so only counting
+    /// them bounds the walk.
+    ///
+    /// MUTATION: drop the `crossed.len() < MAX_PATH_SPACES` guard and the first assertion goes red,
+    /// with the whole sentence read as one name and a question per word of it.
+    #[test]
+    fn the_spaces_a_reading_may_cross_are_capped_and_a_terminator_still_ends_it() {
+        // Five words behind the root; four spaces may be crossed, so the fifth word is in no
+        // reading at all.
+        let readings = rooted_readings("D:\\a b c d e f");
+        assert_eq!(
+            readings,
+            [
+                "D:\\a b c d e",
+                "D:\\a b c d",
+                "D:\\a b c",
+                "D:\\a b",
+                "D:\\a"
+            ]
+        );
+        assert_eq!(
+            readings.len(),
+            MAX_PATH_SPACES + 1,
+            "one reading per space crossed, and the reading the token had before any were"
+        );
+        // A terminator that is not a space ends the extent exactly where it always did.
+        assert_eq!(rooted_readings("(D:\\a b) c"), ["D:\\a b", "D:\\a"]);
+        assert_eq!(rooted_readings("D:\\a b\tc"), ["D:\\a b", "D:\\a"]);
+        assert_eq!(rooted_readings("`D:\\a b` c"), ["D:\\a b", "D:\\a"]);
+        // A run of blanks is not one blank: Win32 takes the trailing blanks off a component before
+        // the filesystem is ever asked, so a name spelled with two of them is a name that would be
+        // answered about under another name — the fact `is_sentence_stop` reads about the dot.
+        assert_eq!(rooted_readings("D:\\a  b"), ["D:\\a"]);
+        // And a space never swallows the name behind it: the walk resumes at the token's own end,
+        // so a second rooted name still opens where it stands.
+        assert_eq!(
+            rooted_readings("D:\\a C:\\b"),
+            ["D:\\a C:\\b", "D:\\a", "C:\\b"]
+        );
+    }
+
     /// §7.30 and §7.1.5j ⑨ share one colon without fighting over it: `:` opens a seam only when
     /// what follows it is not a decimal line number, and a located reference keeps its location
     /// through the cut.
@@ -6731,9 +7034,18 @@ mod tests {
     #[test]
     fn a_links_range_covers_the_printed_text_and_never_a_neighbours() {
         let path = PathBuf::from("D:\\src\\a.md");
+        // The two readings the prose behind the name offers (§7.30, 2026-09-21) are denied, which
+        // is what a disk says about them; the name itself is the one that is there.
         let links = PrintedPathLinks::new(
             Some(PathBuf::from("D:\\src")),
-            BTreeMap::from([(path.clone(), true)]),
+            BTreeMap::from([
+                (path.clone(), true),
+                (PathBuf::from("D:\\src\\a.md and"), false),
+                (
+                    PathBuf::from("D:\\src\\a.md and file:///D:/src/a.md"),
+                    false,
+                ),
+            ]),
         );
         let line = "D:\\src\\a.md and file:///D:/src/a.md";
         let mut unknown = BTreeSet::new();
@@ -6968,7 +7280,7 @@ mod posix_tests {
 
     /// Every candidate one line offers, as `(text, spelling)` pairs in reading order.
     fn candidates(text: &str) -> Vec<(&str, PrintedPathSpelling)> {
-        let mut found = detect_absolute_path_candidates(text);
+        let mut found = detect_absolute_path_candidates(text, TokenSpaces::ReadAcross);
         found.extend(detect_relative_path_candidates(text, &|_| true));
         found.extend(detect_file_uri_candidates(text));
         found.sort_by_key(|candidate| candidate.byte_start);
@@ -6985,9 +7297,18 @@ mod posix_tests {
             .collect::<Vec<_>>()
     }
 
+    /// The readings one line's **rooted** tokens offer, in the order the disk is asked about them
+    /// — the sibling of the Windows module's helper of the same name.
+    fn rooted_readings(text: &str) -> Vec<&str> {
+        detect_absolute_path_candidates(text, TokenSpaces::ReadAcross)
+            .into_iter()
+            .map(|candidate| candidate.reference_text(text))
+            .collect()
+    }
+
     /// Every candidate as `(path text, location)` — the two halves a located reference splits into.
     fn located(text: &str) -> Vec<(&str, Option<PrintedPathLocation>)> {
-        let mut found = detect_absolute_path_candidates(text);
+        let mut found = detect_absolute_path_candidates(text, TokenSpaces::ReadAcross);
         found.extend(detect_relative_path_candidates(text, &|_| true));
         found.extend(detect_file_uri_candidates(text));
         found.sort_by_key(|candidate| candidate.byte_start);
@@ -7069,12 +7390,48 @@ mod posix_tests {
         assert_eq!(spans("D:/Developer/folio-terminal/README.md"), NO_SPANS);
     }
 
-    /// Boundary table rows 3 and 4. A space ends an unquoted token, and quoting is the one
-    /// declaration of extent that lets a path carry one.
+    /// Boundary table rows 3 and 4, **as the 2026-09-21 entry leaves them**: quoting is still the
+    /// one declaration of extent, and unquoted the space is now a seam the token is read across.
     #[test]
     fn a_space_belongs_to_a_path_only_inside_quotes() {
         assert_eq!(spans("\"/tmp/a b/c.md\""), ["/tmp/a b/c.md"]);
-        assert_eq!(spans("/tmp/a b/c.md"), ["/tmp/a", "b/c.md"]);
+        assert_eq!(
+            spans("/tmp/a b/c.md"),
+            ["/tmp/a b/c.md", "/tmp/a", "b/c.md"]
+        );
+    }
+
+    /// PIN (owner report 2026-09-21) — **a printed path may hold spaces** where a filesystem has
+    /// one root, and the disk still says which reading is real.
+    ///
+    /// The Windows module's `a_bare_path_is_read_across_the_spaces_a_filename_may_hold` is the
+    /// same claim in the spelling that platform reads; this is it in the spelling this one does,
+    /// because a space is a property of the name and not of the root in front of it.
+    ///
+    /// MUTATION: take `token_end_across_spaces` back out of `detect_rooted_candidates` and the
+    /// first assertion goes red with one reading where there should be four.
+    #[test]
+    fn a_bare_path_is_read_across_the_spaces_a_filename_may_hold() {
+        assert_eq!(
+            rooted_readings("see /home/alice/My Documents/x.txt for details"),
+            [
+                "/home/alice/My Documents/x.txt for details",
+                "/home/alice/My Documents/x.txt for",
+                "/home/alice/My Documents/x.txt",
+                "/home/alice/My",
+            ]
+        );
+        // Three spaces, one name.
+        assert_eq!(
+            rooted_readings("/a b/c d/e f.md"),
+            ["/a b/c d/e f.md", "/a b/c d/e", "/a b/c", "/a"]
+        );
+        // The bound, and the terminators that are not spaces.
+        let readings = rooted_readings("/a b c d e f");
+        assert_eq!(readings, ["/a b c d e", "/a b c d", "/a b c", "/a b", "/a"]);
+        assert_eq!(readings.len(), MAX_PATH_SPACES + 1);
+        assert_eq!(rooted_readings("(/a b) c"), ["/a b", "/a"]);
+        assert_eq!(rooted_readings("/a  b"), ["/a"]);
     }
 
     /// Boundary table rows 5 and 6: a closing delimiter ends the token, in either width.
