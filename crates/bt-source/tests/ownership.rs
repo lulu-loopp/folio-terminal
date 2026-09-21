@@ -24,22 +24,27 @@ use bt_source::{
     enumerate,
 };
 
-fn fixture_root() -> PathBuf {
+fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("ownership")
+        .join(name)
 }
 
-fn enumerated() -> Enumeration {
-    let directory = fixture_root();
+fn fixture_root() -> PathBuf {
+    fixture("ownership")
+}
+
+/// The fixture directory `name`, walked from its `lib.rs`.
+fn enumerated_from(name: &str) -> Enumeration {
+    let directory = fixture(name);
     let universe = Universe::declare(
-        "the ownership fixture",
+        format!("the {name} fixture"),
         vec![TargetRoot {
             id: TargetId {
-                package: "ownership".to_owned(),
+                package: name.to_owned(),
                 kind: TargetKind::Library,
-                name: "ownership".to_owned(),
+                name: name.to_owned(),
             },
             file: directory.join("lib.rs"),
         }],
@@ -50,14 +55,17 @@ fn enumerated() -> Enumeration {
     enumerate(&universe).expect("the fixture resolves completely")
 }
 
-/// The fixture-relative paths of a set of files, with one separator whichever
+fn enumerated() -> Enumeration {
+    enumerated_from("ownership")
+}
+
+/// The paths of a set of files written from `root`, with one separator whichever
 /// platform is reading.
-fn named(paths: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
-    let root = fixture_root();
+fn named_under(paths: impl IntoIterator<Item = PathBuf>, root: &Path) -> Vec<String> {
     let mut names: Vec<String> = paths
         .into_iter()
         .map(|path| {
-            path.strip_prefix(&root)
+            path.strip_prefix(root)
                 .expect("a file of the fixture")
                 .to_string_lossy()
                 .replace('\\', "/")
@@ -65,6 +73,10 @@ fn named(paths: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+fn named(paths: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
+    named_under(paths, &fixture_root())
 }
 
 /// RED — **an inline module is a component of the module path, so the file its
@@ -92,6 +104,40 @@ fn a_nested_declaration_looks_inside_the_inline_module() {
     assert!(
         leaf.permits_product(),
         "nothing on this path is gated on `test`"
+    );
+}
+
+/// RED — **a file reached through `#[path]` is a `mod.rs` to its own children**,
+/// so a plain `mod child;` written in it is looked for beside the file that
+/// named it and not under a directory of its own name.
+///
+/// This is rustc's rule and it is explicit in its own resolver — *"All `#[path]`
+/// files are treated as though they are a `mod.rs` file"* — and its E0583 for a
+/// missing one names `src/q.rs` or `src/q/mod.rs`, never `src/p/q.rs`. The
+/// fixture carries **both** candidates: the file rustc compiles, and a decoy at
+/// `reached/child.rs` that a walk with the old rule would have taken silently.
+/// Taking the wrong file without a word is the worse half of the defect this
+/// crate exists to remove, and a refusal for a legal declaration is the other.
+///
+/// MUTATION: open the `#[path]`-reached frame as a plain file again and the
+/// second assertion takes `reached/child.rs` while the third goes empty.
+#[test]
+fn a_path_reached_file_is_a_mod_rs_to_its_children() {
+    let root = fixture("path_reached");
+    let enumeration = enumerated_from("path_reached");
+    assert_eq!(
+        named_under(enumeration.files().keys().cloned(), &root),
+        ["child.rs", "lib.rs", "reached.rs"],
+        "the three files rustc compiles, and not the decoy"
+    );
+    let child = enumeration
+        .file(&root.join("child.rs"))
+        .expect("child.rs is the file rustc compiles");
+    assert_eq!(child.owners()[0].module_path, "crate::p::child");
+    assert_eq!(
+        named_under(enumeration.unreached().iter().cloned(), &root),
+        ["reached/child.rs"],
+        "the decoy is on the disk and no declaration reaches it"
     );
 }
 
@@ -139,6 +185,20 @@ fn the_gate_belongs_to_the_declaration_and_carries_down() {
     assert_eq!(
         named(enumeration.product_reachable_files()),
         ["lib.rs", "outer/leaf.rs", "shared.rs"]
+    );
+
+    // The gate that did it is on the step, in the words it is written in, and
+    // the file it gates carries no gate of its own.
+    let helper = enumeration
+        .file(&fixture_root().join("gate").join("helper.rs"))
+        .expect("gate/helper.rs is reached");
+    let steps = &helper.owners()[0].steps;
+    assert_eq!(
+        steps
+            .iter()
+            .map(|step| (step.module.as_str(), step.predicates.as_slice()))
+            .collect::<Vec<_>>(),
+        [("gate", ["test".to_owned()].as_slice()), ("helper", &[])]
     );
 }
 

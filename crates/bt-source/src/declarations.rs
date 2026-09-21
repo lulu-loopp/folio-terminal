@@ -30,6 +30,7 @@
 //! product compilation, and the walk follows the declaration either way.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use syn::visit::Visit;
 
@@ -93,8 +94,15 @@ pub struct DeclarationStep {
     pub at: Position,
     pub body: ModuleBody,
     /// The text inside each `#[cfg(…)]` standing on the declaration, in the
-    /// order they are written. Kept as source text because P1c's queries are
-    /// about what the code *says*, and a re-printed predicate is not that.
+    /// order they are written and **byte for byte as they are written** — the
+    /// bytes between the parentheses, spacing included, not the parser's
+    /// re-printing of the tokens. `#[cfg(all(test, windows))]` is
+    /// `all(test, windows)` here and not `all (test , windows)`.
+    ///
+    /// That is the contract because P1c's queries are about what the code
+    /// *says* (plan §2.1: spelling is not value), and because a comparison
+    /// against a re-printing is a comparison against a parser version. See
+    /// [`spelling`].
     pub predicates: Vec<String>,
     /// What those predicates say about a product build.
     pub compilation: Compilation,
@@ -122,13 +130,18 @@ pub struct ReachedModule {
 #[derive(Clone, Debug)]
 struct Frame {
     file: PathBuf,
+    /// The file's own text, kept so that a `cfg` predicate can be read back in
+    /// the spelling it was written in rather than in the parser's printing of
+    /// it. Shared, because a frame is rebuilt for every inline module.
+    source: Rc<str>,
     /// The directory the file itself sits in. A `#[path]` written at the top
     /// level of a file is relative to **this**, which is the one place the two
     /// bases differ.
     file_parent: PathBuf,
     /// The directory a `mod x;` written here resolves against: the file's own
-    /// directory for a crate root or a `mod.rs`, a directory named after the
-    /// file otherwise, with one component per enclosing inline module.
+    /// directory for a file that owns the directory it sits in, a directory
+    /// named after the file otherwise, with one component per enclosing inline
+    /// module.
     directory: PathBuf,
     /// How many inline module blocks enclose the current position in this file.
     inline_depth: usize,
@@ -137,14 +150,31 @@ struct Frame {
 impl Frame {
     /// The frame a file opens with.
     ///
-    /// `is_root` is not "the file is called `main.rs`". A target's root file is a
-    /// root module whatever it is called — `tests/cvt.rs` is one — and the
-    /// mod-rs rule turns on being a root module or being named `mod.rs`.
-    fn opening(file: &Path, is_root: bool) -> Self {
+    /// **`owns_its_directory` is not "the file is called `main.rs`."** Three
+    /// different files own the directory they sit in, and rustc's rule is the
+    /// union of them rather than a rule about names:
+    ///
+    /// * a target's **root** file, whatever it is called — `tests/cvt.rs` is one,
+    ///   which is why its `mod cvt { mod arg_parse; }` names `tests/cvt/arg_parse.rs`
+    ///   and not `tests/cvt/cvt/arg_parse.rs`;
+    /// * a file called **`mod.rs`**;
+    /// * a file reached through **`#[path]`**. `rustc_expand::module` puts it
+    ///   plainly — *"All `#[path]` files are treated as though they are a
+    ///   `mod.rs` file"* — so a plain `mod q;` written in a file reached by
+    ///   `#[path = "p.rs"]` from `src/lib.rs` names `src/q.rs`, and rustc's
+    ///   E0583 for a missing one says to create `src/q.rs` or `src/q/mod.rs`.
+    ///   Looking under `src/p/` instead is the worse half of the defect this
+    ///   crate exists to remove: it is a refusal for a legal declaration, or — if
+    ///   a directory of that name happens to exist — a silent resolution to a
+    ///   file rustc never compiles.
+    ///
+    /// `bt_platform::…::module_file` keys this on the file's stem being `lib`,
+    /// `main` or `mod`, and so is wrong about all three of the above.
+    fn opening(file: &Path, owns_its_directory: bool, source: Rc<str>) -> Self {
         let file = normalized(file);
         let parent = file.parent().unwrap_or(Path::new("")).to_path_buf();
-        let mod_rs = is_root || file.file_name().is_some_and(|name| name == "mod.rs");
-        let directory = if mod_rs {
+        let owned = owns_its_directory || file.file_name().is_some_and(|name| name == "mod.rs");
+        let directory = if owned {
             parent.clone()
         } else {
             let stem = file.file_stem().unwrap_or_default().to_owned();
@@ -152,6 +182,7 @@ impl Frame {
         };
         Self {
             file,
+            source,
             file_parent: parent,
             directory,
             inline_depth: 0,
@@ -215,8 +246,11 @@ impl Walk {
         combined
     }
 
-    /// Read a file, parse it, and walk its items under the current frame.
-    fn enter_file(&mut self, file: &Path) {
+    /// Read a file, parse it, and walk its items in a frame of its own.
+    ///
+    /// The frame is pushed only once both readings succeed, so a file the walk
+    /// cannot read is a refusal and never a frame with nothing in it.
+    fn enter_file(&mut self, file: &Path, owns_its_directory: bool) {
         let text = match std::fs::read_to_string(file) {
             Ok(text) => text,
             Err(error) => {
@@ -228,7 +262,15 @@ impl Walk {
             }
         };
         match syn::parse_file(&text) {
-            Ok(parsed) => syn::visit::visit_file(self, &parsed),
+            Ok(parsed) => {
+                self.frames.push(Frame::opening(
+                    file,
+                    owns_its_directory,
+                    Rc::from(text.as_str()),
+                ));
+                syn::visit::visit_file(self, &parsed);
+                self.frames.pop();
+            }
             Err(error) => self.rejections.push(Rejection::UnparsableFile {
                 file: file.to_path_buf(),
                 reason: error.to_string(),
@@ -280,7 +322,8 @@ impl Walk {
 
 impl<'ast> Visit<'ast> for Walk {
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        let declaration = read_declaration(item);
+        let source = Rc::clone(&self.frame().source);
+        let declaration = read_declaration(item, &source);
         let declared_in = self.frame().file.clone();
 
         if let Some((_, items)) = &item.content {
@@ -300,6 +343,7 @@ impl<'ast> Visit<'ast> for Walk {
                 .unwrap_or(&declaration.module);
             let next = Frame {
                 file: frame.file.clone(),
+                source: Rc::clone(&frame.source),
                 file_parent: frame.file_parent.clone(),
                 directory: normalized(&base.join(component)),
                 inline_depth: frame.inline_depth + 1,
@@ -346,9 +390,12 @@ impl<'ast> Visit<'ast> for Walk {
             predicates: declaration.predicates,
             compilation: declaration.compilation,
         };
+        // **A `#[path]` file is a `mod.rs` to its own children** — see
+        // [`Frame::opening`]. This is the argument rustc's own resolver makes
+        // and the one both readers in this tree get wrong.
+        let owns_its_directory = declaration.path_attribute.is_some();
         self.module_path.push(declaration.module);
         self.steps.push(step);
-        self.frames.push(Frame::opening(&file, false));
         self.modules.push(ReachedModule {
             target: self.target.clone(),
             module_path: self.path_now(),
@@ -357,8 +404,7 @@ impl<'ast> Visit<'ast> for Walk {
             steps: self.steps.clone(),
             compilation: self.combined(),
         });
-        self.enter_file(&file);
-        self.frames.pop();
+        self.enter_file(&file, owns_its_directory);
         self.steps.pop();
         self.module_path.pop();
     }
@@ -368,7 +414,7 @@ impl<'ast> Visit<'ast> for Walk {
 pub(crate) fn walk_target(root: &TargetRoot) -> (Vec<ReachedModule>, Vec<Rejection>) {
     let mut walk = Walk {
         target: root.id.clone(),
-        frames: vec![Frame::opening(&root.file, true)],
+        frames: Vec::new(),
         module_path: Vec::new(),
         steps: Vec::new(),
         modules: Vec::new(),
@@ -383,12 +429,13 @@ pub(crate) fn walk_target(root: &TargetRoot) -> (Vec<ReachedModule>, Vec<Rejecti
         steps: Vec::new(),
         compilation: walk.combined(),
     });
-    walk.enter_file(&file);
+    walk.enter_file(&file, true);
     (walk.modules, walk.rejections)
 }
 
-/// What stands on a `mod` declaration.
-fn read_declaration(item: &syn::ItemMod) -> Declaration {
+/// What stands on a `mod` declaration, read against the text of the file it is
+/// written in.
+fn read_declaration(item: &syn::ItemMod, source: &str) -> Declaration {
     let span = item.mod_token.span.start();
     let mut predicates = Vec::new();
     let mut compilation = Compilation::AlwaysInProduct;
@@ -396,7 +443,7 @@ fn read_declaration(item: &syn::ItemMod) -> Declaration {
     for attribute in &item.attrs {
         if attribute.path().is_ident("cfg") {
             if let syn::Meta::List(list) = &attribute.meta {
-                predicates.push(list.tokens.to_string());
+                predicates.push(spelling(&list.delimiter, source));
             }
             compilation = compilation.and(cfg_compilation(attribute));
         } else if attribute.path().is_ident("path")
@@ -417,6 +464,27 @@ fn read_declaration(item: &syn::ItemMod) -> Declaration {
         compilation,
         path_attribute,
     }
+}
+
+/// The text between a delimiter pair, exactly as it is written.
+///
+/// **Spelling and not a re-printing** (plan §2.1, "spelling is not value"). The
+/// obvious `list.tokens.to_string()` hands back the parser's own rendering —
+/// `#[cfg(all(test, windows))]` comes out as `all (test , windows)` — and a
+/// query about what the code *says* cannot be answered from that. `span-locations`
+/// is on, so the open and close delimiters carry byte ranges into the text this
+/// file was parsed from, and the bytes between them are the predicate.
+///
+/// # Panics
+///
+/// If the byte range the parser reports is not a range of the text it was given.
+/// It is the same text, passed down the frame the file opened, so this cannot
+/// happen; it panics rather than substituting a second-best answer.
+fn spelling(delimiter: &syn::MacroDelimiter, source: &str) -> String {
+    let span = delimiter.span();
+    let from = span.open().byte_range().end;
+    let to = span.close().byte_range().start;
+    source[from..to].to_owned()
 }
 
 /// What one `#[cfg(…)]` says about a product build.
@@ -476,12 +544,16 @@ fn product_cfg(meta: &syn::Meta) -> Option<bool> {
 mod tests {
     use super::*;
 
-    fn compilation_of(source: &str) -> Compilation {
+    fn declaration_of(source: &str) -> Declaration {
         let file: syn::File = syn::parse_str(source).expect("the fixture parses");
         let syn::Item::Mod(item) = &file.items[0] else {
             panic!("the fixture declares a module");
         };
-        read_declaration(item).compilation
+        read_declaration(item, source)
+    }
+
+    fn compilation_of(source: &str) -> Compilation {
+        declaration_of(source).compilation
     }
 
     /// PIN — the `test` bit is the only one evaluated, and the other two answers
@@ -517,15 +589,61 @@ mod tests {
         );
     }
 
-    /// PIN — the mod-rs rule is about being a root module or being called
-    /// `mod.rs`, never about being called `main.rs`.
+    /// PIN — **a `cfg` predicate is kept in the spelling it was written in.**
+    ///
+    /// The field is what P1c queries and what P1b's index lowers, so the
+    /// contract is the exact bytes and not the parser's rendering of them.
+    /// Every line below would be a different string under
+    /// `TokenStream::to_string`, which is what this crate used to store.
+    ///
+    /// MUTATION: go back to `list.tokens.to_string()` and every assertion here
+    /// goes red with a re-printed predicate beside the written one.
+    #[test]
+    fn a_predicate_is_kept_in_the_spelling_it_was_written_in() {
+        assert_eq!(declaration_of("#[cfg(test)] mod t;").predicates, ["test"]);
+        assert_eq!(
+            declaration_of("#[cfg(all(test, windows))] mod t;").predicates,
+            ["all(test, windows)"],
+            "not `all (test , windows)`"
+        );
+        assert_eq!(
+            declaration_of("#[cfg(any(test,   windows))] mod t;").predicates,
+            ["any(test,   windows)"],
+            "the spacing somebody wrote is part of the spelling"
+        );
+        assert_eq!(
+            declaration_of("#[cfg(feature = \"x\")] mod t;").predicates,
+            ["feature = \"x\""]
+        );
+        // One string per gate, in the order they stand on the declaration.
+        assert_eq!(
+            declaration_of("#[cfg(windows)] #[cfg(test)] mod t;").predicates,
+            ["windows", "test"]
+        );
+        assert!(declaration_of("mod t;").predicates.is_empty());
+    }
+
+    /// PIN — **three different files own the directory they sit in**: a target
+    /// root whatever it is called, a `mod.rs`, and a file reached through
+    /// `#[path]`. The rule is never about being called `main.rs`.
+    ///
+    /// The third arm is the one this crate got wrong until 2026-09-21, and it is
+    /// wrong in `bt_platform::…::module_file` today.
     #[test]
     fn a_target_root_owns_the_directory_it_sits_in() {
-        let root = Frame::opening(Path::new("tests/cvt.rs"), true);
+        let empty = || Rc::from("");
+        let root = Frame::opening(Path::new("tests/cvt.rs"), true, empty());
         assert_eq!(root.directory, PathBuf::from("tests"));
-        let reached = Frame::opening(Path::new("tests/cvt.rs"), false);
+        let reached = Frame::opening(Path::new("tests/cvt.rs"), false, empty());
         assert_eq!(reached.directory, Path::new("tests").join("cvt"));
-        let module = Frame::opening(Path::new("src/video/mod.rs"), false);
+        let module = Frame::opening(Path::new("src/video/mod.rs"), false, empty());
         assert_eq!(module.directory, Path::new("src").join("video"));
+        let by_path = Frame::opening(Path::new("src/p.rs"), true, empty());
+        assert_eq!(
+            by_path.directory,
+            PathBuf::from("src"),
+            "a `#[path]` file is a `mod.rs` to its children, so a plain `mod q;` in it names \
+             src/q.rs — which is what rustc's own E0583 tells you to create"
+        );
     }
 }

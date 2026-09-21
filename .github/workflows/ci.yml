@@ -262,7 +262,8 @@ jobs:
           --package bt-viewport --package bt-detect --package bt-corpus
           --package bt-layout --package bt-math --package bt-pty
           --package bt-platform --package bt-persist --package bt-unicode
-          --package bt-render --package bt-winres --package bt-app
+          --package bt-render --package bt-winres --package bt-source
+          --package bt-app
           -- --check
 
       # The two excluded packages are still *linted* — their libraries are
@@ -536,7 +537,7 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
-          -p alacritty_terminal
+          -p bt-source -p alacritty_terminal
 
       # **The application, every target of it** (M1-10). A step of its own and
       # not a name on the line above, because the claim is a different one: the
@@ -688,7 +689,7 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
-          -p alacritty_terminal
+          -p bt-source -p alacritty_terminal
 
       # `core-macos`'s ten, plus `bt-pty` for the reason above and minus
       # `bt-math` for one of the same shape. `bt-render` is still checked and not
