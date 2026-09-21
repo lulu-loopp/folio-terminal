@@ -5383,11 +5383,16 @@ mod tests {
     /// that need it (§7.1.5j, user report 2026-08-23, and
     /// `a_path_the_disk_has_denied_is_never_asked_about_again` directly above). The scenario list
     /// asked for the opposite: a file that did not exist at first print and is built afterwards
-    /// should become a link. Both are now true, because the ruling gave the "no" the one expiry
-    /// that is a fact rather than a guess — **the pane's next `OSC 133 D`**. A command has ended,
-    /// so the disk may have moved; and a command is not a frame, so the budget is untouched. See
+    /// should become a link. Both are now true, because the ruling gave the "no" an expiry that is
+    /// a fact rather than a guess — **the pane's next `OSC 133 D`**. A command has ended, so the
+    /// disk may have moved; and a command is not a frame, so the budget is untouched. See
     /// `bt_term::DualPlaneSession::expire_denied_paths`, which is where the expiry lives: this
     /// layer's contract is unchanged, it answers whichever ledger it is handed.
+    ///
+    /// A second boundary joined it on 2026-09-20 — **the name being printed again** — for the pane
+    /// that never ends a command at all, and it reaches this layer exactly the same way: the
+    /// session hands over a ledger without that denial in it (`reprinted_path_links`) and the
+    /// sighting below becomes a question. Step ② is that step for both boundaries.
     ///
     /// **The conflict was not hypothetical, and 2026-08-25 is the day it was photographed.** The
     /// reader reported that `D:\Developer\folio-terminal\test-assets\folio-pdf-test.pdf` — an
