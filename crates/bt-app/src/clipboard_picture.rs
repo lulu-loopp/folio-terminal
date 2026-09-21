@@ -353,7 +353,16 @@ fn png_from(picture: &PictureBytes) -> Result<Vec<u8>, String> {
             Ok(picture.bytes.clone())
         }
         PictureEncoding::DibV5 | PictureEncoding::Dib => png_from_dib(&picture.bytes),
-        PictureEncoding::Tiff => bt_platform::png_from_tiff(&picture.bytes),
+        // **The system's own decoder, judged by this module's own ceiling**
+        // (audit 3 B-2). There is no Rust TIFF decoder in this tree to read a
+        // header off, so the shape comes back *out* of the platform arm — read
+        // from the representation AppKit built out of the container, before it
+        // is asked for a single pixel — and is refused here, by the one
+        // `refuse_oversize` the other two arms call. The arm that decodes
+        // cannot skip it, because the judgement is the argument it is called
+        // with: a fourth encoding added beside these three arrives at the same
+        // sentence or does not decode.
+        PictureEncoding::Tiff => bt_platform::png_from_tiff(&picture.bytes, refuse_oversize),
     }
 }
 
@@ -694,6 +703,84 @@ mod tests {
         }])
         .expect_err("a truncated body is still refused");
         assert!(!truncated.contains("ceiling"), "{truncated}");
+    }
+
+    /// RED — **one ceiling, and every arm of the dispatch is judged by it**
+    /// (audit 3 B-2).
+    ///
+    /// The rule the module states for itself is about *a* clipboard picture,
+    /// not about two of the three encodings it reads. The TIFF arm was the one
+    /// that did not state it: there is no Rust TIFF decoder in this tree to
+    /// read a header off, so the arm handed the bytes to AppKit and the
+    /// system's decoder rasterized whatever the IFD claimed — a ~180-byte file
+    /// claiming 65,535 square asks for 17.2 GB, and an `NSMallocException` out
+    /// of AppKit is an abort in this build rather than an `Err`. The shape now
+    /// comes back out of the platform arm and is judged here, by this function.
+    ///
+    /// Two halves, because the defect had two. The **value** half: one shape,
+    /// one answer, whichever encoding claimed it — the numbers below are the
+    /// three fixtures' own claims. The **source** half: that every arm of
+    /// `png_from` really reaches this judge, which is the half a value cannot
+    /// carry, because an arm that skips the ceiling answers nothing at all on a
+    /// machine the encoding does not exist on.
+    ///
+    /// MUTATION: drop the `refuse_oversize` argument from the TIFF arm — the
+    /// shape the defect had — and the source half names it. Widen `fits` and
+    /// the value half does.
+    #[test]
+    fn every_encoding_is_judged_by_the_one_ceiling() {
+        for (width, height, decoded) in [
+            // The TIFF fixture's claim, four samples a pixel.
+            (65_535_u32, 65_535_u32, 65_535_u64 * 65_535 * 4),
+            // The DIB header's, at 24 bits.
+            (32_768, 32_768, 32_768_u64 * 32_768 * 3),
+            // And a shape inside both sides whose pixels are still too much.
+            (MAX_SIDE, MAX_SIDE, MAX_DECODED_BYTES + 1),
+        ] {
+            assert!(!fits(width, height, decoded), "{width}x{height}");
+            let refusal = refuse_oversize(width, height, decoded)
+                .expect_err("a picture this process will not carry is refused");
+            assert!(
+                refusal.contains("ceiling") && refusal.contains(&format!("{width}x{height}")),
+                "one sentence, carrying the shape and no picture: {refusal}"
+            );
+        }
+        assert!(
+            fits(1_920, 1_080, 1_920 * 1_080 * 4),
+            "and an ordinary screenshot is a picture this paste decodes"
+        );
+
+        const SOURCE: &str = include_str!("clipboard_picture.rs");
+        let body = |signature: &str| -> &'static str {
+            let at = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[at + signature.len()..];
+            &rest[..rest.find("\n}\n").unwrap_or(rest.len())]
+        };
+        let dispatch = body("fn png_from(picture: &PictureBytes) -> Result<Vec<u8>, String> {");
+        // One arm per line of the match, which is how they are written — a
+        // `DibV5 | Dib` arm names the type twice and is still one arm.
+        let arms: Vec<&str> = dispatch
+            .split("\n        PictureEncoding::")
+            .skip(1)
+            .collect();
+        assert_eq!(
+            arms.len(),
+            3,
+            "an encoding was added or removed:\n{dispatch}"
+        );
+        for arm in arms {
+            assert!(
+                arm.contains("refuse_oversize") || arm.contains("png_from_dib"),
+                "an encoding is decoded without its shape being judged:\n{arm}"
+            );
+        }
+        assert!(
+            body("fn png_from_dib(dib: &[u8]) -> Result<Vec<u8>, String> {")
+                .contains("refuse_oversize"),
+            "the arm the dispatch delegates to no longer judges the shape either"
+        );
     }
 
     /// A `BITMAPINFOHEADER` with the given shape and not one pixel behind it.
