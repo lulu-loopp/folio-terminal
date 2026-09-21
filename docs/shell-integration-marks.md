@@ -82,13 +82,19 @@ Profile edits preserve UTF-8, UTF-8 BOM or UTF-16LE BOM and every existing line'
 terminator. Removal consumes only owned lines and their own terminators; blank
 lines and empty profile files remain. Changed profiles get a byte-identical
 dated backup before `bt_persist::atomic_replace_preserving`. Windows uses
-`ReplaceFileW` without ignoring metadata/ACL merge errors, and stages the original
-Hidden/Archive/System flags before and after replacement (ReplaceFileW sets
-Archive even when it was clear). If restoring flags fails, the original object
-is restored from the recovery sibling; if rollback also fails, its path is
-reported and retained. The same recovery sibling also retains the original
-object if the native operation fails after moving it. Unix copies uid,
-gid and mode before rename, refusing if any preservation step fails. New files
+`ReplaceFileW` without ignoring the replacement's own failure, and stages the
+original Hidden/Archive/System flags before and after replacement (ReplaceFileW
+sets Archive even when it was clear). **The flag steps are best effort on both
+sides**: content is guaranteed and what the file carried is not, so a successful
+replacement is never rolled back over an attribute. The recovery sibling is
+retired on every exit except the one where it is the only copy of the original —
+then it is kept and the reported error names it. After
+`ERROR_UNABLE_TO_MOVE_REPLACEMENT_2` the original is restored to its own name by
+rename, falling back to a hard link where a rename is refused. Unix carries uid, gid,
+mode and every extended attribute (quarantine, Finder tags, `user.*`) onto the
+replacement before the rename; handing a file to another user is a privileged
+call, so a refused `chown` leaves the replacement this process's rather than
+failing a write, and an attribute that cannot be set is skipped. New files
 use ordinary `atomic_write`. Hard-linked files (`nlink > 1`), symlinks/reparse
 points (including ancestors), read-only/locked files and unsupported encodings
 are refused. A concurrent external path replacement is still a narrow race;
