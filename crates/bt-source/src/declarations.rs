@@ -433,20 +433,36 @@ pub(crate) fn walk_target(root: &TargetRoot) -> (Vec<ReachedModule>, Vec<Rejecti
     (walk.modules, walk.rejections)
 }
 
+/// Every `#[cfg(…)]` standing on an item, in the spelling it is written in, and
+/// what the conjunction of them says about a product build.
+///
+/// The one reading of a `cfg` attribute in this crate. P1b's index carries the
+/// same spellings on an item's conditional variant that P1a carries on a module
+/// declaration (plan §2.4), and two readings of one attribute would be two
+/// answers waiting to disagree.
+pub(crate) fn cfg_predicates(attrs: &[syn::Attribute], source: &str) -> (Vec<String>, Compilation) {
+    let mut predicates = Vec::new();
+    let mut compilation = Compilation::AlwaysInProduct;
+    for attribute in attrs {
+        if !attribute.path().is_ident("cfg") {
+            continue;
+        }
+        if let syn::Meta::List(list) = &attribute.meta {
+            predicates.push(spelling(&list.delimiter, source));
+        }
+        compilation = compilation.and(cfg_compilation(attribute));
+    }
+    (predicates, compilation)
+}
+
 /// What stands on a `mod` declaration, read against the text of the file it is
 /// written in.
 fn read_declaration(item: &syn::ItemMod, source: &str) -> Declaration {
     let span = item.mod_token.span.start();
-    let mut predicates = Vec::new();
-    let mut compilation = Compilation::AlwaysInProduct;
+    let (predicates, compilation) = cfg_predicates(&item.attrs, source);
     let mut path_attribute = None;
     for attribute in &item.attrs {
-        if attribute.path().is_ident("cfg") {
-            if let syn::Meta::List(list) = &attribute.meta {
-                predicates.push(spelling(&list.delimiter, source));
-            }
-            compilation = compilation.and(cfg_compilation(attribute));
-        } else if attribute.path().is_ident("path")
+        if attribute.path().is_ident("path")
             && let syn::Meta::NameValue(value) = &attribute.meta
             && let syn::Expr::Lit(literal) = &value.value
             && let syn::Lit::Str(named) = &literal.lit

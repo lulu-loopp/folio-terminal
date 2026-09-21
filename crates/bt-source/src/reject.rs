@@ -90,6 +90,11 @@ pub enum Rejection {
     },
     /// A universe names a package the workspace does not have.
     NoSuchPackage { name: String },
+    /// The union of a universe's file texts does not fit the `u32` offsets the
+    /// index is built on. Four gigabytes of Rust is not a universe anybody in
+    /// this workspace declares, and a wrapped offset would be a quietly wrong
+    /// answer rather than a refusal.
+    UnionTooLarge { bytes: usize },
 }
 
 impl fmt::Display for Rejection {
@@ -157,6 +162,11 @@ impl fmt::Display for Rejection {
             Self::NoSuchPackage { name } => {
                 write!(formatter, "`{name}` is not a package of this workspace")
             }
+            Self::UnionTooLarge { bytes } => write!(
+                formatter,
+                "this universe's files are {bytes} bytes together, which does not fit the \
+                 index's 32-bit offsets"
+            ),
         }
     }
 }

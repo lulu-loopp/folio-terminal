@@ -29,7 +29,7 @@ use crate::paths::normalized;
 use crate::reject::Rejection;
 
 /// Which compilation a root starts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TargetKind {
     /// `src/lib.rs`, or whatever `[lib] path` names.
     Library,
@@ -49,7 +49,7 @@ impl TargetKind {
 }
 
 /// One target, by the three things that name it.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TargetId {
     pub package: String,
     pub kind: TargetKind,
@@ -68,7 +68,7 @@ impl std::fmt::Display for TargetId {
 }
 
 /// A compilation root: the file that is a crate root, and the target it roots.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TargetRoot {
     pub id: TargetId,
     pub file: PathBuf,
