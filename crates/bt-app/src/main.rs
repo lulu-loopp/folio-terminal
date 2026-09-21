@@ -19057,10 +19057,12 @@ fn service_pending_pty_resize(
 
 /// The private shell-integration input owed after one successful ConPTY resize commit.
 ///
-/// Two questions, and **both of them have to be asked**. The open input region says a shell is
-/// reading a line right now: closed regions, alternate screens and shells that have never emitted
-/// OSC 133 are all `false`, and none of them is a moment to put bytes in front of. The door says
-/// *which* shell that is, and it is the half this used to be missing.
+/// Two questions, and **both of them have to be asked**. The prompt says a shell is reading a line
+/// right now and that this session watched that shell open it in order — closed regions, alternate
+/// screens, shells that have never emitted OSC 133 and prompts standing inside a command that is
+/// still running are all `false`, and none of them is a moment to put bytes in front of. See
+/// [`bt_term::Session::shell_prompt_opened_in_order`], which is the whole of that half and says
+/// what it cannot prove. The door says *which* shell it would be, and it is the other half.
 ///
 /// `ESC[24;8~` is not a repaint. It is the key `folio.ps1` binds `InvokePrompt` to, and it means
 /// something only to a PSReadLine holding that binding. The chord used to be sent to any pane with
@@ -19076,9 +19078,9 @@ fn service_pending_pty_resize(
 /// caused is repaired by the shell that owns the prompt, not by this terminal typing at it.
 fn psreadline_resize_repaint_input(
     integration: profiles::Integration,
-    shell_input_region_open: bool,
+    prompt_the_shell_opened: bool,
 ) -> Option<&'static [u8]> {
-    (integration == profiles::Integration::PowerShellOptIn && shell_input_region_open)
+    (integration == profiles::Integration::PowerShellOptIn && prompt_the_shell_opened)
         .then_some(PSREADLINE_INVOKE_PROMPT_INPUT)
 }
 
@@ -19094,18 +19096,18 @@ struct ResizeReanchor<'a> {
 
 fn replace_psreadline_resize_reanchor_debt(
     reanchor: ResizeReanchor<'_>,
-    shell_input_region_open: bool,
+    prompt_the_shell_opened: bool,
 ) {
     *reanchor.pending =
-        psreadline_resize_repaint_input(reanchor.integration, shell_input_region_open).is_some();
+        psreadline_resize_repaint_input(reanchor.integration, prompt_the_shell_opened).is_some();
 }
 
 fn take_psreadline_resize_reanchor_input(
     reanchor: ResizeReanchor<'_>,
-    shell_input_region_open: bool,
+    prompt_the_shell_opened: bool,
 ) -> Option<&'static [u8]> {
     std::mem::take(reanchor.pending)
-        .then(|| psreadline_resize_repaint_input(reanchor.integration, shell_input_region_open))
+        .then(|| psreadline_resize_repaint_input(reanchor.integration, prompt_the_shell_opened))
         .flatten()
 }
 
@@ -19304,7 +19306,7 @@ fn commit_leaf_resize(
         // its actor never follows the solve. Nothing to tell anyone and nothing to close.
         return Ok(LeafResizeCommit::default());
     }
-    let shell_input_region_open = session.shell_input_region_open();
+    let prompt_the_shell_opened = session.shell_prompt_opened_in_order();
     let columns = nonzero_u32(next_grid.columns.get());
     let rows = nonzero_u32(next_grid.rows.get());
     let reconciled = if told_the_child {
@@ -19312,7 +19314,7 @@ fn commit_leaf_resize(
             pty.resize(pty_size(next_grid, physical))
                 .context("commit a coalesced final ConPTY resize")?;
         }
-        replace_psreadline_resize_reanchor_debt(reanchor, shell_input_region_open);
+        replace_psreadline_resize_reanchor_debt(reanchor, prompt_the_shell_opened);
         session.mark_pty_resize_requested_at(columns, rows, observed_at)
     } else {
         session.mark_resize_settled_unchanged_at(columns, rows, observed_at)
@@ -87082,14 +87084,14 @@ impl Runtime<'_> {
                 // `CSI 6 n`. Pay the coalesced repair only after the final resize request *and* every
                 // child byte it caused have been quiet. A new geometry event re-opens the transaction,
                 // so a divider storm cannot install an intermediate commit's still-moving cursor.
-                let shell_input_region_open = leaf.session.shell_input_region_open();
+                let prompt_the_shell_opened = leaf.session.shell_prompt_opened_in_order();
                 let integration = leaf.integration;
                 if let Some(reanchor_input) = take_psreadline_resize_reanchor_input(
                     ResizeReanchor {
                         pending: &mut leaf.pending_psreadline_resize_reanchor,
                         integration,
                     },
-                    shell_input_region_open,
+                    prompt_the_shell_opened,
                 ) {
                     write_pty_input(
                         leaf.pty.as_ref(),

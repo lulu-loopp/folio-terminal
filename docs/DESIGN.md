@@ -11240,6 +11240,20 @@ The growth is rounded to device pixels and that margin is not — both from `3.0
 A decoration now grows only into the room its layout gives it: the panel hands down the box it keeps empty around the list (its own rectangle, floored by the `+` row's top and, on the rail, ceilinged by the heading's foot) and `outset_reach` reconciles the wish with that box once, for all four sides together, floored to whole device pixels.
 One amount and not four, so a clamped card's ring stays concentric; a card anywhere but against the list's own rim pays nothing for this, and no scale that was already exact changed.
 
+### 2026-09-20 — The boundary parser opens a synchronized update where the terminal does
+One rule for both readers of a `CSI ? … h`: every parameter, the first sub-parameter of each — `vte`'s own loop (`private_mode_params_name`, used for 2026 and 1004 alike).
+Reading only the first parameter for 2026 meant `CSI ? 1 ; 2026 h` and `CSI ? 2026 : 0 h` opened a block in the vendored parser and none here.
+An open block ends by a byte match on exactly `ESC [ ? 2 0 2 6 l` (`VENDOR_ESU_CSI`), because while one is open the vendored parser searches bytes and reads no parameters at all.
+With the two disagreeing, the replay tail gave the block's bytes up, a resize armed the canonical fork without them, and the commit dropped the displayed branch, buffer and all — off the grid and off the transcript.
+The fork inherits an open block through that tail and nothing else; `arm_resize_canonical` asserts it rather than repairing it, so the agreement stays one rule instead of two. Audit 3, C-1.
+
+### 2026-09-20 — The prompt chord goes only to a prompt the shell opened in order
+`ESC[24;8~` is the key `folio.ps1` binds `InvokePrompt` to; an open OSC 133 input region alone is not evidence that the shell holding that binding is what will read it.
+A `B` forged while a command runs — a file through `cat`, a git author name, a compromised motd — opened a region, and the next resize typed those seven bytes into `ssh`, `python` or a nested shell.
+Marks stay permissive, deliberately: refusing that `B` would leave a killed command's output region annexing the prompt after it, and DESIGN 2338 already rules a forged cycle indistinguishable from a nested shell's.
+So the order is checked once, where bytes leave for the child: `shell_prompt_opened_in_order` requires an open region **and** no command this session watched start (`C`) that it has not watched end (`D`).
+Bytes cannot prove more. A program printing a whole `D`, `A`, `B` is byte-for-byte the pane's own shell prompting again; the check narrows a forgery from one byte mid-command to a full ordered cycle, and in doubt the answer is no injection.
+
 ### 2026-09-20 — A save replaces the content and keeps what the file carried
 The preview editor writes a user document, so its save replaces the bytes and nothing else the file was carrying.
 Windows carries alternate data streams (Zone.Identifier), the DACL, creation time and the attribute word through ReplaceFileW; Unix carries ownership, mode and every extended attribute (quarantine, Finder tags, user.*) onto the replacement before the rename.
@@ -11252,6 +11266,14 @@ Content is guaranteed, what the file carried is best effort: a volume that answe
 **R4, open and not closed here: `ReplaceFileW` is a sequence, not an atomic rename.** It moves the document to the backup name and then moves the replacement into that name; a crash or power loss between the two leaves the document under `<name>.tmp-<hex>` and nothing in the product looks for it. `MoveFileExW` had no such window. The alternative that would close it — write the temp, copy streams, DACL and attributes onto the temp, then commit with one `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` — needs `BackupRead`/`BackupWrite` (or per-stream copies) and an explicit security-descriptor copy, and is a ticket of its own.
 Also recorded there: the whole Win32 attribute word is round-tripped, including bits `SetFileAttributesW` does not own (reparse, compressed, encrypted, offline) — harmless now that both attribute calls are best effort, but a mask down to the settable set is the cheaper statement; and on Unix a `chown` this process may not perform is tolerated, so a save of a file owned by somebody else lands with the owner changed to the writer rather than failing.
 The staging file is born `create_new` and, when it is replacing somebody else’s document, mode `0600`, widened afterwards to the mode the replaced file carried: a private note is never world-readable, not even for the length of one write.
+
+### 2026-09-20 — Corrections to the two entries above (closure review)
+The replay tail has a third limit the two parsers do not share: `PARSER_TAIL_MAX_BYTES` counts pre-BSU bytes, `vte`'s `SYNC_BUFFER_SIZE` does not.
+A block plus two megabytes inside one unterminated sequence lowers this side's flag over a block `vte` still holds, and an assertion there is a panic a child can ask for.
+So arming commits a block the fork cannot inherit (`commit_a_block_the_fork_cannot_inherit`) — a release-mode reconcile, not a debug-only accusation.
+The chord's floor was two markers, not three: `D` is accepted from any phase and the count floors at zero, so `D` then `B` with no `A` earned it.
+`shell_prompt_opened_in_order` now also requires the `B` to have stood in a prompt an `A` opened, so the floor is a full forged `D, A, B`.
+The real proof of origin is a nonce minted in the integration script's own scope and carried on every mark (`aid=`), unreadable to a child; it changes the mark protocol and is ledgered for a later ticket.
 
 ### 2026-09-20 — Folio installs its module only where the place is empty or its own
 The occupancy check lives inside `psreadline::install_checked`, the one writer, so no caller and no `RowState` can write around it.
