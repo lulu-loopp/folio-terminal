@@ -34,14 +34,19 @@ use syn::spanned::Spanned;
 use crate::declarations::cfg_predicates;
 use crate::index::{
     CommentKind, CommentRecord, ConditionalVariant, FileRecord, Index, ItemKind, ItemRecord,
-    LiteralRecord, LiteralValue, Span, TokenKind, TokenRecord,
+    LiteralRecord, LiteralValue, MacroKind, MacroRecord, MacroShape, ModuleRecord, ModuleShape,
+    Span, TokenKind, TokenRecord, UnsupportedMacroShape,
 };
 use crate::reject::Rejection;
 use crate::universe::Universe;
 
 /// Lower `universe`, and drop every parser object on the way out.
 pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
-    let enumeration = crate::enumerate(universe)?;
+    let (enumeration, unreached) = crate::enumerate(universe)?;
+    // Spent by carrying it: the set travels into the index's own cross-check,
+    // which is where a migrated walker's ticket reads it (§3.2).
+    let carried = unreached.carried_forward();
+    debug_assert_eq!(&carried, &enumeration.cross_check().only_on_disk);
 
     let paths: Vec<PathBuf> = enumeration.files().keys().cloned().collect();
     let total: usize = paths
@@ -61,9 +66,18 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     let mut literals = Vec::new();
     let mut comments = Vec::new();
     let mut items = Vec::new();
+    let mut modules = Vec::new();
+    let mut macros = Vec::new();
+    let mut shapes = Vec::new();
     let mut rejections = Vec::new();
 
-    for (at, path) in paths.iter().enumerate() {
+    for path in &paths {
+        // The file's own position is `files.len()` and never the loop index:
+        // a file that cannot be read pushes a rejection and no record, and an
+        // index taken from the loop would be one too high for every file after
+        // it. The rejection is returned before the index is published either
+        // way, so this is the invariant made structural rather than lucky.
+        let at = files.len();
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) => {
@@ -95,13 +109,22 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
             found.dedup();
             found
         };
+        let file_span = Span::new(at_union(base, 0), at_union(base, text.len()));
         files.push(FileRecord {
             path: path.clone(),
-            span: Span::new(at_union(base, 0), at_union(base, text.len())),
+            span: file_span,
             line_starts: line_starts(&text),
             owners,
         });
         by_path.insert(path.clone(), at);
+        // A module whose body is a file is that file's bytes — the other half
+        // of a named scope, beside the inline modules the parse finds.
+        modules.push(ModuleRecord {
+            file: at,
+            module_paths: module_paths.clone(),
+            span: file_span,
+            body: ModuleShape::WholeFile,
+        });
 
         match TokenStream::from_str(&text) {
             Ok(stream) => {
@@ -112,6 +135,8 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
                     tokens: &mut tokens,
                     literals: &mut literals,
                     comments: &mut comments,
+                    macros: &mut macros,
+                    shapes: &mut shapes,
                 };
                 lexed.walk(stream);
                 lexed.gap_to(text.len());
@@ -130,6 +155,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
                     file: at,
                     module_paths: &module_paths,
                     items: &mut items,
+                    modules: &mut modules,
                 };
                 parsed_items.walk(&parsed.items, &mut Vec::new(), &mut Vec::new());
             }
@@ -148,7 +174,13 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     literals.shrink_to_fit();
     comments.shrink_to_fit();
     items.shrink_to_fit();
+    macros.shrink_to_fit();
+    macros.sort_by_key(|record| (record.tokens.start(), record.tokens.end()));
+    shapes.shrink_to_fit();
     union.shrink_to_fit();
+    // Every fact in the index is asked for by span, so the ones a query looks
+    // up by position are held in union order.
+    modules.sort_by_key(|module| (module.span.start(), module.span.end()));
 
     Ok(Index {
         universe: universe.clone(),
@@ -156,11 +188,13 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
         files,
         by_path,
         items,
+        modules,
         tokens,
         literals,
         comments,
+        macros,
         cross_check: enumeration.cross_check().clone(),
-        macro_shapes: None,
+        macro_shapes: shapes,
     })
 }
 
@@ -195,6 +229,8 @@ struct Lexed<'a> {
     tokens: &'a mut Vec<TokenRecord>,
     literals: &'a mut Vec<LiteralRecord>,
     comments: &'a mut Vec<CommentRecord>,
+    macros: &'a mut Vec<MacroRecord>,
+    shapes: &'a mut Vec<UnsupportedMacroShape>,
 }
 
 impl Lexed<'_> {
@@ -224,6 +260,12 @@ impl Lexed<'_> {
                 at = next;
                 continue;
             }
+            // **Recorded, never skipped.** A macro invocation and an attribute
+            // are noted here and then lexed like anything else: their tokens
+            // are tokens (§2.7's coverage floor), and what these two readings
+            // add is only the knowledge of *where* they were found.
+            self.note_macro(&trees, at);
+            self.note_attribute(&trees, at);
             if let Some(next) = self.lifetime(&trees, at) {
                 at = next;
                 continue;
@@ -231,6 +273,165 @@ impl Lexed<'_> {
             self.tree(&trees[at]);
             at += 1;
         }
+    }
+
+    /// `path ! ( … )`, `macro_rules ! name { … }` — found lexically, because the
+    /// parser's visitor does not descend into what is inside them.
+    fn note_macro(&mut self, trees: &[TokenTree], at: usize) {
+        let Some(TokenTree::Ident(first)) = trees.get(at) else {
+            return;
+        };
+        // A path may have several segments: `bt_source::needle!(…)`.
+        let mut path = first.to_string();
+        let mut next = at + 1;
+        loop {
+            let colons = matches!(trees.get(next), Some(TokenTree::Punct(one)) if one.as_char() == ':')
+                && matches!(trees.get(next + 1), Some(TokenTree::Punct(two)) if two.as_char() == ':');
+            if !colons {
+                break;
+            }
+            let Some(TokenTree::Ident(segment)) = trees.get(next + 2) else {
+                break;
+            };
+            path.push_str("::");
+            path.push_str(&segment.to_string());
+            next += 3;
+        }
+        if !matches!(trees.get(next), Some(TokenTree::Punct(bang)) if bang.as_char() == '!') {
+            return;
+        }
+        next += 1;
+        // `macro_rules! name { … }` carries its name between the `!` and the
+        // body; every other invocation opens its delimiters straight away.
+        let definition = path == "macro_rules";
+        let mut name = path.clone();
+        if definition {
+            let Some(TokenTree::Ident(declared)) = trees.get(next) else {
+                return;
+            };
+            name = declared.to_string();
+            next += 1;
+        }
+        let Some(TokenTree::Group(group)) = trees.get(next) else {
+            return;
+        };
+        let opening = first.span().byte_range().start;
+        let closing = group.span().byte_range().end;
+        let inside = group.span_open().byte_range().end..group.span_close().byte_range().start;
+        let record = MacroRecord {
+            span: self.span(opening, closing),
+            tokens: self.span(inside.start, inside.end),
+            path: if definition { name } else { path },
+            kind: if definition {
+                MacroKind::Definition
+            } else {
+                MacroKind::Invocation
+            },
+        };
+        if definition {
+            self.note_item_constructing_arms(group);
+        } else {
+            self.note_invocation_shape(&record);
+        }
+        self.macros.push(record);
+    }
+
+    /// The shapes of §2.7 an *invocation* can be.
+    fn note_invocation_shape(&mut self, record: &MacroRecord) {
+        let shape = match record.name() {
+            "include" => MacroShape::SourceInclusion,
+            "module_path" => MacroShape::ModulePath,
+            "compile_error" => MacroShape::CompileError,
+            "line" | "column" | "file" => MacroShape::LineNumber,
+            _ => return,
+        };
+        self.report(record.span(), shape);
+    }
+
+    /// A `macro_rules!` arm whose expansion opens an item.
+    ///
+    /// The item it makes is not in this index — nothing parses an expansion —
+    /// so a query for that item would answer "not declared", and §2.7 says that
+    /// is reported rather than examined.
+    fn note_item_constructing_arms(&mut self, definition: &proc_macro2::Group) {
+        let trees: Vec<TokenTree> = definition.stream().into_iter().collect();
+        for at in 0..trees.len() {
+            let arrow = matches!(&trees[at], TokenTree::Punct(one) if one.as_char() == '=')
+                && matches!(trees.get(at + 1), Some(TokenTree::Punct(two)) if two.as_char() == '>');
+            if !arrow {
+                continue;
+            }
+            let Some(TokenTree::Group(expansion)) = trees.get(at + 2) else {
+                continue;
+            };
+            let opens_an_item = expansion.stream().into_iter().any(|tree| {
+                matches!(tree, TokenTree::Ident(ref word) if OPENS_AN_ITEM
+                    .iter()
+                    .any(|keyword| word == keyword))
+            });
+            if opens_an_item {
+                let range = expansion.span().byte_range();
+                self.report(
+                    self.span(range.start, range.end),
+                    MacroShape::ItemConstructingArm,
+                );
+            }
+        }
+    }
+
+    /// `#[…]` and `#![…]`: the attribute's own name, weighed against the ones
+    /// the language defines.
+    fn note_attribute(&mut self, trees: &[TokenTree], at: usize) {
+        let Some(TokenTree::Punct(hash)) = trees.get(at) else {
+            return;
+        };
+        if hash.as_char() != '#' {
+            return;
+        }
+        let mut next = at + 1;
+        if matches!(trees.get(next), Some(TokenTree::Punct(bang)) if bang.as_char() == '!') {
+            next += 1;
+        }
+        let Some(TokenTree::Group(group)) = trees.get(next) else {
+            return;
+        };
+        if group.delimiter() != Delimiter::Bracket {
+            return;
+        }
+        let inside: Vec<TokenTree> = group.stream().into_iter().collect();
+        let Some(TokenTree::Ident(name)) = inside.first() else {
+            return;
+        };
+        let whole = self.span(
+            hash.span().byte_range().start,
+            group.span().byte_range().end,
+        );
+        let name = name.to_string();
+        if name == "derive" {
+            // One row for the attribute, however many of its derives are
+            // somebody else's: the span is the attribute and the spelling in
+            // the report names them all.
+            if derived_names(&inside)
+                .iter()
+                .any(|derived| !BUILT_IN_DERIVES.contains(&derived.as_str()))
+            {
+                self.report(whole, MacroShape::DeriveReplacingABody);
+            }
+            return;
+        }
+        if !BUILT_IN_ATTRIBUTES.contains(&name.as_str()) {
+            self.report(whole, MacroShape::AttributeReplacingABody);
+        }
+    }
+
+    fn report(&mut self, span: Span, shape: MacroShape) {
+        let start = span.start() - self.base;
+        let end = span.end() - self.base;
+        self.shapes.push(UnsupportedMacroShape {
+            span,
+            shape,
+            spelling: self.text[start..end].to_owned(),
+        });
     }
 
     /// `#[doc = "…"]` in either of its two spellings, and **nothing else that
@@ -392,6 +593,110 @@ impl Lexed<'_> {
     }
 }
 
+/// The keywords that open an item, for [`Lexed::note_item_constructing_arms`].
+const OPENS_AN_ITEM: [&str; 12] = [
+    "fn",
+    "struct",
+    "enum",
+    "union",
+    "trait",
+    "impl",
+    "mod",
+    "const",
+    "static",
+    "type",
+    "use",
+    "macro_rules",
+];
+
+/// The derives the language itself defines. Everything else generates items no
+/// byte of this index holds.
+const BUILT_IN_DERIVES: [&str; 9] = [
+    "Clone",
+    "Copy",
+    "Debug",
+    "Default",
+    "PartialEq",
+    "Eq",
+    "PartialOrd",
+    "Ord",
+    "Hash",
+];
+
+/// The attributes the language defines, so that what is left is what may be an
+/// attribute macro.
+///
+/// It is a list of the ones this workspace writes plus the common remainder,
+/// and it is deliberately **not** exhaustive of rustc's: a built-in nobody here
+/// uses that turns up in the report is a row somebody reads and adds, which is
+/// the right direction to be wrong in. The other direction — guessing that an
+/// unknown attribute is inert — is the silence §2.7 forbids.
+const BUILT_IN_ATTRIBUTES: [&str; 41] = [
+    "allow",
+    "automatically_derived",
+    "bench",
+    "cfg",
+    "cfg_attr",
+    "cold",
+    "crate_name",
+    "crate_type",
+    "default",
+    "deny",
+    "deprecated",
+    "derive",
+    "doc",
+    "expect",
+    "export_name",
+    "forbid",
+    "global_allocator",
+    "ignore",
+    "inline",
+    "link",
+    "link_name",
+    "link_section",
+    "macro_export",
+    "macro_use",
+    "must_use",
+    "no_implicit_prelude",
+    "no_main",
+    "no_mangle",
+    "no_std",
+    "non_exhaustive",
+    "panic_handler",
+    "path",
+    "repr",
+    "should_panic",
+    "target_feature",
+    "test",
+    "thread_local",
+    "track_caller",
+    "used",
+    "warn",
+    "windows_subsystem",
+];
+
+/// The last segment of every path listed inside a `derive(…)`.
+fn derived_names(attribute: &[TokenTree]) -> Vec<String> {
+    let Some(TokenTree::Group(list)) = attribute.get(1) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut last: Option<String> = None;
+    for tree in list.stream() {
+        match tree {
+            TokenTree::Ident(name) => last = Some(name.to_string()),
+            TokenTree::Punct(punct) if punct.as_char() == ',' => {
+                if let Some(name) = last.take() {
+                    names.push(name);
+                }
+            }
+            _ => {}
+        }
+    }
+    names.extend(last);
+    names
+}
+
 /// The length of the block comment `rest` starts with, nesting counted.
 fn block_comment_end(rest: &str) -> Option<usize> {
     let bytes = rest.as_bytes();
@@ -437,6 +742,7 @@ struct Parsed<'a> {
     file: usize,
     module_paths: &'a [String],
     items: &'a mut Vec<ItemRecord>,
+    modules: &'a mut Vec<ModuleRecord>,
 }
 
 impl Parsed<'_> {
@@ -458,13 +764,23 @@ impl Parsed<'_> {
         for item in items {
             match item {
                 syn::Item::Mod(declaration) => {
-                    let Some((_, inner)) = &declaration.content else {
+                    let Some((brace, inner)) = &declaration.content else {
                         continue;
                     };
                     let (own, _) = cfg_predicates(&declaration.attrs, self.text);
                     let depth = predicates.len();
                     predicates.extend(own);
                     module.push(declaration.ident.to_string());
+                    // An inline module's bytes are its braces and what is
+                    // between them — the scope a reader names by its Rust path.
+                    let span = self.span(braces(brace));
+                    let module_paths = self.paths_for(module);
+                    self.modules.push(ModuleRecord {
+                        file: self.file,
+                        module_paths,
+                        span,
+                        body: ModuleShape::Inline,
+                    });
                     self.walk(inner, module, predicates);
                     module.pop();
                     predicates.truncate(depth);
@@ -497,7 +813,7 @@ impl Parsed<'_> {
                     let trait_name = block
                         .trait_
                         .as_ref()
-                        .map(|(_, path, _)| path_spelling(path));
+                        .map(|(_, path, _)| self.trait_spelling(path));
                     for member in &block.items {
                         let syn::ImplItem::Fn(function) = member else {
                             continue;
@@ -565,6 +881,20 @@ impl Parsed<'_> {
         }
     }
 
+    /// The module paths an inline module inside this file answers to — one per
+    /// owning declaration path of the file (§2.3), each with the inline
+    /// ancestry appended.
+    fn paths_for(&self, module: &[String]) -> Vec<String> {
+        let suffix = module
+            .iter()
+            .map(|part| format!("::{part}"))
+            .collect::<String>();
+        self.module_paths
+            .iter()
+            .map(|path| format!("{path}{suffix}"))
+            .collect()
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "the identity of §2.4 is six components and the bytes are two more; naming them \
@@ -584,15 +914,7 @@ impl Parsed<'_> {
     ) {
         let mut predicates = outer.to_vec();
         predicates.extend(own);
-        let suffix = module
-            .iter()
-            .map(|part| format!("::{part}"))
-            .collect::<String>();
-        let module_paths: Vec<String> = self
-            .module_paths
-            .iter()
-            .map(|path| format!("{path}{suffix}"))
-            .collect();
+        let module_paths = self.paths_for(module);
         let whole = self.span(whole);
         let body = body.map(|range| self.span(range));
         self.items.push(ItemRecord {
@@ -608,6 +930,25 @@ impl Parsed<'_> {
         });
     }
 
+    /// The trait an `impl` block implements, **with its arguments**.
+    ///
+    /// The self type drops them (§2.4: `Runtime<'_>` and `Runtime<'a>` are one
+    /// type); the trait may not. `impl From<Vec<Block>> for Layout` and
+    /// `impl From<[Block; N]> for Layout` are two different traits implemented
+    /// for one type, and a reading that printed both as `From` would make them
+    /// one identity with two arms — which is exactly what the eleven
+    /// conditional identities look like, and they are not that.
+    ///
+    /// A lifetime written in a trait's arguments stays in the spelling; a query
+    /// may name a trait with its arguments or without, and without matches
+    /// every implementation of it (see [`crate::ItemQuery::of_trait`]).
+    fn trait_spelling(&self, path: &syn::Path) -> String {
+        let range = path.span().byte_range();
+        self.text
+            .get(range)
+            .map_or_else(|| path_spelling(path), collapsed)
+    }
+
     /// The self type of an `impl`, **without lifetimes or generic arguments**,
     /// so `Runtime<'_>` and `Runtime<'a>` are one type (§2.4).
     fn type_owner(&self, ty: &syn::Type) -> String {
@@ -619,12 +960,13 @@ impl Parsed<'_> {
         // Anything that is not a path — `&[u8]`, a tuple, a trait object — has
         // no arguments to drop, so it is its own spelling with the source's own
         // spacing collapsed.
-        let range = ty.span().byte_range();
-        self.text[range]
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+        collapsed(&self.text[ty.span().byte_range()])
     }
+}
+
+/// Source text with its own spacing collapsed to one space a gap.
+fn collapsed(written: &str) -> String {
+    written.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// A path with its generic arguments dropped: `a::b::Runtime<'_>` is
@@ -678,9 +1020,28 @@ mod tests {
     use super::*;
 
     fn lower(text: &str) -> (Vec<TokenRecord>, Vec<LiteralRecord>, Vec<CommentRecord>) {
+        let (tokens, literals, comments, _, _) = lex(text);
+        (tokens, literals, comments)
+    }
+
+    #[expect(
+        clippy::type_complexity,
+        reason = "five readings of one file, named by their order in the module doc"
+    )]
+    fn lex(
+        text: &str,
+    ) -> (
+        Vec<TokenRecord>,
+        Vec<LiteralRecord>,
+        Vec<CommentRecord>,
+        Vec<MacroRecord>,
+        Vec<UnsupportedMacroShape>,
+    ) {
         let mut tokens = Vec::new();
         let mut literals = Vec::new();
         let mut comments = Vec::new();
+        let mut macros = Vec::new();
+        let mut shapes = Vec::new();
         let mut lexed = Lexed {
             text,
             base: 0,
@@ -688,10 +1049,12 @@ mod tests {
             tokens: &mut tokens,
             literals: &mut literals,
             comments: &mut comments,
+            macros: &mut macros,
+            shapes: &mut shapes,
         };
         lexed.walk(TokenStream::from_str(text).expect("the fixture lexes"));
         lexed.gap_to(text.len());
-        (tokens, literals, comments)
+        (tokens, literals, comments, macros, shapes)
     }
 
     fn masked(text: &str) -> Vec<(&str, CommentKind)> {
@@ -847,12 +1210,14 @@ mod tests {
             panic!("the fixture is an impl block");
         };
         let mut items = Vec::new();
+        let mut modules = Vec::new();
         let parsed = Parsed {
             text,
             base: 0,
             file: 0,
             module_paths: &[],
             items: &mut items,
+            modules: &mut modules,
         };
         parsed.type_owner(&block.self_ty)
     }

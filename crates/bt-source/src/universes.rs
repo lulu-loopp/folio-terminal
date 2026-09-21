@@ -38,7 +38,7 @@ const NOT_SHIPPED: [&str; 3] = ["bin", "tests", "target"];
 pub fn roots_within(
     packages: &[Package],
     scopes: &[DiskScope],
-) -> Result<Vec<TargetRoot>, Rejection> {
+) -> Result<Vec<TargetRoot>, Vec<Rejection>> {
     let mut covered = std::collections::BTreeSet::new();
     for scope in scopes {
         covered.extend(scope.files()?);
@@ -63,7 +63,7 @@ pub fn roots_within(
 /// # Errors
 ///
 /// Whatever [`Universe::declare`] and the disk walk reject.
-pub fn stand_in_windows(workspace: &Workspace) -> Result<Universe, Rejection> {
+pub fn stand_in_windows(workspace: &Workspace) -> Result<Universe, Vec<Rejection>> {
     let scopes = vec![DiskScope::under(workspace.root().join("crates")).retaining_component("src")];
     let roots = roots_within(workspace.packages(), &scopes)?;
     Universe::declare(
@@ -72,6 +72,7 @@ pub fn stand_in_windows(workspace: &Workspace) -> Result<Universe, Rejection> {
         scopes,
         Vendor::Excluded,
     )
+    .map_err(|rejection| vec![rejection])
 }
 
 /// `crates/`, retained to `src`, **excluding directories named `bin`, `tests`
@@ -82,7 +83,7 @@ pub fn stand_in_windows(workspace: &Workspace) -> Result<Universe, Rejection> {
 /// # Errors
 ///
 /// Whatever [`Universe::declare`] and the disk walk reject.
-pub fn quiet_doors(workspace: &Workspace) -> Result<Universe, Rejection> {
+pub fn quiet_doors(workspace: &Workspace) -> Result<Universe, Vec<Rejection>> {
     let scopes = vec![
         DiskScope::under(workspace.root().join("crates"))
             .excluding(&NOT_SHIPPED)
@@ -90,6 +91,7 @@ pub fn quiet_doors(workspace: &Workspace) -> Result<Universe, Rejection> {
     ];
     let roots = roots_within(workspace.packages(), &scopes)?;
     Universe::declare("the quiet door", roots, scopes, Vendor::Excluded)
+        .map_err(|rejection| vec![rejection])
 }
 
 /// **Every `.rs` file that can end up in `folio.exe`** — `crates/` *and*
@@ -103,7 +105,7 @@ pub fn quiet_doors(workspace: &Workspace) -> Result<Universe, Rejection> {
 /// # Errors
 ///
 /// Whatever [`Universe::declare`] and the disk walk reject.
-pub fn shipped_program(workspace: &Workspace) -> Result<Universe, Rejection> {
+pub fn shipped_program(workspace: &Workspace) -> Result<Universe, Vec<Rejection>> {
     let scopes = vec![
         DiskScope::under(workspace.root().join("crates")).excluding(&NOT_SHIPPED),
         DiskScope::under(workspace.root().join("vendor")).excluding(&NOT_SHIPPED),
@@ -115,6 +117,7 @@ pub fn shipped_program(workspace: &Workspace) -> Result<Universe, Rejection> {
         scopes,
         Vendor::Included,
     )
+    .map_err(|rejection| vec![rejection])
 }
 
 /// One package's own `src/`, recursively.
@@ -126,7 +129,7 @@ pub fn shipped_program(workspace: &Workspace) -> Result<Universe, Rejection> {
 /// # Errors
 ///
 /// Whatever [`Universe::declare`] and the disk walk reject.
-pub fn crate_sources(package: &Package, vendor: Vendor) -> Result<Universe, Rejection> {
+pub fn crate_sources(package: &Package, vendor: Vendor) -> Result<Universe, Vec<Rejection>> {
     let scopes = vec![DiskScope::under(package.directory().join("src"))];
     let roots = roots_within(std::slice::from_ref(package), &scopes)?;
     Universe::declare(
@@ -135,6 +138,7 @@ pub fn crate_sources(package: &Package, vendor: Vendor) -> Result<Universe, Reje
         scopes,
         vendor,
     )
+    .map_err(|rejection| vec![rejection])
 }
 
 /// One package's whole compilation: every target, and the directories they are
@@ -146,7 +150,7 @@ pub fn crate_sources(package: &Package, vendor: Vendor) -> Result<Universe, Reje
 /// # Errors
 ///
 /// Whatever [`Universe::declare`] and the disk walk reject.
-pub fn whole_package(package: &Package, vendor: Vendor) -> Result<Universe, Rejection> {
+pub fn whole_package(package: &Package, vendor: Vendor) -> Result<Universe, Vec<Rejection>> {
     let mut scopes = vec![DiskScope::under(package.directory().join("src"))];
     let tests = package.directory().join("tests");
     if tests.is_dir() {
@@ -158,4 +162,5 @@ pub fn whole_package(package: &Package, vendor: Vendor) -> Result<Universe, Reje
         scopes,
         vendor,
     )
+    .map_err(|rejection| vec![rejection])
 }

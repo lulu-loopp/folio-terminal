@@ -100,6 +100,66 @@ impl FileSetDiff {
     }
 }
 
+/// **The files on the disk that no declaration reaches, handed to the caller in
+/// a shape that makes looking away visible.**
+///
+/// `UNREACHED` is a value and not a failure (see this module's header), and the
+/// P1a review's finding was that nothing made a consumer look at it: the
+/// enumeration answered `files()`, `modules()` and the rest without the set ever
+/// being read, while §3.2 puts the obligation on a ticket. So [`enumerate`]
+/// hands it back *beside* the enumeration, `#[must_use]`, and the only ways to
+/// spend it name what is being done — asserted empty, carried somewhere else, or
+/// read.
+///
+/// **The limit, said plainly.** Rust cannot make a caller *look*; `let (e, _) =`
+/// discards this as quietly as anything else. What it can do is make the
+/// discarding a written act a reviewer greps for, rather than the absence of a
+/// call nobody notices.
+#[must_use = "UNREACHED is the evidence §3.2 asks every migrated walker to ship: assert it empty, \
+              carry it, or say in the ticket why it is not read"]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Unreached {
+    paths: BTreeSet<PathBuf>,
+}
+
+impl Unreached {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    #[must_use]
+    pub fn paths(&self) -> &BTreeSet<PathBuf> {
+        &self.paths
+    }
+
+    /// One path a line, for an assertion message.
+    #[must_use]
+    pub fn report(&self) -> String {
+        self.paths
+            .iter()
+            .map(|path| format!("UNREACHED: {}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Spend it by requiring that it is empty.
+    ///
+    /// # Panics
+    ///
+    /// Naming every file no declaration reaches.
+    pub fn expect_none(self, reason: &str) {
+        assert!(self.paths.is_empty(), "{reason}\n{}", self.report());
+    }
+
+    /// Spend it by taking the set somewhere a later reader asserts on it — the
+    /// index carries it into [`crate::Index::cross_check`] this way.
+    #[must_use]
+    pub fn carried_forward(self) -> BTreeSet<PathBuf> {
+        self.paths
+    }
+}
+
 /// A universe, run.
 #[derive(Clone, Debug)]
 pub struct Enumeration {
@@ -153,26 +213,27 @@ impl Enumeration {
     }
 
     /// The declared set beside the disk set.
+    ///
+    /// The `UNREACHED` half of it is also handed back on its own by
+    /// [`enumerate`], in a [`Unreached`] the caller has to spend.
     #[must_use]
     pub fn cross_check(&self) -> &FileSetDiff {
         &self.diff
     }
-
-    /// Files on the disk that no declaration reaches.
-    #[must_use]
-    pub fn unreached(&self) -> &BTreeSet<PathBuf> {
-        &self.diff.only_on_disk
-    }
 }
 
 /// Run `universe`: walk its target roots, walk its disk scopes, and compare.
+///
+/// The second half of the answer is [`Unreached`], which is `#[must_use]`: the
+/// files on the disk no declaration reaches are the evidence §3.2 asks for, and
+/// P1a's review found nothing made a consumer take them.
 ///
 /// # Errors
 ///
 /// Every refusal the walk made, in the order it made them. They are returned
 /// together rather than one at a time because a tree with three broken
 /// declarations should say so once.
-pub fn enumerate(universe: &Universe) -> Result<Enumeration, Vec<Rejection>> {
+pub fn enumerate(universe: &Universe) -> Result<(Enumeration, Unreached), Vec<Rejection>> {
     let mut modules = Vec::new();
     let mut rejections = Vec::new();
     for root in universe.roots() {
@@ -210,8 +271,8 @@ pub fn enumerate(universe: &Universe) -> Result<Enumeration, Vec<Rejection>> {
 
     let on_disk = match universe.disk_files() {
         Ok(found) => found,
-        Err(rejection) => {
-            rejections.push(rejection);
+        Err(refused) => {
+            rejections.extend(refused);
             BTreeSet::new()
         }
     };
@@ -226,10 +287,16 @@ pub fn enumerate(universe: &Universe) -> Result<Enumeration, Vec<Rejection>> {
         in_both: declared.intersection(&on_disk).cloned().collect(),
     };
 
-    Ok(Enumeration {
-        universe: universe.clone(),
-        modules,
-        files,
-        diff,
-    })
+    let unreached = Unreached {
+        paths: diff.only_on_disk.clone(),
+    };
+    Ok((
+        Enumeration {
+            universe: universe.clone(),
+            modules,
+            files,
+            diff,
+        },
+        unreached,
+    ))
 }

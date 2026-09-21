@@ -106,17 +106,22 @@ impl DiskScope {
     ///
     /// # Errors
     ///
-    /// [`Rejection::MissingDiskScope`] when the root is not a directory. A scope
-    /// that quietly walks nothing is how a guard reads an empty universe and
-    /// passes.
-    pub fn files(&self) -> Result<BTreeSet<PathBuf>, Rejection> {
+    /// [`Rejection::MissingDiskScope`] when the root is not a directory, and
+    /// [`Rejection::UnreadableDirectory`] for every directory under it the
+    /// walk could not list. A scope that quietly walks nothing — or quietly
+    /// walks less — is how a guard reads a smaller universe and passes.
+    pub fn files(&self) -> Result<BTreeSet<PathBuf>, Vec<Rejection>> {
         if !self.root.is_dir() {
-            return Err(Rejection::MissingDiskScope {
+            return Err(vec![Rejection::MissingDiskScope {
                 root: self.root.clone(),
-            });
+            }]);
         }
         let mut found = BTreeSet::new();
-        self.walk(&self.root, &mut found);
+        let mut refused = Vec::new();
+        self.walk(&self.root, &mut found, &mut refused);
+        if !refused.is_empty() {
+            return Err(refused);
+        }
         if let Some(component) = &self.required_component {
             found.retain(|path| {
                 path.components()
@@ -126,11 +131,32 @@ impl DiskScope {
         Ok(found)
     }
 
-    fn walk(&self, directory: &Path, found: &mut BTreeSet<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return;
+    /// **Nothing here is skipped quietly.** A directory that cannot be listed,
+    /// and an entry that cannot be read inside one that can, are both refusals:
+    /// they are the one side of the cross-check whose shrinking would look like
+    /// agreement.
+    fn walk(&self, directory: &Path, found: &mut BTreeSet<PathBuf>, refused: &mut Vec<Rejection>) {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                refused.push(Rejection::UnreadableDirectory {
+                    directory: directory.to_path_buf(),
+                    reason: error.to_string(),
+                });
+                return;
+            }
         };
-        for entry in entries.filter_map(Result::ok) {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    refused.push(Rejection::UnreadableDirectory {
+                        directory: directory.to_path_buf(),
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            };
             let path = entry.path();
             if path.is_dir() {
                 let excluded = entry
@@ -138,7 +164,7 @@ impl DiskScope {
                     .to_str()
                     .is_some_and(|name| self.excluded_directories.iter().any(|it| it == name));
                 if !excluded {
-                    self.walk(&path, found);
+                    self.walk(&path, found, refused);
                 }
             } else if path.extension().is_some_and(|extension| extension == "rs") {
                 found.insert(normalized(&path));
@@ -165,6 +191,7 @@ impl Universe {
     ///
     /// # Errors
     ///
+    /// [`Rejection::RelativePath`] for a root or a scope that is not absolute,
     /// [`Rejection::VendorNotDeclared`] when a root or a scope lies under a
     /// `vendor` directory and `vendor` is [`Vendor::Excluded`], and
     /// [`Rejection::MissingTargetRoot`] when a declared root is not there at
@@ -181,6 +208,20 @@ impl Universe {
         let mut scopes = scopes;
         scopes.sort();
         scopes.dedup();
+        // **A universe is its own cache key, so a relative path is a collision
+        // waiting for a second checkout** — `crates/x/src` names one tree here
+        // and another there, and `paths::normalized` deliberately neither
+        // absolutizes nor canonicalizes. Absolutizing against the current
+        // directory would hide the ambiguity behind wherever the process was
+        // started; refusing makes the caller say which tree it means.
+        let relative = roots
+            .iter()
+            .map(|root| root.file.clone())
+            .chain(scopes.iter().map(|scope| scope.root.clone()))
+            .find(|path| !path.is_absolute());
+        if let Some(path) = relative {
+            return Err(Rejection::RelativePath { path });
+        }
         for root in &roots {
             if !root.file.exists() {
                 return Err(Rejection::MissingTargetRoot {
@@ -232,13 +273,22 @@ impl Universe {
     ///
     /// # Errors
     ///
-    /// Whatever [`DiskScope::files`] rejects.
-    pub fn disk_files(&self) -> Result<BTreeSet<PathBuf>, Rejection> {
+    /// Whatever [`DiskScope::files`] rejects, from every scope rather than from
+    /// the first that refuses.
+    pub fn disk_files(&self) -> Result<BTreeSet<PathBuf>, Vec<Rejection>> {
         let mut found = BTreeSet::new();
+        let mut refused = Vec::new();
         for scope in &self.scopes {
-            found.extend(scope.files()?);
+            match scope.files() {
+                Ok(files) => found.extend(files),
+                Err(rejections) => refused.extend(rejections),
+            }
         }
-        Ok(found)
+        if refused.is_empty() {
+            Ok(found)
+        } else {
+            Err(refused)
+        }
     }
 }
 
@@ -258,4 +308,52 @@ pub fn targets_of(package: &Package) -> Vec<TargetRoot> {
 pub fn is_vendored(path: &Path) -> bool {
     path.components()
         .any(|component| matches!(component, Component::Normal(name) if name == "vendor"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PIN — **a directory the walk cannot list is a refusal, never a skip.**
+    ///
+    /// The public path guards the scope's own root with `is_dir`, so the only
+    /// way to reach this inside a run is a directory that vanishes or refuses
+    /// under the walk — a permission, a race, a device. Neither is stageable as
+    /// a fixture on both platforms, and the rule is the one the P1a review
+    /// named as the crate's last silent skip, so it is pinned here on the walk
+    /// itself with the one error every platform gives the same way.
+    ///
+    /// MUTATION: put `let Ok(entries) = … else { return };` back and the
+    /// refusal vanishes while the walk still reports success over no files.
+    #[test]
+    fn a_directory_the_walk_cannot_list_is_a_refusal() {
+        let scope = DiskScope::under(std::env::temp_dir());
+        let mut found = BTreeSet::new();
+        let mut refused = Vec::new();
+        let missing = std::env::temp_dir().join("folio-bt-source-no-such-directory");
+        scope.walk(&missing, &mut found, &mut refused);
+        assert!(found.is_empty());
+        assert!(
+            matches!(refused.as_slice(), [Rejection::UnreadableDirectory { directory, .. }] if *directory == missing),
+            "{refused:#?}"
+        );
+    }
+
+    /// PIN — **a relative root or scope is refused**, because a universe is a
+    /// cache key and two checkouts would share it.
+    #[test]
+    fn a_universe_is_declared_in_absolute_paths() {
+        let relative = Path::new("crates").join("bt-app").join("src");
+        let refusal = Universe::declare(
+            "relative",
+            Vec::new(),
+            vec![DiskScope::under(&relative)],
+            Vendor::Excluded,
+        )
+        .expect_err("a relative scope is refused");
+        assert!(
+            matches!(&refusal, Rejection::RelativePath { path } if *path == relative),
+            "{refusal}"
+        );
+    }
 }
