@@ -9,10 +9,8 @@
 fn a_local_file() -> bt_term::PathVerdict {
     bt_term::PathVerdict {
         exists: true,
-        directory: false,
         bytes: Some(0),
-        locality: bt_term::PathLocality::ThisMachine,
-        executable: false,
+        ..bt_term::PathVerdict::absent()
     }
 }
 

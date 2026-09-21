@@ -67,63 +67,13 @@ pub const LIVE_MATH_STABLE_INTERVAL: Duration = Duration::from_millis(200);
 /// It is context, not an inference: an opener older than this tail is unknowable at this layer.
 const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
 const MAX_OFFSCREEN_RECORDS: usize = 128;
-/// Where a path this window was shown stands, once the disk has been asked.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PathLocality {
-    /// A volume this machine holds, reached without passing through a reparse point that leads off
-    /// it. The whole of what makes a name one this window opens on its own.
-    ThisMachine,
-    /// **A link on the way in leads somewhere this window does not read unasked** — a share
-    /// spelled `\server\share`, a device path, another distribution's root.
-    ///
-    /// Exactly what `may_read_unasked` refuses of a spelling, asked of every reparse point the
-    /// walk meets rather than of the final component alone — which is what
-    /// `bt_transcript::paths::may_read_unasked_through_links` answered `false` for before this
-    /// walk existed, and therefore what `path_exists` already reported as "not there".
-    ///
-    /// **A mapped network drive is not one of these** (owner ruling 2026-09-21). `Z:` standing for
-    /// a NAS is a volume the reader keeps their work on; the reason to have refused one was the
-    /// window-thread stall, and the stall is gone — this question runs on a lane nobody waits on,
-    /// so a slow share only means the link is not live until the answer lands. A volume question
-    /// may reproduce this product's refusals and never add one.
-    AnotherMachine,
-    /// The spelling names nothing this window reads unasked — a device path, a verbatim path,
-    /// another distribution's share. Refused before any syscall.
-    Refused,
-    /// The name is reachable only through **more reparse points than this window follows**
-    /// ([`MAX_REPARSE_HOPS`]), so nobody here can say what it really is.
-    ///
-    /// A fourth arm and not a second spelling of [`Self::AnotherMachine`], because the two are
-    /// different facts and the user is shown a different sentence for each: one says the file is
-    /// on somebody else's machine, this one says the chain of links is longer than this window
-    /// walks. Reporting the first for the second is what a purely local path with two links in it
-    /// got until 2026-09-20 — a network refusal card over a file on `C:`.
-    BeyondFollowedLinks,
-}
-
-/// **How deep a chain of links this window follows before it stops** (closure review of audit 3
-/// C-2).
-///
-/// It was **one** hop, inherited from the final-component rule that preceded the walk, and one hop
-/// is an accident rather than a rule: `/var`, `/tmp` and `/etc` are symlinks into `/private` on
-/// macOS, so everything under `$TMPDIR` spends the only hop before it has begun, and on Windows a
-/// pnpm `node_modules` symlink under a junctioned source root is two. Both fail closed, which is
-/// safe and wrong.
-///
-/// The walk cannot cycle — each turn pops one component and nothing is ever pushed back — so what
-/// the bound buys is *work*, not termination, and it is chosen the way every operating system
-/// chooses that bound — a small constant that no honest chain reaches. Eight is
-/// POSIX's own neighbourhood (`SYMLOOP_MAX` is at least eight); the locality of every hop is
-/// re-asked, so depth buys an attacker nothing it did not have at hop one.
-const MAX_REPARSE_HOPS: usize = 8;
-
 /// **What the disk said about one path the terminal named** — the ledger's value, and the one
 /// authority on "is this a real, readable, local path" (§7.1.5j, audit 3 C-2).
 ///
 /// Every field is an answer a *worker* brought back. The window thread reads this and asks the
 /// filesystem nothing: a hover that stats a mapped network drive freezes the window for the
 /// operating system's own timeout, which is the defect this type exists to close.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PathVerdict {
     /// Something is there under that name.
     pub exists: bool,
@@ -133,8 +83,12 @@ pub struct PathVerdict {
     /// Its size, off that same call — what the glance card prints, so the card costs the window
     /// thread nothing either (§7.29 ⑬).
     pub bytes: Option<u64>,
-    /// Whose disk it stands on.
-    pub locality: PathLocality,
+    /// **The name the operating system gave back for it**, `..` folded and the spelling settled —
+    /// `std::fs::canonicalize`, which the hand-off doors used to call themselves at click time.
+    ///
+    /// `None` when the platform would not say. The doors then use the name as printed, which is
+    /// what they did before there was a canonicaliser in front of them.
+    pub canonical: Option<PathBuf>,
     /// **Whether opening it would run it** — the execute bit on a filesystem that has one, and an
     /// application bundle's own name (owner ruling 2026-09-21).
     ///
@@ -149,89 +103,37 @@ pub struct PathVerdict {
 }
 
 impl PathVerdict {
-    /// The answer for a spelling this window does not read unasked. Nothing was asked of any disk
-    /// to produce it.
-    #[must_use]
-    pub const fn refused() -> Self {
-        Self {
-            exists: false,
-            directory: false,
-            bytes: None,
-            locality: PathLocality::Refused,
-            executable: false,
-        }
-    }
-
-    /// The answer for a name on somebody else's machine. Nothing was asked of the network to
-    /// produce it either — `GetDriveTypeW` reads this session's device map.
-    #[must_use]
-    pub const fn elsewhere() -> Self {
-        Self {
-            exists: false,
-            directory: false,
-            bytes: None,
-            locality: PathLocality::AnotherMachine,
-            executable: false,
-        }
-    }
-
-    /// The answer for a name only a longer chain of links than this window walks would reach.
-    #[must_use]
-    pub const fn beyond_followed_links() -> Self {
-        Self {
-            exists: false,
-            directory: false,
-            bytes: None,
-            locality: PathLocality::BeyondFollowedLinks,
-            executable: false,
-        }
-    }
-
-    /// The disk answered, and nothing is there.
+    /// **The answer for a name this window did not go and look at, or looked at and did not
+    /// find** — which are one answer, because they were one answer on `main`: `path_exists`
+    /// returned `false` for both.
     #[must_use]
     pub const fn absent() -> Self {
         Self {
             exists: false,
             directory: false,
             bytes: None,
-            locality: PathLocality::ThisMachine,
+            canonical: None,
             executable: false,
         }
     }
 }
 
-/// **What the disk says about a printed path** — the whole of what `verified` means for a file this
-/// window has no other reason to open (§7.1.5j), and since audit 3 C-2 the whole of what a hover
-/// and a press are allowed to know about one.
+/// **What the disk says about a printed path** — `main`'s own question, asked on a worker
+/// (audit 3 C-2; owner rulings 2026-09-21).
 ///
-/// **Every call it makes is a call a worker may make and the window thread may not.** That is the
-/// division the defect was hiding in: until 2026-09-20 the locality half of this question was
-/// asked on the thread that paints, by a predicate whose own doc promised it cost nothing, and a
-/// mapped drive whose server was gone stopped the window for the redirector's timeout on every
-/// pointer motion over the cell.
+/// **The same calls in the same order that stood on the window thread**, and that is the whole of
+/// the design. Between 2026-09-20 and 2026-09-21 this walked the path component by component,
+/// re-asking locality at every reparse point; that mechanism `main` never had, and three things
+/// that are live links on `main` died in it — a WSL path through a Linux symlink (`read_link`
+/// cannot decode `IO_REPARSE_TAG_LX_SYMLINK`), an intermediate junction into a live share, and a
+/// spelling carrying `..`. It is withdrawn. A long or odd chain of links behaves exactly as it
+/// does on `main`, because on both it is the operating system answering.
 ///
-/// Three questions, in the order that keeps the expensive one from being asked:
-///
-/// 1. **The spelling**, through the one lexical predicate. A device path, a verbatim path or
-///    another distribution's share is refused here, with no syscall at all.
-/// 2. **Every reparse point on the way in**, walked from the root outwards, each one's target put
-///    to that same lexical predicate. `C:\build\out\a.txt`, where `C:\build\out` is a junction
-///    into a share, is drive-local in its spelling, and a single `symlink_metadata` of the whole
-///    path dials that share while resolving `out`. Walking outwards and stopping at the first
-///    reparse point is what keeps the question off the wire — a `symlink_metadata` of the reparse
-///    point *itself* reports the link and never opens what it names, and `read_link` reads the
-///    name written inside it.
-/// 3. **The file**, at last — one `metadata`, which answers `exists`, `directory`, `bytes` and
-///    whether opening it would run it.
-///
-/// **What it deliberately does not ask is the volume** (owner ruling 2026-09-21). A drive letter
-/// that stands for a NAS is a place the reader keeps their work, and a question that refused one
-/// would be a refusal this product never made; the reason to have asked it was the window-thread
-/// stall, and this runs on a lane nobody waits on.
-///
-/// Budget: one `symlink_metadata` per path component plus one `metadata`, against two calls before.
-/// It buys the junction case, it is paid on a lane of this feature's own
-/// ([`crate::SessionDecorationTask::VerifyPath`]), and the ledger makes the steady state free.
+/// So: the trailing-dot rule, then the one lexical-plus-one-hop predicate
+/// [`bt_transcript::paths::may_read_unasked_through_links`] — the same predicate `path_exists`
+/// put here before — then one `metadata`. Two things ride along that `main` computed at *click*
+/// time, on the thread that paints, and that is the only reason they are here: the canonical name
+/// its reveal and open doors resolved, and the execute bit its macOS door read.
 ///
 /// **A name Win32 cannot hold is not there, and asking about one answers about a different name**
 /// (user ruling 2026-09-05, §7.30 row 58). Windows normalizes a path before the filesystem ever
@@ -242,44 +144,42 @@ impl PathVerdict {
 /// settle the longer one, which is precisely what let a sentence's full stop into the reference the
 /// demo rehearsal photographed. The honest answer is the one below: no Win32 filesystem holds a
 /// name whose last component ends in a dot or a space, so no such name is there.
-///
-/// It is a statement about what this platform can name and not a spelling rule, which is why it is
-/// asked of `cfg!(windows)` rather than of the string alone: on a filesystem that really can hold
-/// `notes.md.`, `notes.md.` is a file and §7.30's longest reading wins it.
 #[must_use]
 pub fn verify_path(path: &Path) -> PathVerdict {
-    // `PathNamer::ThisWindow`: the spelling reaching here has already been translated out of the
-    // pane's own namespace by `PrintedPathLinks`, which is where the pane's half of the rule is
-    // asked.
-    if !bt_transcript::paths::may_read_unasked(path, bt_transcript::paths::PathNamer::ThisWindow) {
-        return PathVerdict::refused();
-    }
-    let resolved = match resolve_through_reparse_points(path) {
-        Resolution::Resolved(resolved) => resolved,
-        Resolution::AnotherMachine => return PathVerdict::elsewhere(),
-        Resolution::BeyondFollowedLinks => return PathVerdict::beyond_followed_links(),
-    };
     if cfg!(windows) && win32_would_trim_the_name(path) {
         return PathVerdict::absent();
     }
-    let Ok(metadata) = std::fs::metadata(&resolved) else {
+    // **A name this window may not read is not a name it goes looking for** (route C of the
+    // untrusted-path audit, 2026-09-08). `PathNamer::ThisWindow`: the spelling reaching here has
+    // already been translated out of the pane's own namespace by `PrintedPathLinks`, which is
+    // where the pane's half of the rule is asked.
+    if !bt_transcript::paths::may_read_unasked_through_links(
+        path,
+        bt_transcript::paths::PathNamer::ThisWindow,
+    ) {
+        return PathVerdict::absent();
+    }
+    let Ok(metadata) = std::fs::metadata(path) else {
         return PathVerdict::absent();
     };
     PathVerdict {
         exists: true,
         directory: metadata.is_dir(),
         bytes: (!metadata.is_dir()).then_some(metadata.len()),
-        locality: PathLocality::ThisMachine,
-        executable: opening_it_would_run_it(&resolved, &metadata),
+        // Asked of the same name the `metadata` above answered about, and allowed to fail: a door
+        // handed `None` uses the printed spelling, which is what it had before this existed.
+        canonical: std::fs::canonicalize(path).ok(),
+        executable: opening_it_would_run_it(path, &metadata),
     }
 }
 
-/// **Whether opening this would run it** — `macos_handoff::opening_it_would_run_it`'s rule, asked
+/// **Whether opening it would run it** — `macos_handoff::opening_it_would_run_it`'s rule, asked
 /// where the `metadata` already is (owner ruling 2026-09-21).
 ///
-/// A bundle is a directory whose name ends in `.app`; everything else is the execute bit. The rule
-/// lives beside the mode bits rather than in `bt-platform`, because this is the one call that has
-/// them — the hand-off's own copy stat-ed the file a second time, on the thread that paints.
+/// Byte for byte the rule that door applied to the same two facts: a bundle is a directory whose
+/// name ends in `.app`, and everything else is the execute bit. It lives beside the mode bits
+/// rather than in `bt-platform` because this is the call that has them — the door's own copy
+/// stat-ed the file a second time, on the thread that paints.
 #[cfg(unix)]
 fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -292,94 +192,12 @@ fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
 }
 
 /// The same question on a filesystem with no mode bits: there, "would opening it run it" is about
-/// the *association* and `bt_platform::names_a_program` answers it from the name.
+/// the *association*, and `bt_platform::names_a_program` answers it from the name exactly as it
+/// does on `main`.
 #[cfg(not(unix))]
 fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
     let _ = (path, metadata);
     false
-}
-
-/// The name a reader would really open, with every reparse point on the way in resolved — or
-/// `None` when one of them leads somewhere this window does not read unasked.
-///
-/// **Outwards from the root, one component at a time.** That order is the whole of why this is
-/// safe to run at all: `symlink_metadata` of a *whole* path resolves every component but the last,
-/// so asking it about `C:\build\out\a.txt` is what dials the share `out` stands for. Asked about
-/// `C:\build\out` it opens the reparse point itself and reports the link, which is a local call.
-fn resolve_through_reparse_points(path: &Path) -> Resolution {
-    use std::path::Component;
-
-    let mut resolved = PathBuf::new();
-    let mut rest: std::collections::VecDeque<std::ffi::OsString> =
-        std::collections::VecDeque::new();
-    for component in path.components() {
-        match component {
-            // The root is the volume, and the volume was answered above. It is never a name a
-            // filesystem is asked about here.
-            Component::Prefix(_) | Component::RootDir => resolved.push(component.as_os_str()),
-            _ => rest.push_back(component.as_os_str().to_owned()),
-        }
-    }
-    // The chain belongs to whoever wrote it, so it is walked to a bound rather than to its end —
-    // and the bound is [`MAX_REPARSE_HOPS`], which is about cycles and not about trust: every hop
-    // re-asks the same two locality questions, so a deep chain reaches nothing a shallow one
-    // could not.
-    let mut hops = 0usize;
-    while let Some(name) = rest.pop_front() {
-        resolved.push(&name);
-        let Ok(metadata) = std::fs::symlink_metadata(&resolved) else {
-            // Nothing is there, so nothing can be a link, so nothing on the rest of the spelling
-            // can lead off this machine. The `metadata` above will say the name is not there.
-            for name in rest {
-                resolved.push(&name);
-            }
-            return Resolution::Resolved(resolved);
-        };
-        if !metadata.file_type().is_symlink() {
-            continue;
-        }
-        if hops == MAX_REPARSE_HOPS {
-            return Resolution::BeyondFollowedLinks;
-        }
-        hops += 1;
-        let Ok(target) = std::fs::read_link(&resolved) else {
-            return Resolution::BeyondFollowedLinks;
-        };
-        // A link may be written relative to the directory it stands in, and what it names is then
-        // that directory's own answer — so the question is put to the name the reader would open.
-        let target = if target.is_absolute() {
-            target
-        } else {
-            match resolved.parent() {
-                Some(directory) => directory.join(target),
-                None => return Resolution::BeyondFollowedLinks,
-            }
-        };
-        // The one question, and it is the lexical one this workspace has always asked of a link's
-        // target: a share, a device, another distribution. **Not the volume** — a mapped drive is
-        // a place the reader keeps their work, and refusing one would be a refusal `main` never
-        // made (owner ruling 2026-09-21).
-        if !bt_transcript::paths::may_read_unasked(
-            &target,
-            bt_transcript::paths::PathNamer::ThisWindow,
-        ) {
-            return Resolution::AnotherMachine;
-        }
-        // The link named a place; the rest of the spelling hangs off it, and the component just
-        // consumed is not part of what is left.
-        resolved = target;
-    }
-    Resolution::Resolved(resolved)
-}
-
-/// What the walk above found: a name to ask the disk about, or the reason nobody here can.
-///
-/// Three arms and not an `Option`, because the two refusals are different facts and the reader is
-/// shown a different sentence for each (closure review of audit 3 C-2).
-enum Resolution {
-    Resolved(PathBuf),
-    AnotherMachine,
-    BeyondFollowedLinks,
 }
 
 /// Whether a printed path names anything on this disk.
@@ -3181,7 +2999,7 @@ impl DualPlaneSession {
     /// later with a frame of its own.
     #[must_use]
     pub fn path_verdict(&self, path: &Path) -> Option<PathVerdict> {
-        self.path_verdicts.get(path).copied()
+        self.path_verdicts.get(path).cloned()
     }
 
     /// **Forget every "no" in this pane's ledger** (user ruling 2026-08-25, §7.1.5k 丙).
@@ -26910,10 +26728,7 @@ mod tests {
                 let verdict = if on_disk(&path) {
                     PathVerdict {
                         exists: true,
-                        directory: false,
-                        bytes: Some(0),
-                        locality: PathLocality::ThisMachine,
-                        executable: false,
+                        ..PathVerdict::absent()
                     }
                 } else {
                     PathVerdict::absent()

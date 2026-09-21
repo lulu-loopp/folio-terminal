@@ -827,11 +827,6 @@ pub enum Text {
     PreviewRefusalBinary,
     /// The longest of the six, and the one that wraps inside its card.
     PreviewRefusalNetworkPath,
-    // CHINESE PENDING
-    /// A path on this machine that only a longer chain of links than this window walks would
-    /// reach (closure review of audit 3 C-2). English in both columns until the owner's writer
-    /// gives it one; registered in [`Self::CHINESE_PENDING`] for both platforms.
-    PreviewRefusalBeyondFollowedLinks,
     PreviewRefusalPermissionDenied,
     PreviewRefusalNotFound,
     PreviewRefusalUnreadable,
@@ -3433,12 +3428,6 @@ impl Text {
                 "No preview: network paths are not read automatically",
                 "无法预览 —— 网络路径不会自动读取",
             ),
-            // CHINESE PENDING
-            Self::PreviewRefusalBeyondFollowedLinks => pick(
-                lang,
-                "No preview: too many links to follow",
-                "No preview: too many links to follow",
-            ),
             Self::PreviewRefusalPermissionDenied => pick(
                 lang,
                 "No preview: permission denied",
@@ -5330,7 +5319,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 746] = [
+    pub const ALL: [Self; 745] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5518,7 +5507,6 @@ impl Text {
         Self::PreviewRefusalType,
         Self::PreviewRefusalBinary,
         Self::PreviewRefusalNetworkPath,
-        Self::PreviewRefusalBeyondFollowedLinks,
         Self::PreviewRefusalPermissionDenied,
         Self::PreviewRefusalNotFound,
         Self::PreviewRefusalUnreadable,
@@ -6223,17 +6211,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 2] = [
-        // The card for a path only a longer chain of links than this window walks would reach
-        // (closure review of audit 3 C-2). One column, because the sentence is about this
-        // window's own rule and not about a platform — both entries are the same English, and
-        // both are here so the pair is retired together when the Chinese lands.
-        (
-            Self::PreviewRefusalBeyondFollowedLinks,
-            HostPlatform::Windows,
-        ),
-        (Self::PreviewRefusalBeyondFollowedLinks, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

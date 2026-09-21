@@ -24449,10 +24449,9 @@ fn preview_link_answers_a_press(control: bool, target: &str, document: &Path) ->
 /// answer for a share is settled before any question could be put to the network: §7.1.3 does not read one
 /// unasked, the preview seat has a card that says so, and probing whether a cold
 /// `\\server` is a directory would stall the event loop to reach a conclusion
-/// that was already reached. A **mapped drive** is that same answer arriving one
-/// step later, off the ledger instead of off the spelling — `docs/DESIGN.md` §3.4
-/// names 映射盘 as a network path by name, and a resting pointer is not the
-/// explicit confirmation it asks for.
+/// that was already reached. A **mapped drive** is not one of those and never
+/// was: a drive letter standing for a NAS is where the reader keeps their work,
+/// and this window reads one exactly as `main` does (owner ruling 2026-09-21).
 fn hyperlink_activation(
     control: bool,
     click_no_drag: bool,
@@ -24523,16 +24522,6 @@ fn hyperlink_activation(
         let Some(verdict) = verdict(&path) else {
             return HyperlinkActivation::None;
         };
-        // **A mapped drive is a network path** (`docs/DESIGN.md` §3.4: 「网络路径(UNC/映射盘)默认不
-        // 自动预览(显式确认)」), and so is a junction on a local disk whose target is one. Neither is
-        // spelled any differently from `C:\…`, which is why the lexical gate above cannot see them
-        // and why the answer comes off the ledger. It is the same answer a share spelled `\\server`
-        // gets three lines up, and the preview seat prints the same card for it.
-        if verdict.locality != bt_term::PathLocality::ThisMachine {
-            return HyperlinkActivation::Preview(path, at);
-        }
-        // The folder question first: a directory may be named `site.html`, and
-        // Explorer's arm was settled before the page arm existed.
         // **A name the disk says is not there is never handed to a file manager** (closure
         // re-review B-1'). `reveal_arguments`' own doc gave the third reason it asked the disk:
         // "a path that is not there leaves Explorer to fall back to a folder nobody named, which
@@ -24544,6 +24533,8 @@ fn hyperlink_activation(
         if !verdict.exists {
             return HyperlinkActivation::Preview(path, at);
         }
+        // The folder question first: a directory may be named `site.html`, and
+        // Explorer's arm was settled before the page arm existed.
         if verdict.directory {
             return match intent {
                 // The files column, pointed at it (user ruling 2026-08-21). A
@@ -84248,13 +84239,22 @@ impl Runtime<'_> {
     /// has already declined to produce an arm for one, and this is the same answer said again
     /// where the shell is actually reached, so no future caller can hand over a name nobody has
     /// seen.
-    fn verified_target(&self, seat: SeatId, path: &Path) -> bt_platform::VerifiedTarget {
-        let held = self.seat_path_verdict(seat, path);
-        bt_platform::VerifiedTarget {
-            exists: held.is_some_and(|verdict| verdict.exists),
-            is_directory: held.is_some_and(|verdict| verdict.directory),
-            executable: held.is_some_and(|verdict| verdict.executable),
-        }
+    fn verified_target(&self, seat: SeatId, path: &Path) -> (PathBuf, bt_platform::VerifiedTarget) {
+        let Some(verdict) = self.seat_path_verdict(seat, path) else {
+            return (path.to_path_buf(), bt_platform::VerifiedTarget::absent());
+        };
+        (
+            // **The name the operating system gave back**, which is what `main`'s doors resolved
+            // for themselves at click time — so a printed `C:epo\src\..\docs` folds here
+            // exactly as it folded there, and the guard against a `..` on a command line still
+            // has nothing to fire on.
+            verdict.canonical.unwrap_or_else(|| path.to_path_buf()),
+            bt_platform::VerifiedTarget {
+                exists: verdict.exists,
+                is_directory: verdict.directory,
+                executable: verdict.executable,
+            },
+        )
     }
 
     /// [`Self::open_local_path`] for a path a worker has already answered for — the door a
@@ -89156,11 +89156,11 @@ impl Runtime<'_> {
                 |path| match self.seat_path_verdict(seat, &path) {
                     None => format!("path={} verdict=?", path.display()),
                     Some(verdict) => format!(
-                        "path={} exists={} dir={} locality={:?}",
+                        "path={} exists={} dir={} exec={}",
                         path.display(),
                         u8::from(verdict.exists),
                         u8::from(verdict.directory),
-                        verdict.locality,
+                        u8::from(verdict.executable),
                     ),
                 },
             );
@@ -89232,7 +89232,8 @@ impl Runtime<'_> {
             // and travel here. On Windows the door asks no disk anyway; on a Mac it canonicalised
             // and stat-ed, which is a stall on a mounted share.
             HyperlinkActivation::External(path) => {
-                self.open_local_path_verified(&path, self.verified_target(seat, &path));
+                let (target, facts) = self.verified_target(seat, &path);
+                self.open_local_path_verified(&target, facts);
             }
             HyperlinkActivation::Preview(path, at) => self.open_preview_at(path, at)?,
             // **Shown where it lives, whatever it is** (audit 3 C-4). A folder took this arm from
@@ -89248,7 +89249,8 @@ impl Runtime<'_> {
                 // this thread; the ledger already answered both — the name is there, and it is a
                 // folder or it is not — and a `Ctrl`+click on a path under a junction into a dead
                 // share must not stall the window inside a call this branch exists to remove.
-                self.reveal_verified(&path, self.verified_target(seat, &path));
+                let (target, facts) = self.verified_target(seat, &path);
+                self.reveal_verified(&target, facts);
             }
             // The folder's own road, and the one that stays in this window: the
             // column this tab already has is pointed at it, and a tab without one
@@ -130442,16 +130444,15 @@ mod printed_path_provenance_tests {
     fn local_file() -> bt_term::PathVerdict {
         bt_term::PathVerdict {
             exists: true,
-            directory: false,
             bytes: Some(11),
-            locality: bt_term::PathLocality::ThisMachine,
-            executable: false,
+            ..bt_term::PathVerdict::absent()
         }
     }
 
     fn local_folder() -> bt_term::PathVerdict {
         bt_term::PathVerdict {
             directory: true,
+            bytes: None,
             ..local_file()
         }
     }
@@ -130480,7 +130481,7 @@ mod printed_path_provenance_tests {
                 "the table asked about a name it was never given"
             );
             self.asked.set(self.asked.get() + 1);
-            self.answer
+            self.answer.clone()
         }
     }
 
@@ -130553,33 +130554,6 @@ mod printed_path_provenance_tests {
             HyperlinkActivation::FilesColumn(target.to_path_buf()),
             "and the folder question is the ledger's too"
         );
-    }
-
-    /// RED (audit 3 C-2) — **a name on another machine is not opened unasked, under either
-    /// modifier** (`docs/DESIGN.md` §3.4).
-    ///
-    /// That ruling names a mapped drive by name as a network path needing an explicit
-    /// confirmation, and a mapped drive is spelled exactly like a local one, so the lexical gate
-    /// cannot see it and this arm is the only place the ruling can be kept. Both halves answer
-    /// `Preview`, which is the preview seat's own network refusal card — the same answer a path
-    /// spelled as a share has always got.
-    #[test]
-    fn a_name_on_another_machine_is_not_opened_unasked() {
-        let target = Path::new(r"Z:\work\notes.md");
-        for control in [false, true] {
-            let ledger = Ledger::new(target, Some(bt_term::PathVerdict::elsewhere()));
-            assert_eq!(
-                hyperlink_activation(
-                    control,
-                    true,
-                    "file:///Z:/work/notes.md",
-                    bt_transcript::paths::PathNamer::ThisWindow,
-                    &|path| ledger.read(path),
-                ),
-                HyperlinkActivation::Preview(target.to_path_buf(), None),
-                "a mapped drive meets the card 7.1.3 already has, with Ctrl {control}"
-            );
-        }
     }
 
     /// PIN (owner ruling 2026-09-21) — **`Ctrl` on a printed file opens it with the machine's
@@ -130895,40 +130869,6 @@ mod printed_path_provenance_tests {
         );
     }
 
-    /// PIN (closure re-review, out-of-scope undo) — **the preview reader asks nothing about the
-    /// volume a file the user chose stands on.**
-    ///
-    /// The locality refusal belongs to the routing table, where the provenance is known. Put back
-    /// into `read_up_to` it took the preview away from every file on a mapped network drive,
-    /// whoever named it — and a document on a NAS is a document the reader chose, which is the
-    /// opposite of the unasked reach §3.4 is about.
-    #[test]
-    fn the_preview_reader_does_not_refuse_a_file_on_its_volume() {
-        const PREVIEW: &str = include_str!("preview.rs");
-        let signature = "fn read_up_to(";
-        let start = PREVIEW.find(signature).expect("the one preview reader");
-        let rest = &PREVIEW[start + signature.len()..];
-        let reader = &rest[..rest
-            .find(
-                "
-}
-",
-            )
-            .unwrap_or(rest.len())];
-        let volume = ["PathLocality", "::", "AnotherMachine"].concat();
-        assert!(
-            !reader.contains(volume.as_str()),
-            "the preview reader serves both provenances and must not decide a locality one of \
-             them was never asked about"
-        );
-        let links = ["PathLocality", "::", "BeyondFollowedLinks"].concat();
-        assert!(
-            reader.contains(links.as_str()),
-            "a chain longer than this window walks is a fact about the path, not about who \
-             named it"
-        );
-    }
-
     /// PIN (owner ruling 2026-09-21) — **the door out of this window refuses exactly what its own
     /// list refuses, and asks no machine about the file.**
     ///
@@ -131140,7 +131080,7 @@ mod printed_path_provenance_tests {
             table.contains(plain.as_str()),
             "and the plain half is still this window's own seat"
         );
-        for gate in ["verdict.exists", "verdict.locality", "verdict.directory"] {
+        for gate in ["verdict.exists", "verdict.directory"] {
             assert!(
                 table.contains(gate),
                 "{gate} decides before any arm is produced, and it is a ledger read"

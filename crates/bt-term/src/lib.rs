@@ -51,8 +51,8 @@ pub use session::{
     AttentionRequest, BellSource, DualPlaneSession, FrameImageReference, HeldUnbackedRecord,
     HostScreen, InlineImageRecordView, LIVE_MATH_READABLE_SCALE_MILLI, LIVE_MATH_STABLE_INTERVAL,
     LIVE_MIN_VISIBLE_TEXT_ROWS, MathLayoutOptions, MathToggleFaces, MathTogglePresentation,
-    NotificationSource, PathLocality, PathVerdict, ProgressState, ResizeTraceEvent,
-    ResizeTraceKind, ResizeTraceRowOrigin, SPIKE_CELL_HEIGHT_SUBPIXELS, SessionDecorationTask,
-    SessionError, SessionMathTask, SessionStatus, TerminalNotification, decoration_state_label,
-    path_exists, render_detection_task, render_live_detection_task, verify_path,
+    NotificationSource, PathVerdict, ProgressState, ResizeTraceEvent, ResizeTraceKind,
+    ResizeTraceRowOrigin, SPIKE_CELL_HEIGHT_SUBPIXELS, SessionDecorationTask, SessionError,
+    SessionMathTask, SessionStatus, TerminalNotification, decoration_state_label, path_exists,
+    render_detection_task, render_live_detection_task, verify_path,
 };

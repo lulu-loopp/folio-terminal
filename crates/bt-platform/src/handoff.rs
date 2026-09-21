@@ -65,6 +65,18 @@ pub struct VerifiedTarget {
     pub executable: bool,
 }
 
+impl VerifiedTarget {
+    /// **The answer for a name nobody has asked the disk about** — every door refuses it.
+    #[must_use]
+    pub const fn absent() -> Self {
+        Self {
+            exists: false,
+            is_directory: false,
+            executable: false,
+        }
+    }
+}
+
 /// The extensions that are a program whatever this machine's `PATHEXT` says.
 ///
 /// `PATHEXT` is the system's own list of what a *command line* will execute
@@ -1687,29 +1699,6 @@ mod windows_handoff {
     /// normalised first and everything below — the extension check and the
     /// hand-off — uses that one value, so there is no spelling in which the two
     /// can be talking about different files.
-    /// **The same door, for a path a worker has already answered for** (owner ruling 2026-09-21).
-    ///
-    /// `Ctrl`+click on a reference a program printed opens it with the machine's registered
-    /// handler, exactly as it always has — but the two questions that decide *whether* it may are
-    /// now the ledger's rather than this thread's. On Windows the door below asks no disk at all,
-    /// so the only thing this adds is the existence check the caller used to get for free from the
-    /// shell's own failure: a name that is not there must not reach `ShellExecuteW`, which answers
-    /// a bare error code the user never sees.
-    ///
-    /// `names_a_program` is asked below, unchanged and with the list it has always had — the
-    /// refusal is the door's, not the caller's, which is `docs/DESIGN.md`'s
-    /// 「拒绝写在门上而不是写在每个敲门的人身上」.
-    pub fn open_local_path_verified(
-        window: NativeWindow,
-        path: &Path,
-        target: VerifiedTarget,
-    ) -> Result<(), String> {
-        if !target.exists {
-            return Err(format!("{path:?}: not there"));
-        }
-        open_local_path(window, path)
-    }
-
     pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
         let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
         validate_openable_path(&path)?;
@@ -1721,6 +1710,29 @@ mod windows_handoff {
             return Err(PROGRAM_REFUSED.to_owned());
         }
         hand_over(window, &path.to_string_lossy(), None, &folder_of(&path))
+    }
+
+    /// **The same door, for a path a worker has already answered for** (owner ruling 2026-09-21).
+    ///
+    /// `Ctrl`+click on a reference a program printed opens it with the machine's registered
+    /// handler, exactly as it always has — but the two questions that decide *whether* it may are
+    /// now the ledger's rather than this thread's. On Windows the door above asks no disk at all,
+    /// so the only thing this adds is the existence check the caller used to get for free from the
+    /// shell's own failure: a name that is not there must not reach `ShellExecuteW`, which answers
+    /// a bare error code the user never sees.
+    ///
+    /// `names_a_program` is asked by that door, unchanged and with the list it has always had — the
+    /// refusal is the door's, not the caller's, which is `docs/DESIGN.md`'s
+    /// 「拒绝写在门上而不是写在每个敲门的人身上」.
+    pub fn open_local_path_verified(
+        window: NativeWindow,
+        path: &Path,
+        target: VerifiedTarget,
+    ) -> Result<(), String> {
+        if !target.exists {
+            return Err(format!("{path:?}: not there"));
+        }
+        open_local_path(window, path)
     }
 
     /// Open Explorer on a path, with a file **highlighted** inside its folder

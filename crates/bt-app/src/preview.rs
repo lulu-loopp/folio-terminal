@@ -4363,7 +4363,7 @@ pub fn is_readable_unasked(path: &Path) -> bool {
     bt_transcript::paths::may_read_unasked(path, bt_transcript::paths::PathNamer::ThisWindow)
 }
 
-/// The five ways a file declines to be previewed.
+/// The four ways a file declines to be previewed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreviewRefusal {
     /// Nothing in this window reads this kind of file.
@@ -4372,14 +4372,6 @@ pub enum PreviewRefusal {
     Binary,
     /// A share on another machine, which §7.1.3 does not read unasked.
     NetworkPath,
-    /// The name is reachable only through a longer chain of links than this window walks
-    /// ([`bt_term::PathLocality::BeyondFollowedLinks`]).
-    ///
-    /// A fourth refusal and not a second use of [`Self::NetworkPath`], because the two are
-    /// different facts and the card says so: this one is on this machine, and nobody here can say
-    /// what it really is. Until the closure review of audit 3 C-2 a purely local path with two
-    /// links in it raised the *network* card.
-    BeyondFollowedLinks,
     /// The disk was asked and said no.
     Fault(PreviewFault),
 }
@@ -4395,9 +4387,6 @@ impl PreviewRefusal {
             Self::Type => crate::i18n::Text::PreviewRefusalType.text(),
             Self::Binary => crate::i18n::Text::PreviewRefusalBinary.text(),
             Self::NetworkPath => crate::i18n::Text::PreviewRefusalNetworkPath.text(),
-            Self::BeyondFollowedLinks => {
-                crate::i18n::Text::PreviewRefusalBeyondFollowedLinks.text()
-            }
             Self::Fault(fault) => fault.notice(),
         }
     }
@@ -4422,17 +4411,13 @@ impl PreviewRefusal {
     ///   fail again somewhere the reader cannot see it — and for
     ///   [`PreviewFault::NotFound`] there is nothing to open at all.
     ///
-    /// * [`Self::BeyondFollowedLinks`] is the same argument one link further along: this window
-    ///   stopped walking the chain because it could not say where it ends, and a button that
-    ///   handed the name to the shell would let the shell walk it instead.
-    ///
     /// A card with no button is still a card: it has the mark, the sentence and
-    /// the seat, which is the whole of what those refusals have to say.
+    /// the seat, which is the whole of what those two refusals have to say.
     #[must_use]
     pub fn offers_the_default_app(self) -> bool {
         match self {
             Self::Type | Self::Binary => true,
-            Self::NetworkPath | Self::BeyondFollowedLinks | Self::Fault(_) => false,
+            Self::NetworkPath | Self::Fault(_) => false,
         }
     }
 }
@@ -7047,21 +7032,6 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
     // preview after it. `PreviewBuffer::new` asks the same question before it ever files a read;
     // this is the same predicate asked where the blocking call actually is, and it asks the disk's
     // half of it as well, because a drive-rooted name can be a local spelling of a share.
-    // **And a chain of links longer than this window walks gets its own sentence** (closure
-    // review of audit 3 C-2): it is a fact about the path and not about who named it, and the
-    // network card was the wrong words for a file on this machine.
-    //
-    // **The volume question is deliberately not asked here** (closure re-review, 2026-09-21).
-    // `bt_term::verify_path` also answers `AnotherMachine` for a mapped network drive, and this
-    // reader serves both provenances — a row the user picked out of the files column reaches it
-    // exactly as a reference a program printed does. Refusing on the volume here took the preview
-    // away from anyone whose documents live on a NAS, which is nobody's ruling: §3.4 is about
-    // what this window reaches for **unasked**, and a file the reader chose is asked for. The
-    // terminal's own targets are refused on locality one layer up, in `hyperlink_activation`,
-    // where the provenance is known.
-    if bt_term::verify_path(path).locality == bt_term::PathLocality::BeyondFollowedLinks {
-        return HeadOutcome::Refused(PreviewRefusal::BeyondFollowedLinks);
-    }
     if !bt_transcript::paths::may_read_unasked_through_links(
         path,
         bt_transcript::paths::PathNamer::ThisWindow,
