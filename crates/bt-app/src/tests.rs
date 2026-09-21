@@ -18776,13 +18776,13 @@ fn the_resize_anchor_chord_goes_to_a_powershell_pane_and_to_no_other_shell() {
             start,
         )
         .unwrap();
-        let open = session.shell_input_region_open();
+        let at_a_prompt = session.shell_prompt_opened_in_order();
         take_psreadline_resize_reanchor_input(
             ResizeReanchor {
                 pending: &mut pending,
                 integration,
             },
-            open,
+            at_a_prompt,
         )
     };
 
@@ -18842,6 +18842,120 @@ fn the_resize_anchor_chord_goes_to_a_powershell_pane_and_to_no_other_shell() {
         commit(&mut closed, profiles::Integration::PowerShellOptIn),
         None,
         "a PowerShell running a command is not at a prompt, and hears nothing"
+    );
+}
+
+/// RED — **Audit 3, finding C-3: `ESC[24;8~` goes to a prompt the shell opened in order, and a
+/// prompt mark printed by something running inside a command is not one.**
+///
+/// The chord's two gates were the pane's `Integration` — derived from the start program's file
+/// name, so every Windows default pane passes it whether or not `folio.ps1` was ever loaded — and
+/// an open input region. Both were writable by the child: `OSC 133` is in band and
+/// unauthenticated, so seven bytes in a file reaching the screen through `cat`, in a git author
+/// name, or in a compromised host's motd opened the region *while the real command was still
+/// running*, and the next resize wrote `ESC[24;8~` onto the stdin of whatever that command was.
+/// This window's own record says what that does to one of them: GNU readline inserts what it
+/// cannot decode, and the next command dies on `syntax error near unexpected token ';'`.
+/// `docs/DESIGN.md` line 2338 allows forged marker cycles, and scopes what it is accepting in the
+/// same breath — "没有任何东西被执行". Bytes on a program's stdin are past that line.
+///
+/// The nested arm is the limit, stated rather than hidden: a shell started *by* a command speaks
+/// the protocol legitimately and is byte-for-byte a program printing the same cycle. Its prompt is
+/// marked like any other — that is the design's ruling and it still holds — and this window types
+/// at neither, because the command it was started by has not ended.
+#[test]
+fn a_prompt_mark_forged_inside_a_running_command_is_typed_at_by_nothing() {
+    let start = Instant::now();
+    let resize_and_take = |session: &mut DualPlaneSession| {
+        let mut pending = false;
+        let integration = profiles::Integration::PowerShellOptIn;
+        commit_leaf_resize(
+            session,
+            None,
+            ResizeReanchor {
+                pending: &mut pending,
+                integration,
+            },
+            ReleaseGrids {
+                local: grid_of(80, 24),
+                conpty: grid_of(80, 24),
+                next: grid_of(60, 24),
+            },
+            PhysicalSize::new(480, 600),
+            start,
+        )
+        .unwrap();
+        let at_a_prompt = session.shell_prompt_opened_in_order();
+        take_psreadline_resize_reanchor_input(
+            ResizeReanchor {
+                pending: &mut pending,
+                integration,
+            },
+            at_a_prompt,
+        )
+    };
+
+    // The behaviour being kept: a real prompt is repaired, once.
+    let mut real = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+    real.feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start)
+        .unwrap();
+    assert_eq!(
+        resize_and_take(&mut real),
+        Some(PSREADLINE_INVOKE_PROMPT_INPUT),
+        "the pane the chord was cut for, at the prompt its own shell opened"
+    );
+
+    // A command is running and its output carries the marker.
+    let mut forged = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+    forged
+        .feed_at(
+            b"\x1b]133;A\x07PS> \x1b]133;B\x07ssh host\r\x1b]133;C\x07\r\n",
+            start,
+        )
+        .unwrap();
+    forged.feed_at(b"motd\x1b]133;B\x07", start).unwrap();
+    assert!(
+        forged.shell_input_region_open(),
+        "the region still opens — a mark is owed to different evidence than a pty write"
+    );
+    assert_eq!(
+        resize_and_take(&mut forged),
+        None,
+        "zero bytes reach a program the reader is talking to"
+    );
+
+    // A nested shell that speaks the protocol: marked, and still not typed at.
+    let mut nested = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+    nested
+        .feed_at(
+            b"\x1b]133;A\x07PS> \x1b]133;B\x07pwsh\r\x1b]133;C\x07\r\n",
+            start,
+        )
+        .unwrap();
+    nested
+        .feed_at(b"\x1b]133;A\x07nested> \x1b]133;B\x07", start)
+        .unwrap();
+    assert!(
+        nested.shell_input_region_open(),
+        "the nested shell's prompt is marked like any other (DESIGN.md line 2338)"
+    );
+    assert_eq!(
+        resize_and_take(&mut nested),
+        None,
+        "and the command it was started by has not ended, so nothing is typed at it"
+    );
+
+    // That command ends, the pane's own shell prompts again, and the chord is owed again.
+    nested
+        .feed_at(
+            b"exit\r\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07",
+            start,
+        )
+        .unwrap();
+    assert_eq!(
+        resize_and_take(&mut nested),
+        Some(PSREADLINE_INVOKE_PROMPT_INPUT),
+        "the shell this window spawned is reading a line again"
     );
 }
 

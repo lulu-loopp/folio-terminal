@@ -11233,3 +11233,10 @@ Reading only the first parameter for 2026 meant `CSI ? 1 ; 2026 h` and `CSI ? 20
 An open block ends by a byte match on exactly `ESC [ ? 2 0 2 6 l` (`VENDOR_ESU_CSI`), because while one is open the vendored parser searches bytes and reads no parameters at all.
 With the two disagreeing, the replay tail gave the block's bytes up, a resize armed the canonical fork without them, and the commit dropped the displayed branch, buffer and all — off the grid and off the transcript.
 The fork inherits an open block through that tail and nothing else; `arm_resize_canonical` asserts it rather than repairing it, so the agreement stays one rule instead of two. Audit 3, C-1.
+
+### 2026-09-20 — The prompt chord goes only to a prompt the shell opened in order
+`ESC[24;8~` is the key `folio.ps1` binds `InvokePrompt` to; an open OSC 133 input region alone is not evidence that the shell holding that binding is what will read it.
+A `B` forged while a command runs — a file through `cat`, a git author name, a compromised motd — opened a region, and the next resize typed those seven bytes into `ssh`, `python` or a nested shell.
+Marks stay permissive, deliberately: refusing that `B` would leave a killed command's output region annexing the prompt after it, and DESIGN 2338 already rules a forged cycle indistinguishable from a nested shell's.
+So the order is checked once, where bytes leave for the child: `shell_prompt_opened_in_order` requires an open region **and** no command this session watched start (`C`) that it has not watched end (`D`).
+Bytes cannot prove more. A program printing a whole `D`, `A`, `B` is byte-for-byte the pane's own shell prompting again; the check narrows a forgery from one byte mid-command to a full ordered cycle, and in doubt the answer is no injection.
