@@ -3292,6 +3292,7 @@ pub mod explorer_command;
 /// `flock` on a descriptor held for the life of the process off it. The part
 /// worth testing on either platform — which directories claim the same name —
 /// is a function of a path.
+pub mod cleanup;
 pub mod instance;
 
 mod webview;

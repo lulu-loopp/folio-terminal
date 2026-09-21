@@ -893,6 +893,29 @@ pub fn documents_directory() -> Option<PathBuf> {
 ///
 /// Takes a Documents root rather than reading one, so a test can install into a
 /// temporary directory and read back exactly what a real install would write.
+pub fn install_recorded(documents: &Path, data: &Path) -> io::Result<PathBuf> {
+    use crate::shell_integration::profile_marks::{self, Marks};
+    let root = module_directory(documents);
+    if !root.is_absolute() {
+        return Err(io::Error::other(crate::i18n::Text::ShellMarksPath.text()));
+    }
+    let _lock = profile_marks::lock(data)?;
+    let mut marks = Marks::read(data)?;
+    if !marks.psreadline_module_roots.contains(&root) {
+        marks.psreadline_module_roots.push(root);
+    }
+    marks.write(data)?;
+    install_into(documents)
+}
+
+/// Historical roots must have exactly the shape this writer owns.
+pub fn documents_for_module_root(root: &Path) -> Option<PathBuf> {
+    let documents = root
+        .ancestors()
+        .find(|parent| module_directory(parent) == root)?;
+    Some(documents.to_owned())
+}
+
 pub fn install_into(documents: &Path) -> io::Result<PathBuf> {
     let root = module_directory(documents);
     for (name, bytes) in BUNDLED_FILES {
@@ -1211,11 +1234,34 @@ pub enum Outcome {
 /// tables — `the_greyed_item_and_the_refusal_agree_on_every_state` pins them
 /// together.
 #[must_use]
+pub fn apply_recorded(
+    install: bool,
+    documents: Option<&Path>,
+    state: RowState,
+    probe: Option<Probe>,
+    data: &Path,
+) -> Outcome {
+    apply_with(install, documents, state, probe, |documents| {
+        install_recorded(documents, data)
+    })
+}
+
+#[cfg(test)]
 pub fn apply(
     install: bool,
     documents: Option<&Path>,
     state: RowState,
     probe: Option<Probe>,
+) -> Outcome {
+    apply_with(install, documents, state, probe, install_into)
+}
+
+fn apply_with(
+    install: bool,
+    documents: Option<&Path>,
+    state: RowState,
+    probe: Option<Probe>,
+    writer: impl FnOnce(&Path) -> io::Result<PathBuf>,
 ) -> Outcome {
     let Some(documents) = documents else {
         return Outcome::Refused(Refusal::NoDocuments);
@@ -1264,7 +1310,7 @@ pub fn apply(
             path,
         });
     }
-    match install_into(documents) {
+    match writer(documents) {
         Ok(root) => Outcome::Installed(root),
         Err(error) => Outcome::Refused(Refusal::Write {
             path,

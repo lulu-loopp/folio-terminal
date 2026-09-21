@@ -336,6 +336,49 @@ const fn pick_platform(
 /// have to be renamed with it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Text {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
+        )
+    )]
+    CleanupArchiveExit,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
+        )
+    )]
+    CleanupArchiveReady,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
+        )
+    )]
+    CleanupArchiveIncomplete,
+
+    CleanupRecovery,
+    CleanupRuntime,
+
+    CleanupRemoved,
+    CleanupAbsent,
+    CleanupLeft,
+    CleanupRefused,
+    CleanupRoot,
+    CleanupRunning,
+    CleanupBusy,
+    CleanupUnexpected,
+    CleanupApplication,
+    CleanupLink,
+    CleanupUsage,
+    CleanupSystemUnknown,
+    CleanupRecorded,
+    CleanupMacHeld,
+
     // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
     PastePathEncoding,
     PastePathControl,
@@ -2687,6 +2730,7 @@ pub enum Text {
     ShellProfileEncoding,
     ShellMarksVersion,
     ShellMarksPath,
+    ShellMarksProfileKind,
     ShellProfileUnchanged,
     ShellProfileMigrated,
     ShellProfileRemoved,
@@ -4543,6 +4587,87 @@ impl Text {
                 "Move Folio out of App Translocation before installing hooks.",
                 "将 Folio 移出 App Translocation 后再安装 hook。",
             ),
+            Self::CleanupRecovery => pick(
+                lang,
+                "left (dated recovery copies of user configuration are kept)",
+                "已保留（带日期的配置备份不删除）",
+            ),
+            Self::CleanupRuntime => pick(
+                lang,
+                "left (OS runtime lock files are kept to preserve single-instance exclusion)",
+                "已保留（运行时锁文件用于单实例互斥）",
+            ),
+            Self::CleanupArchiveExit => pick(lang, "Cleanup exit code:", "清理退出码："),
+            Self::CleanupArchiveReady => pick(
+                lang,
+                "You can now delete the Folio application folder. Your settings and data were kept.",
+                "现在可以删除 Folio 应用文件夹。设置和数据已保留。",
+            ),
+            Self::CleanupArchiveIncomplete => pick(
+                lang,
+                "Cleanup did not complete. Read the result above before deleting the folder.",
+                "清理未完成。删除文件夹前请查看上方结果。",
+            ),
+            Self::CleanupRemoved => pick(lang, "removed", "已移除"),
+            Self::CleanupAbsent => pick(lang, "not present", "不存在"),
+            Self::CleanupLeft => pick(
+                lang,
+                "left (belongs to another existing copy):",
+                "已保留（属于另一份 Folio）：",
+            ),
+            Self::CleanupRefused => pick(lang, "refused", "未能移除"),
+            Self::CleanupRoot => pick(
+                lang,
+                "An absolute, verified cleanup root is required.",
+                "需要经过验证的绝对路径作为清理根目录。",
+            ),
+            Self::CleanupRunning => pick(
+                lang,
+                "A Folio instance is running; nothing was changed.",
+                "Folio 正在运行，未做任何更改。",
+            ),
+            Self::CleanupBusy => pick(
+                lang,
+                "A process holds Folio data; nothing was changed",
+                "有进程持有 Folio 数据，未做任何更改",
+            ),
+            Self::CleanupUnexpected => pick(
+                lang,
+                "The remover returned an unexpected outcome.",
+                "清理操作返回了意外结果。",
+            ),
+            Self::CleanupApplication => pick(
+                lang,
+                "The application folder cannot be purged.",
+                "应用程序文件夹不能被清除。",
+            ),
+            Self::CleanupLink => pick(
+                lang,
+                "A symlink or junction was found; the root was left unchanged.",
+                "发现符号链接或连接点，根目录未更改。",
+            ),
+            Self::CleanupUsage => pick(
+                lang,
+                "Use folio --uninstall-cleanup [--purge].",
+                "用法：folio --uninstall-cleanup [--purge]",
+            ),
+            Self::CleanupSystemUnknown => pick(
+                lang,
+                "The registration could not be read.",
+                "无法读取注册信息。",
+            ),
+            Self::CleanupRecorded => pick(
+                lang,
+                "The record names a path this door will not act on.",
+                "记录中的路径不在清理范围内。",
+            ),
+            Self::CleanupMacHeld => pick(
+                lang,
+                "On macOS Folio cannot tell whether another program holds this data. \
+                 Quit Folio before --purge.",
+                "macOS 上 Folio 无法判断是否有其他程序持有此数据。\
+                 清除前请先退出 Folio。",
+            ),
             Self::AgentHooksOwnerUnknown => pick(
                 lang,
                 "The hook executable’s owner could not be verified.",
@@ -5045,6 +5170,11 @@ impl Text {
                 "Integration mark paths must be absolute.",
                 "整合记录中的路径必须是绝对路径。",
             ),
+            Self::ShellMarksProfileKind => pick(
+                lang,
+                "A recorded $PROFILE must be a .ps1 file.",
+                "记录的 $PROFILE 必须是 .ps1 文件。",
+            ),
             Self::ShellProfileUnchanged => pick(lang, "Folio profile unchanged", "$PROFILE 未改动"),
             Self::ShellProfileMigrated => pick(
                 lang,
@@ -5149,7 +5279,26 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 719] = [
+    pub const ALL: [Self; 739] = [
+        Self::CleanupArchiveExit,
+        Self::CleanupArchiveReady,
+        Self::CleanupArchiveIncomplete,
+        Self::CleanupRecovery,
+        Self::CleanupRuntime,
+        Self::CleanupRemoved,
+        Self::CleanupAbsent,
+        Self::CleanupLeft,
+        Self::CleanupRefused,
+        Self::CleanupRoot,
+        Self::CleanupRunning,
+        Self::CleanupBusy,
+        Self::CleanupUnexpected,
+        Self::CleanupApplication,
+        Self::CleanupLink,
+        Self::CleanupUsage,
+        Self::CleanupSystemUnknown,
+        Self::CleanupRecorded,
+        Self::CleanupMacHeld,
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -5858,6 +6007,7 @@ impl Text {
         Self::ShellProfileEncoding,
         Self::ShellMarksVersion,
         Self::ShellMarksPath,
+        Self::ShellMarksProfileKind,
         Self::ShellProfileUnchanged,
         Self::ShellProfileMigrated,
         Self::ShellProfileRemoved,

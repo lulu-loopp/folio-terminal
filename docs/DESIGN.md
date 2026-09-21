@@ -11220,3 +11220,9 @@ The first card's top is the list's top exactly, so clamping the grown box cost t
 `ChromeSprite` carries no clip box and a chrome layer's marks are one draw under one scissor, so the growth is simply allowed: 3 logical px against the panel's own 6px top margin and its bottom one, empty ground either way.
 The status dot now breathes on the halo's clock and curve (the window's one 1.7s breath), one sample taken in `wait_pulse` and worn by the card's edge, the halo and all four dot surfaces; reduced motion answers each channel's own flat value — no halo, full dot.
 The dot had never pulsed because the mock-up's `.unreaddot.await` names `@keyframes fcpulse`, which the mock-up never defines: an undefined animation does nothing, and the Rust transcription inherited the name without a curve.
+
+### 2026-09-20 — Ending a synchronized update keeps the sequence it interrupted
+The replay tail carries two facts: the bytes a DEC 2026 block holds back, and the sequence the boundary parser is still inside.
+Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
+One function owns that release, and it never writes `parser_sequence_open` — the boundary parser alone says whether a sequence is open.
+The deadline arm used to clear both, so a resize seeded the canonical fork at Ground and printed the rest of an escape payload onto the grid.

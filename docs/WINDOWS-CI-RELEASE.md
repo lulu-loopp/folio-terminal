@@ -105,7 +105,7 @@ hashes verify, and `folio.exe --version` equals `Folio <version> (<git rev-parse
 --short=10 HEAD>)`. Check SHA, tag and branch lookups resolve to the intended
 commit. Change one byte in a disposable downloaded PDB and ensure `-Binary`
 refuses before signing; also exercise a different checkout SHA. Then package a
-fresh copy with `-Sign`, run signed smoke, inspect the nine-file zip, its SBOM
+fresh copy with `-Sign`, run signed smoke, inspect the ten-file zip, its SBOM
 and final checksums, and retain run URL/BUILDINFO/PDB. No existing `main` CI run
 has this artifact contract until this new job has run; do not substitute the
 debug or unsigned-rehearsal archive. Release-script tests use offline fixtures
