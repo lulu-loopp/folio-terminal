@@ -13,9 +13,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
-- Touch input — a touch screen, or a remote-desktop tool that sends touch — now
-  works as it does in other Windows programs: tap, drag to scroll, press and
-  hold for the menu.
+- Touch input — a touch screen, or a remote-desktop tool that sends touch —
+  now reaches Folio the way it reaches other Windows programs: a tap is a
+  click, and press-and-hold opens the menu. Windows does the translating.
 
 ## 0.4.3-preview — 2026-09-21
 
