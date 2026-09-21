@@ -54,6 +54,11 @@ pub fn atomic_replace_preserving(path: &Path, contents: &[u8]) -> Result<(), Wri
 fn preserving_replace(path: &Path, contents: &[u8]) -> Result<(), ReplaceRefusal> {
     let tmp_path = temp_sibling_path(path).map_err(ReplaceRefusal::Refused)?;
     let recovery = temp_sibling_path(path).map_err(ReplaceRefusal::Refused)?;
+    // **Only a temp this call made is this call's to delete.** `write_temp`
+    // retires its own file when it fails, and refuses a name that is already
+    // taken; removing `tmp_path` on *that* refusal would delete somebody else's
+    // file one frame above the function that declined to touch it.
+    let mut temp_is_ours = false;
     let result = (|| -> Result<(), ReplaceRefusal> {
         let file = File::open(path).map_err(ReplaceRefusal::Refused)?;
         if bt_platform::file_link_count(&file).map_err(ReplaceRefusal::Refused)? > 1 {
@@ -63,9 +68,10 @@ fn preserving_replace(path: &Path, contents: &[u8]) -> Result<(), ReplaceRefusal
         }
         drop(file);
         write_temp(&tmp_path, contents, TempBirth::OwnerOnly).map_err(ReplaceRefusal::Refused)?;
+        temp_is_ours = true;
         bt_platform::replace_file_preserving(&tmp_path, path, &recovery)
     })();
-    if result.is_err() {
+    if result.is_err() && temp_is_ours {
         let _ = fs::remove_file(&tmp_path);
     }
     result
