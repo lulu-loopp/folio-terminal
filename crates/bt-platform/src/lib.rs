@@ -18735,4 +18735,9 @@ pub fn png_from_tiff(_tiff: &[u8]) -> Result<Vec<u8>, String> {
     Err("TIFF is not a clipboard picture encoding on this platform".to_owned())
 }
 mod file_replace;
-pub use file_replace::{file_link_count, replace_file_preserving};
+#[cfg(windows)]
+pub use file_replace::set_file_attributes;
+pub use file_replace::{
+    ReplaceRefusal, carry_metadata, extended_attribute_names, file_link_count,
+    replace_file_preserving, volume_cannot_replace,
+};
