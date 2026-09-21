@@ -2008,6 +2008,50 @@ mod tests {
         assert!(probe.contains("from_secs(5)"));
     }
 
+    /// PIN — **the window hears a removal only through the report's own answer,
+    /// and the console door keeps its sentence.**
+    ///
+    /// Two doors read the same `Report` and they owe different things. The
+    /// window is not owed a toast about a `$PROFILE` line that was never there
+    /// — that toast was a new machine's first sight of Folio, because the
+    /// first-run card's PowerShell row left off presses the Settings page's
+    /// `Off` and `Off` runs a removal. Somebody who typed
+    /// `--remove-shell-integration` *is* owed an answer, so that door still
+    /// prints `ShellProfileNothing`.
+    ///
+    /// MUTATIONS:
+    /// ① put the empty-text substitution back on the window's door and the
+    ///    corner speaks about nothing again;
+    /// ② take it off the console door and a command answers with silence and an
+    ///    exit code.
+    #[test]
+    fn shell_integration_removal_speaks_to_a_window_only_through_the_report() {
+        let source = include_str!("main.rs");
+        let probed = source
+            .split_once("AppEvent::PowerShellProfileProbed => {")
+            .unwrap()
+            .1
+            .split_once("AppEvent::UpdateChecked")
+            .unwrap()
+            .0;
+        assert!(probed.contains("report.window_text()"));
+        assert!(
+            !probed.contains("ShellProfileNothing"),
+            "the window is being told about a removal that removed nothing"
+        );
+        let console = source
+            .split_once("if cli::remove_shell_integration(std::env::args_os().skip(1)) {")
+            .unwrap()
+            .1
+            .split_once("if cli::remove_explorer_menu(")
+            .unwrap()
+            .0;
+        assert!(
+            console.contains("ShellProfileNothing"),
+            "a person who typed the command is owed an answer"
+        );
+    }
+
     fn source_for_profile_probe() -> &'static str {
         include_str!("shell_integration.rs")
             .split_once("fn run_profile_probe(program: &Path)")

@@ -310,6 +310,53 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn one(fate: Fate) -> Report {
+        Report {
+            files: vec![FileReport {
+                path: PathBuf::from(r"C:\Users\alice\profile.ps1"),
+                fate,
+            }],
+        }
+    }
+
+    /// PIN — **a removal that found nothing to remove says nothing in the
+    /// window**, and a refusal or a real removal still speaks.
+    ///
+    /// The rule is [`Report::window_text`]'s and not the toast call site's,
+    /// because the call site is what broke it: an empty successful report was
+    /// given the words `No Folio profile lines found.`, and the first-run
+    /// card's PowerShell row left off presses the same `Off` the Settings page
+    /// sends, which runs a removal — so a brand-new machine's first sight of
+    /// Folio was a message about a `$PROFILE` line it never had.
+    ///
+    /// MUTATIONS:
+    /// ① give the empty report words again and `Done` greets a new reader with
+    ///    a toast about nothing;
+    /// ② drop the refusal flag and a removal that was refused arrives in the
+    ///    corner as an `Ok`, with the refusal's own sentence missing besides.
+    #[test]
+    fn shell_integration_removal_with_nothing_to_remove_tells_the_window_nothing() {
+        assert_eq!(Report::default().window_text(), None);
+        let unchanged = one(Fate::Unchanged);
+        assert_eq!(unchanged.exit_code(), 0);
+        assert_eq!(
+            unchanged.window_text(),
+            None,
+            "a profile that was looked at and left alone is being announced"
+        );
+        let (refused, text) = one(Fate::Removed)
+            .window_text()
+            .expect("a line that was taken out of somebody's $PROFILE is news");
+        assert!(!refused);
+        assert!(text.contains(r"C:\Users\alice\profile.ps1"));
+        assert!(text.contains(Text::ShellProfileRemoved.text()));
+        let (refused, text) = one(Fate::Refused("the file is in use".to_owned()))
+            .window_text()
+            .expect("a removal that could not be done is always news");
+        assert!(refused);
+        assert!(text.contains("the file is in use"));
+    }
+
     #[test]
     fn shell_integration_offer_predicate_never_grants_write_ownership() {
         let source = include_str!("../shell_integration.rs");
@@ -393,8 +440,10 @@ mod tests {
         assert_eq!(report.exit_code(), 0);
         assert_eq!(report.files[0].fate, Fate::Unchanged);
         assert_eq!(fs::read(&profile).unwrap(), original);
-        // Both settings and CLI map an empty successful report to ShellProfileNothing.
+        // The CLI maps an empty successful report to ShellProfileNothing; the
+        // window is told nothing at all. See `window_text`.
         assert!(report.text(false).is_empty());
+        assert_eq!(report.window_text(), None);
         let marks = Marks::read(&root).unwrap();
         assert!(marks.is_off());
         assert!(marks.powershell_profiles.is_empty());
