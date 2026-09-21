@@ -130673,9 +130673,13 @@ mod printed_path_provenance_tests {
         let signature = "fn read_up_to(";
         let start = PREVIEW.find(signature).expect("the one preview reader");
         let rest = &PREVIEW[start + signature.len()..];
-        let reader = &rest[..rest.find("
+        let reader = &rest[..rest
+            .find(
+                "
 }
-").unwrap_or(rest.len())];
+",
+            )
+            .unwrap_or(rest.len())];
         let volume = ["PathLocality", "::", "AnotherMachine"].concat();
         assert!(
             !reader.contains(volume.as_str()),

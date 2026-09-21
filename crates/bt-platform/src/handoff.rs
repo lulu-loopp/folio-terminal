@@ -873,7 +873,7 @@ mod macos_handoff {
     pub fn reveal_verified(
         window: NativeWindow,
         path: &Path,
-        target: VerifiedTarget,
+        target: super::VerifiedTarget,
     ) -> Result<(), String> {
         let _ = window;
         if !target.exists {
