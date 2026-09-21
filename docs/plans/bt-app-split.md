@@ -1772,6 +1772,54 @@ the original resolution.
 
 **Dispatch gates for Step 2:** §0.1's rows 2a and 2b.
 
+### 6.6 2026-09-21 — the preparation has its own plan
+
+§6.2's first column — the guard preparation that lands on the topology that
+exists — is now planned in full in **`bt-app-split-prep.md`**. Two design
+revisions and two reviews went into it; nothing above is withdrawn, and the
+plan there is the detail behind this column rather than a replacement for it.
+
+**The scope is ruled: workspace-wide.** Two scopes were priced side by side —
+workspace-wide (before the move, no reader anywhere in the workspace names a
+file, outside a small permanent allowlist) and narrow (migrate only what the
+move disturbs, leave the rest on a debt list). The narrow scope was recommended
+and **the owner ruled workspace-wide on 2026-09-21**: this preparation is the
+foundation every later move stands on — `seats.rs`, the free functions and
+declarations a strict two-impl 2a leaves in `main.rs`, and Step 3's crate
+extractions — each of which would otherwise re-open exactly the rows the narrow
+scope left open, in a tree with more readers than today. It is done once,
+completely. Hours order the tickets; they do not decide whether the tickets
+happen.
+
+**The ticket order is: what blocks the move, then the move, then the rest to
+zero.** Ids are stable and briefs cite them.
+
+* **First half, the mechanism** — P0 inventory and disposition ledger (including
+  hand-reading the 96 body-finder call sites whose selector a static classifier
+  cannot resolve); P1a–P1c the `bt-source` crate, its index and its measured
+  cost budget; P2 the migration-debt list, the permanent allowlist and the
+  tripwire.
+* **First half, the readers the move disturbs** — P3 the named-body pins of the
+  moving methods (474 sites in 40 module batches); P4 the disturbed whole-source
+  counts; P5 the disturbed negatives and all 27 text-prefix scopes; P6 the
+  `file_reads_doors.txt` rows keyed to a moving method; P7
+  `the_shell_page_is_gone`'s recursion, which is the one walker losing coverage
+  today; P8 the two latent non-recursive walkers; P9 the child-process
+  completion proof; P10 the agreement test over `scripts/check-portable-core.ps1`,
+  whose array reader is unchanged and is allowlist entry 1.
+* **The move** — P11 the dry run of the smallest topic (`quake`) on a throwaway
+  branch, then the relocation commit under §6.5's bounded freeze.
+* **Second half, after the move, to zero** — P12 `bt-platform`'s walkers and the
+  `stand_in` guard; P13 the remaining walks; P14 the remaining 49 pin sites;
+  P15–P17 the remaining counts, rows, text scopes and cross-crate readers; P18
+  the 110 halved needles; P19 the CI dependency-direction guard; P20 the debt
+  list closed to zero.
+
+**The preparation freezes nothing.** Every ticket lands alone, green on its own
+base and re-validated on the merge result, through CI like any other change, and
+ordinary feature work continues beside it. The only freeze in this plan is the
+relocation commit itself — §6.5's window, unchanged.
+
 ---
 
 ## 7. Step 3 — extract crates, from a table that reproduces
