@@ -1,3 +1,28 @@
+//! **The four facts a ledger answers, as a test writes them** (audit 3 C-2).
+//!
+//! The routing table used to take a predicate that asked the disk; it takes a read of the pane's
+//! own [`bt_term::PathVerdict`] ledger now, and `None` is a real answer — *nobody has asked yet*,
+//! which the table reads as "not a link". These three are the whole vocabulary the tables below
+//! need, spelled once so that a test that cares about an arm does not have to spell a struct.
+
+/// A file on a volume this machine holds.
+fn a_local_file() -> bt_term::PathVerdict {
+    bt_term::PathVerdict {
+        exists: true,
+        directory: false,
+        bytes: Some(0),
+        locality: bt_term::PathLocality::ThisMachine,
+    }
+}
+
+/// A folder on a volume this machine holds.
+fn a_local_folder() -> bt_term::PathVerdict {
+    bt_term::PathVerdict {
+        directory: true,
+        ..a_local_file()
+    }
+}
+
 /// Runs the actual production queue in a disposable process. The watchdog
 /// kills only this test's child if a regression makes conversion infinite.
 #[test]
@@ -104,19 +129,28 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
         )
         .is_ok()
     );
-    tasks
-        .send(MathWorkerRequest::VerifyPath {
+    // **The path lane, which is a thread of its own since audit 3 C-2** — a stat that blocks for
+    // the redirector's timeout must not stand in front of a formula. Driven here by hand, exactly
+    // as the decoration queue above it is.
+    let (path_tasks, path_requests) = mpsc::channel();
+    let (path_results, path_completions) = mpsc::channel();
+    let path_worker =
+        std::thread::spawn(move || run_path_verify_worker(path_requests, path_results, || {}));
+    path_tasks
+        .send(PathWorkerRequest {
             leaf,
             path: log.clone(),
         })
         .unwrap();
     assert!(matches!(
-        completions
+        path_completions
             .recv_timeout(Duration::from_secs(1))
             .unwrap()
             .completion,
-        DecorationWorkerCompletion::VerifiedPath { exists: true, .. }
+        DecorationWorkerCompletion::VerifiedPath { verdict, .. } if verdict.exists
     ));
+    drop(path_tasks);
+    path_worker.join().unwrap();
     assert!(std::fs::read_to_string(log).unwrap().contains("unwrap"));
     assert_eq!(fatal_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(!bt_math::render_panic_is_contained());
@@ -707,8 +741,8 @@ fn a_refused_verb_raises_one_notice_and_a_read_that_failed_raises_none() {
 ///    every local file stops raising a card the moment `Ctrl` is held down.
 #[test]
 fn a_reference_in_the_output_raises_the_card_the_files_column_raises() {
-    let file = |_: &Path| false;
-    let folder = |_: &Path| true;
+    let file = |_: &Path| Some(a_local_file());
+    let folder = |_: &Path| Some(a_local_folder());
 
     // A file, however it was printed: §7.1.5j turns a bare path, a `file:`
     // URI and an OSC 8 target into the same link, so one case covers all
@@ -9637,9 +9671,12 @@ fn copy_on_select_is_the_readers_answer_and_off_means_off() {
     assert!(!should_copy_on_select_release(Some(&route), true, false));
 }
 
-/// Nothing on the disk is a directory, for the arms that must not ask.
-fn no_directories(_: &Path) -> bool {
-    false
+/// **A ledger in which every name is an ordinary local file**, for the arms whose subject is not
+/// the folder question (audit 3 C-2). It was `fn no_directories(_: &Path) -> bool { false }` until
+/// the routing table stopped asking a disk and started reading a pane's ledger; `None` is a real
+/// answer now — *nobody has asked yet* — so a test about some other arm has to say which.
+fn no_directories(_: &Path) -> Option<bt_term::PathVerdict> {
+    Some(a_local_file())
 }
 
 /// PIN — **a drag is only ever a selection**, and the plain half of the table
@@ -9685,7 +9722,7 @@ fn hyperlink_activation_requires_a_click_without_drag() {
                     false,
                     uri,
                     bt_transcript::paths::PathNamer::ThisWindow,
-                    &|_| true
+                    &|_| Some(a_local_folder())
                 ),
                 HyperlinkActivation::None,
                 "a drag rather than a click: {uri:?}, Ctrl {control}"
@@ -9718,7 +9755,13 @@ fn hyperlink_activation_requires_a_click_without_drag() {
                 true,
                 uri,
                 bt_transcript::paths::PathNamer::ThisWindow,
-                &|path| path == Path::new(r"C:\some\folder")
+                &|path| {
+                    Some(if path == Path::new(r"C:\some\folder") {
+                        a_local_folder()
+                    } else {
+                        a_local_file()
+                    })
+                }
             ),
             HyperlinkActivation::None,
             "a plain click on a target that leaves this window: {uri:?}"
@@ -9730,7 +9773,13 @@ fn hyperlink_activation_requires_a_click_without_drag() {
             true,
             "file:///C:/page.html",
             bt_transcript::paths::PathNamer::ThisWindow,
-            &|path| path == Path::new(r"C:\some\folder")
+            &|path| {
+                Some(if path == Path::new(r"C:\some\folder") {
+                    a_local_folder()
+                } else {
+                    a_local_file()
+                })
+            }
         ),
         HyperlinkActivation::Preview(PathBuf::from(r"C:\page.html"), None),
         "and a page is a destination inside this window now, so it is not on \
@@ -9742,7 +9791,13 @@ fn hyperlink_activation_requires_a_click_without_drag() {
             true,
             "file:///C:/some/folder",
             bt_transcript::paths::PathNamer::ThisWindow,
-            &|path| path == Path::new(r"C:\some\folder")
+            &|path| {
+                Some(if path == Path::new(r"C:\some\folder") {
+                    a_local_folder()
+                } else {
+                    a_local_file()
+                })
+            }
         ),
         HyperlinkActivation::FilesColumn(PathBuf::from(r"C:\some\folder")),
         "and the folder that left it starts no program either — it opens a column"
@@ -9945,7 +10000,7 @@ fn a_web_address_printed_in_the_terminal_opens_in_this_window() {
 /// hands the shell the address.
 #[test]
 fn the_browser_door_refuses_the_userinfo_shape_the_address_field_refuses() {
-    let no_directories = |_: &Path| false;
+    let no_directories = |_: &Path| Some(a_local_file());
     for uri in [
         "https://example.test@evil.test/",
         "https://user:pass@evil.test/path",
@@ -10212,7 +10267,7 @@ fn a_plain_click_stays_in_this_window_and_ctrl_hands_it_to_the_system() {
             true,
             "file:///C:/notes/plan.md",
             bt_transcript::paths::PathNamer::ThisWindow,
-            &|_| false,
+            &|_| Some(a_local_file()),
         );
         let reference = local_image_activation(control, true, Some(picture));
         let (link_stays, reference_stays) = (
@@ -10370,9 +10425,15 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
             true,
             "file:///C:/repo/docs",
             bt_transcript::paths::PathNamer::ThisWindow,
-            &|path| path == Path::new(r"C:\repo\docs")
+            &|path| {
+                Some(if path == Path::new(r"C:\repo\docs") {
+                    a_local_folder()
+                } else {
+                    a_local_file()
+                })
+            }
         ),
-        HyperlinkActivation::Reveal(PathBuf::from(r"C:\repo\docs")),
+        HyperlinkActivation::External(PathBuf::from(r"C:\repo\docs")),
         "a folder is Explorer's"
     );
     assert_eq!(
@@ -10381,7 +10442,13 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
             true,
             "file:///C:/repo/docs",
             bt_transcript::paths::PathNamer::ThisWindow,
-            &|path| path == Path::new(r"C:\repo\docs")
+            &|path| {
+                Some(if path == Path::new(r"C:\repo\docs") {
+                    a_local_folder()
+                } else {
+                    a_local_file()
+                })
+            }
         ),
         HyperlinkActivation::FilesColumn(PathBuf::from(r"C:\repo\docs")),
         "and a plain click opens no Explorer window: it points this window's own column at it"
@@ -10648,9 +10715,15 @@ fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does
             true,
             "file:///C:/sites/archive.html",
             bt_transcript::paths::PathNamer::ThisWindow,
-            &|path| path == Path::new(r"C:\sites\archive.html")
+            &|path| {
+                Some(if path == Path::new(r"C:\sites\archive.html") {
+                    a_local_folder()
+                } else {
+                    a_local_file()
+                })
+            }
         ),
-        HyperlinkActivation::Reveal(PathBuf::from(r"C:\sites\archive.html")),
+        HyperlinkActivation::External(PathBuf::from(r"C:\sites\archive.html")),
         "a folder is Explorer's however it is named"
     );
     for control in [false, true] {
@@ -10938,7 +11011,11 @@ fn the_hover_line_says_where_control_would_send_a_local_path() {
         assert!(hover.activate_if_due(
             start + Duration::from_millis(300),
             bt_transcript::paths::PathNamer::ThisWindow,
-            &|_: &Path| directory
+            &|_: &Path| Some(if directory {
+                a_local_folder()
+            } else {
+                a_local_file()
+            })
         ));
         hover
     }
@@ -11004,7 +11081,11 @@ fn the_hover_line_spends_grid_cells_and_not_characters() {
         assert!(hover.activate_if_due(
             start + Duration::from_millis(300),
             bt_transcript::paths::PathNamer::ThisWindow,
-            &|_: &Path| directory
+            &|_: &Path| Some(if directory {
+                a_local_folder()
+            } else {
+                a_local_file()
+            })
         ));
         hover
     }
@@ -11471,8 +11552,8 @@ fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
     session.absorb_printed_path_probes(&mut projection);
     while let Some(task) = session.take_decoration_worker_task() {
         if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
-            let exists = bt_term::path_exists(&path);
-            session.complete_path_verification(path, exists);
+            let verdict = bt_term::verify_path(&path);
+            session.complete_path_verification(path, verdict);
         }
     }
     let frame = session.viewport_frame(&mut projection).unwrap();
@@ -11482,7 +11563,7 @@ fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
     let readable_column = 0u32;
     let page_column = readable.to_string_lossy().chars().count() as u32 + 1;
     let directory_column = page_column + page.to_string_lossy().chars().count() as u32 + 1;
-    let is_directory = |path: &Path| path.is_dir();
+    let is_directory = |path: &Path| Some(bt_term::verify_path(path));
     for (column, named, plain, control) in [
         (
             readable_column,
@@ -11595,8 +11676,8 @@ fn a_located_reference_carries_its_line_to_the_preview_arm_alone() {
     session.absorb_printed_path_probes(&mut projection);
     while let Some(task) = session.take_decoration_worker_task() {
         if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
-            let exists = bt_term::path_exists(&path);
-            session.complete_path_verification(path, exists);
+            let verdict = bt_term::verify_path(&path);
+            session.complete_path_verification(path, verdict);
         }
     }
     let frame = session.viewport_frame(&mut projection).unwrap();
@@ -11621,7 +11702,7 @@ fn a_located_reference_carries_its_line_to_the_preview_arm_alone() {
         "the target is the file, and the line rides in its fragment"
     );
 
-    let is_directory = |path: &Path| path.is_dir();
+    let is_directory = |path: &Path| Some(bt_term::verify_path(path));
     assert_eq!(
         hyperlink_activation(
             false,
@@ -11728,7 +11809,7 @@ fn a_wrapped_link_activates_the_same_target_from_either_segment() {
                 true,
                 &hit.uri,
                 bt_transcript::paths::PathNamer::ThisWindow,
-                &|_| false
+                &|_| Some(a_local_file())
             ),
             opened,
             "either segment opens the one file the run names"
@@ -14603,6 +14684,7 @@ fn disconnected_math_dispatch_downgrades_once_and_leaves_the_real_session_usable
     let (tasks, receiver) = mpsc::channel();
     drop(receiver);
     let (scale_tasks, _scale_receiver) = mpsc::channel();
+    let (path_tasks, _path_receiver) = mpsc::channel();
     let mut running = true;
     let mut notice_pending = false;
 
@@ -14611,6 +14693,7 @@ fn disconnected_math_dispatch_downgrades_once_and_leaves_the_real_session_usable
         &mut session,
         &tasks,
         &scale_tasks,
+        &path_tasks,
         &mut running,
         &mut notice_pending,
     ));
@@ -14636,6 +14719,7 @@ fn disconnected_math_dispatch_downgrades_once_and_leaves_the_real_session_usable
         &mut session,
         &tasks,
         &scale_tasks,
+        &path_tasks,
         &mut running,
         &mut notice_pending,
     ));
@@ -15989,11 +16073,14 @@ fn two_surfaces_of_one_buffer_hold_their_own_zoom() {
 fn local_path_validation_and_resampling_are_dispatched_to_independent_lanes() {
     let (tasks, task_receiver) = mpsc::channel();
     let (scale_tasks, scale_receiver) = mpsc::channel();
+    // The third lane, since audit 3 C-2: a path question is not the decoration queue's.
+    let (path_tasks, path_receiver) = mpsc::channel();
     assert!(dispatch_decoration_task(
         probe_leaf(),
         SessionDecorationTask::ScaleInlineImage(scale_task("same-path", 128)),
         &tasks,
         &scale_tasks,
+        &path_tasks,
     ));
     assert!(dispatch_decoration_task(
         probe_leaf(),
@@ -16003,6 +16090,7 @@ fn local_path_validation_and_resampling_are_dispatched_to_independent_lanes() {
         }),
         &tasks,
         &scale_tasks,
+        &path_tasks,
     ));
 
     assert!(matches!(
@@ -16019,6 +16107,28 @@ fn local_path_validation_and_resampling_are_dispatched_to_independent_lanes() {
             ..
         })
     ));
+
+    // **And a path question goes down a third lane** (audit 3 C-2). It rode the decoration queue
+    // until a printed name turned out to be able to name a mapped drive whose server is gone: a
+    // `GetFileAttributesW` inside the SMB redirector takes about twenty-one seconds to give up,
+    // and twenty-one seconds at the head of *this* queue is every formula and every picture in
+    // the window waiting behind one hostile line of output. Nobody waits on the path lane — an
+    // unanswered name is simply not a link yet — so it is the one that may be slow.
+    assert!(dispatch_decoration_task(
+        probe_leaf(),
+        SessionDecorationTask::VerifyPath(PathBuf::from(r"Z:\work\notes.md")),
+        &tasks,
+        &scale_tasks,
+        &path_tasks,
+    ));
+    assert!(matches!(
+        path_receiver.try_recv(),
+        Ok(PathWorkerRequest { .. })
+    ));
+    assert!(
+        task_receiver.try_recv().is_err(),
+        "a path question must not be able to stand in front of a formula"
+    );
 }
 
 /// The caret rectangle leaves the frame in the terminal seat's coordinates
@@ -24955,7 +25065,13 @@ fn a_markdown_link_wears_the_pointing_finger() {
 fn a_terminal_hyperlink_wears_the_finger_where_a_press_would_answer() {
     use winit::window::CursorIcon;
     let folder = Path::new(r"C:\repo\docs");
-    let is_directory: &dyn Fn(&Path) -> bool = &|path| path == folder;
+    let is_directory: &dyn Fn(&Path) -> Option<bt_term::PathVerdict> = &|path| {
+        Some(if path == folder {
+            a_local_folder()
+        } else {
+            a_local_file()
+        })
+    };
     // rows: the URI, then the hand plainly and the hand under Ctrl.
     for (uri, plainly, under_control) in [
         ("file:///C:/notes.md", true, true),
@@ -40387,6 +40503,7 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
 
     let (tasks, requests) = mpsc::channel();
     let (scale_tasks, _scale_requests) = mpsc::channel();
+    let (path_tasks, _path_requests) = mpsc::channel();
     let mut running = true;
     let mut notice_pending = false;
     assert!(
@@ -40395,6 +40512,7 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
             &mut tab,
             &tasks,
             &scale_tasks,
+            &path_tasks,
             &mut running,
             &mut notice_pending,
         ),
@@ -40411,8 +40529,7 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
             | MathWorkerRequest::PeekAnimation { leaf, .. }
             | MathWorkerRequest::AnimationFill { leaf, .. }
             | MathWorkerRequest::PeekPage { leaf, .. }
-            | MathWorkerRequest::PreviewMath { leaf, .. }
-            | MathWorkerRequest::VerifyPath { leaf, .. } => leaf,
+            | MathWorkerRequest::PreviewMath { leaf, .. } => leaf,
         })
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(

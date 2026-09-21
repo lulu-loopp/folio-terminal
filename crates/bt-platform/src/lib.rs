@@ -4,6 +4,9 @@ use std::num::NonZeroIsize;
 
 pub mod file_reads;
 pub mod ime_trace;
+pub mod volume;
+
+pub use volume::{Volume, volume_of};
 
 /// Fresh native facts for a diagnostic line only. Unreadable is not false.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

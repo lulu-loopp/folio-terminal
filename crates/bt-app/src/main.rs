@@ -1226,10 +1226,6 @@ enum MathWorkerRequest {
         fit: (u32, u32),
         known: Option<SystemTime>,
     },
-    /// Ask the disk whether one printed path names anything (§7.1.5j). The cheapest thing this
-    /// worker is ever handed, and it is here rather than on the event thread for the reason every
-    /// other read is: the answer costs a syscall and the frame is being drawn.
-    VerifyPath { leaf: ShellAddress, path: PathBuf },
     /// Set one formula a markdown preview is showing.
     ///
     /// The same engine, the same thread and the same channel the terminal's formulas already use,
@@ -1241,6 +1237,31 @@ enum MathWorkerRequest {
         leaf: ShellAddress,
         key: Box<PreviewMathKey>,
     },
+}
+
+/// **Ask the disk about one path a program named** (§7.1.5j, audit 3 C-2) — and the only request
+/// in this window with a thread of its own.
+///
+/// It rode the decoration queue until 2026-09-20, beside a formula's render and a picture's
+/// decode, on the argument that it is the cheapest thing that queue is ever handed. That argument
+/// is true of the answer and false of the *wait*: the question is asked of a name a child process
+/// printed, and a name a child process printed may stand on a mapped drive whose server is gone or
+/// behind a junction into a dead share. The redirector's own timeout is about twenty-one seconds,
+/// and twenty-one seconds at the head of the decoration queue is every formula and every picture
+/// in the window starved behind one hostile line of output.
+///
+/// So it has a lane. The two properties that lane is chosen for: **nobody waits on it** — a path
+/// nobody has answered for is simply not a link yet, and the frame that draws without it is
+/// correct — and **it can only starve itself**, which the session's own queue already bounds by
+/// dropping the oldest question ([`bt_term::DualPlaneSession::take_decoration_worker_task`]).
+///
+/// A timeout was the alternative and it is not available honestly: a blocking `GetFileAttributesW`
+/// inside the SMB redirector cannot be cancelled, so "abandoning" one means leaking the thread
+/// that is stuck in it — an unbounded number of them, one per dead share a program names. A lane
+/// that is allowed to be slow is the design that needs no such escape.
+struct PathWorkerRequest {
+    leaf: ShellAddress,
+    path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1452,10 +1473,11 @@ enum DecorationWorkerCompletion {
     PreviewScaledImage {
         scaled: bt_term::ScaledInlineImage,
     },
-    /// What the disk said about one printed path (§7.1.5j).
+    /// What the disk said about one printed path (§7.1.5j) — all of it, because since audit 3 C-2
+    /// this is the *only* thing the window thread is allowed to know about that path.
     VerifiedPath {
         path: PathBuf,
-        exists: bool,
+        verdict: bt_term::PathVerdict,
     },
     /// One markdown preview's formula, set or refused.
     ///
@@ -1666,6 +1688,8 @@ fn peek_pixels(
 struct MathWorker {
     tasks: mpsc::Sender<MathWorkerRequest>,
     scale_tasks: mpsc::Sender<ScaleWorkerRequest>,
+    /// The path-verification lane — see [`PathWorkerRequest`] for why it is not the queue above.
+    path_tasks: mpsc::Sender<PathWorkerRequest>,
     results: mpsc::Receiver<MathWorkerResult>,
 }
 
@@ -1673,9 +1697,22 @@ impl MathWorker {
     fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
         let (task_tx, task_rx) = mpsc::channel::<MathWorkerRequest>();
         let (scale_tx, scale_rx) = mpsc::channel::<ScaleWorkerRequest>();
+        let (path_tx, path_rx) = mpsc::channel::<PathWorkerRequest>();
         let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
         let scale_result_tx = result_tx.clone();
         let scale_proxy = proxy.clone();
+        let path_result_tx = result_tx.clone();
+        let path_proxy = proxy.clone();
+        bt_platform::spawn_at_priority(
+            "bt-path-verify-worker",
+            bt_platform::ThreadPriority::BelowNormal,
+            move || {
+                run_path_verify_worker(path_rx, path_result_tx, move || {
+                    let _ = path_proxy.send_event(AppEvent::MathReady);
+                });
+            },
+        )
+        .context("spawn path verification worker")?;
         // Read here rather than handed down: the lane is spawned before there is
         // a `Runtime` to own the flag, and this is the same question
         // [`Runtime::trace_perf`] asks of the same variable.
@@ -1733,8 +1770,34 @@ impl MathWorker {
         Ok(Self {
             tasks: task_tx,
             scale_tasks: scale_tx,
+            path_tasks: path_tx,
             results: result_rx,
         })
+    }
+}
+
+/// **The path-verification lane** (audit 3 C-2).
+///
+/// One question, one call, one answer, and nothing else runs here — which is the whole of the
+/// design: a `verify_path` that blocks inside the SMB redirector holds up nothing but the next
+/// path question, and the window thread was never waiting on either.
+fn run_path_verify_worker(
+    task_rx: mpsc::Receiver<PathWorkerRequest>,
+    result_tx: mpsc::Sender<MathWorkerResult>,
+    mut wake: impl FnMut(),
+) {
+    while let Ok(PathWorkerRequest { leaf, path }) = task_rx.recv() {
+        let verdict = bt_term::verify_path(&path);
+        if result_tx
+            .send(MathWorkerResult {
+                leaf,
+                completion: DecorationWorkerCompletion::VerifiedPath { path, verdict },
+            })
+            .is_err()
+        {
+            return;
+        }
+        wake();
     }
 }
 
@@ -1789,13 +1852,6 @@ fn run_decoration_worker(
                 (
                     leaf,
                     DecorationWorkerCompletion::PreviewMath { key, result },
-                )
-            }
-            MathWorkerRequest::VerifyPath { leaf, path } => {
-                let exists = bt_term::path_exists(&path);
-                (
-                    leaf,
-                    DecorationWorkerCompletion::VerifiedPath { path, exists },
                 )
             }
             MathWorkerRequest::PeekImage { leaf, path } => {
@@ -10461,6 +10517,7 @@ fn dispatch_decoration_task(
     task: SessionDecorationTask,
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
+    path_tasks: &mpsc::Sender<PathWorkerRequest>,
 ) -> bool {
     match task {
         SessionDecorationTask::Math(task) => tasks
@@ -10476,9 +10533,11 @@ fn dispatch_decoration_task(
         SessionDecorationTask::ScaleInlineImage(task) => scale_tasks
             .send(ScaleWorkerRequest::InlineImage { leaf, task })
             .is_ok(),
-        SessionDecorationTask::VerifyPath(path) => tasks
-            .send(MathWorkerRequest::VerifyPath { leaf, path })
-            .is_ok(),
+        // **Its own lane** — see [`PathWorkerRequest`]. A stat that blocks for the redirector's
+        // timeout must not stand in front of a formula the reader is waiting on.
+        SessionDecorationTask::VerifyPath(path) => {
+            path_tasks.send(PathWorkerRequest { leaf, path }).is_ok()
+        }
     }
 }
 
@@ -10489,6 +10548,7 @@ fn dispatch_pending_math_tasks(
     session: &mut DualPlaneSession,
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
+    path_tasks: &mpsc::Sender<PathWorkerRequest>,
     running: &mut bool,
     notice_pending: &mut bool,
 ) -> bool {
@@ -10496,7 +10556,7 @@ fn dispatch_pending_math_tasks(
         return false;
     }
     while let Some(task) = session.take_decoration_worker_task() {
-        if !dispatch_decoration_task(leaf, task, tasks, scale_tasks) {
+        if !dispatch_decoration_task(leaf, task, tasks, scale_tasks, path_tasks) {
             return disable_math_worker_state(running, notice_pending);
         }
     }
@@ -10529,6 +10589,7 @@ fn dispatch_tab_decoration_tasks(
     tab: &mut TabState,
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
+    path_tasks: &mpsc::Sender<PathWorkerRequest>,
     running: &mut bool,
     notice_pending: &mut bool,
 ) -> bool {
@@ -10546,6 +10607,7 @@ fn dispatch_tab_decoration_tasks(
             &mut leaf.session,
             tasks,
             scale_tasks,
+            path_tasks,
             running,
             notice_pending,
         );
@@ -12970,6 +13032,23 @@ struct WindowRuntime {
     /// A boolean is intentional: every commit in one drag replaces the same debt, and only the
     /// final transaction quiescence may pay it.
     hyperlink_hover: HyperlinkHover,
+    /// **The reference under the pointer, resolved once for the length of one pointer event**
+    /// (audit 3 C-2).
+    ///
+    /// One `CursorMoved` asks three surfaces the same question — the folder flyout's trigger, the
+    /// glance's row and the picture peek's subject — and each of them used to resolve the cell
+    /// from scratch. While that resolution reached the disk the cost was six blocking syscalls
+    /// per motion event; it reaches no disk any more, and it is still one answer being computed
+    /// three times about one cell.
+    ///
+    /// Emptied at the top of [`Runtime::pointer_moved`] and read only by the three consumers that
+    /// run inside it, which is why a `RefCell` is enough state for it: everything a
+    /// [`TerminalReference`] is derived from — the pane's presented frame, the pane's ledger, the
+    /// renderer's metrics, the seat layout — changes only through a `&mut self` door, and no such
+    /// door runs between the clear and the three reads. Every other caller of
+    /// [`Runtime::terminal_reference_at`] resolves afresh, because those run on frames rather than
+    /// on pointer events.
+    pointer_reference: PointerReferenceMemo,
     /// The pane the pointer was last found standing in, or `None` when it is over chrome, over a
     /// non-terminal pane, or outside the window.
     ///
@@ -15259,7 +15338,7 @@ mod worker_answer_routing_tests {
             leaf: address,
             completion: DecorationWorkerCompletion::VerifiedPath {
                 path: PathBuf::from("/notes.md"),
-                exists: true,
+                verdict: bt_term::PathVerdict::absent(),
             },
         };
         assert_eq!(
@@ -21708,9 +21787,9 @@ impl ControlClickHint {
     fn of(
         uri: &str,
         namer: bt_transcript::paths::PathNamer<'_>,
-        is_directory: &dyn Fn(&Path) -> bool,
+        verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
     ) -> Option<Self> {
-        match hyperlink_activation(true, true, uri, namer, is_directory) {
+        match hyperlink_activation(true, true, uri, namer, verdict) {
             HyperlinkActivation::External(_) | HyperlinkActivation::Browser => {
                 Some(Self::DefaultApp)
             }
@@ -21768,10 +21847,12 @@ struct HyperlinkHover {
     blocked: bool,
     /// Filled once, when the hover settles — see [`ControlClickHint`].
     ///
-    /// Once and not per frame, because deciding it asks the filesystem whether
-    /// the path is a folder: the status line is repainted on every frame the
-    /// pane owes and the hover settles exactly once, so this is the only clock
-    /// the question may be asked on.
+    /// Once and not per frame, because the status line is repainted on every frame the pane owes
+    /// and the hover settles exactly once. It used to be the *filesystem* that made this matter:
+    /// deciding the hint asked whether the path was a folder, on the thread that paints. Since
+    /// audit 3 C-2 it is a ledger read and costs a map lookup, and the clock is kept anyway —
+    /// this is the moment the sentence is decided, and a second decider per frame would be a
+    /// second opinion about it.
     hands_on: Option<ControlClickHint>,
 }
 
@@ -21804,15 +21885,15 @@ impl HyperlinkHover {
 
     /// Settle the hover, and while settling it decide what `Ctrl` would do.
     ///
-    /// `is_directory` is handed in rather than reached for, on this file's
-    /// standing division: the answer is a fact about the disk and this type
-    /// holds none. It is asked here and nowhere else, which is what keeps one
-    /// filesystem question off the frame clock.
+    /// `verdict` is handed in rather than reached for, on this file's standing division: the
+    /// answer is a fact about the disk and this type holds none. It is a read of the pane's own
+    /// ledger and never a syscall (audit 3 C-2) — a hover that stats a mapped network drive
+    /// freezes the window for the redirector's timeout.
     fn activate_if_due(
         &mut self,
         now: Instant,
         namer: bt_transcript::paths::PathNamer<'_>,
-        is_directory: &dyn Fn(&Path) -> bool,
+        verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
     ) -> bool {
         if self.show_at.is_none_or(|deadline| now < deadline) {
             return false;
@@ -21823,7 +21904,7 @@ impl HyperlinkHover {
         self.hands_on = self
             .active
             .as_ref()
-            .and_then(|hit| ControlClickHint::of(&hit.uri, namer, is_directory));
+            .and_then(|hit| ControlClickHint::of(&hit.uri, namer, verdict));
         self.active.is_some()
     }
 
@@ -24298,18 +24379,33 @@ fn preview_link_answers_a_press(control: bool, target: &str, document: &Path) ->
 /// down. So the plain half is [`HyperlinkActivation::FilesColumn`] and the rule stays whole:
 /// plainly, this window; under `Ctrl`, the system.
 ///
-/// # Why the directory question is a parameter
+/// # Why the disk's answer is a parameter, and why it is a *ledger* read
 ///
 /// Everything else here is a fact about the URI's own text, and this one thing
 /// is not: `file:///C:/notes` names a folder or a file depending on what is on
-/// the disk, and the URI cannot say which. It arrives as an argument for exactly
-/// the reason [`bt_platform::reveal_arguments`] takes the same one — so the
-/// routing table stays a pure function with a case per arm, and so the one
-/// caller that must touch a disk is the one place that does.
+/// the disk, and the URI cannot say which.
 ///
-/// It is asked **before** the page question, and that order is the ruling's:
-/// a folder may be named `site.html`, and Explorer's arm was settled a slice
-/// before the page arm existed.
+/// It used to arrive as a predicate that *asked* the disk — `path.is_dir()`
+/// behind a lexical gate — and every caller of this table is on the thread that
+/// paints. That is audit 3 C-2: a path on a mapped drive whose server is gone is
+/// lexically a local disk path, indistinguishable from one on `C:`, and
+/// `GetFileAttributesW` on it goes to the redirector, which takes as long as TCP
+/// takes to give up. A pointer resting on the cell re-armed it on every motion
+/// event. So the rule this table now obeys is one sentence: **the window thread
+/// never asks a filesystem about a path that came from program output.**
+///
+/// `verdict` is that rule's shape. It is a read of the pane's own ledger
+/// ([`bt_term::DualPlaneSession::path_verdict`]) — the answers a *worker*
+/// brought back about existence, folder-ness and whose machine the volume is —
+/// and it makes no call of its own. `None` means nobody has asked yet, and this
+/// table's answer for that is that the reference is **not a link**: the question
+/// is put on the same event ([`bt_term::DualPlaneSession::ask_about_link_target`])
+/// and the answer arrives a worker hop later with a frame of its own, which is
+/// exactly the rhythm a bare printed path has always had.
+///
+/// The folder question is asked **before** the page question, and that order is
+/// the ruling's: a folder may be named `site.html`, and Explorer's arm was
+/// settled a slice before the page arm existed.
 ///
 /// It is deliberately **not** asked of a share, nor of anything else this
 /// window may not read unasked. `bt_transcript::paths::may_read_unasked` is
@@ -24317,13 +24413,16 @@ fn preview_link_answers_a_press(control: bool, target: &str, document: &Path) ->
 /// answer for a share is settled before any question could be put to the network: §7.1.3 does not read one
 /// unasked, the preview seat has a card that says so, and probing whether a cold
 /// `\\server` is a directory would stall the event loop to reach a conclusion
-/// that was already reached.
+/// that was already reached. A **mapped drive** is that same answer arriving one
+/// step later, off the ledger instead of off the spelling — `docs/DESIGN.md` §3.4
+/// names 映射盘 as a network path by name, and a resting pointer is not the
+/// explicit confirmation it asks for.
 fn hyperlink_activation(
     control: bool,
     click_no_drag: bool,
     uri: &str,
     namer: bt_transcript::paths::PathNamer<'_>,
-    is_directory: &dyn Fn(&Path) -> bool,
+    verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
 ) -> HyperlinkActivation {
     if !click_no_drag {
         return HyperlinkActivation::None;
@@ -24373,16 +24472,32 @@ fn hyperlink_activation(
         // **And the question is the pane's** (route D of the untrusted-path audit, 2026-09-08).
         // The prefix test that stood here admitted a device path, a verbatim path and every
         // distribution's share, whichever pane the link was printed in — so `file://./pipe/name`
-        // and `file://wsl.localhost/Stopped/x` both walked past it into `is_directory`, which is a
-        // filesystem call on the thread that paints. The predicate below refuses all three before
-        // any syscall, and it refuses a distribution's share unless *this* pane is the one standing
-        // in that distribution, which is the only way this window ever mints one.
+        // and `file://wsl.localhost/Stopped/x` both walked past it into a filesystem call on the
+        // thread that paints. The predicate below refuses all three with no syscall at all, and it
+        // refuses a distribution's share unless *this* pane is the one standing in that
+        // distribution, which is the only way this window ever mints one.
         if !bt_transcript::paths::may_read_unasked(&path, namer) {
+            return HyperlinkActivation::Preview(path, at);
+        }
+        // **Nobody has asked the disk about this name yet, so it is not a link yet** (audit 3
+        // C-2). Not a refusal and not an answer — the one state a ledger has that a syscall does
+        // not, and the state every bare printed path passes through before its underline appears.
+        // The question is put by the same gesture that reached this table; the answer brings a
+        // frame with it.
+        let Some(verdict) = verdict(&path) else {
+            return HyperlinkActivation::None;
+        };
+        // **A mapped drive is a network path** (`docs/DESIGN.md` §3.4: 「网络路径(UNC/映射盘)默认不
+        // 自动预览(显式确认)」), and so is a junction on a local disk whose target is one. Neither is
+        // spelled any differently from `C:\…`, which is why the lexical gate above cannot see them
+        // and why the answer comes off the ledger. It is the same answer a share spelled `\\server`
+        // gets three lines up, and the preview seat prints the same card for it.
+        if verdict.locality != bt_term::PathLocality::ThisMachine {
             return HyperlinkActivation::Preview(path, at);
         }
         // The folder question first: a directory may be named `site.html`, and
         // Explorer's arm was settled before the page arm existed.
-        if is_directory(&path) {
+        if verdict.directory {
             return match intent {
                 // The files column, pointed at it (user ruling 2026-08-21). A
                 // folder is the one row that leaves this half empty and yet has
@@ -24404,10 +24519,10 @@ fn hyperlink_activation(
             // thing forwards, that the arm is what changes when W2 lands. W2 has
             // landed: `open_preview_at` sends a page down the engine's lane, so
             // a plain click on a link to a page now opens the page, which is
-            // what was asked for. The table is back to one sentence with no
-            // exception in it — 平点 = the destination inside this window,
-            // Ctrl+click = hand it to the system.
+            // what was asked for.
             ClickIntent::Here => HyperlinkActivation::Preview(path, at),
+            // The table is one sentence with no exception in it — 平点 = the
+            // destination inside this window, Ctrl+click = hand it to the system.
             ClickIntent::System => HyperlinkActivation::External(path),
         };
     }
@@ -24445,20 +24560,65 @@ struct TerminalReference {
     rect: [f32; 4],
 }
 
-/// **Whether a link target is a folder, asked only where it may be asked** (route D of the
-/// untrusted-path audit, 2026-09-08).
+// `path_is_a_directory_unasked` stood here from route D of the untrusted-path audit (2026-09-08)
+// until audit 3 C-2 (2026-09-20). It was `may_read_unasked_through_links(path) && path.is_dir()`,
+// and its own doc said the first half "costs nothing off the machine" — true of a link on a local
+// disk and false of everything this finding is about. A drive letter is lexically local whatever
+// it stands for, so a mapped network drive walked straight into `symlink_metadata`, which resolves
+// the whole path through the redirector; and an intermediate junction into a share did the same on
+// a spelling with no network in it at all. Every caller was on the thread that paints, and the
+// pointer re-armed it three times per motion event.
+//
+// There is no narrower version of it. The window thread does not ask a filesystem about a path
+// that came from program output — it reads [`bt_term::PathVerdict`] out of the pane's ledger, and
+// [`bt_term::verify_path`] is where those four questions are now asked, on a lane of their own.
+
+/// The cell a pointer event's reference was resolved for, and the answer — see
+/// [`WindowRuntime::pointer_reference`].
+type PointerReferenceMemo = RefCell<Option<((SeatId, u32), Option<TerminalReference>)>>;
+
+/// **One answer per subject, for however many readers ask** — the memo behind
+/// [`Runtime::pointer_reference_at`] (audit 3 C-2).
 ///
-/// `Path::is_dir` is a filesystem call, and every caller of it in the routing table is on the
-/// thread that paints: a target on a disconnected share stops the window for the operating
-/// system's own timeout, and a target in the device namespace stops it for as long as whoever is
-/// on the other end likes. So the question is put to the name first, through the one predicate,
-/// and the disk is asked only about a name this window would read anyway.
+/// A free function over the cell it is holding, so the property that matters can be stated as a
+/// value: three questions about one subject run `resolve` **once**, and a question about another
+/// subject runs it again. A memo that answered the second from the first would be the defect this
+/// one repairs, upside down.
+fn answered_once<Subject: Eq + Copy, Answer: Clone>(
+    memo: &RefCell<Option<(Subject, Answer)>>,
+    subject: Subject,
+    resolve: impl FnOnce() -> Answer,
+) -> Answer {
+    if let Some((held, answer)) = memo.borrow().as_ref()
+        && *held == subject
+    {
+        return answer.clone();
+    }
+    let answer = resolve();
+    *memo.borrow_mut() = Some((subject, answer.clone()));
+    answer
+}
+
+/// **Is it still there, and how large** — for a file the *user* pointed at (§7.37, §7.29 ⑬).
 ///
-/// The link hop is included and costs nothing off the machine: `symlink_metadata` and `read_link`
-/// are asked of the link itself, never of what it points at, so a junction into `\\server\share`
-/// is refused for what is written inside it rather than by going there.
-fn path_is_a_directory_unasked(path: &Path, namer: bt_transcript::paths::PathNamer<'_>) -> bool {
-    bt_transcript::paths::may_read_unasked_through_links(path, namer) && path.is_dir()
+/// One stat, on the window thread, once per frame of one hover. It is the budget §7.29 settled and
+/// `docs/DESIGN.md:189` is the ruling that admits it: the user chose this path, so this window may
+/// be as slow as the place they chose it in.
+///
+/// **A path a program printed does not come here** (audit 3 C-2). That is the whole of why this is
+/// a function with a name rather than four lines inside the card: the card takes a terminal
+/// reference's facts off its pane's ledger and everything else's from here, so the source guard
+/// over the hover path can say "no filesystem call in those bodies" with no exception in it.
+fn facts_of_a_file_the_user_chose(path: &Path) -> (bool, Option<u64>) {
+    let stat = bt_transcript::paths::may_read_unasked_through_links(
+        path,
+        bt_transcript::paths::PathNamer::ThisWindow,
+    )
+    .then(|| std::fs::metadata(path));
+    (
+        matches!(stat, Some(Err(_))),
+        stat.and_then(Result::ok).map(|file| file.len()),
+    )
 }
 
 /// [`ReferenceCard`] for the target `uri`, or `None` for a reference this window
@@ -24501,9 +24661,9 @@ fn path_is_a_directory_unasked(path: &Path, namer: bt_transcript::paths::PathNam
 fn reference_card(
     uri: &str,
     namer: bt_transcript::paths::PathNamer<'_>,
-    is_directory: &dyn Fn(&Path) -> bool,
+    verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
 ) -> Option<ReferenceCard> {
-    match hyperlink_activation(false, true, uri, namer, is_directory) {
+    match hyperlink_activation(false, true, uri, namer, verdict) {
         HyperlinkActivation::Preview(path, _) => Some(ReferenceCard::File(path)),
         HyperlinkActivation::FilesColumn(path) => Some(ReferenceCard::Folder(path)),
         HyperlinkActivation::None
@@ -29726,16 +29886,17 @@ fn pointer_cursor(
 ///
 /// One expression rather than two agreeing ones, for the reason 7.1.5f wrote
 /// down: a pointer that promises a press the release then declines is this window
-/// lying about what it can do. `is_directory` travels for the same reason it
-/// travels into the table, and reaches a disk on the same terms — never a share.
+/// lying about what it can do. `verdict` travels for the same reason it travels
+/// into the table, and reaches no disk at all (audit 3 C-2) — so a name nobody
+/// has answered for wears no finger, exactly as it is no link.
 fn terminal_link_answers_a_press(
     control: bool,
     uri: Option<&str>,
     namer: bt_transcript::paths::PathNamer<'_>,
-    is_directory: &dyn Fn(&Path) -> bool,
+    verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
 ) -> bool {
     uri.is_some_and(|uri| {
-        hyperlink_activation(control, true, uri, namer, is_directory) != HyperlinkActivation::None
+        hyperlink_activation(control, true, uri, namer, verdict) != HyperlinkActivation::None
     })
 }
 
@@ -31939,6 +32100,15 @@ struct FilePeekSubject {
     /// for a composed document — a commit's reading of a file is on no disk, and
     /// the one thing this field is for is the picture lane.
     path: Option<PathBuf>,
+    /// **Which pane printed the name, when a pane did** (audit 3 C-2).
+    ///
+    /// The card rises over four hosts and only one of them hands it a path out of *program
+    /// output*: a terminal reference. That is the provenance the window thread's rule turns on —
+    /// a name a child process chose may stand on a mapped drive whose server is gone, so the
+    /// facts about it are read from that pane's ledger and never from a disk. A files column row,
+    /// a Git page row and a composed document are the user's own choice and answer `None`, and
+    /// the card asks about them exactly as it always has.
+    printed_in: Option<SeatId>,
     name: String,
     ftype: preview::PreviewFtype,
     /// Whether the buffer has refused to be read at all — a network path, a
@@ -37947,6 +38117,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         local_wheel_subpixel_remainder: 0.0,
         local_wheel_column_remainder: 0.0,
         hyperlink_hover: HyperlinkHover::default(),
+        pointer_reference: RefCell::default(),
         hover_pane: None,
         underlined_image_reference: None,
         peek_hover: PeekHover::default(),
@@ -67398,12 +67569,14 @@ impl Runtime<'_> {
             let active = self.window.active_tab;
             let tasks = self.app.math_worker.tasks.clone();
             let scale_tasks = self.app.math_worker.scale_tasks.clone();
+            let path_tasks = self.app.math_worker.path_tasks.clone();
             let window = self.window_id();
             dispatch_tab_decoration_tasks(
                 window,
                 &mut self.window.tabs[active],
                 &tasks,
                 &scale_tasks,
+                &path_tasks,
                 &mut self.app.math_worker_running,
                 &mut self.app.math_worker_notice_pending,
             );
@@ -67505,6 +67678,7 @@ impl Runtime<'_> {
                     &mut self.window.tabs[active],
                     &tasks,
                     &scale_tasks,
+                    &path_tasks,
                     &mut self.app.math_worker_running,
                     &mut self.app.math_worker_notice_pending,
                 );
@@ -71430,7 +71604,7 @@ impl Runtime<'_> {
         let namespace = self.seat_path_namespace(seat);
         let namer = bt_transcript::paths::PathNamer::Pane(&namespace);
         let card = reference_card(&hyperlink.uri, namer, &|path| {
-            path_is_a_directory_unasked(path, namer)
+            self.seat_path_verdict(seat, path)
         })?;
         let cells = frame.hyperlink_cells(&hyperlink);
         // **Identity is the run's first cell and the target together.** The
@@ -71467,6 +71641,28 @@ impl Runtime<'_> {
             subpixels(interval.end),
         )?;
         Some(TerminalReference { card, key, rect })
+    }
+
+    /// **[`Self::terminal_reference_at`], answered once per cell per pointer event** (audit 3
+    /// C-2).
+    ///
+    /// One `CursorMoved` puts the same question to three surfaces —
+    /// [`Self::folder_reference_trigger`], [`Self::terminal_reference_cell`] and
+    /// [`Self::peek_target`] — and each of them resolved the cell from scratch. Three answers
+    /// about one cell is not three facts; it is one fact derived three times, which is what rule 3
+    /// of `docs/CONVENTIONS.md` §十 is about, and while the derivation reached the disk it was six
+    /// blocking syscalls per motion event.
+    ///
+    /// **Only a pointer event may read it.** The memo is emptied at the top of
+    /// [`Self::pointer_moved`] and nothing between that line and these three reads can change what
+    /// a reference resolves to. Every other caller — the float's rectangle, the glance's row
+    /// geometry, the card's subject — is answering a *frame* and calls the resolution directly,
+    /// because a frame may be composed at any time and an answer from the last pointer event would
+    /// be a reference at a place the pointer has left.
+    fn pointer_reference_at(&self, seat: SeatId, cell: u32) -> Option<TerminalReference> {
+        answered_once(&self.window.pointer_reference, (seat, cell), || {
+            self.terminal_reference_at(seat, cell)
+        })
     }
 
     /// **The pointer resting on another row while a card is up** (user ruling,
@@ -71860,6 +72056,11 @@ impl Runtime<'_> {
         let buffer = self.preview_buffer_on(PreviewSurface::Peek)?;
         Some(FilePeekSubject {
             path: peek.source.file_path().map(Path::to_path_buf),
+            // The one host whose path came out of a child process — see the field.
+            printed_in: match peek.host {
+                RowHost::Terminal(seat) => Some(seat),
+                RowHost::Column(_) | RowHost::Float(_) | RowHost::Git(_) => None,
+            },
             name: peek.name.clone(),
             // **The chip says what the name claims, and when the name claims
             // nothing it says what the bytes said** (user ruling 2026-08-27;
@@ -72457,25 +72658,25 @@ impl Runtime<'_> {
         // one author for one number: the worker's page read stopped carrying a
         // byte count on the same day ([`preview::PreviewWant::PageCount`]).
         //
-        // **And the filter is the one predicate, links included** (route D of the untrusted-path
-        // audit, 2026-09-08). A prefix test admits `C:\…\reachable` whose junction points at a
-        // share, and this `metadata` follows a link before it answers — once per frame, on the
-        // thread that paints. Both halves of the question are asked here rather than only the
-        // lexical one because both are local calls: `symlink_metadata` and `read_link` are asked of
-        // the link and never of what it points at, so this stays the same handful of microseconds
-        // §7.29 already spends here.
-        let stat = subject
-            .path
-            .as_deref()
-            .filter(|path| {
-                bt_transcript::paths::may_read_unasked_through_links(
-                    path,
-                    bt_transcript::paths::PathNamer::ThisWindow,
-                )
-            })
-            .map(std::fs::metadata);
-        let gone = matches!(stat, Some(Err(_)));
-        let bytes = stat.and_then(Result::ok).map(|file| file.len());
+        // **And for a name a program printed, neither half is asked here at all** (audit 3 C-2).
+        // Route D of the 2026-09-08 audit put a locality predicate in front of the stat below and
+        // called both halves local calls; they are local for a link on a local disk, and they are
+        // a network round trip for a mapped drive or for an intermediate junction into a share —
+        // once per frame, on the thread that paints, over a name a child process chose. So a
+        // terminal reference reads its four facts out of its own pane's ledger, where a worker
+        // put them, and the card costs the window thread a map lookup. A files column row, a Git
+        // row and a composed document keep the stat, in a function of its own: the user pointed
+        // at those, which is `DESIGN.md:189`'s division, and their budget is unchanged.
+        let (gone, bytes) = match (subject.path.as_deref(), subject.printed_in) {
+            (None, _) => (false, None),
+            (Some(path), Some(seat)) => match self.seat_path_verdict(seat, path) {
+                Some(verdict) => (!verdict.exists, verdict.bytes),
+                // A reference with no verdict is not a link and raises no card, so this is
+                // unreachable in practice; `false` is the answer that claims nothing.
+                None => (false, None),
+            },
+            (Some(path), None) => facts_of_a_file_the_user_chose(path),
+        };
         let body_kind = match peek_body_kind(
             subject.ftype,
             subject.path.as_deref(),
@@ -74817,7 +75018,7 @@ impl Runtime<'_> {
         let (seat, hit) = self.pane_frame_hit()?;
         let cell = self.reference_cell_index(seat, hit)?;
         matches!(
-            self.terminal_reference_at(seat, cell)?.card,
+            self.pointer_reference_at(seat, cell)?.card,
             ReferenceCard::File(_)
         )
         .then_some((RowHost::Terminal(seat), usize::try_from(cell).ok()?))
@@ -77955,7 +78156,7 @@ impl Runtime<'_> {
         let (seat, hit) = self.pane_frame_hit()?;
         let cell = self.reference_cell_index(seat, hit)?;
         matches!(
-            self.terminal_reference_at(seat, cell)?.card,
+            self.pointer_reference_at(seat, cell)?.card,
             ReferenceCard::Folder(_)
         )
         .then(|| float::FloatTrigger::Reference {
@@ -84497,11 +84698,11 @@ impl Runtime<'_> {
                 // the directory relative text is measured from is per pane. Unlike the two
                 // above it *is* gated on the tab still being on screen — a pane nobody can
                 // see has no frame to redraw, and the answer is kept either way.
-                DecorationWorkerCompletion::VerifiedPath { path, exists } => target_index
+                DecorationWorkerCompletion::VerifiedPath { path, verdict } => target_index
                     .is_some_and(|index| {
                         let drew = leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
                             .is_some_and(|session| {
-                                session.complete_path_verification(path, exists)
+                                session.complete_path_verification(path, verdict)
                             });
                         target_active && drew
                     }),
@@ -84510,12 +84711,14 @@ impl Runtime<'_> {
         let active = self.window.active_tab;
         let tasks = self.app.math_worker.tasks.clone();
         let scale_tasks = self.app.math_worker.scale_tasks.clone();
+        let path_tasks = self.app.math_worker.path_tasks.clone();
         let window = self.window_id();
         dispatch_tab_decoration_tasks(
             window,
             &mut self.window.tabs[active],
             &tasks,
             &scale_tasks,
+            &path_tasks,
             &mut self.app.math_worker_running,
             &mut self.app.math_worker_notice_pending,
         );
@@ -84615,12 +84818,14 @@ impl Runtime<'_> {
         }
         let tasks = self.app.math_worker.tasks.clone();
         let scale_tasks = self.app.math_worker.scale_tasks.clone();
+        let path_tasks = self.app.math_worker.path_tasks.clone();
         let window = self.window_id();
         let disabled = dispatch_tab_decoration_tasks(
             window,
             &mut self.window.tabs[active],
             &tasks,
             &scale_tasks,
+            &path_tasks,
             &mut self.app.math_worker_running,
             &mut self.app.math_worker_notice_pending,
         );
@@ -87476,6 +87681,50 @@ impl Runtime<'_> {
             .unwrap_or_default()
     }
 
+    /// **What this window is allowed to know about a path `seat`'s shell printed** — the ledger
+    /// read that stands where a filesystem call used to (audit 3 C-2).
+    ///
+    /// The whole of the rule is in the body: a `get` on a `BTreeMap` the *worker* filled. The
+    /// window thread has no other way to ask, and a pane with no session has no ledger, which is
+    /// the honest `None` — a folder tab prints nothing and answers for nothing.
+    fn seat_path_verdict(&self, seat: SeatId, path: &Path) -> Option<bt_term::PathVerdict> {
+        self.sessions.get(&seat)?.session.path_verdict(path)
+    }
+
+    /// [`Self::seat_path_verdict`] for the pane the pointer is standing in, for
+    /// [`Self::hovered_pane_path_namespace`]'s reason: the link under the pointer was printed by
+    /// *that* pane's shell, so it is that pane's ledger that answers for it.
+    fn hovered_pane_path_verdict(&self, path: &Path) -> Option<bt_term::PathVerdict> {
+        self.seat_path_verdict(self.window.hover_pane?, path)
+    }
+
+    /// **Put the target of the link under the pointer in front of the hovered pane's worker**
+    /// (audit 3 C-2) — the question whose answer [`Self::hovered_pane_path_verdict`] reads.
+    ///
+    /// The lexical gate is asked here and not on the worker for the reason it has always been
+    /// asked first: it costs nothing, and a device path, a verbatim path or a stranger's
+    /// distribution share is refused without anybody being queued for it. Everything past it is
+    /// the worker's, including the two questions that used to be this thread's — whose machine the
+    /// volume is, and what the reparse points on the way in lead to.
+    fn ask_the_worker_about_a_link_target(&mut self, uri: &str) {
+        let Some(seat) = self.window.hover_pane else {
+            return;
+        };
+        let Some(path) = bt_platform::file_uri_to_path(uri) else {
+            return;
+        };
+        let namespace = self.seat_path_namespace(seat);
+        if !bt_transcript::paths::may_read_unasked(
+            &path,
+            bt_transcript::paths::PathNamer::Pane(&namespace),
+        ) {
+            return;
+        }
+        if let Some(leaf) = self.sessions.get_mut(&seat) {
+            leaf.session.ask_about_link_target(path);
+        }
+    }
+
     /// The cell a selection drag that began in `seat` is over, with the pointer
     /// clamped into that pane's own body.
     ///
@@ -87767,7 +88016,7 @@ impl Runtime<'_> {
         // every time, and the picture would win.
         if self
             .reference_cell_index(seat, hit)
-            .and_then(|cell| self.terminal_reference_at(seat, cell))
+            .and_then(|cell| self.pointer_reference_at(seat, cell))
             .is_some()
         {
             return None;
@@ -88309,18 +88558,20 @@ impl Runtime<'_> {
     }
 
     fn activate_hyperlink_hover_if_due(&mut self, now: Instant) -> Result<()> {
-        // The disk is asked here, on the settle, and the settle happens once
-        // per link — [`HyperlinkHover::activate_if_due`]'s own note. It is the
-        // same question [`Self::activate_hyperlink`] asks on the press, so the
-        // sentence the reader is shown and the door the press opens are one
-        // answer read twice.
+        // The **ledger** is read here, on the settle, and the settle happens once per link —
+        // [`HyperlinkHover::activate_if_due`]'s own note. It is the same question
+        // [`Self::activate_hyperlink`] asks on the press, so the sentence the reader is shown and
+        // the door the press opens are one answer read twice. Neither asks a disk (audit 3 C-2).
         let namespace = self.hovered_pane_path_namespace();
         let namer = bt_transcript::paths::PathNamer::Pane(&namespace);
-        if self
-            .window
-            .hyperlink_hover
-            .activate_if_due(now, namer, &|path| path_is_a_directory_unasked(path, namer))
-        {
+        // Lifted out of the window for the length of the call so that the ledger — which lives in
+        // a pane of the same window — can be read while the hover itself is being written. The
+        // hover is `Default`, and nothing between these two lines can observe the gap.
+        let mut hover = std::mem::take(&mut self.window.hyperlink_hover);
+        let settled =
+            hover.activate_if_due(now, namer, &|path| self.hovered_pane_path_verdict(path));
+        self.window.hyperlink_hover = hover;
+        if settled {
             self.repaint_hovered_pane()?;
         }
         Ok(())
@@ -88439,7 +88690,7 @@ impl Runtime<'_> {
         let namespace = self.seat_path_namespace(seat);
         let namer = bt_transcript::paths::PathNamer::Pane(&namespace);
         let activation = hyperlink_activation(control, true, &hyperlink.uri, namer, &|path| {
-            path_is_a_directory_unasked(path, namer)
+            self.seat_path_verdict(seat, path)
         });
         // Which arm of the routing table this address fell into, the address it
         // fell there with, and — for a `file:` — what the address actually named
@@ -88452,24 +88703,23 @@ impl Runtime<'_> {
         // which from outside the window is indistinguishable from the click
         // never having arrived at all.
         //
-        // The disk questions are asked only inside the closure, so an unset gate
-        // asks none of them, and never of a share: §7.1.3 does not read one
-        // unasked and a diagnostic must not be the thing that stalls the loop on
-        // a cold `\\server`.
+        // **The diagnostic asks the ledger, not the disk** (audit 3 C-2). It used to stat the
+        // target inside the closure, on the argument that an unset gate asks nothing — true, and
+        // beside the point once the gate *is* set: a diagnostic must not be the thing that stalls
+        // the loop on a cold share, and it is the same rule the table one line up now obeys.
+        // `verdict=?` is a name nobody has answered for, which the table reads as "not a link".
         self.mouse_trace(|| {
             let named = bt_platform::file_uri_to_path(&hyperlink.uri).map_or_else(
                 || "path=unparsed".to_owned(),
-                |path| {
-                    if !bt_transcript::paths::may_read_unasked_through_links(&path, namer) {
-                        format!("path={} refused=1", path.display())
-                    } else {
-                        format!(
-                            "path={} exists={} dir={}",
-                            path.display(),
-                            u8::from(path.exists()),
-                            u8::from(path.is_dir()),
-                        )
-                    }
+                |path| match self.seat_path_verdict(seat, &path) {
+                    None => format!("path={} verdict=?", path.display()),
+                    Some(verdict) => format!(
+                        "path={} exists={} dir={} locality={:?}",
+                        path.display(),
+                        u8::from(verdict.exists),
+                        u8::from(verdict.directory),
+                        verdict.locality,
+                    ),
                 },
             );
             format!(
@@ -88522,21 +88772,18 @@ impl Runtime<'_> {
                     self.publish_interaction_frame()?;
                 }
             }
-            // The one door out of this window that takes a *path* — the same one
-            // an unpreviewable file's card offers and a files row used to fall
-            // through to, and the same one that will not start a program. A page
-            // leaves through it too: the handler this machine has registered for
-            // `.html` is its browser, so the ruling's "system browser" and the
-            // table's "system handler" are one call and not two.
-            HyperlinkActivation::External(path) => {
-                self.open_local_path(&path);
-            }
             // The files column's own road, entered at the same door
             // ([`Self::open_preview`]): a picture down the decode lane, everything
             // else through the tab's pool, and what even that cannot read gets the
             // "no preview" card whose one button is the system's handler. A share
             // arrives here too and meets §7.1.3's own refusal, which is a card
             // this window already has words for.
+            // The one door out of this window that takes a *path* — the same one
+            // an unpreviewable file's card offers and a files row used to fall
+            // through to, and the same one that will not start a program.
+            HyperlinkActivation::External(path) => {
+                self.open_local_path(&path);
+            }
             HyperlinkActivation::Preview(path, at) => self.open_preview_at(path, at)?,
             HyperlinkActivation::Reveal(path) => {
                 self.reveal_in_explorer(&path);
@@ -90102,6 +90349,10 @@ impl Runtime<'_> {
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         self.window.pointer_position = Some(position);
         self.window.pointer_last_seen = Some(position);
+        // **One resolution of the reference under the pointer, for the three surfaces that ask
+        // about it** (audit 3 C-2). Emptied here and filled by the first of them — see
+        // [`WindowRuntime::pointer_reference`] for why this line is the whole of its lifetime.
+        self.window.pointer_reference.get_mut().take();
         // **The hosted page, before anything returns**, for the reason the two
         // chevron clocks below are told: a page's own hover ends when the
         // pointer is somewhere else, and every branch under this one consumes
@@ -90687,6 +90938,15 @@ impl Runtime<'_> {
                 math_hit.is_none() && !matches!(self.window.mouse_route, Some(MouseRoute::Local(_)))
             })
             .and_then(|hit| self.hyperlink_hit(hit));
+        // **And the pane is asked what the disk says about it** (audit 3 C-2). An `OSC 8` target
+        // is the one shape of reference that never went through the printed-path scan — the
+        // program declared it and the cell carries it verbatim — so until this line existed
+        // nobody had put a question about it anywhere, and the window thread asked on its own
+        // behalf, on this very event. It is idempotent: an answered name, a queued one and one a
+        // worker is holding all cost a map lookup, which is what makes it safe per motion event.
+        if let Some(hit) = hyperlink.as_ref() {
+            self.ask_the_worker_about_a_link_target(&hit.uri);
+        }
         if self.window.hyperlink_hover.observe(hyperlink, now) {
             // **The hand moved with the modifier; now it moves with the cell**
             // (§7.1.5g, user ruling 2026-08-20). While the finger meant only
@@ -91505,7 +91765,7 @@ impl Runtime<'_> {
                 .underline_target()
                 .map(|hyperlink| hyperlink.uri.as_str()),
             namer,
-            &|path| path_is_a_directory_unasked(path, namer),
+            &|path| self.hovered_pane_path_verdict(path),
         )
     }
 
@@ -105404,12 +105664,14 @@ impl Runtime<'_> {
             if owes_the_engine {
                 let tasks = self.app.math_worker.tasks.clone();
                 let scale_tasks = self.app.math_worker.scale_tasks.clone();
+                let path_tasks = self.app.math_worker.path_tasks.clone();
                 let window = self.window_id();
                 dispatch_tab_decoration_tasks(
                     window,
                     &mut self.window.tabs[active],
                     &tasks,
                     &scale_tasks,
+                    &path_tasks,
                     &mut self.app.math_worker_running,
                     &mut self.app.math_worker_notice_pending,
                 );
@@ -129583,5 +129845,323 @@ mod clipboard_path_tests {
             .find("\n    }\n")
             .expect("a method is closed by a `}` at the `impl`'s indentation");
         &rest[..end]
+    }
+}
+
+/// **The window thread never asks the disk about a path a program printed** (audit 3 C-2;
+/// `docs/DESIGN.md` 2026-09-20).
+///
+/// A reference scraped out of a child process's output is answered from a ledger a *worker*
+/// filled. The value half of the rule is a table over the pure routing function; the structural
+/// half is this file read as text, because no value in the program can witness the *absence* of a
+/// call.
+#[cfg(test)]
+mod printed_path_provenance_tests {
+    use super::{
+        HyperlinkActivation, Runtime, TerminalReference, answered_once, hyperlink_activation,
+    };
+    use bt_layout::SeatId;
+    use std::{cell::RefCell, path::Path};
+
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the brace that closes it at the `impl`'s own
+    /// indentation.
+    fn method(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest
+            .find("\n    }\n")
+            .expect("a method is closed by a `}` at the `impl`'s indentation");
+        &rest[..end]
+    }
+
+    /// The text of one free function of this file.
+    fn free_function(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest
+            .find("\n}\n")
+            .expect("a free function is closed by a `}` in the first column");
+        &rest[..end]
+    }
+
+    fn local_file() -> bt_term::PathVerdict {
+        bt_term::PathVerdict {
+            exists: true,
+            directory: false,
+            bytes: Some(11),
+            locality: bt_term::PathLocality::ThisMachine,
+        }
+    }
+
+    fn local_folder() -> bt_term::PathVerdict {
+        bt_term::PathVerdict {
+            directory: true,
+            ..local_file()
+        }
+    }
+
+    /// A ledger that knows one name, counts every question and **panics** at any other — standing
+    /// in for the filesystem the table used to reach, so that "it touched nothing" is an assertion
+    /// rather than a reading of the source.
+    struct Ledger<'a> {
+        name: &'a Path,
+        answer: Option<bt_term::PathVerdict>,
+        asked: std::cell::Cell<usize>,
+    }
+
+    impl Ledger<'_> {
+        fn new(name: &Path, answer: Option<bt_term::PathVerdict>) -> Ledger<'_> {
+            Ledger {
+                name,
+                answer,
+                asked: std::cell::Cell::new(0),
+            }
+        }
+
+        fn read(&self, path: &Path) -> Option<bt_term::PathVerdict> {
+            assert_eq!(
+                path, self.name,
+                "the table asked about a name it was never given"
+            );
+            self.asked.set(self.asked.get() + 1);
+            self.answer
+        }
+    }
+
+    /// RED (audit 3 C-2) — **a name nobody has answered for is not a link.**
+    ///
+    /// The whole of the freeze, stated as a value: a hover over an `OSC 8` target this window has
+    /// asked nothing about produces *no arm at all*, on either half of the modifier, and produces
+    /// it without a filesystem anywhere in reach. Before this ticket the table answered by calling
+    /// `symlink_metadata` and `is_dir` on the window thread, and a target on a mapped network
+    /// drive whose server was gone held the event loop for the redirector's own timeout — re-armed
+    /// on every pointer motion over the cell.
+    ///
+    /// Red on `origin/main`: the parameter there is a `&dyn Fn(&Path) -> bool` that asks the disk,
+    /// with no way to say "unanswered", and the arms below are `Preview` and `External`.
+    ///
+    /// MUTATION: answer `Preview` for an unanswered name and the first assertion goes red — a
+    /// window promising to open a file nobody has told it is there.
+    #[test]
+    fn a_name_nobody_has_answered_for_is_not_a_link_and_touches_nothing() {
+        let target = Path::new(r"C:\work\notes.md");
+        for control in [false, true] {
+            let ledger = Ledger::new(target, None);
+            assert_eq!(
+                hyperlink_activation(
+                    control,
+                    true,
+                    "file:///C:/work/notes.md",
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &|path| ledger.read(path),
+                ),
+                HyperlinkActivation::None,
+                "an unanswered name is not a link, with Ctrl {control}"
+            );
+            assert_eq!(
+                ledger.asked.get(),
+                1,
+                "and the ledger is read once — there is no second opinion to reconcile"
+            );
+        }
+    }
+
+    /// RED (audit 3 C-2) — **a name the ledger calls local becomes a link, and the disk is not
+    /// consulted to find that out.**
+    ///
+    /// The contrast group for the test above, and the one that says the ledger really is the whole
+    /// of the answer: the same URI, the same table, one field different.
+    #[test]
+    fn a_ledgers_local_name_is_a_link_with_no_filesystem_call() {
+        let target = Path::new(r"C:\work\notes.md");
+        let ledger = Ledger::new(target, Some(local_file()));
+        assert_eq!(
+            hyperlink_activation(
+                false,
+                true,
+                "file:///C:/work/notes.md",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| ledger.read(path),
+            ),
+            HyperlinkActivation::Preview(target.to_path_buf(), None),
+        );
+        let folder = Ledger::new(target, Some(local_folder()));
+        assert_eq!(
+            hyperlink_activation(
+                false,
+                true,
+                "file:///C:/work/notes.md",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| folder.read(path),
+            ),
+            HyperlinkActivation::FilesColumn(target.to_path_buf()),
+            "and the folder question is the ledger's too"
+        );
+    }
+
+    /// RED (audit 3 C-2) — **a name on another machine is not opened unasked, under either
+    /// modifier** (`docs/DESIGN.md` §3.4).
+    ///
+    /// That ruling names a mapped drive by name as a network path needing an explicit
+    /// confirmation, and a mapped drive is spelled exactly like a local one, so the lexical gate
+    /// cannot see it and this arm is the only place the ruling can be kept. Both halves answer
+    /// `Preview`, which is the preview seat's own network refusal card — the same answer a path
+    /// spelled as a share has always got.
+    #[test]
+    fn a_name_on_another_machine_is_not_opened_unasked() {
+        let target = Path::new(r"Z:\work\notes.md");
+        for control in [false, true] {
+            let ledger = Ledger::new(target, Some(bt_term::PathVerdict::elsewhere()));
+            assert_eq!(
+                hyperlink_activation(
+                    control,
+                    true,
+                    "file:///Z:/work/notes.md",
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &|path| ledger.read(path),
+                ),
+                HyperlinkActivation::Preview(target.to_path_buf(), None),
+                "a mapped drive meets the card 7.1.3 already has, with Ctrl {control}"
+            );
+        }
+    }
+
+    /// RED (audit 3 C-2) — **one resolution per subject, however many readers ask.**
+    ///
+    /// `pointer_moved` puts the same question to three surfaces — the folder flyout's trigger, the
+    /// glance's row and the picture peek's subject — and each resolved the cell from scratch, six
+    /// blocking syscalls per motion event while the resolution reached the disk. The memo is a
+    /// free function so the property is a value rather than a reading of the source.
+    #[test]
+    fn one_subject_is_resolved_once_however_many_readers_ask() {
+        type Memo = RefCell<Option<((SeatId, u32), Option<u32>)>>;
+        let memo: Memo = RefCell::default();
+        let runs = std::cell::Cell::new(0);
+        let resolve = |answer: u32| {
+            runs.set(runs.get() + 1);
+            Some(answer)
+        };
+        let cell = (SeatId(1), 7);
+        for _ in 0..3 {
+            assert_eq!(answered_once(&memo, cell, || resolve(42)), Some(42));
+        }
+        assert_eq!(runs.get(), 1, "three readers, one resolution");
+        assert_eq!(
+            answered_once(&memo, (SeatId(1), 8), || resolve(43)),
+            Some(43),
+            "and another cell is another question"
+        );
+        assert_eq!(runs.get(), 2);
+        assert_eq!(
+            answered_once(&memo, cell, || resolve(99)),
+            Some(99),
+            "a memo holds one subject, so the first is asked again rather than remembered wrongly"
+        );
+    }
+
+    /// The window-thread bodies that answer a pointer over a reference, by the signature each is
+    /// declared with.
+    ///
+    /// **The list is the test.** An eighth door that asks a filesystem about a printed path is the
+    /// defect this ticket repaired, and the sweep below is what catches one added without a line
+    /// added here.
+    const HOVER_DOORS: [&str; 7] = [
+        "    fn peek_target(",
+        "    fn terminal_reference_at(",
+        "    fn pointer_reference_at(",
+        "    fn terminal_link_grasp(",
+        "    fn activate_hyperlink_hover_if_due(",
+        "    fn activate_hyperlink(",
+        "    fn file_peek_card_layers(",
+    ];
+
+    /// The filesystem calls none of them may make. Assembled at run time so this pin cannot match
+    /// its own text.
+    fn filesystem_calls() -> Vec<String> {
+        vec![
+            ["fs", "::", "metadata"].concat(),
+            ["symlink_", "metadata"].concat(),
+            [".", "exists", "()"].concat(),
+            [".", "is_dir", "()"].concat(),
+            ["canonicali", "ze"].concat(),
+            ["read_", "link"].concat(),
+            ["may_read_unasked_through_", "links"].concat(),
+        ]
+    }
+
+    /// RED GATE (audit 3 C-2) — **no door on the pointer's path asks a filesystem anything.**
+    ///
+    /// The rule in the only form that can be checked: a body, read as text, with none of the seven
+    /// spellings in it. Put the directory stat back into any one of them and this goes red while
+    /// every value test in this workspace stays green, because a machine with no dead share on it
+    /// cannot feel the difference — which is the shape of the defect.
+    #[test]
+    fn no_hover_door_asks_a_filesystem_about_a_printed_path() {
+        for signature in HOVER_DOORS {
+            let text = method(signature);
+            for call in filesystem_calls() {
+                assert!(
+                    !text.contains(call.as_str()),
+                    "{signature} reaches `{call}` on the thread that paints — a path a program \
+                     printed may name a mapped drive whose server is gone, and the answer costs \
+                     the redirector's own timeout"
+                );
+            }
+        }
+    }
+
+    /// RED GATE (audit 3 C-2) — **and neither does the routing table itself.**
+    ///
+    /// The three free functions the doors above go through. They take a ledger reader now, and a
+    /// reader that reached for a disk would put the syscall back one level down.
+    #[test]
+    fn the_routing_table_asks_a_filesystem_nothing() {
+        for signature in [
+            "fn hyperlink_activation(",
+            "fn reference_card(",
+            "fn terminal_link_answers_a_press(",
+        ] {
+            let text = free_function(signature);
+            for call in filesystem_calls() {
+                assert!(
+                    !text.contains(call.as_str()),
+                    "{signature} reaches `{call}`, and every caller of it is on the window thread"
+                );
+            }
+        }
+    }
+
+    /// PIN (audit 3 C-2) — **the memo lives for exactly one pointer event.**
+    ///
+    /// Everything a [`TerminalReference`] is derived from changes only through a `&mut self` door,
+    /// and none runs between this clear and the three reads. A memo that outlived the event would
+    /// answer a frame with a reference from where the pointer used to be.
+    #[test]
+    fn the_pointer_memo_is_emptied_at_the_top_of_every_pointer_move() {
+        let moved = method("    fn pointer_moved(");
+        let cleared = moved
+            .find("self.window.pointer_reference.get_mut().take();")
+            .expect("a pointer move empties the memo");
+        let first_reader = moved
+            .find("self.float_trigger_at(position)")
+            .expect("and the first of the three readers runs after it");
+        assert!(cleared < first_reader);
+        // And the reader really is a method of this window, with the signature the three
+        // consumers call.
+        fn takes_the_reader(
+            runtime: &Runtime<'_>,
+            seat: SeatId,
+            cell: u32,
+        ) -> Option<TerminalReference> {
+            runtime.pointer_reference_at(seat, cell)
+        }
+        let _ = takes_the_reader;
     }
 }
