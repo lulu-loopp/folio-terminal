@@ -11226,3 +11226,10 @@ The replay tail carries two facts: the bytes a DEC 2026 block holds back, and th
 Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
 One function owns that release, and it never writes `parser_sequence_open` — the boundary parser alone says whether a sequence is open.
 The deadline arm used to clear both, so a resize seeded the canonical fork at Ground and printed the rest of an escape payload onto the grid.
+
+### 2026-09-20 — The boundary parser opens a synchronized update where the terminal does
+One rule for both readers of a `CSI ? … h`: every parameter, the first sub-parameter of each — `vte`'s own loop (`private_mode_params_name`, used for 2026 and 1004 alike).
+Reading only the first parameter for 2026 meant `CSI ? 1 ; 2026 h` and `CSI ? 2026 : 0 h` opened a block in the vendored parser and none here.
+An open block ends by a byte match on exactly `ESC [ ? 2 0 2 6 l` (`VENDOR_ESU_CSI`), because while one is open the vendored parser searches bytes and reads no parameters at all.
+With the two disagreeing, the replay tail gave the block's bytes up, a resize armed the canonical fork without them, and the commit dropped the displayed branch, buffer and all — off the grid and off the transcript.
+The fork inherits an open block through that tail and nothing else; `arm_resize_canonical` asserts it rather than repairing it, so the agreement stays one rule instead of two. Audit 3, C-1.
