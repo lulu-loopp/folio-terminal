@@ -22,12 +22,54 @@
 //! what it copies once the button is up is the file's own bytes — the two models
 //! hand over at the release, exactly where the page changes face.
 //!
+//! **One press is answered where it stands, and the rule says which** (closure
+//! review of this ruling, 2026-09-21). The page's face is a function of the
+//! caret's *seat* alone ([`caret_seat`]) — so a caret moving **inside the seat
+//! the page is already drawing** changes no face, and there is nothing to
+//! defer. [`keeps_the_seat`] is that question, and it is the whole of the
+//! exception: a press inside the block already drawn as source seats the caret
+//! at once and its drag goes on extending it, which is the ordinary editing
+//! gesture and must go on showing the selection as it is drawn. The moment the
+//! hand leaves the seat the caret stops following it — the seat may not change
+//! while a gesture is in flight — and the release places it where the hand let
+//! go.
+//!
 //! **Pure, in [`crate::preview_live`]'s style**: no window, no pane and no
 //! pointer. Which byte a point names is the window's question and is asked
 //! before a value of either type is made; everything after that is a function of
 //! the record and of whether the hand travelled.
 
+use std::ops::Range;
+
+use crate::preview_live::caret_seat;
 use crate::preview_select::Grain;
+
+/// **Whether a press may be answered where it stands**: the byte it named and
+/// the caret already standing in the page are in one seat, so putting the caret
+/// there changes no block's face.
+///
+/// `caret` is the caret the page is *drawing from* — `None` for a page nobody
+/// has entered, which draws no source block at all and therefore has no seat to
+/// keep. That is why a first press into a rendered page always waits for the
+/// release and a press inside the block already open never does.
+///
+/// Asked in seats rather than in ranges so that the two positions a range cannot
+/// tell apart — the end of an unterminated last block, and the blank line after
+/// a paragraph — are answered here exactly as the page answers them when it
+/// decides what to draw. A gap is a seat like any other: the empty line it is
+/// drawn as stands in the same place whichever of its bytes the caret is on.
+#[must_use]
+pub fn keeps_the_seat(
+    content: &str,
+    ranges: &[Range<usize>],
+    caret: Option<usize>,
+    offset: usize,
+) -> bool {
+    let Some(caret) = caret else {
+        return false;
+    };
+    caret_seat(content, ranges, caret) == caret_seat(content, ranges, offset)
+}
 
 /// **What a press on a rendered page named**, kept until the gesture it began
 /// has ended.
@@ -154,6 +196,9 @@ mod tests {
         /// The gesture in flight — what the press recorded, and the last byte
         /// the hand has reached.
         flight: Option<(Pressed, Option<usize>)>,
+        /// `PreviewTextDrag::seated`: whether the press was answered where it
+        /// stood, so that this gesture is already extending the caret.
+        seated: bool,
     }
 
     impl Page {
@@ -163,6 +208,7 @@ mod tests {
                 caret: EditCaret::default(),
                 entered: false,
                 flight: None,
+                seated: false,
             }
         }
 
@@ -174,26 +220,57 @@ mod tests {
                 .and_then(CaretSeat::block)
         }
 
-        /// The button going down on a byte of the file.
-        fn press(&mut self, pressed: Pressed) {
-            self.flight = Some((pressed, None));
+        /// The caret the page is drawing from, which a page nobody has entered
+        /// does not have.
+        fn drawing_from(&self) -> Option<usize> {
+            self.entered.then_some(self.caret.caret)
         }
 
-        /// The hand moving with the button down, over another byte.
-        fn drag_to(&mut self, offset: usize) {
-            if let Some((_, reached)) = self.flight.as_mut() {
-                *reached = Some(offset);
+        /// The button going down on a byte of the file — and answered here and
+        /// now when it keeps the seat, exactly as the window's own press does.
+        fn press(&mut self, pressed: Pressed) {
+            self.flight = Some((pressed, None));
+            self.seated = match pressed {
+                Pressed::Byte { offset, .. } => {
+                    keeps_the_seat(PAGE, &ranges(), self.drawing_from(), offset)
+                }
+                Pressed::Ground => false,
+            };
+            if self.seated {
+                self.spend(pressed.spend(false, None));
             }
         }
 
-        /// The button coming up — the window's own release, as [`Spend`]
-        /// dictates it and through the same two functions the window obeys it
-        /// with ([`EditCaret::place`], [`word_start`]/[`word_end`]).
+        /// The hand moving with the button down, over another byte.
+        ///
+        /// **The caret follows it while the seat does not change, and no
+        /// further**: past the edge of the seat it stops, because a page may not
+        /// change face under a gesture that has not let go.
+        fn drag_to(&mut self, offset: usize) {
+            let Some((_, reached)) = self.flight.as_mut() else {
+                return;
+            };
+            *reached = Some(offset);
+            if self.seated && keeps_the_seat(PAGE, &ranges(), self.drawing_from(), offset) {
+                self.caret.place(PAGE, offset, true);
+            }
+        }
+
+        /// The button coming up — the record spent whatever the press already
+        /// did with it, which is what keeps every gesture's end state one
+        /// function of the record.
         fn release(&mut self, travelled: bool) {
             let Some((pressed, reached)) = self.flight.take() else {
                 return;
             };
-            match pressed.spend(travelled, reached) {
+            self.seated = false;
+            self.spend(pressed.spend(travelled, reached));
+        }
+
+        /// The window's own [`Spend`], through the same functions it obeys it
+        /// with ([`EditCaret::place`], [`word_start`]/[`word_end`]).
+        fn spend(&mut self, spend: Spend) {
+            match spend {
                 Spend::Ground => self.entered = false,
                 Spend::Caret {
                     offset,
@@ -214,7 +291,8 @@ mod tests {
             }
         }
 
-        /// What the caret model would put on the clipboard.
+        /// What the caret model would put on the clipboard — and, while a
+        /// gesture is in flight, what it is drawing a band over.
         fn selected(&self) -> &'static str {
             &PAGE[self.caret.range()]
         }
@@ -341,6 +419,100 @@ mod tests {
         page.release(false);
         assert_eq!(page.selected(), "st paragraph\n\nsecond pa");
         assert_eq!(page.source_block(), Some(2));
+    }
+
+    /// RED — **a press inside the seat the page is already drawing is answered
+    /// where it stands, and its drag draws as it goes** (closure review of this
+    /// ruling, 2026-09-21).
+    ///
+    /// The ordinary editing gesture: drag across the words you are about to
+    /// replace, inside the paragraph you are already editing. Nothing about the
+    /// page's face can change — the caret never leaves the seat — so there is
+    /// nothing to wait for, and waiting would mean a hand selecting text with no
+    /// highlight under it until it let go.
+    ///
+    /// MUTATION: make [`Page::press`] defer this one too (drop the
+    /// [`keeps_the_seat`] arm) and the band is empty for the whole gesture,
+    /// which is the regression this test was written against.
+    #[test]
+    fn a_press_inside_the_standing_seat_is_answered_where_it_stands() {
+        let mut page = Page::read();
+        page.press(Pressed::byte(12, Grain::Character, false));
+        page.release(false);
+        assert_eq!(page.source_block(), Some(1), "the page has been entered");
+        // And now the second gesture, inside the block that is already open.
+        page.press(Pressed::byte(10, Grain::Character, false));
+        assert_eq!(page.caret.caret, 10, "the caret did not follow the press");
+        page.drag_to(20);
+        assert_eq!(
+            page.selected(),
+            "irst parag",
+            "no band is drawn while the hand is selecting the words it is editing",
+        );
+        assert_eq!(
+            page.source_block(),
+            Some(1),
+            "and the face is the one it was: the caret never left the seat",
+        );
+        page.release(true);
+        assert_eq!(page.selected(), "irst parag", "the end state is the drag's");
+        assert_eq!(page.source_block(), Some(1));
+    }
+
+    /// RED — **a drag out of the seat freezes the caret until the release**
+    /// (closure review, 2026-09-21).
+    ///
+    /// The other half of the same sentence: the caret may move while the seat is
+    /// unchanged, **and no further**. A caret that went on following the hand
+    /// would take the source block with it, which is the half of the owner's
+    /// report about a page changing shape under a selection being drawn.
+    #[test]
+    fn a_drag_out_of_the_seat_freezes_the_caret_until_the_release() {
+        let mut page = Page::read();
+        page.press(Pressed::byte(12, Grain::Character, false));
+        page.release(false);
+        page.press(Pressed::byte(10, Grain::Character, false));
+        page.drag_to(20);
+        page.drag_to(35);
+        assert_eq!(
+            page.caret.caret, 20,
+            "the caret followed the hand out of its own seat",
+        );
+        assert_eq!(
+            page.source_block(),
+            Some(1),
+            "so the paragraph under the pointer re-flowed mid-gesture",
+        );
+        page.release(true);
+        assert_eq!(
+            page.selected(),
+            "irst paragraph\n\nsecond pa",
+            "and the release reaches the byte the hand let go over",
+        );
+        assert_eq!(page.source_block(), Some(2));
+    }
+
+    /// **A repeated press inside the standing seat takes its word at once**,
+    /// which is what the seat rule costs and what it is worth.
+    ///
+    /// The first click of a double click enters the page, so the second press is
+    /// inside the seat and is answered where it stands. Nothing changes face —
+    /// the word is inside the block that is already open — and the reader sees
+    /// the word the moment the second press lands, as every editor does.
+    #[test]
+    fn a_double_click_inside_the_standing_seat_takes_its_word_at_once() {
+        let mut page = Page::read();
+        page.press(Pressed::byte(12, Grain::Character, false));
+        page.release(false);
+        page.press(Pressed::byte(12, Grain::Word, false));
+        assert_eq!(
+            page.selected(),
+            "first",
+            "the word is not taken until later"
+        );
+        assert_eq!(page.source_block(), Some(1));
+        page.release(false);
+        assert_eq!(page.selected(), "first", "and the release says the same");
     }
 
     /// **A press that named no byte of the file is the page's empty ground**,
