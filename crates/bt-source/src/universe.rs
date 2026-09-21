@@ -34,14 +34,14 @@ use crate::reject::Rejection;
 /// choices — the workspace lint table refuses to apply this project's lints to
 /// it for exactly that reason — so whether a rule covers it is a decision, and a
 /// universe that reaches in without one is rejected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Vendor {
     Excluded,
     Included,
 }
 
 /// A directory read as text, and what it will not descend into.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DiskScope {
     root: PathBuf,
     excluded_directories: Vec<String>,
@@ -148,7 +148,11 @@ impl DiskScope {
 }
 
 /// The four knobs, as one value.
-#[derive(Clone, Debug)]
+///
+/// Equality and [`Hash`] are over all four, which is what makes a universe its
+/// own cache key: two readers that declare the same roots, the same scopes and
+/// the same vendor answer share one lowered index (plan §5).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Universe {
     name: String,
     roots: Vec<TargetRoot>,

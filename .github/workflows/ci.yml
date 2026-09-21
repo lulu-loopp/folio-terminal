@@ -194,6 +194,37 @@ jobs:
           }
           exit 0
 
+      # **The split plan's budgets, watched where a red is information.**
+      #
+      # `bt-source`'s measurement runs in every ordinary `cargo test` and prints
+      # its four numbers there, but it asserts only the memory budget: that one
+      # is a property of the tree and the lowering, the same on an idle machine
+      # and a loaded one. The two wall-clock budgets of
+      # `docs/plans/bt-app-split-prep.md` §5 — 20 s to build the index, 200 ms
+      # for the query set — are time-sensitive, and asserting them in the
+      # ordinary run would make every suite in this repository go red for a
+      # reason that is not about this code, which is the one thing a guard must
+      # never do.
+      #
+      # So they are held here, with `continue-on-error`, which is the whole
+      # point: a breach turns this step red and leaves the merge alone. §5 says
+      # exceeding a budget is a finding and the design changes — the fallbacks
+      # it names are serialising the lowered index under `target/` keyed by
+      # content hash, and narrowing the default universe — and a finding is
+      # something somebody reads, never a number somebody raises. A blocking
+      # gate here would invite the second.
+      #
+      # This job runs on `windows-2025` with the rest of the canaries, so these
+      # are Windows numbers. `core-macos` and `core-linux` run the same test
+      # without the variable, so the other two platforms print their numbers on
+      # every run and assert only the memory budget.
+      - name: the index's cost is inside the budgets of the split plan
+        shell: pwsh
+        continue-on-error: true
+        env:
+          BT_SOURCE_MEASURE_BUDGETS: "1"
+        run: cargo test -p bt-source --locked --test measure -- --nocapture
+
   # ── everything that is decided by reading, not by hardware ────────────────
   logic:
     runs-on: windows-2025
@@ -575,7 +606,7 @@ jobs:
           cargo test --locked
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
-          -p bt-platform -p bt-pty -p alacritty_terminal
+          -p bt-platform -p bt-pty -p bt-source -p alacritty_terminal
 
       # **The lint line, held on the second platform** (M1-10). `logic` runs
       # `clippy --workspace --all-targets -- -D warnings` on Windows, and until
@@ -714,4 +745,4 @@ jobs:
           cargo test --locked
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-transcript -p bt-viewport
-          -p bt-pty -p alacritty_terminal
+          -p bt-pty -p bt-source -p alacritty_terminal

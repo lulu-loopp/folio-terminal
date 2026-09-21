@@ -26,9 +26,23 @@
 //! * The disk cross-check, [`FileSetDiff`], which is the evidence §3.2 asks every
 //!   migrated walker to ship: not a count, the sorted paths on each side.
 //!
-//! What it deliberately does **not** build: the immutable index of §5 (P1b), and
-//! the views, needles and identity-with-variants of §2 (P1c). Every type here is
-//! owned, plain data with no parser type in its public API, so P1b can lower it.
+//! What P1b adds on top (§5, "the index, not the trees"):
+//!
+//! * [`Index`] — the enumeration, lowered into owned, plain, immutable data:
+//!   the union of every file's text, numeric spans into it, item identities with
+//!   their body spans, the ownership paths with their `cfg` spellings, the
+//!   identifier view's tokens, the literals with their decoded values, and the
+//!   comment masks. **Every `syn` and `proc_macro2` object is dropped before it
+//!   is published**, which is what makes it [`Send`] and [`Sync`] and therefore
+//!   shareable by every thread of a process.
+//! * [`Index::shared`] — one index per process per universe, so the cost of the
+//!   lowering is paid once however many readers ask.
+//! * The queries the measurement of §5 needs, and only those: [`Index::body_of`],
+//!   [`Index::count_identifier`], [`Index::contains`] and [`Index::owners_of`],
+//!   each refusing loudly rather than answering a smaller question.
+//!
+//! What it deliberately does **not** build: the four views' full contract, needle
+//! provenance, named scopes and the lexical macro traversal of §2 (P1c).
 //!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
@@ -37,17 +51,27 @@
 //! disagree about what it means. The one predicate that *is* evaluated is `test`,
 //! three-valued, and it decides [`Compilation`] and nothing else.
 
+mod cache;
 mod declarations;
 mod enumerate;
+mod index;
+mod lower;
 mod manifest;
 mod paths;
+mod query;
 mod reject;
 mod universe;
 pub mod universes;
 
 pub use declarations::{Compilation, DeclarationStep, ModuleBody, ReachedModule};
 pub use enumerate::{Enumeration, FileFacts, FileOwner, FileSetDiff, enumerate};
+pub use index::{
+    CommentKind, CommentRecord, ConditionalVariant, FileRecord, Index, ItemIdentity, ItemKind,
+    ItemRecord, LiteralRecord, LiteralValue, Location, MacroShape, Span, TokenKind, TokenRecord,
+    UnsupportedMacroShape,
+};
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};
+pub use query::{Candidate, ItemQuery, QueryFailure, View};
 pub use reject::{Position, Rejection, report};
 pub use universe::{DiskScope, Universe, Vendor, is_vendored, targets_of};
