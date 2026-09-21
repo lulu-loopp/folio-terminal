@@ -11,6 +11,7 @@ anyhow.workspace = true
 bt-pty = { path = "../bt-pty" }
 bt-render = { path = "../bt-render" }
 bt-term = { path = "../bt-term" }
+bt-transcript = { path = "../bt-transcript" }
 bt-viewport = { path = "../bt-viewport" }
 portable-pty.workspace = true
 pollster.workspace = true
@@ -19,6 +20,13 @@ vte.workspace = true
 
 [dev-dependencies]
 serde_json = "1"
+
+# A developer probe, not a shipped program: it drives a real ConPTY and replays
+# the bytes through a terminal, so it lives with the other tools rather than in
+# `bt-pty`, whose transport owes terminal policy nothing.
+[[bin]]
+name = "bt-conpty-width-probe"
+path = "src/bin/bt-conpty-width-probe.rs"
 
 [[bin]]
 name = "bt-record"
