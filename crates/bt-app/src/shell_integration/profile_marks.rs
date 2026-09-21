@@ -4,7 +4,10 @@
 use super::*;
 use crate::i18n::Text;
 use serde::{Deserialize, Serialize};
-use std::{fs, io};
+use std::{
+    fs, io,
+    time::{Duration, Instant},
+};
 
 pub const RECORD_FILE: &str = "integration-marks.json";
 pub const LEGACY_LINE: &str = r#". "$env:APPDATA\Folio\shell-integration\folio.ps1""#;
@@ -328,11 +331,11 @@ impl Marks {
 /// holds no marks and has no decision to keep: `None` says "read [`Marks::default`],
 /// write nothing", and the root is still absent when the run ends. Writers — install,
 /// enable, the Settings row — keep using [`lock`], which creates the root it guards.
-pub fn lock_existing(data: &Path) -> io::Result<Option<fs::File>> {
+pub fn lock_existing(data: &Path, asker: Asker) -> io::Result<Option<fs::File>> {
     if !data.is_dir() {
         return Ok(None);
     }
-    lock(data).map(Some)
+    lock(data, asker).map(Some)
 }
 
 /// Whether a recorded `$PROFILE` path may be read and edited.
@@ -353,9 +356,70 @@ pub fn recorded_profile_is_usable(path: &Path) -> bool {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
 }
 
+/// **How long one of Folio's own writers waits for its turn at the record.**
+///
+/// Not a timeout on an operation: a bound on the *queue*, and the only thing it
+/// is measured against is what this program holds the record across. The
+/// longest of those is the PSReadLine module write — nine files, 429 KB — then
+/// a `$PROFILE` read, its dated copy and an atomic write, then the record's own
+/// kilobyte of JSON. That is ordinary small-file I/O: tens of milliseconds, a
+/// couple of hundred with a scanner in the way. Two seconds is an order of
+/// magnitude above the worst of them, which is what makes running out a
+/// diagnosis rather than a delay — a wait this long is no longer one of ours
+/// being slow, it is another process holding the file, and that is the case
+/// [`Fate::Refused`] was written for.
+pub const OUR_TURN: Duration = Duration::from_secs(2);
+
+/// How often a waiting writer looks again — the same twenty milliseconds the
+/// profile probe waits on its own child with, and for the same reason: this is
+/// an edge somebody pressed, not a clock run, so it owes nothing to the frame
+/// budget and is over before the next one.
+const LOOK_AGAIN: Duration = Duration::from_millis(20);
+
+/// **Who is asking for the record, and therefore what a busy lock means.**
+///
+/// One record, two askers, two answers, and the difference is not a judgement
+/// the lock can make for itself — so every caller states which it is and the
+/// wrong use cannot be spelled by leaving something out.
+///
+/// The distinction was learned from a red toast on a brand-new machine's
+/// welcome card (2026-09-21): pressing `Done` with two rows on starts the
+/// `$PROFILE` install on the window thread and the enable worker beside it, both
+/// of them Folio's, and the loser of that meeting said *"lock acquisition failed
+/// because the operation would block"* in the corner of a window whose every row
+/// had in fact been written. Contention between two of our own writers is not a
+/// failure; it is a queue, and a queue is something to stand in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Asker {
+    /// A writer inside this running Folio — the first-run card, a Settings row,
+    /// the strip's `Add to $PROFILE`, the startup migration, the enable and
+    /// removal workers. It waits its turn, up to [`OUR_TURN`], and only a wait
+    /// that runs out is reported.
+    InApp,
+    /// A command-line door in another process — `--uninstall-cleanup`,
+    /// `--remove-shell-integration`, `uninstall.cmd`. It refuses at once and
+    /// says so, because the caller is a script with an exit code to read and
+    /// nothing it can usefully wait for: whatever holds the record is a Folio
+    /// that will still be holding it when the wait ends.
+    Door,
+}
+
+impl Asker {
+    const fn patience(self) -> Duration {
+        match self {
+            Self::InApp => OUR_TURN,
+            Self::Door => Duration::ZERO,
+        }
+    }
+}
+
 /// Hold across read/modify/write AND the corresponding profile operation.
 /// OS lock is released on drop/crash; the empty lock file is not a mark.
-pub fn lock(data: &Path) -> io::Result<fs::File> {
+///
+/// `asker` chooses between waiting and refusing; see [`Asker`]. A refusal is the
+/// same `io::Error` it always was, in the same words, so the doors' transcripts
+/// are byte-for-byte what they were.
+pub fn lock(data: &Path, asker: Asker) -> io::Result<fs::File> {
     fs::create_dir_all(data)?;
     let path = data.join("integration-marks.lock");
     super::refuse_profile_path(&path)?;
@@ -365,8 +429,18 @@ pub fn lock(data: &Path) -> io::Result<fs::File> {
         .create(true)
         .truncate(false)
         .open(path)?;
-    file.try_lock().map_err(io::Error::other)?;
-    Ok(file)
+    let deadline = Instant::now() + asker.patience();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            // A door's patience is zero, so `now` is already past its deadline
+            // and it leaves by the arm below with the error it always gave.
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(LOOK_AGAIN);
+            }
+            Err(error) => return Err(io::Error::other(error)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

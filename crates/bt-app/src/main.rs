@@ -125610,7 +125610,9 @@ fn main() -> Result<()> {
     // stopped to raise a modal nobody is in front of would be worse than an
     // uninstall that said nothing at all.
     if cli::remove_shell_integration(std::env::args_os().skip(1)) {
-        let report = shell_integration::remove_shell_integration();
+        let report = shell_integration::remove_shell_integration(
+            shell_integration::profile_marks::Asker::Door,
+        );
         let done = report.text(false);
         if done.is_empty() && report.exit_code() == 0 {
             bt_platform::write_to_console(&format!("{}\n", i18n::Text::ShellProfileNothing.text()));

@@ -1981,7 +1981,7 @@ mod tests {
         let source = include_str!("main.rs");
         let main = source.rsplit_once("fn main()").unwrap().1;
         let removed = main
-            .find("shell_integration::remove_shell_integration()")
+            .find("shell_integration::remove_shell_integration(")
             .unwrap();
         for later in [
             "cli::parse(",
@@ -3842,7 +3842,7 @@ mod tests {
         // The second half: a profile that declares the integration is what asks.
         let source = include_str!("shell_integration/profile_runtime.rs");
         let body = source
-            .split_once("fn operate(data: &Path, action: Action) -> Report {")
+            .split_once("fn operate(data: &Path, asker: Asker, action: Action) -> Report {")
             .expect("startup migration")
             .1;
         let end = body.find("\n}\n").expect("its end");
