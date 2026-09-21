@@ -575,7 +575,7 @@ jobs:
           cargo test --locked
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
-          -p bt-platform -p bt-pty -p alacritty_terminal
+          -p bt-platform -p bt-pty -p bt-source -p alacritty_terminal
 
       # **The lint line, held on the second platform** (M1-10). `logic` runs
       # `clippy --workspace --all-targets -- -D warnings` on Windows, and until
@@ -714,4 +714,4 @@ jobs:
           cargo test --locked
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-transcript -p bt-viewport
-          -p bt-pty -p alacritty_terminal
+          -p bt-pty -p bt-source -p alacritty_terminal
