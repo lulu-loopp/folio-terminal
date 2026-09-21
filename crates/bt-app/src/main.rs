@@ -21779,12 +21779,9 @@ fn rename_key(
 /// way, a scheme this window refuses — says nothing at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlClickHint {
-    /// A **web address** — `Ctrl` hands it to this machine's browser.
-    ///
-    /// It was a readable file's clause too, until audit 3 C-4 took the `open` verb away from
-    /// every path that came out of program output. A file says [`Self::Explorer`] now.
+    /// `file:` at a readable file, or a web address — `Ctrl` hands it to this machine's handler.
     DefaultApp,
-    /// `file:` at a file or a folder — `Ctrl` shows it where it lives instead.
+    /// `file:` at a folder — `Ctrl` shows it in Explorer instead.
     Explorer,
 }
 
@@ -21795,12 +21792,9 @@ impl ControlClickHint {
         verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
     ) -> Option<Self> {
         match hyperlink_activation(true, true, uri, namer, verdict) {
-            HyperlinkActivation::Browser => Some(Self::DefaultApp),
-            // **A file says this now too** (audit 3 C-4). `Ctrl` on a reference a
-            // program printed shows it where it lives rather than opening it with
-            // whatever the machine has registered, and the sentence under the cells
-            // says the same thing it did for a folder, because it is now the same
-            // thing.
+            HyperlinkActivation::External(_) | HyperlinkActivation::Browser => {
+                Some(Self::DefaultApp)
+            }
             HyperlinkActivation::Reveal(_) => Some(Self::Explorer),
             HyperlinkActivation::None
             | HyperlinkActivation::Page(_)
@@ -24155,6 +24149,17 @@ enum HyperlinkActivation {
     /// second opinion about what an address means is the one thing §7.1.5g ⑤
     /// forbids in as many words.
     Page(String),
+    /// **A local file, handed to whatever the system has registered for it** — the files column's
+    /// own way out ([`Runtime::open_local_path_verified`]), which opens a document and refuses a
+    /// program.
+    ///
+    /// **Owner ruling 2026-09-21.** Between 2026-09-20 and that ruling this arm did not exist:
+    /// audit 3 C-4 routed every `Ctrl`+click on a printed reference to [`Self::Reveal`]. The owner
+    /// withdrew that rule — the modifier is the reader's consent, and what a hand deliberately
+    /// `Ctrl`+clicks is the reader's business. `bt_platform::names_a_program` refuses exactly what
+    /// it refuses on `main`. What survives of the audit here is that the disk question in front of
+    /// this arm is the pane's ledger and not a `metadata` on the thread that paints.
+    External(PathBuf),
     /// A local file, opened the way this window opens every other file — the
     /// preview seat's own door, and the line inside it the reference named
     /// (§7.1.5j, `path:line[:col]`).
@@ -24424,16 +24429,19 @@ fn preview_link_answers_a_press(control: bool, target: &str, document: &Path) ->
 /// the ruling's: a folder may be named `site.html`, and Explorer's arm was
 /// settled a slice before the page arm existed.
 ///
-/// # And nothing here ever runs a program
+/// # What `Ctrl` reaches
 ///
-/// Audit 3 C-4. `Ctrl` on a file used to answer `External`, which is
-/// `ShellExecuteW`'s `open` verb — whatever this machine has registered, and for
-/// `.py` on a stock install that is `py.exe "%L" %*`. The *label* of an `OSC 8`
-/// link is chosen by the program that printed it, so `notes.txt` could stand over
-/// a `.py` target and one `Ctrl`+click ran it. The arm is now
-/// [`HyperlinkActivation::Reveal`] for a file exactly as for a folder: this is
-/// the *terminal's* table, everything in it came out of a child process, and what
-/// a program printed is revealed, never run.
+/// `Ctrl` on a file answers [`HyperlinkActivation::External`] — the machine's registered handler,
+/// as it always has. **The modifier is the reader's consent** (owner ruling 2026-09-21): what a
+/// hand deliberately `Ctrl`+clicks is the reader's business, and audit 3 C-4's reveal-only arm,
+/// which stood here through two rounds of review and never shipped, is withdrawn.
+/// `bt_platform::names_a_program` refuses exactly what it refuses on `main`.
+///
+/// What this table contributes is the half that is its own, and it is not a gate on the reader:
+/// the question in front of the arm is a **ledger** read, so nothing is asked of a disk on the
+/// thread that paints, and a target this window could only answer for by stalling — a mapped
+/// drive, a chain of links longer than it walks, a name that is not there — gets a card that says
+/// so instead of a frozen window or a file manager on the wrong folder.
 ///
 /// It is deliberately **not** asked of a share, nor of anything else this
 /// window may not read unasked. `bt_transcript::paths::may_read_unasked` is
@@ -24560,14 +24568,16 @@ fn hyperlink_activation(
             // a plain click on a link to a page now opens the page, which is
             // what was asked for.
             ClickIntent::Here => HyperlinkActivation::Preview(path, at),
-            // **And `Ctrl` shows it where it lives rather than opening it with
-            // whatever is registered** (audit 3 C-4). 平点 = the destination
-            // inside this window; Ctrl+click = hand it to the system — and for a
-            // path a *program* printed, the thing handed to the system is the
-            // file manager's selection, which never executes anything. The
-            // machine's `open` verb is still one gesture away, from the surfaces
-            // where the user chose the file.
-            ClickIntent::System => HyperlinkActivation::Reveal(path),
+            // **And `Ctrl` hands it to the machine's own handler** (owner ruling 2026-09-21).
+            // 平点 = the destination inside this window; Ctrl+click = 交给系统, and for a file
+            // that means the program this desk opens that kind of file with. One sentence with
+            // no exception in it: the modifier is the reader's own consent, and this is the
+            // gesture he spends all day.
+            //
+            // The lines above are not a second opinion about that. They are the ledger standing
+            // where a `metadata` used to stand on this thread, so the answer costs nothing and a
+            // name this window cannot reach without stalling is said out loud instead.
+            ClickIntent::System => HyperlinkActivation::External(path),
         };
     }
     refused
@@ -24713,6 +24723,7 @@ fn reference_card(
         HyperlinkActivation::None
         | HyperlinkActivation::Browser
         | HyperlinkActivation::Page(_)
+        | HyperlinkActivation::External(_)
         | HyperlinkActivation::Reveal(_)
         | HyperlinkActivation::Blocked => None,
     }
@@ -84230,6 +84241,48 @@ impl Runtime<'_> {
     /// **It hands over the whole verdict and the bridge refuses on `exists`** (closure re-review
     /// B-1'): the first shape of this door took a lone `bool` and the caller that should have
     /// checked the other half did not.
+    /// **What a pane's ledger has to say to a hand-off** — the three facts the doors out of this
+    /// window ask, carried instead of fetched (audit 3 C-2; owner ruling 2026-09-21).
+    ///
+    /// A name with no verdict answers `exists: false`, which every door refuses: the routing table
+    /// has already declined to produce an arm for one, and this is the same answer said again
+    /// where the shell is actually reached, so no future caller can hand over a name nobody has
+    /// seen.
+    fn verified_target(&self, seat: SeatId, path: &Path) -> bt_platform::VerifiedTarget {
+        let held = self.seat_path_verdict(seat, path);
+        bt_platform::VerifiedTarget {
+            exists: held.is_some_and(|verdict| verdict.exists),
+            is_directory: held.is_some_and(|verdict| verdict.directory),
+            executable: held.is_some_and(|verdict| verdict.executable),
+        }
+    }
+
+    /// [`Self::open_local_path`] for a path a worker has already answered for — the door a
+    /// reference printed in the terminal takes under the hand-over modifier.
+    ///
+    /// The refusal is still the door's and still spoken: "the files column does not run programs"
+    /// is a rule the reader is entitled to be told once, whichever surface asked.
+    fn open_local_path_verified(
+        &mut self,
+        path: &Path,
+        target: bt_platform::VerifiedTarget,
+    ) -> bool {
+        let result = native_window(&self.window.window).and_then(|native| {
+            bt_platform::open_local_path_verified(native, path, target)
+                .map_err(|error| anyhow!(error))
+                .context("open a printed reference with its default handler")
+        });
+        if let Err(error) = result {
+            if format!("{error:#}").contains(bt_platform::PROGRAM_REFUSED) {
+                self.window.files_notice =
+                    Some((files_program_refused_notice().to_owned(), Instant::now()));
+            }
+            eprintln!("recoverable reference open failure: {error:#}");
+            return false;
+        }
+        true
+    }
+
     fn reveal_verified(&mut self, path: &Path, target: bt_platform::VerifiedTarget) -> bool {
         let result = native_window(&self.window.window).and_then(|native| {
             bt_platform::reveal_verified(native, path, target)
@@ -89167,6 +89220,20 @@ impl Runtime<'_> {
             // "no preview" card whose one button is the system's handler. A share
             // arrives here too and meets §7.1.3's own refusal, which is a card
             // this window already has words for.
+            // **The one door out of this window that takes a *path*** — the same one an
+            // unpreviewable file's card offers, and the same one that will not start a program.
+            // A page leaves through it too: the handler this machine has registered for `.html`
+            // is its browser, so the ruling's "system browser" and the table's "system handler"
+            // are one call and not two.
+            //
+            // **Fed by the ledger** (audit 3 C-2 + owner ruling 2026-09-21). The verb is main's;
+            // what changed is that the three questions the door used to ask a disk on this thread
+            // — is it there, is it a folder, would opening it run it — were answered by a worker
+            // and travel here. On Windows the door asks no disk anyway; on a Mac it canonicalised
+            // and stat-ed, which is a stall on a mounted share.
+            HyperlinkActivation::External(path) => {
+                self.open_local_path_verified(&path, self.verified_target(seat, &path));
+            }
             HyperlinkActivation::Preview(path, at) => self.open_preview_at(path, at)?,
             // **Shown where it lives, whatever it is** (audit 3 C-4). A folder took this arm from
             // the beginning; a file takes it since the day `ShellExecuteW`'s `open` verb turned
@@ -89181,18 +89248,7 @@ impl Runtime<'_> {
                 // this thread; the ledger already answered both — the name is there, and it is a
                 // folder or it is not — and a `Ctrl`+click on a path under a junction into a dead
                 // share must not stall the window inside a call this branch exists to remove.
-                let held = self.seat_path_verdict(seat, &path);
-                self.reveal_verified(
-                    &path,
-                    bt_platform::VerifiedTarget {
-                        // **Both facts, and the door refuses on the first** (closure re-review
-                        // B-1'). The arm above already refuses a name the ledger calls absent;
-                        // this is the same answer said again where the shell is actually
-                        // reached, so no future caller can hand over a name nobody has seen.
-                        exists: held.is_some_and(|verdict| verdict.exists),
-                        is_directory: held.is_some_and(|verdict| verdict.directory),
-                    },
-                );
+                self.reveal_verified(&path, self.verified_target(seat, &path));
             }
             // The folder's own road, and the one that stays in this window: the
             // column this tab already has is pointed at it, and a tab without one
@@ -130389,6 +130445,7 @@ mod printed_path_provenance_tests {
             directory: false,
             bytes: Some(11),
             locality: bt_term::PathLocality::ThisMachine,
+            executable: false,
         }
     }
 
@@ -130525,17 +130582,15 @@ mod printed_path_provenance_tests {
         }
     }
 
-    /// RED (audit 3 C-4) — **`Ctrl` on a path a program printed reveals it; it never hands it to
-    /// the shell's `open` verb, whatever the extension is.**
+    /// PIN (owner ruling 2026-09-21) — **`Ctrl` on a printed file opens it with the machine's
+    /// own handler, whatever the extension is.**
     ///
-    /// The trigger in one line: an `OSC 8` link may show the label `notes.txt` over the target
-    /// `notes.py`, and on a stock Windows install that extension's registered open verb is the
-    /// Python launcher. Every extension below reaches the same arm, which is the point — the rule
-    /// is about where the path came from and not about how it is spelled.
-    ///
-    /// Red on `origin/main`: every row answers `External`, which is `ShellExecuteW`'s `open`.
+    /// Audit 3 C-4 routed this arm to a reveal and the owner withdrew the rule: the modifier is
+    /// the reader's consent, and what a hand deliberately `Ctrl`+clicks is the reader's business.
+    /// The extensions below are the ones that finding named; every one of them answers `External`
+    /// again, exactly as on `main`, and the door past it refuses by the list it has always had.
     #[test]
-    fn ctrl_on_a_printed_path_reveals_it_whatever_the_extension() {
+    fn ctrl_on_a_printed_file_opens_it_whatever_the_extension() {
         for name in [
             "notes.py",
             "hook.ahk",
@@ -130557,10 +130612,23 @@ mod printed_path_provenance_tests {
                     bt_transcript::paths::PathNamer::ThisWindow,
                     &|path| ledger.read(path),
                 ),
-                HyperlinkActivation::Reveal(target.clone()),
-                "{name} printed by a program is shown where it lives, never opened"
+                HyperlinkActivation::External(target.clone()),
+                "{name} goes to this desk's own handler under the modifier"
             );
         }
+        // A folder keeps Explorer's arm, which is what it has always had.
+        let folder = std::path::PathBuf::from(r"C:\work\src");
+        let ledger = Ledger::new(&folder, Some(local_folder()));
+        assert_eq!(
+            hyperlink_activation(
+                true,
+                true,
+                "file:///C:/work/src",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| ledger.read(path),
+            ),
+            HyperlinkActivation::Reveal(folder),
+        );
     }
 
     /// RED (audit 3 C-4) — **and the plain half is unchanged**: what this window can show, it
@@ -130661,7 +130729,7 @@ mod printed_path_provenance_tests {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|path| session.path_verdict(path),
             ),
-            HyperlinkActivation::Reveal(target.clone()),
+            HyperlinkActivation::External(target.clone()),
             "and the press that follows is answered by the table, never by another dead click"
         );
         assert_eq!(
@@ -130861,14 +130929,16 @@ mod printed_path_provenance_tests {
         );
     }
 
-    /// PIN (closure re-review, out-of-scope undo) — **the doors where the user picked a file by
-    /// name refuse exactly what the list refuses, and nothing the machine was asked about.**
+    /// PIN (owner ruling 2026-09-21) — **the door out of this window refuses exactly what its own
+    /// list refuses, and asks no machine about the file.**
     ///
-    /// `AssocIsDangerous` and `SHGetFileInfo(SHGFI_EXETYPE)` were added under the extension list on
-    /// 2026-09-20 and taken out again: after C-4's provenance rule no terminal-printed reference
-    /// reaches `open_local_path` at all, so the floor guarded nothing — while refusing a `.docm`
-    /// the reader had named, with a sentence about running programs that is false about a
-    /// document.
+    /// `AssocIsDangerous` and `SHGetFileInfo(SHGFI_EXETYPE)` were added under the extension list
+    /// on 2026-09-20 and taken out again. The owner's ruling is the reason and it is not a
+    /// measurement: **the modifier is the reader's consent** — what a hand deliberately
+    /// `Ctrl`+clicks is the reader's business — and a floor that refused a macro-bearing document
+    /// the reader had named, with a sentence about running programs, was answering a question
+    /// nobody had asked. `bt_platform::names_a_program` refuses what it refuses on `main`, no
+    /// more and no less.
     #[test]
     fn the_user_chosen_door_asks_no_machine_about_the_file() {
         let handoff = include_str!("../../bt-platform/src/handoff.rs");
@@ -131035,27 +131105,61 @@ mod printed_path_provenance_tests {
         }
     }
 
-    /// RED GATE (audit 3 C-4) — **`Runtime::open_local_path` is unreachable from terminal output.**
+    /// RED GATE (owner ruling 2026-09-21) — **a printed reference reaches the machine's handler
+    /// only under the modifier, only with a local `exists` verdict, and only past the door's own
+    /// refusal.**
     ///
-    /// The provenance rule, held structurally, because no value can witness the absence of a call:
-    /// the arm that used to reach the shell's `open` verb from a printed reference is gone from
-    /// this file entirely, so there is no arm to route back through it by accident.
+    /// The rule as it actually is, replacing the pin that forbade the door outright. Three
+    /// conditions and each is in a different place, which is why this is structural: the modifier
+    /// is [`ClickIntent`]'s, the verdict is the table's, and the refusal is
+    /// `bt_platform::names_a_program`'s — on the door, not on the caller.
     #[test]
-    fn nothing_a_program_printed_reaches_the_shells_open_verb() {
-        let gone = ["HyperlinkActivation", "::", "External"].concat();
+    fn a_printed_reference_reaches_the_handler_only_under_the_modifier_and_a_local_verdict() {
+        let table = free_function("fn hyperlink_activation(");
+        let arm = [
+            "ClickIntent",
+            "::",
+            "System => HyperlinkActivation",
+            "::",
+            "External(",
+        ]
+        .concat();
         assert!(
-            !SOURCE.contains(gone.as_str()),
-            "the arm that handed a printed path to `open_local_path` is back; what a program \
-             printed is revealed, never run"
+            table.contains(arm.as_str()),
+            "the modifier is the only half that hands a file to the machine"
         );
-        let door = method("    fn activate_hyperlink(");
+        let plain = [
+            "ClickIntent",
+            "::",
+            "Here => HyperlinkActivation",
+            "::",
+            "Preview(",
+        ]
+        .concat();
         assert!(
-            !door.contains("open_local_path("),
-            "a click on terminal output reaches the tree's bridge again"
+            table.contains(plain.as_str()),
+            "and the plain half is still this window's own seat"
         );
+        for gate in ["verdict.exists", "verdict.locality", "verdict.directory"] {
+            assert!(
+                table.contains(gate),
+                "{gate} decides before any arm is produced, and it is a ledger read"
+            );
+        }
+        // The door is reached through the verified twin, so the three facts travel rather than
+        // being fetched on this thread.
+        let press = method("    fn activate_hyperlink(");
+        assert!(press.contains("open_local_path_verified("));
         assert!(
-            door.contains("reveal_verified("),
-            "and the arm a printed file takes is the one that shows it where it lives,              off the ledger's own answer"
+            !press.contains("self.open_local_path("),
+            "the asking door belongs to the surfaces where the user picked the file"
+        );
+        // And the refusal is the platform door's own, with the list it has always had.
+        let handoff = include_str!("../../bt-platform/src/handoff.rs");
+        let refusal = ["names_a_", "program(&path,"].concat();
+        assert!(
+            handoff.contains(refusal.as_str()),
+            "the door refuses a program by its own list"
         );
     }
 

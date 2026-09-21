@@ -59,6 +59,10 @@ pub struct VerifiedTarget {
     pub exists: bool,
     /// And that it is a folder.
     pub is_directory: bool,
+    /// And that opening it would **run** it — the execute bit, or an application bundle's own
+    /// name. Always `false` on Windows, where that question is about the association and
+    /// [`names_a_program`] answers it from the name.
+    pub executable: bool,
 }
 
 /// The extensions that are a program whatever this machine's `PATHEXT` says.
@@ -503,6 +507,17 @@ mod portable_handoff {
         Err(not_here("opening a file"))
     }
 
+    /// The same, for a path a worker has already answered for.
+    #[cfg(not(target_os = "macos"))]
+    pub fn open_local_path_verified(
+        window: NativeWindow,
+        path: &Path,
+        target: super::VerifiedTarget,
+    ) -> Result<(), String> {
+        let _ = (window, path, target);
+        Err(not_here("opening a file"))
+    }
+
     /// Show a file in the file manager.
     #[cfg(not(target_os = "macos"))]
     pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
@@ -537,15 +552,15 @@ pub use portable_handoff::program_on_path;
 /// The other five, on a platform with neither a Win32 shell nor a `NSWorkspace`.
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_handoff::{
-    open_local_file, open_local_path, open_system_fonts_page, reveal_in_explorer, reveal_verified,
-    shell_execute,
+    open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
+    reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 /// **The five verbs that leave this window, over `NSWorkspace`** (M2-2).
 #[cfg(target_os = "macos")]
 pub use macos_handoff::{
-    open_local_file, open_local_path, open_system_fonts_page, reveal_in_explorer, reveal_verified,
-    shell_execute,
+    open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
+    reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 /// **Everything this product gives to the machine, on a Mac** — the macOS twin
@@ -827,6 +842,33 @@ mod macos_handoff {
         let (real, directory) = openable_target(path)?;
         let url = file_url(&real, directory)?;
         hand_over(&url, &real.to_string_lossy())
+    }
+
+    /// **The same door, for a path a worker has already answered for** (owner ruling 2026-09-21)
+    /// — `windows_handoff::open_local_path_verified`'s twin, and the arm where it actually buys
+    /// something.
+    ///
+    /// [`openable_target`] canonicalises and stats, and `Ctrl`/`⌘`+click on a reference a program
+    /// printed reaches it on the thread that paints: a target under a symlink into a mounted share
+    /// stalls the window for as long as the mount takes to answer. All three facts that gate asks
+    /// are the ledger's — the name is there, it is a folder or it is not, and opening it would run
+    /// it — and the third is `bt_term::PathVerdict::executable`, answered off the same `metadata`
+    /// the other two came from. The refusal is still this door's and still [`PROGRAM_REFUSED`].
+    pub fn open_local_path_verified(
+        window: NativeWindow,
+        path: &Path,
+        target: super::VerifiedTarget,
+    ) -> Result<(), String> {
+        let _ = window;
+        openable_unix_path(path)?;
+        if !target.exists {
+            return Err(format!("{path:?}: not there"));
+        }
+        if target.executable {
+            return Err(PROGRAM_REFUSED.to_owned());
+        }
+        let url = file_url(path, target.is_directory)?;
+        hand_over(&url, &path.to_string_lossy())
     }
 
     /// Open Finder on a path, with the file **selected** inside its folder.
@@ -1435,8 +1477,8 @@ mod macos_handoff {
 /// The Windows half: the real directories, the real `PATHEXT`, the real disk.
 #[cfg(windows)]
 pub use windows_handoff::{
-    open_local_file, open_local_path, open_system_fonts_page, program_on_path, reveal_in_explorer,
-    reveal_verified, shell_execute,
+    open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
+    program_on_path, reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 #[cfg(windows)]
@@ -1645,6 +1687,29 @@ mod windows_handoff {
     /// normalised first and everything below — the extension check and the
     /// hand-off — uses that one value, so there is no spelling in which the two
     /// can be talking about different files.
+    /// **The same door, for a path a worker has already answered for** (owner ruling 2026-09-21).
+    ///
+    /// `Ctrl`+click on a reference a program printed opens it with the machine's registered
+    /// handler, exactly as it always has — but the two questions that decide *whether* it may are
+    /// now the ledger's rather than this thread's. On Windows the door below asks no disk at all,
+    /// so the only thing this adds is the existence check the caller used to get for free from the
+    /// shell's own failure: a name that is not there must not reach `ShellExecuteW`, which answers
+    /// a bare error code the user never sees.
+    ///
+    /// `names_a_program` is asked below, unchanged and with the list it has always had — the
+    /// refusal is the door's, not the caller's, which is `docs/DESIGN.md`'s
+    /// 「拒绝写在门上而不是写在每个敲门的人身上」.
+    pub fn open_local_path_verified(
+        window: NativeWindow,
+        path: &Path,
+        target: VerifiedTarget,
+    ) -> Result<(), String> {
+        if !target.exists {
+            return Err(format!("{path:?}: not there"));
+        }
+        open_local_path(window, path)
+    }
+
     pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
         let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
         validate_openable_path(&path)?;

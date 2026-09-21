@@ -4,9 +4,6 @@ use std::num::NonZeroIsize;
 
 pub mod file_reads;
 pub mod ime_trace;
-pub mod volume;
-
-pub use volume::{Volume, volume_of};
 
 /// Fresh native facts for a diagnostic line only. Unreadable is not false.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -11485,9 +11482,9 @@ mod argument_split_tests {
 /// because that is where every caller has always found them, and moving the
 /// door is not the same as moving its handle.
 pub use handoff::{
-    PROGRAM_REFUSED, VerifiedTarget, open_local_file, open_local_path, open_system_fonts_page,
-    program_in_directories, program_on_path, reveal_arguments, reveal_in_explorer, reveal_verified,
-    shell_execute,
+    PROGRAM_REFUSED, VerifiedTarget, open_local_file, open_local_path, open_local_path_verified,
+    open_system_fonts_page, program_in_directories, program_on_path, reveal_arguments,
+    reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 /// The three thread-band calls, off Windows.

@@ -73,9 +73,19 @@ pub enum PathLocality {
     /// A volume this machine holds, reached without passing through a reparse point that leads off
     /// it. The whole of what makes a name one this window opens on its own.
     ThisMachine,
-    /// Somebody else's machine: a mapped network drive, or a junction on a local disk whose target
-    /// is one. `docs/DESIGN.md` §3.4 rules that a network path — 「UNC/映射盘」 — is previewed only
-    /// on an explicit confirmation, and a resting pointer is not one.
+    /// **A link on the way in leads somewhere this window does not read unasked** — a share
+    /// spelled `\server\share`, a device path, another distribution's root.
+    ///
+    /// Exactly what `may_read_unasked` refuses of a spelling, asked of every reparse point the
+    /// walk meets rather than of the final component alone — which is what
+    /// `bt_transcript::paths::may_read_unasked_through_links` answered `false` for before this
+    /// walk existed, and therefore what `path_exists` already reported as "not there".
+    ///
+    /// **A mapped network drive is not one of these** (owner ruling 2026-09-21). `Z:` standing for
+    /// a NAS is a volume the reader keeps their work on; the reason to have refused one was the
+    /// window-thread stall, and the stall is gone — this question runs on a lane nobody waits on,
+    /// so a slow share only means the link is not live until the answer lands. A volume question
+    /// may reproduce this product's refusals and never add one.
     AnotherMachine,
     /// The spelling names nothing this window reads unasked — a device path, a verbatim path,
     /// another distribution's share. Refused before any syscall.
@@ -125,6 +135,17 @@ pub struct PathVerdict {
     pub bytes: Option<u64>,
     /// Whose disk it stands on.
     pub locality: PathLocality,
+    /// **Whether opening it would run it** — the execute bit on a filesystem that has one, and an
+    /// application bundle's own name (owner ruling 2026-09-21).
+    ///
+    /// The one fact the macOS hand-off asks that is neither existence nor folder-ness:
+    /// `macos_handoff::opening_it_would_run_it` refuses any file whose mode carries `0o111`, and
+    /// it used to ask a `metadata` of its own on the thread that paints. It is a fact about the
+    /// file, so it is answered here, beside the other three, off the same `metadata` call.
+    ///
+    /// Always `false` on Windows, where "would opening it run it" is a question about the
+    /// *association* and is answered by `bt_platform::names_a_program` from the name.
+    pub executable: bool,
 }
 
 impl PathVerdict {
@@ -137,6 +158,7 @@ impl PathVerdict {
             directory: false,
             bytes: None,
             locality: PathLocality::Refused,
+            executable: false,
         }
     }
 
@@ -149,6 +171,7 @@ impl PathVerdict {
             directory: false,
             bytes: None,
             locality: PathLocality::AnotherMachine,
+            executable: false,
         }
     }
 
@@ -160,6 +183,7 @@ impl PathVerdict {
             directory: false,
             bytes: None,
             locality: PathLocality::BeyondFollowedLinks,
+            executable: false,
         }
     }
 
@@ -171,6 +195,7 @@ impl PathVerdict {
             directory: false,
             bytes: None,
             locality: PathLocality::ThisMachine,
+            executable: false,
         }
     }
 }
@@ -185,23 +210,24 @@ impl PathVerdict {
 /// mapped drive whose server was gone stopped the window for the redirector's timeout on every
 /// pointer motion over the cell.
 ///
-/// Four questions, in the order that keeps the expensive ones from being asked:
+/// Three questions, in the order that keeps the expensive one from being asked:
 ///
 /// 1. **The spelling**, through the one lexical predicate. A device path, a verbatim path or
 ///    another distribution's share is refused here, with no syscall at all.
-/// 2. **The volume** ([`bt_platform::volume_of`]). A drive letter is lexically local whatever it
-///    stands for, so `Z:` mapped to `\\server\share` passes step 1 and is caught here — by a device
-///    map lookup, which reaches no network.
-/// 3. **Every reparse point on the way in**, walked from the root outwards. This is the case a
-///    drive-type check alone cannot reach: `C:\build\out\a.txt`, where `C:\build\out` is a junction
-///    into a dead share, is drive-local in both its spelling and its volume, and a single
-///    `symlink_metadata` of the whole path dials that share while resolving `out`. Walking outwards
-///    and stopping at the first reparse point is what keeps the question off the wire — a
-///    `symlink_metadata` of the reparse point *itself* reports the link and never opens what it
-///    names, and `read_link` reads the name written inside it. One hop, as before: a link whose
-///    target is a link is refused rather than followed.
-/// 4. **The file**, at last — one `metadata`, which answers all three of `exists`, `directory` and
-///    `bytes`.
+/// 2. **Every reparse point on the way in**, walked from the root outwards, each one's target put
+///    to that same lexical predicate. `C:\build\out\a.txt`, where `C:\build\out` is a junction
+///    into a share, is drive-local in its spelling, and a single `symlink_metadata` of the whole
+///    path dials that share while resolving `out`. Walking outwards and stopping at the first
+///    reparse point is what keeps the question off the wire — a `symlink_metadata` of the reparse
+///    point *itself* reports the link and never opens what it names, and `read_link` reads the
+///    name written inside it.
+/// 3. **The file**, at last — one `metadata`, which answers `exists`, `directory`, `bytes` and
+///    whether opening it would run it.
+///
+/// **What it deliberately does not ask is the volume** (owner ruling 2026-09-21). A drive letter
+/// that stands for a NAS is a place the reader keeps their work, and a question that refused one
+/// would be a refusal this product never made; the reason to have asked it was the window-thread
+/// stall, and this runs on a lane nobody waits on.
 ///
 /// Budget: one `symlink_metadata` per path component plus one `metadata`, against two calls before.
 /// It buys the junction case, it is paid on a lane of this feature's own
@@ -222,22 +248,13 @@ impl PathVerdict {
 /// `notes.md.`, `notes.md.` is a file and §7.30's longest reading wins it.
 #[must_use]
 pub fn verify_path(path: &Path) -> PathVerdict {
-    verify_path_through(path, &bt_platform::volume_of)
-}
-
-/// [`verify_path`] with the volume oracle handed in, so a test can put a name on a machine this
-/// runner does not have without asking anybody to map a drive.
-fn verify_path_through(path: &Path, volume: &dyn Fn(&Path) -> bt_platform::Volume) -> PathVerdict {
     // `PathNamer::ThisWindow`: the spelling reaching here has already been translated out of the
     // pane's own namespace by `PrintedPathLinks`, which is where the pane's half of the rule is
     // asked.
     if !bt_transcript::paths::may_read_unasked(path, bt_transcript::paths::PathNamer::ThisWindow) {
         return PathVerdict::refused();
     }
-    if volume(path) != bt_platform::Volume::ThisMachine {
-        return PathVerdict::elsewhere();
-    }
-    let resolved = match resolve_through_reparse_points(path, volume) {
+    let resolved = match resolve_through_reparse_points(path) {
         Resolution::Resolved(resolved) => resolved,
         Resolution::AnotherMachine => return PathVerdict::elsewhere(),
         Resolution::BeyondFollowedLinks => return PathVerdict::beyond_followed_links(),
@@ -253,7 +270,33 @@ fn verify_path_through(path: &Path, volume: &dyn Fn(&Path) -> bt_platform::Volum
         directory: metadata.is_dir(),
         bytes: (!metadata.is_dir()).then_some(metadata.len()),
         locality: PathLocality::ThisMachine,
+        executable: opening_it_would_run_it(&resolved, &metadata),
     }
+}
+
+/// **Whether opening this would run it** — `macos_handoff::opening_it_would_run_it`'s rule, asked
+/// where the `metadata` already is (owner ruling 2026-09-21).
+///
+/// A bundle is a directory whose name ends in `.app`; everything else is the execute bit. The rule
+/// lives beside the mode bits rather than in `bt-platform`, because this is the one call that has
+/// them — the hand-off's own copy stat-ed the file a second time, on the thread that paints.
+#[cfg(unix)]
+fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if metadata.is_dir() {
+        return path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"));
+    }
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+/// The same question on a filesystem with no mode bits: there, "would opening it run it" is about
+/// the *association* and `bt_platform::names_a_program` answers it from the name.
+#[cfg(not(unix))]
+fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    let _ = (path, metadata);
+    false
 }
 
 /// The name a reader would really open, with every reparse point on the way in resolved — or
@@ -263,10 +306,7 @@ fn verify_path_through(path: &Path, volume: &dyn Fn(&Path) -> bt_platform::Volum
 /// safe to run at all: `symlink_metadata` of a *whole* path resolves every component but the last,
 /// so asking it about `C:\build\out\a.txt` is what dials the share `out` stands for. Asked about
 /// `C:\build\out` it opens the reparse point itself and reports the link, which is a local call.
-fn resolve_through_reparse_points(
-    path: &Path,
-    volume: &dyn Fn(&Path) -> bt_platform::Volume,
-) -> Resolution {
+fn resolve_through_reparse_points(path: &Path) -> Resolution {
     use std::path::Component;
 
     let mut resolved = PathBuf::new();
@@ -315,11 +355,14 @@ fn resolve_through_reparse_points(
                 None => return Resolution::BeyondFollowedLinks,
             }
         };
+        // The one question, and it is the lexical one this workspace has always asked of a link's
+        // target: a share, a device, another distribution. **Not the volume** — a mapped drive is
+        // a place the reader keeps their work, and refusing one would be a refusal `main` never
+        // made (owner ruling 2026-09-21).
         if !bt_transcript::paths::may_read_unasked(
             &target,
             bt_transcript::paths::PathNamer::ThisWindow,
-        ) || volume(&target) != bt_platform::Volume::ThisMachine
-        {
+        ) {
             return Resolution::AnotherMachine;
         }
         // The link named a place; the rest of the spelling hangs off it, and the component just
@@ -26870,6 +26913,7 @@ mod tests {
                         directory: false,
                         bytes: Some(0),
                         locality: PathLocality::ThisMachine,
+                        executable: false,
                     }
                 } else {
                     PathVerdict::absent()
