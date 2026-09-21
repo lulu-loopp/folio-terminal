@@ -825,8 +825,20 @@ pub const ENGINE_INTERNAL: [&str; 3] = ["chrome-extension", "chrome-untrusted", 
 /// **The disk.**
 pub const DISK: &str = "file";
 
-/// **The network.**
-pub const NETWORK: [&str; 2] = ["http", "https"];
+/// **The network** — every scheme by which a document reaches a server, and not
+/// the two it fetches over (audit 3 A-2).
+///
+/// `ws` and `wss` are here because the sentence this table is read for is about
+/// reaching a server and not about how: **a seat that may not fetch may not open
+/// a socket, and a seat that may, may.** A previewed local document that can say
+/// `new WebSocket("wss://…")` is the document telling somebody it was opened,
+/// word for word the thing the third door exists to refuse, and the compiled
+/// patterns are the whole of the enforcement on macOS — so a scheme missing from
+/// this table is a scheme nothing gates there. The other direction is the same
+/// table's doing and is why they are not a separate list: a browsing seat's
+/// hot-module reload is a `ws://localhost:5173/` socket, and it stays open
+/// because the seat's `http://localhost:5173/` page stays open.
+pub const NETWORK: [&str; 4] = ["http", "https", "ws", "wss"];
 
 /// **One compiled rule: an address pattern, and the refusal that is the only
 /// action this product ever emits.**
@@ -1511,7 +1523,7 @@ mod content_rule_tests {
     /// for names itself.
     #[test]
     fn the_two_spellings_of_the_resource_rule_agree() {
-        let fixtures: [(&str, Mint); 21] = [
+        let fixtures: [(&str, Mint); 26] = [
             // A browsing seat: its own origins are its business.
             ("http://127.0.0.1:9002/img.png", Mint::Nothing),
             ("http://127.0.0.1:9002/style.css", Mint::Nothing),
@@ -1519,6 +1531,11 @@ mod content_rule_tests {
             ("http://127.0.0.1:9002/fetched.txt", Mint::Nothing),
             ("http://127.0.0.1:9002/frame.html", Mint::Nothing),
             ("https://example.com/a.png", Mint::Nothing),
+            // …including the socket its dev server reloads it over (audit 3
+            // A-2). A browsing seat reaches a server, and `ws` is one of the
+            // ways.
+            ("ws://localhost:5173/", Mint::Nothing),
+            ("wss://example.com/socket", Mint::Nothing),
             // …and the disk is what it may not touch.
             ("file:///etc/hosts", Mint::Nothing),
             ("file:///D:/seat/open/inside.png", Mint::Nothing),
@@ -1537,8 +1554,12 @@ mod content_rule_tests {
             ("file:///D:/seat/outside/secret.html", a_report()),
             ("http://127.0.0.1:9002/img.png", a_report()),
             ("https://example.com/a.png", a_report()),
+            // …by either of the two ways of reaching one (audit 3 A-2).
+            ("ws://attacker.tld/", a_report()),
+            ("wss://attacker.tld/", a_report()),
             // The host's own empty page fetches nothing.
             ("http://127.0.0.1:9002/img.png", Mint::Blank),
+            ("wss://attacker.tld/", Mint::Blank),
         ];
         for (candidate, mint) in fixtures {
             let rules = content_rule_list(&mint);
@@ -1572,7 +1593,10 @@ mod content_rule_tests {
             .map(|scheme| format!("^{scheme}://"))
             .chain(std::iter::once(format!("^{DISK}:")))
             .collect();
-        assert_eq!(out_of_a_table, ["^http://", "^https://", "^file:"]);
+        assert_eq!(
+            out_of_a_table,
+            ["^http://", "^https://", "^ws://", "^wss://", "^file:"]
+        );
         for mint in [Mint::Nothing, Mint::Blank, a_report()] {
             for rule in content_rule_list(&mint) {
                 assert!(
@@ -1597,6 +1621,58 @@ mod content_rule_tests {
         }
     }
 
+    /// RED — **a seat that may not fetch may not open a socket, and a seat that
+    /// may, may** (audit 3 A-2).
+    ///
+    /// The rule as a property of the mint rather than as a list of fixtures: for
+    /// every mint there is, whatever the seat's answer about `http` and `https`
+    /// is, it is also its answer about `ws` and `wss` — in **both** directions.
+    /// A dev server's page is reloaded over a socket, so a browsing seat that
+    /// kept `http` and lost `ws` would be a preview that never reloads; a local
+    /// document that lost `http` and kept `ws` is the leak this was written for.
+    /// Asked of both spellings at once, because the compiled patterns are the
+    /// whole of the enforcement on macOS and the answer that is not compiled is
+    /// the answer nothing gives.
+    ///
+    /// RED GATE: take `ws` and `wss` back out of [`NETWORK`] and every local and
+    /// blank row fails on the patterns; give the socket schemes a rule of their
+    /// own that fires on every mint and the browsing rows fail.
+    #[test]
+    fn a_seat_that_may_not_fetch_may_not_open_a_socket() {
+        for mint in [Mint::Nothing, Mint::Blank, a_report()] {
+            let rules = content_rule_list(&mint);
+            let refuses = |candidate: &str| {
+                let by_pattern = rules.iter().any(|rule| blocks(&rule.url_filter, candidate));
+                let spoken = matches!(resource_request(candidate, &mint), Decision::Refuse(_));
+                assert_eq!(
+                    by_pattern, spoken,
+                    "{candidate} on {mint:?}: the patterns and the rule disagree"
+                );
+                spoken
+            };
+            for (fetched, socket) in [
+                ("http://example.com/a.png", "ws://example.com/live"),
+                ("https://example.com/a.png", "wss://example.com/live"),
+            ] {
+                assert_eq!(
+                    refuses(fetched),
+                    refuses(socket),
+                    "{mint:?} answers {fetched} and {socket} differently"
+                );
+            }
+        }
+        // And the direction each mint actually takes, so that "they agree"
+        // cannot be satisfied by refusing or allowing all four.
+        assert!(matches!(
+            resource_request("wss://example.com/live", &Mint::Nothing),
+            Decision::Navigate(_)
+        ));
+        assert!(matches!(
+            resource_request("wss://example.com/live", &a_report()),
+            Decision::Refuse(Refusal::NotMinted)
+        ));
+    }
+
     /// RED — **the JSON is what a content blocker reads, and no mint's is
     /// empty.**
     ///
@@ -1616,7 +1692,9 @@ mod content_rule_tests {
             content_rules(&a_report()),
             concat!(
                 r#"[{"trigger":{"url-filter":"^http://"},"action":{"type":"block"}},"#,
-                r#"{"trigger":{"url-filter":"^https://"},"action":{"type":"block"}}]"#
+                r#"{"trigger":{"url-filter":"^https://"},"action":{"type":"block"}},"#,
+                r#"{"trigger":{"url-filter":"^ws://"},"action":{"type":"block"}},"#,
+                r#"{"trigger":{"url-filter":"^wss://"},"action":{"type":"block"}}]"#
             )
         );
         assert_eq!(
@@ -1624,6 +1702,8 @@ mod content_rule_tests {
             concat!(
                 r#"[{"trigger":{"url-filter":"^http://"},"action":{"type":"block"}},"#,
                 r#"{"trigger":{"url-filter":"^https://"},"action":{"type":"block"}},"#,
+                r#"{"trigger":{"url-filter":"^ws://"},"action":{"type":"block"}},"#,
+                r#"{"trigger":{"url-filter":"^wss://"},"action":{"type":"block"}},"#,
                 r#"{"trigger":{"url-filter":"^file:"},"action":{"type":"block"}}]"#
             )
         );

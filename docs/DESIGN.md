@@ -11254,3 +11254,20 @@ Nor can it be kept: WebSocket is invisible to WebView2's `WebResourceRequested`,
 What stays: the `File`-mint refusals in `resource_request` and `content_rule_list`, as best-effort hygiene. They cost nothing, an ordinary web request from a local document is still refused, and nothing in the product promises more than that.
 What is not built: no document served by Folio with a CSP, no second URL grammar, no chase of the Windows WebSocket gap. Opening a local HTML file is the reader's own deliberate act, with a browser's risk.
 What arrives from strangers is mostly Markdown and text, which Folio renders itself with no script engine at all. `SECURITY.md`'s web-preview section says all of this where a reader meets it.
+
+### 2026-09-20 — A page that may not fetch may not open a socket; a stale gate is never hung; only the writer binds
+A seat's resource rule is about reaching a server, not about how: `NETWORK` carries `ws` and `wss` beside `http` and `https`, so a local or blank seat's compiled patterns block WebSocket handshakes — which WebKit routes through content rule lists from macOS 11.3 — and a browsing seat's dev-server reload keeps its socket.
+Residue, stated rather than implied: on Windows `WebResourceRequested` is never raised for WebSocket traffic, so `resource_request`'s refusal is unenforceable there; WebRTC is ungated on both engines, no pattern language and no WebView2 event reaching a peer connection.
+A compile carries a page and a policy, and `compile_is_stale` asks about both before either WebKit call: a list compiled for a rule the seat has moved off is dropped, never attached and then corrected, because for the length of that correction the document on the glass is judged by a policy nobody asked for.
+A seat goes to the last address it was given: `ThirdDoor::destined_for` writes `parked` on both branches, so an address superseded by a later navigation is not replayed a compile round-trip later.
+The data directory's claim is the single owner of "I am the writer", and both of its endpoints are opened off it: `open_the_data_directorys_endpoints` refuses a process that does not hold the claim, and one gate covers both doors so a third cannot be added outside it.
+Ungated, the loser of an ordinary two-launch race bound the names first and the writer latched its `OnceLock` to `None` for life, so every later launch landed in the window whose session writes are discarded.
+`applicationShouldTerminate:` is injected last: the selector loop is irreversible one at a time, and that is the only selector whose live-but-unanswered form is a frozen ⌘Q rather than a missing feature.
+
+### 2026-09-20 — A clipboard picture shows its shape before it is decoded
+The module's own rule is that a picture's shape is refused before anything is allocated for it; the TIFF arm was the one that did not state it.
+There is no Rust TIFF decoder in this tree, so the shape comes back out of the platform arm — `pixelsWide`, `pixelsHigh` and `bitsPerPixel`, read off the representation `imageRepWithData:` built — and is judged by the same `refuse_oversize` the PNG and DIB arms call.
+The judgement is the argument the decoding arm is called with, so a fourth encoding arrives at the same ceiling or does not decode.
+Measured on the Mac mini (macOS 26.6.2): a two-hundred-byte TIFF whose IFD claims 65,535 square returns in milliseconds at flat memory and states 0 x 0 — AppKit checks the strip byte count against the claim.
+The reachable case is the honest one: a picture whose bytes are all there states its real shape, and 16,385 wide is turned away by the ceiling instead of drawn.
+This matters because `objc2` is used without `catch-all`, so an `NSMallocException` out of AppKit aborts the process rather than becoming an `Err`.
