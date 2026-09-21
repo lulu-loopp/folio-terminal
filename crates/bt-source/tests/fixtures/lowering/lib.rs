@@ -67,6 +67,13 @@ mod inner {
     }
 }
 
+/// Documented, and kept out of the rendered documentation. The line below is an
+/// attribute and not documentation text, so it stays in the code view.
+#[doc(hidden)]
+pub fn hidden_but_not_a_comment() -> u8 {
+    3
+}
+
 pub fn through_a_macro() {
     println!("{}", stand_in_inside_a_macro());
 }

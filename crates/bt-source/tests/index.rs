@@ -449,6 +449,15 @@ fn a_view_decides_what_is_there_and_a_match_crosses_nothing() {
     assert!(index.contains("hidden_only_in_a_block", View::Raw));
     assert!(!index.contains("hidden_only_in_a_block", View::CodeKeepingLiterals));
 
+    // An attribute that begins with `doc` is not documentation text: the doc
+    // comment above it is masked and the attribute itself is code.
+    assert!(index.contains("#[doc(hidden)]", View::CodeKeepingLiterals));
+    assert!(index.contains("kept out of the rendered documentation", View::Raw));
+    assert!(!index.contains(
+        "kept out of the rendered documentation",
+        View::CodeKeepingLiterals
+    ));
+
     // A needle inside a string literal survives, because it is code's subject.
     assert!(index.contains("stand_in is not a comment", View::CodeKeepingLiterals));
     assert!(index.contains("stand_in is not a comment", View::LiteralValues));

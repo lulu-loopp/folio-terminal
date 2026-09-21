@@ -233,12 +233,22 @@ impl Lexed<'_> {
         }
     }
 
-    /// `#[doc = "…"]` in either of its two spellings.
+    /// `#[doc = "…"]` in either of its two spellings, and **nothing else that
+    /// begins with the word `doc`**.
     ///
     /// The synthesized one — what `/// x` lexes to — is recognised by its
     /// tokens all carrying the comment's own byte range, and its tokens are not
     /// tokens of this program: they are skipped whole, so the string inside is
     /// never recorded as a literal of the source.
+    ///
+    /// The written-out one has to carry an `=`. `#[doc(hidden)]`,
+    /// `#[doc(alias = "…")]` and `#[doc(cfg(…))]` are **attributes and not
+    /// documentation text**: §2.1 removes comments and doc comments from
+    /// [`crate::View::CodeKeepingLiterals`], and a reading that also removed
+    /// these would answer "no" about bytes that are code. There are none in
+    /// `bt-app`, which is why every number in P1b's measurement is unchanged by
+    /// this, and seven in `bt-platform`, `bt-render` and `bt-term` — the
+    /// universes P1c's first consumer asks.
     fn doc_attribute(&mut self, trees: &[TokenTree], at: usize) -> Option<usize> {
         let TokenTree::Punct(hash) = trees.get(at)? else {
             return None;
@@ -259,14 +269,19 @@ impl Lexed<'_> {
         if group.delimiter() != Delimiter::Bracket {
             return None;
         }
-        let first = group.stream().into_iter().next();
-        if !matches!(first, Some(TokenTree::Ident(ref name)) if name == "doc") {
+        let mut inside = group.stream().into_iter();
+        if !matches!(inside.next(), Some(TokenTree::Ident(ref name)) if name == "doc") {
             return None;
         }
         let closing = group.span().byte_range();
+        let synthesized = opening == closing;
+        if !synthesized
+            && !matches!(inside.next(), Some(TokenTree::Punct(ref sign)) if sign.as_char() == '=')
+        {
+            return None;
+        }
         let whole = opening.start..closing.end;
         self.gap_to(whole.start);
-        let synthesized = opening == closing;
         let kind = if synthesized {
             CommentKind::DocComment
         } else {
@@ -725,6 +740,16 @@ mod tests {
             [("#[doc = \"written\"]", CommentKind::DocAttribute)]
         );
         assert!(masked("fn f() { let s = \"/* not a comment */\"; }").is_empty());
+        // **An attribute that begins with `doc` is not documentation text.**
+        // `#[doc(hidden)]` says something about the item, in code; masking it
+        // would make the code view answer "no" about bytes that are code. Seven
+        // of these live in `bt-platform`, `bt-render` and `bt-term`.
+        //
+        // MUTATION: drop the `=` check in `doc_attribute` and all three rows
+        // below come back as `DocAttribute` masks.
+        assert!(masked("#[doc(hidden)]\npub fn f() {}\n").is_empty());
+        assert!(masked("#[doc(alias = \"other\")]\npub fn f() {}\n").is_empty());
+        assert!(masked("#![doc(html_root_url = \"x\")]\n").is_empty());
     }
 
     /// PIN — a doc comment's synthesized string is not a literal of this
