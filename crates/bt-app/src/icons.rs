@@ -3156,7 +3156,7 @@ mod tests {
 
         // The head, at every scale the chrome is drawn at.
         for scale in [1.0_f32, 1.5, 2.0] {
-            let head: PaneHeadGeometry = pane_head_geometry(rect, SeatKind::Terminal, scale);
+            let head: PaneHeadGeometry = pane_head_geometry(rect, SeatKind::Terminal, false, scale);
             let chevron = head.chevron.expect("a 900px head seats its `⌄`");
             let folder = head.files.expect("and its folder");
             assert!(

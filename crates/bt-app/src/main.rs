@@ -42517,7 +42517,12 @@ impl Runtime<'_> {
                 let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
                     continue;
                 };
-                let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+                let head = seats::pane_head_geometry(
+                    rect,
+                    bt_layout::SeatKind::Preview,
+                    self.seat_layout.seat_is_on_stage(seat),
+                    scale,
+                );
                 let geometry =
                     seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat));
                 for (tool, box_) in seats::preview_head_tool_boxes(&geometry) {
@@ -52361,7 +52366,12 @@ impl Runtime<'_> {
         let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
             return (tools, None);
         };
-        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+        let head = seats::pane_head_geometry(
+            rect,
+            bt_layout::SeatKind::Preview,
+            self.seat_layout.seat_is_on_stage(seat),
+            scale,
+        );
         let name_box = seats::preview_head_geometry(&head, scale, tools).name;
         let box_width = name_box[2] - name_box[0];
         let caret_width = (seats::TAB_RENAME_CARET_LOGICAL_PX * scale)
@@ -58977,7 +58987,7 @@ impl Runtime<'_> {
             .unwrap_or_default()
             .to_owned();
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
-        let run = seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
+        let run = seats::pane_foot_geometry(rect, scale).foot_path;
         let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -73455,7 +73465,12 @@ impl Runtime<'_> {
             device.right as f32,
             device.bottom as f32,
         ];
-        let head = seats::pane_head_geometry(rect, placement.kind, scale);
+        let head = seats::pane_head_geometry(
+            rect,
+            placement.kind,
+            self.seat_layout.seat_is_on_stage(seat),
+            scale,
+        );
         let anchor =
             seats::files_root_box(&head, scale, widths.get(&seat).copied().unwrap_or(0.0))?;
         let choices = self.root_choices(seat);
@@ -74469,7 +74484,12 @@ impl Runtime<'_> {
         let seat = self.preview_menu_seat()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
-        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+        let head = seats::pane_head_geometry(
+            rect,
+            bt_layout::SeatKind::Preview,
+            self.seat_layout.seat_is_on_stage(seat),
+            scale,
+        );
         let anchor =
             seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).pill?;
         let items = self.preview_menu_items(seat);
@@ -77577,7 +77597,12 @@ impl Runtime<'_> {
                 }
             }
             WebHeadVerb::DevTools => {
-                let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+                let head = seats::pane_head_geometry(
+                    rect,
+                    bt_layout::SeatKind::Preview,
+                    self.seat_layout.seat_is_on_stage(seat),
+                    scale,
+                );
                 seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).devtools
             }
         }
@@ -83109,7 +83134,13 @@ impl Runtime<'_> {
         // bare bar at the foot of the window the report shows.
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let anchor = seats::full_pane_rect(&self.seat_layout, seat).and_then(|rect| {
-            seats::pane_head_geometry(rect, bt_layout::SeatKind::Files, scale).float
+            seats::pane_head_geometry(
+                rect,
+                bt_layout::SeatKind::Files,
+                self.seat_layout.seat_is_on_stage(seat),
+                scale,
+            )
+            .float
         });
         // Taking the pane out first, so the window is never both docked and
         // floating at once — the mock-up's own note (3828-3833) records that
@@ -83228,7 +83259,12 @@ impl Runtime<'_> {
         // screen: the window hangs off the control that summoned it, which is
         // every other float's rule.
         let anchor = seats::full_pane_rect(&self.seat_layout, seat).and_then(|rect| {
-            let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+            let head = seats::pane_head_geometry(
+                rect,
+                bt_layout::SeatKind::Preview,
+                self.seat_layout.seat_is_on_stage(seat),
+                scale,
+            );
             seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).popout
         });
         // **The size it was, capped** — the move's own argument applied to the

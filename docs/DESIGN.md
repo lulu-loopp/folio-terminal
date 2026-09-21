@@ -11284,3 +11284,10 @@ The judgement is the argument the decoding arm is called with, so a fourth encod
 Measured on the Mac mini (macOS 26.6.2): a two-hundred-byte TIFF whose IFD claims 65,535 square returns in milliseconds at flat memory and states 0 x 0 — AppKit checks the strip byte count against the claim.
 The reachable case is the honest one: a picture whose bytes are all there states its real shape, and 16,385 wide is turned away by the ceiling instead of drawn.
 This matters because `objc2` is used without `catch-all`, so an `NSMallocException` out of AppKit aborts the process rather than becoming an `Err`.
+
+### 2026-09-20 — A pane head is laid out once, and the zoom mark is one of its slots
+The report: a zoomed web pane printed its name under the accent zoom mark — `[globe] Ṃock 13b — 两栏`, the mark over the `M`, measured at one column of pixels on a 2.0 capture.
+The cause was two owners of "where the name starts": `pane_head_geometry` set `title[0]` one gap after the kind mark and knew nothing of the zoom, a second function placed the mark at that same `x`, and only a third — read by the terminal head alone — pushed the name past it.
+There is one owner now: the geometry takes the zoom fact, returns the mark as a slot of the head, and derives `title[0]` from the slots actually present; the two derived functions are deleted — §7.1.6l's sentence naming `seats::pane_title_box` as where a name's left edge comes from is superseded here — and the preview head, the files root button and the terminal caption all read the one number.
+The zoom fact travels on the solver's answer (`SeatLayout::stage`) rather than being re-derived at each painter, because the free functions that lay out and hit-test a head hold nothing but a layout — and "only one seat is presented" is a guess a one-pane tab breaks.
+Pinned by value: across every pane kind, both postures, both tab layouts, four scales and a narrow and a wide window, no two of a head's boxes intersect and all of them lie inside the head — save the one pair the 2026-08-27 ruling excludes, a caption dissolving under the trailing run.
