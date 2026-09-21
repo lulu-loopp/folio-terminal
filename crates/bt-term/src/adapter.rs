@@ -58,6 +58,19 @@ const XTVERSION_REPLY: &str = concat!("\x1bP>|Folio(", env!("CARGO_PKG_VERSION")
 /// can be found rather than waited for. See [`TerminalAdapter::advance_parsers_through_any_overflow`].
 const VENDOR_SYNC_BUFFER_SIZE: usize = 0x20_0000;
 
+/// **The eight bytes that end an open synchronized update, and nothing else does** — `vte`'s own
+/// `ESU_CSI` (`vte-0.15.0/src/ansi.rs`).
+///
+/// While a block is open the vendored parser is not parsing: `advance_sync` puts every byte in a
+/// buffer and `advance_sync_csi` searches the bytes just added for this exact sequence, saying so
+/// itself — "we only allow EXACTLY `\e[?2026h`/`\e[?2026l` to keep the parser more simple". So
+/// `CSI ? 2026 ; 1 l` and `CSI ? 1 ; 2026 l` are not endings there, and a side that read them as
+/// endings here released the replay tail under a block the vendored parser was still holding
+/// (audit 3, finding C-1). A raw match is the faithful mirror of a raw search, and it cannot
+/// disagree with this side's own parse: an `ESC` ends an OSC, DCS or APC payload in `vte`, so
+/// these eight bytes are never inside anything.
+const VENDOR_ESU_CSI: &[u8] = b"\x1b[?2026l";
+
 #[derive(Clone, Copy)]
 struct GridSize {
     columns: NonZeroU32,
@@ -391,6 +404,10 @@ pub struct TerminalAdapter {
     /// say it made one rather than that it looks like one. See
     /// [`Self::arm_resize_canonical`].
     resize_forks: u64,
+    /// How many times arming a fork had to write an open block to the grid first, because the
+    /// replay tail could not carry it. See [`Self::commit_a_block_the_fork_cannot_inherit`]: zero
+    /// for every ordinary block, and a test's witness that a run really took that path.
+    resize_blocks_committed_to_arm: u64,
     staged_resize_history_size: usize,
     columns: NonZeroU32,
     rows: NonZeroU32,
@@ -491,12 +508,31 @@ struct ParserTailSink;
 
 impl Handler for ParserTailSink {}
 
+/// Does this `CSI ? … h` name private mode `mode`?
+///
+/// **One function because there is one rule**: what opens or closes a mode here is what opens
+/// or closes it in the vendored parser, and that parser reads **every parameter, the first
+/// sub-parameter of each** — `vte-0.15.0/src/ansi.rs`'s `('h', [b'?'])` arm is literally
+/// `for param in params_iter.map(|param| param[0])`, behind the same `ignore ||
+/// intermediates.len() > 2` refusal [`BoundaryPerformer::csi_dispatch`] makes above.
+///
+/// It was written out for `1004` and read first-parameter-only for `2026`, which is two readers
+/// of one rule, and they drifted: `CSI ? 1 ; 2026 h` and `CSI ? 2026 : 0 h` opened a synchronized
+/// update in the vendored parser and none here, so the replay tail gave up the block's bytes and
+/// a resize armed a canonical fork that had never seen them — the block went off the grid and out
+/// of the transcript (audit 3, finding C-1). Neither reading may be spelled twice again.
+fn private_mode_params_name(params: &Params, intermediates: &[u8], mode: u16) -> bool {
+    intermediates == b"?"
+        && params
+            .iter()
+            .any(|parameter| parameter.first() == Some(&mode))
+}
+
 #[derive(Default)]
 struct BoundaryPerformer {
     complete: bool,
     execute_at_ground: bool,
     sync_start: bool,
-    sync_end: bool,
     dcs_hook: bool,
     dcs_put: bool,
     bell: bool,
@@ -575,13 +611,11 @@ impl Perform for BoundaryPerformer {
         if ignore || intermediates.len() > 2 {
             return;
         }
-        let sync_mode = intermediates == b"?"
-            && params
-                .iter()
-                .next()
-                .is_some_and(|parameter| parameter == [2026]);
-        self.sync_start = sync_mode && action == 'h';
-        self.sync_end = sync_mode && action == 'l';
+        // **The vendored parser's own rule, read from the same function that ends the
+        // sequence there.** See [`private_mode_params_name`]; the ending is a byte match
+        // and lives at [`VENDOR_ESU_CSI`], because while a block is open the vendored
+        // parser does not parse at all.
+        self.sync_start = action == 'h' && private_mode_params_name(params, intermediates, 2026);
         // **XTVERSION, and only XTVERSION.** `CSI > q` and its explicit spelling `CSI > 0 q` are the
         // question "which terminal am I talking to"; every other parameter after `CSI >` is a
         // different question this window has no answer for, and `CSI Ps SP q` (DECSCUSR, the cursor
@@ -593,14 +627,8 @@ impl Perform for BoundaryPerformer {
                 .iter()
                 .next()
                 .is_none_or(|parameter| parameter == [0] && params.len() == 1);
-        // **Every parameter, not just the first** — `CSI ? 1004 ; 1006 h` is one
-        // program asking for two things, and a reader that looked only at the
-        // head of the list would hear half of it.
-        self.focus_reports_requested = intermediates == b"?"
-            && action == 'h'
-            && params
-                .iter()
-                .any(|parameter| parameter.first() == Some(&1004));
+        self.focus_reports_requested =
+            action == 'h' && private_mode_params_name(params, intermediates, 1004);
         if intermediates.is_empty() {
             self.cursor_row_positioned_explicitly = match action {
                 // CUP and HVP are the absolute row-placement family used by line editors.
@@ -678,6 +706,7 @@ impl TerminalAdapter {
             pending_stream: VecDeque::new(),
             resize_canonical: None,
             resize_forks: 0,
+            resize_blocks_committed_to_arm: 0,
             staged_resize_history_size: 0,
             columns,
             rows,
@@ -1253,11 +1282,6 @@ impl TerminalAdapter {
     /// transaction the primary one owns the entire mutable resize tail. That is the one copy this
     /// path is allowed, and [`Self::resize_forks`] counts it so a test can say so.
     fn arm_resize_canonical(&mut self) {
-        let listener = CaptureListener::default();
-        let mut term = self.term.fork(listener.clone());
-        install_transcript_hook(&mut term, &listener);
-        self.resize_forks = self.resize_forks.saturating_add(1);
-
         // A transaction can begin between two bytes of a CSI/OSC/DCS/UTF-8 sequence or while a
         // synchronized update is buffered. Seed a fresh processor with that exact uncommitted raw
         // tail; the canonical term already contains every committed semantic action and must not
@@ -1268,14 +1292,65 @@ impl TerminalAdapter {
         // of them back, so a `ParserTailSink` leaves it where a real terminal would. That sink
         // used to be a second `fork`, which made opening a transaction two deep copies of the whole
         // resize tail — and then dropped one of them unread.
-        let mut processor = Processor::new();
+        //
+        // The replay is made **before** the fork, because its answer can change what the fork is
+        // taken of — see [`Self::commit_a_block_the_fork_cannot_inherit`].
+        let mut processor: Processor = Processor::new();
         processor.advance(&mut ParserTailSink, &self.parser_tail);
+        if self.commit_a_block_the_fork_cannot_inherit(&processor) {
+            processor = Processor::new();
+            processor.advance(&mut ParserTailSink, &self.parser_tail);
+        }
+
+        let listener = CaptureListener::default();
+        let mut term = self.term.fork(listener.clone());
+        install_transcript_hook(&mut term, &listener);
+        self.resize_forks = self.resize_forks.saturating_add(1);
 
         self.resize_canonical = Some(ResizeCanonical {
             term,
             processor,
             listener,
         });
+    }
+
+    /// **A fork is armed only where it holds the same open block the displayed branch does** — and
+    /// where it cannot, the block is written to the grid first so that nobody has to reproduce it.
+    ///
+    /// The replay tail is what carries an open DEC 2026 block into the fork, and the two sides
+    /// normally agree about one being open because they now read one rule
+    /// ([`private_mode_params_name`] for the opening, [`VENDOR_ESU_CSI`] for the ending). **The
+    /// tail has a third limit those rules do not share**, and it is the one that can still part
+    /// them: [`PARSER_TAIL_MAX_BYTES`] counts every retained byte, including the ones before the
+    /// BSU, while `vte`'s own `SYNC_BUFFER_SIZE` counts only the block's. A child that opens a
+    /// block and then sends two megabytes inside one sequence it never terminates fills the tail
+    /// first — the cap lowers this side's flag, and nothing completes, so no release ever drains
+    /// what is left. The tail then still begins with the BSU, so a replay of it opens a block in
+    /// the fork that this side says is not open.
+    ///
+    /// That disagreement is C-1's own shape in miniature and an assertion is no answer to it: the
+    /// bytes are the child's, so in a debug build it is a panic a program can ask for, and in a
+    /// release build it is the silent loss the finding is about. What closes it is the audit's
+    /// own suggestion — commit the block the fork cannot inherit. `stop_sync` writes the held
+    /// bytes to the displayed grid, where the hook files them in the transcript, and the release
+    /// leaves the tail holding nothing but the sequence still open at its end, so the second
+    /// replay reaches a fork that opens no block and the two sides agree by construction. The
+    /// events go to the queues every other path drains rather than being returned, because this is
+    /// reached from inside a commit as well as from the start of a transaction.
+    ///
+    /// Returns whether anything was committed, which is the caller's reason to replay again and a
+    /// test's witness that it came this way ([`Self::resize_blocks_committed_to_arm`]).
+    fn commit_a_block_the_fork_cannot_inherit(&mut self, fork: &Processor) -> bool {
+        if fork.sync_timeout().sync_timeout().is_some() == self.parser_sync_active {
+            return false;
+        }
+        if self.synchronized_update_deadline().is_some() {
+            self.processor.stop_sync(&mut self.term);
+        }
+        self.release_synchronized_update_retention();
+        self.answer_xtversion_if_not_buffering();
+        self.resize_blocks_committed_to_arm = self.resize_blocks_committed_to_arm.saturating_add(1);
+        true
     }
 
     pub fn finish_resize_transaction(&mut self) -> Vec<CapturedRow> {
@@ -1469,6 +1544,12 @@ impl TerminalAdapter {
     /// See [`Self::resize_forks`].
     pub fn resize_forks(&self) -> u64 {
         self.resize_forks
+    }
+
+    /// How many open blocks arming a fork has had to write to the grid itself.
+    /// See [`Self::commit_a_block_the_fork_cannot_inherit`].
+    pub fn resize_blocks_committed_to_arm(&self) -> u64 {
+        self.resize_blocks_committed_to_arm
     }
 
     /// Whether `row` soft-wraps into the row below it — the `continues` flag of `visible_row`, read
@@ -1732,15 +1813,20 @@ impl TerminalAdapter {
         }
         self.parser_tail_open_start = self.parser_tail_open_start.min(self.parser_tail.len());
 
-        if performer.sync_start {
-            self.parser_sync_active = true;
-        } else if performer.sync_end {
+        // **An open block ends where the vendored parser ends it, which is a byte match.** See
+        // [`VENDOR_ESU_CSI`]. Asked only while this side holds a block open, because that is the
+        // only state in which the vendored parser reads bytes instead of parameters — outside one,
+        // a `CSI ? 2026 l` is an ordinary completed sequence and takes the ordinary release below.
+        let sync_ended = self.parser_sync_active && self.parser_tail.ends_with(VENDOR_ESU_CSI);
+        if sync_ended {
             // The ESU. Nothing can be open across it — an ESC aborts an OSC, DCS or CSI in `vte`,
             // so the ESU's own introducer ended anything the block had left half-written — and the
             // release below reads exactly that from the start it just computed: the whole tail,
             // the ESU included, is behind this byte.
             self.end_synchronized_update_block();
             self.release_parser_tail_to_open_sequence();
+        } else if performer.sync_start {
+            self.parser_sync_active = true;
         } else if performer.complete && !self.parser_sync_active {
             self.parser_dcs_active = false;
             // ESC can terminate OSC/DCS while simultaneously starting the ST escape, and the start
@@ -1752,7 +1838,7 @@ impl TerminalAdapter {
         BoundaryByte {
             bell: performer.bell,
             xtversion_queried: performer.xtversion_queried,
-            sync_ended: performer.sync_end,
+            sync_ended,
         }
     }
 
@@ -2461,6 +2547,244 @@ mod tests {
         assert!(storm.parser_tail.is_empty());
         assert_eq!(storm.visible_text(), direct.visible_text());
         assert_eq!(storm.cursor(), direct.cursor());
+    }
+
+    /// The rows a feed pushed off the grid, as the transcript received them.
+    ///
+    /// Read from `feed` alone. A pointer size inside a transaction takes rows off the *displayed*
+    /// branch at a geometry the child never had, and those are not the transcript's; every feed in
+    /// the tests below happens at the one size both runs share.
+    fn rows_a_feed_removed(events: &[AdapterEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AdapterEvent::RowsRemoved { rows, .. } => Some(rows),
+                _ => None,
+            })
+            .flatten()
+            .map(|removed| {
+                removed
+                    .row
+                    .cells
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// **Audit 3, finding C-1: a resize inside a synchronized update keeps the block, whatever
+    /// spelling opened it.**
+    ///
+    /// The commit installs the canonical fork and drops the displayed branch, buffer and all, so
+    /// a block the fork never inherited is a block whose bytes reach neither the grid nor the
+    /// transcript — the child painted a frame nothing will ever replay. The fork inherits it
+    /// through the replay tail, and the tail is kept only while *this* side believes a block is
+    /// open, so the two parsers have to answer that question the same way. Three spellings said
+    /// they did not: `CSI ? 1 ; 2026 h` (2026 past the head of the list), `CSI ? 2026 : 0 h`
+    /// (a sub-parameter after it), and `CSI ? 2026 ; 1 l`, which ended a block here while the
+    /// vendored parser — which byte-matches exactly eight bytes once a block is open — went on
+    /// buffering.
+    ///
+    /// The control is the same bytes with no transaction at all, at the same size, so anything
+    /// but equality is the transaction having eaten output. The plain `CSI ? 2026 h` arm is the
+    /// spelling that always worked, and it is here to show the test is not red by construction.
+    #[test]
+    fn a_resize_inside_a_synchronized_update_keeps_the_block_whatever_spelling_wrote_it() {
+        let spellings: [(&str, &[u8]); 4] = [
+            ("CSI ? 2026 h", b"\x1b[?2026h"),
+            ("CSI ? 1 ; 2026 h", b"\x1b[?1;2026h"),
+            ("CSI ? 2026 : 0 h", b"\x1b[?2026:0h"),
+            (
+                "CSI ? 2026 h with a CSI ? 2026 ; 1 l inside it",
+                b"\x1b[?2026h",
+            ),
+        ];
+        for (index, (spelling, open)) in spellings.iter().enumerate() {
+            // The fourth arm spells a reverse divergence: a private-mode reset naming 2026 among
+            // other parameters, which is not this block's ESU on either side.
+            let fake_close: &[u8] = if index == 3 { b"\x1b[?2026;1l" } else { b"" };
+            let mut before = Vec::new();
+            before.extend_from_slice(b"base\r\n");
+            before.extend_from_slice(open);
+            before.extend_from_slice(b"held-1\r\n");
+            before.extend_from_slice(fake_close);
+            before.extend_from_slice(b"held-2\r\nheld-3");
+            let after = b"\r\nheld-4\x1b[?2026l\r\nafter";
+
+            let mut direct = TerminalAdapter::new(nz(20), nz(2));
+            let mut direct_removed = rows_a_feed_removed(&direct.feed(&before));
+            direct_removed.extend(rows_a_feed_removed(&direct.feed(after)));
+
+            // The same bytes, with a drag that commits a pseudoconsole size while the block is
+            // still open — which is where the fork is armed and where the displayed branch dies.
+            let mut storm = TerminalAdapter::new(nz(20), nz(2));
+            let mut storm_removed = rows_a_feed_removed(&storm.feed(&before));
+            storm.begin_resize_transaction();
+            storm.resize(nz(5), nz(2));
+            storm.resize(nz(20), nz(2));
+            storm.reconcile_resize_transaction_to_viewport();
+            storm_removed.extend(rows_a_feed_removed(&storm.feed(after)));
+
+            assert_eq!(
+                storm.visible_text(),
+                direct.visible_text(),
+                "{spelling}: the drag published a screen the block's own bytes never made"
+            );
+            assert_eq!(
+                storm_removed, direct_removed,
+                "{spelling}: the block's rows left the grid without reaching the transcript"
+            );
+        }
+    }
+
+    /// **The replay tail has a limit the two rules do not share, and a fork is never armed over
+    /// the gap it leaves.**
+    ///
+    /// `PARSER_TAIL_MAX_BYTES` counts every retained byte; `vte`'s `SYNC_BUFFER_SIZE` counts only
+    /// the block's own. A child that opens a block and then pours two megabytes into a sequence it
+    /// never terminates fills the tail first — nothing completes, so no release ever drains what
+    /// is left, and the cap lowers this side's flag over a block the vendored parser is still
+    /// holding. The tail still begins with the BSU, so a replay of it opens a block in the fork
+    /// that this side says is not open: C-1's own shape, from a third direction, and asking for it
+    /// costs a child two megabytes of ordinary output.
+    ///
+    /// The answer is not an assertion — these are the child's bytes, so an assertion is a panic a
+    /// program can ask for in a debug build and nothing at all in a release one. The block is
+    /// written to the grid before the fork exists, so that nobody has to reproduce it.
+    #[test]
+    fn a_block_the_replay_tail_could_not_carry_is_written_to_the_grid_before_the_fork() {
+        const PRE_BSU: usize = 4096;
+        const CHUNK: usize = 1024;
+
+        let mut terminal = TerminalAdapter::new(nz(20), nz(4));
+        // A CSI the child never terminates, then the BSU — whose `ESC` aborts it — then the
+        // block's own text. The aborted sequence is what puts the tail ahead of the vendored
+        // buffer: it is retained here and was never part of any block there.
+        let mut opening = b"\x1b[".to_vec();
+        opening.resize(PRE_BSU, b'1');
+        opening.extend_from_slice(b"\x1b[?2026h");
+        opening.extend_from_slice(b"held");
+        // A second unterminated CSI inside the block, so that no byte after it ever completes a
+        // sequence and no release runs.
+        opening.extend_from_slice(b"\x1b[");
+        terminal.feed(&opening);
+        assert!(
+            terminal.parser_sync_active,
+            "the block is open on both sides"
+        );
+
+        let chunk = vec![b'1'; CHUNK];
+        let mut poured = 0;
+        while terminal.parser_sync_active && poured < PARSER_TAIL_MAX_BYTES {
+            terminal.feed(&chunk);
+            poured += CHUNK;
+        }
+        assert!(
+            !terminal.parser_sync_active,
+            "the tail's own cap lowered this side's flag after {poured} bytes"
+        );
+        assert!(
+            terminal.synchronized_update_deadline().is_some(),
+            "while the vendored parser is still holding the block"
+        );
+
+        terminal.begin_resize_transaction();
+
+        assert_eq!(
+            terminal.resize_blocks_committed_to_arm(),
+            1,
+            "arming had to write the block the tail could not carry"
+        );
+        assert!(
+            terminal.synchronized_update_deadline().is_none(),
+            "and the block is on the grid rather than in a buffer the commit would drop"
+        );
+        assert_eq!(
+            terminal.visible_text()[0],
+            "held",
+            "the bytes the child printed inside the block are the bytes on the screen"
+        );
+    }
+
+    /// **The boundary parser opens a synchronized update exactly where the vendored parser does.**
+    ///
+    /// One table, two readings of it: what this side believes (`parser_sync_active`, which decides
+    /// whether the replay tail is kept) and what the vendored parser believes (its own deadline).
+    /// The finding is the two disagreeing, so the first assertion is that they agree; the second
+    /// says which answer is the right one.
+    #[test]
+    fn the_boundary_parser_opens_a_synchronized_update_where_the_vendored_parser_does() {
+        let sequences: [(&[u8], bool); 10] = [
+            (b"\x1b[?2026h", true),
+            (b"\x1b[?1;2026h", true),
+            (b"\x1b[?2026;1h", true),
+            (b"\x1b[?2026:0h", true),
+            // An empty first parameter is a parameter: `Params` yields `[0]` for it.
+            (b"\x1b[?;2026h", true),
+            // `l` is not an opening, whatever it names.
+            (b"\x1b[?12;2026;25l", false),
+            (b"\x1b[?2027h", false),
+            // No `?`: an ANSI mode, not a private one.
+            (b"\x1b[2026h", false),
+            // Past `vte`'s thirty-two parameters the sequence is `ignore`d whole, on both sides.
+            (
+                b"\x1b[?2026;2026;2026;2026;2026;2026;2026;2026;2026;2026;2026;\
+                  2026;2026;2026;2026;2026;2026;2026;2026;2026;2026;2026;2026;\
+                  2026;2026;2026;2026;2026;2026;2026;2026;2026;2026h",
+                false,
+            ),
+            // The 8-bit C1 introducer. `vte` has no entry for it, so it reaches neither
+            // `csi_dispatch`; it is an `Execute` of 0x9B and nothing more.
+            (b"\x9b?2026h", false),
+        ];
+        for (bytes, opens) in sequences {
+            let mut terminal = TerminalAdapter::new(nz(20), nz(4));
+            terminal.feed(bytes);
+            let spelling = String::from_utf8_lossy(bytes).into_owned();
+            assert_eq!(
+                terminal.parser_sync_active,
+                terminal.synchronized_update_deadline().is_some(),
+                "{spelling:?}: the two parsers disagree about whether a block is open"
+            );
+            assert_eq!(
+                terminal.parser_sync_active, opens,
+                "{spelling:?}: wrong answer about opening a block"
+            );
+        }
+    }
+
+    /// **And it ends one exactly where the vendored parser does**, which is a byte match: once a
+    /// block is open `advance_sync_csi` searches the held bytes for exactly `ESC [ ? 2 0 2 6 l`
+    /// and reads no parameters at all. A side that ended the block on any other spelling released
+    /// the replay tail under a block still being buffered, which is the reverse half of C-1.
+    #[test]
+    fn the_boundary_parser_ends_a_synchronized_update_where_the_vendored_parser_does() {
+        let sequences: [(&[u8], bool); 6] = [
+            (b"\x1b[?2026l", true),
+            (b"\x1b[?2026;1l", false),
+            (b"\x1b[?1;2026l", false),
+            (b"\x1b[?2026:0l", false),
+            (b"\x1b[?2027l", false),
+            (b"\x1b[2026l", false),
+        ];
+        for (bytes, ends) in sequences {
+            let mut terminal = TerminalAdapter::new(nz(20), nz(4));
+            terminal.feed(b"\x1b[?2026hheld");
+            terminal.feed(bytes);
+            let spelling = String::from_utf8_lossy(bytes).into_owned();
+            assert_eq!(
+                terminal.parser_sync_active,
+                terminal.synchronized_update_deadline().is_some(),
+                "{spelling:?}: the two parsers disagree about whether the block is still open"
+            );
+            assert_eq!(
+                !terminal.parser_sync_active, ends,
+                "{spelling:?}: wrong answer about ending a block"
+            );
+        }
     }
 
     /// A resize transaction copies this terminal once per point where it arms the canonical

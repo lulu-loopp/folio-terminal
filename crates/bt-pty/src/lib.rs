@@ -5470,7 +5470,7 @@ mod tests {
             }
             self.flush_pending_resize(now);
             if self.session.finish_resize_if_quiescent(now).unwrap() && self.pending_reanchor {
-                if self.session.shell_input_region_open() {
+                if self.session.shell_prompt_opened_in_order() {
                     self.write_invoke_prompt();
                 }
                 self.pending_reanchor = false;
@@ -5514,7 +5514,7 @@ mod tests {
             self.pty.resize(size(columns, rows)).unwrap();
             self.conpty = (columns, rows);
             if self.invoke_prompt_after_resize {
-                let reanchor_owed = self.session.shell_input_region_open();
+                let reanchor_owed = self.session.shell_prompt_opened_in_order();
                 if self.reanchor_after_resize_quiescence {
                     self.pending_reanchor = reanchor_owed;
                 } else if reanchor_owed {
@@ -7049,7 +7049,7 @@ mod tests {
         eprintln!(
             "BT_CONPTY_INVOKE_SCOPE source={} shell=pwsh.exe osc133_open={} writes={} commits={:?}",
             conpty_source(),
-            oracle.session.shell_input_region_open(),
+            oracle.session.shell_prompt_opened_in_order(),
             oracle.invoke_prompt_writes,
             oracle.commits
         );

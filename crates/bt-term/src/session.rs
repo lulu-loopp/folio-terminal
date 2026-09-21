@@ -1498,6 +1498,35 @@ pub struct DualPlaneSession {
     live_screen: ScreenId,
     cursor_logical_line_memory: Option<CursorLogicalLineMemory>,
     shell_phases: BTreeMap<ScreenId, ShellIntegrationPhase>,
+    /// **How many commands this session watched start on this screen it has not watched end** — a
+    /// `C` raises it, that command's `D` lowers it, and nothing else touches it.
+    ///
+    /// The phase cannot answer this, and that is the whole reason this exists: a phase is one
+    /// value, so a nested program's `A` overwrites `Output` and the phase then says the screen is
+    /// at a prompt while the command that program is running inside has not ended. For marks that
+    /// is the right answer and is deliberately permissive — `docs/DESIGN.md` line 2338 rules a
+    /// nested shell running its own cycle indistinguishable from a program printing one, and
+    /// lets both draw. For the one consumer that puts bytes into the child it is the wrong answer,
+    /// so [`Self::shell_prompt_opened_in_order`] asks this instead.
+    ///
+    /// Zero for every screen no `C` has been seen on, which is every screen with no integration.
+    /// A shell that reports `C` and never `D` leaves it standing, and loses the chord rather than
+    /// aiming it at whatever is reading — the safe side of a question bytes cannot settle.
+    shell_commands_running: BTreeMap<ScreenId, u32>,
+    /// **The screens whose open input region was opened by a `B` that stood in a prompt this
+    /// session watched an `A` begin** — the other half of [`Self::shell_prompt_opened_in_order`].
+    ///
+    /// Written at every `B` and nowhere else: in, when the phase it arrived in was `Prompt`; out,
+    /// when it was anything else. A duplicate `B` inside an open region returns before either,
+    /// which is right — the region is the one the first `B` opened. Every marker that closes a
+    /// region (`A`, `C`, `D`) leaves this alone, because the predicate asks about a region that is
+    /// open and a closed one cannot be read through it.
+    ///
+    /// Without it the floor was two markers, not three: `D` is accepted from any phase and the
+    /// count floors at zero, so `OSC 133;D` followed by `OSC 133;B` — twenty bytes, no `A` —
+    /// earned the chord. A prompt is `A` then `B`, and every integration this product ships emits
+    /// them in that order, so asking for the `A` costs nothing and makes the name honest.
+    shell_prompt_cycle_in_order: BTreeSet<ScreenId>,
     /// The screens whose shell has claimed the authority to **replace** the cursor-line heuristic —
     /// which is a narrower claim than "has emitted OSC 133", and the difference is the whole of
     /// this field.
@@ -2132,6 +2161,8 @@ impl DualPlaneSession {
             live_screen: ScreenId::Primary,
             cursor_logical_line_memory: None,
             shell_phases: BTreeMap::new(),
+            shell_commands_running: BTreeMap::new(),
+            shell_prompt_cycle_in_order: BTreeSet::new(),
             shell_region_screens: BTreeSet::new(),
             working_directory: None,
             window_title: None,
@@ -4804,6 +4835,45 @@ impl DualPlaneSession {
         )
     }
 
+    /// **Is the live screen at a prompt this session watched the shell itself open, in order?**
+    ///
+    /// The one question asked before this window types at a child (audit 3, finding C-3). The
+    /// bytes it sends there are `ESC[24;8~`, the key `folio.ps1` binds `InvokePrompt` to, and
+    /// `bt_app::psreadline_resize_repaint_input` owes them after a ConPTY resize. Anything that is
+    /// not that shell's prompt is a program reading its own stdin, and this window's own record
+    /// says what those seven bytes do to one: GNU readline inserts what it cannot decode, so a
+    /// resize once typed `;8~` into a bash prompt and the next command died on a syntax error.
+    ///
+    /// Three facts, and a real prompt has all of them:
+    /// * an open input region — a `B` — which [`Self::shell_input_region_open`] answers;
+    /// * **a prompt around it**: that `B` stood in a cycle an `A` opened
+    ///   ([`Self::shell_prompt_cycle_in_order`]). Without this the floor was two markers — `D`
+    ///   from any phase, then `B` from `Finished`, twenty bytes and no `A` at all;
+    /// * **nothing running inside it**: no command this session watched start is still unfinished
+    ///   ([`Self::shell_commands_running`]). A nested program's prompt cycle is drawn, marked and
+    ///   typeset like any other — that is the design's ruling, `docs/DESIGN.md` line 2338 — and it
+    ///   is still not the shell whose keymap holds this binding.
+    ///
+    /// **What the bytes cannot prove, said once.** OSC 133 is in band and unauthenticated. The
+    /// floor is what a forger must write, and it is now the whole cycle: a `D` no `C` of this
+    /// session's asked for, an `A`, then a `B`. That is byte-for-byte the pane's own shell
+    /// returning to its prompt, and nothing in this stream — or anywhere else this window can see,
+    /// since a pane's integration is read from its start program's file name and never again —
+    /// tells the two apart. So this is not a proof and does not claim to be one; the proof would
+    /// be a nonce minted inside the integration script's own scope and carried on every mark,
+    /// which no child process can read and which is a change to the mark protocol, ledgered for a
+    /// later ticket. Where the answer is in doubt it is `false`, because a wrong `true` here types
+    /// into someone's command line and a wrong `false` costs one prompt redraw the shell would
+    /// have done itself.
+    pub fn shell_prompt_opened_in_order(&self) -> bool {
+        self.shell_input_region_open()
+            && self.shell_prompt_cycle_in_order.contains(&self.live_screen)
+            && self
+                .shell_commands_running
+                .get(&self.live_screen)
+                .is_none_or(|running| *running == 0)
+    }
+
     /// Is the live screen sitting inside an open OSC 133 input region that currently holds typed
     /// content?
     ///
@@ -4991,6 +5061,33 @@ impl DualPlaneSession {
                 if matches!(phase, Some(ShellIntegrationPhase::Input(_))) {
                     return;
                 }
+                // **A `B` standing inside a running command still opens a region, and it is still
+                // not a prompt this window types at** (audit 3, finding C-3).
+                //
+                // The order is deliberately not checked here, and there are two reasons pointing
+                // the same way. `a_prompt_closes_an_output_region_that_never_saw_its_command_
+                // finish` is the first: a command killed mid-flight leaves an output region whose
+                // frontier is the cursor, and this `B` is one of the two markers that seal it —
+                // refusing it would leave that region annexing every row the shell wrote
+                // afterwards, prompt included. `docs/DESIGN.md` line 2338 is the second: marks are
+                // permissive because a program printing a whole cycle cannot be told from a nested
+                // shell speaking the protocol, and the failure that ruling accepts is a picture,
+                // with nothing executed.
+                //
+                // The order is checked where bytes leave for the child instead, once, in
+                // [`Self::shell_prompt_opened_in_order`]: it reads
+                // [`Self::shell_commands_running`] and answers `false` for exactly this `B`,
+                // because the `C` that started the command it stands in has had no `D`.
+                //
+                // **Whether this region is the one a prompt opened**, recorded here because here
+                // is where the phase before it can still be read. See
+                // [`Self::shell_prompt_cycle_in_order`]; it changes nothing a mark or a decoration
+                // asks for.
+                if matches!(phase, Some(ShellIntegrationPhase::Prompt)) {
+                    self.shell_prompt_cycle_in_order.insert(screen);
+                } else {
+                    self.shell_prompt_cycle_in_order.remove(&screen);
+                }
                 // `B` without an intervening `A` or `D` — a shell that skips markers still tells us
                 // here that the command being typed is not output.
                 self.close_open_semantic_output_region(screen, point);
@@ -5073,6 +5170,16 @@ impl DualPlaneSession {
                 if screen == ScreenId::Primary {
                     self.working = true;
                 }
+                // One more command this session has watched start. See
+                // [`Self::shell_commands_running`]. A repeated `C` *inside* a command's own output
+                // is the same command re-stamping its region — the rule below — and starts
+                // nothing, so it does not count; what counts is a `C` that stands at a prompt,
+                // which is what a nested shell's own cycle produces and what a forged one would
+                // have to produce to be counted at all.
+                if !matches!(phase, Some(ShellIntegrationPhase::Output(_))) {
+                    let running = self.shell_commands_running.entry(screen).or_default();
+                    *running = running.saturating_add(1);
+                }
                 self.failure_exit_code = None;
                 self.progress = None;
                 if let Some(ShellIntegrationPhase::Input(region)) = phase {
@@ -5117,6 +5224,12 @@ impl DualPlaneSession {
                     // shell's command boundary, and it is not this ledger's either.
                     // See `Session::expire_denied_paths`.
                     self.expire_denied_paths();
+                }
+                // One command fewer is running here. Saturating, because a `D` nobody's `C` asked
+                // for is a statement this session never watched become true — see
+                // [`Self::shell_commands_running`] — and the floor is what keeps the count a count.
+                if let Some(running) = self.shell_commands_running.get_mut(&screen) {
+                    *running = running.saturating_sub(1);
                 }
                 if let Some(exit_code) = exit_code.filter(|code| *code != 0) {
                     self.failure_exit_code = Some(exit_code);
@@ -5383,6 +5496,9 @@ impl DualPlaneSession {
     /// command (review 2026-09-17 second pass, F3 P2).
     fn retire_alternate_semantic_regions(&mut self) {
         self.shell_phases.remove(&ScreenId::Alternate);
+        self.shell_commands_running.remove(&ScreenId::Alternate);
+        self.shell_prompt_cycle_in_order
+            .remove(&ScreenId::Alternate);
         self.shell_region_screens.remove(&ScreenId::Alternate);
         let input = self
             .semantic_input_regions
@@ -34746,6 +34862,129 @@ mod tests {
             )),
             (1, 1),
             "a whole forged cycle is indistinguishable from a nested shell's own, by contract"
+        );
+    }
+
+    /// **The prompt this window may type at is a prompt with nothing running inside it** (audit 3,
+    /// finding C-3).
+    ///
+    /// A mark and a pty write are not owed to the same evidence. The marks stay where the ruling
+    /// above put them — a forged `B` opens a region, because refusing it would leave a killed
+    /// command's output region annexing the prompt after it, and because a nested shell's cycle is
+    /// the same bytes anyway. What the chord asks is narrower and is asked once: has this session
+    /// watched a command start that it has not watched end? While it has, the thing reading the
+    /// pty is that command — `ssh`, `python`, a nested shell — and `ESC[24;8~` is a key only
+    /// `folio.ps1`'s PSReadLine binds.
+    ///
+    /// The last arm is the honest limit: a program that prints `D`, `A`, `B` in order is
+    /// byte-for-byte the pane's own shell returning to its prompt, and nothing here can tell them
+    /// apart. What the check buys is that a forger must now write the whole cycle instead of one
+    /// byte in the middle of a command — the same limit `docs/DESIGN.md` line 2338 already
+    /// accepts for typesetting.
+    #[test]
+    fn a_prompt_with_a_command_running_inside_it_is_not_one_this_window_types_at() {
+        let started = Instant::now();
+
+        let mut real = DualPlaneSession::new(nz(80), nz(4));
+        real.feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", started)
+            .unwrap();
+        assert!(
+            real.shell_prompt_opened_in_order(),
+            "the shell's own prompt, opened in order, with nothing running in it"
+        );
+
+        let mut forged = DualPlaneSession::new(nz(80), nz(4));
+        forged
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07ssh host\r\x1b]133;C\x07\r\n",
+                started,
+            )
+            .unwrap();
+        forged.feed_at(b"motd\x1b]133;B\x07", started).unwrap();
+        assert!(
+            forged.shell_input_region_open(),
+            "the region still opens — the marks are permissive on purpose"
+        );
+        assert!(
+            !forged.shell_prompt_opened_in_order(),
+            "and the command that `B` was printed inside has not ended, so nothing is typed at it"
+        );
+
+        let mut nested = DualPlaneSession::new(nz(80), nz(4));
+        nested
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07pwsh\r\x1b]133;C\x07\r\n",
+                started,
+            )
+            .unwrap();
+        nested
+            .feed_at(b"\x1b]133;A\x07nested> \x1b]133;B\x07", started)
+            .unwrap();
+        assert!(
+            nested.shell_input_region_open(),
+            "a nested shell speaking the protocol gets its prompt marked like any other"
+        );
+        assert!(
+            !nested.shell_prompt_opened_in_order(),
+            "and is not typed at: the command it was started by is still running"
+        );
+        nested
+            .feed_at(
+                b"ls\r\x1b]133;C\x07\r\nfile\r\n\x1b]133;D;0\x07\x1b]133;A\x07nested> \x1b]133;B\x07",
+                started,
+            )
+            .unwrap();
+        assert!(
+            !nested.shell_prompt_opened_in_order(),
+            "the nested shell's own `D` answers its own `C`, not the command it runs inside"
+        );
+        nested
+            .feed_at(
+                b"exit\r\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07",
+                started,
+            )
+            .unwrap();
+        assert!(
+            nested.shell_prompt_opened_in_order(),
+            "the shell this window spawned is reading a line again"
+        );
+
+        // Two markers are not a prompt. `D` is accepted from any phase and the count floors at
+        // zero, so without the `A` this twenty-byte pair earned the chord.
+        let mut two_markers = DualPlaneSession::new(nz(80), nz(4));
+        two_markers
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07ssh host\r\x1b]133;C\x07\r\n",
+                started,
+            )
+            .unwrap();
+        two_markers
+            .feed_at(b"\x1b]133;D;0\x07\x1b]133;B\x07", started)
+            .unwrap();
+        assert!(
+            two_markers.shell_input_region_open(),
+            "the region opens, as it does for any `B`"
+        );
+        assert!(
+            !two_markers.shell_prompt_opened_in_order(),
+            "but no `A` opened a prompt around it, so this is not a prompt to type at"
+        );
+
+        // The limit, measured rather than claimed.
+        let mut whole_cycle = DualPlaneSession::new(nz(80), nz(4));
+        whole_cycle
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07ssh host\r\x1b]133;C\x07\r\n",
+                started,
+            )
+            .unwrap();
+        whole_cycle
+            .feed_at(b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07", started)
+            .unwrap();
+        assert!(
+            whole_cycle.shell_prompt_opened_in_order(),
+            "a whole forged `D, A, B` is the pane's own shell prompting again, by contract — \
+             bytes cannot settle this one and the chord is aimed by them"
         );
     }
 

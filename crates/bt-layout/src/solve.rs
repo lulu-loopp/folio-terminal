@@ -102,9 +102,27 @@ pub struct SeatPlacement {
 pub struct SeatLayout {
     /// In-order, which is a function of the tree and of nothing else (D2).
     pub rects: Vec<SeatPlacement>,
+    /// **Which seat was given the viewport to itself** — [`LayoutMode::Focus`]'s
+    /// stage — or `None` for a tiled answer.
+    ///
+    /// The posture travels *on the answer* for [`SeatPlacement::kind`]'s reason
+    /// (red line L2): every reader of a layout — the chrome that draws a head,
+    /// the hit test that presses one — has to know it, and the free functions
+    /// that take nothing but a `&SeatLayout` cannot look it back up. Re-deriving
+    /// it from the rectangles ("only one seat is presented, so it must be
+    /// zoomed") would be a guess with a counterexample in the tree: a tab of one
+    /// pane is not a zoomed tab.
+    pub stage: Option<SeatId>,
 }
 
 impl SeatLayout {
+    /// Whether this seat holds the stage alone — the question a pane head asks
+    /// about the pane in front of it (§7.1.6l).
+    #[must_use]
+    pub fn seat_is_on_stage(&self, id: SeatId) -> bool {
+        self.stage == Some(id)
+    }
+
     /// The seats that were actually given a rectangle.
     pub fn presented(&self) -> impl Iterator<Item = (&SeatPlacement, LogicalRect)> {
         self.rects
@@ -511,7 +529,10 @@ fn solve_focused(
             }
         })
         .collect();
-    Ok(SeatLayout { rects })
+    Ok(SeatLayout {
+        rects,
+        stage: Some(stage),
+    })
 }
 
 fn solve_parallel(
@@ -525,7 +546,9 @@ fn solve_parallel(
     let (row, col) = (plan(Axis::Row)?, plan(Axis::Col)?);
     let mut rects = Vec::with_capacity(tree.seat_count());
     allocate(tree, viewport, &row, &col, metrics, &mut rects);
-    Ok(SeatLayout { rects })
+    // Tiled: every seat that fits is presented beside the others, so no seat
+    // holds the stage and no head wears the mark that says one does.
+    Ok(SeatLayout { rects, stage: None })
 }
 
 fn allocate(

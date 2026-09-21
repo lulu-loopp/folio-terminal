@@ -2966,10 +2966,14 @@ mod tests {
         let size = float_opening_size(100_000.0, viewport, HIDPI, FloatSizing::files());
         let gap = FLOAT_WINDOW_TRIGGER_GAP_LOGICAL_PX * HIDPI;
         for (which, pane) in split.iter().enumerate() {
-            let trigger =
-                crate::seats::pane_head_geometry(*pane, bt_layout::SeatKind::Terminal, HIDPI)
-                    .files
-                    .expect("a terminal head carries the folder trigger");
+            let trigger = crate::seats::pane_head_geometry(
+                *pane,
+                bt_layout::SeatKind::Terminal,
+                false,
+                HIDPI,
+            )
+            .files
+            .expect("a terminal head carries the folder trigger");
             let placed = float_placement(trigger, size, viewport, HIDPI);
             let below = (placed[1] - (trigger[3] + gap)).abs() <= 1.0;
             let above = ((trigger[1] - gap) - placed[3]).abs() <= 1.0;
@@ -4984,9 +4988,10 @@ mod tests {
             "anchored to the whole column there is no room on either side of it, and the last resort is a strip — the bug"
         );
 
-        let button = crate::seats::pane_head_geometry(column, bt_layout::SeatKind::Files, HIDPI)
-            .float
-            .expect("a files head offers its pop-out button");
+        let button =
+            crate::seats::pane_head_geometry(column, bt_layout::SeatKind::Files, false, HIDPI)
+                .float
+                .expect("a files head offers its pop-out button");
         let anchored_to_button = float_placement(button, size, viewport, HIDPI);
         let frame = clamp_pinned(anchored_to_button, viewport, HIDPI);
         assert_eq!(

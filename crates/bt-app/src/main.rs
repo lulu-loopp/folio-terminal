@@ -19136,10 +19136,12 @@ fn service_pending_pty_resize(
 
 /// The private shell-integration input owed after one successful ConPTY resize commit.
 ///
-/// Two questions, and **both of them have to be asked**. The open input region says a shell is
-/// reading a line right now: closed regions, alternate screens and shells that have never emitted
-/// OSC 133 are all `false`, and none of them is a moment to put bytes in front of. The door says
-/// *which* shell that is, and it is the half this used to be missing.
+/// Two questions, and **both of them have to be asked**. The prompt says a shell is reading a line
+/// right now and that this session watched that shell open it in order — closed regions, alternate
+/// screens, shells that have never emitted OSC 133 and prompts standing inside a command that is
+/// still running are all `false`, and none of them is a moment to put bytes in front of. See
+/// [`bt_term::Session::shell_prompt_opened_in_order`], which is the whole of that half and says
+/// what it cannot prove. The door says *which* shell it would be, and it is the other half.
 ///
 /// `ESC[24;8~` is not a repaint. It is the key `folio.ps1` binds `InvokePrompt` to, and it means
 /// something only to a PSReadLine holding that binding. The chord used to be sent to any pane with
@@ -19155,9 +19157,9 @@ fn service_pending_pty_resize(
 /// caused is repaired by the shell that owns the prompt, not by this terminal typing at it.
 fn psreadline_resize_repaint_input(
     integration: profiles::Integration,
-    shell_input_region_open: bool,
+    prompt_the_shell_opened: bool,
 ) -> Option<&'static [u8]> {
-    (integration == profiles::Integration::PowerShellOptIn && shell_input_region_open)
+    (integration == profiles::Integration::PowerShellOptIn && prompt_the_shell_opened)
         .then_some(PSREADLINE_INVOKE_PROMPT_INPUT)
 }
 
@@ -19173,18 +19175,18 @@ struct ResizeReanchor<'a> {
 
 fn replace_psreadline_resize_reanchor_debt(
     reanchor: ResizeReanchor<'_>,
-    shell_input_region_open: bool,
+    prompt_the_shell_opened: bool,
 ) {
     *reanchor.pending =
-        psreadline_resize_repaint_input(reanchor.integration, shell_input_region_open).is_some();
+        psreadline_resize_repaint_input(reanchor.integration, prompt_the_shell_opened).is_some();
 }
 
 fn take_psreadline_resize_reanchor_input(
     reanchor: ResizeReanchor<'_>,
-    shell_input_region_open: bool,
+    prompt_the_shell_opened: bool,
 ) -> Option<&'static [u8]> {
     std::mem::take(reanchor.pending)
-        .then(|| psreadline_resize_repaint_input(reanchor.integration, shell_input_region_open))
+        .then(|| psreadline_resize_repaint_input(reanchor.integration, prompt_the_shell_opened))
         .flatten()
 }
 
@@ -19383,7 +19385,7 @@ fn commit_leaf_resize(
         // its actor never follows the solve. Nothing to tell anyone and nothing to close.
         return Ok(LeafResizeCommit::default());
     }
-    let shell_input_region_open = session.shell_input_region_open();
+    let prompt_the_shell_opened = session.shell_prompt_opened_in_order();
     let columns = nonzero_u32(next_grid.columns.get());
     let rows = nonzero_u32(next_grid.rows.get());
     let reconciled = if told_the_child {
@@ -19391,7 +19393,7 @@ fn commit_leaf_resize(
             pty.resize(pty_size(next_grid, physical))
                 .context("commit a coalesced final ConPTY resize")?;
         }
-        replace_psreadline_resize_reanchor_debt(reanchor, shell_input_region_open);
+        replace_psreadline_resize_reanchor_debt(reanchor, prompt_the_shell_opened);
         session.mark_pty_resize_requested_at(columns, rows, observed_at)
     } else {
         session.mark_resize_settled_unchanged_at(columns, rows, observed_at)
@@ -42729,7 +42731,12 @@ impl Runtime<'_> {
                 let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
                     continue;
                 };
-                let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+                let head = seats::pane_head_geometry(
+                    rect,
+                    bt_layout::SeatKind::Preview,
+                    self.seat_layout.seat_is_on_stage(seat),
+                    scale,
+                );
                 let geometry =
                     seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat));
                 for (tool, box_) in seats::preview_head_tool_boxes(&geometry) {
@@ -48883,22 +48890,36 @@ impl Runtime<'_> {
     /// the window went on believing the keyboard was its — which, now that
     /// belief also decides where the keystroke goes, would be a whole window
     /// typing into nothing.
+    ///
+    /// **Stated as a rule and given one owner each, 2026-09-21** (closure review
+    /// of `fix/pane-head-knows-the-zoom-mark`): *a menu whose layout is `None`
+    /// is not up.* Transcribing a layout's fold conditions here is what let the
+    /// third instance in — a preview head too narrow for its switcher dropped
+    /// the pill, `preview_menu_layout` folded on it, and this line went on
+    /// saying the popup was up. So the three popups whose anchor lives inside a
+    /// pane now ask the same `&self` question their own layout folds on —
+    /// [`Self::root_menu_stand`], [`Self::graph_filter_menu_stand`],
+    /// [`Self::preview_menu_stand`] — and there is nothing left here to
+    /// disagree with. The other seven are raised at a *point* (a right press, a
+    /// chord), so they have no anchor that can leave the glass under them.
     fn popups_up(&self) -> PopupsUp {
         PopupsUp {
             profile: self.window.profile_menu.is_open(),
-            root: self.window.root_menu.seat().is_some_and(|seat| {
-                self.seat_layout.rects.iter().any(|placement| {
-                    placement.id == seat && placement.kind == bt_layout::SeatKind::Files
-                })
-            }),
+            root: self
+                .window
+                .root_menu
+                .seat()
+                .is_some_and(|seat| self.root_menu_stand(seat).is_some()),
             file: self.window.file_menu.is_some(),
             pane: self.window.pane_menu.is_some(),
             graph_filter: self
                 .window
                 .graph_filter_menu
                 .as_ref()
-                .is_some_and(|menu| self.preview_surfaces().contains(&menu.surface)),
-            preview: self.preview_menu_seat().is_some(),
+                .is_some_and(|menu| self.graph_filter_menu_stand(menu.surface).is_some()),
+            preview: self
+                .preview_menu_seat()
+                .is_some_and(|seat| self.preview_menu_stand(seat).is_some()),
             git_menu: self.window.git_menu.is_some(),
             term_menu: self.window.term_menu.is_some(),
             // **Not scoped to a tab that still exists**, unlike the three above
@@ -52573,7 +52594,12 @@ impl Runtime<'_> {
         let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
             return (tools, None);
         };
-        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+        let head = seats::pane_head_geometry(
+            rect,
+            bt_layout::SeatKind::Preview,
+            self.seat_layout.seat_is_on_stage(seat),
+            scale,
+        );
         let name_box = seats::preview_head_geometry(&head, scale, tools).name;
         let box_width = name_box[2] - name_box[0];
         let caret_width = (seats::TAB_RENAME_CARET_LOGICAL_PX * scale)
@@ -59189,7 +59215,7 @@ impl Runtime<'_> {
             .unwrap_or_default()
             .to_owned();
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
-        let run = seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
+        let run = seats::pane_foot_geometry(rect, scale).foot_path;
         let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -73679,6 +73705,27 @@ impl Runtime<'_> {
             .collect()
     }
 
+    /// **The column this menu hangs inside and the places it would offer** — or
+    /// `None`, which means it draws nothing.
+    ///
+    /// [`Self::preview_menu_stand`]'s sentence for the root menu, and the same
+    /// two readers: the layout below and [`Self::popups_up`]. The anchor is not
+    /// among the answers because this one's anchor cannot vanish — the button
+    /// falls back to the caption it wraps — so what is left to decide is whether
+    /// the column is on the glass at all and whether there is anywhere to go.
+    fn root_menu_stand(&self, seat: SeatId) -> Option<([f32; 4], Vec<profiles::RootChoice>)> {
+        let is_a_column =
+            self.seat_layout.rects.iter().any(|placement| {
+                placement.id == seat && placement.kind == bt_layout::SeatKind::Files
+            });
+        if !is_a_column {
+            return None;
+        }
+        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
+        let choices = self.root_choices(seat);
+        (!choices.is_empty()).then_some((rect, choices))
+    }
+
     /// The root menu's box this frame, or `None` when it is shut.
     ///
     /// **Laid out against the live head, every frame** (E59/E60). The menu
@@ -73690,26 +73737,24 @@ impl Runtime<'_> {
     /// the menu instead of measuring a rectangle that is no longer anywhere.
     fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {
         let seat = self.window.root_menu.seat()?;
+        let (rect, choices) = self.root_menu_stand(seat)?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let names = self.files_names();
         let widths = self.measure_files_names(&names);
-        let placement = self.seat_layout.rects.iter().find(|placement| {
-            placement.id == seat && placement.kind == bt_layout::SeatKind::Files
-        })?;
-        let device = placement.device_rect?;
-        let rect = [
-            device.left as f32,
-            device.top as f32,
-            device.right as f32,
-            device.bottom as f32,
-        ];
-        let head = seats::pane_head_geometry(rect, placement.kind, scale);
-        let anchor =
-            seats::files_root_box(&head, scale, widths.get(&seat).copied().unwrap_or(0.0))?;
-        let choices = self.root_choices(seat);
-        if choices.is_empty() {
-            return None;
-        }
+        let head = seats::pane_head_geometry(
+            rect,
+            bt_layout::SeatKind::Files,
+            self.seat_layout.seat_is_on_stage(seat),
+            scale,
+        );
+        // **The button when the head seats one, else the caption it wraps** —
+        // [`Self::preview_menu_stand`]'s rule, for the other menu that hangs off
+        // a name: a column narrowed under an open menu loses the button
+        // (`seats::files_root_box` gives it up rather than drawing half of it),
+        // and a menu that folded there would be a window keeping the keyboard
+        // over an empty glass.
+        let anchor = seats::files_root_box(&head, scale, widths.get(&seat).copied().unwrap_or(0.0))
+            .unwrap_or(head.title);
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -74704,6 +74749,44 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **What the switcher stands on and what it would list** — its anchor and
+    /// its rows — or `None`, which means this menu draws nothing at all.
+    ///
+    /// **A menu whose stand is `None` is not up** (P137's rule, third instance,
+    /// 2026-09-21). One `&self` answer, read by both halves that used to decide
+    /// it apart: [`Self::preview_menu_layout`] draws exactly when this is `Some`
+    /// and [`Self::popups_up`] counts the popup as up exactly when it is, so the
+    /// window cannot come to believe the keyboard is a menu's while the glass
+    /// shows none — see `popups_up`'s own note for what that costs a reader.
+    ///
+    /// **The pill when the head wears one, else the name itself.** The two are
+    /// one control (「名字即按钮」, 2026-08-19 — "the name answers the pointer
+    /// whether or not it is a switcher"), and the pill is the switcher's
+    /// *ground*: a head too narrow to seat the switcher's own two boxes drops
+    /// them (`seats::preview_head_geometry`) and the name is then the whole of
+    /// what was pressed. Hanging the list from what is actually drawn is what
+    /// keeps the buffer list reachable at every width — by pointer and, through
+    /// the swallow below, by keyboard.
+    fn preview_menu_stand(
+        &self,
+        seat: SeatId,
+    ) -> Option<([f32; 4], Vec<profiles::PreviewMenuItem>)> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
+        let head = seats::pane_head_geometry(
+            rect,
+            bt_layout::SeatKind::Preview,
+            self.seat_layout.seat_is_on_stage(seat),
+            scale,
+        );
+        let furniture = seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat));
+        let items = self.preview_menu_items(seat);
+        if items.is_empty() {
+            return None;
+        }
+        Some((furniture.pill.unwrap_or(furniture.name), items))
+    }
+
     /// The switcher's box this frame, or `None` when it is shut.
     ///
     /// **Laid out against the live head, every frame** — E59/E60's rule, and
@@ -74715,15 +74798,8 @@ impl Runtime<'_> {
     /// is no longer anywhere.
     fn preview_menu_layout(&mut self) -> Option<profiles::PreviewMenuLayout> {
         let seat = self.preview_menu_seat()?;
+        let (anchor, items) = self.preview_menu_stand(seat)?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
-        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
-        let anchor =
-            seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).pill?;
-        let items = self.preview_menu_items(seat);
-        if items.is_empty() {
-            return None;
-        }
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -74834,11 +74910,13 @@ impl Runtime<'_> {
 
     /// Where the file menu is, if one is up.
     ///
-    /// Unlike [`Runtime::root_menu_layout`] this cannot fold for want of an
-    /// anchor: the anchor is the point the pointer was at, and a point does not
-    /// stop existing when the tree behind it is rebuilt. What the menu *does*
-    /// fold for is the window changing size under it, which the caller handles
-    /// by closing it — a menu is a moment, and a resize ends the moment.
+    /// Unlike [`Runtime::root_menu_layout`] this cannot fold for want of
+    /// something to hang from: the anchor is the point the pointer was at, and a
+    /// point does not stop existing when the tree behind it is rebuilt — so it is
+    /// one of the seven popups [`Runtime::popups_up`] has no stand to ask about.
+    /// What the menu *does* fold for is the window changing size under it, which
+    /// the caller handles by closing it — a menu is a moment, and a resize ends
+    /// the moment.
     fn file_menu_layout(&mut self) -> Option<profiles::FileMenuLayout> {
         let menu = self.window.file_menu.as_ref()?;
         let point = menu.point;
@@ -77825,7 +77903,12 @@ impl Runtime<'_> {
                 }
             }
             WebHeadVerb::DevTools => {
-                let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+                let head = seats::pane_head_geometry(
+                    rect,
+                    bt_layout::SeatKind::Preview,
+                    self.seat_layout.seat_is_on_stage(seat),
+                    scale,
+                );
                 seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).devtools
             }
         }
@@ -78842,10 +78925,21 @@ impl Runtime<'_> {
         self.ask_to_checkout(&origin, root, branch, said, restore::GitCheckoutKind::Stand)
     }
 
+    /// **The toolbar button this menu hangs from**, or `None` when the graph
+    /// that carries it is not on the glass.
+    ///
+    /// [`Self::preview_menu_stand`]'s third reader: the layout below draws
+    /// exactly when this answers, and [`Self::popups_up`] counts the popup as up
+    /// exactly then. Its rows never fold — a repository with no branch still
+    /// lists `All branches` — so the stand is the anchor alone.
+    fn graph_filter_menu_stand(&self, surface: PreviewSurface) -> Option<[f32; 4]> {
+        Some(self.graph_toolbar_rects(surface)?.filter)
+    }
+
     /// Where the filter menu hangs, or nothing when it is not up.
     fn graph_filter_menu_layout(&mut self) -> Option<profiles::GitFilterMenuLayout> {
         let surface = self.window.graph_filter_menu.as_ref()?.surface;
-        let anchor = self.graph_toolbar_rects(surface)?.filter;
+        let anchor = self.graph_filter_menu_stand(surface)?;
         let rows = profiles::git_filter_rows(&self.graph_filter_branches(surface));
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
@@ -83357,7 +83451,13 @@ impl Runtime<'_> {
         // bare bar at the foot of the window the report shows.
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let anchor = seats::full_pane_rect(&self.seat_layout, seat).and_then(|rect| {
-            seats::pane_head_geometry(rect, bt_layout::SeatKind::Files, scale).float
+            seats::pane_head_geometry(
+                rect,
+                bt_layout::SeatKind::Files,
+                self.seat_layout.seat_is_on_stage(seat),
+                scale,
+            )
+            .float
         });
         // Taking the pane out first, so the window is never both docked and
         // floating at once — the mock-up's own note (3828-3833) records that
@@ -83476,7 +83576,12 @@ impl Runtime<'_> {
         // screen: the window hangs off the control that summoned it, which is
         // every other float's rule.
         let anchor = seats::full_pane_rect(&self.seat_layout, seat).and_then(|rect| {
-            let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+            let head = seats::pane_head_geometry(
+                rect,
+                bt_layout::SeatKind::Preview,
+                self.seat_layout.seat_is_on_stage(seat),
+                scale,
+            );
             seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).popout
         });
         // **The size it was, capped** — the move's own argument applied to the
@@ -87322,14 +87427,14 @@ impl Runtime<'_> {
                 // `CSI 6 n`. Pay the coalesced repair only after the final resize request *and* every
                 // child byte it caused have been quiet. A new geometry event re-opens the transaction,
                 // so a divider storm cannot install an intermediate commit's still-moving cursor.
-                let shell_input_region_open = leaf.session.shell_input_region_open();
+                let prompt_the_shell_opened = leaf.session.shell_prompt_opened_in_order();
                 let integration = leaf.integration;
                 if let Some(reanchor_input) = take_psreadline_resize_reanchor_input(
                     ResizeReanchor {
                         pending: &mut leaf.pending_psreadline_resize_reanchor,
                         integration,
                     },
-                    shell_input_region_open,
+                    prompt_the_shell_opened,
                 ) {
                     write_pty_input(
                         leaf.pty.as_ref(),
@@ -107783,6 +107888,68 @@ mod popover_trigger_tests {
                 "{name} is on the popup list and says nothing about what it hangs from"
             );
         }
+    }
+
+    /// PIN — **a menu whose layout is `None` is not up** (P137's rule, third
+    /// instance, closure review 2026-09-21).
+    ///
+    /// RED EVIDENCE: a preview pane dragged narrower than its switcher's two
+    /// boxes (~262 logical px, `SizePolicy::Sovereign` only) dropped the pill,
+    /// `preview_menu_layout` folded on `.pill?` and drew nothing — while
+    /// `popups_up` went on answering `preview_menu_seat().is_some()`, so
+    /// `popup_takes_the_key` swallowed every keystroke until `Esc`. That is
+    /// [`Runtime::popups_up`]'s own stated defect arriving for the third time,
+    /// and it arrived because the fold conditions were transcribed there rather
+    /// than asked.
+    ///
+    /// So each of the three popups whose anchor lives inside a pane has exactly
+    /// one `&self` answer to "would this draw anything", and both readers take
+    /// it. The other seven are raised at a point and have no anchor to lose.
+    ///
+    /// MUTATIONS: (1) fold `preview_menu_layout` on `.pill?` again — the first
+    /// block goes red; (2) answer `popups_up`'s `preview` arm with
+    /// `preview_menu_seat().is_some()` — the second does.
+    #[test]
+    fn a_popup_is_up_only_while_its_own_layout_would_draw() {
+        let up = body("    fn popups_up(&self) -> PopupsUp {");
+        for (layout, stand) in [
+            (
+                "    fn preview_menu_layout(&mut self) -> Option<profiles::PreviewMenuLayout> {",
+                "preview_menu_stand",
+            ),
+            (
+                "    fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {",
+                "root_menu_stand",
+            ),
+            (
+                "    fn graph_filter_menu_layout(&mut self) -> Option<profiles::GitFilterMenuLayout> {",
+                "graph_filter_menu_stand",
+            ),
+        ] {
+            assert!(
+                body(layout).contains(stand),
+                "{layout} decides for itself whether it draws; it has to ask {stand}"
+            );
+            assert!(
+                up.contains(stand),
+                "popups_up answers for a popup without asking {stand}, which is \
+                 the question its layout folds on"
+            );
+        }
+
+        // And neither of the two anchors that a narrowing head can take away is
+        // a fold any more: the switcher falls back to the name it wraps and the
+        // root button to the caption it wraps, so the list stays reachable at
+        // every width instead of the menu becoming invisible and deaf.
+        assert!(
+            body("    fn preview_menu_stand(").contains("furniture.pill.unwrap_or(furniture.name)"),
+            "the switcher hangs from the name when the head wears no pill"
+        );
+        assert!(
+            body("    fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {")
+                .contains(".unwrap_or(head.title)"),
+            "the root menu hangs from the caption when the head seats no button"
+        );
     }
 }
 
