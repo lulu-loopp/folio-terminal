@@ -17,6 +17,7 @@ members = [
     "crates/bt-persist",
     "crates/bt-unicode",
     "crates/bt-render",
+    "crates/bt-source",
     "crates/bt-winres",
     "crates/bt-app",
     "vendor/alacritty_terminal",
@@ -38,7 +39,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.89"
 
-# **None of these fifteen crates is a crates.io package.** They are one product
+# **None of these sixteen crates is a crates.io package.** They are one product
 # cut into compilation units; `bt-math` and `bt-detect` would be squatting names
 # that mean nothing outside this tree, and a `cargo publish` typed in the wrong
 # directory is the only way any of them would ever get there. `vendor/` does not

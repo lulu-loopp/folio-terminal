@@ -1,0 +1,30 @@
+[package]
+name = "bt-source"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# **Nothing in `folio.exe` depends on this crate and nothing ever should.** It is
+# the mechanism `docs/plans/bt-app-split-prep.md` is built on: the guards in this
+# workspace that pin facts about the source read *files*, and a reader bound to a
+# file does not go red when its subject moves to another file. This crate is what
+# they ask instead, and it is reached only as a `[dev-dependencies]` entry — see
+# §6.0 rule 1, which forbids a preparation ticket from touching product code at
+# all.
+
+[dependencies]
+# The line and column a rejection names. `span-locations` is what makes
+# `Span::start()` mean anything outside a procedural macro; without it every
+# position in every message is line 1, which is the same as having no message.
+# It is a feature of a package the lock file already carries, not a new package.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+# `full` because a module declaration can be written anywhere an item can, and
+# `visit` because the walk has to descend into the body of a function to find one
+# — `fn main() { mod helper; }` is legal Rust and a walk that only looked at
+# top-level items would miss the file it names without a word.
+syn = { version = "2", features = ["full", "visit"] }
+
+[lints]
+workspace = true

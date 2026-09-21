@@ -43,6 +43,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 # script can infer. A crate that joins this workspace joins this list on purpose
 # or it is not part of the promise.
 $portable = @(
+    "bt-source",
     "bt-unicode",
     "bt-doc",
     "bt-detect",

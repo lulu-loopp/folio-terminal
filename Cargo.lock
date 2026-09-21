@@ -421,6 +421,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-source"
+version = "0.4.3"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "bt-term"
 version = "0.4.3"
 dependencies = [

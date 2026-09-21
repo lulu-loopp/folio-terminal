@@ -96,7 +96,7 @@ jobs:
           }
           exit 0
 
-      # The portable core is thirteen crates that must go on compiling on the two
+      # The portable core is crates listed below, which must go on compiling on the two
       # platforms this workflow has one job each on.
       # `scripts/check-portable-core.ps1` is the cheap half of that guard and
       # `core-macos` and `core-linux` are the compiling half; this proves the
@@ -127,7 +127,7 @@ jobs:
       # is on, and `main.rs`'s own `FILES_THAT_MAY_NAME_A_PLATFORM` says in which
       # files. The violation is planted in a file that is not on that list, which
       # is the only shape this check refuses. Note that the *first* check runs
-      # first and passes — `bt-app` is not one of the thirteen portable crates —
+      # first and passes — `bt-app` is not one of the portable crates —
       # so a red here is this rule's red and nobody else's.
       - name: the bt-app platform-gate check can actually fail
         shell: pwsh
@@ -262,7 +262,8 @@ jobs:
           --package bt-viewport --package bt-detect --package bt-corpus
           --package bt-layout --package bt-math --package bt-pty
           --package bt-platform --package bt-persist --package bt-unicode
-          --package bt-render --package bt-winres --package bt-app
+          --package bt-render --package bt-winres --package bt-source
+          --package bt-app
           -- --check
 
       # The two excluded packages are still *linted* — their libraries are
@@ -448,7 +449,7 @@ jobs:
   # and nothing will say so, and the 90 % is then a number about a day in
   # September rather than about this repository.
   #
-  # So the crates are named one at a time — the thirteen
+  # So the crates are named one at a time — the portable crates,
   # `scripts/check-portable-core.ps1` names, plus the vendored terminal they are
   # all downstream of, plus `bt-platform` and `bt-app`, which that script does
   # not name because they are the two crates that *may* know what platform they
@@ -474,7 +475,7 @@ jobs:
   #
   # So what this job now proves, in the order the steps make the claims:
   #
-  # ① the fifteen crates below compile on macOS with their test code, which is
+  # ① the crates below compile on macOS with their test code, which is
   #    the promise `core-linux` makes in the same words;
   # ② **`bt-app` compiles here, every target of it** — the binary, its test
   #    target and both video probes in `examples/`. `--all-targets` is the whole
@@ -526,7 +527,7 @@ jobs:
       # hides most cheaply: five of the seven errors this branch fixed were in
       # `#[cfg(test)]` modules that had never been compiled anywhere else.
       #
-      # The same fifteen `core-linux` checks and in the same order, for the
+      # The same `core-linux` checks and in the same order, for the
       # reason that job's own comment gives: two lists that mean one thing
       # drift, and a diff that changes one and not the other is meant to be read
       # as the mistake it is.
@@ -536,7 +537,7 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
-          -p alacritty_terminal
+          -p bt-source -p alacritty_terminal
 
       # **The application, every target of it** (M1-10). A step of its own and
       # not a name on the line above, because the claim is a different one: the
@@ -688,7 +689,7 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
-          -p alacritty_terminal
+          -p bt-source -p alacritty_terminal
 
       # `core-macos`'s ten, plus `bt-pty` for the reason above and minus
       # `bt-math` for one of the same shape. `bt-render` is still checked and not
