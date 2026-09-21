@@ -94,6 +94,10 @@ carrying no version and no identifier, which switches off at
 Settings, profiles and sessions live on your own machine and go nowhere;
 [`docs/PRIVACY.md`](docs/PRIVACY.md) says what is in each file.
 
+## Feedback
+
+Something broken goes in an [issue](https://github.com/lulu-loopp/folio-terminal/issues). An idea, a feature you would like, or a question goes in [Discussions](https://github.com/lulu-loopp/folio-terminal/discussions), where the next person can find the answer.
+
 ## Licence
 
 MIT or Apache-2.0, at your option; [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) carries every dependency's and [`TRADEMARK.md`](TRADEMARK.md) the name and the marks.

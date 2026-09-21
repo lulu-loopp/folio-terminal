@@ -78,6 +78,10 @@ brew install --cask lulu-loopp/folio/folio
 
 Folio 不收集任何数据：没有遥测，没有统计，没有崩溃上报。联网的只有两件事——网页预览里打开的页面，以及更新检查，向 `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` 发一次 `GET`，不携带版本号和标识符，在**设置 > 通用 > 检查更新**或 `"update_check": false` 关闭。设置、配置和会话留在本机，不发往任何地方；[`docs/PRIVACY.md`](docs/PRIVACY.md) 列出每个文件的内容。
 
+## 反馈
+
+遇到问题请提 [issue](https://github.com/lulu-loopp/folio-terminal/issues)。想法、功能建议或任何疑问，发到 [Discussions](https://github.com/lulu-loopp/folio-terminal/discussions)，后来的人也找得到答案。
+
 ## 许可证
 
 MIT 或 Apache-2.0，任选其一；[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 收录所有依赖项的许可证，[`TRADEMARK.md`](TRADEMARK.md) 说明名称和标识的使用。
