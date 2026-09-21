@@ -4372,6 +4372,14 @@ pub enum PreviewRefusal {
     Binary,
     /// A share on another machine, which §7.1.3 does not read unasked.
     NetworkPath,
+    /// The name is reachable only through a longer chain of links than this window walks
+    /// ([`bt_term::PathLocality::BeyondFollowedLinks`]).
+    ///
+    /// A fourth refusal and not a second use of [`Self::NetworkPath`], because the two are
+    /// different facts and the card says so: this one is on this machine, and nobody here can say
+    /// what it really is. Until the closure review of audit 3 C-2 a purely local path with two
+    /// links in it raised the *network* card.
+    BeyondFollowedLinks,
     /// The disk was asked and said no.
     Fault(PreviewFault),
 }
@@ -4387,6 +4395,9 @@ impl PreviewRefusal {
             Self::Type => crate::i18n::Text::PreviewRefusalType.text(),
             Self::Binary => crate::i18n::Text::PreviewRefusalBinary.text(),
             Self::NetworkPath => crate::i18n::Text::PreviewRefusalNetworkPath.text(),
+            Self::BeyondFollowedLinks => {
+                crate::i18n::Text::PreviewRefusalBeyondFollowedLinks.text()
+            }
             Self::Fault(fault) => fault.notice(),
         }
     }
@@ -4411,13 +4422,17 @@ impl PreviewRefusal {
     ///   fail again somewhere the reader cannot see it — and for
     ///   [`PreviewFault::NotFound`] there is nothing to open at all.
     ///
+    /// * [`Self::BeyondFollowedLinks`] is the same argument one link further along: this window
+    ///   stopped walking the chain because it could not say where it ends, and a button that
+    ///   handed the name to the shell would let the shell walk it instead.
+    ///
     /// A card with no button is still a card: it has the mark, the sentence and
-    /// the seat, which is the whole of what those two refusals have to say.
+    /// the seat, which is the whole of what those refusals have to say.
     #[must_use]
     pub fn offers_the_default_app(self) -> bool {
         match self {
             Self::Type | Self::Binary => true,
-            Self::NetworkPath | Self::Fault(_) => false,
+            Self::NetworkPath | Self::BeyondFollowedLinks | Self::Fault(_) => false,
         }
     }
 }
@@ -7032,11 +7047,18 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
     // preview after it. `PreviewBuffer::new` asks the same question before it ever files a read;
     // this is the same predicate asked where the blocking call actually is, and it asks the disk's
     // half of it as well, because a drive-rooted name can be a local spelling of a share.
-    if !bt_transcript::paths::may_read_unasked_through_links(
-        path,
-        bt_transcript::paths::PathNamer::ThisWindow,
-    ) {
-        return HeadOutcome::Refused(PreviewRefusal::NetworkPath);
+    // **And the two refusals it can answer with are told apart** (closure review of audit 3 C-2).
+    // `bt_term::verify_path` is the one place those four questions are asked, and it separates
+    // "somebody else's machine" from "a chain of links longer than this window walks" — which is
+    // a purely local path, and used to raise the network card.
+    match bt_term::verify_path(path).locality {
+        bt_term::PathLocality::ThisMachine => {}
+        bt_term::PathLocality::AnotherMachine | bt_term::PathLocality::Refused => {
+            return HeadOutcome::Refused(PreviewRefusal::NetworkPath);
+        }
+        bt_term::PathLocality::BeyondFollowedLinks => {
+            return HeadOutcome::Refused(PreviewRefusal::BeyondFollowedLinks);
+        }
     }
     let mut file = match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Preview, path)
     {

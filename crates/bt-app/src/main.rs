@@ -67891,6 +67891,12 @@ impl Runtime<'_> {
             // the 300ms settle. When the pointer is in another pane, that pane wears them and this one
             // is left alone, which `redraw` sees to.
             if self.window.hover_pane == Some(self.focused_leaf) {
+                // **And a frame redrawn under a pointer that has not moved asks too** (closure
+                // review B-1). This is the one place "what is under the pointer" is recomputed
+                // without a `CursorMoved`: a wheel scroll and a fresh line of output both arrive
+                // as a frame, and either can slide a link under a resting hand. One hit test and
+                // one map lookup, and only while the pointer is over this pane.
+                self.ask_about_the_link_under_the_pointer();
                 let hovered_reference = self.hovered_image_reference();
                 apply_hover_marks(
                     &mut terminal_frame,
@@ -84081,6 +84087,26 @@ impl Runtime<'_> {
     ///
     /// Reported, because a foot confirms in place and a confirmation printed
     /// over a reveal that never happened is the one thing worse than silence.
+    /// [`Self::reveal_in_explorer`] for a path a worker has already answered for — the door a
+    /// reference printed in the terminal takes (closure review of audit 3 C-2).
+    ///
+    /// The same verb and the same bridge; what differs is that the two facts the bridge needs
+    /// arrive from the pane's ledger instead of being fetched from a disk on the thread that
+    /// paints. A files column's foot keeps the asking door, because a row of the tree is a path
+    /// this window enumerated and has no ledger for.
+    fn reveal_verified(&mut self, path: &Path, is_directory: bool) -> bool {
+        let result = native_window(&self.window.window).and_then(|native| {
+            bt_platform::reveal_verified(native, path, is_directory)
+                .map_err(|error| anyhow!(error))
+                .context("show a verified path in the file manager")
+        });
+        if let Err(error) = result {
+            eprintln!("recoverable reveal failure: {error:#}");
+            return false;
+        }
+        true
+    }
+
     fn reveal_in_explorer(&mut self, path: &Path) -> bool {
         let result = native_window(&self.window.window).and_then(|native| {
             bt_platform::reveal_in_explorer(native, path)
@@ -87887,18 +87913,28 @@ impl Runtime<'_> {
         self.seat_path_verdict(self.window.hover_pane?, path)
     }
 
-    /// **Put the target of the link under the pointer in front of the hovered pane's worker**
-    /// (audit 3 C-2) — the question whose answer [`Self::hovered_pane_path_verdict`] reads.
+    /// **Put the target of a link this window has met in front of that pane's worker**
+    /// (audit 3 C-2) — the question whose answer [`Self::seat_path_verdict`] reads.
+    ///
+    /// **The one function every gesture asks through** (closure review B-1). It was called from
+    /// `pointer_moved` alone, which is `CursorMoved` and nothing else — so a link that arrived
+    /// under a *resting* pointer, by a wheel scroll or by a program printing a fresh line, was
+    /// never asked about, and the click on it answered nothing. Clicking again changed nothing
+    /// either, because only motion put the question. A gesture that can meet a reference asks the
+    /// same thing a pointer move asks, through here, so the four doors cannot drift:
+    /// the pointer move, the press going down, the hand-over modifier going down, and the frame
+    /// that redraws under a pointer standing still.
     ///
     /// The lexical gate is asked here and not on the worker for the reason it has always been
     /// asked first: it costs nothing, and a device path, a verbatim path or a stranger's
     /// distribution share is refused without anybody being queued for it. Everything past it is
     /// the worker's, including the two questions that used to be this thread's — whose machine the
     /// volume is, and what the reparse points on the way in lead to.
-    fn ask_the_worker_about_a_link_target(&mut self, uri: &str) {
-        let Some(seat) = self.window.hover_pane else {
-            return;
-        };
+    ///
+    /// Idempotent and cheap: an answered name, a queued one and one a worker is holding all cost a
+    /// map lookup ([`bt_term::DualPlaneSession::ask_about_link_target`]), which is what lets every
+    /// door call it unconditionally.
+    fn ask_the_worker_about_a_link_target(&mut self, seat: SeatId, uri: &str) {
         let Some(path) = bt_platform::file_uri_to_path(uri) else {
             return;
         };
@@ -87912,6 +87948,27 @@ impl Runtime<'_> {
         if let Some(leaf) = self.sessions.get_mut(&seat) {
             leaf.session.ask_about_link_target(path);
         }
+    }
+
+    /// [`Self::ask_the_worker_about_a_link_target`] for whatever link the pointer is standing on
+    /// right now, resolved from the pane it is standing in (closure review B-1).
+    ///
+    /// The door for the two gestures that carry no hit of their own: the hand-over modifier going
+    /// down, and a frame redrawn under a pointer that has not moved. Answers nothing and costs one
+    /// hit test plus one map lookup when the pointer is over a link, and one hit test when it is
+    /// not.
+    fn ask_about_the_link_under_the_pointer(&mut self) {
+        let Some((seat, hit)) = self.pane_frame_hit() else {
+            return;
+        };
+        let Some(uri) = self
+            .pane_frame(seat)
+            .and_then(|frame| frame.hyperlink_at(hit.row, hit.column))
+            .map(|hyperlink| hyperlink.uri)
+        else {
+            return;
+        };
+        self.ask_the_worker_about_a_link_target(seat, &uri);
     }
 
     /// The cell a selection drag that began in `seat` is over, with the pointer
@@ -88976,7 +89033,15 @@ impl Runtime<'_> {
             // [`Runtime::open_local_path`] is one gesture away, from the surfaces where the
             // *user* picked the file.
             HyperlinkActivation::Reveal(path) => {
-                self.reveal_in_explorer(&path);
+                // **And it is revealed off the ledger, not off the disk** (closure review of
+                // audit 3 C-2). The asking door stats the target and resolves its spelling on
+                // this thread; the ledger already answered both — the name is there, and it is a
+                // folder or it is not — and a `Ctrl`+click on a path under a junction into a dead
+                // share must not stall the window inside a call this branch exists to remove.
+                let directory = self
+                    .seat_path_verdict(seat, &path)
+                    .is_some_and(|verdict| verdict.directory);
+                self.reveal_verified(&path, directory);
             }
             // The folder's own road, and the one that stays in this window: the
             // column this tab already has is pointed at it, and a tab without one
@@ -90391,6 +90456,14 @@ impl Runtime<'_> {
             return Ok(());
         };
         let hyperlink = frame.hyperlink_at(hit.row, hit.column);
+        // **The press asks what a pointer move asks** (closure review B-1). A link that arrived
+        // under a resting pointer — a wheel scroll, a fresh line of output — was never asked
+        // about, so the press found no verdict and the table answered `None`: a click that did
+        // nothing, however many times it was repeated. Asked here, on the way *down*, so the
+        // worker's answer has a whole click to land in and the release usually acts on it; and if
+        // it has not landed, the link is armed and the next click always works. Nothing is read
+        // from a disk on this thread to make that true — that is the defect this branch repaired.
+        let asked_about = hyperlink.as_ref().map(|link| link.uri.clone());
         // **Both references read the one hand-over modifier** (§13.45 ①) — the
         // link's and the picture's, which is `ClickIntent`'s own argument said
         // one level out: `Ctrl` here, `⌘` on a Mac, and never twice.
@@ -90436,6 +90509,9 @@ impl Runtime<'_> {
         // A linear press begins a possible drag but owns no selection yet. Only movement creates
         // one, so click-no-drag cannot briefly feed copy-on-select or leave a zero-width selection.
         self.set_pane_view_selection(seat, initial);
+        if let Some(uri) = asked_about {
+            self.ask_the_worker_about_a_link_target(seat, &uri);
+        }
         self.window.mouse_route = Some(MouseRoute::Local(Box::new(SelectionDrag {
             mode,
             origin_seat: seat,
@@ -91134,8 +91210,8 @@ impl Runtime<'_> {
         // nobody had put a question about it anywhere, and the window thread asked on its own
         // behalf, on this very event. It is idempotent: an answered name, a queued one and one a
         // worker is holding all cost a map lookup, which is what makes it safe per motion event.
-        if let Some(hit) = hyperlink.as_ref() {
-            self.ask_the_worker_about_a_link_target(&hit.uri);
+        if let Some((seat, hit)) = self.window.hover_pane.zip(hyperlink.as_ref()) {
+            self.ask_the_worker_about_a_link_target(seat, &hit.uri);
         }
         if self.window.hyperlink_hover.observe(hyperlink, now) {
             // **The hand moved with the modifier; now it moves with the cell**
@@ -118897,6 +118973,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     // while the pointer does not. Without this the shape would only
                     // ever catch up on the next mouse move, which is to say: after
                     // the hand had already decided whether to press.
+                    // **And the modifier asks what a pointer move asks** (closure review B-1).
+                    // The finger below is a promise about a press, and a press on a link nobody
+                    // has asked the disk about answers nothing — so the key going down is a
+                    // gesture that meets a reference, and it asks through the same one door.
+                    runtime.ask_about_the_link_under_the_pointer();
                     runtime.apply_pointer_cursor();
                     // **The hint card's one input** (§7.1.5e′). winit reports the
                     // whole modifier state on every press and release of one, so
@@ -130289,6 +130370,133 @@ mod printed_path_provenance_tests {
         );
     }
 
+    /// RED (closure review B-1) — **a link that arrives under a resting pointer answers the very
+    /// next press, and never a press after that.**
+    ///
+    /// The defect: `ask_the_worker_about_a_link_target` was reached from `pointer_moved` alone, so
+    /// a link slid under a still pointer — by a wheel scroll, or by a program printing a fresh
+    /// line — was never asked about. With no verdict the table answers `None`, and clicking again
+    /// changed nothing, because only *motion* put the question. Before this branch the press
+    /// resolved the target itself, so the click always worked.
+    ///
+    /// The fix is a rule and not a patch: every gesture that can meet a reference asks through one
+    /// function. This is the half of it that is a value — the press's own door, driven by hand
+    /// because a unit test has no window: no verdict → no link; the press asks; asking twice while
+    /// the question is out asks once; the answer lands; the table says what it says.
+    ///
+    /// MUTATION: delete the `ask_about_link_target` call from the press and the `asked` count
+    /// below is zero, which is the dead click exactly.
+    #[test]
+    fn a_link_under_a_resting_pointer_is_asked_about_by_the_press() {
+        let uri = "file:///C:/work/notes.md";
+        let target = std::path::PathBuf::from(r"C:\work\notes.md");
+        let mut session = bt_term::DualPlaneSession::new(
+            std::num::NonZeroU32::new(40).unwrap(),
+            std::num::NonZeroU32::new(2).unwrap(),
+        );
+        // The link arrives the way a scroll or a fresh line delivers one: printed, with no pointer
+        // event anywhere.
+        session
+            .feed(b"\x1b]8;;file:///C:/work/notes.md\x1b\\notes.txt\x1b]8;;\x1b\\")
+            .unwrap();
+        assert_eq!(
+            session.path_verdict(&target),
+            None,
+            "nobody has asked the disk about an OSC 8 target; the scan never sees one"
+        );
+        assert_eq!(
+            hyperlink_activation(
+                true,
+                true,
+                uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| session.path_verdict(path),
+            ),
+            HyperlinkActivation::None,
+            "which is the dead click, stated as a value"
+        );
+
+        // The press's door. Twice, because a press is a gesture a reader repeats.
+        session.ask_about_link_target(target.clone());
+        session.ask_about_link_target(target.clone());
+        let mut asked = Vec::new();
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
+                asked.push(path);
+            }
+        }
+        assert_eq!(
+            asked,
+            vec![target.clone()],
+            "one question, however many times the gesture is repeated"
+        );
+
+        // The worker answers within the press's own lifetime for a local name; whether it lands
+        // before the release or before the next click, the link is live from here on.
+        session.complete_path_verification(target.clone(), local_file());
+        assert_eq!(
+            hyperlink_activation(
+                true,
+                true,
+                uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| session.path_verdict(path),
+            ),
+            HyperlinkActivation::Reveal(target.clone()),
+            "and the press that follows is answered by the table, never by another dead click"
+        );
+        assert_eq!(
+            hyperlink_activation(
+                false,
+                true,
+                uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| session.path_verdict(path),
+            ),
+            HyperlinkActivation::Preview(target, None),
+            "the plain half too"
+        );
+    }
+
+    /// RED GATE (closure review B-1) — **the four doors that can meet a reference all ask through
+    /// the one function.**
+    ///
+    /// A pointer move, a press going down, the hand-over modifier going down, and a frame redrawn
+    /// under a pointer standing still. The list is the test: a fifth gesture that resolves a link
+    /// and does not ask is the defect again, and a door that grew its own question would be the
+    /// two answers this ticket exists to collapse into one.
+    #[test]
+    fn every_gesture_that_meets_a_reference_asks_the_one_question() {
+        let door = ["ask_the_worker_about_a_link_", "target("].concat();
+        let pointer_door = ["ask_about_the_link_under_the_", "pointer("].concat();
+        for (signature, needle) in [
+            ("    fn pointer_moved(", door.as_str()),
+            ("    fn begin_local_selection(", door.as_str()),
+            ("    fn publish_frame_inner(", pointer_door.as_str()),
+        ] {
+            assert!(
+                method(signature).contains(needle),
+                "{signature} can put a link under the pointer and must ask `{needle})` about it"
+            );
+        }
+        // The modifier's door is in the event loop rather than in a method of the window.
+        let modifiers = SOURCE
+            .find("WindowEvent::ModifiersChanged(modifiers) => {")
+            .expect("the one door every modifier state comes through");
+        let arm = &SOURCE[modifiers..];
+        let arm = &arm[..arm.find("WindowEvent::CursorMoved").unwrap_or(arm.len())];
+        assert!(
+            arm.contains(pointer_door.as_str()),
+            "the hand-over modifier going down is a gesture that meets a reference"
+        );
+        // And the one function is still the only place the question is put.
+        assert_eq!(
+            SOURCE.matches(door.as_str()).count() - SOURCE.matches(&format!("fn {door}")).count(),
+            3,
+            "the pointer move, the press and the pointer-wide door — and nobody else"
+        );
+    }
+
     /// RED (audit 3 C-2) — **one resolution per subject, however many readers ask.**
     ///
     /// `pointer_moved` puts the same question to three surfaces — the folder flyout's trigger, the
@@ -130352,14 +130560,61 @@ mod printed_path_provenance_tests {
         ]
     }
 
-    /// RED GATE (audit 3 C-2) — **no door on the pointer's path asks a filesystem anything.**
+    /// **The two functions a hover door may call that do reach a disk, and why each is safe.**
     ///
-    /// The rule in the only form that can be checked: a body, read as text, with none of the seven
-    /// spellings in it. Put the directory stat back into any one of them and this goes red while
-    /// every value test in this workspace stays green, because a machine with no dead share on it
-    /// cannot feel the difference — which is the shape of the defect.
+    /// The gate below reads a body as text, so it proves something about *direct* calls and
+    /// nothing about what a callee does. That is honest only if the callees are named, so they
+    /// are — by hand, with the argument for each. A third name added here without an argument is
+    /// the thing to catch in review.
+    const DISK_REACHING_CALLEES: [(&str, &str); 2] = [
+        // Reached only where `FilePeekSubject::printed_in` is `None`, which is every host but a
+        // terminal reference: a files column row, a Git row, a composed document. The user chose
+        // those, which is `DESIGN.md:189`'s own division.
+        (
+            "facts_of_a_file_the_user_chose(",
+            "only for a path the user chose, never for one a program printed",
+        ),
+        // `Runtime::reveal_verified` takes the ledger's answer and asks nothing; the door that
+        // canonicalises is `reveal_in_explorer`, which no hover door calls.
+        (
+            "reveal_verified(",
+            "the ledger's own answer, handed over rather than fetched",
+        ),
+    ];
+
+    /// RED GATE (audit 3 C-2) — **no door on the pointer's path makes a filesystem call of its
+    /// own**, and the only functions it hands the question to are the two named above.
+    ///
+    /// The rule in the form that can be checked: a body, read as text, with none of the seven
+    /// spellings in it, plus [`DISK_REACHING_CALLEES`] for the half a textual sweep cannot prove.
+    /// Put the directory stat back into any one of them and this goes red while every value test
+    /// in this workspace stays green, because a machine with no dead share on it cannot feel the
+    /// difference — which is the shape of the defect.
+    ///
+    /// Named for what it proves: *direct* calls. The closure review is right that a textual gate
+    /// does not follow a call, so the second half of the promise is the list and not the sweep.
     #[test]
-    fn no_hover_door_asks_a_filesystem_about_a_printed_path() {
+    fn no_hover_door_makes_a_filesystem_call_of_its_own() {
+        // And the two that are allowed to reach a disk are still the two, still where they were
+        // argued for.
+        let card = method("    fn file_peek_card_layers(");
+        assert!(
+            card.contains(DISK_REACHING_CALLEES[0].0),
+            "the glance card asks {} — {}",
+            DISK_REACHING_CALLEES[0].0,
+            DISK_REACHING_CALLEES[0].1
+        );
+        let press = method("    fn activate_hyperlink(");
+        assert!(
+            press.contains(DISK_REACHING_CALLEES[1].0),
+            "a printed reference is revealed through {} — {}",
+            DISK_REACHING_CALLEES[1].0,
+            DISK_REACHING_CALLEES[1].1
+        );
+        assert!(
+            !press.contains("self.reveal_in_explorer("),
+            "a printed reference must not take the door that canonicalises on this thread"
+        );
         for signature in HOVER_DOORS {
             let text = method(signature);
             for call in filesystem_calls() {
@@ -130413,8 +130668,8 @@ mod printed_path_provenance_tests {
             "a click on terminal output reaches the tree's bridge again"
         );
         assert!(
-            door.contains("reveal_in_explorer("),
-            "and the arm a printed file takes is the one that shows it where it lives"
+            door.contains("reveal_verified("),
+            "and the arm a printed file takes is the one that shows it where it lives, off the              ledger's own answer"
         );
     }
 

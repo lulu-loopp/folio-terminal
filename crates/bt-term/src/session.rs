@@ -80,7 +80,31 @@ pub enum PathLocality {
     /// The spelling names nothing this window reads unasked — a device path, a verbatim path,
     /// another distribution's share. Refused before any syscall.
     Refused,
+    /// The name is reachable only through **more reparse points than this window follows**
+    /// ([`MAX_REPARSE_HOPS`]), so nobody here can say what it really is.
+    ///
+    /// A fourth arm and not a second spelling of [`Self::AnotherMachine`], because the two are
+    /// different facts and the user is shown a different sentence for each: one says the file is
+    /// on somebody else's machine, this one says the chain of links is longer than this window
+    /// walks. Reporting the first for the second is what a purely local path with two links in it
+    /// got until 2026-09-20 — a network refusal card over a file on `C:`.
+    BeyondFollowedLinks,
 }
+
+/// **How deep a chain of links this window follows before it stops** (closure review of audit 3
+/// C-2).
+///
+/// It was **one** hop, inherited from the final-component rule that preceded the walk, and one hop
+/// is an accident rather than a rule: `/var`, `/tmp` and `/etc` are symlinks into `/private` on
+/// macOS, so everything under `$TMPDIR` spends the only hop before it has begun, and on Windows a
+/// pnpm `node_modules` symlink under a junctioned source root is two. Both fail closed, which is
+/// safe and wrong.
+///
+/// The real reason to bound the walk is a *cycle*, not a depth, and the bound is chosen the way
+/// every operating system chooses it — a small constant that no honest chain reaches. Eight is
+/// POSIX's own neighbourhood (`SYMLOOP_MAX` is at least eight); the locality of every hop is
+/// re-asked, so depth buys an attacker nothing it did not have at hop one.
+const MAX_REPARSE_HOPS: usize = 8;
 
 /// **What the disk said about one path the terminal named** — the ledger's value, and the one
 /// authority on "is this a real, readable, local path" (§7.1.5j, audit 3 C-2).
@@ -124,6 +148,17 @@ impl PathVerdict {
             directory: false,
             bytes: None,
             locality: PathLocality::AnotherMachine,
+        }
+    }
+
+    /// The answer for a name only a longer chain of links than this window walks would reach.
+    #[must_use]
+    pub const fn beyond_followed_links() -> Self {
+        Self {
+            exists: false,
+            directory: false,
+            bytes: None,
+            locality: PathLocality::BeyondFollowedLinks,
         }
     }
 
@@ -201,8 +236,10 @@ fn verify_path_through(path: &Path, volume: &dyn Fn(&Path) -> bt_platform::Volum
     if volume(path) != bt_platform::Volume::ThisMachine {
         return PathVerdict::elsewhere();
     }
-    let Some(resolved) = resolve_through_reparse_points(path, volume) else {
-        return PathVerdict::elsewhere();
+    let resolved = match resolve_through_reparse_points(path, volume) {
+        Resolution::Resolved(resolved) => resolved,
+        Resolution::AnotherMachine => return PathVerdict::elsewhere(),
+        Resolution::BeyondFollowedLinks => return PathVerdict::beyond_followed_links(),
     };
     if cfg!(windows) && win32_would_trim_the_name(path) {
         return PathVerdict::absent();
@@ -228,7 +265,7 @@ fn verify_path_through(path: &Path, volume: &dyn Fn(&Path) -> bt_platform::Volum
 fn resolve_through_reparse_points(
     path: &Path,
     volume: &dyn Fn(&Path) -> bt_platform::Volume,
-) -> Option<PathBuf> {
+) -> Resolution {
     use std::path::Component;
 
     let mut resolved = PathBuf::new();
@@ -242,9 +279,11 @@ fn resolve_through_reparse_points(
             _ => rest.push_back(component.as_os_str().to_owned()),
         }
     }
-    // One hop for the whole walk, exactly as the final-component rule this replaces: the chain
-    // belongs to whoever wrote it, and this window is answering a question about a resting pointer.
-    let mut hopped = false;
+    // The chain belongs to whoever wrote it, so it is walked to a bound rather than to its end —
+    // and the bound is [`MAX_REPARSE_HOPS`], which is about cycles and not about trust: every hop
+    // re-asks the same two locality questions, so a deep chain reaches nothing a shallow one
+    // could not.
+    let mut hops = 0usize;
     while let Some(name) = rest.pop_front() {
         resolved.push(&name);
         let Ok(metadata) = std::fs::symlink_metadata(&resolved) else {
@@ -253,33 +292,50 @@ fn resolve_through_reparse_points(
             for name in rest {
                 resolved.push(&name);
             }
-            return Some(resolved);
+            return Resolution::Resolved(resolved);
         };
         if !metadata.file_type().is_symlink() {
             continue;
         }
-        if hopped {
-            return None;
+        if hops == MAX_REPARSE_HOPS {
+            return Resolution::BeyondFollowedLinks;
         }
-        hopped = true;
-        let target = std::fs::read_link(&resolved).ok()?;
+        hops += 1;
+        let Ok(target) = std::fs::read_link(&resolved) else {
+            return Resolution::BeyondFollowedLinks;
+        };
         // A link may be written relative to the directory it stands in, and what it names is then
         // that directory's own answer — so the question is put to the name the reader would open.
         let target = if target.is_absolute() {
             target
         } else {
-            resolved.parent()?.join(target)
+            match resolved.parent() {
+                Some(directory) => directory.join(target),
+                None => return Resolution::BeyondFollowedLinks,
+            }
         };
         if !bt_transcript::paths::may_read_unasked(
             &target,
             bt_transcript::paths::PathNamer::ThisWindow,
         ) || volume(&target) != bt_platform::Volume::ThisMachine
         {
-            return None;
+            return Resolution::AnotherMachine;
         }
+        // The link named a place; the rest of the spelling hangs off it, and the component just
+        // consumed is not part of what is left.
         resolved = target;
     }
-    Some(resolved)
+    Resolution::Resolved(resolved)
+}
+
+/// What the walk above found: a name to ask the disk about, or the reason nobody here can.
+///
+/// Three arms and not an `Option`, because the two refusals are different facts and the reader is
+/// shown a different sentence for each (closure review of audit 3 C-2).
+enum Resolution {
+    Resolved(PathBuf),
+    AnotherMachine,
+    BeyondFollowedLinks,
 }
 
 /// Whether a printed path names anything on this disk.

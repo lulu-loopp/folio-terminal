@@ -495,6 +495,17 @@ mod portable_handoff {
         Err(not_here("showing a file in the file manager"))
     }
 
+    /// The same, for a path a worker has already answered for.
+    #[cfg(not(target_os = "macos"))]
+    pub fn reveal_verified(
+        window: NativeWindow,
+        path: &Path,
+        is_directory: bool,
+    ) -> Result<(), String> {
+        let _ = (window, path, is_directory);
+        Err(not_here("showing a file in the file manager"))
+    }
+
     /// Open the system's font page — Font Book, or the fonts folder.
     #[cfg(not(target_os = "macos"))]
     pub fn open_system_fonts_page(window: NativeWindow) -> Result<(), String> {
@@ -511,13 +522,15 @@ pub use portable_handoff::program_on_path;
 /// The other five, on a platform with neither a Win32 shell nor a `NSWorkspace`.
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_handoff::{
-    open_local_file, open_local_path, open_system_fonts_page, reveal_in_explorer, shell_execute,
+    open_local_file, open_local_path, open_system_fonts_page, reveal_in_explorer, reveal_verified,
+    shell_execute,
 };
 
 /// **The five verbs that leave this window, over `NSWorkspace`** (M2-2).
 #[cfg(target_os = "macos")]
 pub use macos_handoff::{
-    open_local_file, open_local_path, open_system_fonts_page, reveal_in_explorer, shell_execute,
+    open_local_file, open_local_path, open_system_fonts_page, reveal_in_explorer, reveal_verified,
+    shell_execute,
 };
 
 /// **Everything this product gives to the machine, on a Mac** — the macOS twin
@@ -830,6 +843,30 @@ mod macos_handoff {
         let directory = std::fs::metadata(&real)
             .map_err(|error| format!("{real:?}: {error}"))?
             .is_dir();
+        show(real, directory)
+    }
+
+    /// **The same reveal, for a path a worker has already answered for** (closure review of audit
+    /// 3 C-2) — the twin of `windows_handoff::reveal_verified`, and for its reason.
+    ///
+    /// The door above asks the disk twice on the thread that paints, and it is reached from a
+    /// `Ctrl`/`⌘`+click on a path a *program* printed: a target under a symlink into a mounted
+    /// share stalls the window inside `canonicalize` for as long as the mount takes to answer. The
+    /// two facts it wanted are the ledger's — the name is there, and it is a folder or it is not —
+    /// so they arrive instead of being fetched. `NSURL` is built from the path as written, which
+    /// is what Finder resolves anyway.
+    pub fn reveal_verified(
+        window: NativeWindow,
+        path: &Path,
+        is_directory: bool,
+    ) -> Result<(), String> {
+        let _ = window;
+        openable_unix_path(path)?;
+        show(path.to_path_buf(), is_directory)
+    }
+
+    /// The half both reveals end on: a folder is opened, a file is selected in its own.
+    fn show(real: std::path::PathBuf, directory: bool) -> Result<(), String> {
         let url = file_url(&real, directory)?;
         let workspace = NSWorkspace::sharedWorkspace();
         if directory {
@@ -1381,7 +1418,7 @@ mod macos_handoff {
 #[cfg(windows)]
 pub use windows_handoff::{
     open_local_file, open_local_path, open_system_fonts_page, program_on_path, reveal_in_explorer,
-    shell_execute,
+    reveal_verified, shell_execute,
 };
 
 #[cfg(windows)]
@@ -1400,8 +1437,8 @@ mod windows_handoff {
 
     use super::{
         DEFAULT_PATHEXT, PROGRAM_REFUSED, effective_final_component, names_a_program,
-        normalised_target, program_in_directories, reveal_arguments, validate_local_image_path,
-        validate_openable_path,
+        normalised_target, program_in_directories, reveal_argument_form, reveal_arguments,
+        validate_local_image_path, validate_openable_path,
     };
 
     /// **Whether this machine says that opening the file would be an act** — the same question
@@ -1664,6 +1701,40 @@ mod windows_handoff {
     pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
         let arguments =
             reveal_arguments(path).ok_or_else(|| "path is not one to reveal".to_owned())?;
+        hand_explorer_the_argument(window, arguments)
+    }
+
+    /// **The same reveal, for a path a worker has already answered for** (closure review of audit
+    /// 3 C-2).
+    ///
+    /// [`reveal_arguments`] asks the disk twice — `metadata` for the file-or-folder question and
+    /// `canonicalize` for the rest — and the door above it is reached from a `Ctrl`+click on a
+    /// path a *program* printed. That is this branch's own rule broken by its own new code: a
+    /// target under a junction into a dead share would stall the window inside `canonicalize`,
+    /// on the thread that paints, for the redirector's own timeout.
+    ///
+    /// So the two facts arrive instead of being fetched. `is_directory` is the ledger's
+    /// (`bt_term::PathVerdict::directory`), and the ledger also said the name is there. What
+    /// `canonicalize` bought besides those is **text**, and [`reveal_argument_form`] already
+    /// answers every text question on its own: a `"`, a control character and a `..` are each
+    /// refused there, so an argument Explorer could split never reaches a command line.
+    pub fn reveal_verified(
+        window: NativeWindow,
+        path: &Path,
+        is_directory: bool,
+    ) -> Result<(), String> {
+        let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
+        let arguments = reveal_argument_form(&path, is_directory)
+            .ok_or_else(|| "path is not one to reveal".to_owned())?;
+        hand_explorer_the_argument(window, arguments)
+    }
+
+    /// The one line both reveals end on: `explorer.exe`, named absolutely so that an
+    /// `explorer.exe` in some working directory cannot be the one that starts.
+    fn hand_explorer_the_argument(
+        window: NativeWindow,
+        arguments: std::ffi::OsString,
+    ) -> Result<(), String> {
         let explorer = windows_directory().join("explorer.exe");
         hand_over(
             window,
