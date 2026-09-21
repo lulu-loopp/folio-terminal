@@ -100,8 +100,9 @@ pub enum PathLocality {
 /// pnpm `node_modules` symlink under a junctioned source root is two. Both fail closed, which is
 /// safe and wrong.
 ///
-/// The real reason to bound the walk is a *cycle*, not a depth, and the bound is chosen the way
-/// every operating system chooses it — a small constant that no honest chain reaches. Eight is
+/// The walk cannot cycle — each turn pops one component and nothing is ever pushed back — so what
+/// the bound buys is *work*, not termination, and it is chosen the way every operating system
+/// chooses that bound — a small constant that no honest chain reaches. Eight is
 /// POSIX's own neighbourhood (`SYMLOOP_MAX` is at least eight); the locality of every hop is
 /// re-asked, so depth buys an attacker nothing it did not have at hop one.
 const MAX_REPARSE_HOPS: usize = 8;
@@ -3027,6 +3028,21 @@ impl DualPlaneSession {
         self.ask_about_path(path);
     }
 
+    /// **The same question, asked again although this pane already holds an answer** (closure
+    /// re-review B-1').
+    ///
+    /// A "yes" is never re-asked, on the argument written at [`Self::expire_denied_paths`] that a
+    /// link which turns out to be gone is answered by *the click's own re-check*. That re-check
+    /// used to be the `metadata` the reveal made on the window thread, and audit 3 C-2 took it
+    /// off that thread — so the press is the re-check now, and this is the door it asks through.
+    ///
+    /// One question per press and not one per frame: the de-duplication that is skipped is the
+    /// **verdict**, while queued and in-flight still refuse, so a reader leaning on the button
+    /// cannot put more than one question out at a time.
+    pub fn re_ask_about_link_target(&mut self, path: PathBuf) {
+        self.queue_path_question(path);
+    }
+
     /// The one door into the bounded question queue. In flight and queued are both "already asked",
     /// which is what holds a re-ask to one question however fast the row that carries the name is
     /// being rewritten: the second printing finds the first one's question still out.
@@ -3117,6 +3133,12 @@ impl DualPlaneSession {
     /// linked and a link that turns out to be gone is answered by the click's own re-check (that
     /// is 丁, and it lives in the five-armed router). Re-asking the yeses would double the traffic
     /// to buy nothing.
+    ///
+    /// **Where that re-check lives, since audit 3 C-2** (closure re-review, 2026-09-21): it was
+    /// the `metadata` the reveal made on the window thread, and that call is gone. The press is
+    /// the re-check now — [`Self::re_ask_about_link_target`], put by the press going down, so the
+    /// answer is back before the release acts and a held "yes" over a file that has since been
+    /// deleted cannot open a file manager on a folder nobody named.
     ///
     /// # The other boundary: a name printed again (owner ruling 2026-09-20)
     ///

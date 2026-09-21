@@ -46,6 +46,21 @@ use std::path::{Path, PathBuf};
 /// that" apart from "Windows could not".
 pub const PROGRAM_REFUSED: &str = "the files tree does not run programs";
 
+/// **What a worker already established about a path** — the two facts a reveal needs, carried
+/// instead of fetched (closure re-review B-1').
+///
+/// `bt-term`'s ledger is the authority (`bt_term::PathVerdict`) and it cannot be named here,
+/// because that crate depends on this one and not the reverse. So the two fields travel as a type
+/// of this crate's own, and the door refuses on `exists` itself rather than trusting the caller to
+/// have checked: the first shape of this door took a lone `bool` and every caller forgot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VerifiedTarget {
+    /// The disk said something is there under that name.
+    pub exists: bool,
+    /// And that it is a folder.
+    pub is_directory: bool,
+}
+
 /// The extensions that are a program whatever this machine's `PATHEXT` says.
 ///
 /// `PATHEXT` is the system's own list of what a *command line* will execute
@@ -500,9 +515,9 @@ mod portable_handoff {
     pub fn reveal_verified(
         window: NativeWindow,
         path: &Path,
-        is_directory: bool,
+        target: super::VerifiedTarget,
     ) -> Result<(), String> {
-        let _ = (window, path, is_directory);
+        let _ = (window, path, target);
         Err(not_here("showing a file in the file manager"))
     }
 
@@ -858,11 +873,14 @@ mod macos_handoff {
     pub fn reveal_verified(
         window: NativeWindow,
         path: &Path,
-        is_directory: bool,
+        target: VerifiedTarget,
     ) -> Result<(), String> {
         let _ = window;
+        if !target.exists {
+            return Err(format!("{path:?}: not there"));
+        }
         openable_unix_path(path)?;
-        show(path.to_path_buf(), is_directory)
+        show(path.to_path_buf(), target.is_directory)
     }
 
     /// The half both reveals end on: a folder is opened, a file is selected in its own.
@@ -1429,64 +1447,28 @@ mod windows_handoff {
     use crate::NativeWindow;
     use windows::Win32::Foundation::MAX_PATH;
     use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
-    use windows::Win32::UI::Shell::{
-        AssocIsDangerous, SHFILEINFOW, SHGFI_EXETYPE, SHGetFileInfoW, ShellExecuteW,
-    };
+    use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::PCWSTR;
 
     use super::{
-        DEFAULT_PATHEXT, PROGRAM_REFUSED, effective_final_component, names_a_program,
-        normalised_target, program_in_directories, reveal_argument_form, reveal_arguments,
-        validate_local_image_path, validate_openable_path,
+        DEFAULT_PATHEXT, PROGRAM_REFUSED, VerifiedTarget, names_a_program, normalised_target,
+        program_in_directories, reveal_argument_form, reveal_arguments, validate_local_image_path,
+        validate_openable_path,
     };
-
-    /// **Whether this machine says that opening the file would be an act** — the same question
-    /// [`names_a_program`] answers from a list, put to the operating system instead (audit 3 C-4).
-    ///
-    /// Two questions, and each is honest about a different half:
-    ///
-    /// * `AssocIsDangerous` is the shell's *own* judgement about an extension, assembled from the
-    ///   registry — the `IsSafeForOpening`/`FileAssociation` policy, which an administrator or an
-    ///   installer may have written to. It answers for whatever this machine holds rather than for
-    ///   whatever was on a list the day the list was written, which is the property that made the
-    ///   list the defect.
-    /// * `SHGetFileInfoW(SHGFI_EXETYPE)` asks about the **file**, not its name: a non-zero answer
-    ///   means the bytes are an executable image whatever the file is called.
-    ///
-    /// **What it cannot answer, said out loud.** Neither call — and neither does
-    /// `AssocQueryStringW(ASSOCSTR_COMMAND)`, which was tried — can tell an *interpreter* from an
-    /// *editor*: `.py`'s open verb is `py.exe "%L" %*` and `.txt`'s is `notepad.exe "%1"`, and
-    /// nothing in the shape of those two strings says which one runs its argument. So this is a
-    /// second floor and not the rule. The rule that closes C-4 is **provenance**, one layer up: a
-    /// target that came out of program output never reaches this function at all, because the
-    /// terminal's routing table reveals it instead of opening it.
-    fn the_system_calls_it_dangerous(path: &Path) -> bool {
-        let name = effective_final_component(path);
-        if let Some((_, extension)) = name.rsplit_once('.')
-            && !extension.is_empty()
-        {
-            let association = wide(&format!(".{}", extension.to_ascii_lowercase()));
-            // SAFETY: a NUL-terminated UTF-16 buffer that outlives the call.
-            if unsafe { AssocIsDangerous(PCWSTR(association.as_ptr())) }.as_bool() {
-                return true;
-            }
-        }
-        let target = wide(&path.to_string_lossy());
-        let mut info = SHFILEINFOW::default();
-        // SAFETY: `target` is NUL-terminated and outlives the call; `info` is sized by the
-        // `size_of` argument the API is given.
-        let exetype = unsafe {
-            SHGetFileInfoW(
-                PCWSTR(target.as_ptr()),
-                windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
-                Some(&mut info),
-                u32::try_from(std::mem::size_of::<SHFILEINFOW>()).unwrap_or(0),
-                SHGFI_EXETYPE,
-            )
-        };
-        exetype != 0
-    }
+    // `the_system_calls_it_dangerous` stood here from audit 3 C-4 (2026-09-20) until the closure
+    // re-review of 2026-09-21. It put `AssocIsDangerous` and `SHGetFileInfo(SHGFI_EXETYPE)` in
+    // front of `ShellExecuteW` as a second floor under the extension list.
+    //
+    // It is gone because the door it guarded has no attacker-driven caller left. C-4's real fix is
+    // provenance: a reference a *program* printed is revealed and never opened, which `bt-app`'s
+    // `nothing_a_program_printed_reaches_the_shells_open_verb` holds structurally. What remains
+    // here are three surfaces where the **user** picked the file by name -- `Open with...`, the
+    // breadcrumb's `Open` menu and the no-preview card's button -- and on those the shell's own
+    // unsafe-association list refused macro-bearing Office documents with the sentence "the files
+    // tree does not run programs", which is simply false about a `.docm`: the handler is Word, and
+    // Word guards its own macros. A floor that refuses a document the reader named by hand is
+    // worse than the list it was added to.
 
     /// **The one `ShellExecuteW` in this workspace.**
     ///
@@ -1666,14 +1648,11 @@ mod windows_handoff {
     pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
         let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
         validate_openable_path(&path)?;
-        // **The list is a floor and the machine is asked as well** (audit 3 C-4). A list of
-        // spellings cannot know that this installation registered an interpreter for something
-        // nobody thought of; `the_system_calls_it_dangerous` is the same question put to the
-        // registry and to the file's own bytes. Neither can tell an interpreter from an editor,
-        // which is why the *terminal's* targets do not come through this door at all.
-        if names_a_program(&path, std::env::var("PATHEXT").unwrap_or_default().as_str())
-            || the_system_calls_it_dangerous(&path)
-        {
+        // **The list, and only the list** (closure re-review, 2026-09-21). The three surfaces
+        // that reach here are ones where the user picked the file by name, and the terminal's own
+        // references cannot reach this door at all — see the note above for the floor that was
+        // tried here and taken out again.
+        if names_a_program(&path, std::env::var("PATHEXT").unwrap_or_default().as_str()) {
             return Err(PROGRAM_REFUSED.to_owned());
         }
         hand_over(window, &path.to_string_lossy(), None, &folder_of(&path))
@@ -1721,10 +1700,13 @@ mod windows_handoff {
     pub fn reveal_verified(
         window: NativeWindow,
         path: &Path,
-        is_directory: bool,
+        target: VerifiedTarget,
     ) -> Result<(), String> {
+        if !target.exists {
+            return Err("path is not one to reveal".to_owned());
+        }
         let path = normalised_target(path).ok_or_else(|| "path has no name".to_owned())?;
-        let arguments = reveal_argument_form(&path, is_directory)
+        let arguments = reveal_argument_form(&path, target.is_directory)
             .ok_or_else(|| "path is not one to reveal".to_owned())?;
         hand_explorer_the_argument(window, arguments)
     }

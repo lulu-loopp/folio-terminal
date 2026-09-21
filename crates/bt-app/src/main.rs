@@ -24523,6 +24523,17 @@ fn hyperlink_activation(
         }
         // The folder question first: a directory may be named `site.html`, and
         // Explorer's arm was settled before the page arm existed.
+        // **A name the disk says is not there is never handed to a file manager** (closure
+        // re-review B-1'). `reveal_arguments`' own doc gave the third reason it asked the disk:
+        // "a path that is not there leaves Explorer to fall back to a folder nobody named, which
+        // reads as this window having opened the wrong thing rather than as a refusal" — and on
+        // macOS `activateFileViewerSelectingURLs` posts nothing at all, so the gesture is silent.
+        // Taking that `metadata` off the window thread left the question unasked; it is asked
+        // here, of the ledger, so no arm below can forget it. Both halves answer the preview
+        // seat, which is where this window already says "not found".
+        if !verdict.exists {
+            return HyperlinkActivation::Preview(path, at);
+        }
         if verdict.directory {
             return match intent {
                 // The files column, pointed at it (user ruling 2026-08-21). A
@@ -84087,26 +84098,6 @@ impl Runtime<'_> {
     ///
     /// Reported, because a foot confirms in place and a confirmation printed
     /// over a reveal that never happened is the one thing worse than silence.
-    /// [`Self::reveal_in_explorer`] for a path a worker has already answered for — the door a
-    /// reference printed in the terminal takes (closure review of audit 3 C-2).
-    ///
-    /// The same verb and the same bridge; what differs is that the two facts the bridge needs
-    /// arrive from the pane's ledger instead of being fetched from a disk on the thread that
-    /// paints. A files column's foot keeps the asking door, because a row of the tree is a path
-    /// this window enumerated and has no ledger for.
-    fn reveal_verified(&mut self, path: &Path, is_directory: bool) -> bool {
-        let result = native_window(&self.window.window).and_then(|native| {
-            bt_platform::reveal_verified(native, path, is_directory)
-                .map_err(|error| anyhow!(error))
-                .context("show a verified path in the file manager")
-        });
-        if let Err(error) = result {
-            eprintln!("recoverable reveal failure: {error:#}");
-            return false;
-        }
-        true
-    }
-
     fn reveal_in_explorer(&mut self, path: &Path) -> bool {
         let result = native_window(&self.window.window).and_then(|native| {
             bt_platform::reveal_in_explorer(native, path)
@@ -84117,6 +84108,30 @@ impl Runtime<'_> {
             // A courtesy, not an error path: a window that refuses to keep
             // working because a file manager would not start is a worse answer
             // than a button that quietly did nothing.
+            eprintln!("recoverable reveal failure: {error:#}");
+            return false;
+        }
+        true
+    }
+
+    /// [`Self::reveal_in_explorer`] for a path a worker has already answered for — the door a
+    /// reference printed in the terminal takes (closure review of audit 3 C-2).
+    ///
+    /// The same verb and the same bridge; what differs is that the two facts the bridge needs
+    /// arrive from the pane's ledger instead of being fetched from a disk on the thread that
+    /// paints. A files column's foot keeps the asking door, because a row of the tree is a path
+    /// this window enumerated and has no ledger for.
+    ///
+    /// **It hands over the whole verdict and the bridge refuses on `exists`** (closure re-review
+    /// B-1'): the first shape of this door took a lone `bool` and the caller that should have
+    /// checked the other half did not.
+    fn reveal_verified(&mut self, path: &Path, target: bt_platform::VerifiedTarget) -> bool {
+        let result = native_window(&self.window.window).and_then(|native| {
+            bt_platform::reveal_verified(native, path, target)
+                .map_err(|error| anyhow!(error))
+                .context("show a verified path in the file manager")
+        });
+        if let Err(error) = result {
             eprintln!("recoverable reveal failure: {error:#}");
             return false;
         }
@@ -87950,6 +87965,29 @@ impl Runtime<'_> {
         }
     }
 
+    /// **The same question, put again although the pane already holds an answer** (closure
+    /// re-review B-1') — the press's door, and the press's alone.
+    ///
+    /// Everything [`Self::ask_the_worker_about_a_link_target`] refuses, this refuses too: the
+    /// lexical gate, and a question already queued or already out with a worker. What it does not
+    /// skip is a verdict, because a held "yes" is exactly the thing a press has to re-check now
+    /// that no reveal stats its target.
+    fn re_ask_the_worker_about_a_link_target(&mut self, seat: SeatId, uri: &str) {
+        let Some(path) = bt_platform::file_uri_to_path(uri) else {
+            return;
+        };
+        let namespace = self.seat_path_namespace(seat);
+        if !bt_transcript::paths::may_read_unasked(
+            &path,
+            bt_transcript::paths::PathNamer::Pane(&namespace),
+        ) {
+            return;
+        }
+        if let Some(leaf) = self.sessions.get_mut(&seat) {
+            leaf.session.re_ask_about_link_target(path);
+        }
+    }
+
     /// [`Self::ask_the_worker_about_a_link_target`] for whatever link the pointer is standing on
     /// right now, resolved from the pane it is standing in (closure review B-1).
     ///
@@ -89038,10 +89076,18 @@ impl Runtime<'_> {
                 // this thread; the ledger already answered both — the name is there, and it is a
                 // folder or it is not — and a `Ctrl`+click on a path under a junction into a dead
                 // share must not stall the window inside a call this branch exists to remove.
-                let directory = self
-                    .seat_path_verdict(seat, &path)
-                    .is_some_and(|verdict| verdict.directory);
-                self.reveal_verified(&path, directory);
+                let held = self.seat_path_verdict(seat, &path);
+                self.reveal_verified(
+                    &path,
+                    bt_platform::VerifiedTarget {
+                        // **Both facts, and the door refuses on the first** (closure re-review
+                        // B-1'). The arm above already refuses a name the ledger calls absent;
+                        // this is the same answer said again where the shell is actually
+                        // reached, so no future caller can hand over a name nobody has seen.
+                        exists: held.is_some_and(|verdict| verdict.exists),
+                        is_directory: held.is_some_and(|verdict| verdict.directory),
+                    },
+                );
             }
             // The folder's own road, and the one that stays in this window: the
             // column this tab already has is pointed at it, and a tab without one
@@ -90510,7 +90556,13 @@ impl Runtime<'_> {
         // one, so click-no-drag cannot briefly feed copy-on-select or leave a zero-width selection.
         self.set_pane_view_selection(seat, initial);
         if let Some(uri) = asked_about {
-            self.ask_the_worker_about_a_link_target(seat, &uri);
+            // **And the press is the click's own re-check** (closure re-review B-1'). A "yes" is
+            // never re-asked by the ordinary door, on the written argument that a link which
+            // turns out to be gone is caught by the click — an argument that used to be true
+            // because the reveal stat-ed the target on this thread. It does not any more, so the
+            // press puts the question again even when the pane holds an answer: one per press,
+            // and the release acts on whichever of the two came back.
+            self.re_ask_the_worker_about_a_link_target(seat, &uri);
         }
         self.window.mouse_route = Some(MouseRoute::Local(Box::new(SelectionDrag {
             mode,
@@ -130467,11 +130519,14 @@ mod printed_path_provenance_tests {
     /// two answers this ticket exists to collapse into one.
     #[test]
     fn every_gesture_that_meets_a_reference_asks_the_one_question() {
-        let door = ["ask_the_worker_about_a_link_", "target("].concat();
+        let door = ["self.ask_the_worker_about_a_link_", "target("].concat();
+        // The press asks through the re-check door, which is the same question with the held
+        // verdict's de-duplication skipped (closure re-review B-1').
+        let press_door = ["self.re_ask_the_worker_about_a_link_", "target("].concat();
         let pointer_door = ["ask_about_the_link_under_the_", "pointer("].concat();
         for (signature, needle) in [
             ("    fn pointer_moved(", door.as_str()),
-            ("    fn begin_local_selection(", door.as_str()),
+            ("    fn begin_local_selection(", press_door.as_str()),
             ("    fn publish_frame_inner(", pointer_door.as_str()),
         ] {
             assert!(
@@ -130489,12 +130544,172 @@ mod printed_path_provenance_tests {
             arm.contains(pointer_door.as_str()),
             "the hand-over modifier going down is a gesture that meets a reference"
         );
-        // And the one function is still the only place the question is put.
+        // And the two functions are still the only places the question is put.
         assert_eq!(
-            SOURCE.matches(door.as_str()).count() - SOURCE.matches(&format!("fn {door}")).count(),
-            3,
-            "the pointer move, the press and the pointer-wide door — and nobody else"
+            SOURCE.matches(door.as_str()).count(),
+            2,
+            "the pointer move and the pointer-wide door — and nobody else"
         );
+        assert_eq!(
+            SOURCE.matches(press_door.as_str()).count(),
+            1,
+            "the press, and only the press, skips a held verdict"
+        );
+    }
+
+    /// RED (closure re-review B-1') — **a name the ledger says is not there is never revealed.**
+    ///
+    /// `reveal_arguments` asked the disk for three reasons and the third was this: *"a path that is
+    /// not there leaves Explorer to fall back to a folder nobody named, which reads as this window
+    /// having opened the wrong thing rather than as a refusal."* Taking that `metadata` off the
+    /// window thread left the question unasked, and `PathVerdict::absent()` reached the `Reveal`
+    /// arm. Both halves answer the preview seat instead, which is where this window already says
+    /// "not found".
+    ///
+    /// MUTATION: delete the `verdict.exists` gate and the `Ctrl` row comes back `Reveal`, which is
+    /// a file manager opening on a folder nobody named.
+    #[test]
+    fn a_name_the_ledger_says_is_gone_is_never_revealed() {
+        let target = Path::new(r"C:\work\gone.md");
+        for control in [false, true] {
+            let ledger = Ledger::new(target, Some(bt_term::PathVerdict::absent()));
+            assert_eq!(
+                hyperlink_activation(
+                    control,
+                    true,
+                    "file:///C:/work/gone.md",
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &|path| ledger.read(path),
+                ),
+                HyperlinkActivation::Preview(target.to_path_buf(), None),
+                "a file that is not there is not revealed, with Ctrl {control}"
+            );
+        }
+        // And a folder that is gone takes the same road rather than Explorer's.
+        let gone_folder = bt_term::PathVerdict {
+            directory: true,
+            ..bt_term::PathVerdict::absent()
+        };
+        let ledger = Ledger::new(target, Some(gone_folder));
+        assert_eq!(
+            hyperlink_activation(
+                true,
+                true,
+                "file:///C:/work/gone.md",
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| ledger.read(path),
+            ),
+            HyperlinkActivation::Preview(target.to_path_buf(), None),
+        );
+    }
+
+    /// RED (closure re-review B-1') — **a held "yes" is re-asked by the press, and the answer
+    /// stops the reveal.**
+    ///
+    /// A "yes" is never re-asked by the ordinary door, on the argument written at
+    /// `expire_denied_paths` that a link which turns out to be gone is caught by *the click's own
+    /// re-check*. That re-check was the `metadata` the reveal made on the window thread, and audit
+    /// 3 C-2 removed it — so `eza --hyperlink`, delete the file, `Ctrl`+click would have opened a
+    /// file manager on a folder nobody named. The press is the re-check now.
+    ///
+    /// MUTATION: have the press use `ask_about_link_target` instead, and `asked` below is empty —
+    /// the held yes stands and the stale reveal is back.
+    #[test]
+    fn a_press_re_asks_a_held_yes_and_the_answer_stops_the_reveal() {
+        let uri = "file:///C:/work/notes.md";
+        let target = std::path::PathBuf::from(r"C:\work\notes.md");
+        let mut session = bt_term::DualPlaneSession::new(
+            std::num::NonZeroU32::new(40).unwrap(),
+            std::num::NonZeroU32::new(2).unwrap(),
+        );
+        session.complete_path_verification(target.clone(), local_file());
+        // The ordinary door is silent about a name already answered — that is what keeps a
+        // repainting screen free, and it is exactly what a press must not inherit.
+        session.ask_about_link_target(target.clone());
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "a held verdict answers the hover, the modifier and the frame"
+        );
+        // The press's door puts it again.
+        session.re_ask_about_link_target(target.clone());
+        session.re_ask_about_link_target(target.clone());
+        let mut asked = Vec::new();
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
+                asked.push(path);
+            }
+        }
+        assert_eq!(
+            asked,
+            vec![target.clone()],
+            "one question per press, however hard the button is leaned on"
+        );
+        // The file has gone since the yes was written. The release acts on the answer that came
+        // back from the press's own ask.
+        session.complete_path_verification(target.clone(), bt_term::PathVerdict::absent());
+        assert_eq!(
+            hyperlink_activation(
+                true,
+                true,
+                uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|path| session.path_verdict(path),
+            ),
+            HyperlinkActivation::Preview(target, None),
+            "and nothing is handed to a file manager"
+        );
+    }
+
+    /// PIN (closure re-review, out-of-scope undo) — **the preview reader asks nothing about the
+    /// volume a file the user chose stands on.**
+    ///
+    /// The locality refusal belongs to the routing table, where the provenance is known. Put back
+    /// into `read_up_to` it took the preview away from every file on a mapped network drive,
+    /// whoever named it — and a document on a NAS is a document the reader chose, which is the
+    /// opposite of the unasked reach §3.4 is about.
+    #[test]
+    fn the_preview_reader_does_not_refuse_a_file_on_its_volume() {
+        const PREVIEW: &str = include_str!("preview.rs");
+        let signature = "fn read_up_to(";
+        let start = PREVIEW.find(signature).expect("the one preview reader");
+        let rest = &PREVIEW[start + signature.len()..];
+        let reader = &rest[..rest.find("
+}
+").unwrap_or(rest.len())];
+        let volume = ["PathLocality", "::", "AnotherMachine"].concat();
+        assert!(
+            !reader.contains(volume.as_str()),
+            "the preview reader serves both provenances and must not decide a locality one of \
+             them was never asked about"
+        );
+        let links = ["PathLocality", "::", "BeyondFollowedLinks"].concat();
+        assert!(
+            reader.contains(links.as_str()),
+            "a chain longer than this window walks is a fact about the path, not about who \
+             named it"
+        );
+    }
+
+    /// PIN (closure re-review, out-of-scope undo) — **the doors where the user picked a file by
+    /// name refuse exactly what the list refuses, and nothing the machine was asked about.**
+    ///
+    /// `AssocIsDangerous` and `SHGetFileInfo(SHGFI_EXETYPE)` were added under the extension list on
+    /// 2026-09-20 and taken out again: after C-4's provenance rule no terminal-printed reference
+    /// reaches `open_local_path` at all, so the floor guarded nothing — while refusing a `.docm`
+    /// the reader had named, with a sentence about running programs that is false about a
+    /// document.
+    #[test]
+    fn the_user_chosen_door_asks_no_machine_about_the_file() {
+        let handoff = include_str!("../../bt-platform/src/handoff.rs");
+        for call in [
+            ["Assoc", "IsDangerous", "("].concat(),
+            ["SHGetFileInfo", "W", "("].concat(),
+        ] {
+            assert!(
+                !handoff.contains(call.as_str()),
+                "`{call})` is back under the door the user reaches by naming a file"
+            );
+        }
     }
 
     /// RED (audit 3 C-2) — **one resolution per subject, however many readers ask.**
@@ -130669,7 +130884,7 @@ mod printed_path_provenance_tests {
         );
         assert!(
             door.contains("reveal_verified("),
-            "and the arm a printed file takes is the one that shows it where it lives, off the              ledger's own answer"
+            "and the arm a printed file takes is the one that shows it where it lives,              off the ledger's own answer"
         );
     }
 

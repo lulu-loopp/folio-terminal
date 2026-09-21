@@ -4363,7 +4363,7 @@ pub fn is_readable_unasked(path: &Path) -> bool {
     bt_transcript::paths::may_read_unasked(path, bt_transcript::paths::PathNamer::ThisWindow)
 }
 
-/// The four ways a file declines to be previewed.
+/// The five ways a file declines to be previewed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreviewRefusal {
     /// Nothing in this window reads this kind of file.
@@ -7047,18 +7047,26 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
     // preview after it. `PreviewBuffer::new` asks the same question before it ever files a read;
     // this is the same predicate asked where the blocking call actually is, and it asks the disk's
     // half of it as well, because a drive-rooted name can be a local spelling of a share.
-    // **And the two refusals it can answer with are told apart** (closure review of audit 3 C-2).
-    // `bt_term::verify_path` is the one place those four questions are asked, and it separates
-    // "somebody else's machine" from "a chain of links longer than this window walks" — which is
-    // a purely local path, and used to raise the network card.
-    match bt_term::verify_path(path).locality {
-        bt_term::PathLocality::ThisMachine => {}
-        bt_term::PathLocality::AnotherMachine | bt_term::PathLocality::Refused => {
-            return HeadOutcome::Refused(PreviewRefusal::NetworkPath);
-        }
-        bt_term::PathLocality::BeyondFollowedLinks => {
-            return HeadOutcome::Refused(PreviewRefusal::BeyondFollowedLinks);
-        }
+    // **And a chain of links longer than this window walks gets its own sentence** (closure
+    // review of audit 3 C-2): it is a fact about the path and not about who named it, and the
+    // network card was the wrong words for a file on this machine.
+    //
+    // **The volume question is deliberately not asked here** (closure re-review, 2026-09-21).
+    // `bt_term::verify_path` also answers `AnotherMachine` for a mapped network drive, and this
+    // reader serves both provenances — a row the user picked out of the files column reaches it
+    // exactly as a reference a program printed does. Refusing on the volume here took the preview
+    // away from anyone whose documents live on a NAS, which is nobody's ruling: §3.4 is about
+    // what this window reaches for **unasked**, and a file the reader chose is asked for. The
+    // terminal's own targets are refused on locality one layer up, in `hyperlink_activation`,
+    // where the provenance is known.
+    if bt_term::verify_path(path).locality == bt_term::PathLocality::BeyondFollowedLinks {
+        return HeadOutcome::Refused(PreviewRefusal::BeyondFollowedLinks);
+    }
+    if !bt_transcript::paths::may_read_unasked_through_links(
+        path,
+        bt_transcript::paths::PathNamer::ThisWindow,
+    ) {
+        return HeadOutcome::Refused(PreviewRefusal::NetworkPath);
     }
     let mut file = match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Preview, path)
     {
