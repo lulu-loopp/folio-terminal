@@ -25955,26 +25955,55 @@ fn breath_phase(elapsed: Duration) -> f32 {
     (elapsed.as_secs_f32() * 1000.0).rem_euclid(period) / period
 }
 
-/// How bright a waiting card's halo is, `0.0..=1.0` of
-/// [`bt_render::FOCUS_CARD_WAIT_HALO_OPACITY`] (§7.1.5b, §7.1.6b′ F3).
+/// **The waiting breath, taken once for every channel that says "waiting"**
+/// (§7.1.5b, §7.1.6b′ F3) — see [`seats::WaitPulse`] for what the two faces are
+/// and why there are two of them.
 ///
-/// `@keyframes fcard-wait { 50% { box-shadow: … } }` (mock-up 2744-2748): one
-/// keyframe at the midpoint and *no* `0%`/`100%` frame, so the halo grows out of
-/// nothing and goes back into nothing every cycle. That is why this is a ramp
-/// from zero rather than [`breathe_opacity`]'s swing between two visible values
-/// — the mark breathes *between* two strengths because it is always there, and
-/// the halo breathes *in and out* because it is a glow.
+/// **One sampler and one owner.** `docs/DESIGN.md:1774` (user ruling
+/// 2026-07-18) gives a waiting tab an orange dot that pulses *and* an orange
+/// frame on its card, and `:2188` (2026-08-25) restates the pair as three things
+/// reading one answer. Two channels saying one fact drift the moment they are
+/// sampled twice, so they are sampled here, together, from one
+/// [`TabState::animation_elapsed`], and handed down resolved: the card's edge
+/// reads whether there is a sample at all, the halo reads [`seats::WaitPulse::halo`],
+/// and all four status-dot surfaces read [`seats::WaitPulse::dot`] through
+/// `marks::status_dot_sprite`.
 ///
-/// **Reduced motion answers a flat `0.0` at every phase, and that is the ruling
-/// rather than a shortcut**: `@media (prefers-reduced-motion: reduce)` turns the
-/// animation off (line 550), and an animation with no `0%` frame that is turned
-/// off simply has no shadow. Note what it does *not* answer — "not waiting". The
-/// card's warn border keys on there being a number here at all, so a reader with
-/// animation off still sees the statement, and only the motion has gone. That
-/// distinction is the whole of "留橙边、去动效": 动效从来不是消息.
-fn wait_halo_opacity(elapsed: Duration, motion: Motion) -> f32 {
+/// **The halo's face.** `@keyframes fcard-wait { 50% { box-shadow: … } }`
+/// (mock-up 2744-2748): one keyframe at the midpoint and *no* `0%`/`100%` frame,
+/// so the halo grows out of nothing and goes back into nothing every cycle. That
+/// is why it is a ramp from zero rather than [`breathe_opacity`]'s swing between
+/// two visible values — the mark breathes *between* two strengths because it is
+/// always there, and the halo breathes *in and out* because it is a glow.
+///
+/// **The dot's face, and where it came from.** The mock-up writes
+/// `.unreaddot.await { animation: fcpulse .9s infinite }` (`ui-mockup.html:346`)
+/// and never defines `@keyframes fcpulse`; an undefined `animation-name` is
+/// valid CSS that does nothing, so the mock-up's dot never pulsed and the
+/// transcription inherited a name with no curve behind it. The owner ruled the
+/// curve on 2026-09-20: **the same clock and the same curve as the halo** — the
+/// window's one 1.7s breath — because two things saying one fact breathe
+/// together. So the dot rides the very same `breath`, brightest at the instant
+/// the halo is, mapped onto a thing that is always on screen: the window's own
+/// breath depth ([`WINDOW_TAB_BREATHE_MIN_OPACITY`], which
+/// [`breathe_opacity`] swings to) up to full, never out.
+///
+/// **Reduced motion answers each channel's own flat value, and that is the
+/// ruling rather than a shortcut.** `@media (prefers-reduced-motion: reduce)`
+/// turns both animations off — mock-up line 550 for the card, line 386 for the
+/// dot — and an animation turned off leaves the element as it is written: a
+/// keyframe set with no `0%` frame leaves no shadow at all, and `.unreaddot`
+/// itself is an opaque dot. Note what neither answer is — "not waiting". The
+/// card's warn border keys on there being a sample here at all, and the dot is
+/// still drawn, so a reader with animation off still sees the statement and only
+/// the motion has gone. That distinction is the whole of "留橙边、去动效":
+/// 动效从来不是消息.
+fn wait_pulse(elapsed: Duration, motion: Motion) -> seats::WaitPulse {
     if motion == Motion::Reduced {
-        return 0.0;
+        return seats::WaitPulse {
+            halo: 0.0,
+            dot: 1.0,
+        };
     }
     let phase = breath_phase(elapsed);
     let half = if phase < 0.5 {
@@ -25982,7 +26011,11 @@ fn wait_halo_opacity(elapsed: Duration, motion: Motion) -> f32 {
     } else {
         1.0 - (phase - 0.5) * 2.0
     };
-    cubic_bezier(half, EASE_IN_OUT)
+    let breath = cubic_bezier(half, EASE_IN_OUT);
+    seats::WaitPulse {
+        halo: breath,
+        dot: WINDOW_TAB_BREATHE_MIN_OPACITY + (1.0 - WINDOW_TAB_BREATHE_MIN_OPACITY) * breath,
+    }
 }
 
 /// Whether the system wants animation at all.
@@ -32219,7 +32252,7 @@ impl TabState {
             // never disagree with the row about which of the two warns this is.
             pulse: claim
                 .pulses()
-                .then(|| wait_halo_opacity(self.animation_elapsed(now), motion)),
+                .then(|| wait_pulse(self.animation_elapsed(now), motion)),
         }
     }
 
@@ -32277,7 +32310,7 @@ impl TabState {
             // its own, so it owes a frame for exactly as long as the queue place
             // stands — [`TabState::fleet_working`]'s own terms, one channel over.
             // Above the `Reduced` early return on purpose: under reduced motion
-            // `wait_halo_opacity` draws nothing at all, so there is nothing to
+            // `wait_pulse` moves nothing at all, so there is nothing to
             // schedule and this must not wake the loop.
             || self.fleet_awaiting()
     }
@@ -32339,7 +32372,7 @@ impl TabState {
 /// motion in this window that is never decorative — it says "typing lands here"
 /// — so the answer under `Reduced` is not to take the caret away but to stop it
 /// switching: a *solid* caret, permanently lit, which says the same thing with
-/// no motion in it at all. That is [`wait_halo_opacity`]'s pattern (go the
+/// no motion in it at all. That is [`wait_pulse`]'s pattern (go the
 /// glow, keep the orange border) applied to the last surface in the window that
 /// had not been told about the preference, and it costs the window every wake-up
 /// it used to owe twice a second.
@@ -45572,6 +45605,13 @@ impl Runtime<'_> {
                 // peek has no per-leaf memory to ease from and, being a snapshot
                 // that appears and disappears whole, nothing to ease during — so
                 // it shows the reading itself rather than an approach to it.
+                // Asked once and spent twice: the dot this leaf wears and
+                // whether that dot breathes are two questions about one claim,
+                // and folding the fleet a second time is how the two start
+                // disagreeing (§7.1.6b′: 不新写第二套聚合).
+                let claim = session
+                    .map(|leaf| leaf.session_facts(tab_is_active).claim())
+                    .unwrap_or_default();
                 let ring = status.and_then(|status| status.progress).map(|state| {
                     let arc = ring_arc(state, None, elapsed, motion, &palette);
                     seats::TabRing {
@@ -45624,10 +45664,16 @@ impl Runtime<'_> {
                         elapsed,
                         motion,
                     ),
-                    dot: session
-                        .map(|leaf| leaf.session_facts(tab_is_active).claim())
-                        .unwrap_or_default()
-                        .dot(&palette),
+                    dot: claim.dot(&palette),
+                    // **The same claim's other answer**, asked here rather than
+                    // guessed from the dot's colour: `Bell` and `Awaiting` wear
+                    // one warn and only the second is a program standing still
+                    // (§7.1.5b). One sampler for the whole window — the tab's
+                    // card, its strip chip, its rail row and this schematic all
+                    // spend `wait_pulse`'s reading of the same elapsed time, so
+                    // no two of them can be caught at different phases of one
+                    // breath.
+                    pulse: claim.pulses().then(|| wait_pulse(elapsed, motion)),
                     ring,
                 }
             })

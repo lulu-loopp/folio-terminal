@@ -19266,7 +19266,7 @@ mod tests {
     /// the same group in the same place with the same rows and the same verb, no
     /// band cut out of anything, and nothing to wake the window for. The
     /// animation is a layer of gain over a state that was already legible
-    /// without it — `wait_halo_opacity`'s own paradigm — and the way to prove it
+    /// without it — `wait_pulse`'s own paradigm — and the way to prove it
     /// is a layer is to take it away and find the page unchanged.
     ///
     /// Red gate: make `advanced_reveal_of` answer `Some(0.5)` where it answers

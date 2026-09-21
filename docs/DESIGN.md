@@ -11213,3 +11213,10 @@ A clock-run entry is a deadline or an edge, never a poll; quiescent turns do no 
 In 0.4.2 an older Folio PSReadLine copy caused the clock run to reread the 41 KB Changes.txt on every turn after the probe answered.
 The App owns one optional installed-copy fact, read on the unread probe edge, successful install/removal, and each Terminal-page opening.
 First-run availability reads ProfilePrograms; card construction consumes one ready edge, rearmed by profile changes or an answered card.
+
+### 2026-09-20 — The waiting halo's rectangle, and the waiting dot's clock
+An outset decoration grows from the card *as drawn* and is never clamped a second time; the scroller's clamp crops the body, not the growth.
+The first card's top is the list's top exactly, so clamping the grown box cost the waiting halo its whole top outset — 6 device px at 200% — on every frame since the column existed; the flight shadows were the same shape.
+`ChromeSprite` carries no clip box and a chrome layer's marks are one draw under one scissor, so the growth is simply allowed: 3 logical px against the panel's own 6px top margin and its bottom one, empty ground either way.
+The status dot now breathes on the halo's clock and curve (the window's one 1.7s breath), one sample taken in `wait_pulse` and worn by the card's edge, the halo and all four dot surfaces; reduced motion answers each channel's own flat value — no halo, full dot.
+The dot had never pulsed because the mock-up's `.unreaddot.await` names `@keyframes fcpulse`, which the mock-up never defines: an undefined animation does nothing, and the Rust transcription inherited the name without a curve.
