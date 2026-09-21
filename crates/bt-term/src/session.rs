@@ -156,6 +156,10 @@ pub fn verify_path(path: &Path) -> PathVerdict {
     let Ok(metadata) = std::fs::metadata(path) else {
         return PathVerdict::absent();
     };
+    let door_ready = bt_platform::resolved_for_a_door(path);
+    // Asked of the name the door opens, not the one that was printed: a link called `editor`
+    // that lands on `Thing.app` is a bundle, and `main`'s door judged the resolved name.
+    let executable = opening_it_would_run_it(door_ready.as_deref().unwrap_or(path), &metadata);
     PathVerdict {
         exists: true,
         directory: metadata.is_dir(),
@@ -164,8 +168,8 @@ pub fn verify_path(path: &Path) -> PathVerdict {
         // rather than by a second reading of what they do — `canonicalize` *and* the verbatim
         // prefix taken off, which is the pair `reveal_arguments` has always spent together. A raw
         // canonical is a name Explorer, the shape gate and the argument builder all refuse.
-        door_ready: bt_platform::resolved_for_a_door(path),
-        executable: opening_it_would_run_it(path, &metadata),
+        door_ready,
+        executable,
     }
 }
 
