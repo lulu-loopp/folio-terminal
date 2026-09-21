@@ -35224,9 +35224,15 @@ mod tests {",
     ///
     /// MUTATION: in [`pane_head_geometry`], derive `title_left` from
     /// `mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale` whatever `zoom_mark` says.
-    /// The `Preview` and `Files` cells go red at every scale and in both tab
-    /// layouts; every `Terminal` cell stays green, which is what says this
-    /// assertion measures *this* defect and not another.
+    /// Run 2026-09-20: the zoomed `Preview` cell goes red naming the name box
+    /// (`the zoom mark [32,49,45,62] stands on the name [32,40,62,69]`), the
+    /// zoomed `Files` cell names the caption, **and so does `Terminal`** — what
+    /// this test measures is the *geometry*, and pre-fix every kind's
+    /// `head.title` was wrong there. What made the terminal head look right on
+    /// the glass was the third function the painter alone called, which is the
+    /// second owner this ticket deleted; that the terminal's drawn caption did
+    /// not move is pinned by value in
+    /// [`folding_the_zoom_mark_into_the_head_moved_no_other_pixel`], not here.
     ///
     /// **One documented exception**: a caption may run under the *trailing* run
     /// and be dissolved into it (user ruling 2026-08-27 — see
@@ -35697,6 +35703,84 @@ mod tests {",
         assert!(
             button[0] >= mark[2],
             "the button starts after the mark: {button:?} against {mark:?}",
+        );
+    }
+
+    /// **A head too narrow for its switcher still has a name — to read, to
+    /// press, and to hang the list from** (closure review, 2026-09-21).
+    ///
+    /// The head drops the switcher's `⌄` and its badge when the two do not fit,
+    /// which is the rule the tools beside them already keep. What may not go
+    /// with them is the *route*: the name is still drawn, it still answers the
+    /// pointer (ruling 2026-08-19 — "the name answers the pointer whether or not
+    /// it is a switcher"), and it is still a rectangle a menu can stand on.
+    ///
+    /// That last clause is what `Runtime::preview_menu_stand` falls back to.
+    /// Before it, the switcher's menu hung on the pill alone: in this very cell
+    /// the pill is `None`, so a press on the name opened a menu that drew
+    /// nothing while the window went on swallowing every keystroke — P137's
+    /// defect, third instance.
+    ///
+    /// The pane is narrowed the only way a pane can be narrowed this far: a
+    /// window the reader dragged past the program's own minimum, where the
+    /// minima are advice (ruling 2026-08-08).
+    #[test]
+    fn a_preview_head_too_narrow_for_its_switcher_still_answers_on_its_name() {
+        let metrics = seat_metrics(1_000);
+        let tools = PreviewHeadTools {
+            save: true,
+            flip: true,
+            stop: false,
+            web: true,
+            switcher: true,
+            locked: false,
+            name_width: 30.0,
+            count_width: 8.0,
+        };
+        // **The band, found rather than assumed**: the window is narrowed a few
+        // pixels at a time until the head has given the switcher up and still
+        // has a name in it. That there is such a band is half of what this pins
+        // — a head does not lose its name the moment it loses its `⌄`.
+        let narrowed = (480_u32..=900).step_by(4).find_map(|width| {
+            let mut seats = term_beside_files();
+            let preview = seats.add_preview(&metrics).expect("a preview lands");
+            let viewport = logical_viewport(
+                width,
+                600,
+                scale_ppm(1_000),
+                0,
+                folio_band_device_px(scale_ppm(1_000)),
+            );
+            let layout = seats
+                .solve(viewport, &metrics, SizePolicy::Sovereign)
+                .expect("a rectangle the user chose is never refused");
+            let rect = full_pane_rect(&layout, preview)?;
+            let head = pane_head_geometry(rect, SeatKind::Preview, false, 1.0);
+            let geometry = preview_head_geometry(&head, 1.0, tools);
+            (geometry.pill.is_none() && geometry.name[2] > geometry.name[0])
+                .then_some((layout, preview, geometry))
+        });
+        let (layout, preview, geometry) = narrowed.expect(
+            "some window the reader can drag to leaves a preview head without a \
+             switcher and with a name",
+        );
+        assert_eq!(geometry.chevron, None, "the switcher is gone");
+        assert_eq!(geometry.count, None);
+        let (x, y) = (
+            f64::from((geometry.name[0] + geometry.name[2]) / 2.0),
+            f64::from((geometry.name[1] + geometry.name[3]) / 2.0),
+        );
+        assert_eq!(
+            hit_preview_head(
+                &layout,
+                1.0,
+                &[(preview, tools)],
+                HeadRun::hovered(preview),
+                x,
+                y
+            ),
+            Some(ChromeTarget::PreviewName(preview)),
+            "the press still lands on the name, which is what the menu hangs from",
         );
     }
 
