@@ -34,6 +34,38 @@ All notable changes to Folio are recorded here. The format follows
   Folio's platform defaults, and an installed Chinese, Japanese or Korean face
   can be chosen without changing the monospace font used for ASCII.
 
+- **`folio --uninstall-cleanup` undoes what Folio wrote outside its own folder,
+  in one command and without a window.** The `$PROFILE` line, the agent hooks,
+  the Explorer entries and the PSReadLine module, each reported on its own line
+  with what was removed and what was left. Hooks and Explorer entries belonging
+  to another copy of Folio that is still on the machine are left alone. It exits
+  `0` when the machine is the way you asked for it, including when there was
+  nothing to remove; `1` names a refusal to fix and retry; `2` means a Folio is
+  running, or, with `--purge`, that a process still holds the data. `--purge` on
+  the same command also deletes settings, sessions and browser data — both
+  Windows data roots and the legacy one, or all six macOS locations — while
+  keeping the dated recovery copies beside your own configuration files. The
+  application folder is never deleted. On macOS, Folio cannot tell whether
+  another program holds that data, and the command says so as it starts rather
+  than implying a check it never made. Windows also ships `uninstall.cmd`, which
+  is the same command by double-click. `docs/install.md` has the per-channel
+  steps.
+
+- **`folio --remove-shell-integration` takes Folio's line out of your PowerShell
+  `$PROFILE`, without opening a window.** It is the same remover the settings
+  switch uses, and it matches only the exact forms Folio itself writes — never
+  "a line mentioning `folio.ps1`", which may be your own. A profile that is
+  read-only, hard-linked, symlinked, or in an encoding it cannot rewrite is
+  refused and left byte-identical, with the reason on standard error. The
+  profile is replaced through `ReplaceFileW`, so its permissions, alternate
+  streams, attributes and creation time survive.
+
+- **A page for anyone who already deleted an older Folio.**
+  `docs/recovery-after-deleting-folio.md` names the exact `$PROFILE` line to
+  remove from which file, and the hook entries to delete from each coding
+  agent's own configuration — copy-and-paste, with no Folio needed. It exists
+  because a copy that is already gone cannot repair its own marks.
+
 ### Changed
 
 - **When Folio's window pauses, its own log now names the call it was inside.**
@@ -55,6 +87,141 @@ All notable changes to Folio are recorded here. The format follows
   machine's long pauses belong to its discrete GPU — the same build can be run
   both ways and the two recordings compared.
 
+- **A save in the preview editor replaces the content and keeps what the file
+  was carrying.** On Windows the alternate data streams (the `Zone.Identifier` a
+  download carries), the DACL, the creation time and the attribute word travel
+  through `ReplaceFileW`; on Unix the ownership, the mode and every extended
+  attribute — quarantine, Finder tags, `user.*` — are put on the replacement
+  before the rename. **Content is guaranteed and what the file carried is best
+  effort**, stated in that order: a volume that answers that it has no such
+  operation, and has provably changed nothing, gets the plain writer instead,
+  and a metadata step never fails a save on any platform. A symlinked or
+  unopenable name keeps the plain writer, as before; **a hard-linked target keeps
+  it too**, so the file's second name still reads the old bytes — the preserving
+  replacement refuses such targets rather than breaking the link. The staging
+  file is born private and widened afterwards to the mode the replaced file
+  carried, so a private note is never world-readable, not even for the length of
+  one write. **One window is open and recorded:** `ReplaceFileW` is a sequence
+  and not an atomic rename, so a crash or power loss between its two halves
+  leaves the old document under a `.tmp-<hex>` name that nothing in Folio looks
+  for.
+
+- **Folio installs its PSReadLine module only where the place is empty or its
+  own.** Until now the install door had no occupancy check at all: it wrote its
+  nine files into `<Documents>\WindowsPowerShell\Modules\PSReadLine\2.4.6`
+  whatever was standing there, and two states of the settings row let that write
+  through over a module the reader had installed from the PowerShell Gallery —
+  the folder then read as Folio's, so switching the row **Off** deleted it and
+  the gallery's `PSGetModuleInfo.xml`, `en-US\` and catalog with it. **This is
+  byte-identical back to v0.3.0.** To tell whether it happened to you, read the
+  version stamp on the module in that folder and look for the record the gallery
+  leaves beside a module it installed:
+
+  ```powershell
+  $d = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WindowsPowerShell\Modules\PSReadLine\2.4.6'
+  (Get-Item "$d\Microsoft.PowerShell.PSReadLine.dll").VersionInfo.ProductVersion
+  Test-Path "$d\PSGetModuleInfo.xml"
+  ```
+
+  A version containing `-bt.` is Folio's copy — only Folio's own builds put that
+  in the string — and anything else is yours, and untouched. Folio's copy **with**
+  `True` on the second line means a gallery install of yours stood there first
+  and was written over: install the PSReadLine you wanted again from wherever you
+  got it, at the version you had. Folio cannot put back a module it replaced, and
+  it does not try to. From 0.4.3 the check lives inside the one function that
+  writes: a folder is Folio's when the assembly is ours by bytes or by the
+  `2.4.6-bt.` stamp, or when there is no assembly and every name in it is one
+  Folio itself writes, and anything else is foreign — neither written to nor
+  deleted, with both verbs on the row dark over it. The disk fact is read before
+  the stored invitation, so a remembered "installed" can no longer offer the
+  button over somebody else's module. Removal was narrowed with it: the nine
+  names go, and the directories go only while they are empty, so the records
+  beside a mixed folder an older Folio left stay where they are and the cleanup
+  door names them.
+
+- **Folio's line in your PowerShell `$PROFILE` is one guarded form, and existing
+  installs are rewritten at start-up.** The bare dot-source line errored at every
+  PowerShell start once `%APPDATA%\Folio` was gone — a Folio that had been
+  deleted went on making an error in a file that is yours and not Folio's. The
+  line is now one exact managed form that is silent when the script it names is
+  missing, in Windows PowerShell 5.1 and PowerShell 7 and under strict mode, and
+  legacy lines are rewritten to it when Folio starts, off the window thread,
+  across every profile file Folio has written to and every one it can find. An
+  account still on the legacy data root keeps a line that loads the script it
+  actually has. Turning the integration off is recorded, and start-up then does
+  nothing for that account.
+
+- **An agent hook belongs to the `folio.exe` it names.** Until now Folio
+  recognised its own hook entries by a marker alone, so one copy removed
+  another's live hooks and an install silently replaced them. Ownership is now
+  read from the executable the entry names: Folio removes or refreshes an entry
+  naming this copy, removes one naming a `folio.exe` that no longer exists, and
+  leaves one naming another copy that is still there — taking that one over needs
+  a second, explicit press within thirty seconds, and the paths are named before
+  it happens. Only the operand's own file name says whether an entry is a Folio
+  at all, so a reader's own hook that happens to use the same words is a stranger
+  and stays; an entry Folio cannot decode is nobody's and has no say over the
+  entries beside it; and the bare `folio.exe` 0.4.2 wrote when it could not name
+  its own path names no copy, so it is removable rather than permanent. A
+  configuration path reached through a link is resolved once, at the top of the
+  operation, and only to a regular file inside the folder that path names — so a
+  machine whose `~/.claude` is a junction can install and uninstall like any
+  other, while a target outside the folder, a link to nothing, a hard link and a
+  read-only file are refused each with its own sentence, and the row says which
+  instead of reading Off over hooks that are firing. The entries are written in
+  each agent's direct-execution form, which also ends a quoting hazard on Windows
+  where a path containing `$` or a backtick was expanded by a shell. Folio
+  refuses to write a hook at all when it cannot say where its own executable is,
+  or when it is running translocated on macOS. Updating hooks may reformat that
+  agent's JSON settings; a dated backup is kept beside the file.
+
+- **The offer to switch the PowerShell integration on asks whether you already
+  have it, not whether Folio wrote it.** Two facts had been folded into one, and
+  the offer appeared in front of someone whose profile already loaded
+  `folio.ps1` by their own hand. A profile Folio never wrote to is no longer
+  claimed by Folio's record of where it has written.
+
+- **The window thread never asks a filesystem about a path a program printed.**
+  A hover resolved a reference by calling `symlink_metadata` and `is_dir` on the
+  thread that draws, three times per pointer move and uncached; a drive letter is
+  lexically local whatever it stands for, so a mapped network drive whose server
+  is gone — or a junction on a local disk into a dead share, which needs no
+  mapped drive at all — held the event loop for the redirector's own timeout,
+  re-armed on every motion over the cell. The pane's printed-path ledger is the
+  single owner of "is this a real, readable, local path" now, and the hover, the
+  press, the pointing finger and the glance card read it and call nothing; the
+  question itself is asked on a lane of its own that nobody waits on, so a stat
+  blocking inside SMB cannot starve the formulas and pictures on the decoration
+  queue. An unanswered name is not a link yet, which is the rhythm a bare printed
+  path has always had, and an `OSC 8` target is asked about on the pointer event
+  that meets it.
+
+- **On Windows the terminal names its own Chinese family, and the weight asked
+  for never changes it.** A chosen family with no bold cut keeps its regular face
+  rather than leaving for another family's bold, so one bold word in a line of
+  Chinese is no longer set in a different face. Which family owns a script is
+  read from the font's own `OS/2` declaration, with `cmap` block coverage where
+  it declares nothing, never from one sample character. Proportional text and
+  previews keep their own YaHei-first chain and now name their family too. Font
+  enumeration stays off the window thread.
+
+- **Three diagnostics lines are always on, and none of them contains typed
+  text.** A shown window that has owed a picture for longer than the threshold
+  and shown none writes one line. A minute in which file reading went over budget
+  with no input from you writes one line naming the lanes that read and the three
+  most re-read **basenames** — never a directory, never contents; the bounded
+  name table is cleared every minute. A composition that starts inside a live one
+  (`shape=restarted-inside-a-live-composition`) or ends without ever having
+  started (`shape=ended-without-a-start`) writes one line carrying the live
+  pre-edit's byte length and no text, at most 32 per window. `docs/PRIVACY.md`
+  says what may appear and advises reading it before attaching a log to an issue.
+
+- **`BT_IME_TRACE` no longer records composed or committed text.** It writes
+  event kinds, byte lengths, cursor ranges, rectangles, static reasons and
+  results, and a focused pane now records when an input method is active and has
+  not engaged. Older builds wrote the literal characters an input method
+  produced.
+
 ### Fixed
 
 - **A matrix an agent printed is set in the rows it was written in, in three
@@ -74,9 +241,15 @@ All notable changes to Folio are recorded here. The format follows
   What is repaired is repaired for the typesetter only; copying a formula, or
   showing its source, gives back the bytes the terminal received.
 
-- **Chinese terminal text no longer falls through to SimSun on Windows or
-  GB18030 Bitmap on macOS.** Folio now chooses the terminal grid's CJK face
-  explicitly from its platform chain.
+- **Folio names the family it draws Chinese with, instead of leaving the choice
+  to the font library.** The terminal gets a chain of its own, beginning with
+  **NSimSun** on Windows — the family the Windows terminal was measured already
+  resolving to in 0.4.2, reached by falling through the library's own search
+  rather than by being chosen; 0.4.3 makes it the decision, and Settings ▸
+  Terminal can name another family. Proportional text — headers, tab titles, the
+  files column, the preview — keeps its YaHei-first chain and now names it too,
+  so a header asking for a medium weight no longer falls through the library's
+  exact-weight filter to SimSun.
 
 - **Pasting a screenshot no longer makes Folio copy the same picture three
   times before it uses one of them.** A screenshot tool puts the same picture on
@@ -138,6 +311,156 @@ All notable changes to Folio are recorded here. The format follows
   needed one pattern rewritten before the pure-Rust regex engine Folio uses
   would take it. The rewritten line, what it was, and why it means the same
   thing are recorded in `assets/syntaxes/README.md`, beside the grammar itself.
+
+- **Folio no longer reads its installed PSReadLine module off disk on every turn
+  of the event loop.** Once a Windows PowerShell pane had reported its PSReadLine
+  version — or the Terminal settings page had been opened, which asks the same
+  question — the clock run's invitation check re-read the module from disk on
+  every turn, for the rest of the session, to answer a question the Settings row
+  asks once. The module is nine files and 437 KB; the reads come from the file
+  cache and were measured at about 100 MB a second, for as long as the window was
+  open, with nothing on screen or in the log to say why. **0.4.2 has this defect
+  too, and restarting Folio was the only relief.** The fact is now owned once by
+  the application rather than per window, and read at three edges: the moment the
+  version answer lands, an install or removal of the module, and the opening of
+  the Terminal page. A redraw or a hover on an already-open page is not an edge.
+  The rule this establishes is written down: a clock-run entry is a deadline or
+  an edge, never a poll, and a quiescent turn does no filesystem, registry,
+  PATH-search or process-start work.
+
+- **A frame a program held inside a synchronized update is no longer dropped,
+  and ending one keeps the sequence it interrupted.** Folio has two readers of
+  the instruction that opens a DEC 2026 block, and they disagreed on two
+  spellings of it: `CSI ? 1 ; 2026 h` and `CSI ? 2026 : 0 h` opened a block in
+  one and none in the other, so a window resized at that moment installed a grid
+  the held bytes had never reached — off the screen and off the history alike.
+  Both read every parameter now, and the first sub-parameter of each; an open
+  block ends on an exact byte match, because a parser holding one searches bytes
+  and reads no parameters at all. Separately, the deadline that closes a block a
+  program never ends used to throw away the escape sequence the boundary parser
+  was inside along with the block's own bytes, so the rest of that sequence's
+  payload was printed into the terminal as text. One function owns the release
+  now, and it never writes the flag that says a sequence is open.
+
+- **The key that redraws your prompt is sent only to a prompt the shell opened
+  in order.** `ESC[24;8~` is what `folio.ps1` binds `InvokePrompt` to, owed after
+  a ConPTY resize; whether a prompt was open was read from an `OSC 133` region,
+  which any program can open by printing one — a file through `cat`, a git author
+  name, a compromised motd. The next resize then wrote those seven bytes onto the
+  standard input of whatever was really running: `ssh`, `python`, an editor, an
+  agent's own display. The marks themselves stay permissive, deliberately, since
+  a program printing a whole cycle cannot be told from a nested shell speaking
+  the protocol; the order is checked once, where bytes leave for the child.
+  `shell_prompt_opened_in_order` asks for an open region, for the `B` to have
+  stood in a prompt an `A` opened, and for no command this session watched start
+  that it has not watched end. A nested integrated shell keeps its marks and is
+  not typed at while the command it runs inside is live.
+
+- **A printed path the disk refused is asked about again when the program prints
+  it again.** A denial used to stand until the pane's next `OSC 133 D`, and a
+  pane whose foreground program is one agent running for hours never ends a
+  command — so a file the agent named before writing it stayed dark for good,
+  including over the finished file. A denial is re-asked when a live row whose
+  fingerprint changed still spells the name; a repaint is not a printing, so an
+  unchanged row and a full-viewport redraw both cost nothing, no clock is
+  consulted, yeses are never re-asked, and a re-ask enters the same bounded
+  budgets by the same door.
+
+- **A name that is not there says "not found"**, where a reveal used to hand the
+  file manager a folder nobody had asked for — and on macOS to post nothing at
+  all. The routing table reads existence itself, so no arm can forget it, and the
+  press re-asks the question although the pane already holds an answer.
+
+- **A link under a resting pointer answers the first click.** The ledger's
+  question was put from pointer motion and nowhere else, so a path that arrived
+  by a wheel scroll or a fresh line of output, under a pointer already standing
+  on it, was never asked about: clicking it changed nothing, repeatably. One
+  function takes that question now and four doors ask through it — the pointer
+  move, the press going down, the hand-over modifier going down, and a frame
+  redrawn under a pointer standing still — with no filesystem call added to the
+  window thread to make it true.
+
+- **The Settings page is laid out when its content changes, not when the pointer
+  moves.** Every reader of the page's geometry in a turn — hit test, hover,
+  drawing, scroll clamp, the long menu's scroll-to-selected, the expansion clock
+  — laid the whole page out again, two or three times per pointer callback and
+  about 145 times in one turn. The geometry is a function of content, size, scale
+  and language, and it has one owner now that the readers share. Counted: opening
+  the page and moving the pointer across it 64 times went from 257 layouts to
+  one.
+
+- **A formula's two marks are placed from the frame being drawn, and stop when
+  the block lands.** They read the picture *before* the one being presented, so
+  during a change between a block's typeset picture and its source they trailed
+  the band by a frame and snapped into place when it landed. The band's own
+  geometry had a second fault at the same moment: its height and opacity were
+  interpolated while its width flipped in a single frame, so its ground and both
+  marks, which sit against the block's right edge, jumped sideways on the landing
+  frame of a shrink and the first frame of a grow — and the flight was settled
+  before that frame was composed, so it went on easing for another 90 ms after
+  the block had stopped. A window with no marks on screen now asks the picture
+  nothing at all.
+
+- **A focused pane is no longer sent a focus report it did not ask for.** Every
+  time a program turned focus reporting on, Folio reset what it believed the
+  program knew and sent an opening `CSI I`. ConPTY re-asserts focus reporting at
+  every program teardown and when the shell reads cooked input, so the byte
+  arrived at the prompt as a literal `^[[I`. A program that has just subscribed
+  already assumes the pane is focused; only the contrary is owed.
+
+- **A waiting card keeps the whole of its halo, and its dot breathes.** An outset
+  decoration grows from the card as drawn and is never clamped a second time; the
+  first card's top is the list's top exactly, so clamping the grown box had been
+  costing the waiting halo its entire top outset — 6 device pixels at 200% — on
+  every frame since the column existed, and the flight shadows were the same
+  shape. A decoration now grows only into the room its layout gives it, one
+  amount for all four sides, floored to whole device pixels, so a clamped card's
+  ring stays concentric and no scale that was already exact changed. The status
+  dot had never pulsed at all: the design page it was transcribed from names an
+  animation it never defines, and the transcription inherited the name without a
+  curve. It now takes the window's own 1.7-second breath, the one the halo uses;
+  reduced motion answers each channel's flat value — no halo, full dot.
+
+- **A zoomed pane's name is no longer printed under the zoom mark.** Three
+  functions owned "where the name starts" and only one of them knew about the
+  zoom, so a zoomed web pane set the first letter of its name in the same column
+  of pixels as the accent mark. The head is laid out once now, the mark is one of
+  its slots, and the name's left edge is derived from the slots actually present.
+  That pin caught an older overlap with it: a preview head with no room for a
+  name at all still placed the switcher and its badge under the tools.
+
+- **A preview pane too narrow for its switcher no longer swallows the keyboard.**
+  The layout folded the menu away while the window went on believing a popup was
+  up, so one press on the name of a pane dragged under about 262 logical pixels
+  ate every keystroke over a glass with nothing drawn on it. Each popup anchored
+  inside a pane has one answer to "would this draw anything" now, read by both
+  the layout and the window, so being drawn and taking the keyboard are the same
+  answer. Neither that menu nor the root menu folds for want of an anchor any
+  more: the switcher hangs from the name when the head wears no pill and the root
+  menu from the caption when the head carries no button, so the list of what the
+  preview has open stays reachable at every width, by pointer and by keyboard.
+
+- **A clipboard picture's shape is checked before it is decoded**, on the one
+  encoding that was not checking it. There is no TIFF decoder in this tree, so
+  the shape comes back out of the platform — the representation's own pixel
+  width, height and depth — and is judged by the same ceiling the PNG and DIB
+  arms use, and that judgement is the argument the decoding call is given. It
+  matters because an allocation failure inside AppKit ends the process rather
+  than returning an error, so a picture whose bytes are all there and whose real
+  shape is past the ceiling is now turned away instead of drawn at any cost.
+
+- **macOS: the loser of a two-launch race no longer keeps a window whose session
+  is discarded.** The data directory's claim is the single owner of "I am the
+  writer" and both of its endpoints are opened off it; ungated, the loser bound
+  the names first and the writer latched itself to nothing for the life of the
+  process, so every later launch landed in the window whose session writes go
+  nowhere. **And a preview goes to the last address it was given**, so an address
+  superseded by a later navigation is not replayed a round-trip later.
+
+- **An italic request on an upright-only CJK family stays italic.** Writing the
+  matched face's style back turned an italic request into Normal, so the
+  synthetic slant was never applied: italic Chinese in the terminal, and
+  `*emphasis*` in a preview, drew upright.
 
 
 ## 0.4.2-preview — 2026-09-18
