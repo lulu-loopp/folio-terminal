@@ -87,8 +87,11 @@ Hidden/Archive/System flags before and after replacement (ReplaceFileW sets
 Archive even when it was clear). If restoring flags fails, the original object
 is restored from the recovery sibling; if rollback also fails, its path is
 reported and retained. The same recovery sibling also retains the original
-object if the native operation fails after moving it. Unix copies uid,
-gid and mode before rename, refusing if any preservation step fails. New files
+object if the native operation fails after moving it. Unix carries uid, gid,
+mode and every extended attribute (quarantine, Finder tags, `user.*`) onto the
+replacement before the rename; handing a file to another user is a privileged
+call, so a refused `chown` leaves the replacement this process's rather than
+failing a write, and an attribute that cannot be set is skipped. New files
 use ordinary `atomic_write`. Hard-linked files (`nlink > 1`), symlinks/reparse
 points (including ancestors), read-only/locked files and unsupported encodings
 are refused. A concurrent external path replacement is still a narrow race;

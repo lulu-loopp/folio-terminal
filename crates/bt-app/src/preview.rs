@@ -5732,7 +5732,8 @@ impl PreviewBuffer {
     ///   (ruling 8⑨). **Not a prompt and not a blind write** — this slice's
     ///   minimum is that the window says so and keeps the edits, because the
     ///   one unrecoverable outcome is overwriting a change nobody has seen.
-    /// * The write itself is atomic ([`bt_persist::atomic_write`]).
+    /// * The write itself is atomic
+    ///   ([`bt_persist::atomic_replace_keeping_metadata`]).
     ///
     /// **In the encoding the file was read in, mark included** (T2 ①,
     /// 2026-09-10). See [`Self::encoding`] for the defect this pays: the body is
@@ -5747,11 +5748,24 @@ impl PreviewBuffer {
     /// in this window, the PowerShell profile among them. One algorithm, one
     /// place to fix.
     ///
-    /// **Two gaps stay open and are named rather than papered over**: neither
-    /// writer clears a read-only or hidden attribute on the target, and neither
-    /// asks whether the target is a symlink — a rename replaces the link, not
-    /// what it points at, which is the question the read side asks with
-    /// `may_read_unasked_through_links` and the write side still does not.
+    /// **And it replaces the content and nothing else the file carried**
+    /// (audit 3 F-1, 2026-09-20). This is the reader's own document: it can
+    /// carry alternate data streams — `Zone.Identifier`, the Mark of the Web —
+    /// an explicit DACL, hidden and system attributes, a mode, an owner and
+    /// extended attributes, and a `File::create` plus a rename kept none of it,
+    /// so saving a downloaded note quietly de-quarantined it.
+    /// [`bt_persist::atomic_replace_keeping_metadata`] carries what the file the
+    /// save replaces was carrying, and that function documents which arm a file
+    /// takes and why.
+    ///
+    /// **Three gaps stay open and are named rather than papered over**: neither
+    /// writer clears a read-only or hidden attribute on the target (a read-only
+    /// file is refused by Windows and the refusal is reported), and neither asks
+    /// whether the target is a symlink — a rename replaces the link, not what it
+    /// points at, which is the question the read side asks with
+    /// `may_read_unasked_through_links` and the write side still does not. A
+    /// hard-linked file is the third: the save lands on this name and the other
+    /// name keeps the old bytes, as it always has, and nobody has ruled it.
     ///
     /// The mtime is re-read from the file that was just written rather than
     /// remembered from the write, so the next save compares against what the
@@ -5766,7 +5780,9 @@ impl PreviewBuffer {
         if file_mtime(&path) != self.disk_mtime {
             return SaveOutcome::Conflict;
         }
-        if let Err(error) = bt_persist::atomic_write(&path, &self.encoding.encode(content)) {
+        if let Err(error) =
+            bt_persist::atomic_replace_keeping_metadata(&path, &self.encoding.encode(content))
+        {
             return SaveOutcome::Failed(error.to_string());
         }
         self.disk_mtime = file_mtime(&path);
@@ -12410,6 +12426,216 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(on_disk(&buffer)).unwrap(),
             "as it was read\nand as it was edited\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hidden, streamed, explicitly-ACL'd fixture of the file a reader
+    /// downloads and then edits, with the buffer already reading it and its
+    /// stamp taken *after* the metadata was put on — writing a stream moves the
+    /// file's modified time, and a save that then reported `Conflict` would be
+    /// testing the fixture rather than the writer.
+    #[cfg(windows)]
+    fn downloaded(dir: &Path, name: &str, body: &str) -> (PreviewBuffer, PathBuf) {
+        let mut buffer = opened(dir, name, body);
+        let path = on_disk(&buffer).to_path_buf();
+        std::fs::write(dir.join(format!("{name}:Zone.Identifier")), ZONE).unwrap();
+        // Everyone:(R) by SID, so the fixture does not depend on what this
+        // machine's Windows calls its accounts. It grants, never denies: the
+        // save must still be able to write the file it is asserting about.
+        let granted = bt_platform::quiet_command("icacls")
+            .arg(&path)
+            .args(["/grant", "*S-1-1-0:(R)"])
+            .output();
+        assert!(
+            granted.is_ok_and(|done| done.status.success()),
+            "the fixture's explicit ACE was not set"
+        );
+        // Hidden + Archive: the two an ordinary user can set and the two the
+        // preserving replacement has to put back by hand.
+        bt_platform::set_file_attributes(&path, 0x2 | 0x20).unwrap();
+        buffer.disk_mtime = file_mtime(&path);
+        (buffer, path)
+    }
+
+    #[cfg(windows)]
+    const ZONE: &str = "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.com/notes.md\r\n";
+
+    #[cfg(windows)]
+    fn access_control(path: &Path) -> String {
+        let listed = bt_platform::quiet_command("icacls")
+            .arg(path)
+            .output()
+            .expect("icacls runs");
+        String::from_utf8_lossy(&listed.stdout).into_owned()
+    }
+
+    /// RED (audit 3, F-1) — **a save replaces the content and nothing else the
+    /// file carried.**
+    ///
+    /// The document belongs to the reader, not to this product. A
+    /// `File::create` of a sibling and a rename over the name makes a *new file
+    /// object* and throws the old one away with everything on it: the alternate
+    /// data streams (`Zone.Identifier` — the Mark of the Web, which is what
+    /// SmartScreen and Office read before they trust a file), every access
+    /// control entry set on the file itself rather than inherited from the
+    /// folder, and the attribute word. Editing one line of a downloaded note
+    /// silently de-quarantined it.
+    ///
+    /// Red gate: put `bt_persist::atomic_write(&path, …)` back in
+    /// [`PreviewBuffer::save`] and the stream is gone, the explicit ACE is gone
+    /// and the hidden bit is gone — three assertions, one cause.
+    #[cfg(windows)]
+    #[test]
+    fn a_save_keeps_the_stream_the_ace_and_the_attributes_the_file_carried() {
+        use std::os::windows::fs::MetadataExt;
+        let dir = scratch("carried");
+        let (mut buffer, path) = downloaded(&dir, "notes.md", "# downloaded\n");
+        assert!(
+            access_control(&path).contains("Everyone:(R)"),
+            "the fixture starts with an explicit entry"
+        );
+
+        buffer.edit_content(|content| {
+            content.push_str("and edited here\n");
+            true
+        });
+        assert_eq!(buffer.save(), SaveOutcome::Saved);
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# downloaded\nand edited here\n",
+            "the content is the only thing a save replaces"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.md:Zone.Identifier")).unwrap(),
+            ZONE,
+            "the mark of the web is still on the file the reader edited"
+        );
+        assert!(
+            access_control(&path).contains("Everyone:(R)"),
+            "and the entry somebody set on this file by hand"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().file_attributes() & 0x2,
+            0x2,
+            "and the hidden bit it was carrying"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "and neither the staging file nor the replacement's backup is left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A document with a second name still saves** (audit 3, F-1).
+    ///
+    /// The preserving replacement refuses a hard-linked target — the right
+    /// answer for `$PROFILE`, where a refusal is a message and nothing is lost.
+    /// Here it would turn a working save into a failed one, so the file keeps
+    /// the writer it has always had: the save lands under this name and the
+    /// other name goes on holding the bytes it held. **That silent break is
+    /// today's behaviour and nobody has ruled on it**; this test is what would
+    /// have to be rewritten, deliberately, by whoever does.
+    ///
+    /// Red gate: route the save at `atomic_replace_preserving` and the outcome
+    /// is `Failed` with the reader's edits stuck in the window.
+    #[test]
+    fn a_hard_linked_document_still_saves_and_the_other_name_keeps_its_bytes() {
+        let dir = scratch("linked");
+        let mut buffer = opened(&dir, "notes.md", "as it was\n");
+        let path = on_disk(&buffer).to_path_buf();
+        let linked = dir.join("dotfiles-notes.md");
+        std::fs::hard_link(&path, &linked).unwrap();
+        buffer.disk_mtime = file_mtime(&path);
+
+        buffer.edit_content(|content| {
+            content.push_str("and as it is now\n");
+            true
+        });
+        assert_eq!(buffer.save(), SaveOutcome::Saved, "the save still lands");
+        assert!(!buffer.dirty);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "as it was\nand as it is now\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&linked).unwrap(),
+            "as it was\n",
+            "the second name kept the old object, exactly as it did before"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            2,
+            "and nothing was staged into the folder and left there"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A refusal is still a refusal, and it costs the file nothing** (audit 3,
+    /// F-1). Two of them, because the writer now opens the target before it
+    /// writes and both of these answer that open differently: a read-only file
+    /// refuses the replace at the end, and a file another program holds with no
+    /// sharing at all refuses the open at the start. Either way the outcome is
+    /// `Failed`, the buffer keeps the edits, and everything the file carried —
+    /// its bytes and its stream — is exactly where it was.
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_or_locked_file_is_refused_and_loses_nothing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = scratch("refused");
+        let (mut buffer, path) = downloaded(&dir, "notes.md", "not yours to change\n");
+        buffer.edit_content(|content| {
+            content.push_str("mine now\n");
+            true
+        });
+
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert!(
+            matches!(buffer.save(), SaveOutcome::Failed(_)),
+            "a read-only file is not written over"
+        );
+        // Back to the fixture's own word — hidden and archive, and no
+        // read-only bit — through the native call rather than through
+        // `set_readonly(false)`, which means "world writable" one platform over.
+        bt_platform::set_file_attributes(&path, 0x2 | 0x20).unwrap();
+
+        // No sharing at all: what an editor that opened the file exclusively
+        // leaves the rest of the machine looking at.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("this test's own exclusive handle");
+        // Either refusal is a refusal that keeps the file: a lock that also
+        // hides the file's stamp is answered by the conflict check before the
+        // writer is reached, and one that does not is answered by the writer.
+        assert!(
+            matches!(
+                buffer.save(),
+                SaveOutcome::Conflict | SaveOutcome::Failed(_)
+            ),
+            "and neither is one somebody else is holding"
+        );
+        drop(held);
+
+        assert!(buffer.dirty, "the reader's edits are still in the window");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "not yours to change\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.md:Zone.Identifier")).unwrap(),
+            ZONE,
+            "and a refused save took nothing off the file"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "and staged nothing into the folder"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

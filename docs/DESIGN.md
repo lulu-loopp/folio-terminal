@@ -11219,3 +11219,10 @@ The replay tail carries two facts: the bytes a DEC 2026 block holds back, and th
 Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
 One function owns that release, and it never writes `parser_sequence_open` — the boundary parser alone says whether a sequence is open.
 The deadline arm used to clear both, so a resize seeded the canonical fork at Ground and printed the rest of an escape payload onto the grid.
+
+### 2026-09-20 — A save replaces the content and keeps what the file carried
+The preview editor writes a user document, so its save replaces the bytes and nothing else the file was carrying.
+Windows carries alternate data streams (Zone.Identifier), the DACL, creation time and the attribute word through ReplaceFileW; Unix carries ownership, mode and every extended attribute (quarantine, Finder tags, user.*) onto the replacement before the rename.
+This extends 7.1.3v ruling 4, which named only read-only/hidden attributes and symlinks, to everything else the object carried; the symlink gap stands, and a symlinked or unopenable name keeps the plain writer.
+A hard-linked target keeps the plain writer too and its second name still silently keeps the old bytes: the preserving replacement refuses such targets, and refusing a save nobody has ruled unsaveable would be worse than the break. Unruled, awaiting the owner.
+A replacement is never given the read-only bit before it is committed: a read-only file cannot be replaced at all, and a read-only staging file is one the failure path can no longer delete.

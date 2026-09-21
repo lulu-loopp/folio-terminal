@@ -57,6 +57,66 @@ pub fn atomic_replace_preserving(path: &Path, contents: &[u8]) -> Result<(), Wri
     })
 }
 
+/// **A save replaces a file's content and nothing else the file carried**
+/// (audit 3 F-1, 2026-09-20). The file on the other end of this call is the
+/// reader's own document, not one of ours: it can carry alternate data streams
+/// (`Zone.Identifier` among them), an explicit DACL, hidden and system
+/// attributes, a mode, an owner and extended attributes — quarantine and Finder
+/// tags on macOS — and none of that belongs to the bytes being replaced.
+///
+/// Which replacement a file can take is decided by what the file is, and the
+/// rule is *carry as much as this file allows*, never *refuse the save*:
+///
+/// * One name, not a symlink, and openable → [`atomic_replace_preserving`],
+///   which on Windows is `ReplaceFileW` (streams, DACL, creation time, object
+///   id, compression, encryption) and on Unix carries ownership, mode and every
+///   extended attribute onto the replacement before the rename.
+/// * More than one name — a hard link — → the writer this product has always
+///   used, carrying what a rename can carry. **Breaking the other name is
+///   today's behaviour and this is not the ticket that changes it**: the
+///   preserving replacement refuses a hard-linked target, and a refusal would
+///   turn a working save into a failed one for anybody whose notes are linked
+///   into a dotfiles tree. Unruled, and named as such.
+/// * A symlink → the same writer, for the same reason: a rename replaces the
+///   link rather than what it points at, which is the gap `docs/DESIGN.md`
+///   7.1.3v ④ already names, and `ReplaceFileW` has no documented answer for a
+///   reparse point that could be relied on without a Windows to try it on.
+/// * A file this process cannot even open → the same writer. A replacement
+///   whose metadata cannot be read is one that cannot be carried, and a save
+///   that used to land must not start failing because of what it could not copy.
+pub fn atomic_replace_keeping_metadata(path: &Path, contents: &[u8]) -> Result<(), WriteError> {
+    if can_be_preserved(path) {
+        atomic_replace_preserving(path, contents)
+    } else {
+        atomic_write_carrying(path, contents)
+    }
+}
+
+/// Can this file take the preserving replacement? One name, and its own name is
+/// not a link to somebody else's file. Anything this cannot establish answers
+/// no, because what it cannot establish it cannot preserve.
+fn can_be_preserved(path: &Path) -> bool {
+    let single_link = File::open(path)
+        .and_then(|file| bt_platform::file_link_count(&file))
+        .is_ok_and(|links| links == 1);
+    let own_name = fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_symlink());
+    single_link && own_name
+}
+
+/// [`atomic_write`] plus everything a rename *can* bring across: the attribute
+/// word on Windows, ownership, mode and extended attributes on Unix. The
+/// carrying is best effort — what fails here is exactly what this writer has
+/// always lost, and a document must not become unsaveable over it.
+fn atomic_write_carrying(path: &Path, contents: &[u8]) -> Result<(), WriteError> {
+    let tmp_path = temp_sibling_path(path)?;
+    write_temp(&tmp_path, contents).map_err(|source| WriteError::Io {
+        path: tmp_path.clone(),
+        source,
+    })?;
+    let _ = bt_platform::carry_metadata(&tmp_path, path);
+    commit_rename(&tmp_path, path)
+}
+
 /// Step 1: write `contents` into `tmp_path` and `fsync` it. Does not touch
 /// the eventual target file at all — this is the step that can fail without
 /// endangering any existing file.
@@ -154,6 +214,63 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"after");
         assert_eq!(fs::read(&linked).unwrap(), b"after");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// RED (audit 3, F-1) — **a hard-linked document still saves.**
+    ///
+    /// [`atomic_replace_preserving`] refuses a target with a second name, and
+    /// the editor's save must not inherit that refusal: nobody has ruled that a
+    /// linked file is unsaveable, and today's behaviour — the save lands and the
+    /// other name silently keeps the old bytes — is the behaviour this pins
+    /// until somebody does rule. What *is* new on this arm is that the metadata
+    /// a rename can carry is carried.
+    ///
+    /// Red gate: route [`atomic_replace_keeping_metadata`] straight at
+    /// [`atomic_replace_preserving`] and the first assertion is an `Err`.
+    #[test]
+    fn a_hard_linked_target_saves_the_way_it_always_has() {
+        let dir = std::env::temp_dir().join(format!("bt-keeping-linked-{}", unique_suffix()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("notes.md");
+        fs::write(&target, b"before").unwrap();
+        let linked = dir.join("dotfiles-notes.md");
+        fs::hard_link(&target, &linked).unwrap();
+
+        atomic_replace_keeping_metadata(&target, b"after").unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"after", "the save landed");
+        assert_eq!(
+            fs::read(&linked).unwrap(),
+            b"before",
+            "and the other name kept the bytes it had — the link is broken, as it always was"
+        );
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            2,
+            "no staging or recovery file survives the write"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The ordinary file — one name, not a link — takes the preserving arm, and
+    /// the arm leaves nothing beside the file it replaced.
+    #[test]
+    fn a_single_named_file_takes_the_preserving_arm_and_leaves_nothing_beside_it() {
+        let dir = std::env::temp_dir().join(format!("bt-keeping-plain-{}", unique_suffix()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("notes.md");
+        fs::write(&target, b"before").unwrap();
+        assert!(can_be_preserved(&target), "one name, and it is its own");
+
+        atomic_replace_keeping_metadata(&target, b"after").unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"after");
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "one entry, and it is the file that was saved"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
