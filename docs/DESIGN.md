@@ -11213,3 +11213,10 @@ A clock-run entry is a deadline or an edge, never a poll; quiescent turns do no 
 In 0.4.2 an older Folio PSReadLine copy caused the clock run to reread the 41 KB Changes.txt on every turn after the probe answered.
 The App owns one optional installed-copy fact, read on the unread probe edge, successful install/removal, and each Terminal-page opening.
 First-run availability reads ProfilePrograms; card construction consumes one ready edge, rearmed by profile changes or an answered card.
+
+### 2026-09-20 — A name printed again is asked about again
+A printed path answered "no" used to stand until `OSC 133 D`, so a pane running one hours-long agent kept every denial for ever.
+The owner photographed the cost on next83: the agent named a file before writing it, then named it again over the finished file, dark.
+A denial is now re-asked when the program prints the name anew — a live row whose fingerprint changed and still spells it (`paths_named_on_freshly_printed_rows`).
+Repaint is not printing: an unchanged row bumps no revision, so a still screen and a full-viewport TUI redraw both cost zero questions, and no clock is consulted.
+Yeses are never re-asked, the command-boundary expiry stays, a reflow marks itself read, and a re-ask enters the same 256/512/4096 budgets by the same door.
