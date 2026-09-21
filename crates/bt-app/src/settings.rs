@@ -17414,7 +17414,7 @@ mod tests {
     /// read off this machine, so their length is a fact about the machine rather
     /// than about the copy. What is held here instead is the entry each of them
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 23] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 24] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -17493,10 +17493,12 @@ mod tests {
                 Text::DescExplorerFirstPageAwaitingShell,
                 Windows,
             ),
-            // The two PSReadLine states that are an entry rather than a composed
-            // line. See this constant's own note for the four that are not.
+            // The three PSReadLine states that are an entry rather than a
+            // composed line. See this constant's own note for the four that are
+            // not.
             (SettingsRow::PsReadLine, Text::PsReadLineProbing, Windows),
             (SettingsRow::PsReadLine, Text::PsReadLineRowGone, Windows),
+            (SettingsRow::PsReadLine, Text::PsReadLineRowNotOurs, Windows),
             // The sentence with no version in it, for the row above's reason.
             (SettingsRow::UpdateCheck, Text::DescUpdateCheck, Windows),
             // The Mac columns. `LaunchOpens`, `TurnEndNotifications`,
