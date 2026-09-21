@@ -2737,12 +2737,14 @@ impl PrintedPathLinks {
     /// The `file:` links one logical line of text offers, and — into `unknown` — every path it
     /// names that nobody has been asked about yet.
     ///
-    /// Ranges come back in reading order and never overlap: the three spellings are held off each
-    /// other by their own boundary rules (a URI's embedded `D:/…` and a native path's `\.\` are both
-    /// preceded by a path character, and [`is_relative_reference`] refuses anything carrying a `:`),
-    /// so no two of them can claim the same text. The several readings one seam-bearing token
-    /// offers (§7.30) do share text, and at most one of them ever becomes a link — which is what
-    /// the walk below is: one token, one answer.
+    /// Ranges come back in reading order. The three spellings are held off each other by their
+    /// own boundary rules (a URI's embedded `D:/…` and a native path's `\.\` are both preceded by
+    /// a path character, and [`is_relative_reference`] refuses anything carrying a `:`), so no two
+    /// of them can claim the same text — with one exception since the 2026-09-21 entry of §7.30: a
+    /// rooted reading that was read across a space may span a bare relative one behind that space,
+    /// and the viewport's own guard is what keeps two links from being drawn on one text. The
+    /// several readings one seam-bearing token offers (§7.30) do share text, and at most one of
+    /// them ever becomes a link — which is what the walk below is: one token, one answer.
     pub fn links_in(
         &self,
         text: &str,

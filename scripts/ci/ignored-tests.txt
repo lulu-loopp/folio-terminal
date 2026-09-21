@@ -10,7 +10,7 @@
 #     cargo test --workspace --locked -- --ignored --list
 #
 # Why any of them are ignored at all — the policy this list exists to state.
-# Thirty of the thirty-three are **probes**, not regressions:
+# All but a few of these are **probes**, not regressions:
 #
 #   * nineteen in `bt-pty` drive real ConPTY sessions against a real PowerShell
 #     and read what comes back. Their assertions are about host timing and about
@@ -52,7 +52,7 @@
 #     probes ask. Run it with
 #     `cargo test -p bt-platform -- --ignored --nocapture`.
 #
-# The thirty-first is neither a probe nor a regression: it is a **writer**, like
+# One is neither a probe nor a regression: it is a **writer**, like
 # the symbol sheet above it. `highlight::tests::regenerate_the_powershell_packdump`
 # rebuilds `assets/syntaxes/PowerShell.packdump` from the `.sublime-syntax`
 # beside it, and it is ignored because a test that writes into the source tree
