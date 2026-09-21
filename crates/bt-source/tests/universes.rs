@@ -30,16 +30,18 @@ fn roots(universe: &Universe) -> Vec<String> {
 /// property a per-crate module graph would have thrown away.
 ///
 /// A library's module graph does not contain its binary targets, and
-/// `crates/bt-pty/src/bin/bt-conpty-width-probe.rs` is the one the plan's §8.1
-/// is written about: it links against the package's normal dependencies and is
-/// invisible to a walk that starts at `lib.rs`.
+/// `crates/bt-corpus/src/bin/bt-conpty-width-probe.rs` is the one the plan's
+/// §8.1 is written about: it links against the package's normal dependencies and
+/// is invisible to a walk that starts at `lib.rs`. It was `bt-pty`'s until P21
+/// moved it to the tools crate, and that move is exactly the file-set diff this
+/// test exists to make visible — the probe left one package and joined another.
 #[test]
 fn the_stand_in_universe_reaches_the_binary_targets() {
     let workspace = workspace();
     let universe = universes::stand_in_windows(&workspace).expect("the crates tree");
     let named = roots(&universe);
     assert!(
-        named.contains(&"bt-pty:bin:bt-conpty-width-probe".to_owned()),
+        named.contains(&"bt-corpus:bin:bt-conpty-width-probe".to_owned()),
         "a `src/bin/` target is part of this universe: {named:#?}"
     );
     assert!(named.contains(&"bt-app:bin:folio".to_owned()));
@@ -66,7 +68,7 @@ fn the_quiet_door_universe_stops_at_the_bin_directory() {
     let wide = roots(&universes::stand_in_windows(&workspace).expect("the crates tree"));
     let universe = universes::quiet_doors(&workspace).expect("the crates tree");
     let named = roots(&universe);
-    assert!(!named.contains(&"bt-pty:bin:bt-conpty-width-probe".to_owned()));
+    assert!(!named.contains(&"bt-corpus:bin:bt-conpty-width-probe".to_owned()));
     assert!(named.contains(&"bt-app:bin:folio".to_owned()), "{named:#?}");
     let lost: Vec<&String> = wide.iter().filter(|name| !named.contains(name)).collect();
     assert!(

@@ -7,14 +7,14 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-bt-term = { path = "../bt-term" }
 bt-transcript = { path = "../bt-transcript" }
 portable-pty.workspace = true
 thiserror.workspace = true
 
-# `tests/` links against this crate and its dev-dependencies only, so the terminal
-# an integration test has to put in front of a real ConPTY has to be named again
-# here even though the library already depends on it.
+# A transport does not depend on terminal policy: no code this crate ships names
+# `bt_term`. A terminal is only ever the thing a *test* puts in front of a real
+# ConPTY to read back what the transport carried — the unit tests in `lib.rs` and
+# the integration tests in `tests/`, both of which see dev-dependencies.
 [dev-dependencies]
 bt-term = { path = "../bt-term" }
 

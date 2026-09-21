@@ -300,6 +300,7 @@ dependencies = [
  "bt-pty",
  "bt-render",
  "bt-term",
+ "bt-transcript",
  "bt-viewport",
  "pollster",
  "portable-pty",

@@ -8,8 +8,8 @@
 //!
 //! **A package is more than its library's module graph** (plan §3.1, §8.1). A
 //! `src/bin/` target is compiled and linked and is invisible to a walk that
-//! starts at `lib.rs`; `crates/bt-pty/src/bin/bt-conpty-width-probe.rs` is the
-//! instance that made the point, and the guard
+//! starts at `lib.rs`; `crates/bt-corpus/src/bin/bt-conpty-width-probe.rs` is
+//! the instance that made the point, and the guard
 //! `bt_platform::native_window_door_tests::a_stand_in_window_is_only_named_by_tests`
 //! covers those targets today because its walk happens to reach them. So the
 //! three target kinds this crate knows are the three a source guard can care
