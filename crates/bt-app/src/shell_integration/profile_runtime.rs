@@ -50,7 +50,7 @@ pub fn begin_startup_migration() {
                 "powershell-profile-migration",
                 bt_platform::ThreadPriority::BelowNormal,
                 move || {
-                    let report = operate(&data, Action::Migrate);
+                    let report = operate(&data, Asker::InApp, Action::Migrate);
                     for refusal in report.refusals() {
                         eprintln!(
                             "BT_SHELL_PROFILE {}: {}",
@@ -115,28 +115,66 @@ fn candidates(marks: &Marks) -> (Vec<PathBuf>, Report) {
 
 /// Public for T-C1: one account operation, no GUI/settings/handoff, partial
 /// results retained. Call on its cleanup worker or early CLI path.
-pub fn remove_shell_integration() -> Report {
-    operate(&persist::storage_dir(), Action::Remove)
+///
+/// `asker` says which of the two this run is: the Settings row's own worker
+/// inside a running Folio, or somebody at a command line in a process of their
+/// own. See [`Asker`].
+pub fn remove_shell_integration(asker: Asker) -> Report {
+    operate(&persist::storage_dir(), asker, Action::Remove)
 }
 
 /// The cleanup door supplies its resolved data root without triggering storage migration.
 /// An explicit profile set replaces historical and probed paths, just like the sandbox env door.
 pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) -> Report {
-    operate_with(data, Action::Remove, Ok(MANAGED_LINE), |marks| {
-        profiles.map_or_else(
-            || candidates(marks),
-            |paths| (paths.to_vec(), Report::default()),
-        )
-    })
+    // A door, by the name on it: this is `--uninstall-cleanup`'s road, and it has
+    // already refused if a Folio is running. Only a run that will ask the machine
+    // where its profiles are pays for asking.
+    if profiles.is_none() {
+        warm_profile_answers();
+    }
+    operate_with(
+        data,
+        Asker::Door,
+        Action::Remove,
+        Ok(MANAGED_LINE),
+        |marks| {
+            profiles.map_or_else(
+                || candidates(marks),
+                |paths| (paths.to_vec(), Report::default()),
+            )
+        },
+    )
 }
 
-fn operate(data: &Path, action: Action) -> Report {
+/// **Ask the machine its slow question before the record is locked.**
+///
+/// [`candidates`] asks each installed PowerShell where its own `$PROFILE` is,
+/// and that answer costs a child process with a five-second deadline apiece.
+/// Asked where it used to be asked — inside [`operate_with`], under the lock —
+/// one of Folio's own writers could hold the record for ten seconds while two
+/// shells started, which is the difference between a turn worth waiting for and
+/// a wait nobody can be asked to make on a window thread. The answer is a
+/// property of the installation and not of the record, and
+/// `cached_profile_answer` keeps it for the life of the process, so asking it
+/// here leaves `candidates` reading a cache it would have filled anyway.
+fn warm_profile_answers() {
+    // The sandbox door replaces the whole candidate set, so no shell is asked.
+    if std::env::var_os("BT_POWERSHELL_PROFILE").is_some() {
+        return;
+    }
+    for program in installed_powershells() {
+        let _ = cached_profile_answer(&program);
+    }
+}
+
+fn operate(data: &Path, asker: Asker, action: Action) -> Report {
     let managed = if action == Action::Remove {
         Ok(MANAGED_LINE)
     } else {
         account_managed_line(data)
     };
-    operate_with(data, action, managed, |marks| {
+    warm_profile_answers();
+    operate_with(data, asker, action, managed, |marks| {
         // This closure is reached only while enabled, under the same account lock
         // as removal. Off cannot race a late script repair.
         if action == Action::Migrate && std::env::var_os("BT_POWERSHELL_PROFILE").is_none() {
@@ -148,6 +186,7 @@ fn operate(data: &Path, action: Action) -> Report {
 
 fn operate_with(
     data: &Path,
+    asker: Asker,
     action: Action,
     managed: io::Result<&'static str>,
     discover: impl FnOnce(&Marks) -> (Vec<PathBuf>, Report),
@@ -164,7 +203,7 @@ fn operate_with(
     // the run reads the default record and writes nothing — the root is still absent
     // afterwards. Discovery and removal still run: a `$PROFILE` line outlives the data
     // folder, and an account that never had one simply has nothing to report.
-    let _lock = match lock_existing(data) {
+    let _lock = match lock_existing(data, asker) {
         Ok(lock) => lock,
         Err(e) => return refused_record(e),
     };
@@ -232,7 +271,7 @@ pub fn install_recorded(
 ) -> io::Result<ProfileWrite> {
     let profile = std::path::absolute(profile)?;
     let script = std::path::absolute(script)?;
-    let _lock = lock(data)?;
+    let _lock = lock(data, Asker::InApp)?;
     let mut marks = Marks::read(data)?;
     marks.powershell_state = PowerShellState::Enabled {};
     marks.remember(&profile, &script);
@@ -255,7 +294,7 @@ pub fn install_recorded(
 }
 
 fn enable_record(data: &Path) -> io::Result<()> {
-    let _lock = lock(data)?;
+    let _lock = lock(data, Asker::InApp)?;
     let mut marks = Marks::read(data)?;
     marks.powershell_state = PowerShellState::Enabled {};
     marks.write(data)
@@ -290,7 +329,7 @@ pub fn begin_removal() {
         "powershell-profile-removal",
         bt_platform::ThreadPriority::BelowNormal,
         || {
-            let report = remove_shell_integration();
+            let report = remove_shell_integration(Asker::InApp);
             if let Ok(mut outcome) = REMOVAL.lock() {
                 *outcome = Some(report);
             }
@@ -391,9 +430,13 @@ mod tests {
         old.remember(&profile, &script_at(&root));
         old.write(&root).unwrap();
         assert!(!Marks::read(&root).unwrap().is_off());
-        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |marks| {
-            (marks.powershell_profiles.clone(), Report::default())
-        });
+        let report = operate_with(
+            &root,
+            Asker::InApp,
+            Action::Remove,
+            Ok(MANAGED_LINE),
+            |marks| (marks.powershell_profiles.clone(), Report::default()),
+        );
         assert_eq!(report.exit_code(), 0);
         assert_eq!(fs::read(&profile).unwrap(), original);
         assert!(report.text(false).is_empty());
@@ -418,9 +461,13 @@ mod tests {
         let profile = root.join("profile.ps1");
         let original = b". 'D:\\x\\folio.ps1'\r\n";
         fs::write(&profile, original).unwrap();
-        let report = operate_with(&root, Action::Migrate, Ok(MANAGED_LINE), |_| {
-            (vec![profile.clone()], Report::default())
-        });
+        let report = operate_with(
+            &root,
+            Asker::InApp,
+            Action::Migrate,
+            Ok(MANAGED_LINE),
+            |_| (vec![profile.clone()], Report::default()),
+        );
         assert_eq!(report.exit_code(), 0);
         assert_eq!(report.files[0].fate, Fate::Unchanged);
         assert_eq!(fs::read(&profile).unwrap(), original);
@@ -434,9 +481,13 @@ mod tests {
         let profile = root.join("profile.ps1");
         let original = b". 'D:\\x\\folio.ps1'\r\n";
         fs::write(&profile, original).unwrap();
-        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |_| {
-            (vec![profile.clone()], Report::default())
-        });
+        let report = operate_with(
+            &root,
+            Asker::InApp,
+            Action::Remove,
+            Ok(MANAGED_LINE),
+            |_| (vec![profile.clone()], Report::default()),
+        );
         assert_eq!(report.exit_code(), 0);
         assert_eq!(report.files[0].fate, Fate::Unchanged);
         assert_eq!(fs::read(&profile).unwrap(), original);
@@ -464,6 +515,7 @@ mod tests {
         .unwrap();
         let report = operate_with(
             &data,
+            Asker::InApp,
             Action::Migrate,
             managed_line_for(&data, &root),
             |_| (vec![profile.clone()], Report::default()),
@@ -483,14 +535,22 @@ mod tests {
         let root = super::super::tests::temp_dir("followup-off");
         let profile = root.join("profile.ps1");
         fs::write(&profile, LEGACY_LINE).unwrap();
-        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |_| {
-            (vec![profile.clone()], Report::default())
-        });
+        let report = operate_with(
+            &root,
+            Asker::InApp,
+            Action::Remove,
+            Ok(MANAGED_LINE),
+            |_| (vec![profile.clone()], Report::default()),
+        );
         assert_eq!(report.exit_code(), 0);
         let before = fs::read(root.join(RECORD_FILE)).unwrap();
-        let report = operate_with(&root, Action::Migrate, Ok(MANAGED_LINE), |_| {
-            panic!("off must not probe")
-        });
+        let report = operate_with(
+            &root,
+            Asker::InApp,
+            Action::Migrate,
+            Ok(MANAGED_LINE),
+            |_| panic!("off must not probe"),
+        );
         assert_eq!(report.exit_code(), 0);
         assert_eq!(fs::read(root.join(RECORD_FILE)).unwrap(), before);
         let record: serde_json::Value = serde_json::from_slice(&before).unwrap();
@@ -511,19 +571,29 @@ mod tests {
         let script = script_at(&root);
         fs::create_dir_all(script.parent().unwrap()).unwrap();
         fs::write(&script, "user's existing script").unwrap();
-        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |_| {
-            (vec![], Report::default())
-        });
+        let report = operate_with(
+            &root,
+            Asker::InApp,
+            Action::Remove,
+            Ok(MANAGED_LINE),
+            |_| (vec![], Report::default()),
+        );
         assert_eq!(report.exit_code(), 0);
         for _ in 0..3 {
             let mut probes = 0;
             let mut writes = 0;
-            let report = operate_with(&root, Action::Migrate, Ok(MANAGED_LINE), |_| {
-                probes += 2;
-                writes += 1;
-                fs::write(&script, "repaired").unwrap();
-                (vec![], Report::default())
-            });
+            let report = operate_with(
+                &root,
+                Asker::InApp,
+                Action::Migrate,
+                Ok(MANAGED_LINE),
+                |_| {
+                    probes += 2;
+                    writes += 1;
+                    fs::write(&script, "repaired").unwrap();
+                    (vec![], Report::default())
+                },
+            );
             assert_eq!(report.exit_code(), 0);
             assert_eq!((probes, writes), (0, 0));
             assert_eq!(
@@ -534,10 +604,16 @@ mod tests {
         enable_record(&root).unwrap();
         assert!(!Marks::read(&root).unwrap().is_off());
         let mut reached = false;
-        operate_with(&root, Action::Migrate, Ok(MANAGED_LINE), |_| {
-            reached = true;
-            (vec![], Report::default())
-        });
+        operate_with(
+            &root,
+            Asker::InApp,
+            Action::Migrate,
+            Ok(MANAGED_LINE),
+            |_| {
+                reached = true;
+                (vec![], Report::default())
+            },
+        );
         assert!(reached);
     }
 
@@ -665,21 +741,42 @@ mod tests {
         }
     }
 
+    /// PIN — **a holder that is not ours still gets the honest refusal, and it
+    /// gets it only after [`OUR_TURN`].**
+    ///
+    /// This test was written to pin the refusal itself: a record under somebody
+    /// else's lock is a record this run must not edit a `$PROFILE` against, and
+    /// the file it guards has to be left byte-for-byte. All of that still
+    /// stands. What changed on 2026-09-21 is *when* the refusal is honest. The
+    /// refusal used to arrive the instant the lock was busy, which made every
+    /// meeting between two of Folio's own writers a red toast on the reader's
+    /// screen — see [`Asker`] — so an in-app writer now stands in the queue
+    /// first. A holder that outlasts the queue is the case this pin is really
+    /// about, and it is the case tested here: the wait runs out, nothing is
+    /// written, and the refusal says exactly what it always said.
     #[test]
     fn shell_integration_record_lock_refuses_overlap_and_releases_on_drop() {
         let root = super::super::tests::temp_dir("marks-lock");
         let profile = root.join("profile.ps1");
         fs::write(&profile, LEGACY_LINE).unwrap();
-        let held = lock(&root).unwrap();
+        let held = lock(&root, Asker::Door).unwrap();
+        let started = std::time::Instant::now();
+        let refusal = install_recorded(
+            &profile,
+            &root,
+            &script_at(&root),
+            MANAGED_LINE,
+            std::time::UNIX_EPOCH,
+        )
+        .expect_err("a foreign holder is a refusal, not a wait without end");
         assert!(
-            install_recorded(
-                &profile,
-                &root,
-                &script_at(&root),
-                MANAGED_LINE,
-                std::time::UNIX_EPOCH
-            )
-            .is_err()
+            started.elapsed() >= OUR_TURN,
+            "the writer gave up before its turn was over: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            refusal.to_string().contains("would block"),
+            "the refusal lost its words: {refusal}"
         );
         assert_eq!(fs::read(&profile).unwrap(), LEGACY_LINE.as_bytes());
         drop(held);
@@ -694,6 +791,140 @@ mod tests {
         assert_eq!(fs::read(&profile).unwrap(), MANAGED_LINE.as_bytes());
     }
 
+    /// PIN — **two of Folio's own writers that meet on the record both finish,
+    /// and neither of them says anything to the reader.**
+    ///
+    /// These are the two that met on a clean Windows 10 machine on 2026-09-21,
+    /// driven here exactly as the first-run card drives them: `Done` with the
+    /// PowerShell row on spends [`crate::first_run::Application::PowerShellOffer`],
+    /// which starts the enable worker ([`enable_record`]), and
+    /// [`crate::first_run::Application::PowerShellIntent`], which the first
+    /// PowerShell pane to name its `$PROFILE` spends through
+    /// [`install_recorded`] on the window thread. The loser of that meeting
+    /// reported *"lock acquisition failed because the operation would block"* in
+    /// a red toast, on a machine where both rows had in fact been written.
+    ///
+    /// The third holder is what makes the meeting certain rather than likely:
+    /// both writers are let go while the record is held, so both are queued
+    /// behind it and then behind each other.
+    ///
+    /// MUTATIONS: give [`Asker::InApp`] a patience of zero and both writers race
+    /// the holder and lose; drop either writer's mark from the record and the
+    /// uninstall door has nothing to find.
+    #[test]
+    fn shell_integration_two_of_our_own_writers_queue_and_both_finish() {
+        let root = super::super::tests::temp_dir("marks-queue");
+        let profile = root.join("profile.ps1");
+        fs::write(&profile, LEGACY_LINE).unwrap();
+        let script = script_at(&root);
+        let held = lock(&root, Asker::Door).unwrap();
+        let (install, enable) = std::thread::scope(|scope| {
+            let installer = scope.spawn(|| {
+                install_recorded(
+                    &profile,
+                    &root,
+                    &script,
+                    MANAGED_LINE,
+                    std::time::UNIX_EPOCH,
+                )
+            });
+            let enabler = scope.spawn(|| enable_record(&root));
+            // Long enough that both writers are certainly in the queue, and a
+            // small fraction of the turn they are allowed to wait.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(held);
+            (installer.join().unwrap(), enabler.join().unwrap())
+        });
+        install.expect("the window thread's writer waited and wrote");
+        enable.expect("the enable worker waited and wrote");
+        assert_eq!(fs::read(&profile).unwrap(), MANAGED_LINE.as_bytes());
+        let marks = Marks::read(&root).unwrap();
+        assert!(!marks.is_off(), "the enable worker's mark");
+        assert!(
+            marks.powershell_profiles.contains(&profile)
+                && marks.powershell_scripts.contains(&script),
+            "the installer's marks: {marks:?}"
+        );
+        assert!(marks.profile_refusals.is_empty(), "{marks:?}");
+    }
+
+    /// PIN — **the first-run card's `Done` raises nothing**, with the two rows
+    /// the clean-machine run had on.
+    ///
+    /// The card installs nothing itself; it spends
+    /// [`crate::first_run::Application`]s, and this drives the two that reach
+    /// the record — the Explorer row's does not — through the very functions
+    /// `Done` reaches, against a temporary data root and a temporary
+    /// `$PROFILE`. What the window would be told is a [`Report`], so the pin is
+    /// that there is no report to tell: `begin_enable` builds one only out of
+    /// an error, and [`Report::window_text`] is the whole of what a toast can
+    /// say.
+    #[test]
+    fn shell_integration_first_run_done_tells_the_window_nothing() {
+        let root = super::super::tests::temp_dir("first-run-done");
+        let profile = root.join("profile.ps1");
+        fs::write(&profile, b"# mine\r\n").unwrap();
+        let script = script_at(&root);
+        // The card the clean Windows 10 machine put up: three rows, no package
+        // for Explorer's first page, no agent on the path — with the two rows
+        // that arrived off switched on, as they were switched on there.
+        let mut rows = crate::first_run::rows_for(
+            bt_platform::HostPlatform::Windows,
+            &crate::first_run::Machine {
+                explorer_first_page_available: false,
+                claude_found: false,
+                claude_installable: false,
+                codex_found: false,
+                codex_installable: false,
+                copilot_found: false,
+                copilot_installable: false,
+                powershell_integration_installed: false,
+            },
+        );
+        for row in &mut rows {
+            if matches!(
+                row.kind,
+                crate::first_run::RowKind::Explorer | crate::first_run::RowKind::PowerShell
+            ) {
+                row.on = true;
+            }
+        }
+        let spent =
+            crate::first_run::applications(&rows, crate::first_run::ExplorerShape::ClassicOnly);
+        assert!(
+            spent.contains(&crate::first_run::Application::PowerShellOffer(true))
+                && spent.contains(&crate::first_run::Application::PowerShellIntent),
+            "the card no longer spends the two answers this pin is about: {spent:?}"
+        );
+        let (install, enable) = std::thread::scope(|scope| {
+            let installer = scope.spawn(|| {
+                install_recorded(
+                    &profile,
+                    &root,
+                    &script,
+                    MANAGED_LINE,
+                    std::time::UNIX_EPOCH,
+                )
+            });
+            let enabler = scope.spawn(|| enable_record(&root));
+            (installer.join().unwrap(), enabler.join().unwrap())
+        });
+        assert!(install.is_ok() && enable.is_ok(), "{install:?} {enable:?}");
+        // What `begin_enable` would have put in front of the reader.
+        let report = enable.err().map_or_else(Report::default, |error| Report {
+            files: vec![FileReport {
+                path: root.join(RECORD_FILE),
+                fate: Fate::Refused(error.to_string()),
+            }],
+        });
+        assert_eq!(report.window_text(), None, "the corner spoke");
+        let written = fs::read_to_string(&profile).unwrap();
+        assert!(
+            written.starts_with("# mine\r\n") && written.contains(MANAGED_LINE),
+            "{written:?}"
+        );
+    }
+
     #[test]
     fn shell_integration_migration_and_cleanup_retry_recorded_partial_refusal() {
         let root = super::super::tests::temp_dir("migration-refusal");
@@ -706,9 +937,13 @@ mod tests {
         readonly.set_readonly(true);
         fs::set_permissions(&profiles[1], readonly).unwrap();
         let original = fs::read(&profiles[1]).unwrap();
-        let report = operate_with(&root, Action::Migrate, Ok(MANAGED_LINE), |_| {
-            (profiles.to_vec(), Report::default())
-        });
+        let report = operate_with(
+            &root,
+            Asker::InApp,
+            Action::Migrate,
+            Ok(MANAGED_LINE),
+            |_| (profiles.to_vec(), Report::default()),
+        );
         assert_eq!(report.exit_code(), 1);
         assert_eq!(report.files[0].fate, Fate::Migrated);
         assert_eq!(fs::read(&profiles[1]).unwrap(), original);
@@ -717,19 +952,29 @@ mod tests {
         assert_eq!(marks.profile_refusals.len(), 1);
         assert_eq!(marks.profile_refusals[0].path, profiles[1]);
         fs::set_permissions(&profiles[1], permissions).unwrap();
-        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |marks| {
-            let mut paths = marks.powershell_profiles.clone();
-            paths.extend(marks.profile_refusals.iter().map(|r| r.path.clone()));
-            (paths, Report::default())
-        });
+        let report = operate_with(
+            &root,
+            Asker::InApp,
+            Action::Remove,
+            Ok(MANAGED_LINE),
+            |marks| {
+                let mut paths = marks.powershell_profiles.clone();
+                paths.extend(marks.profile_refusals.iter().map(|r| r.path.clone()));
+                (paths, Report::default())
+            },
+        );
         assert_eq!(report.exit_code(), 0);
         for path in &profiles {
             assert_eq!(fs::read(path).unwrap(), b"# mine\r\n\n");
         }
         assert!(Marks::read(&root).unwrap().profile_refusals.is_empty());
-        let report = operate_with(&root, Action::Remove, Ok(MANAGED_LINE), |marks| {
-            (marks.powershell_profiles.clone(), Report::default())
-        });
+        let report = operate_with(
+            &root,
+            Asker::InApp,
+            Action::Remove,
+            Ok(MANAGED_LINE),
+            |marks| (marks.powershell_profiles.clone(), Report::default()),
+        );
         assert!(report.files.iter().all(|f| f.fate == Fate::Unchanged));
     }
 }

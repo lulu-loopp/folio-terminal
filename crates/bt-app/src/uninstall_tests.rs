@@ -268,6 +268,15 @@ fn uninstall_running_claim_refuses_before_any_remover() {
         |_| None::<()>,
     );
     assert_eq!(report.code, 2);
+    // **The door's sentence, byte for byte.** The refusal a script reads when a
+    // Folio is running comes from the instance claim above and not from the
+    // marks lock, which is why Folio's own writers learning to wait for that
+    // lock (2026-09-21) leaves this transcript exactly where it was.
+    assert_eq!(
+        report.stdout(),
+        "Folio: refused (A Folio instance is running; nothing was changed.)\n"
+    );
+    assert_eq!(report.stdout(), report.stderr());
     assert_eq!(fs::read(profile).unwrap(), before);
     assert!(scope.data[0].exists());
     fs::remove_dir_all(root).unwrap();

@@ -950,7 +950,9 @@ pub fn install_recorded(documents: &Path, data: &Path) -> io::Result<Wrote> {
         if !root.is_absolute() {
             return Err(io::Error::other(crate::i18n::Text::ShellMarksPath.text()));
         }
-        let lock = profile_marks::lock(data)?;
+        // One of Folio's own writers: this is a press on the invitation or on
+        // the Settings row, so it stands in the queue rather than reporting one.
+        let lock = profile_marks::lock(data, profile_marks::Asker::InApp)?;
         let mut marks = Marks::read(data)?;
         if !marks.psreadline_module_roots.iter().any(|it| it == root) {
             marks.psreadline_module_roots.push(root.to_owned());

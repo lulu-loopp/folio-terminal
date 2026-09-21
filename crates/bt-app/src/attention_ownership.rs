@@ -265,8 +265,10 @@ pub(crate) fn record(
     if !root.is_absolute() {
         return Err(crate::i18n::Text::AgentHooksRootUnstable.text());
     }
-    let lock =
-        profile_marks::lock(data).map_err(|_| crate::i18n::Text::AgentHooksRecordFailed.text())?;
+    // A Settings row or a first-run row, both of them Folio's own: it waits its
+    // turn behind another of our writers and reports only a wait that ran out.
+    let lock = profile_marks::lock(data, profile_marks::Asker::InApp)
+        .map_err(|_| crate::i18n::Text::AgentHooksRecordFailed.text())?;
     let mut marks =
         Marks::read(data).map_err(|_| crate::i18n::Text::AgentHooksRecordFailed.text())?;
     let roots = match family {
