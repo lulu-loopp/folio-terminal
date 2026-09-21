@@ -5732,7 +5732,16 @@ impl PreviewBuffer {
     ///   (ruling 8⑨). **Not a prompt and not a blind write** — this slice's
     ///   minimum is that the window says so and keeps the edits, because the
     ///   one unrecoverable outcome is overwriting a change nobody has seen.
-    /// * The write itself is atomic ([`bt_persist::atomic_write`]).
+    /// * The write is staged beside the file and committed in one step
+    ///   ([`bt_persist::atomic_replace_keeping_metadata`]) — **and on the
+    ///   Windows preserving arm that step is `ReplaceFileW`, which is a
+    ///   sequence and not one atomic rename**: it moves the document to a
+    ///   backup name and then moves the replacement into the name it vacated.
+    ///   A power loss between the two leaves the document under the backup name
+    ///   rather than its own, recoverable by hand and named in `docs/DESIGN.md`
+    ///   (2026-09-20, known limits). Every other arm — the hard-linked, the
+    ///   symlinked, the unopenable and Unix — commits with the single rename
+    ///   this module has always used.
     ///
     /// **In the encoding the file was read in, mark included** (T2 ①,
     /// 2026-09-10). See [`Self::encoding`] for the defect this pays: the body is
@@ -5747,11 +5756,24 @@ impl PreviewBuffer {
     /// in this window, the PowerShell profile among them. One algorithm, one
     /// place to fix.
     ///
-    /// **Two gaps stay open and are named rather than papered over**: neither
-    /// writer clears a read-only or hidden attribute on the target, and neither
-    /// asks whether the target is a symlink — a rename replaces the link, not
-    /// what it points at, which is the question the read side asks with
-    /// `may_read_unasked_through_links` and the write side still does not.
+    /// **And it replaces the content and nothing else the file carried**
+    /// (audit 3 F-1, 2026-09-20). This is the reader's own document: it can
+    /// carry alternate data streams — `Zone.Identifier`, the Mark of the Web —
+    /// an explicit DACL, hidden and system attributes, a mode, an owner and
+    /// extended attributes, and a `File::create` plus a rename kept none of it,
+    /// so saving a downloaded note quietly de-quarantined it.
+    /// [`bt_persist::atomic_replace_keeping_metadata`] carries what the file the
+    /// save replaces was carrying, and that function documents which arm a file
+    /// takes and why.
+    ///
+    /// **Three gaps stay open and are named rather than papered over**: neither
+    /// writer clears a read-only or hidden attribute on the target (a read-only
+    /// file is refused by Windows and the refusal is reported), and neither asks
+    /// whether the target is a symlink — a rename replaces the link, not what it
+    /// points at, which is the question the read side asks with
+    /// `may_read_unasked_through_links` and the write side still does not. A
+    /// hard-linked file is the third: the save lands on this name and the other
+    /// name keeps the old bytes, as it always has, and nobody has ruled it.
     ///
     /// The mtime is re-read from the file that was just written rather than
     /// remembered from the write, so the next save compares against what the
@@ -5766,7 +5788,9 @@ impl PreviewBuffer {
         if file_mtime(&path) != self.disk_mtime {
             return SaveOutcome::Conflict;
         }
-        if let Err(error) = bt_persist::atomic_write(&path, &self.encoding.encode(content)) {
+        if let Err(error) =
+            bt_persist::atomic_replace_keeping_metadata(&path, &self.encoding.encode(content))
+        {
             return SaveOutcome::Failed(error.to_string());
         }
         self.disk_mtime = file_mtime(&path);
@@ -12410,6 +12434,94 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(on_disk(&buffer)).unwrap(),
             "as it was read\nand as it was edited\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The save goes through the writer that keeps what the file carried**
+    /// (audit 3, F-1).
+    ///
+    /// What that writer keeps is a different thing on every platform — streams,
+    /// a DACL and an attribute word here, a mode and extended attributes on
+    /// macOS — and the assertions about them live where the writer does
+    /// (`bt-persist`'s `atomic.rs`, `bt-platform`'s `file_replace.rs`), because
+    /// this crate does not get to ask what platform it is on
+    /// (`scripts/check-portable-core.ps1`). What belongs here is the edge those
+    /// tests are about: that this `save` is the caller.
+    ///
+    /// Pinned by reading this module's own source, the way
+    /// `sniffing_happens_off_the_window_thread` pins the read side: the fact is
+    /// about the call graph, not about a value this test can compute.
+    ///
+    /// Red gate: put `bt_persist::atomic_write(&path, …)` back in
+    /// [`PreviewBuffer::save`] and the second assertion names it.
+    #[test]
+    fn a_save_is_written_by_the_writer_that_keeps_what_the_file_carried() {
+        // Spelled in halves so the assertion is not its own counter-example:
+        // the source being read is this file, and one whole spelling here would
+        // be found by the search it makes.
+        let keeping = concat!("bt_persist::", "atomic_replace_keeping_metadata(&path");
+        let plain = concat!("bt_persist::", "atomic_write(&path");
+        let source = include_str!("preview.rs");
+        let module = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file carries its tests at the end")
+            .0;
+        let body = module
+            .split_once("pub fn save(&mut self) -> SaveOutcome {")
+            .expect("the editor's save")
+            .1;
+        let end = body.find("\n    }\n").expect("its end");
+        assert!(
+            body[..end].contains(keeping),
+            "the document is replaced by the writer that carries its metadata"
+        );
+        assert!(
+            !body[..end].contains(plain),
+            "and not by the one that leaves it behind"
+        );
+    }
+
+    /// **A document with a second name still saves** (audit 3, F-1).
+    ///
+    /// The preserving replacement refuses a hard-linked target — the right
+    /// answer for `$PROFILE`, where a refusal is a message and nothing is lost.
+    /// Here it would turn a working save into a failed one, so the file keeps
+    /// the writer it has always had: the save lands under this name and the
+    /// other name goes on holding the bytes it held. **That silent break is
+    /// today's behaviour and nobody has ruled on it**; this test is what would
+    /// have to be rewritten, deliberately, by whoever does.
+    ///
+    /// Red gate: route the save at `atomic_replace_preserving` and the outcome
+    /// is `Failed` with the reader's edits stuck in the window.
+    #[test]
+    fn a_hard_linked_document_still_saves_and_the_other_name_keeps_its_bytes() {
+        let dir = scratch("linked");
+        let mut buffer = opened(&dir, "notes.md", "as it was\n");
+        let path = on_disk(&buffer).to_path_buf();
+        let linked = dir.join("dotfiles-notes.md");
+        std::fs::hard_link(&path, &linked).unwrap();
+        buffer.disk_mtime = file_mtime(&path);
+
+        buffer.edit_content(|content| {
+            content.push_str("and as it is now\n");
+            true
+        });
+        assert_eq!(buffer.save(), SaveOutcome::Saved, "the save still lands");
+        assert!(!buffer.dirty);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "as it was\nand as it is now\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&linked).unwrap(),
+            "as it was\n",
+            "the second name kept the old object, exactly as it did before"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            2,
+            "and nothing was staged into the folder and left there"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

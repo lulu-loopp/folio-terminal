@@ -367,6 +367,9 @@ pub enum Text {
     CleanupRemoved,
     CleanupAbsent,
     CleanupLeft,
+    /// Folio's own files went and something it never wrote stood beside them, so
+    /// that something is still there (audit 3, E-1).
+    CleanupNotOurs,
     CleanupRefused,
     CleanupRoot,
     CleanupRunning,
@@ -628,6 +631,9 @@ pub enum Text {
     /// there. Something outside Folio removed it, which is a fact the row owes
     /// the reader rather than a state to silently correct.
     PsReadLineRowGone,
+    /// A module somebody else wrote is standing in the directory Folio installs
+    /// into, so neither verb on the row is offered (audit 3, E-1).
+    PsReadLineRowNotOurs,
     /// The invitation's own question. It names the symptom the reader has
     /// already seen — the input line that does not follow the window — rather
     /// than the module, because the module is not what they noticed.
@@ -1996,6 +2002,10 @@ pub enum Text {
     AgentHooksRootUnstable,
     AgentHooksTakeOver,
     AgentHooksLeftOther,
+    AgentConfigLink,
+    AgentConfigHardLink,
+    AgentConfigReadOnly,
+    AgentConfigChanged,
     ClaudeHooksFailedToast,
     // ── the focus card's height (§7.1.6b′, user ruling 2026-08-21) ──────────
     //
@@ -3251,6 +3261,11 @@ impl Text {
                 lang,
                 "The copy Folio installed is no longer on disk",
                 "Folio 安装的那一份已不在磁盘上",
+            ),
+            Self::PsReadLineRowNotOurs => pick(
+                lang,
+                "Another PSReadLine is installed here. Folio leaves it alone",
+                "此处有非 Folio 安装的 PSReadLine，不做改动",
             ),
             // **Length-sensitive.** The dialog's title is one unwrapped line in
             // a 400px float, exactly as the dirty gate's is; the first draft
@@ -4615,6 +4630,11 @@ impl Text {
                 "left (belongs to another existing copy):",
                 "已保留（属于另一份 Folio）：",
             ),
+            Self::CleanupNotOurs => pick(
+                lang,
+                "left (not Folio's files):",
+                "已保留（非 Folio 的文件）：",
+            ),
             Self::CleanupRefused => pick(lang, "refused", "未能移除"),
             Self::CleanupRoot => pick(
                 lang,
@@ -4697,6 +4717,26 @@ impl Text {
                 lang,
                 "Hooks kept for another Folio:",
                 "已为另一份 Folio 保留 hook：",
+            ),
+            Self::AgentConfigLink => pick(
+                lang,
+                "This file is a link Folio will not write through.",
+                "此文件是链接，Folio 未写入。",
+            ),
+            Self::AgentConfigHardLink => pick(
+                lang,
+                "This file has hard links, possibly from a dotfile manager. Folio left it unchanged.",
+                "此文件存在硬链接，Folio 未做修改。",
+            ),
+            Self::AgentConfigReadOnly => pick(
+                lang,
+                "This file is read-only, or is not a regular file.",
+                "此文件为只读，或不是普通文件。",
+            ),
+            Self::AgentConfigChanged => pick(
+                lang,
+                "The file changed while Folio was working on it. Try again.",
+                "此文件在操作期间被改动，Folio 未写入。请重试。",
             ),
             Self::ClaudeHooksFailedToast => pick(
                 lang,
@@ -5279,7 +5319,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 739] = [
+    pub const ALL: [Self; 745] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5288,6 +5328,7 @@ impl Text {
         Self::CleanupRemoved,
         Self::CleanupAbsent,
         Self::CleanupLeft,
+        Self::CleanupNotOurs,
         Self::CleanupRefused,
         Self::CleanupRoot,
         Self::CleanupRunning,
@@ -5417,6 +5458,7 @@ impl Text {
         Self::OptionSplitDown,
         Self::PsReadLineProbing,
         Self::PsReadLineRowGone,
+        Self::PsReadLineRowNotOurs,
         Self::PsReadLineInviteTitle,
         Self::PsReadLineInstall,
         Self::PsReadLineNotNow,
@@ -5853,6 +5895,10 @@ impl Text {
         Self::AgentHooksRootUnstable,
         Self::AgentHooksTakeOver,
         Self::AgentHooksLeftOther,
+        Self::AgentConfigLink,
+        Self::AgentConfigHardLink,
+        Self::AgentConfigReadOnly,
+        Self::AgentConfigChanged,
         Self::ClaudeHooksFailedToast,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
@@ -6126,6 +6172,7 @@ impl Text {
         //   written under that account's `Documents`
         Self::RowPsReadLine,
         Self::PsReadLineProbing,
+        Self::PsReadLineRowNotOurs,
         Self::PsReadLineRemovedToast,
         // — the `$PROFILE` integration: the row, the strip a pane raises, and
         //   the line an outstanding first-run intent leaves on the row. The
@@ -6555,6 +6602,22 @@ pub fn psreadline_already_current(found: &str, path: &str) -> String {
         Lang::Chinese => {
             format!("本机自带的 PSReadLine {found} 已能守住输入行，未向 {path} 写入任何东西。")
         }
+    }
+}
+
+/// The card raised when `On` is pressed over a module Folio did not write
+/// (audit 3, E-1).
+///
+/// It names the path for the reason every refusal on this row does — that is
+/// the half a reader can act on — and it says who the module belongs to rather
+/// than how new it is, because ownership is what stopped the write.
+#[must_use]
+pub fn psreadline_occupied(path: &str) -> String {
+    match current() {
+        Lang::English => {
+            format!("A PSReadLine Folio did not install is at {path}, so nothing was written.")
+        }
+        Lang::Chinese => format!("{path} 有非 Folio 安装的 PSReadLine，未写入任何东西。"),
     }
 }
 

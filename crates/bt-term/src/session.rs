@@ -545,6 +545,12 @@ struct LiveRowStability {
     settled_revision: Option<u64>,
     candidate_signature: Option<u64>,
     content_fingerprint: Option<CapturedRowFingerprint>,
+    /// The `revision` at which this row's printed names were last read for the path ledger
+    /// (§7.1.5k 丙, owner ruling 2026-09-20). A watermark and not a second copy of the fact: the
+    /// row changed exactly when `revision != path_pass_revision`, and
+    /// [`DualPlaneSession::absorb_printed_path_probes`] closes the gap the moment it has read it,
+    /// so one printing is one question however many frames are drawn over it.
+    path_pass_revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1393,10 +1399,10 @@ pub struct DualPlaneSession {
     ///
     /// Both answers are kept, because a "no" is as much an answer as a "yes" and re-asking it every
     /// frame is what would make a screenful of prose cost a screenful of syscalls. What is *not*
-    /// kept is any notion of when it was asked: a verdict stands until it is evicted, so a file
-    /// created after this pane asked about it stays unlinked until its name is printed again from a
-    /// pane that has not asked. That is the same honesty the image ledger has and the same
-    /// limitation; see §7.1.5j's own left-out list.
+    /// kept is any notion of *when* it was asked — there is no clock in here — but a "no" is not
+    /// permanent either: it stands until the program **prints that name again**, which is the one
+    /// thing that says the question is worth putting to the disk a second time (owner ruling
+    /// 2026-09-20; see [`Self::expire_denied_paths`] for the whole of it).
     path_verdicts: BTreeMap<PathBuf, bool>,
     /// Insertion order over `path_verdicts`, so the ledger can be held to a size without asking a
     /// clock. Oldest question out first.
@@ -1410,6 +1416,15 @@ pub struct DualPlaneSession {
     /// What this pane last told its projection, kept so the telling is free on the frames where
     /// nothing has changed — which is nearly all of them.
     printed_path_links: bt_transcript::paths::PrintedPathLinks,
+    /// The same ledger **with the denials left out**: what a name deserves when it is met in text
+    /// this pane has just printed (owner ruling 2026-09-20).
+    ///
+    /// Derived from `path_verdicts` in the same breath as its twin above and by the same
+    /// constructor, so the two can never disagree about a directory, a namespace or a yes. It holds
+    /// only the yeses, which is what makes a re-ask honest in both directions: a file already seen
+    /// is still a link and is not asked about again, while a name the disk denied is read as one
+    /// nobody has been to the disk for — because, for *this* printing, nobody has.
+    reprinted_path_links: bt_transcript::paths::PrintedPathLinks,
     /// Which spelling of an absolute path the shell in this pane prints (T-3, 2026-09-07).
     ///
     /// Pushed in by the spawn, exactly as [`Self::set_spawn_directory`] is and for the same reason:
@@ -1907,6 +1922,7 @@ impl DualPlaneSession {
             path_verify_tasks: VecDeque::new(),
             path_verify_in_flight: BTreeSet::new(),
             printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
+            reprinted_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             path_namespace: bt_transcript::paths::PrintedPathNamespace::default(),
             printed_path_budget_full: false,
             spawn_directory: None,
@@ -2648,7 +2664,79 @@ impl DualPlaneSession {
         for path in projection.take_printed_path_probes() {
             self.ask_about_path(path);
         }
+        // The other half of the question (owner ruling 2026-09-20): the frame above reports names
+        // **nobody has answered**, and a name the disk denied is not one of them. What makes a
+        // denial worth asking again is the program printing the name anew, which this reads off the
+        // rows that changed — and then marks as read, so one printing is one question.
+        for path in self.paths_named_on_freshly_printed_rows() {
+            self.ask_about_reprinted_path(path);
+        }
+        for row in &mut self.live_rows {
+            row.path_pass_revision = row.revision;
+        }
         self.path_verify_tasks.len().saturating_sub(before)
+    }
+
+    /// Every path named on a live row whose cells have changed since the last pass read them,
+    /// judged against the ledger **with the denials left out** (owner ruling 2026-09-20).
+    ///
+    /// *Freshly printed* is [`LiveRowStability::revision`] — the per-row fingerprint
+    /// [`Self::observe_live_damage`] already compares, and the evidence authority this workspace
+    /// settled on for "the cells moved" (§4.6, 2026-09-06). That is what keeps the rule from being
+    /// a timer in disguise: a full-screen agent rewriting its viewport with the bytes it already
+    /// had changes no fingerprint, so it bumps no revision, so it asks nothing — however many
+    /// frames it draws. A row whose text genuinely changed and still spells the name did print it
+    /// again, and costs one question.
+    ///
+    /// The scan is the frame's own — [`bt_transcript::paths::PrintedPathLinks::links_in`], over the
+    /// same WRAPLINE-joined logical lines [`Self::for_each_live_logical_line`] hands every other
+    /// path reader — so there is no second opinion here about what text names a file, only a second
+    /// ledger to read it against.
+    ///
+    /// Free twice over when there is nothing to re-ask, and both gates are integer comparisons over
+    /// state this session already holds: a pane with no denial on its books returns before it looks
+    /// at the grid, and so does a grid on which no row has moved since the last pass. Only past
+    /// both does anything read a cell, and then it is one walk of the live rows — the same shape
+    /// and the same order as the projection's own path scan.
+    ///
+    /// **Bounded to the live grid**, which is where a program prints. A name that scrolled into
+    /// history between two frames is not re-asked from there — the frame's own probe has exactly
+    /// the same window, and widening one without the other would buy nothing.
+    ///
+    /// **One logical line at a time, so a denial rejoined across an application newline (§7.1.5k ②)
+    /// is not re-asked.** The chain walk that finds those lives in the frame, over the same rows,
+    /// and the honest way to reach it from here is to let it see this reading of the ledger — not
+    /// to write a second chain walk beside it and have two opinions about where a reference ends.
+    /// A name cut by the right margin and denied therefore still waits for a command boundary; a
+    /// name printed whole, which is nearly all of them, does not.
+    fn paths_named_on_freshly_printed_rows(&self) -> BTreeSet<PathBuf> {
+        let mut named = BTreeSet::new();
+        if !self.path_verdicts.values().any(|exists| !exists)
+            || !self
+                .live_rows
+                .iter()
+                .any(|row| row.revision != row.path_pass_revision)
+        {
+            return named;
+        }
+        let live_rows = &self.live_rows;
+        let ledger = &self.reprinted_path_links;
+        self.for_each_live_logical_line(|text, segments| {
+            let freshly_printed = segments.iter().any(|segment| {
+                live_rows
+                    .get(segment.row as usize)
+                    .is_some_and(|row| row.revision != row.path_pass_revision)
+            });
+            if !freshly_printed {
+                return;
+            }
+            // The edge gate (§7.1.5k ①) belongs to the frame, which knows where the last drawn cell
+            // of the line is; this pass is only deciding *what is worth a question*, and a name cut
+            // by the right margin is answered by the frame's own rejoin once the ledger lets it
+            // through. Asking about it here costs one `metadata` call and unblocks that rejoin.
+            ledger.links_in(text, None, &mut named);
+        });
+        named
     }
 
     /// Put one printed path in front of the worker, unless it is already answered or already
@@ -2659,10 +2747,30 @@ impl DualPlaneSession {
     /// **oldest** question is dropped, so a pane that has just scrolled a thousand new paths past
     /// spends its budget on the ones still on the screen.
     fn ask_about_path(&mut self, path: PathBuf) {
-        if self.path_verdicts.contains_key(&path)
-            || self.path_verify_in_flight.contains(&path)
-            || self.path_verify_tasks.contains(&path)
-        {
+        if self.path_verdicts.contains_key(&path) {
+            return;
+        }
+        self.queue_path_question(path);
+    }
+
+    /// The same, for a name this pane has just **printed again** (owner ruling 2026-09-20): a
+    /// standing "no" is no longer a reason to stay quiet, and a standing "yes" still is.
+    ///
+    /// A yes is never re-asked — a file that has been seen once is linked, and a link that turns
+    /// out to be gone is answered by the click's own re-check (§7.1.5k 丁) — so re-asking the yeses
+    /// would double the traffic of every repainting screen to buy nothing.
+    fn ask_about_reprinted_path(&mut self, path: PathBuf) {
+        if self.path_verdicts.get(&path) == Some(&true) {
+            return;
+        }
+        self.queue_path_question(path);
+    }
+
+    /// The one door into the bounded question queue. In flight and queued are both "already asked",
+    /// which is what holds a re-ask to one question however fast the row that carries the name is
+    /// being rewritten: the second printing finds the first one's question still out.
+    fn queue_path_question(&mut self, path: PathBuf) {
+        if self.path_verify_in_flight.contains(&path) || self.path_verify_tasks.contains(&path) {
             return;
         }
         if self.path_verify_tasks.len() == PATH_VERIFY_QUEUE_CAP {
@@ -2721,9 +2829,9 @@ impl DualPlaneSession {
     /// sits on screen, real on disk, and permanently unlinked in the pane that watched it appear.
     ///
     /// **The boundary is a command, not a clock and not a frame.** What has to be true for a "no"
-    /// to have gone stale is that the disk may have changed, and the one thing this window knows
-    /// about that is which of its commands have ended: `OSC 133 D` on the primary screen is the
-    /// shell saying *the thing you were running is over*. So a verdict is re-asked once per
+    /// to have gone stale is that the disk may have changed, and one of the two things this window
+    /// knows about that is which of its commands have ended: `OSC 133 D` on the primary screen is
+    /// the shell saying *the thing you were running is over*. So a verdict is re-asked once per
     /// command rather than once per frame — which is the difference between one question per
     /// printed name per command and one per name per 16 milliseconds, and is why the three budgets
     /// (256 a pass, 512 queued, 4096 remembered) are untouched by this: the steady state of a
@@ -2734,14 +2842,34 @@ impl DualPlaneSession {
     /// is 丁, and it lives in the five-armed router). Re-asking the yeses would double the traffic
     /// to buy nothing.
     ///
-    /// **A pane with no shell integration keeps its "no"s for ever, and that is on purpose**
-    /// (§7.1.5b's degraded path). A root process that does not report its commands never tells this
-    /// window a command ended, and the honest substitutes are all worse than the limitation: a
-    /// timer would re-ask a screenful of dead names on a pane nobody is touching, and inferring a
-    /// boundary from the shape of the output is a guess that fires in the middle of a build as
-    /// readily as at the end of one. So such a pane behaves exactly as every pane did before this
-    /// ruling, and the way out of it is shell integration — which is the same answer §7.1.5b gives
-    /// for busy detection, for the same reason.
+    /// # The other boundary: a name printed again (owner ruling 2026-09-20)
+    ///
+    /// Until 2026-09-20 this comment ended by recording a limitation as a decision: *a pane with no
+    /// shell integration keeps its "no"s for ever, and that is on purpose.* The reasoning was that
+    /// a root process which never reports a command boundary leaves nothing honest to expire on,
+    /// and that both substitutes are worse than the gap — a timer re-asks a screenful of dead names
+    /// on a pane nobody is touching, and a guess at the shape of the output fires in the middle of
+    /// a build as readily as at the end of one. Both of those are still true, and neither is what
+    /// changed.
+    ///
+    /// What changed is the premise underneath, which the owner photographed on candidate next83: a
+    /// pane whose foreground program is a TUI agent running for hours **never ends a command at
+    /// all**. The agent printed `D:\…\menus.html` before the file existed, the disk said no, and
+    /// minutes later it printed the same name again over the finished file — dark, and permanently
+    /// dark. Announcing a file and then writing it is not an edge case of this product; it is what
+    /// agents do all day, and it is now the main scenario.
+    ///
+    /// So there is a second boundary, and it is neither of the two that were rejected: **a name
+    /// that was answered "no" is asked again when the program prints it again.** The signal is the
+    /// program's own act of printing — read off the per-row fingerprint that already owns "the
+    /// cells changed" (§4.6, 2026-09-06), in [`Self::paths_named_on_freshly_printed_rows`] — so a
+    /// repaint of an unchanged row is not a printing, and a screen that sits still is still free.
+    /// The bound comes from the rule itself and not from a rate limit: a full-screen agent
+    /// rewriting its viewport with the bytes it already had asks nothing however fast it draws.
+    ///
+    /// The two boundaries do different work and both stay. This one empties the ledger of denials
+    /// wholesale, because a command that ended could have created any of those files whether or not
+    /// their names are still on the screen; that one asks about exactly the name that was printed.
     ///
     /// Answers `true` when something actually left, so the caller can skip the rebuild on the
     /// commands — the great majority — that denied nothing.
@@ -2757,17 +2885,32 @@ impl DualPlaneSession {
     }
 
     fn rebuild_printed_path_links(&mut self) {
+        let directory = self.reference_directory().map(Path::to_path_buf);
+        // The namespace the spawn pushed, plus the one thing only the shell could say (§7.30's
+        // `~`). Composed here rather than written back into the pushed value, so the profile's own
+        // answer stays the profile's and a re-push cannot lose the report.
+        let namespace = self
+            .path_namespace
+            .with_shell_home(self.shell_home.as_deref());
         // The whole ledger travels, both answers in it: a "no" is what stops the projection from
         // asking about the same dead name on every frame it draws (§7.1.5j).
         self.printed_path_links = bt_transcript::paths::PrintedPathLinks::in_namespace(
-            self.reference_directory().map(Path::to_path_buf),
+            directory.clone(),
             self.path_verdicts.clone(),
-            // The namespace the spawn pushed, plus the one thing only the shell could say
-            // (§7.30's `~`). Composed here rather than written back into the pushed value, so the
-            // profile's own answer stays the profile's and a re-push cannot lose the report.
-            &self
-                .path_namespace
-                .with_shell_home(self.shell_home.as_deref()),
+            &namespace,
+        );
+        // And the same ledger for text this pane has **just printed**, which is the one reading in
+        // which a standing "no" is not an answer (owner ruling 2026-09-20). Built here, beside its
+        // twin and from the same three inputs, so neither can drift from the other about a
+        // directory, a namespace or a yes.
+        self.reprinted_path_links = bt_transcript::paths::PrintedPathLinks::in_namespace(
+            directory,
+            self.path_verdicts
+                .iter()
+                .filter(|(_, exists)| **exists)
+                .map(|(path, exists)| (path.clone(), *exists))
+                .collect(),
+            &namespace,
         );
     }
 
@@ -3511,6 +3654,16 @@ impl DualPlaneSession {
         ];
         let apply_result = self.apply_events(events, observed_at);
         self.alternate_repaint_in_progress = false;
+        // **A reflow is not the program printing** (owner ruling 2026-09-20). Every row of the
+        // rebuilt grid has just had its fingerprint written for the first time, so every one of
+        // them would read as freshly printed and a resize would re-ask about every denied name on
+        // the screen — a window drag would be a burst of disk traffic, which is exactly the shape
+        // the 2026-08-23 budget ruling exists to refuse. The reflowed text was already read at the
+        // revision it came from; marking it read here says so. Whatever the program prints *after*
+        // the reflow moves these revisions on again and is asked about normally.
+        for row in &mut self.live_rows {
+            row.path_pass_revision = row.revision;
+        }
         if let Err(error) = apply_result {
             if plan.begin_transaction {
                 self.stage_resize_history();
@@ -26207,15 +26360,18 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
-    /// **A pane with no shell integration keeps its "no"s, and that is the ruling and not a gap**
-    /// (user ruling 2026-08-25; §7.1.5b's degraded path).
+    /// **Output that does not name it does not re-ask it** (owner ruling 2026-09-20).
     ///
-    /// A root process that does not report its commands never tells this window a command ended.
-    /// The honest substitutes are all worse than the limitation — a timer re-asks a screenful of
-    /// dead names on a pane nobody is touching, and inferring a boundary from the shape of the
-    /// output fires in the middle of a build as readily as at the end of one — so such a pane
-    /// behaves exactly as every pane did before this ruling, and the way out is shell integration.
-    /// That is the same answer §7.1.5b gives for busy detection, for the same reason.
+    /// The pane here has no shell integration at all, so no command ever ends and
+    /// [`DualPlaneSession::expire_denied_paths`] never runs. Ten screens of unrelated output go
+    /// past while the file quietly appears on the disk, and the name is not asked about again —
+    /// because *this* program printed something, not because it printed **that name**. The other
+    /// half of the ruling is the test below: print the name and the question comes back.
+    ///
+    /// Before 2026-09-20 this test stood for "a pane with no shell integration keeps its no's for
+    /// ever, and that is on purpose". That premise is gone; what survives it unchanged is the part
+    /// that was always right — a timer, and a guess at the shape of the output, are both worse than
+    /// the limitation they would lift.
     #[test]
     fn a_pane_without_shell_integration_keeps_every_verdict_it_has() {
         let (directory, _) = temporary_ordinary_file();
@@ -26253,6 +26409,302 @@ mod tests {
         std::fs::remove_file(&built).unwrap();
         std::fs::remove_file(directory.join("notes.md")).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// An absolute directory under the system temp root that is **never created**. Everything under
+    /// it is a spelling and not a file: the tests below state every answer themselves through
+    /// [`settle_printed_paths_against`], so no disk is read and no clock is waited on.
+    fn unwritten_directory(tag: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "betterterminal-{tag}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    /// One frame of the app's own loop with the **disk replaced by what the test says is on it**:
+    /// project, collect the names, answer each one. Returns the names this pass asked about, in the
+    /// order it asked, and whether any answer owed the pane a frame.
+    ///
+    /// The sibling of [`settle_printed_paths`], which reads the real disk. This one exists because
+    /// the re-ask rule is a rule about **what the program printed**, and a test that created files
+    /// to prove it would be measuring a temporary directory instead.
+    fn settle_printed_paths_against(
+        session: &mut DualPlaneSession,
+        projection: &mut ViewportProjection,
+        on_disk: impl Fn(&Path) -> bool,
+    ) -> (Vec<PathBuf>, bool) {
+        session.viewport_frame(projection).unwrap();
+        session.absorb_printed_path_probes(projection);
+        let mut asked = Vec::new();
+        let mut owed = false;
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let SessionDecorationTask::VerifyPath(path) = task {
+                asked.push(path.clone());
+                let exists = on_disk(&path);
+                owed |= session.complete_path_verification(path, exists);
+            }
+        }
+        (asked, owed)
+    }
+
+    /// Every distinct `file:` target the frame draws, in row order.
+    fn frame_file_links(frame: &ViewportFrame) -> Vec<String> {
+        let mut seen = Vec::new();
+        for row in 0..frame.rows.get() {
+            for column in 0..frame.columns.get() {
+                let Some(hit) = frame.hyperlink_at(row, column) else {
+                    continue;
+                };
+                if hit.uri.starts_with("file:") && !seen.contains(&hit.uri) {
+                    seen.push(hit.uri);
+                }
+            }
+        }
+        seen
+    }
+
+    /// **A name printed again is asked about again** (owner ruling 2026-09-20, re-ruling the
+    /// 2026-08-25 "a pane with no shell integration keeps its no's for ever").
+    ///
+    /// The photographed shape (owner, candidate next83): a pane whose foreground program is a TUI
+    /// agent that has been running for hours. It prints `I'll copy it to D:\…\menus.html` **before**
+    /// the file exists; the disk says no and the ledger remembers. Minutes later the file is there
+    /// and the agent prints the same name again — and, with the only expiry hanging on `OSC 133 D`,
+    /// that second printing raised no question at all, so the name stayed dark for the rest of that
+    /// pane's life. Announcing a file and then writing it is what an agent does all day, so the
+    /// premise of the old ruling — that a pane runs a shell whose commands end — stopped being the
+    /// product's main scenario.
+    ///
+    /// The signal is the program's own act of printing the name anew, which on this screen means a
+    /// row whose **cells changed** and now spell it. Two hundred projections of a screen nobody is
+    /// printing to sit between the two printings and cost nothing, which is the 2026-08-23 budget
+    /// ruling still standing: there is no clock here and no per-frame re-scan.
+    ///
+    /// No `OSC 133` anywhere, and no disk: every answer below is stated by the test.
+    ///
+    /// MUTATION: drop the `paths_named_on_freshly_printed_rows` arm of
+    /// [`DualPlaneSession::absorb_printed_path_probes`] and the last three assertions go red — the
+    /// file exists, its name is on the screen twice over, and nothing asks.
+    #[test]
+    fn a_name_printed_again_after_a_no_is_asked_about_again() {
+        let directory = unwritten_directory("printed-again");
+        let menus = directory.join("menus.html");
+
+        let mut session = DualPlaneSession::new(nz(200), nz(24));
+        enable_path_detection(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+
+        // The agent says where it is about to write. The file is not there yet.
+        session
+            .feed(format!("I'll copy it to {}\r\n", menus.display()).as_bytes())
+            .unwrap();
+        let (asked, _) = settle_printed_paths_against(&mut session, &mut projection, |_| false);
+        assert_eq!(
+            asked,
+            vec![menus.clone()],
+            "the first printing is a question"
+        );
+        assert!(!session.path_is_verified(&menus));
+
+        // Minutes of a pane nobody is printing to. The file arrives during them.
+        for pass in 0..200u32 {
+            let (asked, owed) =
+                settle_printed_paths_against(&mut session, &mut projection, |path| path == menus);
+            assert!(
+                asked.is_empty() && !owed,
+                "a screen that sits still costs nothing: pass {pass} asked {asked:?}"
+            );
+        }
+        assert!(
+            !session.path_is_verified(&menus),
+            "nothing was printed, so nothing was asked, so the standing verdict stands"
+        );
+
+        // The agent prints the same name again, now that it has written it.
+        session
+            .feed(format!("Wrote {}\r\n", menus.display()).as_bytes())
+            .unwrap();
+        let (asked, owed) =
+            settle_printed_paths_against(&mut session, &mut projection, |path| path == menus);
+        assert_eq!(
+            asked,
+            vec![menus.clone()],
+            "printed again is asked again — once"
+        );
+        assert!(
+            owed,
+            "a yes changes the picture, so the pane is owed a frame"
+        );
+        assert!(session.path_is_verified(&menus));
+
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            frame_file_links(&frame),
+            vec![bt_transcript::paths::local_path_to_file_uri(&menus)],
+            "and both printings of the name are the link the file deserves"
+        );
+    }
+
+    /// **A repaint of an unchanged row is not a printing** (owner ruling 2026-09-20).
+    ///
+    /// The bound the re-ask rule has to carry on its own, and the reason it is not a timer in
+    /// disguise: an agent's viewport is rewritten in full on every frame it draws, and a thousand
+    /// rewrites of the same bytes are one printing. The fact is owned where it already was — the
+    /// per-row fingerprint `observe_live_damage` compares (§4.6, 2026-09-06: "a row rewritten with
+    /// the bytes it already had did not change, whoever is looking at it") — so nothing here
+    /// measures the text a second way.
+    ///
+    /// MUTATION: re-ask on damage rather than on a changed fingerprint and this asks a thousand
+    /// times.
+    #[test]
+    fn a_thousand_repaints_of_the_same_row_ask_nothing() {
+        let directory = unwritten_directory("repaint-same");
+        let absent = directory.join("pending.html");
+        // The shape an agent's viewport has: a full-screen program addressing its own canvas and
+        // writing it from the top, over and over.
+        let screen = format!(
+            "\x1b[?1049h\x1b[2J\x1b[Hcopying to {}\r\n",
+            absent.display()
+        );
+
+        let mut session = DualPlaneSession::new(nz(160), nz(24));
+        enable_path_detection(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+
+        session.feed(screen.as_bytes()).unwrap();
+        let (asked, _) = settle_printed_paths_against(&mut session, &mut projection, |_| false);
+        assert_eq!(asked, vec![absent.clone()]);
+
+        let mut later = 0usize;
+        for _ in 0..1000u32 {
+            session.feed(screen.as_bytes()).unwrap();
+            let (asked, _) = settle_printed_paths_against(&mut session, &mut projection, |_| false);
+            later += asked.len();
+        }
+        assert_eq!(
+            later, 0,
+            "a thousand repaints of the same text asked {later} questions"
+        );
+    }
+
+    /// **A row that changes and still names it is a printing, and costs exactly one question**
+    /// (owner ruling 2026-09-20).
+    ///
+    /// The case between the two above: the program rewrote the row, and what it wrote still spells
+    /// the name. That is the program printing the name again — a progress line counting up beside a
+    /// file it is building is the shape — so it is one question per change, and the answer's own
+    /// in-flight bookkeeping is what keeps it to one.
+    #[test]
+    fn a_row_rewritten_around_the_same_name_asks_once_per_change() {
+        let directory = unwritten_directory("rewritten-around");
+        let absent = directory.join("bundle.js");
+
+        let mut session = DualPlaneSession::new(nz(160), nz(24));
+        enable_path_detection(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+
+        let mut per_change = Vec::new();
+        for percent in 0..8u32 {
+            session
+                .feed(
+                    format!(
+                        "\x1b[?1049h\x1b[2J\x1b[H{percent}0% {}\r\n",
+                        absent.display()
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            let (asked, _) = settle_printed_paths_against(&mut session, &mut projection, |_| false);
+            per_change.push(asked.len());
+        }
+        assert_eq!(
+            per_change,
+            vec![1; 8],
+            "one printing, one question — never two, never none"
+        );
+    }
+
+    /// **The three budgets are what bound a re-ask, exactly as they bound a first ask**
+    /// (owner ruling 2026-09-20; the 2026-08-23 budget ruling, untouched).
+    ///
+    /// Five thousand distinct names go past, every one of them denied, and every one of them
+    /// printed again. A re-ask enters the same bounded queue by the same door, so 512 questions may
+    /// be outstanding and 4096 verdicts may be remembered — no more, however many names a program
+    /// invents.
+    ///
+    /// The ledger stays **one entry per path**: a re-ask replaces the verdict it re-asks rather
+    /// than filing a second copy of the name, so the eviction order stays as long as the map.
+    #[test]
+    fn five_thousand_reprinted_denials_hold_every_budget() {
+        let directory = unwritten_directory("budgets");
+        let mut session = DualPlaneSession::new(nz(240), nz(24));
+        enable_path_detection(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+
+        let name = |index: u32| directory.join(format!("n{index:05}.out"));
+        for batch in 0..250u32 {
+            let rows = (0..20u32)
+                .map(|slot| format!("emitting {}", name(batch * 20 + slot).display()))
+                .collect::<Vec<_>>()
+                .join("\r\n");
+            session
+                .feed(format!("\x1b[?1049h\x1b[2J\x1b[H{rows}\r\n").as_bytes())
+                .unwrap();
+            session.viewport_frame(&mut projection).unwrap();
+            session.absorb_printed_path_probes(&mut projection);
+            assert!(
+                session.path_verify_tasks.len() <= PATH_VERIFY_QUEUE_CAP,
+                "batch {batch} queued {} questions",
+                session.path_verify_tasks.len()
+            );
+            while let Some(task) = session.take_decoration_worker_task() {
+                if let SessionDecorationTask::VerifyPath(path) = task {
+                    session.complete_path_verification(path, false);
+                }
+            }
+            assert!(
+                session.path_verdicts.len() <= PATH_VERDICT_LEDGER_CAP,
+                "batch {batch} remembered {} verdicts",
+                session.path_verdicts.len()
+            );
+            assert_eq!(
+                session.path_verdict_order.len(),
+                session.path_verdicts.len(),
+                "one entry per path, in both halves of the ledger"
+            );
+        }
+
+        // Every one of them printed again, and nobody answering: the queue is what holds.
+        for batch in 0..250u32 {
+            let rows = (0..20u32)
+                .map(|slot| format!("retry {batch} {}", name(batch * 20 + slot).display()))
+                .collect::<Vec<_>>()
+                .join("\r\n");
+            session
+                .feed(format!("\x1b[?1049h\x1b[2J\x1b[H{rows}\r\n").as_bytes())
+                .unwrap();
+            session.viewport_frame(&mut projection).unwrap();
+            session.absorb_printed_path_probes(&mut projection);
+            assert!(
+                session.path_verify_tasks.len() <= PATH_VERIFY_QUEUE_CAP,
+                "re-ask batch {batch} queued {} questions",
+                session.path_verify_tasks.len()
+            );
+            assert!(
+                session.path_verdicts.len() <= PATH_VERDICT_LEDGER_CAP,
+                "re-ask batch {batch} remembered {} verdicts",
+                session.path_verdicts.len()
+            );
+            assert_eq!(
+                session.path_verdict_order.len(),
+                session.path_verdicts.len(),
+                "a re-ask replaces its entry; it never files a second one"
+            );
+        }
     }
 
     fn enable_path_detection(session: &mut DualPlaneSession) {

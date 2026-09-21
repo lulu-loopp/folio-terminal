@@ -11221,6 +11221,13 @@ The first card's top is the list's top exactly, so clamping the grown box cost t
 The status dot now breathes on the halo's clock and curve (the window's one 1.7s breath), one sample taken in `wait_pulse` and worn by the card's edge, the halo and all four dot surfaces; reduced motion answers each channel's own flat value — no halo, full dot.
 The dot had never pulsed because the mock-up's `.unreaddot.await` names `@keyframes fcpulse`, which the mock-up never defines: an undefined animation does nothing, and the Rust transcription inherited the name without a curve.
 
+### 2026-09-20 — A name printed again is asked about again
+A printed path answered "no" used to stand until `OSC 133 D`, so a pane running one hours-long agent kept every denial for ever.
+The owner photographed the cost on next83: the agent named a file before writing it, then named it again over the finished file, dark.
+A denial is now re-asked when the program prints the name anew — a live row whose fingerprint changed and still spells it (`paths_named_on_freshly_printed_rows`).
+Repaint is not printing: an unchanged row bumps no revision, so a still screen and a full-viewport TUI redraw both cost zero questions, and no clock is consulted.
+Yeses are never re-asked, the command-boundary expiry stays, a reflow marks itself read, and a re-ask enters the same 256/512/4096 budgets by the same door.
+
 ### 2026-09-20 — Ending a synchronized update keeps the sequence it interrupted
 The replay tail carries two facts: the bytes a DEC 2026 block holds back, and the sequence the boundary parser is still inside.
 Everything before `parser_tail_open_start` is the first and is released when the block ends; everything from it on is the second and stays.
@@ -11232,3 +11239,31 @@ The sentence "3 logical px against the panel's own 6px top margin and its bottom
 The growth is rounded to device pixels and that margin is not — both from `3.0 * scale` — so at 125%, 150%, 225% and 250% the rounded growth exceeded the exact room and up to half a pixel of a bottom-clamped card's halo or flight shadow landed on the `+` row's top edge.
 A decoration now grows only into the room its layout gives it: the panel hands down the box it keeps empty around the list (its own rectangle, floored by the `+` row's top and, on the rail, ceilinged by the heading's foot) and `outset_reach` reconciles the wish with that box once, for all four sides together, floored to whole device pixels.
 One amount and not four, so a clamped card's ring stays concentric; a card anywhere but against the list's own rim pays nothing for this, and no scale that was already exact changed.
+
+### 2026-09-20 — A save replaces the content and keeps what the file carried
+The preview editor writes a user document, so its save replaces the bytes and nothing else the file was carrying.
+Windows carries alternate data streams (Zone.Identifier), the DACL, creation time and the attribute word through ReplaceFileW; Unix carries ownership, mode and every extended attribute (quarantine, Finder tags, user.*) onto the replacement before the rename.
+This extends 7.1.3v ruling 4, which named only read-only/hidden attributes and symlinks, to everything else the object carried; the symlink gap stands, and a symlinked or unopenable name keeps the plain writer.
+A hard-linked target keeps the plain writer too and its second name still silently keeps the old bytes: the preserving replacement refuses such targets, and refusing a save nobody has ruled unsaveable would be worse than the break. Unruled, awaiting the owner.
+A replacement is never given the read-only bit before it is committed: a read-only file cannot be replaced at all, and a read-only staging file is one the failure path can no longer delete.
+
+### 2026-09-20 — Known limits of the preserving save (closure review of the above)
+Content is guaranteed, what the file carried is best effort: a volume that answers `ReplaceFileW` with "not an operation I have" (`ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED`, `ERROR_CALL_NOT_IMPLEMENTED`) and has provably changed nothing — the document still under its own name, no backup made — gets the plain writer instead, and a metadata step never fails a save on any platform.
+**R4, open and not closed here: `ReplaceFileW` is a sequence, not an atomic rename.** It moves the document to the backup name and then moves the replacement into that name; a crash or power loss between the two leaves the document under `<name>.tmp-<hex>` and nothing in the product looks for it. `MoveFileExW` had no such window. The alternative that would close it — write the temp, copy streams, DACL and attributes onto the temp, then commit with one `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` — needs `BackupRead`/`BackupWrite` (or per-stream copies) and an explicit security-descriptor copy, and is a ticket of its own.
+Also recorded there: the whole Win32 attribute word is round-tripped, including bits `SetFileAttributesW` does not own (reparse, compressed, encrypted, offline) — harmless now that both attribute calls are best effort, but a mask down to the settable set is the cheaper statement; and on Unix a `chown` this process may not perform is tolerated, so a save of a file owned by somebody else lands with the owner changed to the writer rather than failing.
+The staging file is born `create_new` and, when it is replacing somebody else’s document, mode `0600`, widened afterwards to the mode the replaced file carried: a private note is never world-readable, not even for the length of one write.
+
+### 2026-09-20 — Folio installs its module only where the place is empty or its own
+The occupancy check lives inside `psreadline::install_checked`, the one writer, so no caller and no `RowState` can write around it.
+A leaf is Folio's when the assembly `Microsoft.PowerShell.PSReadLine.dll` is ours by bytes or by the `2.4.6-bt.` stamp, or when there is no assembly and every name in it is one this build writes; anything else is `InstalledCopy::Foreign`.
+`row_state` reads the disk fact before the stored invitation, so `RemovedElsewhere` can no longer offer `On` over a gallery module, and `RowState::NotOurs` darkens both verbs.
+`remove_from`'s rule — never take what Folio did not write — now binds the installer too, and the removal itself deletes the nine bundled names and drops the directory only while it is empty.
+The mixed leaf a previous Folio left (our module, PowerShellGet's `PSGetModuleInfo.xml`, `en-US\` and catalog beside it) is ours to update and not ours to delete; the sidecars stay and the cleanup door names them.
+
+### 2026-09-21 — A previewed local document is not walled off from the network
+The premise: §7.10 (2026-08-22) minted the local seat, and R1-10 (adversarial review 2026-09-08, compiled into a rule list by §13.29 ⑤) made "a local document reads its own folder and reaches no server" a rule of the product.
+It does not hold. No browser promises it — a `file://` page in Chrome, Edge or Safari may open http, WebSocket and WebRTC connections freely; what a browser restricts is what a local page may **read**, not what it may contact.
+Nor can it be kept: WebSocket is invisible to WebView2's `WebResourceRequested`, WebRTC is ungated on both engines, and `dns-prefetch`/`preconnect` leak a host name without making a request any pattern can match — short of switching scripts off, which would end interactive local previews, a thing people use.
+What stays: the `File`-mint refusals in `resource_request` and `content_rule_list`, as best-effort hygiene. They cost nothing, an ordinary web request from a local document is still refused, and nothing in the product promises more than that.
+What is not built: no document served by Folio with a CSP, no second URL grammar, no chase of the Windows WebSocket gap. Opening a local HTML file is the reader's own deliberate act, with a browser's risk.
+What arrives from strangers is mostly Markdown and text, which Folio renders itself with no script engine at all. `SECURITY.md`'s web-preview section says all of this where a reader meets it.

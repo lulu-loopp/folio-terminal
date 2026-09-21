@@ -5,7 +5,10 @@
 1 psreadline.rs: run_probe: .output
 # The installed-module seam: both are the seam's own verb; its production arm reads
 # through file_reads::read(Lane::Settings), so the bytes are counted.
-1 psreadline.rs: is_folios_copy: installed_disk::read
+1 psreadline.rs: is_folios_copy_at: installed_disk::read
+# The install door's own occupancy check (audit 3, E-1): the assembly is read at
+# the moment of the write to establish who wrote the module standing there.
+1 psreadline.rs: unclaimed_or_foreign: installed_disk::read
 1 psreadline.rs: read: .read
 1 main.rs: create_leaf_session: .output
 1 animation.rs: file_source_in_lane: FileAnimationSource::open
@@ -66,10 +69,10 @@
 2 settings.rs: scanned: .read
 1 shell_integration.rs: add_profile_with_forms: profile_marks::Decoded::read
 1 shell_integration.rs: offer_for: profile_marks::Decoded::read
+1 shell_integration.rs: profile_path_reason: std::fs::File::open
 1 shell_integration.rs: read_profile_for_edit: .open
 1 shell_integration.rs: read_profile_for_edit: .read
 1 shell_integration.rs: read_profile_for_edit: .read_to_end
-1 shell_integration.rs: refuse_profile_path: std::fs::File::open
 1 shell_integration.rs: replace_profile: .open
 1 shell_integration/profile_marks.rs: lock: .open
 1 shell_integration/profile_marks.rs: lock: .read
