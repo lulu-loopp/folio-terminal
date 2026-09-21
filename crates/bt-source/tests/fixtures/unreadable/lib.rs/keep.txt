@@ -1,0 +1,3 @@
+This directory is named `lib.rs` on purpose: a target root that exists and
+cannot be read as text is its own refusal, and a directory is the one way to
+stage that on Windows and on macOS alike.
