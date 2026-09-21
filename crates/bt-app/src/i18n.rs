@@ -4592,10 +4592,11 @@ impl Text {
                 "This file is read-only, or is not a regular file.",
                 "此文件为只读，或不是普通文件。",
             ),
-            // CHINESE PENDING — T-B follow-ups; English until owner copy review.
-            Self::AgentConfigChanged => {
-                "The file changed while Folio was working on it. Try again."
-            }
+            Self::AgentConfigChanged => pick(
+                lang,
+                "The file changed while Folio was working on it. Try again.",
+                "此文件在操作期间被改动，Folio 未写入。请重试。",
+            ),
             Self::ClaudeHooksFailedToast => pick(
                 lang,
                 "Claude Code's settings were not changed",
@@ -6041,10 +6042,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 2] = [
-        (Self::AgentConfigChanged, HostPlatform::Windows),
-        (Self::AgentConfigChanged, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
