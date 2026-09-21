@@ -2587,6 +2587,63 @@ mod tests {
         assert!(declined().is_empty());
     }
 
+    /// PIN (§7.56 §7) — **`Done` with the PowerShell row off is a removal, and
+    /// on the machine this card is for it removes nothing, writes nothing and
+    /// says nothing.**
+    ///
+    /// The row off spends `PowerShellOffer(false)`, which is the Settings
+    /// page's own `Off` press, and that press runs
+    /// `shell_integration::begin_removal`. That is right — the answer has to
+    /// reach a `$PROFILE` a previous install wrote — but the card only ever
+    /// appears on a machine that has never run Folio, where there is no line to
+    /// take out. So the report comes back empty, and an empty report tells the
+    /// window nothing (`Report::window_text`). A new reader's first sight of
+    /// Folio is the terminal, not a corner toast about a file they never had.
+    ///
+    /// MUTATIONS:
+    /// ① give the empty report words and `Done` greets a new machine with
+    ///    `No Folio profile lines found.`;
+    /// ② let the removal write and a reader who answered `off` has a `$PROFILE`
+    ///    of their own rewritten for a line it does not contain.
+    #[test]
+    fn done_with_the_powershell_row_off_removes_nothing_and_says_nothing() {
+        let untouched = rows(&every_row());
+        assert!(
+            applications(&untouched, ExplorerShape::FirstPageAndClassic)
+                .contains(&Application::PowerShellOffer(false))
+        );
+        let press = settings_target(Application::PowerShellOffer(false)).expect("a row's press");
+        assert_eq!(
+            settings::powershell_integration_offer_requested(press),
+            Some(false),
+            "the card's off is the dialog's own Off, and Off is what runs the removal"
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "folio-first-run-off-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let profile = root.join("profile.ps1");
+        let original = b"# a profile of somebody's own\r\n";
+        std::fs::write(&profile, original).unwrap();
+        let report = shell_integration::remove_shell_integration_at(
+            &data,
+            Some(std::slice::from_ref(&profile)),
+        );
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(
+            report.window_text(),
+            None,
+            "a machine that has never run Folio is being told about a line it never had"
+        );
+        assert_eq!(std::fs::read(&profile).unwrap(), original);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// PIN (§7.56 §4.3) — **the intent is spent by the first shell to name its
     /// own `$PROFILE`, and a profile that already loads the script clears it
     /// without writing.**

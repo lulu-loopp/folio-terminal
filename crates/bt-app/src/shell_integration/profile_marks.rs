@@ -430,6 +430,37 @@ impl Report {
             })
             .collect()
     }
+
+    /// **What a window is owed by this report, or `None` when it is owed
+    /// nothing.**
+    ///
+    /// A removal that found nothing to remove changed nothing, so there is
+    /// nothing to report and silence is the honest answer. The place this is
+    /// said is the report itself rather than the one call site that raises a
+    /// toast, because the call site said it wrong once already: an empty
+    /// successful report was turned into the words
+    /// [`Text::ShellProfileNothing`], and the first-run card's PowerShell row
+    /// left off presses the Settings page's own `Off`, which runs a removal —
+    /// so a brand-new machine's first sight of Folio was a corner toast about a
+    /// `$PROFILE` line it had never had. A caller that asks the report cannot
+    /// make that mistake again.
+    ///
+    /// **The console door is a different door and keeps its words.** Somebody
+    /// who typed `--remove-shell-integration` asked a question and is owed an
+    /// answer, so `main` still prints [`Text::ShellProfileNothing`] to the
+    /// transcript for an empty report. Refusals and real removals say here
+    /// exactly what they said before.
+    ///
+    /// The refusal flag comes back beside the words, because it is what chooses
+    /// both the words ([`Report::text`]'s filter) and the colour they arrive in:
+    /// handed over together, a caller cannot pair one report's refusal with
+    /// another's tone.
+    #[must_use]
+    pub fn window_text(&self) -> Option<(bool, String)> {
+        let refused = self.exit_code() != 0;
+        let text = self.text(refused);
+        (!text.is_empty()).then_some((refused, text))
+    }
 }
 
 /// Pure multi-file plan, including injected refusals. A refusal never hides

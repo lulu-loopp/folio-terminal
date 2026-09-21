@@ -118863,15 +118863,18 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // and re-solves the ones whose bodies just got a row shorter. Every
             // window, because a `pwsh` is a `pwsh` in all of them.
             AppEvent::PowerShellProfileProbed => {
+                // **Whether there is anything to say is the report's own
+                // answer** (`Report::window_text`), and not a test written
+                // here. A removal that found nothing to remove changed nothing,
+                // so it says nothing: the card's PowerShell row left off is a
+                // removal, and on the machine that card is for there has never
+                // been a line to take out.
                 let mut removal = shell_integration::take_removal();
                 self.for_each_window(|runtime| {
                     runtime.settle_pane_notices()?;
-                    if let Some(report) = removal.take() {
-                        let refused = report.exit_code() != 0;
-                        let mut text = report.text(refused);
-                        if text.is_empty() {
-                            text = i18n::Text::ShellProfileNothing.text().to_owned();
-                        }
+                    if let Some((refused, text)) =
+                        removal.take().and_then(|report| report.window_text())
+                    {
                         runtime.toast(
                             if refused {
                                 toast::ToastKind::Error
