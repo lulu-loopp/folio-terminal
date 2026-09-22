@@ -987,38 +987,26 @@ mod tests {
 
     #[test]
     fn formula_present_uses_one_guard_and_consumes_the_landing_receipt() {
-        let guard = production_body(
-            "    fn formula_overlay_is_active(",
-            "formula_overlay_is_active",
-        );
+        let guard = method_body("formula_overlay_is_active");
         assert!(guard.contains(
             "self.window.math_hover_anchor.is_some() || self.window.math_tools.is_some()"
         ));
-        let carry = production_body("    fn carry_live_journeys(", "carry_live_journeys");
+        let carry = method_body("carry_live_journeys");
         assert!(carry.contains("let formula_present = self.formula_overlay_is_active();"));
         assert!(carry.contains("formula_overlay_owed |= running.chrome || running.overlay"));
-        let refresh = production_body(
-            "    fn refresh_formula_overlay_for_present(",
-            "refresh_formula_overlay_for_present",
-        );
+        let refresh = method_body("refresh_formula_overlay_for_present");
         assert!(refresh.contains("std::mem::take(&mut self.window.formula_overlay_owed)"));
         assert!(refresh.contains("if !carried && !moved && !in_flight"));
-        let settle = production_body("    fn settle_math_toggle(", "settle_math_toggle");
+        let settle = method_body("settle_math_toggle");
         assert!(
             settle.find("follow.finish_ride(flight.anchor())").unwrap()
                 < settle.find("self.repaint_pane_change(seat)").unwrap()
         );
-        let sync = production_body("    fn sync_math_tools(", "sync_math_tools");
+        let sync = method_body("sync_math_tools");
         assert!(sync.contains("follow.is_riding(&boxes.anchor, riding)"));
         assert!(sync.contains("changed |= follow.finish_landing_frame()"));
-        for (signature, name) in [
-            ("    fn redraw(&mut self)", "redraw"),
-            (
-                "    fn present_retained_picture(&mut self)",
-                "present_retained_picture",
-            ),
-        ] {
-            let present = production_body(signature, name);
+        for name in ["redraw", "present_retained_picture"] {
+            let present = method_body(name);
             let guard = present.find("if self.formula_overlay_is_active()").unwrap();
             assert!(
                 guard
@@ -1042,49 +1030,48 @@ mod tests {
                         .unwrap()
             );
         }
-        let trace_line = production_body("    fn math_band_trace_line(", "math_band_trace_line");
+        let trace_line = method_body("math_band_trace_line");
         assert!(
             trace_line.contains("seat=none display=none"),
             "departing marks still get one self-report even without a lit band"
         );
-        let trace = production_body(
-            "    fn math_band_trace_for_present",
-            "math_band_trace_for_present",
-        );
+        let trace = method_body("math_band_trace_for_present");
         assert!(
             trace.find("if !self.app.trace_perf").unwrap()
                 < trace.find("self.sessions.keys()").unwrap()
         );
         // R5/R6: each closure pairs a seat's frame with that seat's body, with
         // the same focused fallback the retained-seat builder actually draws.
-        let retained = production_body(
-            "    fn present_retained_picture(",
-            "present_retained_picture",
-        );
+        let retained = method_body("present_retained_picture");
         assert!(retained.contains("find(|pane| pane.seat == seat)"));
         assert!(retained.contains(".then(|| self.window.renderer.seat_viewport())"));
         assert!(retained.contains(".get(&seat)?"));
-        let redraw = production_body("    fn redraw(", "redraw");
+        let redraw = method_body("redraw");
         assert!(redraw.contains("return Some((focused_body.viewport, &frame));"));
         assert!(redraw.contains("find(|(pane, _)| pane.seat == seat)"));
         assert!(redraw.contains(".map(|(pane, projected)| (pane.viewport, projected))"));
     }
 
-    // ── what these four pins ask the crate instead ────────────────────────
+    // ── the bodies these four pins are about ─────────────────────────────
     //
-    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Nothing is deleted here: every body is read twice
+    // **P3's deletion commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). The commit before this one read every body twice
     // — once as a slice of `main.rs`, once as the body of an item of this crate
-    // — and `production_body` is where the two are required to be the same
-    // bytes. The deletion is the commit after this one, and the pattern is
-    // `main.rs::pty_drain_budget_tests`', not re-derived here.
+    // — and asserted the two were the same bytes; this one removes the older of
+    // the two, because two implementations of one judgement do not vouch for
+    // each other (`docs/CONVENTIONS.md` §十 rule 4).
     //
-    // **The owner is an argument now and not a guess.** The slice below is the
-    // first match for a signature prefix in everything above a named test
-    // module — a method of whatever `impl` happens to come first — and it runs
-    // on to the next `\n    fn `, which is the *next* method's declaration and
-    // its doc comment. Every pin in this module turns out to mean `Runtime`,
-    // and this commit is what establishes that rather than assuming it.
+    // **The pattern is `main.rs::pty_drain_budget_tests`' and is not
+    // re-derived**; that module's header carries the six points behind
+    // `source_index` and `method_body`. What went with the slice: the owner,
+    // which the old reading could not tell (it took the first match for a
+    // signature prefix, which is a method of whatever `impl` comes first), and
+    // the *next* method's declaration and doc comment, which the slice ran on
+    // into — `turn`'s was 45,871 bytes around a 44,426-byte body.
+    //
+    // `include_str!("formula_tools.rs")` stays: it belongs to P14's row for
+    // `the_marks_fade_in_travel_and_fade_out_on_the_tips_own_ninety_milliseconds`,
+    // which reads this file's own text above its tests.
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -1103,43 +1090,11 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    fn production_body(signature: &str, name: &str) -> &'static str {
-        let source = include_str!("main.rs");
-        let production = source
-            .split("mod formula_tool_seat_tests {")
-            .next()
-            .unwrap();
-        let start = production
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in main.rs"));
-        let rest = &production[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        let old = &rest[..end];
-        let new = method_body(name);
-        // A signature prefix that ends in the opening brace has already taken
-        // the first byte of the crate's body with it, so the slice begins one
-        // byte inside it. Both shapes are here because this module writes both.
-        if !old.starts_with(&new[1..]) {
-            let at = old.find(new).unwrap_or_else(|| {
-                panic!(
-                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
-                     bytes"
-                )
-            });
-            assert!(
-                !old[..at].contains('{'),
-                "`Runtime::{name}`: the crate's body stands inside this file's slice rather than \
-                 at the head of it"
-            );
-        }
-        old
-    }
-
     /// RED (2026-09-20, T-MARKS-FRAME-IN-HAND): the marks stand on the band in the
     /// exact `ViewportFrame` this present draws, including the first and landing frames.
     #[test]
     fn the_marks_stand_on_the_band_of_the_frame_being_drawn() {
-        let placement = production_body("    fn math_tool_placement", "math_tool_placement");
+        let placement = method_body("math_tool_placement");
         assert!(
             placement.contains("frame_for(*seat)") && !placement.contains("last_presented_frame"),
             "the runtime must place from the frame its caller hands it:\n{placement}"
@@ -1150,7 +1105,7 @@ mod tests {
     /// borrowed from another frame, so the landing frame has nothing left to snap to.
     #[test]
     fn the_landing_frame_needs_no_snap() {
-        let redraw = production_body("    fn redraw(&mut self) -> Result<()> {", "redraw");
+        let redraw = method_body("redraw");
         let handed = redraw
             .find("self.refresh_formula_overlay_for_present")
             .expect("redraw hands its composed pane frames to the formula lanes");
@@ -1168,8 +1123,8 @@ mod tests {
     /// read one frame — now the frame this present draws.
     #[test]
     fn the_source_face_and_the_marks_read_one_frame() {
-        let marks = production_body("    fn math_tool_placement", "math_tool_placement");
-        let source = production_body("    fn formula_toggle_layers", "formula_toggle_layers");
+        let marks = method_body("math_tool_placement");
+        let source = method_body("formula_toggle_layers");
         for (name, lane) in [("marks", marks), ("source face", source)] {
             assert!(
                 lane.contains("frame_for(") && !lane.contains("last_presented_frame"),
