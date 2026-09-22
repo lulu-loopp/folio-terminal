@@ -129329,25 +129329,32 @@ mod quit_with_no_window_tests {
 /// value (`docs/DESIGN.md` §7.54d).
 #[cfg(test)]
 mod summon_key_wiring_tests {
-    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
-    // commit after this one deletes the older of the two. `source`, `item_body`
-    // and `method_body` are `pty_drain_budget_tests`' helpers word for word,
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Both readers here asked `main.rs` for its text; both now ask `bt-source`
+    // about an *item* of this crate, so no fact in this module is bound to the
+    // file it happens to be written in today. The commit before this one ran both
+    // readings side by side and asserted they agree; this is the one that deletes
+    // the older of the two, because two implementations of one judgement do not
+    // vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body` and `method_body` are that module's helpers word for
+    // word and its header is where the six points behind them live;
     // `trait_method_body` is `resident_run_tests`'.
+    //
+    // **Two owners, not one.** The dispatch arm is
+    // `<FolioApp as ApplicationHandler>::window_event` — a trait method, which is
+    // not an inherent method of anything — and the ladder is `Runtime`'s; the
+    // deleted finder took the first `fn window_event(` in this file and could not
+    // have told the difference.
+    //
+    // **The ladder is the body without its opening brace.** The deleted finder
+    // began at the byte after the signature's `{`, and `Index::body_of` answers
+    // with the braces and what is between them (§2.4), so the one line of the
+    // conversion that is not mechanical is `strip_prefix('{')` — without it the
+    // brace itself would count as a statement standing above the gate, and the
+    // gate's whole claim is that none does.
     use bt_source::{Index, ItemQuery};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -129375,15 +129382,6 @@ mod summon_key_wiring_tests {
         item_body(&ItemQuery::method(owner, name).of_trait(trait_name))
     }
 
-    /// The statements of a ladder, with the blank lines and the comments taken
-    /// out — the reading both halves of the agreement below are made of.
-    fn statements(text: &str) -> Vec<&str> {
-        text.lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with("//"))
-            .collect()
-    }
-
     /// RED (§7.54d) — **`is_synthetic` is carried from winit's event to the
     /// gate, and the gate is the first statement in the ladder.**
     ///
@@ -129403,42 +129401,17 @@ mod summon_key_wiring_tests {
     /// terminal it calls up.
     #[test]
     fn the_synthetic_bit_reaches_the_gate_and_the_gate_stands_first() {
-        let older_dispatch = body("fn window_event(");
         let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
-        assert!(
-            older_dispatch.contains(dispatch),
-            "the older reading of `window_event` does not carry the crate's body"
-        );
-        assert_eq!(
-            older_dispatch.contains("runtime.keyboard_input(&event, is_synthetic)"),
-            dispatch.contains("runtime.keyboard_input(&event, is_synthetic)"),
-            "the two readings of the dispatch arm disagree"
-        );
         assert!(
             dispatch.contains("runtime.keyboard_input(&event, is_synthetic)"),
             "the dispatch arm drops the bit that says whether this was a keystroke"
         );
-        let older_ladder = body(
-            "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
-        );
         let ladder = method_body("Runtime", "keyboard_input")
             .strip_prefix('{')
             .expect("a body is its braces and what is between them");
-        assert!(
-            older_ladder.starts_with(ladder),
-            "the older reading of `keyboard_input` does not open with the crate's body"
-        );
         let gate = ladder
             .find("if !input::is_a_keystroke(event.state, is_synthetic) {")
             .expect("the ladder opens with the gate");
-        let older_gate = older_ladder
-            .find("if !input::is_a_keystroke(event.state, is_synthetic) {")
-            .expect("the ladder opens with the gate");
-        assert_eq!(
-            statements(&older_ladder[..older_gate]),
-            statements(&ladder[..gate]),
-            "the two readings disagree about what stands above the gate"
-        );
         let first = ladder
             .lines()
             .map(str::trim)
