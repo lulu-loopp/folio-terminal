@@ -1414,12 +1414,14 @@ mod tests {
     /// `placement_on` with the *window's* dpi rather than the summoned display's and the fourth
     /// goes red, which is the same seam `an_arrangement_is_restated_at_the_scale_the_display_now_has`
     /// pins one layer down.
-    // ── what this pin asks the crate instead ──────────────────────────────
+    // ── what this pin asks the crate ──────────────────────────
     //
-    // **P3's equivalence commit for this module**
-    // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). Both readings
-    // stand side by side and `agree` requires them to answer the same; the
-    // deletion is the commit after this one. The pattern is
+    // **P3's deletion commit for this module**
+    // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). The commit
+    // before this one stood both readings side by side and asserted they
+    // answered the same; this one removes the older of the two, because two
+    // implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4). The pattern is
     // `main.rs::pty_drain_budget_tests`' and is not re-derived here.
     //
     // **The negative is what changes.** "Not in `main.rs`" was the whole ruling
@@ -1519,34 +1521,20 @@ mod tests {
         in_the_product(&found(needle, bt_source::View::Raw))
     }
 
-    /// **This file's answer and the crate's, compared**, handing this file's
-    /// back so the assertion after it is the one that was always there.
-    fn agree<T: std::fmt::Debug + PartialEq>(what: &str, file: T, crate_reading: T) -> T {
-        assert_eq!(
-            file, crate_reading,
-            "{what}: this file's reading of `main.rs` and the crate's disagree"
-        );
-        file
-    }
-
     #[test]
     fn a_summon_is_placed_by_one_function_and_main_does_not_do_the_geometry() {
-        const MAIN: &str = include_str!("main.rs");
         for name in ["summoned_rect", "placement_on"] {
-            assert!(
-                agree(name, !MAIN.contains(name), mentions_elsewhere(name) == 0),
+            assert_eq!(
+                mentions_elsewhere(name),
+                0,
                 "`{name}` is the summon's geometry and it is being done outside \
                  `quake::Quake::placement`, which is the one door the ruling asks for"
             );
         }
         assert!(
-            agree(
-                "the one door",
-                MAIN.contains("self.app.quake.placement(&screen, settings)"),
-                in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
-                    "self.app.quake.placement(&screen, settings)"
-                ))) > 0,
-            ),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "self.app.quake.placement(&screen, settings)"
+            ))) > 0,
             "the one door is not being called from the one place that shows the window"
         );
 
