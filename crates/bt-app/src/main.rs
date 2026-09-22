@@ -15372,85 +15372,82 @@ mod worker_answer_routing_tests {
 
 #[cfg(test)]
 mod tab_identity_tests {
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree — all
+    // twenty-five body pins compared as bytes — and this is the one that deletes
+    // the older of the two, because two implementations of one judgement do not
+    // vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `free_fn_body` and `found` are that
+    // module's helpers word for word, and its header is where the six points
+    // behind them live. This module adds no shape of its own.
+    //
+    // **Two owners, and the deleted finder could not have told them apart.** It
+    // took the first `\n    fn name(` in this file, which is a method of
+    // whichever `impl` comes first; twenty-three of these pins are `Runtime`'s,
+    // `transfer_tab` and `settle_tear_out` are `FolioApp`'s, and
+    // `preview_tab_index_among` is a free function with a reader of its own
+    // because the two were closed by different braces.
+    //
+    // **What the deleted finders did, recorded before they went.** Each took
+    // everything after the `fn name(` it matched up to the first `\n    }\n`
+    // (or `\n}\n` at column zero) — the method's own closing line, so the slice
+    // stopped one line *short* of the body and carried the tail of the
+    // declaration in front of it instead. The crate's body is the braces and
+    // what is between them; the equivalence commit established that every
+    // assertion here falls inside it, all twenty-five and not a sample.
+    //
+    // **Two scopes widen, decided here rather than inherited (§4.1).** The
+    // retired transfer probe's three names were forbidden in this file and are
+    // forbidden in every file this package compiles, because a probe standing in
+    // any of them is the same second door onto the transaction. The per-window
+    // tab counter was read out of the text of three structs and is now asked for
+    // as an **identifier** over the whole package: `bt-source` indexes callable
+    // items, so a struct's fields are not an identity it can be asked for, and
+    // this is the one reading in this module that could not stay type-scoped.
     use super::*;
 
-    const SOURCE: &str = include_str!("main.rs");
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// [`layer_shape_tests::fn_body`]'s reader, kept beside the pins that use it
-    /// for the reason that module keeps its own: a shape pin that reaches into
-    /// another module for its witness is a pin that moves when that module does.
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!(
-            "
-    fn {name}("
-        );
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find(
-                    "
-    }
-",
-                )
-                .expect("a method is closed by a `}` at the `impl`'s indentation");
-        &SOURCE[start..end]
+    // ── what this module asks the crate instead ───────────────────────────
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
     }
 
-    /// The same for a `fn` in **column zero** — a free function, which is what a
-    /// lookup written to be pinned by value tends to be
-    /// (`preview_tab_index_among`). It is a second reader rather than a parameter
-    /// on the first because the two are closed by different `}`s, and a reader
-    /// that guessed which would be a pin that reads the wrong text.
-    fn top_level_fn_body(name: &str) -> &'static str {
-        let head = format!(
-            "
-fn {name}("
-        );
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared once at the top level"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find(
-                    "
-}
-",
-                )
-                .expect("a top-level function is closed by a `}` in column zero");
-        &SOURCE[start..end]
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// The field lines of a top-level `struct <name> { … }`, prose taken out —
-    /// [`layer_shape_tests::struct_fields`]'s reader, and its reason for
-    /// dropping the doc comments: these pins read the body as text, and a
-    /// sentence *about* a field that has gone reads exactly like the field.
-    fn struct_fields(name: &str) -> String {
-        let head = format!(
-            "
-struct {name} {{
-"
-        );
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`struct {name}` is declared at the top level"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find(
-                    "
-}
-",
-                )
-                .expect("a top-level struct is closed by a `}` in column zero");
-        SOURCE[start..end]
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// PIN (user ruling 2026-08-24) — **the address field changed address, and
@@ -15482,12 +15479,12 @@ struct {name} {{
     /// torn-off page answer `Ctrl+L` at all.
     #[test]
     fn the_address_editor_moved_to_the_rail_and_kept_its_machine() {
-        let head = fn_body("dress_preview_name_editor");
+        let head = method_body("Runtime", "dress_preview_name_editor");
         assert!(
             !head.contains("RenameSubject::WebAddress"),
             "① the head's editor is the rename editor and nothing else"
         );
-        let rail = fn_body("dress_preview_address_editor");
+        let rail = method_body("Runtime", "dress_preview_address_editor");
         assert!(
             rail.contains("RenameSubject::WebAddress"),
             "② and the rail's editor is the address's"
@@ -15510,12 +15507,13 @@ struct {name} {{
         // a second seeding is how two doors onto one room come to disagree about
         // what is in the box.
         assert!(
-            fn_body("open_web_address_on").contains("TabRename::open_address("),
+            method_body("Runtime", "open_web_address_on").contains("TabRename::open_address("),
             "③ the door `Ctrl+L`, `Ctrl+Shift+L` and the press all go through"
         );
         assert!(
-            fn_body("open_web_address").contains("self.open_web_address_on(leaf)")
-                && fn_body("open_address_here").contains("self.open_web_address_on(leaf)"),
+            method_body("Runtime", "open_web_address").contains("self.open_web_address_on(leaf)")
+                && method_body("Runtime", "open_address_here")
+                    .contains("self.open_web_address_on(leaf)"),
             "③ and the two chords go through it rather than seeding for \
              themselves"
         );
@@ -15524,17 +15522,18 @@ struct {name} {{
         // design, so a chord routed through it answers nothing over a torn-off
         // page.
         assert!(
-            fn_body("open_web_address").contains("self.page_with_the_keyboard()"),
+            method_body("Runtime", "open_web_address").contains("self.page_with_the_keyboard()"),
             "③ and the chord is in force wherever the page is"
         );
-        let pressed = fn_body("chrome_mouse_input");
+        let pressed = method_body("Runtime", "chrome_mouse_input");
         let address_arm = pressed
             .split("ChromeTarget::PreviewAddress(seat) => {")
             .nth(1)
             .expect("the address field's own press arm");
         assert!(
             address_arm.contains("seats::PreviewRailPart::Address")
-                && fn_body("press_preview_rail").contains("self.open_web_address_on(leaf)"),
+                && method_body("Runtime", "press_preview_rail")
+                    .contains("self.open_web_address_on(leaf)"),
             "③ and so does the press on the field, through the one ladder both \
              hosts climb"
         );
@@ -15567,7 +15566,7 @@ struct {name} {{
     /// MUTATION: drop the `float_holding_the_page` clause and this goes red.
     #[test]
     fn a_floated_pages_address_field_names_no_target_in_this_tabs_chrome() {
-        let router = fn_body("chrome_mouse_input");
+        let router = method_body("Runtime", "chrome_mouse_input");
         let arm = router
             .split("RenameSubject::WebAddress { leaf }")
             .nth(1)
@@ -15600,7 +15599,7 @@ struct {name} {{
     ///    both `chrome_mouse_input` and `press_float` climb.
     #[test]
     fn a_torn_off_preview_wears_the_panes_row_through_the_panes_own_functions() {
-        let tools = fn_body("float_head_tools");
+        let tools = method_body("Runtime", "float_head_tools");
         assert!(
             tools.contains("self.preview_rail_kind(surface)")
                 && tools.contains("rail: rail.is_some()"),
@@ -15610,7 +15609,7 @@ struct {name} {{
             tools.contains("&& rail.is_none()"),
             "① and hands its flip down to that row, so no window wears two"
         );
-        let layer = fn_body("preview_float_layer");
+        let layer = method_body("Runtime", "preview_float_layer");
         assert!(
             layer.contains("self.dress_preview_rail(surface, scale)"),
             "② dressed by the pane's own dressing"
@@ -15620,16 +15619,17 @@ struct {name} {{
             "③ and drawn by the pane's own paint, into the band the chassis \
              reserved"
         );
-        let hit = fn_body("float_hit_at");
+        let hit = method_body("Runtime", "float_hit_at");
         assert!(
             hit.contains("self.rail_geometry(PreviewSurface::Float(id), scale)")
                 && hit.contains("rail.as_ref()"),
             "④ and a press is resolved against the very geometry that paint read"
         );
         assert!(
-            fn_body("press_float")
+            method_body("Runtime", "press_float")
                 .contains("self.press_preview_rail(PreviewSurface::Float(id), part)")
-                && fn_body("chrome_mouse_input").contains("self.press_preview_rail(surface,"),
+                && method_body("Runtime", "chrome_mouse_input")
+                    .contains("self.press_preview_rail(surface,"),
             "④ and both hosts turn a part into a verb in one place"
         );
     }
@@ -15669,7 +15669,7 @@ struct {name} {{
     /// is the same word twice — once in the pill and once beside it.
     #[test]
     fn a_footless_window_prints_its_standing_fact_on_the_rail_and_flashes_in_a_tag() {
-        let layer = fn_body("preview_float_layer");
+        let layer = method_body("Runtime", "preview_float_layer");
         assert!(
             layer.contains("let footless = !geometry.wears_a_foot();"),
             "the chassis is asked whether there is a strip, rather than a second              reader working it out from the rail"
@@ -15699,7 +15699,7 @@ struct {name} {{
     /// title that offers to be edited.
     #[test]
     fn a_pages_title_no_longer_opens_the_address() {
-        let pressed = fn_body("chrome_mouse_input");
+        let pressed = method_body("Runtime", "chrome_mouse_input");
         let name_arm = pressed
             .split("ChromeTarget::PreviewName(seat) => {")
             .nth(1)
@@ -15764,16 +15764,29 @@ struct {name} {{
     /// opened.
     #[test]
     fn no_window_keeps_a_tab_counter_of_its_own() {
-        for layer in ["WindowRuntime", "NewWindowParts"] {
-            let fields = struct_fields(layer);
-            assert!(
-                !fields.contains("next_tab_id"),
-                "a per-window tab counter is the defect this slice removed, and \
-                 the only witness to its absence is the text of `{layer}`"
-            );
-        }
+        // The one reading in this module the crate cannot keep type-scoped:
+        // `bt-source` indexes callable items, so a struct's fields are not an
+        // identity it can be asked for, and both halves widen from the text of
+        // three structs in this file to every file this package compiles
+        // (§4.1). The name is asked for as an **identifier**, which is what a
+        // field is: the spelling standing in the two doc comments that tell this
+        // story is not a counter, and nothing written in prose can answer this.
+        let counter = found(
+            needle!(Pattern::identifier("next_tab_id")),
+            View::Identifiers,
+        );
         assert!(
-            struct_fields("App").contains("tab_ids: TabIds"),
+            counter.is_empty(),
+            "a per-window tab counter is the defect this slice removed, and no \
+             window — nor the parts one is assembled from — mints one again\n{}",
+            counter.report(source())
+        );
+        assert!(
+            !found(
+                needle!(Pattern::text("tab_ids: TabIds")),
+                View::CodeKeepingLiterals
+            )
+            .is_empty(),
             "and the one that replaced it is the application's"
         );
     }
@@ -15910,14 +15923,14 @@ struct {name} {{
     /// named here.
     #[test]
     fn a_preview_surface_is_read_and_written_in_the_one_tab_that_owns_it() {
-        let owner = fn_body("preview_tab_id");
+        let owner = method_body("Runtime", "preview_tab_id");
         assert!(
             owner.contains("PreviewSurface::Seat(leaf) => Some(leaf.tab)"),
             "a seat's tab is in its own name and is not looked for\n{owner}"
         );
 
         for name in ["preview_tab", "preview_tab_index"] {
-            let body = fn_body(name);
+            let body = method_body("Runtime", name);
             assert!(
                 body.contains("preview_tab_id("),
                 "`{name}` routes through the one door that answers whose tab a \
@@ -15939,7 +15952,7 @@ struct {name} {{
         // The seat half of the lookup is a free function so it can be pinned by
         // value as well as by shape — see
         // `tests::a_preview_seat_is_found_in_the_tab_that_owns_it`.
-        let among = top_level_fn_body("preview_tab_index_among");
+        let among = free_fn_body("preview_tab_index_among");
         assert!(
             among.contains("state.id == tab"),
             "and the strip is walked by the tab's own name\n{among}"
@@ -15991,7 +16004,7 @@ struct {name} {{
     /// pictures, the ticket, the accounting — and it is named here.
     #[test]
     fn the_transfer_is_a_transaction_and_its_commit_pays_every_debt() {
-        let body = fn_body("transfer_tab");
+        let body = method_body("FolioApp", "transfer_tab");
         for (owed, why) in [
             (
                 "owner_of(tab)",
@@ -16103,7 +16116,7 @@ struct {name} {{
             // A pane torn out over the strip.
             "extract_pane_into_new_tab",
         ] {
-            let body = fn_body(door);
+            let body = method_body("Runtime", door);
             assert!(
                 body.contains("tab_ids.mint()"),
                 "`{door}` opens a tab, so the number it opens with is the \
@@ -16132,7 +16145,7 @@ struct {name} {{
     /// `transfer_tab` to move it, and one of these names is missing.
     #[test]
     fn the_menu_row_spends_the_two_verbs_that_already_exist() {
-        let row = fn_body("move_pane_to_new_window");
+        let row = method_body("Runtime", "move_pane_to_new_window");
         assert!(
             row.contains("self.extract_pane_into_new_tab(leaf, slot)"),
             "the pane is promoted by the same tear-out the row above it spends: \
@@ -16155,7 +16168,7 @@ struct {name} {{
                  copy of it is the whole failure this pin is about"
             );
         }
-        let door = fn_body("settle_tear_out");
+        let door = method_body("FolioApp", "settle_tear_out");
         assert!(
             door.contains("self.transfer_tab(errand.tab, into)"),
             "one transaction, pressed by the menu row exactly as F2's drag will \
@@ -16329,10 +16342,18 @@ struct {name} {{
             concat!("Transfer", "Probe"),
             concat!("transfer", "_probe"),
         ] {
+            // An approved widening (§4.1): the prohibition was on this file and
+            // is now on every file this package compiles, because a probe
+            // standing in any of them is the same second door onto the
+            // transaction. The view stays `Raw` — the subject is a spelling
+            // wherever it appears, which is what `include_str!` gave this reader
+            // and what §2.1 says a whole-source negative asks for.
+            let hits = found(needle!(Pattern::text(retired)), View::Raw);
             assert!(
-                !SOURCE.contains(retired),
+                hits.is_empty(),
                 "`{retired}` is F1b's scaffolding, and F1c's row is what it was \
-                 waiting for"
+                 waiting for\n{}",
+                hits.report(source())
             );
         }
     }
