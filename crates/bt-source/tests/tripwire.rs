@@ -684,12 +684,13 @@ fn every_debt_row_names_a_ticket_of_the_plan_and_an_answer_about_the_move() {
         "P0", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P12", "P13", "P14", "P15", "P16",
         "P17", "P18", "P19",
     ]);
+    // No floor on the row count: the list only shrinks, by design, and a
+    // truncated list is caught by `no_source_reader_names_a_file_outside_the_two_lists`
+    // (a reader whose row went missing is on neither list) and by
+    // `scripts/ci/check-migration-debt.ps1` (which refuses growth). A floor
+    // written from the seed census would go red on the batch that migrates
+    // the row under it, which is exactly the work this list exists to record.
     let rows = debt_rows(&workspace_root());
-    assert!(
-        rows.len() > 500,
-        "the debt list has {} rows, which is not the census it was seeded from",
-        rows.len()
-    );
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for row in &rows {
         assert!(
