@@ -18197,12 +18197,6 @@ mod tests {
         let spelling = concat!("float_tag_rects", "(");
         let struck = found(needle!(Pattern::text(spelling)), View::Raw).len();
         assert_eq!(
-            struck,
-            include_str!("lib.rs").matches(spelling).count(),
-            "P8 equivalence: the file reading and the crate reading disagree \
-             about how many places strike a chip"
-        );
-        assert_eq!(
             struck, 2,
             "one definition and one call site — a chip that struck its own \
              colours would be a third"
@@ -20402,55 +20396,43 @@ mod tests {
     /// wrong in every split window.
     #[test]
     fn the_band_accessors_are_given_a_seat_and_never_take_one() {
-        let source = include_str!("lib.rs");
         // The last of the six is the one that does the arithmetic: it takes the
         // seat too, so nothing below the other five can quietly reach for the
         // field again.
-        for (opening, name) in [
-            ("pub fn math_tool_boxes(", "math_tool_boxes"),
-            ("pub fn math_band_face(", "math_band_face"),
-            ("pub fn math_band_trace(", "math_band_trace"),
-            ("pub fn math_hit_test(", "math_hit_test"),
-            ("fn math_failure_geometry(", "math_failure_geometry"),
-            ("fn math_block_geometry(", "math_block_geometry"),
+        for name in [
+            "math_tool_boxes",
+            "math_band_face",
+            "math_band_trace",
+            "math_hit_test",
+            "math_failure_geometry",
+            "math_block_geometry",
         ] {
-            let block = block_beginning_with(source, opening);
-            assert!(!block.is_empty(), "{opening} is declared in this file");
-            // The item, not a slice of a file (P8). `View::CodeKeepingLiterals`
-            // and not `View::Raw` because an item's bytes begin at its first
-            // attribute, so the raw reading would take these accessors' own doc
-            // comments as code — the prose above `math_band_trace` names the
-            // field this forbids.
+            // The item, not a slice of a file (P8), and a refusal rather than
+            // an empty string when it is not declared.
+            // `View::CodeKeepingLiterals` and not `View::Raw` because an item's
+            // bytes begin at its first attribute, so the raw reading would take
+            // these accessors' own doc comments as code — the prose above
+            // `math_band_trace` names the field this forbids.
             let item = Scope::Item(ItemQuery::method("WindowRenderer", name));
-            let handed = !found_in(
+            let handed = found_in(
                 needle!(Pattern::text("seat: SeatViewport")),
                 View::CodeKeepingLiterals,
                 item.clone(),
-            )
-            .is_empty();
-            let reaches = !found_in(
+            );
+            let reaches = found_in(
                 needle!(Pattern::text("self.seat")),
                 View::CodeKeepingLiterals,
                 item,
-            )
-            .is_empty();
-            assert_eq!(
-                handed,
-                block.contains("seat: SeatViewport"),
-                "P8 equivalence: the file reading and the item reading disagree \
-                 about whether {name} is handed a seat"
             );
-            assert_eq!(
-                reaches,
-                block.contains("self.seat"),
-                "P8 equivalence: the file reading and the item reading disagree \
-                 about whether {name} reaches for the field"
-            );
-            assert!(handed, "{name} takes the band's own pane:\n{block}");
             assert!(
-                !reaches,
-                "{name} reads the focused pane's rectangle instead of the one it was \
-                 handed:\n{block}"
+                !handed.is_empty(),
+                "{name} does not take the band's own pane"
+            );
+            assert!(
+                reaches.is_empty(),
+                "{name} reads the focused pane's rectangle instead of the one it \
+                 was handed:\n{}",
+                reaches.report(source())
             );
         }
     }
@@ -21493,93 +21475,15 @@ mod tests {
         headless_device(format, true, None).ok()
     }
 
-    /// Every `#[cfg(test)]` module in one file's source, joined — the region a
-    /// rule about *test* code is allowed to be checked against, so that the
-    /// production constructors and their own definitions are out of scope.
-    ///
-    /// Comment lines go first, so that a sentence naming a constructor can never
-    /// look like a call to it.
-    fn test_code_in(source: &str) -> String {
-        let lines: Vec<&str> = source
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect();
-        let mut collected = Vec::new();
-        let mut index = 0;
-        while index < lines.len() {
-            let opens_a_test_module = lines[index].trim() == concat!("#[cfg(", "test)]")
-                && lines
-                    .get(index + 1)
-                    .is_some_and(|line| line.trim_start().starts_with("mod "));
-            if !opens_a_test_module {
-                index += 1;
-                continue;
-            }
-            index += 1;
-            let indent = indent_of(lines[index]);
-            let closing = format!("{}}}", " ".repeat(indent));
-            while index < lines.len() {
-                collected.push(lines[index]);
-                if lines[index] == closing {
-                    break;
-                }
-                index += 1;
-            }
-            index += 1;
-        }
-        collected.join("\n")
-    }
-
-    /// The body of the item whose first line begins with `opening`, from that
-    /// line to the `}` at the same indent. Empty when there is no such item.
-    fn block_beginning_with(source: &str, opening: &str) -> String {
-        let lines: Vec<&str> = source.lines().collect();
-        let Some(start) = lines
-            .iter()
-            .position(|line| line.trim_start().starts_with(opening))
-        else {
-            return String::new();
-        };
-        let closing = format!("{}}}", " ".repeat(indent_of(lines[start])));
-        let end = lines[start..]
-            .iter()
-            .position(|line| *line == closing)
-            .map_or(lines.len(), |offset| start + offset + 1);
-        lines[start..end].join("\n")
-    }
-
-    fn indent_of(line: &str) -> usize {
-        line.len() - line.trim_start().len()
-    }
-
-    /// This crate's `src`, file by file.
-    fn crate_sources() -> Vec<(String, String)> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files: Vec<(String, String)> = std::fs::read_dir(&root)
-            .expect("this crate's src directory")
-            .map(|entry| entry.expect("a directory entry").path())
-            .filter(|path| path.extension().is_some_and(|kind| kind == "rs"))
-            .map(|path| {
-                let name = path
-                    .file_name()
-                    .expect("a file name")
-                    .to_string_lossy()
-                    .into_owned();
-                (name, std::fs::read_to_string(&path).expect("a source file"))
-            })
-            .collect();
-        files.sort();
-        files
-    }
-
     // ── the crate asked, instead of the directory listed (P8) ─────────────
     //
-    // `docs/plans/bt-app-split-prep.md` §3.3 names [`crate_sources`] above as
-    // one of three non-recursive walkers: it reads `crates/bt-render/src/` one
-    // directory deep, which is every file of this crate today and none of the
-    // files in the first subdirectory anybody adds. The same sentence is true
-    // of every `include_str!("lib.rs")` in this module — a fact that moves to a
-    // file beside this one stops being read, silently and without changing a
+    // `docs/plans/bt-app-split-prep.md` §3.3 named the `crate_sources` walker
+    // that stood here as one of three non-recursive walkers: it read
+    // `crates/bt-render/src/` one directory deep, which was every file of this
+    // crate while that directory was flat and none of the files in the first
+    // subdirectory anybody added. The same sentence was true of the ten
+    // bindings under it that read this file's own text — a fact that moves to
+    // a file beside this one stops being read, silently and without changing a
     // verdict. What stands here instead is the universe this crate's own `mod`
     // declarations describe, and a file on the disk that no declaration reaches
     // is reported rather than skipped.
@@ -21645,9 +21549,9 @@ mod tests {
     /// **One module's own code, with every comment masked out and every space
     /// taken out with them.**
     ///
-    /// The replacement for the `include_str!("lib.rs")` this module used to
-    /// squeeze: a module is a Rust path and not a file, so the day this crate's
-    /// root is split the path still resolves, and the comment masking is
+    /// The replacement for the reading of this file's own text that this module
+    /// used to squeeze: a module is a Rust path and not a file, so the day this
+    /// crate's root is split the path still resolves, and the comment masking is
     /// `View::CodeKeepingLiterals`' (§2.1) rather than a line filter's — which
     /// is a repair, because the filter dropped whole `//` lines and left every
     /// trailing one, so a sentence written after a semicolon could answer a
@@ -21684,174 +21588,33 @@ mod tests {
         code
     }
 
-    /// **The file-set diff §3.2 asks every migrated walker to ship** — not a
-    /// count, the sorted paths on each side, with the directory listing
-    /// [`crate_sources`] takes beside the set this crate's own declarations
-    /// reach. Deleted with the walker it compares against.
+    /// **The evidence §3.2 asks a migrated walker to ship**, kept rather than
+    /// spent: the declared file set, printed in full, and the cross-check that
+    /// says the disk holds nothing the declarations do not reach.
+    ///
+    /// This is what the deleted directory listing meant by seeing the crate,
+    /// said about declarations instead of about a listing, and it is also what
+    /// makes a `.rs` file dropped into `src/` with no `mod` for it a red test
+    /// rather than a file every gate below silently skips.
     #[test]
-    fn the_declared_universe_holds_the_files_the_walk_holds() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let walked: std::collections::BTreeSet<std::path::PathBuf> = std::fs::read_dir(&root)
-            .expect("this crate's src directory")
-            .map(|entry| entry.expect("a directory entry").path())
-            .filter(|path| path.extension().is_some_and(|kind| kind == "rs"))
-            .map(|path| bt_source::normalized(&path))
-            .collect();
-        let declared: std::collections::BTreeSet<std::path::PathBuf> = source()
-            .files()
-            .iter()
-            .map(|file| file.path().to_path_buf())
-            .collect();
+    fn every_file_of_the_renderer_is_reached_by_a_declaration() {
+        let index = source();
         // Printed, not only compared: §3.2 asks for the sorted list of paths
         // and not a count, and `--nocapture` is where a ticket takes it from.
-        for path in &walked {
-            println!("walked:   {}", path.display());
+        for file in index.files() {
+            println!("declared: {}", file.path().display());
         }
-        for path in &declared {
-            println!("declared: {}", path.display());
-        }
-        let only_walked: Vec<String> = walked
-            .difference(&declared)
-            .map(|path| format!("walked, not declared: {}", path.display()))
-            .collect();
-        let only_declared: Vec<String> = declared
-            .difference(&walked)
-            .map(|path| format!("declared, not walked: {}", path.display()))
-            .collect();
         assert!(
-            only_walked.is_empty() && only_declared.is_empty(),
-            "P8 file-set diff for bt-render:\n{}\n{}",
-            only_walked.join("\n"),
-            only_declared.join("\n")
+            index.cross_check().agrees(),
+            "a `.rs` file under this crate's `src/` is reached by no \
+             declaration, so no gate below is read against it:\n{}",
+            index.cross_check().report()
         );
-    }
-
-    /// **P8 equivalence** — the module reading and the file reading answer the
-    /// same about every needle and every cut the gates in this module take.
-    ///
-    /// The nine gates that ask [`source_without_prose`] and
-    /// [`production_source`] are not each rewritten: what changed under them is
-    /// where the text comes from, so what has to be shown is that the text
-    /// answers the same. Deleted with [`file_source_without_prose`] in the
-    /// commit after this one (§6.0 rule 3).
-    #[test]
-    fn the_module_reading_answers_what_the_file_reading_answered() {
-        let file = file_source_without_prose();
-        let module = source_without_prose();
-        let file_product = file_production_source();
-        let module_product = production_source();
-
-        let cut = |text: &str, start: &str, end: &str| -> String {
-            let from = text.find(start).unwrap_or_else(|| panic!("{start}"));
-            let to = text[from..].find(end).unwrap_or_else(|| panic!("{end}"));
-            text[from..from + to].to_owned()
-        };
-        let agree = |what: &str, left: &str, right: &str, needles: &[&str]| {
-            for needle in needles {
-                assert_eq!(
-                    left.matches(needle).count(),
-                    right.matches(needle).count(),
-                    "P8 equivalence, {what}: the file reading and the module \
-                     reading disagree about `{needle}`"
-                );
-            }
-        };
-
-        agree(
-            "the whole crate root",
-            &file,
-            module,
-            &[
-                concat!("Viewport", "::new("),
-                concat!("self.text_viewport", ".update(&gpu", ".queue,Resolution{"),
-                concat!(".update(&gpu", ".queue,Resolution{"),
-                concat!(".render(&gpu", ".atlas,"),
-                concat!(".render(&gpu", ".atlas,&self.text_viewport,"),
-                concat!("&slot", ".viewport"),
-                concat!("glyph_atlas_", "refits+=1;"),
-            ],
+        assert!(
+            index.files().len() >= 12,
+            "the reading must actually see the crate, saw {}",
+            index.files().len()
         );
-        agree(
-            "the product half",
-            &file_product,
-            module_product,
-            &[
-                "fntext_upload_refused(",
-                "text_upload_refused(",
-                "prepare_failure_policy(",
-                concat!(
-                    "wgpu::CurrentSurfaceTexture::Occluded=>{SurfaceAcquisition::Failed(",
-                    "SurfaceFailure::NotVisible)}"
-                ),
-                concat!(
-                    "wgpu::CurrentSurfaceTexture::Timeout=>{SurfaceAcquisition::Failed(",
-                    "SurfaceFailure::Unavailable)}"
-                ),
-            ],
-        );
-        for (what, start, end, needles) in [
-            (
-                "present_frame",
-                "pubfnpresent_frame(&mutself,gpu:&mutGpuContext,",
-                "fncompose_frame(",
-                &["gpu.close_the_frame(&outcome);", "?", "return"][..],
-            ),
-            (
-                "compose_frame",
-                "fncompose_frame(",
-                "fnprepare_text_rows(&mutself,",
-                &[
-                    "gpu.atlas.trim()",
-                    ".is_ok()",
-                    "accept_text_prepare(",
-                    "&mutgpu.atlas,",
-                ][..],
-            ),
-        ] {
-            agree(
-                what,
-                &cut(&file, start, end),
-                &cut(module, start, end),
-                needles,
-            );
-        }
-        for (what, start, end, needles) in [
-            (
-                "handle_surface_failure",
-                "fnhandle_surface_failure(&mutself,gpu:&GpuContext,",
-                "fnconfigure_surface_if_needed(",
-                &[
-                    "gpu.queue.submit(std::iter::empty());",
-                    "count_surface_failure(failure);",
-                    "matchsurface_failure_policy(failure){",
-                    "?",
-                    "return",
-                ][..],
-            ),
-            (
-                "compose_frame, in the product",
-                "fncompose_frame(",
-                "fnprepare_text_rows(&mutself,",
-                &["text_upload_refused("][..],
-            ),
-            (
-                "text_upload_refused",
-                "fntext_upload_refused(",
-                "fnpresent_outcome(",
-                &[
-                    "*text_complete=false;",
-                    "refused.insert(lane)",
-                    "eprintln!(",
-                ][..],
-            ),
-        ] {
-            agree(
-                what,
-                &cut(&file_product, start, end),
-                &cut(module_product, start, end),
-                needles,
-            );
-        }
     }
 
     /// PIN (§7.37) — **no test in this crate stands up a headless device except
@@ -21885,14 +21648,6 @@ mod tests {
             concat!("headless_", "on("),
             concat!("headless_under_a_", "texture_ceiling("),
         ];
-        let doorway = block_beginning_with(
-            &test_code_in(include_str!("lib.rs")),
-            concat!("fn headless_", "device("),
-        );
-        assert!(
-            !doorway.is_empty(),
-            "the one door has to exist before anything can be held to it"
-        );
         // The door is an item of this crate and not a stretch of this file
         // (P8): a door moved into `src/headless/` is the same door, and the
         // query refuses out loud rather than answering about no bytes at all.
@@ -21908,36 +21663,18 @@ mod tests {
                 door.clone(),
             )
             .len();
-            assert_eq!(
-                asked,
-                doorway.matches(constructors[which]).count(),
-                "P8 equivalence: the file reading and the item reading disagree \
-                 about how often the door asks for {what}"
-            );
             assert_eq!(asked, 1, "the door asks for {what} exactly once");
         }
 
-        let mut walked = 0_usize;
-        for (_, source) in crate_sources() {
-            let outside_the_door = test_code_in(&source).replace(&doorway, "");
-            for constructor in constructors {
-                walked += outside_the_door.matches(constructor).count();
-            }
-        }
-        assert_eq!(
-            walked, 0,
-            "the walk this reading replaces has to be green before the reading \
-             that replaces it means anything"
-        );
         // **The same claim as an owner set** (§4.1): every item that names one
         // of the four constructors in test code, and how often. A total cannot
         // say this — "no test builds a device" is a statement about *which*
         // items name the constructors, and the door is one of them.
         //
         // **P8 reconciliation, written down rather than adjusted away** (§6.0
-        // rule 5). The walk above took "test code" to be `#[cfg(test)] mod`
-        // blocks, which is how it is spelled in a file; this reading takes it
-        // to be the `#[cfg(test)]` an item stands under, wherever it is
+        // rule 5). The walk this replaces took "test code" to be `#[cfg(test)]
+        // mod` blocks, which is how it is spelled in a file; this reading takes
+        // it to be the `#[cfg(test)]` an item stands under, wherever it is
         // written (§2.4). The two disagree by one item, and it is a real one:
         // `GpuContext::headless_under_a_texture_ceiling` is itself
         // `#[cfg(test)]`, and the walk never looked inside it. Its two
@@ -23552,20 +23289,6 @@ mod tests {
         SQUEEZED.get_or_init(|| module_code_without_space("crate"))
     }
 
-    /// The reading this module took until P8: `lib.rs` as a file, whole comment
-    /// lines dropped and every space taken out. It stands beside the one above
-    /// for the equivalence commit and is deleted with it (§6.0 rule 3).
-    fn file_source_without_prose() -> String {
-        include_str!("lib.rs")
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect()
-    }
-
     /// The same, with this file's own tests cut off the end.
     ///
     /// A rule counting how many times production code names something has to be
@@ -23578,15 +23301,6 @@ mod tests {
             .find(concat!("#[cfg(", "test)]modtests{"))
             .expect("this file's own test module");
         &source[..tests]
-    }
-
-    /// The same cut taken on the pre-P8 reading, for the equivalence commit.
-    fn file_production_source() -> String {
-        let source = file_source_without_prose();
-        let tests = source
-            .find(concat!("#[cfg(", "test)]modtests{"))
-            .expect("this file's own test module");
-        source[..tests].to_owned()
     }
 
     /// PIN (§7.36) — **a window has one glyphon `Viewport`, and every batch of
@@ -24970,26 +24684,16 @@ mod tests {
              level — and the one `TextRenderer::new` a new overlay level needs, all naming \
              `gpu.atlas` and nothing else"
         );
-        let context = block_beginning_with(include_str!("lib.rs"), "pub struct GpuContext {");
-        assert!(
-            !context.is_empty(),
-            "the device context has to exist before anything can be held to it"
-        );
-        // The type, not the lines under a signature (P8). Its bytes begin at
-        // its first attribute, so the reading masks comments and keeps
-        // literals: the prose over this struct names its atlas twice.
+        // The type, not the lines under a signature (P8), and a refusal rather
+        // than an empty string when it is not declared. Its bytes begin at its
+        // first attribute, so the reading masks comments and keeps literals:
+        // the prose over this struct names its atlas twice.
         let atlases = found_in(
             needle!(Pattern::text("TextAtlas")),
             View::CodeKeepingLiterals,
             Scope::Item(ItemQuery::type_item("GpuContext")),
         )
         .len();
-        assert_eq!(
-            atlases,
-            context.matches("TextAtlas").count(),
-            "P8 equivalence: the file reading and the type reading disagree \
-             about how many atlases the device context holds"
-        );
         assert_eq!(atlases, 1, "one device context, one atlas");
     }
 
@@ -25463,14 +25167,6 @@ mod tests {
             0,
             "the re-pack counter is bumped somewhere that is not the line that reports it"
         );
-        let minting = block_beginning_with(
-            include_str!("lib.rs"),
-            concat!("fn note_a_", "repack(refits: &mut u64)"),
-        );
-        let closing = block_beginning_with(
-            include_str!("lib.rs"),
-            concat!("fn close_the_", "frame(&mut self,"),
-        );
         // Both are items of this crate and not lines of this file (P8): the
         // counter and the sentence stay one statement wherever the two
         // functions are written.
@@ -25498,31 +25194,13 @@ mod tests {
         )
         .len();
         assert_eq!(
-            counted,
-            minting.matches("*refits += 1;").count(),
-            "P8 equivalence: the file reading and the item reading disagree \
-             about where the counter is bumped"
-        );
-        assert_eq!(
-            sentences,
-            minting.matches("format!(").count(),
-            "P8 equivalence: the file reading and the item reading disagree \
-             about how many sentences the pair builds"
-        );
-        assert_eq!(
-            spent,
-            closing.matches(concat!("note_a_", "repack(")).count(),
-            "P8 equivalence: the file reading and the item reading disagree \
-             about how often the closing verb spends the pair"
-        );
-        assert_eq!(
             counted, 1,
-            "the one place that counts a re-pack has to be the one that names it: {minting}"
+            "the one place that counts a re-pack has to be the one that names it"
         );
         assert_eq!(sentences, 1, "one sentence, built once");
         assert_eq!(
             spent, 1,
-            "the frame's closing verb spends the pair exactly once: {closing}"
+            "the frame's closing verb spends the pair exactly once"
         );
     }
 
@@ -28115,28 +27793,6 @@ mod tests {
     /// the picture is painted straight back over the selection.
     #[test]
     fn the_wash_is_struck_over_the_picture_and_under_the_blocks_own_chrome() {
-        let source: String = include_str!("lib.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        let old_wash = source
-            .find(concat!("self.math_selection_wash_", "rectangles(frame);"))
-            .expect("the wash's own list");
-        let old_chrome = source
-            .find(concat!(
-                "math_overlays.extend(self.math_overlay_",
-                "rectangles(frame));"
-            ))
-            .expect("the block's chrome joining the same list");
-        let old_tiles = source
-            .find(concat!("fordrawin&seat.", "math_draws{"))
-            .expect("the seat's math tile draws");
-        let old_overlay = source
-            .find(concat!(
-                "pass.draw(0..6,0..seat.",
-                "math_overlay_countasu32);"
-            ))
-            .expect("the overlay buffer's draw");
         // Four places in this crate's sources rather than four offsets into
         // this file (P8). Each landmark is required to be unique rather than
         // taken first: an order gate whose landmark stopped being the only one
@@ -28169,12 +27825,6 @@ mod tests {
             ))),
             View::Raw,
             "the overlay buffer's draw",
-        );
-        assert_eq!(
-            (old_wash < old_chrome, old_tiles < old_overlay),
-            (wash < chrome, tiles < overlay),
-            "P8 equivalence: the file reading and the crate reading disagree \
-             about the order these four are issued in"
         );
         assert!(
             wash < chrome,
@@ -29325,29 +28975,6 @@ mod tests {
         /// that issues them.
         #[test]
         fn the_hole_is_drawn_over_the_seat_and_under_everything_over_the_window() {
-            let source: String = include_str!("lib.rs")
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect();
-            let old_hole = source
-                .find(concat!(
-                    "pass.set_vertex_buffer(0,",
-                    "buffer.slice(..));pass.draw(0..6,0..web_hole_",
-                    "rects"
-                ))
-                .expect("the hole draw");
-            let old_body = source
-                .find(concat!("pass.draw(0..6,0..", "preview_body_rects.len()"))
-                .expect("the preview body draw");
-            let old_peek = source
-                .find(concat!("pass.draw(0..6,0..", "peek_rects.len()"))
-                .expect("the peek flyout draw");
-            let old_overlay = source
-                .find(concat!(
-                    "pass.set_pipeline(&gpu.",
-                    "ground_fade_rect_pipeline);"
-                ))
-                .expect("the overlay's own grounds");
             // Four places in this crate's sources, each required to be the only
             // one of itself (P8). The hole's landmark is the draw's own count
             // rather than the two statements the squeezed file reading could
@@ -29380,16 +29007,6 @@ mod tests {
                 ))),
                 View::Raw,
                 "the overlay's own grounds",
-            );
-            assert_eq!(
-                (
-                    old_body < old_hole,
-                    old_hole < old_peek,
-                    old_hole < old_overlay
-                ),
-                (body < hole, hole < peek, hole < overlay),
-                "P8 equivalence: the file reading and the crate reading disagree \
-                 about the order these four are issued in"
             );
             assert!(body < hole, "the hole covers the seat's own body");
             assert!(hole < peek, "a floating window covers the hole");
@@ -29426,22 +29043,6 @@ mod tests {
         ///    every hole is back to being punched under the whole stack.
         #[test]
         fn a_layers_own_hole_is_punched_after_the_face_that_layer_draws() {
-            let source: String = include_str!("lib.rs")
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect();
-            let old_ground = source
-                .find(concat!("pass.draw(0..6,0..", "layer.ground_count"))
-                .expect("the overlay layer's ground draw");
-            let old_rects = source
-                .find(concat!("pass.draw(0..6,0..", "layer.rect_count"))
-                .expect("the overlay layer's fill draw");
-            let old_hole = source
-                .find(concat!("pass.draw(0..6,0..", "layer.hole_count"))
-                .expect("the overlay layer's hole draw");
-            let old_loop = source
-                .find("for(index,layer)inoverlay_draws.iter().enumerate()")
-                .expect("the overlay stack's own loop");
             // Four places in this crate's sources, each required to be the only
             // one of itself (P8).
             let ground = only(
@@ -29475,16 +29076,6 @@ mod tests {
                 ))),
                 View::Raw,
                 "the overlay stack's own loop",
-            );
-            assert_eq!(
-                (
-                    old_ground < old_hole,
-                    old_rects < old_hole,
-                    old_loop < old_hole
-                ),
-                (ground < hole, rects < hole, loop_ < hole),
-                "P8 equivalence: the file reading and the crate reading disagree \
-                 about the order these four are issued in"
             );
             assert!(
                 ground < hole,
