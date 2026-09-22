@@ -256,7 +256,6 @@ crates/bt-app/src/main.rs	refused_preview_card_tests::pressing_the_button_on_a_r
 crates/bt-app/src/main.rs	refused_preview_card_tests::the_refused_and_unknown_pages_share_one_card	include_str!	docked_chrome_target_at;float_hit_at;float_refusal_words;push_float_refusal_card;refresh_chrome_with_overlay;refused_preview_card	P3	yes
 crates/bt-app/src/main.rs	resize_skirt_order_tests::the_present_funnel_shrinks_the_skirt_and_asks_for_the_frame_that_does_it	include_str!	present_seats_and_commit	P3	yes
 crates/bt-app/src/main.rs	resize_skirt_order_tests::the_resize_handler_covers_the_new_strip_before_it_does_anything_else	include_str!	resize	P3	yes
-crates/bt-app/src/main.rs	system_preference_wiring_tests::the_system_preference_event_re_reads_the_desktops_canvas	include_str!	adopt_motion_preference;adopt_system_canvas	P14	no
 crates/bt-app/src/main.rs	textless_present_tests::a_textless_present_is_a_frame_the_window_still_owes	include_str!	present_retained_picture;redraw	P3	yes
 crates/bt-app/src/main.rs	textless_present_tests::a_window_that_is_not_on_screen_stops_asking_and_is_woken_once	include_str!	present_retained_picture;publish_frame;redraw	P3	yes
 crates/bt-app/src/persist.rs	persist::tests::the_only_thread_that_fsyncs_session_json_is_the_writer	include_str!	flush_if_due;hand_over	P14	no

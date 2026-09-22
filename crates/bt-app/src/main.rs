@@ -124880,15 +124880,32 @@ fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> 
 /// the watch's callback does nothing but nudge this loop.
 #[cfg(test)]
 mod system_preference_wiring_tests {
-    // **P14's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.5, §6.0 rule 3), taken with P3's because §6.0 rule 4 batches by module.
-    // Both readings stand here and are asserted to agree; the commit after this
-    // one deletes the older of the two. `source` and `item_body` are
-    // `pty_drain_budget_tests`' helpers word for word, `trait_method_body` is
+    // **P14's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.5),
+    // taken with P3's because §6.0 rule 4 batches by module. Both readers here
+    // asked `main.rs` for its text; both now ask `bt-source` about an *item* of
+    // this crate, so no fact in this module is bound to the file it happens to be
+    // written in today. The commit before this one ran both readings side by side
+    // and asserted they agree; this is the one that deletes the older of the two,
+    // because two implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source` and `item_body` are that module's helpers word for word and its
+    // header is where the six points behind them live; `trait_method_body` is
     // `resident_run_tests`'.
+    //
+    // **Two owners, not one.** The arm stands in
+    // `<FolioApp as ApplicationHandler>::user_event` and the reader it names is
+    // `FolioApp::adopt_system_canvas`; the deleted reading knew neither, because
+    // it was a byte offset into a file.
+    //
+    // **The second half was satisfiable by this module's own prose.**
+    // `SOURCE.contains("fn adopt_system_canvas(&mut self) -> Result<()> {")` is
+    // answered by the line that spells it, and this test spells it — it is right
+    // today only because the declaration is written above this module. It asks
+    // `bt-source` for the declaration of the identity instead, which refuses
+    // loudly when there is none.
     use bt_source::{Index, ItemQuery};
-
-    const SOURCE: &str = include_str!("main.rs");
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -124916,16 +124933,11 @@ mod system_preference_wiring_tests {
     /// the canvas their window was opened in until they restart.
     #[test]
     fn the_system_preference_event_re_reads_the_desktops_canvas() {
-        let older = SOURCE
-            .find("AppEvent::SystemPreferencesChanged =>")
-            .map(|at| &SOURCE[at..at + 200])
-            .expect("the event has an arm in the loop's own match");
         let events = trait_method_body("FolioApp", "ApplicationHandler", "user_event");
         let arm = events
             .find("AppEvent::SystemPreferencesChanged =>")
             .map(|at| &events[at..at + 200])
             .expect("the event has an arm in the loop's own match");
-        assert_eq!(older, arm, "the two readings of the arm disagree");
         assert!(
             arm.contains("adopt_motion_preference"),
             "the animation preference is no longer re-read on the event that says it moved:\n{arm}"
@@ -124938,13 +124950,6 @@ mod system_preference_wiring_tests {
         let reader = source()
             .declaration_of(&ItemQuery::method("FolioApp", "adopt_system_canvas"))
             .unwrap_or_else(|failure| panic!("{failure}"));
-        assert_eq!(
-            SOURCE.contains("fn adopt_system_canvas(&mut self) -> Result<()> {"),
-            reader
-                .trim_end()
-                .ends_with("fn adopt_system_canvas(&mut self) -> Result<()>"),
-            "the two readings of the declaration disagree"
-        );
         assert!(
             reader
                 .trim_end()
