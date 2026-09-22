@@ -268,11 +268,6 @@ crates/bt-app/src/main.rs	pages_are_plural_tests::every_page_of_this_tab_draws_a
 crates/bt-app/src/main.rs	pages_are_plural_tests::the_blank_pages_receipt_names_the_pane_the_landing_rule_chose	include_str!	mint_a_blank_page_and_open_its_address	P3	yes
 crates/bt-app/src/main.rs	platform_gate_tests::only_the_named_files_decide_what_platform_this_is	directory walk	(the file it reads)	P10	no
 crates/bt-app/src/main.rs	platform_gate_tests::the_caption_run_is_decided_by_one_capability_read	include_str!	adopt_platform_chrome;caption_targets;platform_chrome;tab_strip_geometry;window_caption_boxes	P3	yes
-crates/bt-app/src/main.rs	pointer_chord_site_tests::every_pointer_door_reads_the_platforms_hand_over_modifier	include_str!	begin_local_selection;press_graph_row;press_preview_text;preview_link_grasp;scroll_web_page;terminal_link_grasp;window	P3	yes
-crates/bt-app/src/main.rs	pointer_chord_site_tests::no_other_door_reads_the_raw_control_key_for_a_gesture	include_str!	preview_browse_key	P4	yes
-crates/bt-app/src/main.rs	pointer_chord_site_tests::no_pointer_door_still_reads_control_by_name	include_str!	begin_local_selection;press_graph_row;press_preview_text;preview_link_grasp;scroll_web_page;terminal_link_grasp	P3	yes
-crates/bt-app/src/main.rs	pointer_chord_site_tests::one_field_remembers_which_press_is_under_the_hand	include_str!	window	P14	no
-crates/bt-app/src/main.rs	pointer_chord_site_tests::the_secondary_click_is_settled_once_and_above_every_router	include_str!	mouse_input	P3	yes
 crates/bt-app/src/main.rs	popover_trigger_tests::a_popup_is_up_only_while_its_own_layout_would_draw	include_str!	graph_filter_menu_layout;graph_filter_menu_stand;popups_up;preview_menu_layout;preview_menu_stand;root_menu_layout;root_menu_stand	P3	yes
 crates/bt-app/src/main.rs	popover_trigger_tests::every_dismissal_arm_asks_the_one_rule	include_str!	main.rs	P3	yes
 crates/bt-app/src/main.rs	popover_trigger_tests::the_register_names_every_popup	include_str!	popup_trigger	P3	yes

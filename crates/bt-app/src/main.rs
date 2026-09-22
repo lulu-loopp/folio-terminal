@@ -112364,40 +112364,44 @@ mod focus_column_notch_tests {
 /// spends Control on the secondary click, so a build that read `control_key()`
 /// there answered one press with two verbs.
 ///
-/// These are read as text because the repair is *which question six doors ask*,
-/// and every one of those doors needs a live `WindowRuntime` — a compositor, a
-/// renderer and a shell — to be asked at run time. What a machine can hold
-/// without a screen is the call each door makes, and that no seventh door grows
-/// back the raw reading beside them.
+/// These are read off the source because the repair is *which question six
+/// doors ask*, and every one of those doors needs a live `WindowRuntime` — a
+/// compositor, a renderer and a shell — to be asked at run time. What a machine
+/// can hold without a screen is the call each door makes, and that no seventh
+/// door grows back the raw reading beside them. Since P3 the six are named by
+/// identity and the sweep is the package's, so neither is bound to the file the
+/// doors happen to be written in today.
 #[cfg(test)]
 mod pointer_chord_site_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Nothing is deleted here: each body pin computes
-    // its answer twice — once from `include_str!("main.rs")`, once from
-    // `bt-source` — and `agreed` asserts the two are the same bytes, and each
-    // whole-file sweep asserts the two answer the same thing.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate. The commit before this one ran
+    // both readings side by side and asserted they agree — thirteen body pins
+    // compared as bytes, three sweeps compared as answers — and this is the one
+    // that deletes the older of the two, because two implementations of one
+    // judgement do not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
     // `source`, `item_body`, `method_body`, `found` and `owner_names` are that
     // module's helpers word for word, and its header is where the six points
-    // behind them live. `agreed` is the equivalence itself and goes with the
-    // old reading.
+    // behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed and stopped before the next
+    // `\n    fn `, which is not the end of the method — 1,437 bytes around
+    // `terminal_link_grasp`'s 630-byte body — and it could not say which `impl`
+    // it had landed in. All seven identities turned out to be `Runtime`'s,
+    // including the seventh the list below does not name.
+    //
+    // **Two sweeps changed view** (§4.2 rule 3), and the mutation table carries
+    // the evidence for it. They filtered out a line whose first characters are
+    // `//`, which is a hand-rolled comment stripper that sees neither a block
+    // comment nor a trailing one; `View::CodeKeepingLiterals` is §2.1's
+    // replacement for exactly that, and it keeps literals verbatim, which
+    // matters because the spelling these forbid is read out of code. Each names
+    // its survivor by the item it stands in (§4.1) rather than by the text of
+    // its line, because an item is what a move keeps.
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method or free function, from its signature to the next.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
-
-    // ── what this module asks the crate instead ───────────────────────────
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -112442,39 +112446,8 @@ mod pointer_chord_site_tests {
         names
     }
 
-    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
-    ///
-    /// `body` hands back everything after the signature prefix it was given and
-    /// stops before the next `\n    fn `: the rest of the declaration, then the
-    /// body, then whatever stands between the closing brace and the next
-    /// method's `fn `. `body_of` hands back the braces and what is between them.
-    /// So the crate's answer has to stand in this file's slice at the head of
-    /// the body, with nothing but the rest of the declaration in front of it.
-    ///
-    /// What comes back is the file's slice, so this commit changes no assertion.
-    fn agreed(old: &'static str, name: &str) -> &'static str {
-        let new = method_body("Runtime", name);
-        let at = match old.find(new) {
-            Some(at) => at,
-            None => {
-                assert!(
-                    old.starts_with(&new[1..]),
-                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
-                     bytes"
-                );
-                0
-            }
-        };
-        assert!(
-            !old[..at].contains('{'),
-            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
-             the head of it"
-        );
-        old
-    }
-
-    /// The six doors a pointer gesture's modifier is read at, by the signature
-    /// each one is declared with.
+    /// The six doors a pointer gesture's modifier is read at, by the name each
+    /// one is declared with.
     ///
     /// **The list is the test.** A seventh gesture that reads the modifier and
     /// is not named here is exactly the defect this ticket repaired — a reading
@@ -112482,19 +112455,19 @@ mod pointer_chord_site_tests {
     /// below without a line added here is caught by
     /// [`no_other_door_reads_the_raw_control_key_for_a_gesture`], which sweeps
     /// the whole file rather than this list.
-    const POINTER_DOORS: [(&str, &str); 6] = [
+    const POINTER_DOORS: [&str; 6] = [
         // A press on a rendered page: the drag carries what the press meant, and
         // the link is answered when the press turns out not to have travelled.
-        ("    fn press_preview_text(", "press_preview_text"),
+        "press_preview_text",
         // A press on a commit row: the compare gesture (D6).
-        ("    fn press_graph_row(", "press_graph_row"),
+        "press_graph_row",
         // A press in a pane: an OSC 8 hyperlink and an inline picture, both.
-        ("    fn begin_local_selection(", "begin_local_selection"),
+        "begin_local_selection",
         // The pointing finger, on each of the two surfaces a link is drawn on.
-        ("    fn terminal_link_grasp(", "terminal_link_grasp"),
-        ("    fn preview_link_grasp(", "preview_link_grasp"),
+        "terminal_link_grasp",
+        "preview_link_grasp",
         // A notch over a hosted page: zoom (方案 §0's five extras).
-        ("    fn scroll_web_page(", "scroll_web_page"),
+        "scroll_web_page",
     ];
 
     /// RED GATE — **each of the six asks the one function that knows which key
@@ -112509,16 +112482,16 @@ mod pointer_chord_site_tests {
         // Assembled at run time so that this pin cannot match its own text.
         let door = ["input", "::", "pointer_chord_held", "("].concat();
         let hand = ["window", ".", "modifiers_held"].concat();
-        for (signature, name) in POINTER_DOORS {
-            let text = agreed(body(signature), name);
+        for name in POINTER_DOORS {
+            let text = method_body("Runtime", name);
             assert!(
                 text.contains(door.as_str()),
-                "{signature} decides a pointer gesture and must ask \
+                "`Runtime::{name}` decides a pointer gesture and must ask \
                  `{door})` which key this platform spends on one"
             );
             assert!(
                 text.contains(hand.as_str()),
-                "{signature} must strike the ruling against what the hand is \
+                "`Runtime::{name}` must strike the ruling against what the hand is \
                  holding and not against what the keyboard means (§13.33 ①)"
             );
         }
@@ -112532,11 +112505,10 @@ mod pointer_chord_site_tests {
     #[test]
     fn no_pointer_door_still_reads_control_by_name() {
         let raw = ["modifiers", ".", "control_key", "()"].concat();
-        for (signature, name) in POINTER_DOORS {
-            let text = agreed(body(signature), name);
+        for name in POINTER_DOORS {
             assert!(
-                !text.contains(raw.as_str()),
-                "{signature} still reads `{raw}` for a gesture — on a Mac that is \
+                !method_body("Runtime", name).contains(raw.as_str()),
+                "`Runtime::{name}` still reads `{raw}` for a gesture — on a Mac that is \
                  the secondary click and not this window's modifier"
             );
         }
@@ -112544,48 +112516,25 @@ mod pointer_chord_site_tests {
 
     /// RED GATE — **a seventh gesture cannot grow back the raw reading.**
     ///
-    /// The whole file is swept for `window.modifiers.control_key()`, which is
+    /// The whole package is swept for `window.modifiers.control_key()`, which is
     /// the exact spelling a pointer path used before this ticket, and the
-    /// survivors are named one by one with the reason each is a keyboard's
-    /// question rather than a hand's. A new pointer door written the old way
-    /// lands in this list and fails.
+    /// survivors are named one by one — by the item each stands in — with the
+    /// reason each is a keyboard's question rather than a hand's. A new pointer
+    /// door written the old way lands in this list and fails.
     #[test]
     fn no_other_door_reads_the_raw_control_key_for_a_gesture() {
         let raw = ["self", ".window", ".modifiers", ".", "control_key", "()"].concat();
-        let readers: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with("//") && line.contains(raw.as_str()))
-            .collect();
         // The one survivor, spelled at run time for the reason the needle is:
         // a keyboard's question in `preview_browse_key`, asking whether the
         // player's five transport keys arrived bare.
         let keyboards = format!("&& !{raw}");
-        assert_eq!(
-            readers,
-            vec![keyboards.as_str()],
-            "every other reading of `{raw}` is a keyboard's; a pointer's reads \
-             `input::pointer_chord_held(self.window.modifiers_held)`"
-        );
-
-        // **The same sweep, asked of the package.** The line filter above drops
-        // a line whose first non-blank characters are `//`; `View::CodeKeeping\
-        // Literals` is §2.1's replacement for every hand-rolled comment
-        // stripper, and it sees the block comments and the trailing ones the
-        // filter could not. §4.1's key is the item the reading stands in, which
-        // is what survives the move a line of this file does not.
         let survivors = found(needle!(Pattern::text(&raw)), View::CodeKeepingLiterals);
-        assert_eq!(
-            survivors.len(),
-            readers.len(),
-            "this file's line sweep and the package's code view disagree about how many \
-             readings are left:\n{}",
-            survivors.report(source())
-        );
         assert_eq!(
             owner_names(&survivors),
             ["preview_browse_key×1"],
-            "the one survivor stands in the method this module's own prose names"
+            "every other reading of `{raw}` is a keyboard's; a pointer's reads \
+             `input::pointer_chord_held(self.window.modifiers_held)`:\n{}",
+            survivors.report(source())
         );
         assert!(
             method_body("Runtime", "preview_browse_key").contains(keyboards.as_str()),
@@ -112602,12 +112551,7 @@ mod pointer_chord_site_tests {
     /// to record what the platform said, not what this window made of it.
     #[test]
     fn the_secondary_click_is_settled_once_and_above_every_router() {
-        let text = agreed(
-            body(
-                "    fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
-            ),
-            "mouse_input",
-        );
+        let text = method_body("Runtime", "mouse_input");
         let needle = ["input", "::", "pressed_button_of_gesture", "("].concat();
         let settle = text
             .find(needle.as_str())
@@ -112625,14 +112569,9 @@ mod pointer_chord_site_tests {
             "the station records the platform's own reading, which a translation \
              made above it would erase"
         );
-        let calls = SOURCE.matches(needle.as_str()).count();
         assert_eq!(
-            calls,
             found(needle!(Pattern::text(&needle)), View::Raw).len(),
-            "this file's count of the settling door and the package's do not agree"
-        );
-        assert_eq!(
-            calls, 1,
+            1,
             "one door decides what button a press is, as one door decides what \
              modifiers are held"
         );
@@ -112646,31 +112585,13 @@ mod pointer_chord_site_tests {
     #[test]
     fn one_field_remembers_which_press_is_under_the_hand() {
         let needle = ["window", ".", "secondary_press"].concat();
-        let uses: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with("//") && line.contains(needle.as_str()))
-            .collect();
-        assert_eq!(
-            uses,
-            vec![format!("&mut self.{needle},")],
-            "the latch is touched at the one door and nowhere else: {uses:?}"
-        );
-
-        // The same sweep, asked of the package, with the comment filter being
-        // the view's rather than this module's own (§2.1).
         let touches = found(needle!(Pattern::text(&needle)), View::CodeKeepingLiterals);
-        assert_eq!(
-            touches.len(),
-            uses.len(),
-            "this file's line sweep and the package's code view disagree about how many \
-             places touch the latch:\n{}",
-            touches.report(source())
-        );
         assert_eq!(
             owner_names(&touches),
             ["mouse_input×1"],
-            "§4.1: the latch is named by the item it is touched in, not by a line of a file"
+            "§4.1: the latch is touched at the one door and nowhere else, and it is named by \
+             the item it is touched in rather than by a line of a file:\n{}",
+            touches.report(source())
         );
         assert!(
             method_body("Runtime", "mouse_input").contains(&format!("&mut self.{needle},")),
