@@ -21,9 +21,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bt_source::{
-    DiskScope, Index, ItemRecord, MacroKind, MacroShape, Needle, Package, Pattern, Provenance,
-    QueryFailure, Search, Site, Span, Universe, Vendor, View, Why, Workspace, needle, report,
-    universes,
+    DiskScope, Index, ItemRecord, MacroKind, MacroShape, ModuleSpec, Needle, Package, Pattern,
+    Provenance, QueryFailure, Scope, Search, Site, Span, Universe, Vendor, View, Why, Workspace,
+    needle, report, universes,
 };
 
 fn workspace() -> Workspace {
@@ -341,6 +341,80 @@ fn a_needle_built_inside_the_queried_universe_excludes_its_construction() {
         "the rejection variant is declared and matched on:\n{}",
         real.report(&index)
     );
+}
+
+/// RED — **self-exclusion works inside a union of modules too**, and it removes
+/// a construction only where the scope reached it.
+///
+/// A union narrows which bytes are read; it does not change what a reader is
+/// allowed to find of itself. This file is one of the universe's own and its
+/// module path is `crate` — one member of the union below — so the needle here
+/// is inside the scope and its own construction is what the exclusion takes.
+///
+/// MUTATION: apply the scope after the removals and the first block's
+/// construction stops being excluded and starts being counted; exclude by file
+/// instead of by construction span and the second block's occurrences in
+/// `src/query.rs` go with it.
+#[test]
+fn a_needle_built_inside_a_union_of_modules_excludes_its_own_construction() {
+    let index = bt_source();
+    let union = || {
+        Scope::Modules(vec![
+            ModuleSpec::exact("crate"),
+            ModuleSpec::tree("crate::query"),
+        ])
+    };
+    let found = index
+        .search(
+            &Search::new(
+                needle!(Pattern::text(
+                    "a_spelling_written_only_where_this_needle_is_built"
+                )),
+                View::Raw,
+            )
+            .in_scope(union()),
+        )
+        .expect("the construction is locatable");
+    assert!(
+        found.is_empty(),
+        "the only occurrence is the needle itself:\n{}",
+        found.report(&index)
+    );
+    assert_eq!(found.excluded().len(), 1, "{}", found.report(&index));
+    assert_eq!(found.excluded()[0].why, Why::NeedleConstruction);
+    let Provenance::Excluded { file, .. } = found.provenance() else {
+        panic!(
+            "this file is one of the universe's own: {:?}",
+            found.provenance()
+        );
+    };
+    assert!(file.ends_with("contract.rs"), "{}", file.display());
+
+    // And a union that does not reach this file still records where the needle
+    // came from, while removing nothing: the exclusion is a span, not a name.
+    let elsewhere = index
+        .search(
+            &Search::new(
+                needle!(Pattern::identifier("ModuleSpec")),
+                View::Identifiers,
+            )
+            .in_scope(Scope::Modules(vec![ModuleSpec::tree("crate::query")])),
+        )
+        .expect("the construction is locatable");
+    assert!(
+        elsewhere.len() >= 2,
+        "the type is declared and resolved there:\n{}",
+        elsewhere.report(&index)
+    );
+    assert!(
+        elsewhere.excluded().is_empty(),
+        "{:?}",
+        elsewhere.excluded()
+    );
+    assert!(matches!(
+        elsewhere.provenance(),
+        Provenance::Excluded { .. }
+    ));
 }
 
 /// RED — **a needle built outside the universe being read is a recorded answer,
