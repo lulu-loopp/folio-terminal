@@ -736,6 +736,130 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
     );
 }
 
+// ── every impl of one type ────────────────────────────────────────────────
+
+fn impls_fixture() -> Arc<Index> {
+    Index::shared(&fixture_universe("impls")).expect("the fixture lowers")
+}
+
+/// RED — **a scope over every `impl` of a type reads that type's blocks,
+/// wherever they are written and whatever arm they stand on** — and reads
+/// nothing else.
+///
+/// `journeys_tests` holds two prohibitions of this shape — "no `impl` of
+/// `PaneMotion` declares a renewable deadline" — and both settle for
+/// `Scope::Module("crate")`, with a note saying a scope over a type's blocks is
+/// what they mean and that this crate has none. A module is right only while
+/// every block stays in it, which is the binding Step 2a breaks, and it is too
+/// wide meanwhile: the needle a prohibition forbids is a spelling other types
+/// legitimately carry, so the free function below would invert the guard.
+///
+/// MUTATION: resolve the scope to the whole of each block's file and both
+/// scoped rows become five; take the trait blocks out and the first becomes
+/// three; filter the `#[cfg]` arm out and it becomes three the other way.
+#[test]
+fn a_scope_over_a_types_impls_reads_every_block_of_it_and_nothing_else() {
+    let index = impls_fixture();
+    let counted = |scope: Scope| {
+        index
+            .search(
+                &Search::new(Needle::new(Pattern::text("renewable_deadline")), View::Raw)
+                    .in_scope(scope),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .len()
+    };
+
+    assert_eq!(
+        counted(Scope::Everything),
+        5,
+        "four blocks and the free function"
+    );
+    assert_eq!(
+        counted(Scope::Impls("Gate".to_owned())),
+        4,
+        "the two inherent blocks, the trait one, and the `#[cfg(windows)]` arm \
+         — and not the free function, which is the occurrence that would \
+         invert the prohibition"
+    );
+    assert_eq!(
+        counted(Scope::Module("crate".to_owned())),
+        4,
+        "the module the blocks happen to be written in today answers about \
+         `second.rs` not at all, and about the free function as though it were \
+         one of them"
+    );
+
+    // The blocks the scope is built from: one record each, in union order,
+    // named by the type and not by the path a file spells it with.
+    let blocks: Vec<(&str, Option<&str>, String)> = index
+        .impls()
+        .iter()
+        .map(|block| {
+            (
+                block.type_owner(),
+                block.trait_name(),
+                block.variant().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        blocks,
+        [
+            ("Gate", None, String::new()),
+            ("Gate", Some("fmt::Display"), String::new()),
+            ("Gate", None, "#[cfg(windows)]".to_owned()),
+            ("Gate", None, String::new()),
+        ],
+        "`impl super::Gate` in the second file is the same owner (§2.4)"
+    );
+    let body = index.text(index.impls()[0].body());
+    assert!(
+        body.starts_with('{') && body.ends_with('}') && body.contains("fn open"),
+        "a block's body is its braces and what is between them: {body}"
+    );
+
+    // **A type with no block at all is a refusal naming it**, because a
+    // prohibition over no bytes holds about everything.
+    let empty = index
+        .search(
+            &Search::new(Needle::new(Pattern::text("renewable_deadline")), View::Raw)
+                .in_scope(Scope::Impls("Lonely".to_owned())),
+        )
+        .expect_err("`Lonely` is declared and implemented nowhere");
+    let QueryFailure::EmptyScope { scope } = &empty else {
+        panic!("{empty}");
+    };
+    assert_eq!(scope, "every `impl` of `Lonely`");
+    assert!(empty.to_string().contains("would answer zero"), "{empty}");
+
+    // And a scope over the type **itself** is unchanged: an item is its own
+    // bytes, which is a different question from where its methods are written.
+    let seat = |scope: Scope| {
+        index
+            .search(
+                &Search::new(
+                    Needle::new(Pattern::identifier("gate_seat")),
+                    View::Identifiers,
+                )
+                .in_scope(scope),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .len()
+    };
+    assert_eq!(seat(Scope::Everything), 3);
+    assert_eq!(
+        seat(Scope::Item(ItemQuery::type_item("Gate"))),
+        1,
+        "the field's declaration, and neither of the two readers of it"
+    );
+    assert_eq!(
+        seat(Scope::Impls("Gate".to_owned())),
+        1,
+        "and the blocks hold the one inside `open`"
+    );
+}
+
 // ── one owner, however the move spelled it ────────────────────────────────
 
 fn self_type_fixture() -> Arc<Index> {

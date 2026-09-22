@@ -35,9 +35,9 @@ use syn::spanned::Spanned;
 
 use crate::declarations::{Compilation, cfg_predicates};
 use crate::index::{
-    CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord, Index, ItemKind,
-    ItemRecord, LiteralRecord, LiteralValue, MacroKind, MacroRecord, MacroShape, ModuleRecord,
-    ModuleShape, Span, TokenKind, TokenRecord, UnsupportedMacroShape,
+    CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord, ImplRecord, Index,
+    ItemKind, ItemRecord, LiteralRecord, LiteralValue, MacroKind, MacroRecord, MacroShape,
+    ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord, UnsupportedMacroShape,
 };
 use crate::reject::Rejection;
 use crate::universe::Universe;
@@ -68,6 +68,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     let mut literals = Vec::new();
     let mut comments = Vec::new();
     let mut items = Vec::new();
+    let mut impls = Vec::new();
     let mut modules = Vec::new();
     let mut macros = Vec::new();
     let mut shapes = Vec::new();
@@ -180,6 +181,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
                     file: at,
                     declared: &declared,
                     items: &mut items,
+                    impls: &mut impls,
                     modules: &mut modules,
                 };
                 // The stack opens empty and unconditional: what stands *outside*
@@ -206,6 +208,8 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     literals.shrink_to_fit();
     comments.shrink_to_fit();
     items.shrink_to_fit();
+    impls.shrink_to_fit();
+    impls.sort_by_key(|block| (block.whole().start(), block.whole().end()));
     macros.shrink_to_fit();
     macros.sort_by_key(|record| (record.tokens.start(), record.tokens.end()));
     shapes.shrink_to_fit();
@@ -220,6 +224,7 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
         files,
         by_path,
         items,
+        impls,
         modules,
         tokens,
         literals,
@@ -776,6 +781,7 @@ struct Parsed<'a> {
     /// on the items inside it (§2.3).
     declared: &'a [DeclarationPath],
     items: &'a mut Vec<ItemRecord>,
+    impls: &'a mut Vec<ImplRecord>,
     modules: &'a mut Vec<ModuleRecord>,
 }
 
@@ -976,6 +982,23 @@ impl Parsed<'_> {
                         .trait_
                         .as_ref()
                         .map(|(_, path, _)| self.trait_spelling(path));
+                    // The block itself, beside the methods in it: it declares no
+                    // name, so no item query can reach it, and a prohibition
+                    // about a type's own `impl`s has nothing else to name.
+                    let written = braces(&block.brace_token);
+                    let opens = start_of(&block.attrs, None, impl_start(block));
+                    let whole = self.span(opens..written.end);
+                    let body = self.span(written);
+                    self.impls.push(ImplRecord {
+                        type_owner: owner.clone(),
+                        trait_name: trait_name.clone(),
+                        variant: ConditionalVariant {
+                            predicates: predicates.clone(),
+                            compilation: inside,
+                        },
+                        whole,
+                        body,
+                    });
                     for member in &block.items {
                         let syn::ImplItem::Fn(function) = member else {
                             continue;
@@ -1279,6 +1302,18 @@ fn signature_start(signature: &syn::Signature) -> usize {
     span.byte_range().start
 }
 
+/// The first byte an `impl` block's own signature opens with: `default`, else
+/// `unsafe`, else the `impl` keyword. Its attributes are in front of all three
+/// and are [`start_of`]'s business.
+fn impl_start(block: &syn::ItemImpl) -> usize {
+    let span = block
+        .defaultness
+        .map(|token| token.span)
+        .or_else(|| block.unsafety.map(|token| token.span))
+        .unwrap_or(block.impl_token.span);
+    span.byte_range().start
+}
+
 /// A block's braces and everything between them.
 fn braces(brace: &syn::token::Brace) -> Range<usize> {
     brace.span.open().byte_range().start..brace.span.close().byte_range().end
@@ -1518,6 +1553,7 @@ mod tests {
             panic!("the fixture is an impl block");
         };
         let mut items = Vec::new();
+        let mut impls = Vec::new();
         let mut modules = Vec::new();
         let parsed = Parsed {
             text,
@@ -1525,6 +1561,7 @@ mod tests {
             file: 0,
             declared: &[],
             items: &mut items,
+            impls: &mut impls,
             modules: &mut modules,
         };
         let owner = parsed.type_owner(&block.self_ty);

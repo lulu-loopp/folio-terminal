@@ -99,6 +99,9 @@
 //! * [`Occurrence::in_the_product`] and [`Found::in_the_product`] — **what a
 //!   build of the shipped program contains**, at the two grains it takes, in
 //!   place of the six copies of that rule `bt-app` had written out.
+//! * [`Scope::Impls`] — **every `impl` block of one type** ([`ImplRecord`]),
+//!   which is the scope a prohibition about a type asks for and which had been
+//!   settling for the module the blocks are written in today.
 //!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
@@ -123,9 +126,9 @@ pub mod universes;
 pub use declarations::{Compilation, DeclarationStep, ModuleBody, ReachedModule};
 pub use enumerate::{Enumeration, FileFacts, FileOwner, FileSetDiff, Unreached, enumerate};
 pub use index::{
-    Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord, Index,
-    ItemIdentity, ItemKind, ItemRecord, LiteralRecord, LiteralValue, Location, MacroKind,
-    MacroRecord, MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord,
+    Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord,
+    ImplRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralRecord, LiteralValue, Location,
+    MacroKind, MacroRecord, MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord,
     UnsupportedMacroShape,
 };
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};

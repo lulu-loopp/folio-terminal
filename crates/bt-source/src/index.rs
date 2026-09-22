@@ -549,6 +549,65 @@ impl ItemRecord {
     }
 }
 
+/// One `impl` block, and the bytes it is written in.
+///
+/// The methods inside it are [`ItemRecord`]s with identities of their own; this
+/// is the **block**, which an item query cannot name because it declares no
+/// name. It is here for [`crate::Scope::Impls`]: a prohibition like "no `impl`
+/// of `PaneMotion` declares a renewable deadline" is a claim about a type's own
+/// blocks, and the nearest thing to it without this was the module they happen
+/// to be written in today — which is the binding a move breaks.
+///
+/// There is one record per block, so a type implemented in three files has
+/// three, and a block standing on a `#[cfg]` is one like any other: the reading
+/// is `cfg`-blind and every arm is in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImplRecord {
+    pub(crate) type_owner: String,
+    pub(crate) trait_name: Option<String>,
+    pub(crate) variant: ConditionalVariant,
+    pub(crate) whole: Span,
+    pub(crate) body: Span,
+}
+
+impl ImplRecord {
+    /// The type this block is for, named as [`ItemIdentity::type_owner`] names
+    /// it: the last segment of the self type's path, without lifetimes or
+    /// generic arguments, so `impl Gate`, `impl crate::Gate<'_>` and
+    /// `impl super::Gate` are one type.
+    #[must_use]
+    pub fn type_owner(&self) -> &str {
+        &self.type_owner
+    }
+
+    /// The trait it implements, with its arguments, or `None` for an inherent
+    /// block.
+    #[must_use]
+    pub fn trait_name(&self) -> Option<&str> {
+        self.trait_name.as_deref()
+    }
+
+    /// The arm the block stands on, as it is written in its file.
+    #[must_use]
+    pub const fn variant(&self) -> &ConditionalVariant {
+        &self.variant
+    }
+
+    /// The whole block: its attributes, the `impl` keyword, what it is for, and
+    /// the braces.
+    #[must_use]
+    pub const fn whole(&self) -> Span {
+        self.whole
+    }
+
+    /// The braces and everything between them — what a scope over this block
+    /// reads.
+    #[must_use]
+    pub const fn body(&self) -> Span {
+        self.body
+    }
+}
+
 /// What kind of name a token carries.
 ///
 /// Only the identifier view's tokens are kept. A punctuation mark and a
@@ -833,6 +892,7 @@ pub struct Index {
     pub(crate) files: Vec<FileRecord>,
     pub(crate) by_path: BTreeMap<PathBuf, usize>,
     pub(crate) items: Vec<ItemRecord>,
+    pub(crate) impls: Vec<ImplRecord>,
     pub(crate) modules: Vec<ModuleRecord>,
     pub(crate) tokens: Vec<TokenRecord>,
     pub(crate) literals: Vec<LiteralRecord>,
@@ -852,6 +912,7 @@ impl fmt::Debug for Index {
             .field("bytes", &self.union.len())
             .field("files", &self.files.len())
             .field("items", &self.items.len())
+            .field("impls", &self.impls.len())
             .field("tokens", &self.tokens.len())
             .field("literals", &self.literals.len())
             .field("comments", &self.comments.len())
@@ -930,6 +991,13 @@ impl Index {
     #[must_use]
     pub fn items(&self) -> &[ItemRecord] {
         &self.items
+    }
+
+    /// Every `impl` block reached, in union order — what
+    /// [`crate::Scope::Impls`] resolves against.
+    #[must_use]
+    pub fn impls(&self) -> &[ImplRecord] {
+        &self.impls
     }
 
     /// Every identifier-view token, in union order.
@@ -1070,6 +1138,18 @@ impl Index {
             total += item.name.capacity();
             total += item.variant.predicates.capacity() * size_of::<String>();
             total += item
+                .variant
+                .predicates
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>();
+        }
+        total += self.impls.capacity() * size_of::<ImplRecord>();
+        for block in &self.impls {
+            total += block.type_owner.capacity();
+            total += block.trait_name.as_ref().map_or(0, String::capacity);
+            total += block.variant.predicates.capacity() * size_of::<String>();
+            total += block
                 .variant
                 .predicates
                 .iter()

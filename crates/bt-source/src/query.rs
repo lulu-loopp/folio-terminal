@@ -341,6 +341,23 @@ pub enum Scope {
     /// One item: the answer to an [`ItemQuery`], which is loud when the item is
     /// not there or is not unique.
     Item(ItemQuery),
+    /// **Every `impl` block of one type**, by the type's own name — the bodies
+    /// of the inherent blocks and the trait ones alike, in every file they are
+    /// written in and on every `#[cfg]` arm they stand on.
+    ///
+    /// The scope a prohibition about a type wants: "no `impl` of `PaneMotion`
+    /// declares a renewable deadline" is a claim about that type's blocks and
+    /// about nothing else. Without it the nearest scope is the module the
+    /// blocks are written in today — which is right until one of them moves,
+    /// and too wide meanwhile: three types in `bt-app` declare the same
+    /// `deadline` signature, so a package-wide zero would invert the guard.
+    ///
+    /// The name is the type's, not a path to it, exactly as
+    /// [`ItemQuery::method`]'s owner is: `impl Gate`, `impl crate::Gate<'_>`
+    /// and `impl super::Gate` are one type (§2.4). A type with no `impl` at all
+    /// is [`QueryFailure::EmptyScope`] naming it, because a prohibition over no
+    /// bytes holds about everything.
+    Impls(String),
     /// One named file, and the reason it is allowed to be one (P2).
     ///
     /// A reader that wants a file has to add a variant to [`FileScoped`], and
@@ -375,6 +392,7 @@ impl fmt::Display for Scope {
             Self::Everything => formatter.write_str("the whole universe"),
             Self::Module(path) => write!(formatter, "module `{path}`"),
             Self::Item(query) => write!(formatter, "item `{query}`"),
+            Self::Impls(type_name) => write!(formatter, "every `impl` of `{type_name}`"),
             Self::File(entry) => write!(formatter, "file `{}`", entry.path()),
         }
     }
@@ -1387,9 +1405,9 @@ impl Index {
             return Ok(Some(spans));
         }
         // The variants are named without their type for the same lexical
-        // reason, and the arm is kept rather than wildcarded so that a fifth
-        // variant is a compile error here.
-        use Scope::{Everything, File, Item, Module};
+        // reason, and every arm is written out rather than wildcarded so that a
+        // new variant is a compile error here.
+        use Scope::{Everything, File, Impls, Item, Module};
         let spans: Vec<Span> = match scope {
             Everything => return Ok(None),
             Module(path) => self
@@ -1402,6 +1420,15 @@ impl Index {
                 .find(query)?
                 .iter()
                 .map(|record| record.whole())
+                .collect(),
+            // Every block of that type, whatever file it is written in and
+            // whatever arm it stands on: the reading is `cfg`-blind (§2.4), so
+            // a block behind `#[cfg(windows)]` is read on every runner.
+            Impls(type_name) => self
+                .impls()
+                .iter()
+                .filter(|block| block.type_owner() == type_name)
+                .map(crate::index::ImplRecord::body)
                 .collect(),
             File(_) => unreachable!("a file scope is answered through its entry, above"),
         };
