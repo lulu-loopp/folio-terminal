@@ -129752,6 +129752,24 @@ mod refused_preview_card_tests {
 /// value in their own modules as well.
 #[cfg(test)]
 mod field_command_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Every reader here asked a *file* for its text:
+    // `main.rs` for seven bodies and two whole-file counts, `preview_edit.rs`
+    // for two. Nothing is deleted here — each computes its answer twice, once
+    // from the file and once from `bt-source`, and asserts the two agree.
+    //
+    // `source`, `item_body`, `method_body`, `free_fn_body` and `found` are
+    // `pty_drain_budget_tests`' helpers word for word, `found_in` is
+    // `formula_tool_seat_tests`' and `trait_method_body` is
+    // `resident_run_tests`'. **Three owners**: five field handlers are
+    // `Runtime`'s, `rename_key` is a free function, and the modifier door is
+    // `<FolioApp as ApplicationHandler>::window_event` — the finder took the
+    // first `fn name(` in the file and could not have said which.
+    //
+    // `preview_edit.rs` becomes the Rust path `crate::preview_edit`, so the day
+    // that module is a directory the scope is unchanged.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
+
     const SOURCE: &str = include_str!("main.rs");
     const PREVIEW_EDIT: &str = include_str!("preview_edit.rs");
 
@@ -129765,6 +129783,91 @@ mod field_command_tests {
         &rest[..end]
     }
 
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one method of `owner`'s implementation of `trait_name`.
+    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name).of_trait(trait_name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// One search over a named scope — a Rust path, never a file.
+    fn found_in(needle: Needle, view: View, scope: Scope) -> Found {
+        source()
+            .search(&Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **This file's slice and the crate's body, compared as bytes.**
+    ///
+    /// [`body`] hands back everything after the signature it matched up to the
+    /// next `\n    fn `, so its slice holds the rest of the declaration, the
+    /// whole body, and then whatever stands between this method and the next.
+    /// [`Index::body_of`] hands back the braces and everything between them, so
+    /// the crate's body **minus its opening brace** has to stand in this file's
+    /// slice, once, with nothing in front of it but the rest of the declaration.
+    ///
+    /// What comes back is this file's slice, so this commit changes no
+    /// assertion; every assertion below was checked against the *narrowed* body
+    /// before this was written, because narrowing a slice can only take a
+    /// positive away.
+    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
+        let inner = new
+            .strip_prefix('{')
+            .expect("a body the crate hands back opens on its brace");
+        let at = old.find(inner).unwrap_or_else(|| {
+            panic!("`{what}`: this file's slice does not hold the body the crate returned")
+        });
+        assert_eq!(
+            old.rfind(inner),
+            Some(at),
+            "`{what}`: the crate's body stands twice inside this file's slice"
+        );
+        let head = &old[..at];
+        assert!(
+            head.is_empty()
+                || (head.ends_with('{') && !head[..head.len() - 1].contains(['{', '}'])),
+            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
+             of its body"
+        );
+        old
+    }
+
+    /// One method pin's two readings, asserted to agree, the file's returned.
+    fn agreed_method(signature: &str, owner: &str, name: &str) -> &'static str {
+        agreed(body(signature), method_body(owner, name), name)
+    }
+
     /// RED (M1-7, X-3 §4 ③) — **a Command chord never types its letter into a
     /// field.**
     ///
@@ -129775,21 +129878,24 @@ mod field_command_tests {
     #[test]
     fn a_command_chord_never_types_its_letter_into_a_field() {
         // The five that live here, each named by its handler.
-        for signature in [
-            concat!("    fn ", "palette_key("),
-            concat!("    fn ", "search_field_key("),
-            concat!("    fn ", "settings_field_key("),
-            concat!("    fn ", "git_menu_key("),
-            concat!("    fn ", "graph_search_key("),
+        for (signature, name) in [
+            (concat!("    fn ", "palette_key("), "palette_key"),
+            (concat!("    fn ", "search_field_key("), "search_field_key"),
+            (
+                concat!("    fn ", "settings_field_key("),
+                "settings_field_key",
+            ),
+            (concat!("    fn ", "git_menu_key("), "git_menu_key"),
+            (concat!("    fn ", "graph_search_key("), "graph_search_key"),
         ] {
-            let handler = body(signature);
+            let handler = agreed_method(signature, "Runtime", name);
             assert!(
                 handler.contains(concat!("input::", "types_a_character")),
-                "{signature} inserts a character without asking whether this press is typing"
+                "{name} inserts a character without asking whether this press is typing"
             );
             assert!(
                 handler.contains(concat!("input::", "is_command_chord")),
-                "{signature} decides what this application's modifier is for itself"
+                "{name} decides what this application's modifier is for itself"
             );
         }
         // The sixth is the Markdown page, whose one key handler is a pure
@@ -129797,6 +129903,22 @@ mod field_command_tests {
         // and that is written down at the arm: this surface exempts AltGr, so
         // `types_a_character`'s "no Control" half would take `€` off a German
         // keyboard.
+        for spelling in [
+            concat!("!crate::input::", "is_terminal_chord(modifiers)"),
+            concat!("crate::input::", "is_command_chord(modifiers)"),
+        ] {
+            assert_eq!(
+                PREVIEW_EDIT.matches(spelling).count(),
+                found_in(
+                    needle!(Pattern::text(spelling)),
+                    View::Raw,
+                    Scope::Module("crate::preview_edit".to_owned()),
+                )
+                .len(),
+                "P3 equivalence: that file and the module hold `{spelling}` the same number of \
+                 times"
+            );
+        }
         assert!(
             PREVIEW_EDIT.contains(concat!("!crate::input::", "is_terminal_chord(modifiers)")),
             "the page being edited takes a chord's letter as text"
@@ -129807,7 +129929,11 @@ mod field_command_tests {
         );
         // And the name box, which had the `super` half already and now asks the
         // platform which modifier that is.
-        let rename = body(concat!("fn ", "rename_key("));
+        let rename = agreed(
+            body(concat!("fn ", "rename_key(")),
+            free_fn_body("rename_key"),
+            "rename_key",
+        );
         assert!(
             rename.contains(concat!("input::", "is_terminal_chord(modifiers)"))
                 && rename.contains(concat!("input::", "is_command_chord_alone(modifiers)")),
@@ -129829,21 +129955,33 @@ mod field_command_tests {
     /// composing characters the reader asked it not to.
     #[test]
     fn the_option_policy_is_applied_at_one_door() {
-        let dispatch = body("fn window_event(");
+        let dispatch = agreed(
+            body("fn window_event("),
+            trait_method_body("FolioApp", "ApplicationHandler", "window_event"),
+            "window_event",
+        );
         assert!(
             dispatch.contains(concat!("input::", "effective_modifiers(")),
             "the modifier door takes winit's answer without applying the Option ruling"
         );
+        let told = concat!("set_option_as_alt(&", "window, ");
         assert_eq!(
-            SOURCE
-                .matches(concat!("set_option_as_alt(&", "window, "))
-                .count(),
+            SOURCE.matches(told).count(),
+            found(needle!(Pattern::text(told)), View::Raw).len(),
+            "P3 equivalence: this file and the crate count the same constructors"
+        );
+        assert_eq!(
+            SOURCE.matches(told).count(),
             2,
             "both window constructors have to tell the window what Option is"
         );
         assert!(
-            body(concat!("    fn ", "adopt_option_as_alt("))
-                .contains(concat!("set_option_as_alt(&self.", "window.window")),
+            agreed_method(
+                concat!("    fn ", "adopt_option_as_alt("),
+                "Runtime",
+                "adopt_option_as_alt",
+            )
+            .contains(concat!("set_option_as_alt(&self.", "window.window")),
             "a window that did not press the row is never told the answer changed"
         );
     }
@@ -129860,8 +129998,14 @@ mod field_command_tests {
     /// to ending the process where it stands.
     #[test]
     fn the_default_menu_does_not_own_command_q() {
+        let told_not_to = concat!("builder.", "with_default_menu(false)");
+        assert_eq!(
+            SOURCE.matches(told_not_to).count(),
+            found(needle!(Pattern::text(told_not_to)), View::Raw).len(),
+            "P3 equivalence: this file and the crate say the same thing about the block"
+        );
         assert!(
-            SOURCE.contains(concat!("builder.", "with_default_menu(false)")),
+            SOURCE.contains(told_not_to),
             "winit's own menu still answers Cmd+Q, past Folio's quit verb"
         );
         // The other half of X-4's rule — that nothing ever sends the selector
