@@ -112371,6 +112371,19 @@ mod focus_column_notch_tests {
 /// back the raw reading beside them.
 #[cfg(test)]
 mod pointer_chord_site_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Nothing is deleted here: each body pin computes
+    // its answer twice — once from `include_str!("main.rs")`, once from
+    // `bt-source` — and `agreed` asserts the two are the same bytes, and each
+    // whole-file sweep asserts the two answer the same thing.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `found` and `owner_names` are that
+    // module's helpers word for word, and its header is where the six points
+    // behind them live. `agreed` is the equivalence itself and goes with the
+    // old reading.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -112384,6 +112397,82 @@ mod pointer_chord_site_tests {
         &rest[..end]
     }
 
+    // ── what this module asks the crate instead ───────────────────────────
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The names of the items these occurrences stand in (§4.1) — the assertion
+    /// that survives a move, because relocating a reader changes no key.
+    fn owner_names(found: &Found) -> Vec<String> {
+        let index = source();
+        let mut names: Vec<String> = found
+            .owners(index)
+            .into_iter()
+            .map(|(identity, count)| format!("{}×{count}", identity.name))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
+    ///
+    /// `body` hands back everything after the signature prefix it was given and
+    /// stops before the next `\n    fn `: the rest of the declaration, then the
+    /// body, then whatever stands between the closing brace and the next
+    /// method's `fn `. `body_of` hands back the braces and what is between them.
+    /// So the crate's answer has to stand in this file's slice at the head of
+    /// the body, with nothing but the rest of the declaration in front of it.
+    ///
+    /// What comes back is the file's slice, so this commit changes no assertion.
+    fn agreed(old: &'static str, name: &str) -> &'static str {
+        let new = method_body("Runtime", name);
+        let at = match old.find(new) {
+            Some(at) => at,
+            None => {
+                assert!(
+                    old.starts_with(&new[1..]),
+                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
+                     bytes"
+                );
+                0
+            }
+        };
+        assert!(
+            !old[..at].contains('{'),
+            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
+             the head of it"
+        );
+        old
+    }
+
     /// The six doors a pointer gesture's modifier is read at, by the signature
     /// each one is declared with.
     ///
@@ -112393,19 +112482,19 @@ mod pointer_chord_site_tests {
     /// below without a line added here is caught by
     /// [`no_other_door_reads_the_raw_control_key_for_a_gesture`], which sweeps
     /// the whole file rather than this list.
-    const POINTER_DOORS: [&str; 6] = [
+    const POINTER_DOORS: [(&str, &str); 6] = [
         // A press on a rendered page: the drag carries what the press meant, and
         // the link is answered when the press turns out not to have travelled.
-        "    fn press_preview_text(",
+        ("    fn press_preview_text(", "press_preview_text"),
         // A press on a commit row: the compare gesture (D6).
-        "    fn press_graph_row(",
+        ("    fn press_graph_row(", "press_graph_row"),
         // A press in a pane: an OSC 8 hyperlink and an inline picture, both.
-        "    fn begin_local_selection(",
+        ("    fn begin_local_selection(", "begin_local_selection"),
         // The pointing finger, on each of the two surfaces a link is drawn on.
-        "    fn terminal_link_grasp(",
-        "    fn preview_link_grasp(",
+        ("    fn terminal_link_grasp(", "terminal_link_grasp"),
+        ("    fn preview_link_grasp(", "preview_link_grasp"),
         // A notch over a hosted page: zoom (方案 §0's five extras).
-        "    fn scroll_web_page(",
+        ("    fn scroll_web_page(", "scroll_web_page"),
     ];
 
     /// RED GATE — **each of the six asks the one function that knows which key
@@ -112420,8 +112509,8 @@ mod pointer_chord_site_tests {
         // Assembled at run time so that this pin cannot match its own text.
         let door = ["input", "::", "pointer_chord_held", "("].concat();
         let hand = ["window", ".", "modifiers_held"].concat();
-        for signature in POINTER_DOORS {
-            let text = body(signature);
+        for (signature, name) in POINTER_DOORS {
+            let text = agreed(body(signature), name);
             assert!(
                 text.contains(door.as_str()),
                 "{signature} decides a pointer gesture and must ask \
@@ -112443,8 +112532,8 @@ mod pointer_chord_site_tests {
     #[test]
     fn no_pointer_door_still_reads_control_by_name() {
         let raw = ["modifiers", ".", "control_key", "()"].concat();
-        for signature in POINTER_DOORS {
-            let text = body(signature);
+        for (signature, name) in POINTER_DOORS {
+            let text = agreed(body(signature), name);
             assert!(
                 !text.contains(raw.as_str()),
                 "{signature} still reads `{raw}` for a gesture — on a Mac that is \
@@ -112478,6 +112567,30 @@ mod pointer_chord_site_tests {
             "every other reading of `{raw}` is a keyboard's; a pointer's reads \
              `input::pointer_chord_held(self.window.modifiers_held)`"
         );
+
+        // **The same sweep, asked of the package.** The line filter above drops
+        // a line whose first non-blank characters are `//`; `View::CodeKeeping\
+        // Literals` is §2.1's replacement for every hand-rolled comment
+        // stripper, and it sees the block comments and the trailing ones the
+        // filter could not. §4.1's key is the item the reading stands in, which
+        // is what survives the move a line of this file does not.
+        let survivors = found(needle!(Pattern::text(&raw)), View::CodeKeepingLiterals);
+        assert_eq!(
+            survivors.len(),
+            readers.len(),
+            "this file's line sweep and the package's code view disagree about how many \
+             readings are left:\n{}",
+            survivors.report(source())
+        );
+        assert_eq!(
+            owner_names(&survivors),
+            ["preview_browse_key×1"],
+            "the one survivor stands in the method this module's own prose names"
+        );
+        assert!(
+            method_body("Runtime", "preview_browse_key").contains(keyboards.as_str()),
+            "and it is the negated half of a keyboard's question, not a hand's"
+        );
     }
 
     /// RED GATE (§13.45 ②) — **the secondary click is settled at the one door
@@ -112489,8 +112602,11 @@ mod pointer_chord_site_tests {
     /// to record what the platform said, not what this window made of it.
     #[test]
     fn the_secondary_click_is_settled_once_and_above_every_router() {
-        let text = body(
-            "    fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+        let text = agreed(
+            body(
+                "    fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+            ),
+            "mouse_input",
         );
         let needle = ["input", "::", "pressed_button_of_gesture", "("].concat();
         let settle = text
@@ -112510,6 +112626,11 @@ mod pointer_chord_site_tests {
              made above it would erase"
         );
         let calls = SOURCE.matches(needle.as_str()).count();
+        assert_eq!(
+            calls,
+            found(needle!(Pattern::text(&needle)), View::Raw).len(),
+            "this file's count of the settling door and the package's do not agree"
+        );
         assert_eq!(
             calls, 1,
             "one door decides what button a press is, as one door decides what \
@@ -112534,6 +112655,26 @@ mod pointer_chord_site_tests {
             uses,
             vec![format!("&mut self.{needle},")],
             "the latch is touched at the one door and nowhere else: {uses:?}"
+        );
+
+        // The same sweep, asked of the package, with the comment filter being
+        // the view's rather than this module's own (§2.1).
+        let touches = found(needle!(Pattern::text(&needle)), View::CodeKeepingLiterals);
+        assert_eq!(
+            touches.len(),
+            uses.len(),
+            "this file's line sweep and the package's code view disagree about how many \
+             places touch the latch:\n{}",
+            touches.report(source())
+        );
+        assert_eq!(
+            owner_names(&touches),
+            ["mouse_input×1"],
+            "§4.1: the latch is named by the item it is touched in, not by a line of a file"
+        );
+        assert!(
+            method_body("Runtime", "mouse_input").contains(&format!("&mut self.{needle},")),
+            "and that item is the one door every button event comes through"
         );
     }
 }
