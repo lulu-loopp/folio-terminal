@@ -101,7 +101,14 @@ every file type and directories, off the projection layer's whole logical line,
 and underlines it only once the disk says the name exists (`bt_term::verify_path`,
 which is an existence question: the trailing-dot rule, then
 `may_read_unasked_through_links`, then one metadata call). A candidate touching
-the last visual cell of a row is suppressed, because it may be truncated.
+the last visual cell of a row is suppressed, because it may be truncated. **A
+relative name is read against the pane's own folder and nowhere else** — the
+last `OSC 7` if one arrived, else the spawn place (`reference_directory()`); a
+pane that has neither marks nothing, and no parent, sibling, workspace root or
+recently printed absolute path is tried. A seam is one character-class
+transition, not a list of stops: a mark a path is never spelled with ends the
+name in whichever width it was typed (`is_seam_separator` reads its class off
+`is_path_tail_char`).
 Freshness is asymmetric: **a "yes" is never re-asked** and expires only at the
 command boundary; **a "no" is re-asked** whenever the program prints the name
 onto a freshly changed row (a repaint is not a printing); and **the press puts
@@ -121,8 +128,11 @@ asks what a pointer move asks*; trailing entries 2026-09-21 *correction: what a
 reveal must still know*, *correction: the component-by-component link walk is
 withdrawn*, *correction: the worker produces the door's input with the door's own
 function*, *a printed path may hold spaces; the disk still says which reading is
-real*; and the project owner's ruling of 2026-09-21 that Ctrl+click on a printed
-path opens it, as before.
+real*; trailing entry 2026-09-22 *a seam sits on the mark that ended the name,
+whichever keyboard wrote it; and a relative name is read against the pane's own
+folder or not at all*; the project owner's ruling of 2026-09-21 that Ctrl+click
+on a printed path opens it, as before; and the owner's ruling of 2026-09-21 that
+a relative name's folder is never guessed.
 **Overrides.** The owner's 2026-09-21 ruling withdrew the 2026-09-20 reveal-only
 rule and removed the volume question it had introduced. The per-component link
 walk, its hop limit and its locality type were withdrawn the same day. The
