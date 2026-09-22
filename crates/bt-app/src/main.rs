@@ -110491,48 +110491,37 @@ mod file_peek_fade_tests {
 /// anything new.
 #[cfg(test)]
 mod formula_tool_seat_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Every reader in this module asked `main.rs` for its
-    // text. Nothing is deleted here: each body pin now computes its answer twice
-    // — once from `include_str!("main.rs")`, once from `bt-source` — and asserts
-    // the two are the same bytes, and each whole-source reading asserts the two
-    // answer the same thing. The deletion is the commit after this one, so that a
-    // reviewer sees the agreement and a bisect can land between them.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* or a *module* of this crate, so no fact in this
+    // module is bound to the file it happens to be written in today. The commit
+    // before this one ran both readings side by side and asserted they agree —
+    // all 58 body pins compared as bytes — and this is the one that deletes the
+    // older of the two, because two implementations of one judgement do not vouch
+    // for each other (`docs/CONVENTIONS.md` §十 rule 4).
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
     // `source`, `item_body`, `method_body` and `found` are that module's helpers
-    // word for word, and its header is where the six points live. Two shapes it
-    // has no consumer for are added here and nowhere else:
+    // word for word, and its header is where the six points behind them live.
+    // One shape it had no consumer for is added here:
     //
-    // * `found_in` — a search narrowed to a named scope, which is what replaces
-    //   the reader that named `formula_tools.rs` by its file name. The scope is
-    //   `crate::formula_tools`, a Rust path, so the concern §4.1 says to preserve
-    //   is preserved exactly rather than widened to the crate.
-    // * `agreed` — the equivalence itself, deleted with the old reading.
+    // * `found_in` — a search narrowed to a **named scope**. It replaces the one
+    //   reader in this module that named another file, `formula_tools.rs`. The
+    //   scope is `crate::formula_tools`, a Rust path, so §4.1's "preserve the
+    //   covered concern" is preserved exactly rather than widened to the crate:
+    //   `target: PasteTarget` is a shape half this window writes.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed and stopped before the next
+    // `\n    fn `, which is not the end of the method. For `math_tools_deadline`
+    // that was 1,965 bytes around a 97-byte body, the rest being the next
+    // method's doc comment; for `turn` it was 45,871. Every assertion here turned
+    // out to fall inside the method it names — the equivalence commit is what
+    // established that — so the narrowing changes no verdict, and a `contains`
+    // satisfied by the next method's prose is no longer possible.
     use super::{PasteTarget, SeatId, TabId, paste_target_is_live};
 
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's.
-    ///
-    /// Search only before this module so a missing method cannot match its own test literal.
-    fn body(signature: &str) -> &'static str {
-        let production = SOURCE
-            .split("mod formula_tool_seat_tests {")
-            .next()
-            .unwrap();
-        let start = production
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &production[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
-
-    // ── what this module asks the crate instead ───────────────────────────
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -110571,43 +110560,6 @@ mod formula_tool_seat_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    // ── the two readings of one body, asserted to agree ───────────────────
-
-    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
-    ///
-    /// `body` hands back everything after the signature prefix it was given and
-    /// stops before the next `\n    fn `: the rest of the declaration, then the
-    /// body, then whatever stands between the closing brace and the next
-    /// method's `fn` — which in this file is that method's doc comment, and for
-    /// a method the next `fn ` is far from is a great deal more. `body_of` hands
-    /// back the braces and what is between them. So the crate's answer has to
-    /// stand in this file's slice at the head of the body, with nothing but the
-    /// rest of the declaration in front of it; some of this module's prefixes
-    /// end with the opening brace, in which case the slice begins one byte
-    /// inside the crate's answer.
-    ///
-    /// What comes back is the file's slice, so this commit changes no assertion.
-    fn agreed(old: &'static str, name: &str) -> &'static str {
-        let new = method_body("Runtime", name);
-        let at = match old.find(new) {
-            Some(at) => at,
-            None => {
-                assert!(
-                    old.starts_with(&new[1..]),
-                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
-                     bytes"
-                );
-                0
-            }
-        };
-        assert!(
-            !old[..at].contains('{'),
-            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
-             the head of it"
-        );
-        old
-    }
-
     /// RED — **the marks are placed under the name the ground was laid under,
     /// in the frame this present draws.**
     ///
@@ -110621,10 +110573,7 @@ mod formula_tool_seat_tests {
     /// trails the newly projected band by one present.
     #[test]
     fn the_marks_are_placed_under_the_hovered_bands_own_name() {
-        let placed = agreed(
-            body(&["    fn math_tool", "_placement<'a>("].concat()),
-            "math_tool_placement",
-        );
+        let placed = method_body("Runtime", "math_tool_placement");
         assert!(
             placed.contains("self.window.math_hover_anchor.as_ref()"),
             "the band is named, and the name is the one the ground was laid under"
@@ -110640,10 +110589,7 @@ mod formula_tool_seat_tests {
         // And the lane that draws them asks nothing of the frame at all: it draws
         // what the follow says, which is what lets a mark be *between* two places
         // on the frame it is asked for (owner's report 2026-09-14 evening).
-        let lane = agreed(
-            body(&["    fn formula_tool", "_layers(&self, now: Instant)"].concat()),
-            "formula_tool_layers",
-        );
+        let lane = method_body("Runtime", "formula_tool_layers");
         assert!(
             lane.contains("self.window.math_tools.as_ref()"),
             "the overlay lane draws the marks this window is holding"
@@ -110667,30 +110613,17 @@ mod formula_tool_seat_tests {
     /// formula lanes owned by another frame.
     #[test]
     fn the_bands_own_turn_draws_the_marks_from_the_picture_that_lit_it() {
-        let sync = agreed(body("    fn sync_math_tools("), "sync_math_tools");
+        let sync = method_body("Runtime", "sync_math_tools");
         assert!(
             sync.find("math_hover_anchor.is_none()").unwrap()
                 < sync.find("else if let Some(boxes) = placement").unwrap()
         );
         assert!(
-            agreed(
-                body("    fn turn(&mut self, now: Instant, application_clocks: bool)"),
-                "turn",
-            )
-            .contains("self.advance_math_tools_if_due(now)"),
+            method_body("Runtime", "turn").contains("self.advance_math_tools_if_due(now)"),
             "the band's marks take a turn like every other hover this window fades in"
         );
 
-        let advancer = agreed(
-            body(
-                &[
-                    "    fn advance_math_tools",
-                    "_if_due(&mut self, now: Instant)",
-                ]
-                .concat(),
-            ),
-            "advance_math_tools_if_due",
-        );
+        let advancer = method_body("Runtime", "advance_math_tools_if_due");
         assert!(
             advancer.contains("self.math_tools_owe_frames(now)")
                 && advancer.contains("self.present_chrome_change()?")
@@ -110698,14 +110631,8 @@ mod formula_tool_seat_tests {
             "the clock asks for a present and does not pretend to own its frame:\n{advancer}"
         );
 
-        for (present, name) in [
-            ("    fn redraw(&mut self)", "redraw"),
-            (
-                "    fn present_retained_picture(&mut self)",
-                "present_retained_picture",
-            ),
-        ] {
-            let drawing = agreed(body(present), name);
+        for present in ["redraw", "present_retained_picture"] {
+            let drawing = method_body("Runtime", present);
             let placement = drawing
                 .find("self.math_tool_placement(frame_for)")
                 .expect("the present places marks from its handed frame set");
@@ -110726,10 +110653,7 @@ mod formula_tool_seat_tests {
 
         // The debt itself keeps no span: the ninety milliseconds belongs to the
         // journey, which reads the tip's own.
-        let owed = agreed(
-            body(&["    fn math_tools", "_owe_frames(&self, now: Instant)"].concat()),
-            "math_tools_owe_frames",
-        );
+        let owed = method_body("Runtime", "math_tools_owe_frames");
         assert!(
             owed.contains("follow.owes_frames(now, self.app.motion)"),
             "the journeys say whether they are still running"
@@ -110748,10 +110672,7 @@ mod formula_tool_seat_tests {
         // `now` is the instant the turn began, and a turn begins whenever
         // anything happens — including the present the last frame asked for — so
         // a frame measured from it is a frame measured from nothing.
-        let wake = agreed(
-            body(&["    fn math_tools", "_deadline(&self, now: Instant)"].concat()),
-            "math_tools_deadline",
-        );
+        let wake = method_body("Runtime", "math_tools_deadline");
         assert!(
             wake.contains("self.animating_deadline("),
             "a moving surface wakes for its next frame, and the window says when that is:\n{wake}"
@@ -110796,10 +110717,7 @@ mod formula_tool_seat_tests {
     #[test]
     fn the_pointer_leaving_takes_the_marks_off_the_glass() {
         // The pointer's own door: no hit, no hover, no waiting.
-        let pointer = agreed(
-            body(&["    fn update_math", "_hover(&mut self, now: Instant)"].concat()),
-            "update_math_hover",
-        );
+        let pointer = method_body("Runtime", "update_math_hover");
         assert!(
             pointer.contains("self.leave_hovered_math(now, MathHoverExit::PointerLeft)?;"),
             "a pointer that is on neither the band nor a mark ends the hover here:\n{pointer}"
@@ -110809,36 +110727,19 @@ mod formula_tool_seat_tests {
             "and it arms no half-second first — every other hover in this window \
              leaves on the pointer's own event:\n{pointer}"
         );
-        let production = SOURCE
-            .split("mod formula_tool_seat_tests {")
-            .next()
-            .unwrap();
+        // Spelled in two halves so that this reader is not itself the occurrence
+        // it forbids — P18's ticket, left alone here. The reading was this file
+        // up to this module and is now every file this package compiles: the
+        // approved widening (§4.1), because the field would be as gone in
+        // `runtime/` as it is here and a reader watching one file could not say
+        // so.
         let armed = ["self.window.math_hover", "_clear_at"].concat();
-        // P3 equivalence. The file's reading was this file up to this module;
-        // the crate's is every file this package compiles, which is the widening
-        // §4.1 asks to be approved rather than inherited — the field would be as
-        // gone in `runtime/` as it is here, and a reading that only watched one
-        // file would not say so.
-        assert_eq!(
-            found(needle!(Pattern::text(&armed)), View::Raw).is_empty(),
-            !production.contains(&armed),
-            "P3 equivalence: the crate and this file agree about the grace's field"
-        );
         assert!(
-            !production.contains(&armed),
+            found(needle!(Pattern::text(&armed)), View::Raw).is_empty(),
             "the grace's field is gone with it, so nothing can arm it again"
         );
 
-        let door = agreed(
-            body(
-                &[
-                    "    fn leave_hovered",
-                    "_math(&mut self, now: Instant, why: MathHoverExit)",
-                ]
-                .concat(),
-            ),
-            "leave_hovered_math",
-        );
+        let door = method_body("Runtime", "leave_hovered_math");
         assert!(
             door.contains("self.present_chrome_change()?"),
             "the band and its marks go through the present door together"
@@ -110894,16 +110795,7 @@ mod formula_tool_seat_tests {
     /// moved.
     #[test]
     fn math_hover_is_asked_again_when_the_picture_moved_under_a_resting_pointer() {
-        let door = agreed(
-            body(
-                &[
-                    "    fn refresh_math_hover",
-                    "_against_the_picture(&mut self, now: Instant)",
-                ]
-                .concat(),
-            ),
-            "refresh_math_hover_against_the_picture",
-        );
+        let door = method_body("Runtime", "refresh_math_hover_against_the_picture");
         assert!(
             door.contains("self.update_math_hover(now)?;"),
             "the picture asks the pointer's own question through the pointer's own door:\n{door}"
@@ -110913,10 +110805,7 @@ mod formula_tool_seat_tests {
             "and it does no hit testing of its own:\n{door}"
         );
 
-        let turning = agreed(
-            body("    fn turn(&mut self, now: Instant, application_clocks: bool)"),
-            "turn",
-        );
+        let turning = method_body("Runtime", "turn");
         let asked = turning
             .find("self.refresh_math_hover_against_the_picture(now)")
             .expect("every turn re-reads the band under a pointer that has not moved");
@@ -110953,16 +110842,7 @@ mod formula_tool_seat_tests {
     /// that has not reached the glass.
     #[test]
     fn math_hover_refuses_before_it_asks_the_picture() {
-        let door = agreed(
-            body(
-                &[
-                    "    fn refresh_math_hover",
-                    "_against_the_picture(&mut self, now: Instant)",
-                ]
-                .concat(),
-            ),
-            "refresh_math_hover_against_the_picture",
-        );
+        let door = method_body("Runtime", "refresh_math_hover_against_the_picture");
         let pointer = door
             .find("if self.window.pointer_position.is_none() {")
             .expect("a window with no pointer in it asks nothing");
@@ -111002,10 +110882,7 @@ mod formula_tool_seat_tests {
     /// exit and an entrance instead of an anchor changing.
     #[test]
     fn math_hover_is_kept_by_a_band_that_comes_back_under_the_pointer() {
-        let door = agreed(
-            body(&["    fn update_math", "_hover(&mut self, now: Instant)"].concat()),
-            "update_math_hover",
-        );
+        let door = method_body("Runtime", "update_math_hover");
         let left = door
             .find("self.leave_hovered_math(now, MathHoverExit::PointerLeft)?;")
             .expect("a pointer on no band at all ends the hover");
@@ -111019,10 +110896,7 @@ mod formula_tool_seat_tests {
              changing and never an exit:\n{door}"
         );
 
-        let sweep = agreed(
-            body("    fn set_hovered_math(&mut self, anchor: Option<MathBlockAnchor>)"),
-            "set_hovered_math",
-        );
+        let sweep = method_body("Runtime", "set_hovered_math");
         assert!(
             sweep.contains("changed |= leaf.session.set_math_hover(wanted);"),
             "and the sweep answers whether anything actually moved:\n{sweep}"
@@ -111036,10 +110910,7 @@ mod formula_tool_seat_tests {
         // half is `formula_tools`' own `a_band_re_entered_before_its_exit_landed_turns_round_where_
         // it_stands`; what is pinned here is that the window's own road reaches it, which is one
         // `if let`: a follow that still exists is continued and never replaced.
-        let syncing = agreed(
-            body(&["    fn sync_math", "_tools("].concat()),
-            "sync_math_tools",
-        );
+        let syncing = method_body("Runtime", "sync_math_tools");
         let continued = syncing
             .find("if let Some(follow) = self.window.math_tools.as_mut() {")
             .expect("marks that are still on the glass are the marks that answer");
@@ -111086,10 +110957,7 @@ mod formula_tool_seat_tests {
     /// in an unfocused pane stops working.
     #[test]
     fn a_tab_or_pane_that_leaves_the_screen_takes_the_bands_hover_with_it() {
-        let switching = agreed(
-            body("    fn activate_tab(&mut self, index: usize, force: bool)"),
-            "activate_tab",
-        );
+        let switching = method_body("Runtime", "activate_tab");
         let left = switching
             .find("self.leave_hovered_math(")
             .expect("a tab switch ends the hover the tab it is leaving was carrying");
@@ -111103,17 +110971,11 @@ mod formula_tool_seat_tests {
 
         for (door, why) in [
             (
-                agreed(
-                    body("    fn focus_seat(&mut self, seat: SeatId)"),
-                    "focus_seat",
-                ),
+                method_body("Runtime", "focus_seat"),
                 "the keyboard's own pane door",
             ),
             (
-                agreed(
-                    body("    fn close_pane(&mut self, seat: bt_layout::SeatId)"),
-                    "close_pane",
-                ),
+                method_body("Runtime", "close_pane"),
                 "a pane whose shell is going away",
             ),
         ] {
@@ -111126,10 +110988,7 @@ mod formula_tool_seat_tests {
         // And the press road does not, on purpose: the two doors share
         // `settle_focus_on`, and a clear there would fire on the very press that
         // operates a mark.
-        let settled = agreed(
-            body("    fn settle_focus_on(&mut self, seat: SeatId)"),
-            "settle_focus_on",
-        );
+        let settled = method_body("Runtime", "settle_focus_on");
         assert!(
             !settled.contains("leave_hovered_math"),
             "a press that focuses a pane must not take the marks out from under itself"
@@ -111139,16 +110998,7 @@ mod formula_tool_seat_tests {
         // the new doors: the leave refuses before it requests a present, so a
         // tab switch in a window that has never hovered a formula costs what it
         // always did.
-        let leaving = agreed(
-            body(
-                &[
-                    "    fn leave_hovered",
-                    "_math(&mut self, now: Instant, why: MathHoverExit)",
-                ]
-                .concat(),
-            ),
-            "leave_hovered_math",
-        );
+        let leaving = method_body("Runtime", "leave_hovered_math");
         let refusal = leaving
             .find("return Ok(());")
             .expect("a window with nothing hovered leaves nothing");
@@ -111177,19 +111027,13 @@ mod formula_tool_seat_tests {
     /// the press and the drawing disagree again, one pane over.
     #[test]
     fn the_press_and_the_drawing_are_cut_to_one_pane() {
-        let hit = agreed(
-            body("    fn math_hit(&self) -> Option<(SeatId, MathHit)>"),
-            "math_hit",
-        );
+        let hit = method_body("Runtime", "math_hit");
         assert!(
             hit.contains("seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)")
                 && hit.contains("math_hit_test(body, frame, position.x, position.y)"),
             "the pointer's own pane is what its band is cut to:\n{hit}"
         );
-        let placed = agreed(
-            body(&["    fn math_tool", "_placement<'a>("].concat()),
-            "math_tool_placement",
-        );
+        let placed = method_body("Runtime", "math_tool_placement");
         assert!(
             placed.contains("let (body, frame) = frame_for(*seat)?;")
                 && placed.contains("math_tool_boxes(body, frame, hovered)"),
@@ -111224,37 +111068,16 @@ mod formula_tool_seat_tests {
     fn an_interrupted_change_of_face_lands_before_the_thing_that_interrupted_it() {
         for (door, why) in [
             (
-                agreed(
-                    body(
-                        &[
-                            "    fn leave_hovered",
-                            "_math(&mut self, now: Instant, why: MathHoverExit)",
-                        ]
-                        .concat(),
-                    ),
-                    "leave_hovered_math",
-                ),
+                method_body("Runtime", "leave_hovered_math"),
                 "a tab switch, a pane close and a focus change",
             ),
+            (method_body("Runtime", "scroll_view"), "a keyboard page"),
             (
-                agreed(
-                    body(&["    fn scroll", "_view(&mut self, rows: i32)"].concat()),
-                    "scroll_view",
-                ),
-                "a keyboard page",
-            ),
-            (
-                agreed(
-                    body(&["    fn scroll_view", "_exact_in("].concat()),
-                    "scroll_view_exact_in",
-                ),
+                method_body("Runtime", "scroll_view_exact_in"),
                 "a wheel notch",
             ),
             (
-                agreed(
-                    body(&["    fn scroll_seat", "_to_subpixels("].concat()),
-                    "scroll_seat_to_subpixels",
-                ),
+                method_body("Runtime", "scroll_seat_to_subpixels"),
                 "a drag of the scroll bar",
             ),
         ] {
@@ -111265,10 +111088,7 @@ mod formula_tool_seat_tests {
         }
 
         // The turn pays the journey's frames, ahead of the marks that ride the rectangle it moves.
-        let turning = agreed(
-            body("    fn turn(&mut self, now: Instant, application_clocks: bool)"),
-            "turn",
-        );
+        let turning = method_body("Runtime", "turn");
         let toggle = turning
             .find("self.advance_math_toggle_if_due(now)")
             .expect("a change of face takes a turn like every other motion in this window");
@@ -111281,16 +111101,7 @@ mod formula_tool_seat_tests {
         );
 
         // And the advancer re-reads the far end rather than trusting the one it set out for.
-        let advancer = agreed(
-            body(
-                &[
-                    "    fn advance_math_toggle",
-                    "_if_due(&mut self, now: Instant)",
-                ]
-                .concat(),
-            ),
-            "advance_math_toggle_if_due",
-        );
+        let advancer = method_body("Runtime", "advance_math_toggle_if_due");
         assert!(
             advancer.contains("still_measures(heights)"),
             "a pane that re-wrapped mid-flight moves the height the journey lands on:\n{advancer}"
@@ -111307,16 +111118,7 @@ mod formula_tool_seat_tests {
         );
 
         // Stillness and the live plane take the one-frame switch, in the press's own door.
-        let press = agreed(
-            body(
-                &[
-                    "    fn press_math",
-                    "_toggle(&mut self, target: PasteTarget, anchor",
-                ]
-                .concat(),
-            ),
-            "press_math_toggle",
-        );
+        let press = method_body("Runtime", "press_math_toggle");
         assert!(
             press.contains("Motion::Reduced") && press.contains("self.switch_math_source_now("),
             "a reader who asked for no motion gets the change on the frame it is asked for:\n\
@@ -111336,10 +111138,7 @@ mod formula_tool_seat_tests {
     /// thickening the instant the mark is pressed.
     #[test]
     fn the_source_face_is_not_struck_over_a_picture_already_drawing_it() {
-        let lane = agreed(
-            body(&["    fn formula_toggle", "_layers<'a>("].concat()),
-            "formula_toggle_layers",
-        );
+        let lane = method_body("Runtime", "formula_toggle_layers");
         assert!(
             lane.contains("face.display == bt_viewport::MathBlockDisplay::Source"),
             "the lane asks which face the picture in hand is wearing:\n{lane}"
@@ -111370,12 +111169,7 @@ mod formula_tool_seat_tests {
     /// search again and two panes can answer for one block.
     #[test]
     fn a_blocks_verbs_all_ask_the_pane_the_block_is_in() {
-        let copy = agreed(
-            body(
-                "    fn copy_math_latex(&mut self, target: PasteTarget, anchor: &MathBlockAnchor) {",
-            ),
-            "copy_math_latex",
-        );
+        let copy = method_body("Runtime", "copy_math_latex");
         assert!(
             copy.contains(".get(&target.seat)"),
             "the copy verb asks the seat the press handed it:\n{copy}"
@@ -111384,21 +111178,18 @@ mod formula_tool_seat_tests {
             !copy.contains("self.focused()"),
             "and never the pane that happens to hold the keyboard:\n{copy}"
         );
-        for (signature, name) in [
-            ("    fn math_toggle_faces(", "math_toggle_faces"),
-            ("    fn math_toggle_heights(", "math_toggle_heights"),
-            ("    fn switch_math_source_now(", "switch_math_source_now"),
+        for verb in [
+            "math_toggle_faces",
+            "math_toggle_heights",
+            "switch_math_source_now",
         ] {
-            let lane = agreed(body(signature), name);
+            let lane = method_body("Runtime", verb);
             assert!(
                 !lane.contains("self.sessions.iter()"),
                 "no verb searches for a pane that will answer:\n{lane}"
             );
         }
-        let hit = agreed(
-            body("    fn math_hit(&self) -> Option<(SeatId, MathHit)> {"),
-            "math_hit",
-        );
+        let hit = method_body("Runtime", "math_hit");
         assert!(
             hit.contains(".map(|hit| (seat, hit))"),
             "and the seat the hit was taken in comes back with it:\n{hit}"
@@ -111420,97 +111211,67 @@ mod formula_tool_seat_tests {
         ] {
             assert_eq!(paste_target_is_live(tab, standing, target), expected);
         }
+        // The same approved widening: read out of this file before, read out of
+        // every file this package compiles now.
         let retained = [
             "pending_math_context_anchor: Option<(",
             "PasteTarget, MathBlockAnchor)>",
         ]
         .concat();
-        // P3 equivalence, and the same approved widening as above: the field was
-        // read out of this file and is now read out of every file this package
-        // compiles.
-        assert_eq!(
-            !found(needle!(Pattern::text(&retained)), View::Raw).is_empty(),
-            SOURCE.contains(&retained),
-            "P3 equivalence: the crate and this file agree about the menu's pending block"
-        );
         assert!(
-            SOURCE.contains(&retained),
+            !found(needle!(Pattern::text(&retained)), View::Raw).is_empty(),
             "the menu must retain the tab, seat and shell incarnation from the press"
         );
-        let press = agreed(body("    fn mouse_input("), "mouse_input");
+        let press = method_body("Runtime", "mouse_input");
         assert!(press.contains("self.paste_target(math_seat)"));
         assert!(press.contains("Some((target, math_hit.anchor.clone()))"));
-        let answer = agreed(
-            body("    fn apply_math_context_menu_result(&mut self)"),
-            "apply_math_context_menu_result",
-        );
+        let answer = method_body("Runtime", "apply_math_context_menu_result");
         assert!(answer.contains("self.copy_math_latex(target, &anchor)"));
-        let copy = agreed(
-            body("    fn copy_math_latex(&mut self, target: PasteTarget,"),
-            "copy_math_latex",
-        );
+        let copy = method_body("Runtime", "copy_math_latex");
         assert!(
             copy.find("self.live_paste_target(target)").unwrap()
                 < copy.find("bt_platform::set_clipboard_text").unwrap()
         );
-        let validate = agreed(
-            body("    fn live_paste_target(&self, target: PasteTarget)"),
-            "live_paste_target",
-        );
+        let validate = method_body("Runtime", "live_paste_target");
         assert!(validate.contains("tab.sessions.get(&target.seat)"));
         assert!(validate.contains("paste_target_is_live(tab.id, standing, target)"));
     }
 
     #[test]
     fn delayed_math_toggle_validates_its_original_owner() {
-        let flight = include_str!("formula_tools.rs");
-        // P3 equivalence. This reader named another *file*; its concern is that
-        // module, so the scope is the Rust path and not a widening to the crate
-        // (§4.1) — `target: PasteTarget` is a shape half the window writes.
-        assert_eq!(
+        // This reader named another *file*; its concern is that module, so the
+        // scope is the Rust path and not a widening to the crate (§4.1) —
+        // `target: PasteTarget` is a shape half this window writes.
+        assert!(
             !found_in(
                 needle!(Pattern::text("target: PasteTarget")),
                 View::Raw,
                 Scope::Module("crate::formula_tools".to_owned()),
             )
             .is_empty(),
-            flight.contains("target: PasteTarget"),
-            "P3 equivalence: the crate and that file agree about the flight's owner"
-        );
-        assert!(
-            flight.contains("target: PasteTarget"),
             "a flight must carry the full owner"
         );
-        let press = agreed(body("    fn press_math_toggle("), "press_math_toggle");
+        let press = method_body("Runtime", "press_math_toggle");
         assert!(press.contains("FormulaToggleMotion::begin(\n            target,"));
         assert!(press.contains("flight.target() == target"));
-        for (signature, name) in [
-            ("    fn math_toggle_faces(", "math_toggle_faces"),
-            ("    fn math_toggle_heights(", "math_toggle_heights"),
-            ("    fn switch_math_source_now(", "switch_math_source_now"),
-            ("    fn present_math_toggle(", "present_math_toggle"),
+        for verb in [
+            "math_toggle_faces",
+            "math_toggle_heights",
+            "switch_math_source_now",
+            "present_math_toggle",
         ] {
             assert!(
-                agreed(body(signature), name).contains("self.live_paste_target(target)"),
-                "{signature}"
+                method_body("Runtime", verb).contains("self.live_paste_target(target)"),
+                "{verb}"
             );
         }
-        let settle = agreed(
-            body("    fn settle_math_toggle(&mut self)"),
-            "settle_math_toggle",
-        );
+        let settle = method_body("Runtime", "settle_math_toggle");
         assert!(settle.contains("self.live_paste_target(target)"));
         assert!(settle.contains("self.math_toggle_heights(target, flight.anchor())"));
-        let advance = agreed(
-            body("    fn advance_math_toggle_if_due(&mut self, now: Instant)"),
-            "advance_math_toggle_if_due",
-        );
+        let advance = method_body("Runtime", "advance_math_toggle_if_due");
         assert!(advance.contains("flight.target()"));
         assert!(advance.contains("self.math_toggle_heights(target, &anchor)"));
-        let overlay = agreed(
-            body("    fn formula_toggle_layers<'a>("),
-            "formula_toggle_layers",
-        );
+        let overlay = method_body("Runtime", "formula_toggle_layers");
         assert!(overlay.contains("self.live_paste_target(target)"));
         assert!(!overlay.contains("self.sessions.iter()"));
     }
@@ -111548,7 +111309,7 @@ mod formula_tool_seat_tests {
     /// the frames whose cells have not changed, which is all of them.
     #[test]
     fn every_frame_of_a_change_of_face_reaches_the_glass_as_a_terminal_picture() {
-        let present = agreed(body("    fn present_math_toggle("), "present_math_toggle");
+        let present = method_body("Runtime", "present_math_toggle");
         assert!(
             present.contains("leaf.session.math_toggle_presentation() == presentation.as_ref()"),
             "the refusal is the presentation and not a picture's digest:\n{present}"
@@ -111566,7 +111327,7 @@ mod formula_tool_seat_tests {
             !present[published..].contains("self.refresh_overlay()"),
             "the clock does not build a lane before the frame exists:\n{present}"
         );
-        let redraw = agreed(body("    fn redraw(&mut self)"), "redraw");
+        let redraw = method_body("Runtime", "redraw");
         let projected = redraw
             .rfind("unfocused_frames.push")
             .expect("all sibling panes are projected before formula placement");
@@ -111583,18 +111344,12 @@ mod formula_tool_seat_tests {
 
         // ③ — the one caller that may skip on an unchanged digest is the wheel, and it says so by
         // handing an answer rather than by being the road a toggle takes.
-        let repaint = agreed(
-            body("    fn repaint_pane_change(&mut self, seat: SeatId)"),
-            "repaint_pane_change",
-        );
+        let repaint = method_body("Runtime", "repaint_pane_change");
         assert!(
             repaint.contains("self.repaint_pane_change_inner(seat, None)"),
             "a pane change publishes unconditionally; only a wheel notch brings a verdict:\n{repaint}"
         );
-        let inner = agreed(
-            body("    fn repaint_pane_change_inner("),
-            "repaint_pane_change_inner",
-        );
+        let inner = method_body("Runtime", "repaint_pane_change_inner");
         assert!(
             inner.contains("wheel_view_moved.is_some()"),
             "and `skip_unchanged` is exactly that verdict's presence:\n{inner}"
@@ -111624,7 +111379,7 @@ mod formula_tool_seat_tests {
     /// caches is the one that freezes.
     #[test]
     fn a_frame_composed_for_any_reason_carries_the_journeys_and_the_landing_is_never_paced() {
-        let compose = agreed(body("    fn publish_frame_inner("), "publish_frame_inner");
+        let compose = method_body("Runtime", "publish_frame_inner");
         let carried = compose
             .find("self.carry_live_journeys(Instant::now());")
             .expect("every compose carries the journeys that are running");
@@ -111637,10 +111392,7 @@ mod formula_tool_seat_tests {
              sample:\n{compose}"
         );
 
-        let carry = agreed(
-            body("    fn carry_live_journeys(&mut self, now: Instant)"),
-            "carry_live_journeys",
-        );
+        let carry = method_body("Runtime", "carry_live_journeys");
         assert!(
             carry.contains("self.sample_math_toggle(now);"),
             "the one animation this window caches is sampled on every frame:\n{carry}"
@@ -111673,10 +111425,7 @@ mod formula_tool_seat_tests {
                 && carry.contains("} else if running.overlay"),
             "chrome and the ordinary overlay lane stay exclusive:\n{carry}"
         );
-        let chrome = agreed(
-            body("    fn refresh_chrome_with_overlay("),
-            "refresh_chrome_with_overlay",
-        );
+        let chrome = method_body("Runtime", "refresh_chrome_with_overlay");
         assert!(
             chrome.contains("include_overlay && self.refresh_overlay()"),
             "ordinary chrome ends in the overlay while formula presents defer it:\n{chrome}"
@@ -111687,23 +111436,17 @@ mod formula_tool_seat_tests {
         // which also carry a wait: a tip's 380ms, a notice's life, a card's
         // grace. Waiting is not moving, and a window that treated it as moving
         // would rebuild its whole interface for the length of every wait.
-        let gate = agreed(
-            body("    fn animation_frame_is_due(&mut self) -> bool {"),
-            "animation_frame_is_due",
-        );
+        let gate = method_body("Runtime", "animation_frame_is_due");
         assert!(
             !gate.contains("note_running"),
             "asking the gate is a question and never evidence:\n{gate}"
         );
-        let turning = agreed(
-            body("    fn turn(&mut self, now: Instant, application_clocks: bool)"),
-            "turn",
-        );
+        let turning = method_body("Runtime", "turn");
         assert!(
             turning.contains("self.window.frame_clock.note_running(running);"),
             "the window reports what is mid-flight once a turn:\n{turning}"
         );
-        let report = agreed(body("    fn running_journeys("), "running_journeys");
+        let report = method_body("Runtime", "running_journeys");
         for waiting in ["tooltip_deadline", "toast_deadline", "file_peek_deadline"] {
             assert!(
                 !report.contains(waiting),
@@ -111723,10 +111466,7 @@ mod formula_tool_seat_tests {
             );
         }
 
-        let advance = agreed(
-            body("    fn advance_math_toggle_if_due(&mut self, now: Instant)"),
-            "advance_math_toggle_if_due",
-        );
+        let advance = method_body("Runtime", "advance_math_toggle_if_due");
         let settles = advance
             .find("if landed || !still_measures {")
             .expect("a journey that has arrived is settled");
@@ -111738,10 +111478,7 @@ mod formula_tool_seat_tests {
             "the landing is owed to the document and waits for no display:\n{advance}"
         );
 
-        let wake = agreed(
-            body(&["    fn math_toggle", "_deadline(&self, now: Instant)"].concat()),
-            "math_toggle_deadline",
-        );
+        let wake = method_body("Runtime", "math_toggle_deadline");
         assert!(
             wake.contains("flight.lands_at()"),
             "and the loop is woken for that landing on its own clock:\n{wake}"
@@ -111765,7 +111502,7 @@ mod formula_tool_seat_tests {
     /// block this window could not measure two faces for — is the one road that never prints.
     #[test]
     fn a_press_says_whether_it_began_a_journey() {
-        let press = agreed(body("    fn press_math_toggle("), "press_math_toggle");
+        let press = method_body("Runtime", "press_math_toggle");
         let printed = press
             .find("BT_PERF_TRACE toggle plane=")
             .expect("a press says which road it took");
@@ -111816,10 +111553,7 @@ mod formula_tool_seat_tests {
     /// number becomes one per row.
     #[test]
     fn the_other_faces_rows_are_measured_once_per_change_and_not_once_per_frame() {
-        let lane = agreed(
-            body(&["    fn formula_toggle", "_layers<'a>("].concat()),
-            "formula_toggle_layers",
-        );
+        let lane = method_body("Runtime", "formula_toggle_layers");
         assert!(
             lane.contains("flight.source_rows()"),
             "the overlay draws the rows the flight was handed when it began:\n{lane}"
@@ -111840,16 +111574,7 @@ mod formula_tool_seat_tests {
 
         // And the rows are laid out in exactly the two places a change acquires them: setting out,
         // and turning round.
-        let press = agreed(
-            body(
-                &[
-                    "    fn press_math",
-                    "_toggle(&mut self, target: PasteTarget, anchor",
-                ]
-                .concat(),
-            ),
-            "press_math_toggle",
-        );
+        let press = method_body("Runtime", "press_math_toggle");
         assert_eq!(
             press.matches("faces.source,").count(),
             2,
