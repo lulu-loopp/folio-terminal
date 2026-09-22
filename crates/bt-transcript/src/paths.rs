@@ -1601,7 +1601,11 @@ fn token_end(text: &str, start: usize) -> usize {
 /// folder a work account gets — `C:\Users\alice\OneDrive - Example State University\notes.md` — crosses
 /// four, and it is the widest everyday shape there is. A name wider than that can still be quoted,
 /// which is the appeal every other bound in this module offers.
-const MAX_PATH_SPACES: usize = 4;
+///
+/// Public for the same reason [`MAX_REJOIN_ROWS`] is: it is a **budget** other hops of the chain
+/// assert against, and a budget spelled as a literal in a second crate is a budget that can drift
+/// away from the code that spends it.
+pub const MAX_PATH_SPACES: usize = 4;
 
 /// Where an unquoted token ends once the spaces a filename may hold are read across, and the byte
 /// offset of every space it crossed, ascending — §7.30 (owner report 2026-09-21).
