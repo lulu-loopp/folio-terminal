@@ -23,6 +23,9 @@ All notable changes to Folio are recorded here. The format follows
   behind it (`experiments/plot.png：…`) is a link again when the file is in
   the pane's folder.
 
+- A folder an agent prints with a slash on the end (`whydrift/models/`) is a
+  link, like the same folder printed without one. Clicking it shows the folder.
+
 ## 0.4.3-preview — 2026-09-21
 
 ### Added

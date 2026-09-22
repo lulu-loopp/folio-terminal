@@ -25940,6 +25940,139 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// RED (owner report 2026-09-22, two screenshots off a restored Claude Code pane) — **a
+    /// relative directory printed with a trailing slash is a link**, walked from the printed row to
+    /// the real disk.
+    ///
+    /// Three lines wore no mark: `文件都在 mjx_experiments/umarm_can/media/：`,
+    /// `新写在 whydrift/models/；` and `产出 experiments/qx181_model_ladder/ 的`, each naming a
+    /// real directory of the pane's own folder — while `whydrift/models` on a row above, the same
+    /// folder spelled **without** the slash, was an ordinary dotted link. That contrast is the
+    /// whole of the report and it is why all four rows are here: one lexical difference, one
+    /// answer apart.
+    ///
+    /// The lexer's half is pinned in `bt_transcript::paths` by
+    /// `a_trailing_separator_is_not_the_evidence_a_bare_reference_is_admitted_on`. **This is the
+    /// half that decides**: a reading settles nothing until a real worker has read a real
+    /// filesystem, and a directory is what the disk reports here — `exists` and `directory`, which
+    /// is the verdict §7.1.5j has drawn a reference on since directories joined the scan.
+    ///
+    /// The two full-width marks behind the first two references need the 2026-09-22 seam entry to
+    /// reach the trailing-slash reading at all; the third has an ordinary space behind its slash
+    /// and needs no seam, which is what says the trailing separator was a cause of its own.
+    ///
+    /// The row is 75 columns and every line is shorter than that on purpose: §7.1.5k ①'s
+    /// truncation gate is not the subject here, and a reference standing on the row's last cell
+    /// would be pressed down for a reason that has nothing to do with the report.
+    ///
+    /// MUTATION: put `!candidate.ends_with(['/', '\\'])` back into `is_relative_reference` and the
+    /// three directory rows go dark exactly as photographed, while the fourth keeps its link.
+    #[test]
+    fn a_relative_directory_printed_with_a_trailing_slash_is_a_link() {
+        /// The reference's text and its target, read off one frame row: every cell of that row
+        /// carrying a link, in order. Wide spacers carry no text, so a CJK row reads as it prints.
+        fn linked_on(frame: &ViewportFrame, row: u32) -> Option<(String, String)> {
+            let columns = frame.columns.get() as usize;
+            let start = row as usize * columns;
+            let mut text = String::new();
+            let mut uri = None;
+            for cell in &frame.cells[start..start + columns] {
+                if let Some(link) = &cell.hyperlink {
+                    uri.get_or_insert_with(|| link.uri.to_string());
+                    text.push_str(&cell.text);
+                }
+            }
+            uri.map(|uri| (text, uri))
+        }
+
+        let (directory, spare) = temporary_ordinary_file();
+        let media = directory
+            .join("mjx_experiments")
+            .join("umarm_can")
+            .join("media");
+        let models = directory.join("whydrift").join("models");
+        let ladder = directory.join("experiments").join("qx181_model_ladder");
+        for folder in [&media, &models, &ladder] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+
+        let printed = [
+            "两项收尾都完成了，已推送。文件都在 mjx_experiments/umarm_can/media/：",
+            "Agent(Build model ladder L0-L2 in whydrift/models) Opus 5",
+            "新写在 whydrift/models/；每级要给出退化到下一级的参数极限",
+            "产出 experiments/qx181_model_ladder/ 的",
+        ];
+        let mut session = DualPlaneSession::new(nz(75), nz(8));
+        enable_path_detection(&mut session);
+        session
+            .feed(
+                format!(
+                    "\x1b]7;file:///{}\x07",
+                    directory.to_string_lossy().replace('\\', "/")
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        for line in printed {
+            assert!(
+                bt_unicode::text_width(line) < 75,
+                "the fixture's rows must not reach the last cell, or the truncation gate answers \
+                 instead of the rule under test: {line}"
+            );
+            session.feed(format!("{line}\r\n").as_bytes()).unwrap();
+        }
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        for folder in [&media, &models, &ladder] {
+            assert!(
+                session.path_is_verified(folder),
+                "the worker read the directory the line names: {}",
+                folder.display()
+            );
+        }
+
+        // The slash is part of what the reader points at, because the name as printed is the span.
+        assert_eq!(
+            linked_on(&frame, 0),
+            Some((
+                "mjx_experiments/umarm_can/media/".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(&media)
+            )),
+            "the reference behind the full-width colon is a link, slash and all"
+        );
+        // The contrast row, which was a link all along.
+        assert_eq!(
+            linked_on(&frame, 1),
+            Some((
+                "whydrift/models".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(&models)
+            ))
+        );
+        assert_eq!(
+            linked_on(&frame, 2),
+            Some((
+                "whydrift/models/".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(&models)
+            )),
+            "the same folder with the slash on it reaches the same place"
+        );
+        assert_eq!(
+            linked_on(&frame, 3),
+            Some((
+                "experiments/qx181_model_ladder/".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(&ladder)
+            )),
+            "and the one with an ordinary space behind the slash needs no seam at all"
+        );
+
+        std::fs::remove_dir_all(directory.join("mjx_experiments")).unwrap();
+        std::fs::remove_dir_all(directory.join("whydrift")).unwrap();
+        std::fs::remove_dir_all(directory.join("experiments")).unwrap();
+        std::fs::remove_file(&spare).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
     /// PIN (user report 2026-08-21) — **a path the terminal wrapped is still one link**, asked of
     /// the real vendor grid rather than of a hand-built one.
     ///

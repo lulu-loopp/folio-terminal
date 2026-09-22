@@ -108,7 +108,11 @@ pane that has neither marks nothing, and no parent, sibling, workspace root or
 recently printed absolute path is tried. A seam is one character-class
 transition, not a list of stops: a mark a path is never spelled with ends the
 name in whichever width it was typed (`is_seam_separator` reads its class off
-`is_path_tail_char`).
+`is_path_tail_char`). **The separator that admits a bare relative name is one
+that divides two segments**, so that test is asked of the name with its trailing
+separators taken off: `docs/` is `docs` with a slash after it and is refused,
+while `docs/plans/` is a directory somebody named and is a link whose span
+carries the slash as printed.
 Freshness is asymmetric: **a "yes" is never re-asked** and expires only at the
 command boundary; **a "no" is re-asked** whenever the program prints the name
 onto a freshly changed row (a repaint is not a printing); and **the press puts
@@ -130,9 +134,11 @@ withdrawn*, *correction: the worker produces the door's input with the door's ow
 function*, *a printed path may hold spaces; the disk still says which reading is
 real*; trailing entry 2026-09-22 *a seam sits on the mark that ended the name,
 whichever keyboard wrote it; and a relative name is read against the pane's own
-folder or not at all*; the project owner's ruling of 2026-09-21 that Ctrl+click
-on a printed path opens it, as before; and the owner's ruling of 2026-09-21 that
-a relative name's folder is never guessed.
+folder or not at all*; trailing entry 2026-09-22 *a trailing slash is not the
+evidence a bare reference is admitted on; it is the person naming a directory*;
+the project owner's ruling of 2026-09-21 that Ctrl+click on a printed path opens
+it, as before; and the owner's ruling of 2026-09-21 that a relative name's folder
+is never guessed.
 **Overrides.** The owner's 2026-09-21 ruling withdrew the 2026-09-20 reveal-only
 rule and removed the volume question it had introduced. The per-component link
 walk, its hop limit and its locality type were withdrawn the same day. The

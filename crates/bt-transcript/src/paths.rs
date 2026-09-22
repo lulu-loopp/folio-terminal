@@ -1072,25 +1072,38 @@ pub fn detect_relative_path_candidates(
 /// loosened: `docs/a.md:12:3` reaches this as `docs/a.md`, and `docs/a.md:abc` reaches it whole and
 /// is refused exactly as it always was.
 ///
-/// Five refusals. A candidate with no separator is a single bare name, which is out of scope. One
+/// Four refusals. A candidate with no separator is a single bare name, which is out of scope. One
 /// that *opens* with a separator names a place from the drive root rather than from here —
 /// `/usr/share/x.png` in a log line, or the `//host/x.png` a scheme leaves behind — and joining it
 /// to a working directory would invent a location nobody named. One containing `:` is not relative
 /// at all: the colon is exactly the character that makes text absolute (`D:\…`) or schemed
 /// (`file:…`, `https:…`), both of which are other scans' business and must never be claimed twice.
 ///
-/// # A reading must end on a character that is part of a name (user ruling 2026-08-28, §7.30)
+/// # The separator that admits a reference is one that divides two segments (user ruling
+/// 2026-08-28, §7.30; narrowed on the owner's report of 2026-09-22)
 ///
-/// The fourth refusal is a **trailing** separator. `src/` is a directory prefix, and a directory
-/// prefix is a name nobody wrote — not even when the disk holds it, because existence was only ever
-/// the licence to *draw* a reference, never to invent one. The line that settled it is git's rename
+/// The first refusal is asked of the candidate **with its trailing separators taken off**, and
+/// that one clause is the whole of the rule a trailing separator answers to. A bare reference is
+/// admitted on the strength of **carrying a separator** — that mark is the only thing ordinary
+/// prose does not have — and a separator at the very end divides nothing: `docs/` is `docs` with a
+/// slash after it, and `docs` alone was never a reference. The line that settled it is git's rename
 /// compression, `src/{old => new}/main.rs`, where the brace seams (§7.30) and the reading in front
-/// of it is exactly such a prefix.
+/// of it is exactly that shape; it is refused here as it always was.
 ///
-/// It closes a hole in the first refusal rather than adding a rule beside it. A bare reference is
-/// admitted on the strength of **carrying a separator** — that mark is the only thing ordinary prose
-/// does not have — and a trailing separator is the one place where the mark is not evidence of two
-/// segments at all. `docs/` is `docs` with a slash after it, and `docs` alone was never a reference.
+/// It used to be written as a refusal of its own — a candidate ending on a separator, whatever
+/// stood in front of it — and that spelling said more than the argument did.
+/// `mjx_experiments/umarm_can/media/` carries two separators that divide three named segments; the
+/// evidence is there, and the slash the agent typed after `media` is the person naming a
+/// **directory**, which this scan has recognised like a file since §7.1.5j. Three lines of one
+/// owner report of 2026-09-22 went dark on it — `文件都在 mjx_experiments/umarm_can/media/：`,
+/// `新写在 whydrift/models/；` and `experiments/qx181_model_ladder/ 的` — while `whydrift/models`
+/// on the row above, the same folder spelled without the slash, was an ordinary link. Nothing about
+/// existence loosens: the disk still says whether the directory is there, and it is asked about
+/// under the name the components spell ([`resolve_relative_reference`] drops the empty component
+/// the trailing slash leaves).
+///
+/// The slash stays inside the reference's span, because the name as printed is the name the reader
+/// points at — the same reason the printed spelling is the span everywhere else in this module.
 ///
 /// The absolute scan is deliberately not given the same clause: there the separator is never the
 /// evidence that something is a reference (the drive prefix is), and `D:\` is a real place whose own
@@ -1118,20 +1131,21 @@ pub fn detect_relative_path_candidates(
 pub fn is_relative_reference(candidate: &str) -> bool {
     !candidate.starts_with(['/', '\\'])
         && !candidate.starts_with('~')
-        && !candidate.ends_with(['/', '\\'])
-        && candidate.contains(['/', '\\'])
+        && candidate
+            .trim_end_matches(['/', '\\'])
+            .contains(['/', '\\'])
         && !candidate.contains(':')
 }
 
-/// The same five refusals where `\` is not a separator.
+/// The same four refusals where `\` is not a separator.
 ///
 /// Every word of the ruling above still holds; one character leaves the class
 /// it is tested against. A backslash is a **legal character in a POSIX
 /// filename** — `a\ b.txt` is what a shell prints for a name with a space in
 /// it — so reading it as a separator here would do the two wrong things at
 /// once: it would admit `docs\a.md` as a two-segment reference on a system
-/// where that is one file nobody has, and it would refuse `weird\name` as a
-/// trailing separator when it is a name.
+/// where that is one file nobody has, and it would take the `\` off the end of
+/// `weird\name` when it is part of the name.
 ///
 /// It stays on [`is_path_tail_char`] for exactly that reason: what a name may
 /// be *spelled with* and what divides a name into segments are two questions,
@@ -1140,8 +1154,7 @@ pub fn is_relative_reference(candidate: &str) -> bool {
 pub fn is_relative_reference(candidate: &str) -> bool {
     !candidate.starts_with('/')
         && !candidate.starts_with('~')
-        && !candidate.ends_with('/')
-        && candidate.contains('/')
+        && candidate.trim_end_matches('/').contains('/')
         && !candidate.contains(':')
 }
 
@@ -1824,8 +1837,10 @@ fn is_seam_separator(character: char) -> bool {
 ///
 /// The path-structure characters `- _ ~` stay off the list: they end real names — an editor's
 /// `main.rs~`, an 8.3 short name — and none of them ends a sentence. `/` and `\` stay off it for a
-/// second reason as well: a reading ending on a separator is refused outright
-/// ([`is_relative_reference`], row 53), so a stop there would only ever offer a name nobody wrote.
+/// second reason as well: a reading ending on a separator names the directory its own components
+/// spell ([`is_relative_reference`], row 53, as narrowed on 2026-09-22), so a stop there would
+/// only ever offer that same place under a shorter spelling — a second question for one answer —
+/// and for `docs/` a name nobody wrote at all.
 ///
 /// **The double quote comes off it too, and that is §7.30 ⑤ rather than an exception to it.** A `"`
 /// is the one mark this scan reads as a *declaration of extent*: both scans open a quoted token on
@@ -5427,9 +5442,10 @@ mod tests {
     fn group_d_git_and_virtual_schemes() {
         let cwd = Some("D:\\case");
         // 44 keeps its "no link at all" across the opening-bracket seam (§7.30, user ruling
-        // 2026-08-28 evening). The brace does seam, but the reading in front of it is `src/` — a
-        // directory prefix, and a reading must end on a character that is part of a name. See
-        // `a_reading_that_ends_on_a_separator_is_not_a_name`.
+        // 2026-08-28 evening). The brace does seam, but the reading in front of it is `src/` — one
+        // segment with a slash after it, and the separator that admits a bare reference is one
+        // that divides two. See
+        // `a_trailing_separator_is_not_the_evidence_a_bare_reference_is_admitted_on`.
         for line in [
             "--- a/src/main.rs",
             "+++ b/src/main.rs",
@@ -6488,33 +6504,73 @@ mod tests {
         assert!(spans(":8080/img/x.png").is_empty());
     }
 
-    /// §7.30, boundary table row 52 (user ruling 2026-08-28, evening): **a reading must end on a
-    /// character that is part of a name.** A trailing `/` or `\` is not; what stands in front of one
-    /// is a directory prefix, and a directory prefix is a name nobody wrote — not even when the disk
-    /// holds it, because existence was never the licence to invent a reference, only to draw one.
+    /// RED (owner report 2026-09-22, on `next86`) — §7.30, boundary table row 52 (user ruling
+    /// 2026-08-28, evening): **the separator that admits a bare reference is one that divides two
+    /// segments**, and the first refusal is therefore asked of the candidate with its trailing
+    /// separators taken off.
     ///
-    /// This is the same discipline that keeps a single bare word out (`README` is prose until
-    /// something says otherwise): a bare reference is admitted on the strength of carrying a
-    /// separator, and a **trailing** separator is the one place where that mark is not evidence of
-    /// two segments at all. So it closes a hole in the old rule rather than adding a new one, and it
-    /// is asked of every reading — the seam's shorter forms and the whole token alike.
+    /// The ruling's own argument was never about the last character. A bare reference is admitted
+    /// on the strength of carrying a separator — that mark is the only thing ordinary prose does
+    /// not have — and `docs/` is `docs` with a slash after it, where `docs` alone was never a
+    /// reference. Written as "a reading may not end on a separator" it said more than that: it also
+    /// refused `mjx_experiments/umarm_can/media/`, whose two interior separators divide three named
+    /// segments and whose trailing one is a person naming a **directory**, which this scan has
+    /// recognised like a file since §7.1.5j.
+    ///
+    /// RED EVIDENCE. The lines below are the owner's, replayed with the real base. Before the
+    /// narrowing, `spans` returned nothing for any of the three while `whydrift/models` on the row
+    /// above — the same folder spelled without the slash — was an ordinary link.
+    ///
+    /// MUTATION: put `!candidate.ends_with(['/', '\\'])` back beside the first refusal and the
+    /// three directory readings go dark again, while every assertion in the first half still
+    /// passes — which is the shape of the defect, a rule stated wider than its argument.
     #[test]
-    fn a_reading_that_ends_on_a_separator_is_not_a_name() {
+    fn a_trailing_separator_is_not_the_evidence_a_bare_reference_is_admitted_on() {
         let cwd = Some("D:\\case");
         // The line that settled it: git's rename compression, where the opening brace seams and the
-        // reading in front of it is a directory prefix. Scenario 44 keeps its "no link at all".
+        // reading in front of it is one segment with a slash after it. Scenario 44 keeps its "no
+        // link at all".
         assert_eq!(linked_on_a_full_disk(cwd, "src/{old => new}/main.rs"), []);
-        // The same shape without any seam: a lone directory prefix is refused at the lexer, so it
-        // never reaches the disk. `docs` alone was already out; `docs/` is out for the same reason.
+        // The same shape without any seam: one segment is refused at the lexer, so it never reaches
+        // the disk. `docs` alone was already out; `docs/` is out for the same reason.
         assert!(spans("docs/").is_empty());
         assert!(spans("cd docs/").is_empty());
         assert!(spans("./").is_empty(), "an anchor alone names no file");
+        assert!(spans("../").is_empty(), "and neither does a climb");
         assert_eq!(linked_on_a_full_disk(cwd, "cd docs/"), []);
         // What the rule must not touch: a reading that ends on a name still stands, seam or no seam.
         assert_eq!(spans("docs/a.md(1"), ["docs/a.md"]);
         assert_eq!(
             linked_on_a_full_disk(cwd, "cd docs/a.md"),
             [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())]
+        );
+
+        // The owner's three lines. Two of them reach the reading only through the full-width seam
+        // of the 2026-09-22 entry; the third has an ordinary space behind the slash and needs no
+        // seam at all, which is what says the trailing separator is a cause of its own.
+        assert_eq!(
+            spans("● 两项收尾都完成了，已推送。文件都在 mjx_experiments/umarm_can/media/："),
+            ["mjx_experiments/umarm_can/media/"]
+        );
+        assert_eq!(
+            spans("新写在 whydrift/models/；每级要给出退化到下一级的参数极限"),
+            ["whydrift/models/"]
+        );
+        assert_eq!(
+            spans("产出 experiments/qx181_model_ladder/ 的"),
+            ["experiments/qx181_model_ladder/"]
+        );
+        // The row above it in the same output, which was a link all along — the contrast the
+        // report was written around.
+        assert_eq!(
+            spans("● Agent(Build model ladder L0-L2 in whydrift/models) Opus 5"),
+            ["whydrift/models"]
+        );
+        // The slash is inside the span, and the place asked about is the one the components spell:
+        // the empty component the trailing separator leaves is dropped on the way to the disk.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "文件都在 docs/plans/"),
+            [("docs/plans/", "file:///D:/case/docs/plans".to_owned())]
         );
     }
 
@@ -6786,8 +6842,8 @@ mod tests {
         // sentence punctuation, so no shorter reading is offered behind them.
         assert_eq!(spans("see docs/main.rs~"), ["docs/main.rs~"]);
         assert_eq!(spans("see docs/a.md-"), ["docs/a.md-"]);
-        // And a reading may still not end on a separator (row 53), so the stop does not hand
-        // anybody `docs/`.
+        // And one segment with a slash after it is still not a reference (row 53), so the stop does
+        // not hand anybody `docs/`.
         assert!(!spans("see docs/.").contains(&"docs/"));
     }
 
@@ -7566,10 +7622,11 @@ mod posix_tests {
 
     // ── the relative grammar ────────────────────────────────────────────────
 
-    /// The five refusals, in the shape this platform prints them. The fourth — a trailing
-    /// separator — and the fifth — a leading `~` — are the two that carry a ruling of their own.
+    /// The four refusals, in the shape this platform prints them. The first — which since
+    /// 2026-09-22 is asked of the name with its trailing separators off — and the last, a leading
+    /// `~`, are the two that carry a ruling of their own.
     #[test]
-    fn the_five_refusals_hold() {
+    fn the_four_refusals_hold() {
         // no separator at all
         assert_eq!(spans("README"), NO_SPANS);
         // opens with a separator: that is the rooted scan's, not this one's
@@ -7577,9 +7634,15 @@ mod posix_tests {
             candidates("/usr/share/x.png"),
             [("/usr/share/x.png", PrintedPathSpelling::Absolute)]
         );
-        // a trailing separator is a directory prefix, and a reading must end on a character that
-        // is part of a name
+        // one segment with a slash after it carries no separator that divides anything, so the
+        // first refusal takes it
         assert_eq!(spans("src/"), NO_SPANS);
+        // and the POSIX sibling of the owner's 2026-09-22 lines: two segments and a trailing slash
+        // is a directory somebody named, and the separator that admits it is the interior one
+        assert_eq!(
+            spans("产出 experiments/qx181_model_ladder/ 的"),
+            ["experiments/qx181_model_ladder/"]
+        );
         // a colon is what makes text absolute or schemed, and both are other scans' business
         assert_eq!(spans("node:internal/modules/cjs/loader"), NO_SPANS);
         // a leading `~` is somebody else's expansion — the same ruling, unchanged by the platform
