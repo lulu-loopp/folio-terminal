@@ -112295,40 +112295,27 @@ mod focus_mode_door_tests {
 /// the column — which is precisely the defect this slice repairs.
 #[cfg(test)]
 mod focus_column_notch_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Every reader in this module asked `main.rs` for its
-    // text — two body pins and two line sweeps. Nothing is deleted here: each
-    // computes its answer twice, once from the file it named and once from
-    // `bt-source`, and asserts the two agree. The deletion is the commit after
-    // this one, because two implementations of one judgement do not vouch for
-    // each other (`docs/CONVENTIONS.md` §十 rule 4).
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text — two body pins and two line
+    // sweeps. Every one of them now asks `bt-source` about an *item* or about the
+    // package, so no fact in this module is bound to the file it happens to be
+    // written in today. The commit before this one ran both readings side by side
+    // and asserted they agree; this is the one that deletes the older of the two,
+    // because two implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4).
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
     // `source`, `item_body`, `method_body` and `found` are that module's helpers
-    // word for word; `lines_holding` and `agreed` are `focus_mode_door_tests`',
-    // whose finder is this one's shape exactly — it runs **past** the closing
-    // brace, to the next `\n    fn `, so its slice holds the rest of the
-    // declaration, the whole body braces and all, and then the closing line and
-    // whatever stands between this method and the next.
+    // word for word and its header is where the six points behind them live;
+    // `lines_holding` is `focus_mode_door_tests`'.
     //
     // **One owner, established rather than assumed.** Both pins are methods of
     // `Runtime`. The deleted finder took the first `    fn name(` in this file,
     // which is a method of whatever `impl` happens to come first, and could not
-    // have told the difference.
+    // have told the difference — and its slice ran 1,346 bytes past
+    // `scroll_rail`'s body, so that method's two prohibitions were being asked of
+    // its neighbour as well.
     use bt_source::{Found, Index, ItemQuery, Needle, Search, View, needle};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -112360,9 +112347,9 @@ mod focus_column_notch_tests {
 
     /// **The trimmed lines of this package that hold `needle`, in file order.**
     ///
-    /// The reading two pins here take of one file —
-    /// `SOURCE.lines().map(str::trim).filter(|line| line.contains(needle))` —
-    /// asked of every file the crate compiles. A line is genuinely what those
+    /// The reading two pins here used to take of one file — that file's text
+    /// split into lines, trimmed, and kept when it held the needle — asked of
+    /// every file the crate compiles. A line is genuinely what those
     /// assertions are about: they name a door by the text it stands on, so the
     /// answer stays a list of lines rather than becoming a count.
     ///
@@ -112396,45 +112383,6 @@ mod focus_column_notch_tests {
         lines
     }
 
-    /// **This file's slice and the crate's body, compared as bytes.**
-    ///
-    /// [`body`] hands back everything after the signature it matched up to the
-    /// next `\n    fn `, so its slice holds the rest of the declaration, the
-    /// whole body braces and all, and then whatever stands between that method
-    /// and the next one. [`Index::body_of`] hands back the braces and everything
-    /// between them, so the crate's answer has to stand inside this file's
-    /// slice, once, with nothing but the rest of the declaration in front of it.
-    ///
-    /// What comes back is this file's slice, so this commit changes no
-    /// assertion — and every assertion below was checked against the *narrowed*
-    /// body before this was written, because narrowing a slice can only take a
-    /// positive away.
-    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
-        let at = old.find(new).unwrap_or_else(|| {
-            panic!("`{what}`: this file's slice does not hold the body the crate returned")
-        });
-        assert_eq!(
-            old.rfind(new),
-            Some(at),
-            "`{what}`: the crate's body stands twice inside this file's slice"
-        );
-        assert!(
-            !old[..at].contains('{'),
-            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
-             of its body"
-        );
-        old
-    }
-
-    /// One method pin's two readings, asserted to agree, the file's returned.
-    fn agreed_method(owner: &str, name: &str) -> &'static str {
-        agreed(
-            body(&format!("    fn {name}(")),
-            method_body(owner, name),
-            name,
-        )
-    }
-
     /// **There is one call to the aim, and it stands inside the modified arm.**
     ///
     /// The needle is assembled at run time so that this pin cannot match its own
@@ -112447,16 +112395,7 @@ mod focus_column_notch_tests {
     #[test]
     fn the_only_aim_stands_inside_the_modified_arm() {
         let needle = ["self", ".", "aim_focus_card_window", "("].concat();
-        let calls: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
-        assert_eq!(
-            calls,
-            lines_holding(needle.as_str()),
-            "P3 equivalence: this file and the crate hold the same lines"
-        );
+        let calls = lines_holding(needle.as_str());
         assert_eq!(
             calls.len(),
             1,
@@ -112474,7 +112413,7 @@ mod focus_column_notch_tests {
     /// scrolled would move both.
     #[test]
     fn the_column_asks_the_ruling_before_it_scrolls() {
-        let scroll_rail = agreed_method("Runtime", "scroll_rail");
+        let scroll_rail = method_body("Runtime", "scroll_rail");
         let decision = scroll_rail
             .find(&["column_notch", "("].concat())
             .expect("the column's own wheel door names the ruling");
@@ -112501,7 +112440,7 @@ mod focus_column_notch_tests {
     /// exact shape of a defect no key test could ever have caught.
     #[test]
     fn the_column_reads_what_the_hand_is_holding() {
-        let scroll_rail = agreed_method("Runtime", "scroll_rail");
+        let scroll_rail = method_body("Runtime", "scroll_rail");
         let call = scroll_rail
             .lines()
             .map(str::trim)
@@ -112519,16 +112458,7 @@ mod focus_column_notch_tests {
     #[test]
     fn one_door_writes_both_readings_of_the_modifiers() {
         let needle = ["window", ".", "modifiers_held", " = "].concat();
-        let writes: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
-        assert_eq!(
-            writes,
-            lines_holding(needle.as_str()),
-            "P3 equivalence: this file and the crate hold the same writes"
-        );
+        let writes = lines_holding(needle.as_str());
         assert_eq!(
             writes.len(),
             1,
@@ -112540,9 +112470,9 @@ mod focus_column_notch_tests {
     /// The plain wheel never calls the card's content-position update.
     #[test]
     fn one_line_moves_a_cards_window() {
-        let aim = agreed_method("Runtime", "aim_focus_card_window");
+        let aim = method_body("Runtime", "aim_focus_card_window");
         assert!(aim.contains("aim_card_window(leaf, rows, steps, card)"));
-        let scroll = agreed_method("Runtime", "scroll_rail");
+        let scroll = method_body("Runtime", "scroll_rail");
         assert!(!scroll.contains("aim_card_window("));
     }
 }
