@@ -46703,11 +46703,49 @@ fn a_playing_video_is_spelled_as_the_file_it_is() {
 /// but stopped calling it would pass the other four.
 #[test]
 fn the_shell_page_is_gone() {
+    let index = source();
     let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let relative = |path: &std::path::Path| {
+        bt_source::normalized(path)
+            .strip_prefix(bt_source::normalized(&source_dir))
+            .expect("a file under this crate's own src")
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+
+    // ── ① the module that wrote the page ──────────────────────────────────
+    //
+    // The disk reading, and the declared one beside it: no file this crate is
+    // made of is named `player.rs`, and neither is any `.rs` file lying beside
+    // the declarations. The second half is what keeps the claim as wide as the
+    // walk's was — an undeclared file is not in the universe, and
+    // `Index::cross_check` is where it is reported rather than lost.
     assert!(
         !source_dir.join("player.rs").exists(),
         "the module that wrote the shell page is still on the disk"
     );
+    let is_the_module = |path: &std::path::Path| path.ends_with("player.rs");
+    assert!(
+        !index.files().iter().any(|file| is_the_module(file.path())),
+        "the module that wrote the shell page is declared again"
+    );
+    assert!(
+        !index
+            .cross_check()
+            .only_on_disk
+            .iter()
+            .any(|path| is_the_module(path)),
+        "the module that wrote the shell page is lying beside the declarations:\n{}",
+        index.cross_check().report()
+    );
+
+    // ── the walk this reader is leaving, and the file-set diff (§3.2) ─────
+    //
+    // Deleted in the commit after this one. It is here so that the two
+    // readings answer beside each other once, on the tree the ticket was taken
+    // on: the walk is **not recursive**, and the three subdirectories under
+    // `src/` have been outside the guard's coverage for as long as they have
+    // existed (plan §3.3).
     let mut sources = Vec::new();
     for entry in std::fs::read_dir(&source_dir).expect("this crate has a source directory") {
         let path = entry.expect("a directory entry").path();
@@ -46721,8 +46759,46 @@ fn the_shell_page_is_gone() {
         "the walk found the crate: {}",
         sources.len()
     );
-    // **Asked of the code, and comment lines are dropped before it is
-    // asked** (2026-08-28).
+    assert!(
+        index.files().len() > 40,
+        "the declarations found the crate: {}",
+        index.files().len()
+    );
+    let walked: std::collections::BTreeSet<String> =
+        sources.iter().map(|(path, _)| relative(path)).collect();
+    let declared: std::collections::BTreeSet<String> = index
+        .files()
+        .iter()
+        .map(|file| relative(file.path()))
+        .collect();
+    let added: Vec<&String> = declared.difference(&walked).collect();
+    let gone: Vec<&String> = walked.difference(&declared).collect();
+    println!(
+        "the flat walk: {} files; the declared universe: {} files\nonly in the declared universe: \
+         {added:#?}\nonly in the flat walk: {gone:#?}",
+        walked.len(),
+        declared.len()
+    );
+    assert!(
+        gone.is_empty(),
+        "the declarations do not reach a file the walk read: {gone:#?}"
+    );
+    assert_eq!(
+        added,
+        [
+            "attention/tests.rs",
+            "attention_words/tests.rs",
+            "shell_integration/profile_marks.rs",
+            "shell_integration/profile_runtime.rs",
+        ]
+        .iter()
+        .collect::<Vec<_>>(),
+        "the three subdirectories the flat walk never descended into are the whole of the \
+         difference"
+    );
+
+    // **Asked of the code, and comments are dropped before it is asked**
+    // (2026-08-28).
     //
     // Not a loophole: the rule is about what this crate *does*, and a
     // paragraph explaining a route that was retired is not that route.
@@ -46730,33 +46806,80 @@ fn the_shell_page_is_gone() {
     // about the accessor that read its mint, and this test's own doc comment
     // would be another — a pin that forbade the prose would forbid the only
     // record of why the code is gone. `bt-render`'s source pins drop
-    // comments for exactly this reason.
-    //
-    // Each needle is still spelled in halves, because this file is one of
-    // the ones walked and a needle written whole would be found in the array
-    // that looks for it.
+    // comments for exactly this reason, and `View::CodeKeepingLiterals` is
+    // that reading with the literals kept, which is where three of these four
+    // spellings would live if they came back.
     let code_of = |text: &str| -> String {
         text.lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let code: Vec<(&std::path::PathBuf, String)> = sources
-        .iter()
-        .map(|(path, text)| (path, code_of(text)))
-        .collect();
+    let mut walk_said: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut walk_elements: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for (path, whole) in &sources {
+        let text = code_of(whole);
+        let path = relative(path);
+        // Each needle is spelled in halves here, because this file is one of
+        // the ones the walk reads and a needle written whole would be found in
+        // the array that looks for it. The reading below says the same thing
+        // with `needle!`, which excludes the one expression that built it.
+        for needle in [
+            concat!("Video", "Shell"),
+            concat!("--autoplay", "-policy"),
+            concat!("mint_player", "_shell"),
+            concat!("shell_", "html"),
+        ] {
+            if text.contains(needle) {
+                walk_said.insert(format!("{needle} is still in {path}"));
+            }
+        }
+        let opening = concat!("<", "video");
+        for (at, _) in text.match_indices(opening) {
+            *walk_elements.entry(path.clone()).or_default() += 1;
+            let after = text[at + opening.len()..].chars().next();
+            if matches!(after, None | Some('>' | ' ' | '\t' | '\n' | '/')) {
+                walk_said.insert(format!("an opening video element is back in {path}"));
+            }
+        }
+        if text.contains(concat!("Folio", "\\", "player")) {
+            walk_said.insert(format!("the shell folder is still named in {path}"));
+        }
+    }
+
+    // ── the same five readings, asked of the crate's declared files ───────
+    //
+    // The needles are spelled **whole** here. `needle!` records where the
+    // expression that built it stands and excludes that one span (§2.6), which
+    // is the mechanism's own answer to the thing the halves above are working
+    // around — and the only difference between the two readings on this tree:
+    // `own_construction` below is what the walk sees in this file and the
+    // declared reading has set aside, named spelling by spelling.
+    let mut said: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut own_construction: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    let mut elements: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for needle in [
-        concat!("Video", "Shell"),
-        concat!("--autoplay", "-policy"),
-        concat!("mint_player", "_shell"),
-        concat!("shell_", "html"),
+        needle!(Pattern::text("VideoShell")),
+        needle!(Pattern::text("--autoplay-policy")),
+        needle!(Pattern::text("mint_player_shell")),
+        needle!(Pattern::text("shell_html")),
     ] {
-        for (path, text) in &code {
-            assert!(
-                !text.contains(needle),
-                "{needle} is still in {}",
-                path.display()
-            );
+        let spelling = needle.pattern().spelling();
+        let answer = found(needle, View::CodeKeepingLiterals);
+        println!("{}", answer.report(index));
+        for occurrence in answer.occurrences() {
+            let file = index
+                .file_at(occurrence.span.start())
+                .expect("every match stands in a file of the universe");
+            said.insert(format!("{spelling} is still in {}", relative(file.path())));
+        }
+        for gone in answer.excluded() {
+            let file = index
+                .file_at(gone.span.start())
+                .expect("every match stands in a file of the universe");
+            own_construction.insert(format!("{spelling} is still in {}", relative(file.path())));
         }
     }
     // **And the element, shaped like a tag rather than like four
@@ -46766,25 +46889,64 @@ fn the_shell_page_is_gone() {
     // cannot be written except by writing the element, and it is the whole
     // class: the bare tag, the tag with attributes, and the self-closing
     // one alike.
-    let opening = concat!("<", "video");
-    for (path, text) in &code {
-        for (at, _) in text.match_indices(opening) {
-            let after = text[at + opening.len()..].chars().next();
-            assert!(
-                !matches!(after, None | Some('>' | ' ' | '\t' | '\n' | '/')),
-                "an opening video element is back in {}",
-                path.display()
-            );
+    let openings = found(needle!(Pattern::text("<video")), View::CodeKeepingLiterals);
+    println!("{}", openings.report(index));
+    for gone in openings.excluded() {
+        let file = index
+            .file_at(gone.span.start())
+            .expect("every match stands in a file of the universe");
+        *elements.entry(relative(file.path())).or_default() += 1;
+    }
+    for occurrence in openings.occurrences() {
+        let file = index
+            .file_at(occurrence.span.start())
+            .expect("every match stands in a file of the universe");
+        let text = index.text(file.span());
+        let path = relative(file.path());
+        *elements.entry(path.clone()).or_default() += 1;
+        let after = text[occurrence.span.end() - file.span().start()..]
+            .chars()
+            .next();
+        if matches!(after, None | Some('>' | ' ' | '\t' | '\n' | '/')) {
+            said.insert(format!("an opening video element is back in {path}"));
         }
     }
-    // And the folder the shells lived in is written by nothing.
-    for (path, text) in &code {
-        assert!(
-            !text.contains(concat!("Folio", "\\", "player")),
+    // And the folder the shells lived in is written by nothing. The spelling
+    // is the one a `\` in a Rust literal is written with, which is what both
+    // readings look for in the bytes of a file.
+    let folder = found(
+        needle!(Pattern::text("Folio\\player")),
+        View::CodeKeepingLiterals,
+    );
+    println!("{}", folder.report(index));
+    for occurrence in folder.occurrences() {
+        let file = index
+            .file_at(occurrence.span.start())
+            .expect("every match stands in a file of the universe");
+        said.insert(format!(
             "the shell folder is still named in {}",
-            path.display()
-        );
+            relative(file.path())
+        ));
     }
+
+    // ── the two readings, compared ────────────────────────────────────────
+    println!("the element's spelling stands in: {elements:#?}");
+    let shared: std::collections::BTreeMap<String, usize> = elements
+        .iter()
+        .filter(|(path, _)| walked.contains(*path))
+        .map(|(path, count)| (path.clone(), *count))
+        .collect();
+    assert_eq!(
+        shared, walk_elements,
+        "the two readings disagree about where the element's spelling stands"
+    );
+    let both: std::collections::BTreeSet<String> = said.union(&own_construction).cloned().collect();
+    assert_eq!(
+        both, walk_said,
+        "the two readings disagree about what is still here, beyond the needles' own \
+         construction: {own_construction:#?}"
+    );
+    assert!(said.is_empty(), "{said:#?}");
 }
 
 /// RED — **a tick whose only news is a decoded picture still reaches the
