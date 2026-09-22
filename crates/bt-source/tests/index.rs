@@ -448,6 +448,120 @@ fn identity_separates_an_inherent_method_from_a_trait_one() {
     );
 }
 
+// ── one owner, however the move spelled it ────────────────────────────────
+
+fn self_type_fixture() -> Arc<Index> {
+    Index::shared(&fixture_universe("self_type")).expect("the fixture lowers")
+}
+
+/// RED — **a method that moved into a newly declared submodule, and had its self
+/// type qualified on the way, is still the same owner** (§2.4).
+///
+/// This is the shape every relocation of P2a makes: the block comes out of
+/// `main.rs` into `src/runtime/mod.rs`, where `Runtime` is no longer in scope
+/// and is written `crate::Runtime<'_>`. Identity is stable across a move, so the
+/// pin that named the owner `Runtime` before the move names it after — an owner
+/// that carried the qualification would answer zero here, and answering zero
+/// about a subject that moved is the failure this crate exists to remove.
+///
+/// MUTATION: join the whole self-type path in `lower::Parsed::type_owner` and
+/// this goes red, with the candidate printed as
+/// `crate::runtime::crate::Runtime::file_peek_promotes`.
+#[test]
+fn a_self_type_qualified_by_a_move_is_the_owner_it_was_before() {
+    let index = self_type_fixture();
+    let body = index
+        .body_of(&ItemQuery::method("Runtime", "file_peek_promotes"))
+        .expect("the moved method answers to the owner it had before the move");
+    assert_eq!(body.trim(), "{\n        !self.name.is_empty()\n    }");
+
+    let identities: Vec<String> = index
+        .one(&ItemQuery::method("Runtime", "file_peek_promotes"))
+        .expect("one declaration")
+        .identities()
+        .map(|identity| identity.to_string())
+        .collect();
+    assert_eq!(identities, ["crate::runtime::Runtime::file_peek_promotes"]);
+}
+
+/// RED — **two files spelling one owner two ways each answer for their own
+/// method**, and neither query is refused.
+///
+/// `impl Runtime<'_>` in `lib.rs` and `impl crate::Runtime<'_>` in
+/// `runtime/mod.rs` hold differently named methods; `super::Runtime<'_>` in
+/// `peek.rs` is the third spelling the same move writes. One owner, three
+/// modules, three answers — the module path is what tells the declarations
+/// apart, exactly as §2.4's tuple says.
+///
+/// MUTATION: keep the qualification in the owner and the first row still
+/// answers while the other two refuse — which is how the defect looked: a move
+/// took two of three methods out of reach without a red test anywhere near them.
+#[test]
+fn one_owner_spelled_three_ways_answers_three_times() {
+    let index = self_type_fixture();
+    let mut modules: Vec<&str> = Vec::new();
+    for method in [
+        "turn_stays_in_the_root",
+        "file_peek_promotes",
+        "peek_card_names_its_folder",
+    ] {
+        let record = index
+            .one(&ItemQuery::method("Runtime", method))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(record.type_owner(), Some("Runtime"));
+        assert_eq!(record.trait_name(), None);
+        modules.push(record.module_paths()[0].as_str());
+    }
+    assert_eq!(modules, ["crate", "crate::runtime", "crate::peek"]);
+
+    // And the owner is the type, never the path to it: a query that named the
+    // move's own spelling is a refusal rather than a second way to ask.
+    assert!(
+        index
+            .find(&ItemQuery::method("crate::Runtime", "file_peek_promotes"))
+            .is_err(),
+        "`crate::Runtime` is a path and not an owner"
+    );
+}
+
+/// RED — **the qualified path a refusal prints is well-formed**: the module the
+/// item is written in, then the owner, then the name.
+///
+/// The report is the whole value of a loud refusal, and a reader who is told the
+/// candidate is `crate::runtime::crate::Runtime::file_peek_promotes` is told
+/// something that is not a Rust path and cannot be looked up. The module path
+/// appears once, the owner is a single segment, and no `crate::` is glued inside.
+///
+/// MUTATION: join the whole self-type path in `lower::Parsed::type_owner` and
+/// the doubled segment is back in this message.
+#[test]
+fn a_ruled_out_candidate_prints_one_module_path_and_one_owner() {
+    let index = self_type_fixture();
+    let refused = index
+        .body_of(&ItemQuery::function("file_peek_promotes"))
+        .expect_err("`file_peek_promotes` belongs to a type");
+    let QueryFailure::Multiplicity { found, near, .. } = &refused else {
+        panic!("{refused}");
+    };
+    assert!(found.is_empty(), "{refused}");
+    let ruled_out: Vec<String> = near
+        .iter()
+        .map(|candidate| candidate.identity.to_string())
+        .collect();
+    assert_eq!(ruled_out, ["crate::runtime::Runtime::file_peek_promotes"]);
+
+    let printed = refused.to_string();
+    assert!(printed.contains("same name, ruled out"), "{printed}");
+    assert!(
+        printed.contains("crate::runtime::Runtime::file_peek_promotes"),
+        "{printed}"
+    );
+    assert!(
+        !printed.contains("crate::runtime::crate::"),
+        "a `crate::` segment is glued inside the candidate path:\n{printed}"
+    );
+}
+
 /// RED — **a file reached two ways answers to two identities**, and the owner
 /// set says which declaration paths those are (§2.3).
 #[test]

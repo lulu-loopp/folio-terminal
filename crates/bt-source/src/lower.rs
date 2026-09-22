@@ -949,13 +949,34 @@ impl Parsed<'_> {
             .map_or_else(|| path_spelling(path), collapsed)
     }
 
-    /// The self type of an `impl`, **without lifetimes or generic arguments**,
-    /// so `Runtime<'_>` and `Runtime<'a>` are one type (§2.4).
+    /// The self type of an `impl`, as **the last segment of its path**, without
+    /// lifetimes or generic arguments — so `Runtime<'_>`, `Runtime<'a>`,
+    /// `crate::Runtime<'_>` and `super::Runtime` are one owner (§2.4).
+    ///
+    /// **The qualification is dropped because identity has to survive a move,
+    /// and a move is exactly when a module-relative spelling becomes a qualified
+    /// one.** A method cut out of `main.rs` into a newly declared
+    /// `src/runtime/mod.rs` is rewritten `impl crate::Runtime<'_>` there, and an
+    /// owner that kept the prefix would make every pin on that method answer
+    /// zero the day it moved — the failure this crate exists to remove. Which
+    /// module the `impl` is written in is not lost by dropping it: it is the
+    /// identity's own first component ([`crate::ItemIdentity::module_path`]),
+    /// which is also why keeping it here printed it twice —
+    /// `crate::runtime::crate::Runtime::file_peek_promotes`.
+    ///
+    /// Two distinct types of one name are therefore one owner, and that is a
+    /// [`crate::QueryFailure::Multiplicity`] naming both rather than a quiet
+    /// pick: a query narrows by module path (`in_module`) to say which.
+    ///
+    /// The trait is the other way round and keeps its whole spelling
+    /// ([`Parsed::trait_spelling`]): a trait is named where it is defined, not
+    /// where the `impl` is written, so moving the `impl` does not rewrite it.
     fn type_owner(&self, ty: &syn::Type) -> String {
         if let syn::Type::Path(path) = ty
             && path.qself.is_none()
+            && let Some(last) = path.path.segments.last()
         {
-            return path_spelling(&path.path);
+            return last.ident.to_string();
         }
         // Anything that is not a path — `&[u8]`, a tuple, a trait object — has
         // no arguments to drop, so it is its own spelling with the source's own
@@ -969,8 +990,12 @@ fn collapsed(written: &str) -> String {
     written.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// A path with its generic arguments dropped: `a::b::Runtime<'_>` is
-/// `a::b::Runtime`.
+/// A path with its generic arguments dropped: `a::b::Display<'_>` is
+/// `a::b::Display`.
+///
+/// The trait's fallback spelling, for the rare path whose bytes the file cannot
+/// be sliced at. The self type does not use it: an owner is one segment
+/// ([`Parsed::type_owner`]).
 fn path_spelling(path: &syn::Path) -> String {
     path.segments
         .iter()
@@ -1204,7 +1229,8 @@ mod tests {
         assert_eq!(literals.len(), 1);
     }
 
-    fn owner_of(text: &str) -> String {
+    /// The two spellings one `impl` block lowers to: its owner, and its trait.
+    fn spellings_of(text: &str) -> (String, Option<String>) {
         let file = syn::parse_file(text).expect("the fixture parses");
         let syn::Item::Impl(block) = &file.items[0] else {
             panic!("the fixture is an impl block");
@@ -1219,26 +1245,56 @@ mod tests {
             items: &mut items,
             modules: &mut modules,
         };
-        parsed.type_owner(&block.self_ty)
+        let owner = parsed.type_owner(&block.self_ty);
+        let trait_name = block
+            .trait_
+            .as_ref()
+            .map(|(_, path, _)| parsed.trait_spelling(path));
+        (owner, trait_name)
     }
 
-    /// PIN — **a type owner drops lifetimes and generic arguments** so that
-    /// `Runtime<'_>` and `Runtime<'a>` are one type (§2.4), and a self type that
-    /// is not a path keeps its own spelling.
+    fn owner_of(text: &str) -> String {
+        spellings_of(text).0
+    }
+
+    /// PIN — **a type owner is the last path segment, without lifetimes or
+    /// generic arguments**, so `Runtime<'_>`, `Runtime<'a>`, `crate::Runtime<'_>`
+    /// and `super::Runtime` are one owner (§2.4), and a self type that is not a
+    /// path keeps its own spelling.
+    ///
+    /// MUTATION: join the whole path here again and the qualified rows read
+    /// `crate::Runtime` — which is the spelling a move writes, and the one that
+    /// made a pinned query answer zero and print
+    /// `crate::runtime::crate::Runtime::…`.
     #[test]
-    fn a_type_owner_is_the_type_without_its_arguments() {
+    fn a_type_owner_is_the_last_segment_without_its_arguments() {
         assert_eq!(owner_of("impl Runtime<'_> { fn f(&self) {} }"), "Runtime");
         assert_eq!(
             owner_of("impl<'a> Runtime<'a> { fn f(&self) {} }"),
             "Runtime"
         );
         assert_eq!(
-            owner_of("impl a::b::Runtime { fn f(&self) {} }"),
-            "a::b::Runtime"
+            owner_of("impl crate::Runtime<'_> { fn f(&self) {} }"),
+            "Runtime"
         );
+        assert_eq!(
+            owner_of("impl super::Runtime { fn f(&self) {} }"),
+            "Runtime"
+        );
+        assert_eq!(owner_of("impl a::b::Runtime { fn f(&self) {} }"), "Runtime");
         assert_eq!(
             owner_of("impl Door for &'static [u8] { fn f(&self) {} }"),
             "&'static [u8]"
         );
+    }
+
+    /// PIN — **the trait keeps its whole spelling** where the self type drops
+    /// it: a trait is named where it is defined and a move does not rewrite it,
+    /// so `impl fmt::Display for Site` is `fmt::Display` and not `Display`.
+    #[test]
+    fn a_trait_keeps_the_path_the_impl_names_it_by() {
+        let (owner, trait_name) = spellings_of("impl fmt::Display for Site { fn fmt(&self) {} }");
+        assert_eq!(owner, "Site");
+        assert_eq!(trait_name.as_deref(), Some("fmt::Display"));
     }
 }
