@@ -119020,13 +119020,114 @@ fn parking(control_flow: ControlFlow, heart: &hang_watch::Heartbeat) -> hang_wat
 /// against the source itself, the way this file's other structural promises are.
 #[cfg(test)]
 mod resident_run_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Every source reader in this module asked `main.rs`
+    // for its text. Nothing is deleted here: each computes its answer twice, once
+    // from the file and once from `bt-source`, and asserts the two are the same
+    // bytes. The deletion is the commit after this one, because two
+    // implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body` and `method_body` are that module's helpers word for
+    // word and `agreed` is `tab_identity_tests`', whose finders are these two's
+    // shape exactly — they stop at the first `\n    }\n` (or `\n}\n`) after the
+    // signature, which is the item's own closing line, so the slice holds the
+    // tail of the declaration, the opening brace and the body, and not the
+    // closing brace.
+    //
+    // **Three owners, and the finders could not have told them apart.**
+    // `drain_pty` is a method of `Runtime`, `about_to_wait_inner` is `FolioApp`'s,
+    // `main` is the free function — and `about_to_wait` and `new_events` are not
+    // inherent methods at all but `<FolioApp as ApplicationHandler<AppEvent>>`'s,
+    // which is why they are asked for with `ItemQuery::method(..).of_trait(..)`.
     use std::time::{Duration, Instant};
 
+    use bt_source::{Index, ItemQuery};
     use winit::event_loop::ControlFlow;
 
     use super::{hang_watch, parking};
 
     const SOURCE: &str = include_str!("main.rs");
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// **This file's slice and the crate's body, compared as bytes.**
+    ///
+    /// Both finders below stop at the item's own closing line, so their slice is
+    /// the tail of the declaration, the opening brace and the body without its
+    /// closing brace. [`Index::body_of`] returns the braces and everything
+    /// between them, so the crate's answer with that closing line taken off has
+    /// to be the tail of this file's slice, standing there once, with no brace in
+    /// front of it and nothing after it.
+    fn agreed(old: &'static str, new: &'static str, what: &str, closing: &str) -> &'static str {
+        let opened = new.strip_suffix(closing).unwrap_or_else(|| {
+            panic!("`{what}`: the crate's body does not close where this file's finder stopped")
+        });
+        let at = old.find(opened).unwrap_or_else(|| {
+            panic!("`{what}`: this file's slice and the crate's body are not the same bytes")
+        });
+        assert_eq!(
+            old.rfind(opened),
+            Some(at),
+            "`{what}`: the crate's body stands twice inside this file's slice"
+        );
+        assert!(
+            !old[..at].contains('{'),
+            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
+             of its body"
+        );
+        assert_eq!(
+            old.len(),
+            at + opened.len(),
+            "`{what}`: this file's slice runs past the body the crate returned"
+        );
+        old
+    }
+
+    /// One inherent method pin's two readings, asserted to agree.
+    fn agreed_method(owner: &str, name: &str) -> &'static str {
+        agreed(fn_body(name), method_body(owner, name), name, "\n    }")
+    }
+
+    /// One trait method pin's two readings, asserted to agree — the platform's
+    /// own entry points, which are not inherent methods of anything.
+    fn agreed_trait_method(owner: &str, trait_name: &str, name: &str) -> &'static str {
+        agreed(
+            fn_body(name),
+            item_body(&ItemQuery::method(owner, name).of_trait(trait_name)),
+            name,
+            "\n    }",
+        )
+    }
+
+    /// One free function pin's two readings, asserted to agree.
+    fn agreed_free_fn(name: &str) -> &'static str {
+        agreed(
+            free_fn_body(name),
+            item_body(&ItemQuery::function(name)),
+            name,
+            "\n}",
+        )
+    }
 
     /// The body of a free function declared at column zero.
     fn free_fn_body(name: &str) -> &'static str {
@@ -119108,7 +119209,7 @@ mod resident_run_tests {
     /// body is a separate method and the parking is the wrapper's last line.
     #[test]
     fn the_turn_notes_its_parking_on_every_path_out() {
-        let door = fn_body("about_to_wait");
+        let door = agreed_trait_method("FolioApp", "ApplicationHandler", "about_to_wait");
         assert!(
             door.contains("hang_watch::beat()"),
             "the pulse is still the first thing in the turn:\n{door}"
@@ -119128,12 +119229,13 @@ mod resident_run_tests {
              conditional and the whole promise is void:\n{door}"
         );
         assert!(
-            fn_body("about_to_wait_inner").contains("return;"),
+            agreed_method("FolioApp", "about_to_wait_inner").contains("return;"),
             "which is only worth saying because the body it wraps does leave \
              early, in several places"
         );
         assert!(
-            fn_body("new_events").contains("hang_watch::woke()"),
+            agreed_trait_method("FolioApp", "ApplicationHandler", "new_events")
+                .contains("hang_watch::woke()"),
             "and the park ends at the wake, not at the next turn — an event \
              that wedges is a thread holding control"
         );
@@ -119158,7 +119260,7 @@ mod resident_run_tests {
     /// right, which is the version that would have survived review.
     #[test]
     fn the_drain_says_when_the_marks_ledger_has_moved() {
-        let drain = fn_body("drain_pty");
+        let drain = agreed_method("Runtime", "drain_pty");
         let reads: Vec<&str> = drain
             .lines()
             .map(str::trim)
@@ -119206,7 +119308,7 @@ mod resident_run_tests {
     /// the exact sentence this slice was opened by.
     #[test]
     fn the_front_door_is_answered_on_the_console_and_the_run_moves_to_the_log() {
-        let door = free_fn_body("main");
+        let door = agreed_free_fn("main");
         let at = |needle: &str| {
             door.find(needle)
                 .unwrap_or_else(|| panic!("`main` still does `{needle}`:\n{door}"))
@@ -119260,7 +119362,7 @@ mod resident_run_tests {
     /// works.
     #[test]
     fn taking_folio_out_of_explorers_menu_is_answered_before_any_of_that() {
-        let door = free_fn_body("main");
+        let door = agreed_free_fn("main");
         let at = |needle: &str| {
             door.find(needle)
                 .unwrap_or_else(|| panic!("`main` still does `{needle}`:\n{door}"))
