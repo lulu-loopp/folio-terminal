@@ -263,7 +263,6 @@ crates/bt-app/src/main.rs	pages_are_plural_tests::a_pane_with_no_engine_has_one_
 crates/bt-app/src/main.rs	pages_are_plural_tests::every_page_of_this_tab_draws_and_answers_for_its_own_sheet	include_str!	press_web_sheet;web_sheet_layers	P3	yes
 crates/bt-app/src/main.rs	pages_are_plural_tests::the_blank_pages_receipt_names_the_pane_the_landing_rule_chose	include_str!	mint_a_blank_page_and_open_its_address	P3	yes
 crates/bt-app/src/main.rs	platform_gate_tests::only_the_named_files_decide_what_platform_this_is	directory walk	(the file it reads)	P10	no
-crates/bt-app/src/main.rs	platform_gate_tests::the_caption_run_is_decided_by_one_capability_read	include_str!	adopt_platform_chrome;caption_targets;platform_chrome;tab_strip_geometry;window_caption_boxes	P3	yes
 crates/bt-app/src/main.rs	pointer_chord_site_tests::every_pointer_door_reads_the_platforms_hand_over_modifier	include_str!	begin_local_selection;press_graph_row;press_preview_text;preview_link_grasp;scroll_web_page;terminal_link_grasp;window	P3	yes
 crates/bt-app/src/main.rs	pointer_chord_site_tests::no_other_door_reads_the_raw_control_key_for_a_gesture	include_str!	preview_browse_key	P4	yes
 crates/bt-app/src/main.rs	pointer_chord_site_tests::no_pointer_door_still_reads_control_by_name	include_str!	begin_local_selection;press_graph_row;press_preview_text;preview_link_grasp;scroll_web_page;terminal_link_grasp	P3	yes
