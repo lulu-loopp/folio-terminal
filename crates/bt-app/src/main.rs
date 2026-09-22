@@ -128939,44 +128939,46 @@ mod summon_key_wiring_tests {
 /// is a defect this window has already had once on this very surface (§7.39's
 /// float, §7.1.5f's ladder).
 ///
-/// So these read the file as text, for [`mouse_trace_station_tests`]' stated
-/// reason, and they assert only the wiring: not what a function computes, but
-/// that it is the one being asked.
+/// So these read the source, for [`mouse_trace_station_tests`]' stated reason,
+/// and they assert only the wiring: not what a function computes, but that it
+/// is the one being asked. Since P3 they ask the crate about an item rather
+/// than this file about a slice of its text, so the wiring follows the
+/// functions when they move.
 #[cfg(test)]
 mod live_markdown_edit_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Every reader in this module asked `main.rs` for its
-    // text. Nothing is deleted here: each body pin now computes its answer twice
-    // — once from `include_str!("main.rs")`, once from `bt-source` — and asserts
-    // the two are the same bytes, and each of the four counts asserts the two
-    // answer the same number. The deletion is the commit after this one, so that
-    // a reviewer sees the agreement and a bisect can land between them.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree —
+    // twenty-two body pins compared as bytes, four counts as numbers — and this
+    // is the one that deletes the older of the two, because two implementations
+    // of one judgement do not vouch for each other (`docs/CONVENTIONS.md` §十
+    // rule 4).
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
     // `source`, `item_body`, `method_body` and `found` are that module's helpers
     // word for word, and its header is where the six points behind them live.
-    // `in_product_items` is `clipboard_path_tests`', word for word, and it is
-    // the shape the counts here need: this module spells every counted needle a
-    // second time in its own assertions and `needle!` excludes one construction
-    // expression rather than every mention, so the grain has to be the item and
-    // not the file. `agreed` is the equivalence itself and goes with the old
-    // reading.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed and stopped before the next
+    // `\n    fn `, which is not the end of the method — 1,599 bytes around
+    // `leave_preview_page`'s 235-byte body, 2,088 around `seat_preview_caret`'s
+    // 757 — and it could not say which `impl` it had landed in. All fifteen
+    // identities turned out to be `Runtime`'s; the equivalence commit is what
+    // established that rather than assumed it.
+    //
+    // The four counts took this file **cut at this module's own declaration**,
+    // because every needle they count is spelled a second time in the
+    // assertions below and a count over the whole file would count the
+    // questions as well as the answers. `needle!` excludes one construction
+    // expression rather than every mention, so the file grain the pilot's
+    // `in_product` uses is not enough here: `in_product_items` is
+    // `clipboard_path_tests`' helper word for word, and it filters the
+    // package's answer by the `cfg` predicates §2.4 writes onto each
+    // occurrence's own item. A cut is a fact about one file; a `#[cfg(test)]`
+    // module is a fact that survives the move.
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
-
-    // ── what this module asks the crate instead ───────────────────────────
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -129043,53 +129045,6 @@ mod live_markdown_edit_tests {
             .sum()
     }
 
-    // ── the two readings of one body, asserted to agree ───────────────────
-
-    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
-    ///
-    /// `body` hands back everything after the signature prefix it was given and
-    /// stops before the next `\n    fn `: the rest of the declaration, then the
-    /// body, then whatever stands between the closing brace and the next
-    /// method's `fn `, which in this file is that method's doc comment.
-    /// `body_of` hands back the braces and what is between them. So the crate's
-    /// answer has to stand in this file's slice at the head of the body, with
-    /// nothing but the rest of the declaration in front of it.
-    ///
-    /// What comes back is the file's slice, so this commit changes no assertion.
-    fn agreed(old: &'static str, name: &str) -> &'static str {
-        let new = method_body("Runtime", name);
-        let at = match old.find(new) {
-            Some(at) => at,
-            None => {
-                assert!(
-                    old.starts_with(&new[1..]),
-                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
-                     bytes"
-                );
-                0
-            }
-        };
-        assert!(
-            !old[..at].contains('{'),
-            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
-             the head of it"
-        );
-        old
-    }
-
-    /// **The window, without the pins that read it.**
-    ///
-    /// Every count below is a count of how many places in this file do a thing,
-    /// and the assertions themselves spell that thing out in a string literal —
-    /// so a count over the whole file would count the questions as well as the
-    /// answers. This module stands last, which is what makes the cut one line.
-    fn window() -> &'static str {
-        let end = SOURCE
-            .find("mod live_markdown_edit_tests {")
-            .expect("this module is declared in this file");
-        &SOURCE[..end]
-    }
-
     /// **Entering is one door and it does all five things** (T5 ①).
     ///
     /// The caret moves, the page's other selection model lets go (research §10
@@ -129100,7 +129055,7 @@ mod live_markdown_edit_tests {
     /// block nothing can be typed into.
     #[test]
     fn entering_writes_all_five_things_in_one_place() {
-        let door = agreed(body("    fn seat_preview_caret("), "seat_preview_caret");
+        let door = method_body("Runtime", "seat_preview_caret");
         for promise in [
             "caret.place(&content, offset, extend)",
             "pane.md_select = None",
@@ -129114,16 +129069,10 @@ mod live_markdown_edit_tests {
             );
         }
         assert_eq!(
-            window().matches("pane.md_caret = true").count(),
             in_product_items(&found(
                 needle!(Pattern::text("pane.md_caret = true")),
                 View::Raw
             )),
-            "this file cut at this module, and the package at item grain, \
-             disagree about how many places enter",
-        );
-        assert_eq!(
-            window().matches("pane.md_caret = true").count(),
             1,
             "one entrance, counted here on purpose — a second is a ruling and \
              not an edit",
@@ -129157,55 +129106,41 @@ mod live_markdown_edit_tests {
     /// and a press on a link renders the page it is standing in.
     #[test]
     fn leaving_is_one_door_that_escape_the_ground_and_a_blur_all_reach() {
-        for (door, name, what) in [
-            ("    fn preview_key(", "preview_key", "`Esc`"),
+        for (name, what) in [
+            ("preview_key", "`Esc`"),
             (
-                "    fn spend_preview_press(",
                 "spend_preview_press",
                 "a press on the page's empty ground, spent at the release",
             ),
             (
-                "    fn chrome_mouse_input(",
                 "chrome_mouse_input",
                 "losing the keyboard to a press elsewhere",
             ),
         ] {
             assert!(
-                agreed(body(door), name).contains("leave_preview_page("),
+                method_body("Runtime", name).contains("leave_preview_page("),
                 "{what} no longer renders the page again",
             );
         }
         assert!(
-            agreed(body("    fn press_preview_text("), "press_preview_text")
-                .contains("live && caret_at.is_none()"),
+            method_body("Runtime", "press_preview_text").contains("live && caret_at.is_none()"),
             "empty ground is a press that named no byte of the file — asked of \
              `caret_at`, because a press on a link names one and is the link's",
         );
         assert!(
-            agreed(
-                body("    fn leave_preview_buffer_in("),
-                "leave_preview_buffer_in"
-            )
-            .contains("pane.md_caret = false"),
+            method_body("Runtime", "leave_preview_buffer_in").contains("pane.md_caret = false"),
             "and handing this surface a different file still leaves the page",
         );
         assert_eq!(
-            window().matches("md_caret = false").count(),
             in_product_items(&found(
                 needle!(Pattern::text("md_caret = false")),
                 View::Raw
             )),
-            "this file cut at this module, and the package at item grain, \
-             disagree about how many places leave",
-        );
-        assert_eq!(
-            window().matches("md_caret = false").count(),
             2,
             "one door and the file swap, counted here on purpose",
         );
         assert!(
-            !agreed(body("    fn leave_preview_page("), "leave_preview_page")
-                .contains("pane.caret ="),
+            !method_body("Runtime", "leave_preview_page").contains("pane.caret ="),
             "and leaving keeps the caret: it is a byte offset, and the flip to \
              the source face finds it where this left it",
         );
@@ -129222,21 +129157,14 @@ mod live_markdown_edit_tests {
     #[test]
     fn a_floated_page_takes_the_caret_through_the_docked_press() {
         assert!(
-            agreed(body("    fn press_float("), "press_float")
-                .contains("self.press_preview_text(position)"),
+            method_body("Runtime", "press_float").contains("self.press_preview_text(position)"),
             "the float's body branch no longer reaches the rendered page's press",
         );
         assert_eq!(
-            window().matches("self.place_preview_caret_on(").count(),
             in_product_items(&found(
                 needle!(Pattern::text("self.place_preview_caret_on(")),
                 View::Raw
             )),
-            "this file cut at this module, and the package at item grain, \
-             disagree about how many places put the caret down",
-        );
-        assert_eq!(
-            window().matches("self.place_preview_caret_on(").count(),
             3,
             "the two ends of one spent gesture — where the press named and where \
              the hand let go — and the drag's own step inside a seat that cannot \
@@ -129253,11 +129181,8 @@ mod live_markdown_edit_tests {
     #[test]
     fn the_glance_card_refuses_the_caret_by_name() {
         assert!(
-            agreed(
-                body("    fn preview_caret_takes_the_press("),
-                "preview_caret_takes_the_press"
-            )
-            .contains("matches!(surface, PreviewSurface::Peek)"),
+            method_body("Runtime", "preview_caret_takes_the_press")
+                .contains("matches!(surface, PreviewSurface::Peek)"),
             "the card is no longer refused where the press decides",
         );
     }
@@ -129275,7 +129200,7 @@ mod live_markdown_edit_tests {
     /// height and lands the caret nowhere near the pointer.
     #[test]
     fn the_quick_edits_press_declines_a_rendered_page() {
-        let press = agreed(body("    fn press_preview_body("), "press_preview_body");
+        let press = method_body("Runtime", "press_preview_body");
         assert!(
             press.contains("if self.preview_shows_live_markdown(surface) {"),
             "the quick edit's press no longer stands aside for the rendered page",
@@ -129305,35 +129230,32 @@ mod live_markdown_edit_tests {
     /// and draw another.
     #[test]
     fn the_caret_answers_before_the_piece_selection_everywhere() {
-        for (signature, name, first, second) in [
+        for (name, first, second) in [
             (
-                "    fn preview_selected_text(",
                 "preview_selected_text",
                 "self.preview_live_caret(surface)",
                 "pane.md_select?",
             ),
             (
-                "    fn preview_caret_selection_places(",
                 "preview_caret_selection_places",
                 "self.preview_live_caret(surface)?",
                 "preview_provenance::place_of(",
             ),
         ] {
-            let text = agreed(body(signature), name);
+            let text = method_body("Runtime", name);
             let one = text
                 .find(first)
-                .unwrap_or_else(|| panic!("{signature} no longer asks `{first}`"));
+                .unwrap_or_else(|| panic!("`Runtime::{name}` no longer asks `{first}`"));
             let two = text
                 .find(second)
-                .unwrap_or_else(|| panic!("{signature} no longer reaches `{second}`"));
-            assert!(one < two, "{signature} asks the two in the wrong order");
+                .unwrap_or_else(|| panic!("`Runtime::{name}` no longer reaches `{second}`"));
+            assert!(
+                one < two,
+                "`Runtime::{name}` asks the two in the wrong order"
+            );
         }
         assert!(
-            agreed(
-                body("    fn preview_selected_text("),
-                "preview_selected_text"
-            )
-            .contains("caret.selected(content)"),
+            method_body("Runtime", "preview_selected_text").contains("caret.selected(content)"),
             "and a caret selection copies the file's own bytes",
         );
     }
@@ -129363,7 +129285,7 @@ mod live_markdown_edit_tests {
     /// wrong.
     #[test]
     fn a_press_on_a_rendered_page_changes_no_blocks_face() {
-        let press = agreed(body("    fn press_preview_text("), "press_preview_text");
+        let press = method_body("Runtime", "press_preview_text");
         for wrote in [
             "self.place_preview_caret_on(",
             "self.seat_preview_caret(",
@@ -129414,7 +129336,7 @@ mod live_markdown_edit_tests {
     /// spent nothing.
     #[test]
     fn the_release_spends_the_record_and_the_drag_holds_its_seat() {
-        let release = agreed(body("    fn release_preview_text("), "release_preview_text");
+        let release = method_body("Runtime", "release_preview_text");
         for reaches in ["pressed.spend(!click, head)", "self.spend_preview_press("] {
             assert!(
                 release.contains(reaches),
@@ -129422,7 +129344,7 @@ mod live_markdown_edit_tests {
                  answered",
             );
         }
-        let drag = agreed(body("    fn drag_preview_text("), "drag_preview_text");
+        let drag = method_body("Runtime", "drag_preview_text");
         assert_eq!(
             drag.matches("self.place_preview_caret_on(").count(),
             1,
@@ -129456,12 +129378,12 @@ mod live_markdown_edit_tests {
     /// [`Runtime::settle_preview_caret`].
     #[test]
     fn the_grain_and_the_owed_caret_both_ride_on_the_record() {
-        let press = agreed(body("    fn press_preview_text("), "press_preview_text");
+        let press = method_body("Runtime", "press_preview_text");
         assert!(
             press.contains("let grain = preview_text_grain(clicks);"),
             "the press no longer classifies the repeat count it is recording",
         );
-        let spend = agreed(body("    fn spend_preview_press("), "spend_preview_press");
+        let spend = method_body("Runtime", "spend_preview_press");
         assert!(
             spend.contains("self.widen_preview_caret(surface, grain)"),
             "the release no longer grows the caret to the grain the press asked \
@@ -129473,22 +129395,15 @@ mod live_markdown_edit_tests {
              caret it asked for",
         );
         assert_eq!(
-            window().matches("md_caret_wanted = Some(").count(),
             in_product_items(&found(
                 needle!(Pattern::text("md_caret_wanted = Some(")),
                 View::Raw
             )),
-            "this file cut at this module, and the package at item grain, \
-             disagree about how many places owe the caret",
-        );
-        assert_eq!(
-            window().matches("md_caret_wanted = Some(").count(),
             1,
             "one place owes the caret, counted here on purpose",
         );
         assert!(
-            agreed(body("    fn settle_preview_caret("), "settle_preview_caret")
-                .contains("md_caret_wanted"),
+            method_body("Runtime", "settle_preview_caret").contains("md_caret_wanted"),
             "and nothing spends it when the body lands",
         );
     }
@@ -129504,7 +129419,7 @@ mod live_markdown_edit_tests {
     /// still opened by the same `preview_press_opens_its_link` gate it was.
     #[test]
     fn a_press_on_a_link_records_no_caret_and_the_release_still_follows_it() {
-        let press = agreed(body("    fn press_preview_text("), "press_preview_text");
+        let press = method_body("Runtime", "press_preview_text");
         assert!(
             press.contains("let placing = caret_at.filter(|_| link.is_none() || shift);"),
             "a plain press on a link no longer declines the caret",
@@ -129514,7 +129429,7 @@ mod live_markdown_edit_tests {
             "the record is built from something other than `placing`, so a link \
              press may now put a caret in the page",
         );
-        let release = agreed(body("    fn release_preview_text("), "release_preview_text");
+        let release = method_body("Runtime", "release_preview_text");
         let gate = release
             .find("preview_press_opens_its_link(&drag.latch)")
             .expect("the release still asks the latch which gesture this was");
