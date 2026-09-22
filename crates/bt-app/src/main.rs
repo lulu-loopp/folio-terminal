@@ -131158,15 +131158,141 @@ mod clipboard_path_tests {
 /// value in the program can witness the *absence* of a call.
 #[cfg(test)]
 mod printed_path_provenance_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Every reader in this module named a file — this one
+    // through `include_str!("main.rs")`, two others through a relative path into
+    // `bt-platform` and `bt-term`. Nothing is deleted here: each reading computes
+    // its answer twice, once from the file's text and once from `bt-source`, and
+    // asserts the two agree. The deletion is the commit after this one.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `free_fn_body` and `found` are that
+    // module's helpers word for word, `found_in` is `formula_tool_seat_tests`',
+    // and its header is where the six points behind them live. Two shapes this
+    // batch needed and no example had:
+    //
+    // * `agreed` — the equivalence itself, deleted with the old reading. This
+    //   module's finders stop **before** the closing brace, so the comparison is
+    //   written for that shape and says so where it stands.
+    // * `found_in_package` — the two readings that reach into another package of
+    //   this workspace. `Index::of_package` takes the package's name, so a
+    //   cross-crate reader asks about a module of that crate rather than about a
+    //   path from this file to its source.
+    //
+    // **Two owners, not one.** Every body pin here is a method of `Runtime`
+    // except `status_text_in`, which belongs to `HyperlinkHover`; the deleted
+    // finder took the first `    fn status_text_in(` in this file and could not
+    // have told the difference.
     use super::{
         ClickIntent, HyperlinkActivation, Runtime, TerminalReference, answered_once,
         hyperlink_activation, verified_target_of,
     };
     use bt_layout::SeatId;
+    use bt_source::{Found, Index, ItemQuery, Needle, Scope, Search, View, needle};
     use std::{cell::RefCell, path::Path};
 
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
+    /// One search over a named scope of another package of this workspace — the
+    /// reading that used to be a relative path from this file to that crate's
+    /// source. The scope is a Rust path in *that* crate, so `crate::handoff` is
+    /// `bt-platform`'s module however its file is spelled.
+    fn found_in_package(package: &str, needle: Needle, view: View, scope: Scope) -> Found {
+        Index::of_package(package)
+            .search(&Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **This file's slice and the crate's body, compared as bytes.**
+    ///
+    /// [`method`] and [`free_function`] hand back everything after the signature
+    /// they matched up to the first `closing` — the rest of the declaration, the
+    /// opening brace, the body, and **not** the closing brace line, which is the
+    /// line they stopped on. [`Index::body_of`] hands back the braces and
+    /// everything between them. So the crate's answer, with that closing line
+    /// taken off, has to be the *tail* of this file's slice: it has to stand
+    /// there once, with nothing but the rest of the declaration in front of it,
+    /// and the slice has to end where it ends.
+    ///
+    /// What comes back is this file's slice, so this commit changes no assertion.
+    fn agreed(old: &'static str, new: &'static str, what: &str, closing: &str) -> &'static str {
+        let opened = new.strip_suffix(closing).unwrap_or_else(|| {
+            panic!("`{what}`: the crate's body does not close where this file's finder stopped")
+        });
+        let at = old.find(opened).unwrap_or_else(|| {
+            panic!("`{what}`: this file's slice and the crate's body are not the same bytes")
+        });
+        assert_eq!(
+            old.rfind(opened),
+            Some(at),
+            "`{what}`: the crate's body stands twice inside this file's slice"
+        );
+        assert!(
+            !old[..at].contains('{'),
+            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
+             of its body"
+        );
+        assert_eq!(
+            old.len(),
+            at + opened.len(),
+            "`{what}`: this file's slice runs past the body the crate returned"
+        );
+        old
+    }
+
+    /// One method pin's two readings, asserted to agree, the file's returned.
+    fn agreed_method(owner: &str, name: &str) -> &'static str {
+        agreed(
+            method(&format!("    fn {name}(")),
+            method_body(owner, name),
+            name,
+            "\n    }",
+        )
+    }
+
+    /// One free function pin's two readings, asserted to agree.
+    fn agreed_free_fn(name: &str) -> &'static str {
+        agreed(
+            free_function(&format!("fn {name}(")),
+            free_fn_body(name),
+            name,
+            "\n}",
+        )
+    }
 
     /// The text of one method, from its signature to the brace that closes it at the `impl`'s own
     /// indentation.
@@ -131485,35 +131611,61 @@ mod printed_path_provenance_tests {
         // verdict's de-duplication skipped (closure re-review B-1').
         let press_door = ["self.re_ask_the_worker_about_a_link_", "target("].concat();
         let pointer_door = ["ask_about_the_link_under_the_", "pointer("].concat();
-        for (signature, needle) in [
-            ("    fn pointer_moved(", door.as_str()),
-            ("    fn begin_local_selection(", press_door.as_str()),
-            ("    fn publish_frame_inner(", pointer_door.as_str()),
+        for (name, needle) in [
+            ("pointer_moved", door.as_str()),
+            ("begin_local_selection", press_door.as_str()),
+            ("publish_frame_inner", pointer_door.as_str()),
         ] {
             assert!(
-                method(signature).contains(needle),
-                "{signature} can put a link under the pointer and must ask `{needle})` about it"
+                agreed_method("Runtime", name).contains(needle),
+                "`{name}` can put a link under the pointer and must ask `{needle})` about it"
             );
         }
-        // The modifier's door is in the event loop rather than in a method of the window.
-        let modifiers = SOURCE
-            .find("WindowEvent::ModifiersChanged(modifiers) => {")
-            .expect("the one door every modifier state comes through");
-        let arm = &SOURCE[modifiers..];
-        let arm = &arm[..arm.find("WindowEvent::CursorMoved").unwrap_or(arm.len())];
+        // The modifier's door is in the event loop rather than in a method of the window, so the
+        // arm is cut out of `window_event`'s own body rather than out of this file. The cut is
+        // the same two needles either way, and this asserts the two cuts are the same bytes —
+        // which is the whole of the difference, because the file's reading would keep running
+        // past the end of the event loop and the crate's cannot.
+        let head = "WindowEvent::ModifiersChanged(modifiers) => {";
+        let cut = |text: &str| {
+            let at = text
+                .find(head)
+                .expect("the one door every modifier state comes through");
+            let arm = &text[at..];
+            arm[..arm.find("WindowEvent::CursorMoved").unwrap_or(arm.len())].to_owned()
+        };
+        let arm = cut(item_body(
+            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
+        ));
+        assert_eq!(
+            cut(SOURCE),
+            arm,
+            "P3 equivalence: this file and `window_event`'s own body hold the same modifier arm"
+        );
+        let arm = arm.as_str();
         assert!(
             arm.contains(pointer_door.as_str()),
             "the hand-over modifier going down is a gesture that meets a reference"
         );
         // And the two functions are still the only places the question is put.
+        let asks = found(needle!(door.as_str()), View::Raw).len();
         assert_eq!(
             SOURCE.matches(door.as_str()).count(),
-            2,
-            "the pointer move and the pointer-wide door — and nobody else"
+            asks,
+            "P3 equivalence: this file and the crate count the same doors"
         );
         assert_eq!(
+            asks, 2,
+            "the pointer move and the pointer-wide door — and nobody else"
+        );
+        let presses = found(needle!(press_door.as_str()), View::Raw).len();
+        assert_eq!(
             SOURCE.matches(press_door.as_str()).count(),
-            1,
+            presses,
+            "P3 equivalence: this file and the crate count the same presses"
+        );
+        assert_eq!(
+            presses, 1,
             "the press, and only the press, skips a held verdict"
         );
     }
@@ -131638,8 +131790,19 @@ mod printed_path_provenance_tests {
             ["Assoc", "IsDangerous", "("].concat(),
             ["SHGetFileInfo", "W", "("].concat(),
         ] {
+            let asked = found_in_package(
+                "bt-platform",
+                needle!(call.as_str()),
+                View::Raw,
+                Scope::Module("crate::handoff".to_owned()),
+            );
+            assert_eq!(
+                handoff.contains(call.as_str()),
+                !asked.is_empty(),
+                "P3 equivalence: the file and `bt-platform`'s own module agree about `{call})`"
+            );
             assert!(
-                !handoff.contains(call.as_str()),
+                asked.is_empty(),
                 "`{call})` is back under the door the user reaches by naming a file"
             );
         }
@@ -131788,7 +131951,7 @@ mod printed_path_provenance_tests {
     /// does not make.
     #[test]
     fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
-        let press = method("    fn activate_hyperlink(");
+        let press = agreed_method("Runtime", "activate_hyperlink");
         let open = press
             .find("self.open_local_path_verified(&path, facts);")
             .expect("the open door is handed the path as printed");
@@ -131799,8 +131962,19 @@ mod printed_path_provenance_tests {
         // And the resolved name is the doors' own transform, not a second reading of it.
         let ledger = include_str!("../../bt-term/src/session.rs");
         let door = ["resolved_for_a_", "door("].concat();
-        assert!(
+        let produced = found_in_package(
+            "bt-term",
+            needle!(door.as_str()),
+            View::Raw,
+            Scope::Module("crate::session".to_owned()),
+        );
+        assert_eq!(
             ledger.contains(door.as_str()),
+            !produced.is_empty(),
+            "P3 equivalence: the file and `bt-term`'s own module agree about `{door})`"
+        );
+        assert!(
+            !produced.is_empty(),
             "the worker produces the door's input with the door's own function"
         );
     }
@@ -131838,20 +132012,20 @@ mod printed_path_provenance_tests {
         );
     }
 
-    /// The window-thread bodies that answer a pointer over a reference, by the signature each is
-    /// declared with.
+    /// The window-thread bodies that answer a pointer over a reference, by name — every one of
+    /// them an inherent method of [`Runtime`].
     ///
     /// **The list is the test.** An eighth door that asks a filesystem about a printed path is the
     /// defect this ticket repaired, and the sweep below is what catches one added without a line
     /// added here.
     const HOVER_DOORS: [&str; 7] = [
-        "    fn peek_target(",
-        "    fn terminal_reference_at(",
-        "    fn pointer_reference_at(",
-        "    fn terminal_link_grasp(",
-        "    fn activate_hyperlink_hover_if_due(",
-        "    fn activate_hyperlink(",
-        "    fn file_peek_card_layers(",
+        "peek_target",
+        "terminal_reference_at",
+        "pointer_reference_at",
+        "terminal_link_grasp",
+        "activate_hyperlink_hover_if_due",
+        "activate_hyperlink",
+        "file_peek_card_layers",
     ];
 
     /// The filesystem calls none of them may make. Assembled at run time so this pin cannot match
@@ -131905,14 +132079,14 @@ mod printed_path_provenance_tests {
     fn no_hover_door_makes_a_filesystem_call_of_its_own() {
         // And the two that are allowed to reach a disk are still the two, still where they were
         // argued for.
-        let card = method("    fn file_peek_card_layers(");
+        let card = agreed_method("Runtime", "file_peek_card_layers");
         assert!(
             card.contains(DISK_REACHING_CALLEES[0].0),
             "the glance card asks {} — {}",
             DISK_REACHING_CALLEES[0].0,
             DISK_REACHING_CALLEES[0].1
         );
-        let press = method("    fn activate_hyperlink(");
+        let press = agreed_method("Runtime", "activate_hyperlink");
         assert!(
             press.contains(DISK_REACHING_CALLEES[1].0),
             "a printed reference is revealed through {} — {}",
@@ -131923,12 +132097,12 @@ mod printed_path_provenance_tests {
             !press.contains("self.reveal_in_explorer("),
             "a printed reference must not take the door that canonicalises on this thread"
         );
-        for signature in HOVER_DOORS {
-            let text = method(signature);
+        for name in HOVER_DOORS {
+            let text = agreed_method("Runtime", name);
             for call in filesystem_calls() {
                 assert!(
                     !text.contains(call.as_str()),
-                    "{signature} reaches `{call}` on the thread that paints — a path a program \
+                    "`{name}` reaches `{call}` on the thread that paints — a path a program \
                      printed may name a mapped drive whose server is gone, and the answer costs \
                      the redirector's own timeout"
                 );
@@ -131942,16 +132116,16 @@ mod printed_path_provenance_tests {
     /// reader that reached for a disk would put the syscall back one level down.
     #[test]
     fn the_routing_table_asks_a_filesystem_nothing() {
-        for signature in [
-            "fn hyperlink_activation(",
-            "fn reference_card(",
-            "fn terminal_link_answers_a_press(",
+        for name in [
+            "hyperlink_activation",
+            "reference_card",
+            "terminal_link_answers_a_press",
         ] {
-            let text = free_function(signature);
+            let text = agreed_free_fn(name);
             for call in filesystem_calls() {
                 assert!(
                     !text.contains(call.as_str()),
-                    "{signature} reaches `{call}`, and every caller of it is on the window thread"
+                    "`{name}` reaches `{call}`, and every caller of it is on the window thread"
                 );
             }
         }
@@ -131967,7 +132141,7 @@ mod printed_path_provenance_tests {
     /// `bt_platform::names_a_program`'s — on the door, not on the caller.
     #[test]
     fn a_printed_reference_reaches_the_handler_only_under_the_modifier_and_a_local_verdict() {
-        let table = free_function("fn hyperlink_activation(");
+        let table = agreed_free_fn("hyperlink_activation");
         let arm = [
             "ClickIntent",
             "::",
@@ -132000,7 +132174,7 @@ mod printed_path_provenance_tests {
         }
         // The door is reached through the verified twin, so the three facts travel rather than
         // being fetched on this thread.
-        let press = method("    fn activate_hyperlink(");
+        let press = agreed_method("Runtime", "activate_hyperlink");
         assert!(press.contains("open_local_path_verified("));
         assert!(
             !press.contains("self.open_local_path("),
@@ -132009,8 +132183,19 @@ mod printed_path_provenance_tests {
         // And the refusal is the platform door's own, with the list it has always had.
         let handoff = include_str!("../../bt-platform/src/handoff.rs");
         let refusal = ["names_a_", "program(&path,"].concat();
-        assert!(
+        let refused = found_in_package(
+            "bt-platform",
+            needle!(refusal.as_str()),
+            View::Raw,
+            Scope::Module("crate::handoff".to_owned()),
+        );
+        assert_eq!(
             handoff.contains(refusal.as_str()),
+            !refused.is_empty(),
+            "P3 equivalence: the file and `bt-platform`'s own module agree about the refusal"
+        );
+        assert!(
+            !refused.is_empty(),
             "the door refuses a program by its own list"
         );
     }
@@ -132023,7 +132208,7 @@ mod printed_path_provenance_tests {
     /// be about the thing the press would reach.
     #[test]
     fn the_hover_line_is_built_from_the_target_and_not_from_the_cells() {
-        let line = method("    fn status_text_in(");
+        let line = agreed_method("HyperlinkHover", "status_text_in");
         assert!(
             line.contains("printable_address(&self.active.as_ref()?.uri)"),
             "the status line must read the link's own target"
@@ -132043,7 +132228,7 @@ mod printed_path_provenance_tests {
     /// answer a frame with a reference from where the pointer used to be.
     #[test]
     fn the_pointer_memo_is_emptied_at_the_top_of_every_pointer_move() {
-        let moved = method("    fn pointer_moved(");
+        let moved = agreed_method("Runtime", "pointer_moved");
         let cleared = moved
             .find("self.window.pointer_reference.get_mut().take();")
             .expect("a pointer move empties the memo");
