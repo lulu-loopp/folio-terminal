@@ -102,6 +102,13 @@
 //! * [`Scope::Impls`] — **every `impl` block of one type** ([`ImplRecord`]),
 //!   which is the scope a prohibition about a type asks for and which had been
 //!   settling for the module the blocks are written in today.
+//! * [`Scope::Modules`] — **a union of named modules** ([`ModuleSpec`]), each
+//!   of them its own bytes or its whole tree. `Scope::Module` is exact equality
+//!   on one path, so a guard whose claim is "in the crate root *and* everywhere
+//!   under `crate::runtime`" had no scope at all once the methods moved: the
+//!   one path answers about what stayed behind, and [`Scope::Everything`]
+//!   inverts the guard, because four other modules spell the same register
+//!   names for registers of their own.
 //!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
@@ -134,8 +141,8 @@ pub use index::{
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};
 pub use query::{
-    Candidate, Excluded, Found, ItemQuery, MemberSite, Multiplicity, Needle, Occurrence, Pattern,
-    Provenance, QueryFailure, Scope, Search, Site, View, Why,
+    Candidate, Excluded, Found, ItemQuery, MemberSite, ModuleSpec, Multiplicity, Needle,
+    Occurrence, Pattern, Provenance, QueryFailure, Reach, Scope, Search, Site, View, Why,
 };
 pub use reject::{Position, Rejection, report};
 pub use scope::FileScoped;

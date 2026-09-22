@@ -21,8 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bt_source::{
-    DiskScope, Index, ItemKind, ItemQuery, Needle, Package, Pattern, QueryFailure, Scope, Search,
-    Span, TargetId, TargetKind, TargetRoot, Universe, Vendor, View, Workspace, report, universes,
+    DiskScope, Index, ItemKind, ItemQuery, ModuleSpec, Needle, Package, Pattern, QueryFailure,
+    Scope, Search, Span, TargetId, TargetKind, TargetRoot, Universe, Vendor, View, Workspace,
+    report, universes,
 };
 use syn::parse::Parser as _;
 
@@ -857,6 +858,204 @@ fn a_scope_over_a_types_impls_reads_every_block_of_it_and_nothing_else() {
         seat(Scope::Impls("Gate".to_owned())),
         1,
         "and the blocks hold the one inside `open`"
+    );
+}
+
+// ── a union of modules, and how far down each member reaches ──────────────
+
+fn module_tree_fixture() -> Arc<Index> {
+    Index::shared(&fixture_universe("module_tree")).expect("the fixture lowers")
+}
+
+/// RED — **a scope can be the union of several modules, and each member says
+/// how far down its own declarations it reaches.**
+///
+/// `Scope::Module` is exact equality on one path, which is the whole story only
+/// while a subject stays in one module. Two guards in `bt-app` —
+/// `arrival_wiring_tests::nothing_but_the_paint_and_the_frame_clock_reads_the_register`
+/// and `…::only_the_paint_and_the_frame_clock_can_read_the_settling_register` —
+/// name twelve functions that may read a register and claim nobody else does,
+/// and ten of the twelve leave the crate root for `crate::runtime` in the
+/// relocation this preparation is for. Afterwards the exact path answers about
+/// the two that stayed — red for a subject that merely moved — and the whole
+/// universe answers about four other modules that spell `.settling` for
+/// registers of their own, which inverts the guard the other way. The union is
+/// the claim itself: this module's bytes, and everything under that one.
+///
+/// MUTATION: resolve a tree member by prefix instead of by separator and the
+/// sibling `crate::runtimes` joins the union; stop a tree member at the module
+/// it names and the grandchild leaves it; leave the inline modules out of the
+/// reading and the two rows written in braces disappear.
+#[test]
+fn a_union_of_modules_reads_each_members_own_bytes_and_the_trees_it_asked_for() {
+    let index = module_tree_fixture();
+    let found = |scope: Scope| {
+        index
+            .search(
+                &Search::new(
+                    Needle::new(Pattern::text("the_needle_the_union_counts")),
+                    View::Raw,
+                )
+                .in_scope(scope),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    };
+    let counted = |scope: Scope| found(scope).len();
+    // Which of the fixture's files the answer stands in, by their stems, so
+    // that "the sibling is not in it" is asserted and not inferred from a
+    // total.
+    let in_files = |scope: Scope| {
+        let mut stems: Vec<String> = found(scope)
+            .occurrences()
+            .iter()
+            .map(|occurrence| {
+                index
+                    .file_at(occurrence.span.start())
+                    .expect("every occurrence stands in a file of the universe")
+                    .path()
+                    .file_stem()
+                    .expect("a file of the fixture")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        stems.sort();
+        stems.dedup();
+        stems
+    };
+
+    assert_eq!(
+        counted(Scope::Everything),
+        6,
+        "one needle in each of the six"
+    );
+
+    // The claim the two arrival guards make, after the methods have moved.
+    let union = || {
+        Scope::Modules(vec![
+            ModuleSpec::exact("crate"),
+            ModuleSpec::tree("crate::runtime"),
+        ])
+    };
+    assert_eq!(
+        counted(union()),
+        5,
+        "the root's own two, the module file, the grandchild and the inline \
+         module written inside it"
+    );
+    assert_eq!(
+        in_files(union()),
+        ["lib", "mod", "quake"],
+        "the root's file, the module file and the grandchild — and the sibling \
+         is no part of it, whatever its name begins with"
+    );
+    assert_eq!(
+        in_files(Scope::Modules(vec![ModuleSpec::tree("crate::runtimes")])),
+        ["runtimes"],
+        "which is a module of its own and answers on its own"
+    );
+
+    // The three readings of one path, which are three different claims.
+    assert_eq!(
+        counted(Scope::Modules(vec![ModuleSpec::tree("crate")])),
+        6,
+        "a tree from the root is the universe here, and says so"
+    );
+    assert_eq!(
+        counted(Scope::Modules(vec![ModuleSpec::exact("crate::runtime")])),
+        1,
+        "the module file's own bytes: what it declares is a file of its own"
+    );
+    assert_eq!(
+        counted(Scope::Modules(vec![ModuleSpec::tree("crate::runtime")])),
+        3,
+        "and the tree is that file, the grandchild and the braces inside it"
+    );
+
+    // An inline module is a member like any other, in either reach.
+    assert_eq!(
+        counted(Scope::Modules(vec![ModuleSpec::exact(
+            "crate::inline_child"
+        )])),
+        1,
+        "the braces and what is between them, not the file they are written in"
+    );
+    assert_eq!(
+        counted(Scope::Modules(vec![ModuleSpec::exact(
+            "crate::runtime::quake"
+        )])),
+        2,
+        "a grandchild's own bytes hold the inline module written in it"
+    );
+
+    // Members may overlap: a match is kept when it lies within any one of them,
+    // so naming a tree and something inside it counts nothing twice.
+    assert_eq!(
+        counted(Scope::Modules(vec![
+            ModuleSpec::tree("crate::runtime"),
+            ModuleSpec::exact("crate::runtime::quake"),
+            ModuleSpec::tree("crate::runtime::quake::deeper"),
+        ])),
+        3
+    );
+    assert_eq!(
+        ModuleSpec::tree("crate::runtime").path(),
+        "crate::runtime",
+        "a member says what it names, for a message somebody reads"
+    );
+}
+
+/// RED — **a member that names no module is a refusal naming that member**, and
+/// a union with no members at all is the same refusal.
+///
+/// The silence of one name is exactly what a union is built to survive: a
+/// member whose module has moved or was misspelled would otherwise leave the
+/// union answering about the others, which is the smaller question this crate
+/// exists to refuse.
+///
+/// MUTATION: drop the per-member check and the first refusal below becomes an
+/// answer of two.
+#[test]
+fn a_union_member_that_names_nothing_refuses_naming_that_member() {
+    let index = module_tree_fixture();
+    let refused = |scope: Scope| {
+        let failure = index
+            .search(
+                &Search::new(
+                    Needle::new(Pattern::text("the_needle_the_union_counts")),
+                    View::Raw,
+                )
+                .in_scope(scope),
+            )
+            .expect_err("a scope that names nothing is loud");
+        let QueryFailure::EmptyScope { scope } = &failure else {
+            panic!("{failure}");
+        };
+        assert!(
+            failure.to_string().contains("would answer zero"),
+            "{failure}"
+        );
+        scope.clone()
+    };
+
+    assert_eq!(
+        refused(Scope::Modules(vec![
+            ModuleSpec::exact("crate"),
+            ModuleSpec::tree("crate::runtime_that_moved"),
+        ])),
+        "module `crate::runtime_that_moved` and everything under it",
+        "the member is named, not the union that carried it"
+    );
+    assert_eq!(
+        refused(Scope::Modules(vec![ModuleSpec::exact(
+            "crate::runtime::gone"
+        )])),
+        "module `crate::runtime::gone`"
+    );
+    assert_eq!(
+        refused(Scope::Modules(Vec::new())),
+        "the union of no modules at all",
+        "a scope over no bytes would hold about everything"
     );
 }
 
