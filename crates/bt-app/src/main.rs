@@ -108617,13 +108617,79 @@ mod key_hint_spend_tests {
         &rest[..end]
     }
 
+    // ── what this module asks the crate instead ───────────────────────────
+    //
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Nothing is deleted here: both pins are read twice
+    // — once from `include_str!("main.rs")`, once from `bt-source` — and
+    // `agreed` asserts the two are the same bytes. The deletion is the commit
+    // after this one.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
+    ///
+    /// The signatures this module hands `body` already end in the opening
+    /// brace, so the slice begins inside the body and the crate's answer is the
+    /// same bytes with that brace put back on the front.
+    fn agreed(old: &'static str, name: &str) -> &'static str {
+        let new = method_body("Runtime", name);
+        let at = match old.find(new) {
+            Some(at) => at,
+            None => {
+                assert!(
+                    old.starts_with(&new[1..]),
+                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
+                     bytes"
+                );
+                0
+            }
+        };
+        assert!(
+            !old[..at].contains('{'),
+            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
+             the head of it"
+        );
+        old
+    }
+
     #[test]
     fn the_wheel_and_the_button_spend_a_raised_hold_the_way_a_key_does() {
-        for signature in [
-            "fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {",
-            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+        for (signature, name) in [
+            (
+                "fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {",
+                "mouse_wheel",
+            ),
+            (
+                "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+                "mouse_input",
+            ),
         ] {
-            let text = body(signature);
+            let text = agreed(body(signature), name);
             let spend = text
                 .find("self.spend_key_hint()?;")
                 .unwrap_or_else(|| panic!("{signature} spends the hold"));
@@ -108649,8 +108715,11 @@ mod key_hint_spend_tests {
     /// below, as this door did until 2026-09-10, and it goes red.
     #[test]
     fn the_button_router_is_reached_through_the_one_function_that_knows_the_rule() {
-        let text = body(
-            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+        let text = agreed(
+            body(
+                "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+            ),
+            "mouse_input",
         );
         assert!(
             text.contains("let router_position = button_router_position("),
