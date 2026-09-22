@@ -34755,18 +34755,29 @@ mod arrival_wiring_tests {
     // of `Runtime`; the deleted finder took the first `\n    fn name(` in this
     // file, which is a method of whatever `impl` happens to come first.
     //
-    // **The register gates read a module, not a file.** They used to scan this
+    // **The register gates read modules, not a file.** They used to scan this
     // file for `.passages` / `.settling` and name the reader by searching
     // backwards for the nearest `\n    fn `, which answers with the *previous*
     // method for any occurrence that does not stand in a method's own body. They
     // now ask `Found::owners` for the item each occurrence really stands in, over
-    // `Scope::Module("crate")` — this crate's root module, whatever file it is
-    // written in. The scope stays the module rather than widening to the package
-    // because `.settling` is spelled in four other modules of this crate for
-    // registers of their own (`float`, `keyhint`, `peek_strip`, `tooltip`), and a
-    // package-wide reading would invert the guard; `.passages` is scoped the same
-    // way so that the two twins stay twins.
-    use bt_source::{Found, Index, ItemQuery, Scope, Search, View, needle};
+    // a scope that is **the crate root's own bytes together with every module
+    // under `crate::runtime`** — this crate's root module whatever file it is
+    // written in, and everything Step 2a cuts out of it.
+    //
+    // Both members are one claim, and neither half is the claim on its own. The
+    // two allowed lists below hold twelve entries naming ten distinct methods —
+    // the frame clock's two are on both — and every one of the ten is written in
+    // one of the two `impl Runtime<'_>` blocks Step 2a cuts out into
+    // `src/runtime/*.rs`; a scope that named only the root would go on reading a
+    // smaller program and go on being green about it, which is the failure this
+    // preparation exists to remove. And `Scope::Everything` is not
+    // the other half: `.settling` is spelled in four other modules of this crate
+    // for registers of their own (`float`, `keyhint`, `peek_strip`, `tooltip`),
+    // so a package-wide reading would invert the guard rather than widen it.
+    // `.passages` is scoped the same way so that the two twins stay twins.
+    // [`the_root_and_the_runtime`] is where the union is written, and is where
+    // the state of that second member is explained.
+    use bt_source::{Found, Index, ItemQuery, ModuleSpec, Scope, Search, View, needle};
 
     use super::{Layered, ModalBand, Popup, Travel};
 
@@ -34795,6 +34806,49 @@ mod arrival_wiring_tests {
         source()
             .search(&Search::new(needle, view).in_scope(scope))
             .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **Whether this universe holds a module of that path.**
+    ///
+    /// `Index::modules()` is the record a named scope resolves against
+    /// (`bt_source::query::Index::scope_spans`), so this asks the same question
+    /// `Scope::Modules` asks, one moment before it is asked — which is the only
+    /// way to tell "the module is not there yet" apart from "the module is there
+    /// and holds nothing", and those two are opposite verdicts for a gate.
+    fn declares(module_path: &str) -> bool {
+        source()
+            .modules()
+            .iter()
+            .any(|module| module.module_paths().iter().any(|path| path == module_path))
+    }
+
+    /// **The bytes the two register gates are a claim about** — the crate root,
+    /// and every module under `crate::runtime`.
+    ///
+    /// The second member is **not written here yet, and not written
+    /// conditionally either.** `crate::runtime` does not exist on this tree, and
+    /// a `ModuleSpec` naming no module in the universe is
+    /// `QueryFailure::EmptyScope` on its own name — the refusal that stops a
+    /// union quietly answering a smaller question than it was asked. A helper
+    /// that added the member the moment the module appeared would dodge that
+    /// refusal by widening the gates with nobody deciding to, which is the same
+    /// silence wearing the other hat.
+    ///
+    /// So the flip is a red test instead of a memory. The day the relocation
+    /// commit lands, the assertion below fails and says what to write; until
+    /// then the union has one member and expresses exactly what
+    /// `Scope::Module("crate")` expressed before it.
+    fn the_root_and_the_runtime() -> Scope {
+        assert!(
+            !declares("crate::runtime"),
+            "`crate::runtime` is declared, so the relocation landed and the ten \
+             methods these two gates allow between them are written under it. This \
+             scope has to become `Scope::Modules(vec![ModuleSpec::exact(\"crate\"), \
+             ModuleSpec::tree(\"crate::runtime\")])` — and so does \
+             `journeys_tests::in_the_root_or_the_runtime`, which is the third guard \
+             on the same union"
+        );
+        Scope::Modules(vec![ModuleSpec::exact("crate")])
     }
 
     /// **The names of the items these occurrences stand in** (§4.1), each named
@@ -34947,7 +35001,7 @@ mod arrival_wiring_tests {
         let seen = reader_names(&found_in(
             needle!(needle),
             View::Raw,
-            Scope::Module("crate".to_owned()),
+            the_root_and_the_runtime(),
         ));
         for name in &seen {
             assert!(
@@ -35064,7 +35118,7 @@ mod arrival_wiring_tests {
         let seen = reader_names(&found_in(
             needle!(needle),
             View::Raw,
-            Scope::Module("crate".to_owned()),
+            the_root_and_the_runtime(),
         ));
         for name in &seen {
             assert!(
