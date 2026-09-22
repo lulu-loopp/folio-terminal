@@ -108691,36 +108691,56 @@ mod launch_landing_tests {
 /// `key_hint` at all.
 #[cfg(test)]
 mod key_hint_spend_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Both claims are about which line stands before which in a handler that
+    // needs a whole window to reach, so they are source pins. They used to read
+    // `include_str!("main.rs")`; they now ask `bt-source` about an *item* of
+    // this crate, so neither is bound to the file the handler happens to be
+    // written in today (`docs/plans/bt-app-split-prep.md` §6.3). The commit
+    // before this one ran both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
     }
 
     #[test]
     fn the_wheel_and_the_button_spend_a_raised_hold_the_way_a_key_does() {
-        for signature in [
-            "fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {",
-            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
-        ] {
-            let text = body(signature);
+        for name in ["mouse_wheel", "mouse_input"] {
+            let text = method_body("Runtime", name);
             let spend = text
                 .find("self.spend_key_hint()?;")
-                .unwrap_or_else(|| panic!("{signature} spends the hold"));
+                .unwrap_or_else(|| panic!("`Runtime::{name}` spends the hold"));
             // Every `return` in these two functions is a surface saying "this
             // gesture was mine"; a spend behind one of them is a card that
             // survives whichever surface answered first.
             let first_return = text.find("return ").unwrap_or(text.len());
             assert!(
                 spend < first_return,
-                "{signature} spends the hold before the first surface can take the gesture home"
+                "`Runtime::{name}` spends the hold before the first surface can take the \
+                 gesture home"
             );
         }
     }
@@ -108736,9 +108756,7 @@ mod key_hint_spend_tests {
     /// below, as this door did until 2026-09-10, and it goes red.
     #[test]
     fn the_button_router_is_reached_through_the_one_function_that_knows_the_rule() {
-        let text = body(
-            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
-        );
+        let text = method_body("Runtime", "mouse_input");
         assert!(
             text.contains("let router_position = button_router_position("),
             "the door asks `button_router_position` where to answer from:\n{text}"
@@ -108768,24 +108786,45 @@ mod key_hint_spend_tests {
 /// nothing either.
 #[cfg(test)]
 mod git_hover_heal_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Both pins used to read `include_str!("main.rs")`; they now ask
+    // `bt-source` about an *item* of this crate, so neither is bound to the
+    // file the method happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
     }
 
     /// The heal stands in `refresh_chrome`, **after** the pages it heals against
     /// have been published and before anything is drawn from them.
     #[test]
     fn the_git_pages_hover_is_healed_against_the_page_it_is_drawn_from() {
-        let text = body("    fn refresh_chrome_with_overlay(");
+        let text = method_body("Runtime", "refresh_chrome_with_overlay");
         let published = text
             .find("self.window.git_pages_shown = git_pages.clone();")
             .expect("`refresh_chrome` publishes the pages the hit test reads");
@@ -108802,7 +108841,7 @@ mod git_hover_heal_tests {
     /// a reader holding still over a row that is still there must keep it.
     #[test]
     fn the_heal_re_derives_the_hover_and_does_not_clear_it() {
-        let text = body("    fn heal_git_hover(&mut self, scale: f32) {");
+        let text = method_body("Runtime", "heal_git_hover");
         assert!(
             text.contains("seats::hit_git_panel("),
             "the heal asks the same question the pointer's own handler asks:\n{text}"
@@ -109217,29 +109256,59 @@ mod mouse_trace_station_tests {
 /// could read.
 #[cfg(test)]
 mod recent_folder_door_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // The two rulings below are about *where* one call is made, which has no
+    // value to read back — so they are counted. That count used to be taken off
+    // `include_str!("main.rs")` line by line; it is now asked of `bt-source`,
+    // of an *item* of this crate or of the package, so neither ruling is bound
+    // to the file the doors happen to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source` live.
+    //
+    // The trimmed-line-start rule the file reading needed is what a view makes
+    // unnecessary: the mentions it was written to step over were this module's
+    // own needle and the doc comments that explain the door, and
+    // `View::Identifiers` masks both. What it cannot mask is the door's own
+    // declaration, which is a call shape too — so that is named and exempted,
+    // which is §2.5's rule rather than a rule of this module's.
 
-    /// The text of one method, from its signature to the next method's —
-    /// [`super::mouse_trace_station_tests`]' own reader.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
     }
 
-    /// The call, as a line begins it. Matched against a **trimmed line's start**
-    /// rather than anywhere in the text, so the mentions inside this module — and
-    /// inside the doc comments that explain the door — are not counted as doors.
-    const CALL: &str = "self.note_folder_opened(";
+    /// The door, looked for as a call and not as a spelling, with its own
+    /// declaration taken out.
+    fn doors(scope: bt_source::Scope) -> usize {
+        source()
+            .search(
+                &bt_source::Search::new(
+                    bt_source::Needle::new(bt_source::Pattern::call("note_folder_opened")),
+                    bt_source::View::Identifiers,
+                )
+                .in_scope(scope)
+                .exempting_declarations_of(bt_source::ItemQuery::method(
+                    "Runtime",
+                    "note_folder_opened",
+                )),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .len()
+    }
 
-    fn calls(text: &str) -> usize {
-        text.lines()
-            .filter(|line| line.trim_start().starts_with(CALL))
-            .count()
+    /// The doors inside one method of `Runtime`.
+    fn doors_in(name: &str) -> usize {
+        doors(bt_source::Scope::Item(bt_source::ItemQuery::method(
+            "Runtime", name,
+        )))
     }
 
     /// RED (user ruling 2026-09-05) — **the two doors a hand goes through record,
@@ -109253,19 +109322,22 @@ mod recent_folder_door_tests {
     #[test]
     fn the_doors_that_remember_a_folder_are_the_two_a_hand_goes_through() {
         assert_eq!(
-            calls(body("    fn reroot_files_column(")),
+            doors_in("reroot_files_column"),
             1,
             "pointing a column somewhere else is the door the menu, `Browse…`, a \
              drop and a walk into a folder all come through"
         );
         assert_eq!(
-            calls(body("    fn show_folder_in_files_column(")),
+            doors_in("show_folder_in_files_column"),
             1,
             "and a tab with no column at all gets one, which is the same gesture \
              with nothing to re-root"
         );
+        // Counted over the package and not over one file: a third door could be
+        // written anywhere, and wherever it was written it would be the ruling
+        // this number exists to require.
         assert_eq!(
-            calls(SOURCE),
+            doors(bt_source::Scope::Everything),
             2,
             "two doors, counted here on purpose - a third is a ruling and not an edit"
         );
@@ -109285,15 +109357,15 @@ mod recent_folder_door_tests {
     /// every `cd` the reader happens to open a column after.
     #[test]
     fn a_column_opened_onto_a_shells_own_folder_remembers_nothing() {
-        for signature in [
-            "    fn toggle_files_pane(",
-            "    fn seat_a_files_column(",
-            "    fn files_root_for_new_pane(",
+        for name in [
+            "toggle_files_pane",
+            "seat_a_files_column",
+            "files_root_for_new_pane",
         ] {
             assert_eq!(
-                calls(body(signature)),
+                doors_in(name),
                 0,
-                "{signature} takes its folder from a shell and not from a hand"
+                "`Runtime::{name}` takes its folder from a shell and not from a hand"
             );
         }
     }
@@ -110527,22 +110599,40 @@ mod files_locate_door_tests {
 mod file_peek_fade_tests {
     use super::*;
 
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // The wiring pins used to read `include_str!("main.rs")`; they now ask
+    // `bt-source` about an *item* of this crate, so none of them is bound to
+    // the file the method happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree. The split signatures
+    // went with the file reading: a name handed to `ItemQuery` is not searched
+    // for in this file, so nothing here can find itself.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
 
-    /// The text of one method, from its signature to the next method's.
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
     ///
-    /// Signatures are handed in **split** (`["    fn file_peek", "_opacity("]`)
-    /// for the reason [`files_locate_door_tests`] splits its own: an unbroken
-    /// literal here is a second occurrence of the very string being searched
-    /// for, and `find` would answer with this test instead of with the method.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
     }
 
     /// The opacity the card would be painted at, read exactly as
@@ -110627,13 +110717,13 @@ mod file_peek_fade_tests {
         // The card's wake-ups while it is up are the fade's own rule and nothing
         // else.
         assert!(
-            body(&["    fn file_peek", "_deadline("].concat()).contains("hover_fade_owes_frames("),
+            method_body("Runtime", "file_peek_deadline").contains("hover_fade_owes_frames("),
             "the card's wake-ups while it is up are the fade's own rule"
         );
         // And the way out drops the card whole on the frame it is asked to —
         // there is no third state for a card on its way off the glass, and
         // therefore nothing to schedule.
-        let hidden = body(&["    fn hide_file", "_peek("].concat());
+        let hidden = method_body("Runtime", "hide_file_peek");
         assert!(
             hidden.contains("self.window.file_peek = None;"),
             "hiding takes the card down whole"
@@ -110724,7 +110814,7 @@ mod file_peek_fade_tests {
     /// 90ms a motionless hand started.
     #[test]
     fn the_cards_fade_is_the_tips_rule_read_once_and_reaches_every_layer() {
-        let reads = body(&["    fn file_peek", "_opacity("].concat());
+        let reads = method_body("Runtime", "file_peek_opacity");
         assert!(
             reads.contains("tooltip::hover_fade_opacity("),
             "the card asks the tip's rule"
@@ -110736,7 +110826,7 @@ mod file_peek_fade_tests {
             );
         }
 
-        let layer = body(&["    fn file_peek", "_layer("].concat());
+        let layer = method_body("Runtime", "file_peek_layer");
         assert!(
             layer.contains("for layer in &mut layers {"),
             "the fade is folded over every layer the card put down"
@@ -110747,8 +110837,7 @@ mod file_peek_fade_tests {
         );
 
         assert!(
-            body(&["    fn advance_file", "_peek("].concat())
-                .contains("self.file_peek_owes_frame(now)"),
+            method_body("Runtime", "advance_file_peek").contains("self.file_peek_owes_frame(now)"),
             "and the card's own turn is what wakes the loop while it climbs"
         );
     }
@@ -113227,31 +113316,48 @@ mod a_page_lands_where_it_was_aimed_tests {
 /// compile and still pass every rectangle test the drop owns.
 #[cfg(test)]
 mod page_under_a_laden_hand_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Both claims are about where one question is asked and about how wide a
+    // list is, and neither returns a value — so they are source pins. They used
+    // to read `include_str!("main.rs")`; they now ask `bt-source` about *items*
+    // of this crate, so neither is bound to the file a method or a struct
+    // happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live. The struct half is `layer_shape_tests`' ask,
+    // `ItemQuery::type_item`, which finds the type's own declaration wherever
+    // it is written and at whatever indentation, rather than a `struct` keyword
+    // in column zero.
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
     }
 
-    /// The field lines of a top-level `struct <name> { … }`.
-    fn struct_fields(name: &str) -> &'static str {
-        let head = ["\nstruct ", name, " {\n"].concat();
-        let start = SOURCE
-            .find(head.as_str())
-            .unwrap_or_else(|| panic!("`struct {name}` is declared at the top level"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n}\n")
-                .expect("the struct is closed by a `}` in column zero");
-        &SOURCE[start..end]
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// The braces one type's members are written in, and what is between them.
+    fn type_body(name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::type_item(name))
     }
 
     /// **The carry is asked, and asked before any rectangle is.**
@@ -113266,7 +113372,7 @@ mod page_under_a_laden_hand_tests {
     /// the scan, and this goes red by name.
     #[test]
     fn the_hand_is_asked_before_any_page_is() {
-        let web_page_at = body("    fn web_page_at(");
+        let web_page_at = method_body("Runtime", "web_page_at");
         let asked = web_page_at
             .find("self.a_gesture_holds_the_pointer()")
             .expect("the page's door subtracts a hand that is already carrying");
@@ -113291,10 +113397,10 @@ mod page_under_a_laden_hand_tests {
     /// MUTATION: drop any one `…_drag` arm from the predicate and this names it.
     #[test]
     fn every_carry_this_window_can_hold_is_named_by_the_one_predicate() {
-        let predicate = body("    fn a_gesture_holds_the_pointer(");
+        let predicate = method_body("Runtime", "a_gesture_holds_the_pointer");
         let mut found = 0;
         for owner in ["WindowRuntime", "TabState"] {
-            for line in struct_fields(owner).lines() {
+            for line in type_body(owner).lines() {
                 let field = line.trim_start();
                 let Some((name, _)) = field.split_once(": Option<") else {
                     continue;
@@ -115725,24 +115831,45 @@ mod textless_present_tests {
         assert_eq!(swapchain, 0, "no image is not a textless image");
     }
 
-    /// This file as text. The reason is the one `application_change_tests` used
-    /// to give beside its own copy of this reader, before P3 migrated it: what
-    /// is under test is which *arm* a variant lands in, and a `WindowRuntime` is
-    /// a surface, a compositor and four Win32 bridges, so there is no value this
-    /// process can be handed for it without a screen.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what is under test here is which *arm* a variant lands in ─────────
+    //
+    // A `WindowRuntime` is a surface, a compositor and four Win32 bridges, so
+    // the two present sites cannot be stood up and what can be held about them
+    // is the shape of their `match`. That used to be read out of
+    // `include_str!("main.rs")`; it is now asked of `bt-source` about an *item*
+    // of this crate, so no claim here is bound to the file the method happens to
+    // be written in (`docs/plans/bt-app-split-prep.md` §6.3). The commit before
+    // this one ran both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
 
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!("\n    fn {name}(");
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n    }\n")
-                .expect("a method is closed by a `}` at its `impl`'s indentation");
-        &SOURCE[start..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// The body of one method written in a `impl <trait> for <owner>` block.
+    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name).of_trait(trait_name))
     }
 
     /// PIN — **a picture that lost its characters is re-filed and asked for
@@ -115767,7 +115894,7 @@ mod textless_present_tests {
     #[test]
     fn a_textless_present_is_a_frame_the_window_still_owes() {
         for method in ["redraw", "present_retained_picture"] {
-            let body = fn_body(method);
+            let body = method_body("Runtime", method);
             let owed = body
                 .find("PresentOutcome::PresentedWithoutText(_)")
                 .unwrap_or_else(|| panic!("`{method}` must name the textless outcome"));
@@ -115834,7 +115961,7 @@ mod textless_present_tests {
 
         // ② Both present sites still owe the picture.
         for method in ["redraw", "present_retained_picture"] {
-            let body = fn_body(method);
+            let body = method_body("Runtime", method);
             let owed = body
                 .find("PresentOutcome::SkippedNotVisible")
                 .unwrap_or_else(|| {
@@ -115853,16 +115980,20 @@ mod textless_present_tests {
         // ③ And the turn that pays the debt exists, on the event winit raises
         // from the very same `Visible` bit the acquire tested.
         //
-        // The needle is spelled in two pieces so that this test cannot find
-        // itself: the event-loop arm it is looking for stands *later* in this
-        // file than the test does.
-        let woken = SOURCE
+        // The dispatch is asked for by name —
+        // `<FolioApp as ApplicationHandler<AppEvent>>::window_event` — and the
+        // default arm the slice stops at is what makes that matter: it is
+        // spelled seven times in `main.rs` and once in `hang_watch.rs`, so
+        // "the next one" only means this dispatch's while the reading is the
+        // item's. The needle stays in two pieces for P18 to join.
+        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let woken = dispatch
             .find(concat!(
                 "WindowEvent::Occluded(false) => runtime.",
                 "publish_frame(FrameTrigger {"
             ))
             .expect("the event loop answers the window that came back on screen");
-        let arm = &SOURCE[woken..];
+        let arm = &dispatch[woken..];
         let end = arm.find("_ => Ok(())").expect("the dispatch default arm");
         assert_eq!(
             arm[..end].matches("publish_frame").count(),
@@ -122742,22 +122873,25 @@ fn set_option_as_alt(window: &Window, option_sends_alt: bool) {
 /// window's ground is never laid under a clear that already carries it.
 #[cfg(test)]
 mod resize_skirt_order_tests {
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// One method's text, from its signature to the next method's.
+    /// One method's statements, asked of the crate by the name of the method
+    /// rather than of this file by a line of it.
     ///
     /// Comments go, and then whitespace goes. Both for the same reason: the
     /// claims below are about which *statement* stands first, and a paragraph
     /// explaining why it does is not a statement. Leaving comments in would
-    /// also make the pins fail the moment somebody rewords one.
-    fn body(signature: &str) -> String {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        rest[..end]
-            .lines()
+    /// also make the pins fail the moment somebody rewords one. The braces go
+    /// with them: they delimit the body, they are not a statement in it, and
+    /// the first claim below counts characters from the first statement.
+    fn body(name: &str) -> String {
+        let whole = normalised(method_body("Runtime", name));
+        whole[1..whole.len() - 1].to_owned()
+    }
+
+    /// The statements of a run of source, with everything that is not one
+    /// taken out — the reading both `body` and the crate's answer are put
+    /// through, so that the two are compared on the same terms.
+    fn normalised(text: &str) -> String {
+        text.lines()
             .map(|line| match line.find("//") {
                 Some(at) => &line[..at],
                 None => line,
@@ -122768,6 +122902,40 @@ mod resize_skirt_order_tests {
             .collect()
     }
 
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Both pins used to read `include_str!("main.rs")`; they now ask
+    // `bt-source` about an *item* of this crate, so neither is bound to the
+    // file the method happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
     /// Red gate: move the `set_window_size` call below the `renderer.resize`
     /// that follows it — or anywhere else in the handler — and this goes red.
     /// That is the shipped build of 2026-08-24, where the strip outside the old
@@ -122775,7 +122943,7 @@ mod resize_skirt_order_tests {
     /// through Folio's own frame.
     #[test]
     fn the_resize_handler_covers_the_new_strip_before_it_does_anything_else() {
-        let handler = body("fn resize(&mut self, physical: PhysicalSize<u32>) -> Result<()> {");
+        let handler = body("resize");
         // Plain needles: `body` hands back one method's text, so this test's own
         // source is not among the things being searched.
         let told = handler
@@ -122810,7 +122978,7 @@ mod resize_skirt_order_tests {
     /// swapchain that had caught up.
     #[test]
     fn the_present_funnel_shrinks_the_skirt_and_asks_for_the_frame_that_does_it() {
-        let funnel = body("fn present_seats_and_commit(");
+        let funnel = body("present_seats_and_commit");
         let shrunk = funnel
             .find(".set_covered_size(covered_width,covered_height)")
             .expect("the funnel tells the compositor what the swapchain now covers");
@@ -127130,6 +127298,58 @@ mod platform_gate_tests {
         opens && PLATFORM_WORDS.iter().any(|word| line.contains(word))
     }
 
+    // ── what the capability pin asks the crate ────────────────────────────
+    //
+    // `the_caption_run_is_decided_by_one_capability_read` used to read
+    // `main.rs` and `seats.rs` as two `include_str!` constants. It now asks
+    // `bt-source` about *items* and *modules* of this crate, so none of its
+    // claims is bound to the file a method happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // `sources()` above is **not** part of that: that walk is the P10 row of
+    // the debt list (§6.3), it is the twin of
+    // `scripts/check-portable-core.ps1`'s array reader — allowlist entry 1 —
+    // and P10's acceptance is the agreement test between the two walks, which
+    // is P10's ticket and not this batch's. It is left exactly as it is.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// One search over a named scope — a Rust path, never a file.
+    fn found_in(
+        needle: bt_source::Needle,
+        view: bt_source::View,
+        scope: bt_source::Scope,
+    ) -> bt_source::Found {
+        source()
+            .search(&bt_source::Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
     /// RED — **no unlisted file, and no name on the list that has stopped
     /// asking.**
     ///
@@ -127237,13 +127457,19 @@ mod platform_gate_tests {
     /// past the accessor, and the last two do.
     #[test]
     fn the_caption_run_is_decided_by_one_capability_read() {
-        const MAIN: &str = include_str!("main.rs");
-        const SEATS: &str = include_str!("seats.rs");
         // Assembled rather than written whole, for `attention_hooks`' reason:
         // a pin that spelled its own needle would be an occurrence of the very
-        // thing it counts, and this count has to be exact.
+        // thing it counts, and this count has to be exact. Writing the halves
+        // back together is P18's ticket.
         const DOOR: &str = concat!("custom_window_frame", ".platform_chrome()");
-        let reads: Vec<usize> = MAIN.match_indices(DOOR).map(|(at, _)| at).collect();
+        // Counted over the package: a fourth reach for the frame could be
+        // written anywhere, and wherever it was written it would be the second
+        // opinion this number exists to refuse.
+        let reads = found_in(
+            bt_source::Needle::new(bt_source::Pattern::text(DOOR)),
+            bt_source::View::Raw,
+            bt_source::Scope::Everything,
+        );
         assert_eq!(
             reads.len(),
             3,
@@ -127252,22 +127478,28 @@ mod platform_gate_tests {
              everything else takes their answer",
             reads.len()
         );
+        let accessor = source()
+            .one(&bt_source::ItemQuery::method("Runtime", "platform_chrome"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(
-            MAIN.contains("fn platform_chrome(&self) -> bt_platform::PlatformChrome {"),
+            source()
+                .text(accessor.declaration())
+                .contains("fn platform_chrome(&self) -> bt_platform::PlatformChrome "),
             "and it is read there"
         );
-        // The accessor is the last of the three: the constructors stand above it
-        // in the file, and each binds what it reads to the local every argument
-        // below it is written off.
-        let accessor = MAIN
-            .find("fn platform_chrome(&self) -> bt_platform::PlatformChrome {")
-            .expect("the one accessor");
-        let (in_accessor, in_constructors): (Vec<usize>, Vec<usize>) =
-            reads.iter().partition(|at| **at > accessor);
-        assert_eq!(in_accessor.len(), 1, "the accessor reads it once");
-        for at in in_constructors {
+        // One of the three stands inside the accessor and the other two are the
+        // constructors binding the measurement they have just taken. Asked as
+        // containment, because which of them the file happens to hold first is
+        // no part of the claim.
+        let accessor_body = accessor.body().expect("the accessor has a body");
+        let (inside, outside): (Vec<bt_source::Span>, Vec<bt_source::Span>) = reads
+            .spans()
+            .into_iter()
+            .partition(|span| span.within(accessor_body));
+        assert_eq!(inside.len(), 1, "the accessor reads it once");
+        for span in outside {
             assert!(
-                MAIN[..at].ends_with("let platform_chrome = "),
+                source().union()[..span.start()].ends_with("let platform_chrome = "),
                 "a read outside the accessor is a window constructor binding the \
                  measurement it has just taken, and nothing else"
             );
@@ -127277,64 +127509,75 @@ mod platform_gate_tests {
         // the function whose whole job is the caption run, and the one branch in
         // the solver that decides the tabs' shape — and the module's own test
         // helper, which is how the other arm is written down at all.
-        let decisions: Vec<usize> = SEATS
-            .match_indices("buttons_are_the_platforms")
-            .map(|(at, _)| at)
-            .collect();
-        let body_of = |signature: &str| -> std::ops::Range<usize> {
-            let at = SEATS
-                .find(signature)
-                .unwrap_or_else(|| panic!("`{signature}` is not in `seats.rs`"));
-            let end = SEATS[at..]
-                .find("\n}\n")
-                .map(|to| at + to)
-                .expect("a function is closed at column zero");
-            at..end
-        };
+        //
+        // Read of the module `crate::seats` and not of the package: this very
+        // test spells the name three times in `main.rs`, and a package-wide
+        // reading would invert the claim.
+        let decisions = found_in(
+            bt_source::Needle::new(bt_source::Pattern::text("buttons_are_the_platforms")),
+            bt_source::View::Raw,
+            bt_source::Scope::Module("crate::seats".to_owned()),
+        );
         let readers = [
-            ("caption_targets", body_of("pub fn caption_targets(")),
-            ("tab_strip_geometry", body_of("pub fn tab_strip_geometry(")),
-            (
-                "window_caption_boxes",
-                body_of("pub fn window_caption_boxes("),
-            ),
+            "caption_targets",
+            "tab_strip_geometry",
+            "window_caption_boxes",
         ];
+        let bodies: Vec<bt_source::Span> = readers
+            .iter()
+            .map(|name| {
+                source()
+                    .one(&bt_source::ItemQuery::function(name).in_module("crate::seats"))
+                    .unwrap_or_else(|failure| panic!("{failure}"))
+                    .body()
+                    .unwrap_or_else(|| panic!("`{name}` has a body"))
+            })
+            .collect();
         assert_eq!(
             decisions.len(),
             readers.len() + 1,
-            "the capability is named {} times in `seats.rs`; it is read by \
+            "the capability is named {} times in `crate::seats`; it is read by \
              `caption_targets`, by `tab_strip_geometry` and by `window_caption_boxes`, \
              and constructed once by that module's own test helper — nothing else may \
              branch on it",
             decisions.len()
         );
         // Matched by *containment* rather than by position, because the order
-        // the two functions happen to stand in the file is not part of the
-        // claim: each named body holds exactly one read, and what is left over
-        // is the helper.
-        for (name, body) in &readers {
+        // the three functions happen to stand in is no part of the claim: each
+        // named body holds exactly one read, and what is left over is the
+        // helper.
+        for (name, body) in readers.iter().zip(&bodies) {
             assert_eq!(
-                decisions.iter().filter(|at| body.contains(*at)).count(),
+                decisions
+                    .spans()
+                    .iter()
+                    .filter(|span| span.within(*body))
+                    .count(),
                 1,
                 "`{name}` does not read the capability exactly once"
             );
         }
         let helper = decisions
-            .iter()
-            .find(|at| !readers.iter().any(|(_, body)| body.contains(*at)))
-            .expect("one occurrence outside the two readers");
+            .spans()
+            .into_iter()
+            .find(|span| !bodies.iter().any(|body| span.within(*body)))
+            .expect("one occurrence outside the three readers");
         assert!(
-            SEATS[*helper..].starts_with("buttons_are_the_platforms: true"),
-            "the occurrence outside the two readers is not the test helper that states \
+            source().union()[helper.start()..].starts_with("buttons_are_the_platforms: true"),
+            "the occurrence outside the three readers is not the test helper that states \
              the other arm"
         );
 
         // **The fourth site: the state change** (§13.48). One answer to the
         // wake, and it asks the accessor rather than the frame.
-        let answers: Vec<usize> = MAIN
-            .match_indices(concat!("AppEvent::WindowChromeChanged", " =>"))
-            .map(|(at, _)| at)
-            .collect();
+        let answers = found_in(
+            bt_source::Needle::new(bt_source::Pattern::text(concat!(
+                "AppEvent::WindowChromeChanged",
+                " =>"
+            ))),
+            bt_source::View::Raw,
+            bt_source::Scope::Everything,
+        );
         assert_eq!(
             answers.len(),
             1,
@@ -127342,30 +127585,35 @@ mod platform_gate_tests {
              window's own buttons away has one consequence and it is stated once",
             answers.len()
         );
-        let handler = "fn adopt_platform_chrome(&mut self) -> Result<()> {";
+        let handler = "`FolioApp::adopt_platform_chrome`";
         assert!(
-            MAIN[answers[0]..].starts_with(concat!(
+            source().union()[answers.spans()[0].start()..].starts_with(concat!(
                 "AppEvent::WindowChromeChanged",
                 " => self.adopt_platform_chrome(),"
             )),
-            "and what it is answered with is `{handler}`"
+            "and what it is answered with is {handler}"
         );
-        let at = MAIN.find(handler).expect("the fourth site");
-        let body = &MAIN[at..at + MAIN[at..].find("\n    }\n").expect("its end")];
         assert!(
-            !body.contains(DOOR),
+            !method_body("FolioApp", "adopt_platform_chrome").contains(DOOR),
             "the fourth read goes through `Runtime::platform_chrome` like every other \
              reader; reaching the frame here would be a second opinion about a window \
              that now has more than one answer"
         );
 
         // And the module that draws and hit-tests the bar knows nothing about
-        // which machine it is on.
+        // which machine it is on. Of `crate::seats` and of nothing wider: all
+        // three spellings stand in the files the list above admits on purpose,
+        // so a package-wide negative would be about nothing at all.
         for gate in ["target_os", "cfg!(windows)", "#[cfg(windows)]"] {
             assert!(
-                !SEATS.contains(gate),
-                "`seats.rs` names `{gate}`; the chrome is a capability and this file decides \
-                 by the value it is handed"
+                found_in(
+                    bt_source::Needle::new(bt_source::Pattern::text(gate)),
+                    bt_source::View::Raw,
+                    bt_source::Scope::Module("crate::seats".to_owned()),
+                )
+                .is_empty(),
+                "`crate::seats` names `{gate}`; the chrome is a capability and that module \
+                 decides by the value it is handed"
             );
         }
     }
@@ -129318,17 +129566,50 @@ mod edit_menu_clipboard_tests {
 /// and a `#[test]` can make neither.
 #[cfg(test)]
 mod quit_with_no_window_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Both rulings are about the order of two lines and about which doors write
+    // one flag, neither of which returns a value — so they are source pins.
+    // They used to read `include_str!("main.rs")`; they now ask `bt-source`
+    // about an *item* of this crate, so no claim here is bound to the file the
+    // door happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body`,
+    // `method_body` and `found` live. The owner is an argument here because the
+    // four doors are not one type's: three are `FolioApp`'s and the chord's is
+    // `Runtime`'s, which is a distinction a text finder could not make.
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// RED — **the application's own verbs are answered before a window is
@@ -129346,7 +129627,7 @@ mod quit_with_no_window_tests {
     /// goes red — which is the bug, exactly.
     #[test]
     fn a_menu_quit_is_dispatched_before_the_landing_asks_for_a_window() {
-        let landing = body("    fn answer_a_menu_row(");
+        let landing = method_body("FolioApp", "answer_a_menu_row");
         // The needles are the code's own spelling and not the prose around it:
         // a comment that stayed put while the call moved would otherwise keep
         // this green.
@@ -129384,21 +129665,31 @@ mod quit_with_no_window_tests {
     #[test]
     fn every_door_onto_the_quit_records_the_same_debt() {
         assert!(
-            body("    fn run_a_verb_of_the_applications(").contains("app.ask_to_quit();"),
+            method_body("FolioApp", "run_a_verb_of_the_applications")
+                .contains("app.ask_to_quit();"),
             "the menu bar's Quit does not reach the quit transaction"
         );
         assert!(
-            body("    fn run_shortcut(").contains("self.app.ask_to_quit();"),
+            method_body("Runtime", "run_shortcut").contains("self.app.ask_to_quit();"),
             "the chord no longer records the debt through the one door"
         );
         assert!(
-            body("    fn begin_the_systems_quit(").contains("app.ask_to_quit();"),
+            method_body("FolioApp", "begin_the_systems_quit").contains("app.ask_to_quit();"),
             "AppKit's own quit request no longer records it through the one door"
         );
-        // And nothing writes the flag behind that door's back. The needle is
-        // spelled in two halves so that this line is not itself an occurrence.
+        // And nothing writes the flag behind that door's back. Counted over the
+        // package and not over one file, because "somewhere other than
+        // `App::ask_to_quit`" includes somewhere else entirely. The needle
+        // stays in two halves for P18 to join.
         assert_eq!(
-            SOURCE.matches(concat!("quit_requested", " = true")).count(),
+            found(
+                bt_source::Needle::new(bt_source::Pattern::text(concat!(
+                    "quit_requested",
+                    " = true"
+                ))),
+                bt_source::View::Raw,
+            )
+            .len(),
             1,
             "the quit debt is recorded somewhere other than `App::ask_to_quit`"
         );
@@ -130008,16 +130299,47 @@ mod live_markdown_edit_tests {
 mod refused_preview_card_tests {
     use super::{PictureRefusal, i18n, refused_preview_card, seats};
 
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Eleven of the joints below are wiring, and wiring has no value to assert
+    // without a window — so they are held as source pins. They used to read
+    // `include_str!("main.rs")`; they now ask `bt-source` about an *item* of
+    // this crate, so no claim here is bound to the file the method happens to
+    // be written in today (`docs/plans/bt-app-split-prep.md` §6.3). The commit
+    // before this one ran both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body`,
+    // `method_body` and `found` live.
 
-    /// The body of a method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// Every refusal the picture lane can put on a pane with nothing on it.
@@ -130121,16 +130443,24 @@ mod refused_preview_card_tests {
     /// nothing at all.
     #[test]
     fn the_refused_and_unknown_pages_share_one_card() {
+        // Counted over the package and not over one file: a second builder is
+        // the defect, and it could be written anywhere. The needle stays in two
+        // pieces for P18 to join.
         assert_eq!(
-            SOURCE
-                .matches(concat!("fn ", "refused_preview_card("))
-                .count(),
+            found(
+                bt_source::Needle::new(bt_source::Pattern::text(concat!(
+                    "fn ",
+                    "refused_preview_card("
+                ))),
+                bt_source::View::Raw,
+            )
+            .len(),
             1,
             "the card is built in more than one place, or nowhere"
         );
         // ① the pane's dressing pass builds both of its cards there — the
         //    picture it would not draw, and the document nothing here reads.
-        let dressing = body(concat!("    fn ", "refresh_chrome_with_overlay("));
+        let dressing = method_body("Runtime", "refresh_chrome_with_overlay");
         assert_eq!(
             dressing
                 .matches(concat!("refused_preview_card", "("))
@@ -130143,7 +130473,7 @@ mod refused_preview_card_tests {
             "the pane's card builder never asks the picture lane, so a refused picture is a bare sentence again"
         );
         // ② and a window's two, through the same function.
-        let window = body(concat!("    fn ", "float_refusal_words("));
+        let window = method_body("Runtime", "float_refusal_words");
         assert_eq!(
             window.matches(concat!("refused_preview_card", "(")).count(),
             2,
@@ -130151,20 +130481,20 @@ mod refused_preview_card_tests {
         );
         // ③ both hosts paint through the painter they already shared.
         assert!(
-            body(concat!("    fn ", "push_float_refusal_card("))
+            method_body("Runtime", "push_float_refusal_card")
                 .contains(concat!("seats::", "push_preview_card(")),
             "a window draws the card with something other than the pane's painter"
         );
         // ④ the pane's paint and its hit test read one geometry — the pane's
         //    card button is sized by the words this frame dressed.
         assert!(
-            body(concat!("    fn ", "docked_chrome_target_at("))
+            method_body("Runtime", "docked_chrome_target_at")
                 .contains(concat!("preview_card", "_verbs")),
             "the pane's card button is hit from something other than the words it was drawn with"
         );
         // ⑤ and the window's hit test asks the same question its paint asked.
         assert!(
-            body(concat!("    fn ", "float_hit_at(")).contains(concat!("float_refusal_words", "(")),
+            method_body("Runtime", "float_hit_at").contains(concat!("float_refusal_words", "(")),
             "the window's card button is hit from a second reading of what is refused"
         );
     }
@@ -130183,30 +130513,30 @@ mod refused_preview_card_tests {
     fn pressing_the_button_on_a_refused_page_runs_the_same_verb_as_the_unknown_page() {
         // The pane's button and the window's reach the same verb.
         assert!(
-            body(concat!("    fn ", "chrome_mouse_input("))
+            method_body("Runtime", "chrome_mouse_input")
                 .contains(concat!("ChromeTarget::", "PreviewOpenButton(_) => {")),
             "the pane's card button no longer takes a press"
         );
         assert!(
-            body(concat!("    fn ", "open_preview_externally("))
+            method_body("Runtime", "open_preview_externally")
                 .contains(concat!("open_preview_externally_on", "(")),
             "the pane's button has grown a second verb of its own"
         );
         assert!(
-            body(concat!("    fn ", "press_float(")).contains(concat!(
+            method_body("Runtime", "press_float").contains(concat!(
                 "open_preview_externally_on(",
                 "PreviewSurface::Float(id))"
             )),
             "the window's card button no longer reaches the pane's verb"
         );
         // And that one verb names the file through both lanes.
-        let verb = body(concat!("    fn ", "open_preview_externally_on("));
+        let verb = method_body("Runtime", "open_preview_externally_on");
         assert!(
             verb.contains(concat!("preview_file_on(", "surface)"))
                 && verb.contains(concat!("open_path_in_default_app", "(")),
             "the verb no longer asks this surface for its file, or no longer hands it over"
         );
-        let file = body(concat!("    fn ", "preview_file_on("));
+        let file = method_body("Runtime", "preview_file_on");
         assert!(
             file.contains(concat!("preview_buffer_on(", "surface)"))
                 && file.contains(concat!("preview_picture(", "surface)")),
@@ -130214,7 +130544,7 @@ mod refused_preview_card_tests {
         );
         // One launcher, and it is the door it has always been.
         assert!(
-            body(concat!("    fn ", "open_path_in_default_app("))
+            method_body("Runtime", "open_path_in_default_app")
                 .contains(concat!("self.", "open_local_path(path)")),
             "the card's button no longer goes through this window's one door"
         );
