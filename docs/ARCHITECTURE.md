@@ -431,6 +431,7 @@ happen" has one answer and a guard can hold it.
 | constructing a child process | `bt_platform::quiet_command_named` (and `quiet_command`) — absolute path resolved by `handoff::program_on_path` | pinned as the only `Command` construction |
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace | its own module, one function per verb |
 | starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` — a name and a priority band | every call site is in `bt-app`, so the name is the thread |
+| taking a native window's messages away from the framework | `bt_platform::let_the_system_translate_touch` — the touch subclass that hands `WM_TOUCH` and the three `WM_POINTER*` to `DefWindowProc` | a message table pinned by test; called once per window, from the two `create_window` sites |
 
 Two corollaries. **Each lane declares itself**: a new kind of read joins
 `file_reads` with a named lane rather than reading bytes beside it. **The worker

@@ -3413,6 +3413,9 @@ mod windows_impl {
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
                 KeyboardAndMouse::{GetCapture, GetKeyboardLayout, SetFocus, VkKeyScanW},
+                // One call, and it undoes one winit makes — see
+                // [`let_the_system_translate_touch`].
+                Touch::UnregisterTouchWindow,
             },
             Shell::{
                 ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA, Common::COMDLG_FILTERSPEC, DefSubclassProc,
@@ -3426,8 +3429,8 @@ mod windows_impl {
                 TBPF_PAUSED, TaskbarList,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
-                FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GA_ROOT,
+                AppendMenuW, CreateCaret, CreatePopupMenu, DefWindowProcW, DestroyCaret,
+                DestroyMenu, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GA_ROOT,
                 GCLP_HBRBACKGROUND, GetAncestor, GetClientRect, GetCursorPos, GetSystemMetrics,
                 GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
                 HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic,
@@ -3438,8 +3441,9 @@ mod windows_impl {
                 SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
                 SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
                 TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DPICHANGED,
-                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_NCHITTEST,
-                WM_SETTINGCHANGE, WM_THEMECHANGED, WM_WINDOWPOSCHANGING, WindowFromPoint,
+                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_NCDESTROY,
+                WM_NCHITTEST, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_SETTINGCHANGE,
+                WM_THEMECHANGED, WM_TOUCH, WM_WINDOWPOSCHANGING, WindowFromPoint,
             },
         },
     };
@@ -3498,6 +3502,7 @@ mod windows_impl {
     const FOLDER_PICKER_SUBCLASS_ID: usize = 0x4254_4650;
     const IMAGE_PICKER_SUBCLASS_ID: usize = 0x4254_4950;
     const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
+    const TOUCH_SUBCLASS_ID: usize = 0x4254_5443;
     const TASKBAR_SUBCLASS_ID: usize = 0x4254_5442;
     const SYSTEM_SETTINGS_SUBCLASS_ID: usize = 0x4254_5343;
 
@@ -5176,6 +5181,223 @@ mod windows_impl {
             }
             _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
         }
+    }
+
+    /// **The messages a touch makes that Windows' own translation has to see**,
+    /// handed to `DefWindowProc` ahead of winit's window procedure (owner
+    /// ruling 2026-09-21).
+    ///
+    /// These four and no others, because these four are exactly the ones winit
+    /// 0.30.13 takes for itself: `WM_TOUCH` and `WM_POINTERDOWN` /
+    /// `WM_POINTERUPDATE` / `WM_POINTERUP` are turned into
+    /// `WindowEvent::Touch` and answered with `ProcResult::Value(0)`, so the
+    /// default handling that would have made a mouse out of them never runs
+    /// (`winit::platform_impl::windows::event_loop::public_window_callback`).
+    /// Every other message a touch raises — `WM_GESTURE`, `WM_GESTURENOTIFY`,
+    /// `WM_POINTERENTER`, `WM_POINTERLEAVE`,
+    /// `WM_TABLET_QUERYSYSTEMGESTURESTATUS` — falls through winit's own default
+    /// arm to `DefWindowProc` already, and a window that answers nothing to the
+    /// last of those *receives every system gesture*, press-and-hold included,
+    /// which is the documented default
+    /// (<https://learn.microsoft.com/en-us/windows/win32/tablet/wm-tablet-querysystemgesturestatus-message>).
+    /// Naming one of them here would be a second statement of a route that is
+    /// already right.
+    ///
+    /// **All of the pointer input or none of it.** `WM_POINTERDOWN`'s own
+    /// remarks are explicit that *"if an application selectively consumes some
+    /// pointer input and passes the rest to DefWindowProc, the resulting
+    /// behavior is undefined"*
+    /// (<https://learn.microsoft.com/en-us/windows/win32/inputmsg/wm-pointerdown>),
+    /// so this list is the whole of what winit would have consumed rather than
+    /// the part of it somebody wanted back.
+    const TOUCH_GOES_TO_THE_SYSTEM: [u32; 4] =
+        [WM_TOUCH, WM_POINTERUPDATE, WM_POINTERDOWN, WM_POINTERUP];
+
+    /// Whether this message is one of [`TOUCH_GOES_TO_THE_SYSTEM`].
+    ///
+    /// The subclass's whole routing decision, as a function, so that what is
+    /// forwarded is a thing a test can ask rather than a thing a test has to
+    /// deliver a finger to.
+    fn touch_goes_to_the_system(message: u32) -> bool {
+        TOUCH_GOES_TO_THE_SYSTEM.contains(&message)
+    }
+
+    /// Everything the touch subclass reads, in one stable allocation the
+    /// subclass owns and frees — see [`let_the_system_translate_touch`].
+    struct TouchToTheSystem {
+        /// **The self-report** (`docs/CONVENTIONS.md` §十 rule 2): a touch that
+        /// reached this window at all, said once, so that the road can be shown
+        /// to have been walked before anything about the far end of it is
+        /// claimed.
+        report: Box<dyn Fn()>,
+        /// Whether [`Self::report`] has been spent. A `Cell` and not an atomic
+        /// for `TaskbarState`'s reason: both sides are the window's own thread,
+        /// and an atomic here would be a claim about sharing that is not true.
+        reported: Cell<bool>,
+    }
+
+    impl TouchToTheSystem {
+        /// A touch message arrived on this window. The first one says so and
+        /// every one after it says nothing — a finger that is drawing a line
+        /// raises these by the hundred.
+        fn arrived(&self) {
+            if self.reported.replace(true) {
+                return;
+            }
+            (self.report)();
+        }
+    }
+
+    /// **Touch is the system's to translate, and this is the window saying so**
+    /// (owner ruling 2026-09-21).
+    ///
+    /// # What was wrong
+    ///
+    /// Folio answered nothing to a finger: no tap, no drag, no scroll, on a
+    /// touch screen or through a remote-desktop tool that sends touch. Two
+    /// facts, and the second is a consequence of the first. winit registers
+    /// every window on a machine with a digitizer for touch input —
+    /// `RegisterTouchWindow(window, TWF_WANTPALM)` in its own window
+    /// constructor — and *"by default, you receive `WM_GESTURE` messages
+    /// instead of `WM_TOUCH` messages. If you call `RegisterTouchWindow`, you
+    /// will stop receiving `WM_GESTURE` messages"*
+    /// (<https://learn.microsoft.com/en-us/windows/win32/wintouch/getting-started-with-multi-touch-messages>;
+    /// the two are *"mutually exclusive"* per
+    /// <https://learn.microsoft.com/en-us/windows/win32/wintouch/troubleshooting-applications>).
+    /// So the system's gesture engine — the thing that makes a tap a click, a
+    /// drag a scroll with its own inertia, and a press-and-hold a right click —
+    /// was switched off for this window. And winit then consumed the raw
+    /// messages that were left ([`TOUCH_GOES_TO_THE_SYSTEM`]) to deliver
+    /// `WindowEvent::Touch`, which this program does not read, so nothing was
+    /// promoted to mouse input either.
+    ///
+    /// # What this does, and why it is not a gesture engine of our own
+    ///
+    /// The owner's ruling is that Folio writes no translation from touch to
+    /// anything: *the system* turns touch into the mouse, as it does for every
+    /// ordinary Windows program, with the system's own feel. One engine that
+    /// nobody here maintains beats one that somebody here does.
+    ///
+    /// Two halves, and each is one sentence:
+    ///
+    /// 1. **The window is unregistered for touch**, which hands the gesture
+    ///    engine back (`UnregisterTouchWindow`). Best-effort and not propagated:
+    ///    on a machine with no digitizer winit never registered the window, so
+    ///    this refuses, and a refusal there means the thing it asks for is
+    ///    already true.
+    /// 2. **A subclass gives the four messages winit would consume to
+    ///    `DefWindowProc` instead**, before winit's window procedure can see
+    ///    them — a subclass procedure runs ahead of the original window
+    ///    procedure, which is the class procedure winit registered, and
+    ///    `DefSubclassProc` is what would carry a message on to it. *"If the
+    ///    application does not process this message, it should call
+    ///    `DefWindowProc` … `DefWindowProc` may generate one or more
+    ///    `WM_GESTURE` messages if the sequence of input from this and,
+    ///    possibly, other pointers is recognized as a gesture. If a gesture is
+    ///    not recognized, `DefWindowProc` may generate mouse input"*
+    ///    (<https://learn.microsoft.com/en-us/windows/win32/inputmsg/wm-pointerdown>).
+    ///    `WM_TOUCH` is in the list for the same reason and for one of its own:
+    ///    *"If the application does not process the message, it must call
+    ///    `DefWindowProc`. Not doing so causes the application to leak memory
+    ///    because the touch input handle is not closed"*
+    ///    (<https://learn.microsoft.com/en-us/windows/win32/wintouch/wm-touchdown>)
+    ///    — and after step 1 a `WM_TOUCH` should not arrive at all, so the entry
+    ///    is what holds the window between this call and a registration that
+    ///    could not be given back.
+    ///
+    /// What arrives afterwards is `WM_LBUTTONDOWN`, `WM_MOUSEMOVE`,
+    /// `WM_MOUSEWHEEL` and the rest, which winit reads and this program has
+    /// answered since its first window.
+    ///
+    /// # What could be verified by reading, and what could not
+    ///
+    /// Read and held by tests: the four ids, that nothing else is taken away
+    /// from winit, that a window that is not ours is refused, and that the
+    /// self-report is said once per window. Read and *not* testable here: that
+    /// winit registers for touch and consumes exactly those four (its own
+    /// source, version 0.30.13), and the documented promotion quoted above.
+    /// **Only a real touch source on the owner's machine can show that a tap
+    /// reaches the terminal** — which is what `report` is for.
+    ///
+    /// # Called once per window
+    ///
+    /// Beside the rest of a window's native setup. A second call on the same
+    /// window would replace the first's reference data rather than add a
+    /// second subclass, and the first allocation would never be reclaimed;
+    /// nothing calls it twice.
+    pub fn let_the_system_translate_touch(
+        window: NativeWindow,
+        report: Box<dyn Fn()>,
+    ) -> Result<(), String> {
+        let hwnd = window.as_hwnd();
+        let state = Box::into_raw(Box::new(TouchToTheSystem {
+            report,
+            reported: Cell::new(false),
+        }));
+        // SAFETY: `state` is a live allocation handed to the subclass as its
+        // reference data, and the subclass reclaims it at `WM_NCDESTROY` —
+        // after which no further message can reach that procedure. The window
+        // is this thread's; `SetWindowSubclass` refuses any other.
+        let installed = unsafe {
+            SetWindowSubclass(
+                hwnd,
+                Some(touch_to_the_system_subclass),
+                TOUCH_SUBCLASS_ID,
+                state as usize,
+            )
+        };
+        if !installed.as_bool() {
+            // SAFETY: nothing took the pointer, so this is its only reclaim.
+            drop(unsafe { Box::from_raw(state) });
+            return Err(format!(
+                "SetWindowSubclass(touch to the system) failed: {}",
+                unsafe { GetLastError().0 }
+            ));
+        }
+        // SAFETY: as above. A window that was never registered for touch
+        // refuses, which is the answer this call wanted anyway.
+        let _ = unsafe { UnregisterTouchWindow(hwnd) };
+        Ok(())
+    }
+
+    /// [`let_the_system_translate_touch`]'s half that runs on the messages.
+    unsafe extern "system" fn touch_to_the_system_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        reference_data: usize,
+    ) -> LRESULT {
+        // **The window is going**, and this is where a subclass with an
+        // allocation behind it lets go of both — the shape the documented
+        // `SetWindowSubclass` sample has: remove the subclass, then carry the
+        // message on. `CustomWindowFrame` removes its own in `Drop` instead
+        // because a value in the application holds it; this one is held by
+        // nothing above, so the last message is its owner.
+        if message == WM_NCDESTROY {
+            let _ = unsafe {
+                RemoveWindowSubclass(hwnd, Some(touch_to_the_system_subclass), TOUCH_SUBCLASS_ID)
+            };
+            // SAFETY: the allocation `let_the_system_translate_touch` handed to
+            // this subclass, reclaimed here and only here. `WM_NCDESTROY`
+            // arrives once per window and nothing reaches this procedure after
+            // it, so no later message can read the freed state.
+            drop(unsafe { Box::from_raw(reference_data as *mut TouchToTheSystem) });
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        if !touch_goes_to_the_system(message) {
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        // SAFETY: the allocation above is live until the `WM_NCDESTROY` handled
+        // above, and this procedure runs on the thread that owns the window.
+        let state = unsafe { &*(reference_data as *const TouchToTheSystem) };
+        state.arrived();
+        // **`DefWindowProcW` and not `DefSubclassProc`, and that is the whole
+        // ticket**: the default handling runs now and winit's window procedure
+        // never sees the message, so the system translates it instead of
+        // delivering it to a program that reads nothing.
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
     }
 
     /// Everything the taskbar subclass reads, kept in one stable allocation the
@@ -8835,12 +9057,140 @@ mod windows_impl {
     mod tests {
         use super::{
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
-            ShellPickKind, compositor_failure, newest_live_owner, primary_language_id,
-            retry_open_clipboard, wide_null,
+            ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM, TouchToTheSystem, compositor_failure,
+            let_the_system_translate_touch, newest_live_owner, primary_language_id,
+            retry_open_clipboard, touch_goes_to_the_system, wide_null,
         };
         use crate::NativeWindow;
         use crate::handoff::{validate_local_image_path, validate_openable_path};
+        use std::cell::Cell;
         use std::path::{Path, PathBuf};
+        use std::rc::Rc;
+
+        /// **The four messages taken away from winit, and no fifth** (the touch
+        /// ruling of 2026-09-21).
+        ///
+        /// The table is the claim, written as the numbers Windows' own headers
+        /// give rather than as the constants, so that a rename upstream cannot
+        /// make this test agree with itself about a different set of messages.
+        /// The four are exactly what winit 0.30.13 answers `Value(0)` to; every
+        /// id in the second list reaches `DefWindowProc` through winit's own
+        /// default arm already, and taking one of them would be this program
+        /// standing in a road that is not blocked.
+        ///
+        /// MUTATION: add any id to `TOUCH_GOES_TO_THE_SYSTEM` and the second
+        /// half goes red naming it; drop one and the first half does.
+        #[test]
+        fn the_messages_handed_to_the_system_are_the_four_winit_would_consume() {
+            assert_eq!(
+                TOUCH_GOES_TO_THE_SYSTEM,
+                [0x0240, 0x0245, 0x0246, 0x0247],
+                "WM_TOUCH, WM_POINTERUPDATE, WM_POINTERDOWN and WM_POINTERUP are the messages \
+                 winit turns into WindowEvent::Touch and answers itself; those are the ones the \
+                 system has to see instead"
+            );
+            for (message, name) in [
+                (0x0240_u32, "WM_TOUCH"),
+                (0x0245, "WM_POINTERUPDATE"),
+                (0x0246, "WM_POINTERDOWN"),
+                (0x0247, "WM_POINTERUP"),
+            ] {
+                assert!(
+                    touch_goes_to_the_system(message),
+                    "{name} is winit's to consume and therefore ours to hand over"
+                );
+            }
+            for (message, name) in [
+                (0x0119_u32, "WM_GESTURE"),
+                (0x011A, "WM_GESTURENOTIFY"),
+                (0x0084, "WM_NCHITTEST"),
+                (0x0200, "WM_MOUSEMOVE"),
+                (0x0201, "WM_LBUTTONDOWN"),
+                (0x0202, "WM_LBUTTONUP"),
+                (0x0204, "WM_RBUTTONDOWN"),
+                (0x020A, "WM_MOUSEWHEEL"),
+                (0x0249, "WM_POINTERENTER"),
+                (0x024A, "WM_POINTERLEAVE"),
+                (0x02CC, "WM_TABLET_QUERYSYSTEMGESTURESTATUS"),
+                (0x0082, "WM_NCDESTROY"),
+            ] {
+                assert!(
+                    !touch_goes_to_the_system(message),
+                    "{name} is not taken away from winit: the mouse messages are what this \
+                     ticket exists to deliver, and the rest already reach DefWindowProc through \
+                     winit's own default arm"
+                );
+            }
+        }
+
+        /// RED — **a window that is not ours is refused, and nothing is left
+        /// behind.**
+        ///
+        /// The door's only refusal, and the one a test can reach without a
+        /// digitizer: `SetWindowSubclass` will not subclass a handle that names
+        /// no window of this thread, so the call answers with Windows' own
+        /// error and reclaims the state it had built for it.
+        ///
+        /// MUTATION: install the subclass without reading its answer and this
+        /// goes red; leak the allocation on the failing path and Miri does.
+        #[test]
+        fn touch_is_not_handed_over_by_a_window_that_is_not_ours() {
+            let said = Rc::new(Cell::new(0_u32));
+            let error = {
+                let said = Rc::clone(&said);
+                let_the_system_translate_touch(
+                    NativeWindow::stand_in(11),
+                    Box::new(move || said.set(said.get() + 1)),
+                )
+            }
+            .expect_err(
+                "a token that names no window has no window procedure to stand in front of",
+            );
+            assert!(
+                error.starts_with("SetWindowSubclass(touch to the system) failed: "),
+                "the refusal names the call that refused, as every other bridge here does: {error}"
+            );
+            assert_eq!(
+                said.get(),
+                0,
+                "a door that refused reports no touch: the self-report is a fact about a message \
+                 that arrived, not about a call that was made"
+            );
+        }
+
+        /// RED — **the self-report is said once per window.**
+        ///
+        /// A finger drawing one line raises these by the hundred, and the line
+        /// the owner reads is evidence that the road was walked at all
+        /// (`docs/CONVENTIONS.md` §十 rule 2) — one per window, not one per
+        /// contact. Two states here are two windows: each says its own line.
+        ///
+        /// MUTATION: report on every message and the first count is 4; share
+        /// one flag between windows and the second is 0.
+        #[test]
+        fn the_first_touch_on_a_window_says_so_and_every_one_after_it_says_nothing() {
+            let said = Rc::new(Cell::new(0_u32));
+            let window = |said: &Rc<Cell<u32>>| {
+                let said = Rc::clone(said);
+                TouchToTheSystem {
+                    report: Box::new(move || said.set(said.get() + 1)),
+                    reported: Cell::new(false),
+                }
+            };
+            let first = window(&said);
+            for _ in 0..4 {
+                first.arrived();
+            }
+            assert_eq!(said.get(), 1, "one window, one line, however many contacts");
+            let second = window(&said);
+            second.arrived();
+            second.arrived();
+            assert_eq!(
+                said.get(),
+                2,
+                "a second window is a second road and says its own line"
+            );
+        }
 
         /// A DirectComposition refusal has to be readable by the person holding
         /// the machine it refused on, and there is no fallback path to soften it
@@ -10625,15 +10975,16 @@ pub use windows_impl::{
     file_product_version, flash_window, get_dpi_for_window, get_window_rect, get_work_area,
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
     install_window_class_background, is_window_cloaked, is_window_minimized, leave_process,
-    message_box, monitor_id_at, monospace_font_families, os_ui_language, pointer_position,
-    pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
-    register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
-    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, silence_std_streams, spawn_at_priority, spawn_at_priority_with_stack,
-    stand_window_at, std_error_is_console, system_backdrop_available, system_uses_light_apps,
-    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
-    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_screen_rect,
-    wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error, write_to_console,
+    let_the_system_translate_touch, message_box, monitor_id_at, monospace_font_families,
+    os_ui_language, pointer_position, pointer_position_in_window, read_context_menu, recycle,
+    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
+    request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
+    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
+    spawn_at_priority, spawn_at_priority_with_stack, stand_window_at, std_error_is_console,
+    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
+    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
+    window_is_exposed, work_area_at, write_std_error, write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -10652,10 +11003,10 @@ pub use portable_impl::{
     CustomWindowFrame, FilePickKind, ImeSystemCaret, ShellPickKind, adopt_parent_console,
     announce_explorer_menu_change, detach_console, directory_folds_case,
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
-    is_window_cloaked, leave_process, read_context_menu, redirect_std_streams_to_file,
-    register_clipboard_owner, remove_context_menu, set_system_backdrop, silence_std_streams,
-    system_backdrop_available, thread_mouse_capture, virtual_key_for_character, write_std_error,
-    write_to_console,
+    is_window_cloaked, leave_process, let_the_system_translate_touch, read_context_menu,
+    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
+    set_system_backdrop, silence_std_streams, system_backdrop_available, thread_mouse_capture,
+    virtual_key_for_character, write_std_error, write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).

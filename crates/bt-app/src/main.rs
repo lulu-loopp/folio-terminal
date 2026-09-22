@@ -39113,6 +39113,13 @@ impl Runtime<'_> {
         )
         .map_err(|error| anyhow!(error))
         .context("install self-drawn Win32 window frame")?;
+        // **Touch is the system's to translate, and this window says so**
+        // (owner ruling 2026-09-21). Beside the frame because it is the same
+        // kind of statement about the same native window, and after it because
+        // winit made the registration this undoes when it built the window.
+        // Reported and never propagated: a window that answers nothing to a
+        // finger is a window, and a launch that died instead is not.
+        let_the_system_translate_touch(native);
         // **This window's own chrome, read where it was measured** (M3-3;
         // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
         // where the platform is asked what it still draws in this bar, and the
@@ -39778,6 +39785,9 @@ impl Runtime<'_> {
         )
         .map_err(|error| anyhow!(error))
         .context("install self-drawn Win32 window frame")?;
+        // A second window answers a finger the way the first one does — see
+        // that constructor's note.
+        let_the_system_translate_touch(native);
         // **This window's own chrome, read where it was measured** (M3-3;
         // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
         // where the platform is asked what it still draws in this bar, and the
@@ -124165,6 +124175,36 @@ fn native_window(window: &Window) -> Result<bt_platform::NativeWindow> {
         other => Err(anyhow!(
             "bt-app has no native window backend for {other:?} on this platform"
         )),
+    }
+}
+
+/// **Hand this window's touch input to the system that already knows what to do
+/// with it** (owner ruling 2026-09-21), and say so once when a finger arrives.
+///
+/// Folio writes no translation from touch to anything. Tap becomes click, drag
+/// becomes scroll and press-and-hold becomes the menu because Windows makes
+/// them so, with the system's own inertia and timings, the way every ordinary
+/// program gets them — and `bt_platform::let_the_system_translate_touch` is the
+/// one door that says it. On macOS the door does nothing, because a trackpad's
+/// gestures already arrive as mouse and scroll events.
+///
+/// **The line is the self-report** (`docs/CONVENTIONS.md` §十 rule 2). Touch
+/// reaches this program from a touch screen or from a remote-desktop tool, both
+/// of which are somebody else's machine as far as this session is concerned, so
+/// the road says once per window that it was walked: what is in
+/// `diagnostics.log` afterwards separates "the finger never reached Folio" from
+/// "it reached Folio and the system did something else with it". Once per
+/// window, no position, nothing about what was touched.
+///
+/// Both window constructors call it, and neither lets it decide whether a
+/// window opens: a refusal is a window that answers nothing to a finger, which
+/// is precisely what it did before this door existed.
+fn let_the_system_translate_touch(native: bt_platform::NativeWindow) {
+    if let Err(error) = bt_platform::let_the_system_translate_touch(
+        native,
+        Box::new(|| diagnostics::note("touch arrived; handed to the system")),
+    ) {
+        diagnostics::note(&format!("touch is not handed to the system: {error}"));
     }
 }
 

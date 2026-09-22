@@ -1079,6 +1079,12 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Input_Ime",
     "Win32_UI_TextServices",
     "Win32_UI_Input_KeyboardAndMouse",
+    # `UnregisterTouchWindow`: the one call that takes back the touch
+    # registration winit makes on every window of a machine with a digitizer,
+    # so that Windows goes on translating touch into gestures and mouse input
+    # the way it does for every other program (`let_the_system_translate_touch`).
+    # A feature and not a package, for `Win32_UI_Input_Ime`'s reason above.
+    "Win32_UI_Input_Touch",
     "Win32_UI_Shell",
     # `COMDLG_FILTERSPEC` and therefore `IFileDialog::SetFileTypes`, which is
     # what filters the picture chooser to the formats the decoder honours.
