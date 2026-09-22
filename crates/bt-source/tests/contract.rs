@@ -79,14 +79,29 @@ fn item_at(index: &Index, span: Span) -> Option<&ItemRecord> {
 /// than a paragraph somebody read once. `run_probe` is declared four times
 /// across two modules, so the key is the module path and never the name.
 ///
+/// **The kind is part of the key, and has to be.** The index holds types and
+/// their members beside the callables, and `Toast::anchor` is a field and a
+/// method of one name — two identities, not two arms of one. A key without the
+/// kind made every such pair in `bt-app` look like a duplicated identity, which
+/// is the reading §2.4 forbids in the other direction: two different things
+/// taken for one.
+///
 /// MUTATION: add a second `#[cfg(unix)]` arm to any function in `bt-app` and a
 /// twelfth row appears here; take `#[cfg(debug_assertions)]` off
-/// `panic_selftest_if_due`'s pair and one disappears.
+/// `panic_selftest_if_due`'s pair and one disappears; drop the kind from the
+/// key and the field/method pairs flood the first list.
 #[test]
 fn the_identities_bt_app_declares_twice_are_the_eleven() {
     let index = bt_app();
-    let mut by_identity: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut by_identity: BTreeMap<(&'static str, String), Vec<String>> = BTreeMap::new();
     for record in index.items() {
+        let sort = if record.kind().is_callable() {
+            "callable"
+        } else if record.kind().is_type() {
+            "type"
+        } else {
+            "member"
+        };
         for identity in record.identities() {
             let owner = match (&identity.type_owner, &identity.trait_name) {
                 (Some(owner), Some(trait_name)) => format!("<{owner} as {trait_name}>::"),
@@ -95,23 +110,27 @@ fn the_identities_bt_app_declares_twice_are_the_eleven() {
                 (None, None) => String::new(),
             };
             by_identity
-                .entry(format!(
-                    "{}::{owner}{}",
-                    identity.module_path, identity.name
+                .entry((
+                    sort,
+                    format!("{}::{owner}{}", identity.module_path, identity.name),
                 ))
                 .or_default()
                 .push(identity.variant.to_string());
         }
     }
-    let duplicated: BTreeMap<String, Vec<String>> = by_identity
+    let duplicated: BTreeMap<(&str, String), Vec<String>> = by_identity
         .into_iter()
         .filter(|(_, variants)| variants.len() > 1)
         .collect();
     println!("declared more than once:\n{duplicated:#?}");
 
-    let names: Vec<&str> = duplicated.keys().map(String::as_str).collect();
+    let callables: Vec<&str> = duplicated
+        .keys()
+        .filter(|(sort, _)| *sort == "callable")
+        .map(|(_, path)| path.as_str())
+        .collect();
     assert_eq!(
-        names,
+        callables,
         [
             "crate::FolioApp::surface_selftest_if_due",
             "crate::attention_copilot::run_probe",
@@ -128,13 +147,34 @@ fn the_identities_bt_app_declares_twice_are_the_eleven() {
         "the eleven of `docs/plans/bt-app-split-prep.md` §2.4, regenerated — a twelfth is a \
          finding about the tree, never a row added to make this green"
     );
+
+    // The same claim for the data the program keeps, whose identities arrived
+    // with the struct and field ticket. `bt-app` declares none of them twice:
+    // the day it does, the row below is a finding about the tree in exactly the
+    // way a twelfth callable would be.
+    let data: Vec<String> = duplicated
+        .keys()
+        .filter(|(sort, _)| *sort != "callable")
+        .map(|(sort, path)| format!("{sort} {path}"))
+        .collect();
+    assert_eq!(
+        data,
+        Vec::<String>::new(),
+        "no type and no field of `bt-app` is declared under two conditions"
+    );
+
     for (identity, variants) in &duplicated {
-        assert_eq!(variants.len(), 2, "{identity} has {} arms", variants.len());
+        assert_eq!(
+            variants.len(),
+            2,
+            "{identity:?} has {} arms",
+            variants.len()
+        );
         let distinct: BTreeSet<&String> = variants.iter().collect();
         assert_eq!(
             distinct.len(),
             2,
-            "{identity}'s two declarations stand on the same predicate"
+            "{identity:?}'s two declarations stand on the same predicate"
         );
     }
 }

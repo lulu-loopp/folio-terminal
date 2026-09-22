@@ -21,9 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bt_source::{
-    DiskScope, Index, ItemQuery, Package, QueryFailure, Span, TargetId, TargetKind, TargetRoot,
-    Universe, Vendor, View, Workspace, report, universes,
+    DiskScope, Index, ItemKind, ItemQuery, Needle, Package, Pattern, QueryFailure, Scope, Search,
+    Span, TargetId, TargetKind, TargetRoot, Universe, Vendor, View, Workspace, report, universes,
 };
+use syn::parse::Parser as _;
 
 // ── 1. the compile-time proof ─────────────────────────────────────────────
 
@@ -197,6 +198,11 @@ fn the_lowering_leaves_nothing_of_the_universe_behind() {
         );
     }
 
+    let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for item in index.items() {
+        *by_kind.entry(format!("{:?}", item.kind())).or_default() += 1;
+    }
+    println!("bt-app items by kind: {by_kind:?}");
     println!(
         "bt-app: {} files, {} lines, {} bytes, {} items, {} identifier tokens, {} literals, \
          {} comment masks",
@@ -241,24 +247,47 @@ fn slicing_the_union_at_an_item_yields_that_item() {
     let mut checked = 0usize;
     for item in index.items() {
         let text = index.text(item.whole());
-        // A method is parsed as a method, a trait's own declaration as one, and
-        // a free function as an item: the shapes are not interchangeable, and
-        // asking for the wrong one would be a round trip that proved nothing.
-        let parsed_name = if item.type_owner().is_some() {
-            syn::parse_str::<syn::ImplItemFn>(text)
+        // A method is parsed as a method, a trait's own declaration as one, a
+        // free function and a data type as items, a field as a field and a
+        // variant as a variant: the shapes are not interchangeable, and asking
+        // for the wrong one would be a round trip that proved nothing.
+        let parsed_name = match item.kind() {
+            ItemKind::AssociatedFunction if item.type_owner().is_some() => {
+                syn::parse_str::<syn::ImplItemFn>(text)
+                    .ok()
+                    .map(|parsed| parsed.sig.ident.to_string())
+            }
+            ItemKind::AssociatedFunction => syn::parse_str::<syn::TraitItemFn>(text)
                 .ok()
-                .map(|parsed| parsed.sig.ident.to_string())
-        } else if item.trait_name().is_some() {
-            syn::parse_str::<syn::TraitItemFn>(text)
+                .map(|parsed| parsed.sig.ident.to_string()),
+            ItemKind::Function | ItemKind::Struct | ItemKind::Enum | ItemKind::Union => {
+                syn::parse_str::<syn::Item>(text)
+                    .ok()
+                    .and_then(|parsed| match parsed {
+                        syn::Item::Fn(function) => Some(function.sig.ident.to_string()),
+                        syn::Item::Struct(structure) => Some(structure.ident.to_string()),
+                        syn::Item::Enum(enumeration) => Some(enumeration.ident.to_string()),
+                        syn::Item::Union(union) => Some(union.ident.to_string()),
+                        _ => None,
+                    })
+            }
+            // A tuple field's name is its position, which the text it is
+            // written as does not carry; that the slice parses **as an unnamed
+            // field** is the whole of what the span can be held to, and the
+            // named case carries its name like everything else.
+            ItemKind::Field => syn::Field::parse_named
+                .parse_str(text)
                 .ok()
-                .map(|parsed| parsed.sig.ident.to_string())
-        } else {
-            syn::parse_str::<syn::Item>(text)
+                .and_then(|field| field.ident.map(|name| name.to_string()))
+                .or_else(|| {
+                    syn::Field::parse_unnamed
+                        .parse_str(text)
+                        .ok()
+                        .map(|_| item.name().to_owned())
+                }),
+            ItemKind::Variant => syn::parse_str::<syn::Variant>(text)
                 .ok()
-                .and_then(|parsed| match parsed {
-                    syn::Item::Fn(function) => Some(function.sig.ident.to_string()),
-                    _ => None,
-                })
+                .map(|variant| variant.ident.to_string()),
         };
         let at = index
             .locate(item.whole().start())
@@ -559,6 +588,373 @@ fn a_ruled_out_candidate_prints_one_module_path_and_one_owner() {
     assert!(
         !printed.contains("crate::runtime::crate::"),
         "a `crate::` segment is glued inside the candidate path:\n{printed}"
+    );
+}
+
+// ── types, and the members they carry ─────────────────────────────────────
+
+fn type_members_fixture() -> Arc<Index> {
+    Index::shared(&fixture_universe("type_members")).expect("the fixture lowers")
+}
+
+/// RED — **a `struct` is an identity, found by its own name wherever it is
+/// written** (§2.4, extended past the callables).
+///
+/// A guard that says "the counter lives on `App`" has to be able to name `App`.
+/// Before this, `bt-source` held callables only, so the nearest a reader could
+/// get was a spelling somewhere in the package — a reading that stays green when
+/// the field moves to another struct, which is the failure this crate exists to
+/// remove.
+///
+/// MUTATION: drop the `Item::Struct` arm from `lower::Parsed::walk` and every
+/// row here is a multiplicity of zero.
+#[test]
+fn a_struct_is_an_identity_found_by_name_in_a_submodule() {
+    let index = type_members_fixture();
+    let record = index
+        .one(&ItemQuery::type_item("App"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(record.kind(), ItemKind::Struct);
+    assert_eq!(record.type_owner(), None, "a type's own name is its name");
+    assert_eq!(
+        record
+            .identities()
+            .map(|it| it.to_string())
+            .collect::<Vec<_>>(),
+        ["crate::panes::App"],
+        "the module it is written in is the identity's first component, and the query \
+         did not have to know it"
+    );
+
+    // The body of a type is the list its members are written in.
+    let body = index
+        .body_of(&ItemQuery::type_item("App"))
+        .expect("a named field list is a body");
+    assert!(body.starts_with('{') && body.ends_with('}'), "{body}");
+    assert!(body.contains("pane_seat"), "{body}");
+
+    // A unit struct has no list, so it has no body — and its whole text is its
+    // declaration, semicolon included.
+    assert_eq!(
+        index
+            .declaration_of(&ItemQuery::type_item("Nothing"))
+            .expect("a unit struct is still an item"),
+        "pub struct Nothing;"
+    );
+    assert!(matches!(
+        index.body_of(&ItemQuery::type_item("Nothing")),
+        Err(QueryFailure::NoBody { .. })
+    ));
+
+    // The three kinds are one constructor and three answers.
+    for (name, kind) in [
+        ("Edge", ItemKind::Enum),
+        ("Word", ItemKind::Union),
+        ("Wrapper", ItemKind::Struct),
+    ] {
+        assert_eq!(
+            index
+                .one(&ItemQuery::type_item(name))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .kind(),
+            kind
+        );
+    }
+}
+
+/// RED — **a field's bytes are its declaration and stop before the comma.**
+///
+/// The comma separates two fields and belongs to neither; a span that swallowed
+/// it would make the last field of a list a different shape from every other
+/// field, and a pin comparing two of them would be comparing two shapes.
+///
+/// MUTATION: end the field at the comma in `lower::Parsed::members` and the two
+/// `ends_with` rows go red; start it at the type instead of the name and the
+/// named rows lose their names.
+#[test]
+fn a_fields_span_is_its_declaration_and_the_comma_is_not_part_of_it() {
+    let index = type_members_fixture();
+    assert_eq!(
+        index
+            .declaration_of(&ItemQuery::field("App", "edge"))
+            .expect("a field of App"),
+        "pub(crate) edge: Edge",
+        "the visibility, the name and the type, and nothing after them"
+    );
+
+    // Attributes are part of a declaration for a field exactly as they are for
+    // a callable, and a doc comment is an attribute.
+    let counter = index
+        .declaration_of(&ItemQuery::field("App", "tab_ids"))
+        .expect("the counter is a field of App");
+    assert!(counter.starts_with("/// **The one counter"), "{counter}");
+    assert!(counter.ends_with("pub tab_ids: TabIds"), "{counter}");
+
+    // A tuple field is named by its position, which is the name the language
+    // gives it, and there is nothing in front of its type but its visibility.
+    assert_eq!(
+        index
+            .declaration_of(&ItemQuery::field("Wrapper", "0"))
+            .expect("the one field of a tuple struct"),
+        "pub u32"
+    );
+
+    // A field has no body, and asking for one is a refusal rather than the
+    // declaration handed back under the wrong name.
+    assert!(matches!(
+        index.body_of(&ItemQuery::field("App", "edge")),
+        Err(QueryFailure::NoBody { .. })
+    ));
+
+    // A union's fields are fields.
+    assert_eq!(
+        index
+            .declaration_of(&ItemQuery::field("Word", "bytes"))
+            .expect("a union carries fields like a struct"),
+        "pub bytes: [u8; 4]"
+    );
+}
+
+/// RED — **a field and a method of one name are two identities**, told apart by
+/// the kind and by nothing else, and both printed as a Rust path a reader can
+/// look up.
+///
+/// MUTATION: leave the kind out of `ItemQuery::selects` and each query finds two
+/// declarations and refuses — which is the better half of that mistake; the
+/// worse half is a query for the method answering with the field's bytes.
+#[test]
+fn a_field_and_a_method_of_one_name_are_two_identities() {
+    let index = type_members_fixture();
+    let field = index
+        .one(&ItemQuery::field("App", "tab_ids"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let method = index
+        .one(&ItemQuery::method("App", "tab_ids"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(field.kind(), ItemKind::Field);
+    assert_eq!(method.kind(), ItemKind::AssociatedFunction);
+    assert!(
+        !field.whole().overlaps(method.whole()),
+        "two declarations, and the field is not inside the impl block"
+    );
+    for record in [field, method] {
+        assert_eq!(
+            record
+                .identities()
+                .map(|it| it.to_string())
+                .collect::<Vec<_>>(),
+            ["crate::panes::App::tab_ids"],
+            "the module, the type, the name — the shape §2.4 prints a method in"
+        );
+    }
+}
+
+/// RED — **a member the type does not carry is a refusal naming the members it
+/// does**, and a member of a type nobody declares says that instead.
+///
+/// "Not found" plus the names beside it is a diagnosis; "not found" alone is the
+/// answer a guard reading a moved subject gets, and the whole preparation exists
+/// to stop that being an answer.
+///
+/// MUTATION: return an empty `find` instead of the refusal and the first block
+/// becomes a multiplicity of zero with nothing to read in it.
+#[test]
+fn a_member_nobody_declares_names_the_members_the_type_does_carry() {
+    let index = type_members_fixture();
+    let refused = index
+        .declaration_of(&ItemQuery::field("App", "next_tab_id"))
+        .expect_err("`App` carries no such field");
+    let QueryFailure::Member {
+        owner,
+        declarations,
+        ..
+    } = &refused
+    else {
+        panic!("{refused}");
+    };
+    assert_eq!(owner, "App");
+    assert_eq!(declarations.len(), 1, "{refused}");
+    assert!(!declarations[0].carries);
+    assert_eq!(
+        declarations[0].members,
+        ["tab_ids", "edge", "pane_seat"],
+        "in the order they are written"
+    );
+    let printed = refused.to_string();
+    assert!(
+        printed.contains("carries no field called `next_tab_id`"),
+        "{printed}"
+    );
+    assert!(printed.contains("tab_ids, edge, pane_seat"), "{printed}");
+
+    // A type that is not declared at all is a different diagnosis, and saying
+    // "no such field" about it would send the reader looking in the wrong place.
+    let no_type = index
+        .one(&ItemQuery::field("NoSuchTypeIsDeclared", "anything"))
+        .expect_err("the type is not there");
+    let QueryFailure::Member { declarations, .. } = &no_type else {
+        panic!("{no_type}");
+    };
+    assert!(declarations.is_empty(), "{no_type}");
+    assert!(
+        no_type
+            .to_string()
+            .contains("no `struct`, `enum` or `union` called `NoSuchTypeIsDeclared` is declared"),
+        "{no_type}"
+    );
+
+    // A variant's own fields are not identities, and the refusal says which
+    // members the enum really has rather than pretending there are none.
+    let variant_field = index
+        .one(&ItemQuery::field("Edge", "inset"))
+        .expect_err("a field of a variant is not an identity of this index");
+    assert!(
+        variant_field.to_string().contains("Top, Bottom, Corner"),
+        "{variant_field}"
+    );
+}
+
+/// RED — **a field carried by one `#[cfg]` arm of a type declared twice is a
+/// refusal, not one declaration as expected.**
+///
+/// This is the quiet one. The reading is `cfg`-blind on purpose (§2.4), so both
+/// arms are in the index; a query asking for one declaration and getting one
+/// would be told "yes, `Split` has `only_on_windows`" about a type that has it
+/// on one platform. The refusal names the arm that carries it and the arm that
+/// does not, and the arm can then be pinned on purpose.
+///
+/// MUTATION: take `Index::member_gap` out and the first block answers with the
+/// Windows arm's field and says nothing.
+#[test]
+fn a_field_carried_by_one_arm_of_a_split_type_names_both_arms() {
+    let index = type_members_fixture();
+    let refused = index
+        .one(&ItemQuery::field("Split", "only_on_windows"))
+        .expect_err("one arm of two carries it");
+    let QueryFailure::Member { declarations, .. } = &refused else {
+        panic!("{refused}");
+    };
+    assert_eq!(declarations.len(), 2, "{refused}");
+    assert_eq!(
+        declarations.iter().filter(|site| site.carries).count(),
+        1,
+        "{refused}"
+    );
+    let printed = refused.to_string();
+    assert!(
+        printed.contains("carried by 1 of the 2 declarations of `Split`"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("#[cfg(windows)]") && printed.contains("#[cfg(not(windows))]"),
+        "the arms are named in the words they are written in:\n{printed}"
+    );
+
+    // Said out loud, the arm is an identity like any other.
+    let pinned = index
+        .one(&ItemQuery::field("Split", "only_on_windows").in_variant(&["windows"]))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(index.text(pinned.whole()), "pub only_on_windows: u8");
+
+    // The field both arms carry is two declarations, and a query expecting one
+    // is refused by the machinery the callables use (§2.4).
+    assert!(index.find(&ItemQuery::field("Split", "shared")).is_err());
+    assert_eq!(
+        index
+            .find(&ItemQuery::field("Split", "shared").one_per_variant())
+            .expect("one per arm")
+            .len(),
+        2
+    );
+}
+
+/// RED — **a variant is a member the way a field is**, down to the span and the
+/// refusals, and its body is its own field list or the discriminant it is fixed
+/// to.
+#[test]
+fn a_variant_carries_its_fields_or_its_discriminant_as_its_body() {
+    let index = type_members_fixture();
+    assert_eq!(
+        index.text(
+            index
+                .one(&ItemQuery::variant("Edge", "Bottom"))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .whole()
+        ),
+        "Bottom { inset: u8 }",
+        "the name and its list, and not the comma after it"
+    );
+    assert_eq!(
+        index
+            .body_of(&ItemQuery::variant("Edge", "Corner"))
+            .expect("a tuple variant's list is its body"),
+        "(u8, u8)"
+    );
+    assert!(
+        matches!(
+            index.body_of(&ItemQuery::variant("Edge", "Top")),
+            Err(QueryFailure::NoBody { .. })
+        ),
+        "a fieldless variant fixed to nothing has no body"
+    );
+    assert_eq!(
+        index
+            .body_of(&ItemQuery::variant("Numbered", "Third"))
+            .expect("the discriminant is what this variant carries"),
+        "= 3"
+    );
+
+    // A variant asked of a type that has none is the same refusal a missing
+    // field is, in the words a variant is asked for in.
+    let refused = index
+        .one(&ItemQuery::variant("App", "Top"))
+        .expect_err("`App` is a struct");
+    assert!(
+        refused
+            .to_string()
+            .contains("carries no variant called `Top`"),
+        "{refused}"
+    );
+}
+
+/// RED — **a search scoped to a struct reads that struct's bytes and no
+/// others** (§4.1: where the concern is genuinely one item, the scope says so
+/// and the reading does not widen).
+///
+/// This is what a guard about a type's own contents gets instead of a
+/// whole-package count: the same needle is written once inside `App` and once
+/// outside every type, and the scoped reading sees one of them.
+///
+/// MUTATION: resolve `Scope::Item` to the file the item is in and both numbers
+/// become two.
+#[test]
+fn a_scope_over_a_struct_reads_its_own_bytes_and_no_others() {
+    let index = type_members_fixture();
+    let needle = || Needle::new(Pattern::identifier("pane_seat"));
+    let everywhere = index
+        .search(&Search::new(needle(), View::Identifiers))
+        .expect("a name of the fixture");
+    assert_eq!(
+        everywhere.len(),
+        2,
+        "the field and the free function:\n{}",
+        everywhere.report(&index)
+    );
+    let inside = index
+        .search(
+            &Search::new(needle(), View::Identifiers)
+                .in_scope(Scope::Item(ItemQuery::type_item("App"))),
+        )
+        .expect("a struct is a scope");
+    assert_eq!(inside.len(), 1, "{}", inside.report(&index));
+    assert_eq!(
+        inside
+            .owners(&index)
+            .into_keys()
+            .map(|identity| identity.to_string())
+            .collect::<Vec<_>>(),
+        ["crate::panes::App::pane_seat"],
+        "and the occurrence inside a type is owned by the member it declares"
     );
 }
 
