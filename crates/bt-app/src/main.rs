@@ -112721,6 +112721,27 @@ mod pointer_chord_site_tests {
 /// say without a screen. What it can say is which door calls which.
 #[cfg(test)]
 mod pages_are_plural_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Every reader in this module asked `main.rs` for its
+    // text — six body pins over five methods. Nothing is deleted here: each
+    // computes its answer twice, once from the file and once from `bt-source`,
+    // and asserts the two are the same bytes. The deletion is the commit after
+    // this one, because two implementations of one judgement do not vouch for
+    // each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body` and `method_body` are that module's helpers word for
+    // word and `agreed` is `focus_mode_door_tests`', whose finder is this one's
+    // shape exactly — it runs **past** the closing brace, to the next
+    // `\n    fn `, so its slice holds the rest of the declaration, the whole body
+    // braces and all, and then the closing line and the next method's doc
+    // comment.
+    //
+    // **One owner, established rather than assumed.** All five pins are methods
+    // of `Runtime`; the deleted finder took the first `    fn name(` in this
+    // file, which is a method of whatever `impl` happens to come first.
+    use bt_source::{Index, ItemQuery};
+
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -112734,6 +112755,65 @@ mod pages_are_plural_tests {
         &rest[..end]
     }
 
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// **This file's slice and the crate's body, compared as bytes.**
+    ///
+    /// [`body`] hands back everything after the signature it matched up to the
+    /// next `\n    fn `, so its slice holds the rest of the declaration, the
+    /// whole body braces and all, and then whatever stands between that method
+    /// and the next one. [`Index::body_of`] hands back the braces and everything
+    /// between them, so the crate's answer has to stand inside this file's
+    /// slice, once, with nothing but the rest of the declaration in front of it.
+    ///
+    /// What comes back is this file's slice, so this commit changes no
+    /// assertion — and every assertion below was checked against the *narrowed*
+    /// body before this was written, because narrowing a slice can only take a
+    /// positive away.
+    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
+        let at = old.find(new).unwrap_or_else(|| {
+            panic!("`{what}`: this file's slice does not hold the body the crate returned")
+        });
+        assert_eq!(
+            old.rfind(new),
+            Some(at),
+            "`{what}`: the crate's body stands twice inside this file's slice"
+        );
+        assert!(
+            !old[..at].contains('{'),
+            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
+             of its body"
+        );
+        old
+    }
+
+    /// One method pin's two readings, asserted to agree, the file's returned.
+    fn agreed_method(owner: &str, name: &str) -> &'static str {
+        agreed(
+            body(&format!("    fn {name}(")),
+            method_body(owner, name),
+            name,
+        )
+    }
+
     /// **A page lands on the pane a file would land on, and asks nothing else.**
     ///
     /// Red gate: this is the defect. Put the reuse arm back — "the seat of this
@@ -112742,7 +112822,7 @@ mod pages_are_plural_tests {
     /// every address the tab is ever given.
     #[test]
     fn a_page_lands_on_the_pane_a_file_would() {
-        let door = body("    fn open_web_page_with(");
+        let door = agreed_method("Runtime", "open_web_page_with");
         assert!(
             door.contains("self.preview_landing_surface()"),
             "a page no longer lands by the rule every other preview lands by:\n{door}"
@@ -112762,7 +112842,7 @@ mod pages_are_plural_tests {
     /// them asks how many the window already holds.
     #[test]
     fn a_pane_with_no_engine_has_one_built_for_it() {
-        let door = body("    fn open_web_page_on(");
+        let door = agreed_method("Runtime", "open_web_page_on");
         assert!(
             door.contains("self.window.web.contains_key(&leaf)")
                 && door.contains("webhost::WebSeat::open(")
@@ -112778,7 +112858,7 @@ mod pages_are_plural_tests {
     /// the wrong pane the moment a tab holds two.
     #[test]
     fn the_blank_pages_receipt_names_the_pane_the_landing_rule_chose() {
-        let mint = body("    fn mint_a_blank_page_and_open_its_address(");
+        let mint = agreed_method("Runtime", "mint_a_blank_page_and_open_its_address");
         assert!(
             mint.contains("self.page_on_the_landing_pane()"),
             "the receipt names a pane by some other rule than the one that \
@@ -112796,13 +112876,13 @@ mod pages_are_plural_tests {
     /// instead of the list, and this names whichever half went back.
     #[test]
     fn every_page_of_this_tab_draws_and_answers_for_its_own_sheet() {
-        let layers = body("    fn web_sheet_layers(");
+        let layers = agreed_method("Runtime", "web_sheet_layers");
         assert!(
             layers.contains(".preview_seats()")
                 && layers.contains("self.window.web_sheet_layouts.push((seat, layout));"),
             "the sheets are not laid out one per page of this tab:\n{layers}"
         );
-        let press = body("    fn press_web_sheet(");
+        let press = agreed_method("Runtime", "press_web_sheet");
         assert!(
             press.contains(".web_sheet_layouts")
                 && press.contains("websheet::covers(layout, x, y)"),
