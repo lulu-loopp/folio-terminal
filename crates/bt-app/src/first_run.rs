@@ -3889,16 +3889,34 @@ mod clock_edge_tests {
         assert_eq!(reads, 2);
     }
 
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source_index() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4
+    /// rather than a line of a file.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        source_index()
+            .body_of(&bt_source::ItemQuery::method(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
     #[test]
     fn first_run_clock_run_disk_questions_follow_the_ready_edge() {
-        let source = include_str!("main.rs");
-        let body = source
-            .split("    fn raise_first_run_if_due(")
-            .nth(1)
-            .unwrap()
-            .split("\n    fn ")
-            .next()
-            .unwrap();
+        // **P3's deletion commit for this pin** (`docs/plans/bt-app-split-prep.md`
+        // §6.3, and §6.0 rule 3). The commit before this one read every body
+        // twice — once as a slice of a named file, once as the body of an item
+        // of this crate — and asserted the two were the same bytes; this one
+        // removes the older of the two, because two implementations of one
+        // judgement do not vouch for each other (`docs/CONVENTIONS.md`
+        // §十 rule 4). The pattern is `main.rs::pty_drain_budget_tests`', not
+        // re-derived here.
+        let body = method_body("Runtime", "raise_first_run_if_due");
         let edge = body
             .find("first_run::take_ready_edge(")
             .expect("one attempt after the probe settles");
@@ -3919,33 +3937,13 @@ mod clock_edge_tests {
             );
         }
         // Agent availability already has one owner; never add a second PATH cache.
-        let lookup = source
-            .split("    fn agent_is_on_this_machine(")
-            .nth(1)
-            .unwrap()
-            .split("\n    fn ")
-            .next()
-            .unwrap();
+        let lookup = method_body("Runtime", "agent_is_on_this_machine");
         assert!(lookup.contains("self.app.profile_programs.is_available(id)"));
         assert!(!lookup.contains("search_path("));
-        let profiles = include_str!("profiles.rs");
-        let available = profiles
-            .split("pub fn is_available(&self, id: &str)")
-            .nth(1)
-            .unwrap()
-            .split("\n    }")
-            .next()
-            .unwrap();
+        let available = method_body("ProfilePrograms", "is_available");
         assert!(available.contains("self.program(id).is_some()"));
-        for signature in ["    fn adopt_profile_table(", "    fn answer_first_run("] {
-            let rearm = source
-                .split_once(signature)
-                .unwrap()
-                .1
-                .split("\n    fn ")
-                .next()
-                .unwrap();
-            assert!(rearm.contains("self.app.first_run_attempted = false;"));
+        for name in ["adopt_profile_table", "answer_first_run"] {
+            assert!(method_body("Runtime", name).contains("self.app.first_run_attempted = false;"));
         }
     }
 }
