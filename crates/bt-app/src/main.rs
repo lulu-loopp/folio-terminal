@@ -110627,6 +110627,71 @@ mod file_peek_fade_tests {
         &rest[..end]
     }
 
+    // ── what this module asks the crate instead ───────────────────────────
+    //
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Nothing is deleted here: every pin is read twice
+    // — once from `include_str!("main.rs")`, once from `bt-source` — and
+    // `agreed` asserts the two are the same bytes. The deletion is the commit
+    // after this one.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live. The split literals the doc comment above explains are
+    // left exactly as they are: a name handed to `ItemQuery` is not searched
+    // for in this file, so the reason for splitting them is gone, but writing
+    // the halves back together is P18's ticket.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
+    ///
+    /// `body` hands back everything after the signature prefix it was given and
+    /// stops before the next `\n    fn `; `body_of` hands back the braces and
+    /// what is between them. So the crate's answer has to stand in this file's
+    /// slice at the head of the body, with nothing but the rest of the
+    /// declaration in front of it.
+    fn agreed(old: &'static str, name: &str) -> &'static str {
+        let new = method_body("Runtime", name);
+        let at = match old.find(new) {
+            Some(at) => at,
+            None => {
+                assert!(
+                    old.starts_with(&new[1..]),
+                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
+                     bytes"
+                );
+                0
+            }
+        };
+        assert!(
+            !old[..at].contains('{'),
+            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
+             the head of it"
+        );
+        old
+    }
+
     /// The opacity the card would be painted at, read exactly as
     /// `Runtime::file_peek_opacity` reads it: the card's own epoch, through the
     /// tip's rule. `None` is "there is nothing to paint".
@@ -110709,13 +110774,20 @@ mod file_peek_fade_tests {
         // The card's wake-ups while it is up are the fade's own rule and nothing
         // else.
         assert!(
-            body(&["    fn file_peek", "_deadline("].concat()).contains("hover_fade_owes_frames("),
+            agreed(
+                body(&["    fn file_peek", "_deadline("].concat()),
+                "file_peek_deadline"
+            )
+            .contains("hover_fade_owes_frames("),
             "the card's wake-ups while it is up are the fade's own rule"
         );
         // And the way out drops the card whole on the frame it is asked to —
         // there is no third state for a card on its way off the glass, and
         // therefore nothing to schedule.
-        let hidden = body(&["    fn hide_file", "_peek("].concat());
+        let hidden = agreed(
+            body(&["    fn hide_file", "_peek("].concat()),
+            "hide_file_peek",
+        );
         assert!(
             hidden.contains("self.window.file_peek = None;"),
             "hiding takes the card down whole"
@@ -110806,7 +110878,10 @@ mod file_peek_fade_tests {
     /// 90ms a motionless hand started.
     #[test]
     fn the_cards_fade_is_the_tips_rule_read_once_and_reaches_every_layer() {
-        let reads = body(&["    fn file_peek", "_opacity("].concat());
+        let reads = agreed(
+            body(&["    fn file_peek", "_opacity("].concat()),
+            "file_peek_opacity",
+        );
         assert!(
             reads.contains("tooltip::hover_fade_opacity("),
             "the card asks the tip's rule"
@@ -110818,7 +110893,10 @@ mod file_peek_fade_tests {
             );
         }
 
-        let layer = body(&["    fn file_peek", "_layer("].concat());
+        let layer = agreed(
+            body(&["    fn file_peek", "_layer("].concat()),
+            "file_peek_layer",
+        );
         assert!(
             layer.contains("for layer in &mut layers {"),
             "the fade is folded over every layer the card put down"
@@ -110829,8 +110907,11 @@ mod file_peek_fade_tests {
         );
 
         assert!(
-            body(&["    fn advance_file", "_peek("].concat())
-                .contains("self.file_peek_owes_frame(now)"),
+            agreed(
+                body(&["    fn advance_file", "_peek("].concat()),
+                "advance_file_peek"
+            )
+            .contains("self.file_peek_owes_frame(now)"),
             "and the card's own turn is what wakes the loop while it climbs"
         );
     }
