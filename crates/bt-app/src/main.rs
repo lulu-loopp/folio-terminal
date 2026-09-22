@@ -112295,6 +112295,28 @@ mod focus_mode_door_tests {
 /// the column — which is precisely the defect this slice repairs.
 #[cfg(test)]
 mod focus_column_notch_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Every reader in this module asked `main.rs` for its
+    // text — two body pins and two line sweeps. Nothing is deleted here: each
+    // computes its answer twice, once from the file it named and once from
+    // `bt-source`, and asserts the two agree. The deletion is the commit after
+    // this one, because two implementations of one judgement do not vouch for
+    // each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `found` are that module's helpers
+    // word for word; `lines_holding` and `agreed` are `focus_mode_door_tests`',
+    // whose finder is this one's shape exactly — it runs **past** the closing
+    // brace, to the next `\n    fn `, so its slice holds the rest of the
+    // declaration, the whole body braces and all, and then the closing line and
+    // whatever stands between this method and the next.
+    //
+    // **One owner, established rather than assumed.** Both pins are methods of
+    // `Runtime`. The deleted finder took the first `    fn name(` in this file,
+    // which is a method of whatever `impl` happens to come first, and could not
+    // have told the difference.
+    use bt_source::{Found, Index, ItemQuery, Needle, Search, View, needle};
+
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -112306,6 +112328,111 @@ mod focus_column_notch_tests {
         let rest = &SOURCE[start + signature.len()..];
         let end = rest.find("\n    fn ").unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **The trimmed lines of this package that hold `needle`, in file order.**
+    ///
+    /// The reading two pins here take of one file —
+    /// `SOURCE.lines().map(str::trim).filter(|line| line.contains(needle))` —
+    /// asked of every file the crate compiles. A line is genuinely what those
+    /// assertions are about: they name a door by the text it stands on, so the
+    /// answer stays a list of lines rather than becoming a count.
+    ///
+    /// Each occurrence is cut back to its own file's boundaries before the line
+    /// is taken, so a match at the head of a file cannot reach into the one
+    /// concatenated in front of it; two occurrences on one line answer once, as
+    /// the line reading did.
+    fn lines_holding(needle: &str) -> Vec<&'static str> {
+        let index = source();
+        let union = index.union();
+        let mut lines: Vec<&'static str> = Vec::new();
+        let mut last = None;
+        for occurrence in found(needle!(needle), View::Raw).occurrences() {
+            let at = occurrence.span.start();
+            let file = index
+                .file_at(at)
+                .expect("every occurrence of a search stands in a file of its universe");
+            let floor = file.span().start();
+            let start = union[floor..at]
+                .rfind('\n')
+                .map_or(floor, |break_at| floor + break_at + 1);
+            if last == Some(start) {
+                continue;
+            }
+            last = Some(start);
+            let end = union[start..]
+                .find('\n')
+                .map_or(union.len(), |break_at| start + break_at);
+            lines.push(union[start..end].trim());
+        }
+        lines
+    }
+
+    /// **This file's slice and the crate's body, compared as bytes.**
+    ///
+    /// [`body`] hands back everything after the signature it matched up to the
+    /// next `\n    fn `, so its slice holds the rest of the declaration, the
+    /// whole body braces and all, and then whatever stands between that method
+    /// and the next one. [`Index::body_of`] hands back the braces and everything
+    /// between them, so the crate's answer has to stand inside this file's
+    /// slice, once, with nothing but the rest of the declaration in front of it.
+    ///
+    /// What comes back is this file's slice, so this commit changes no
+    /// assertion — and every assertion below was checked against the *narrowed*
+    /// body before this was written, because narrowing a slice can only take a
+    /// positive away.
+    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
+        let at = old.find(new).unwrap_or_else(|| {
+            panic!("`{what}`: this file's slice does not hold the body the crate returned")
+        });
+        assert_eq!(
+            old.rfind(new),
+            Some(at),
+            "`{what}`: the crate's body stands twice inside this file's slice"
+        );
+        assert!(
+            !old[..at].contains('{'),
+            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
+             of its body"
+        );
+        old
+    }
+
+    /// One method pin's two readings, asserted to agree, the file's returned.
+    fn agreed_method(owner: &str, name: &str) -> &'static str {
+        agreed(
+            body(&format!("    fn {name}(")),
+            method_body(owner, name),
+            name,
+        )
     }
 
     /// **There is one call to the aim, and it stands inside the modified arm.**
@@ -112326,6 +112453,11 @@ mod focus_column_notch_tests {
             .filter(|line| line.contains(needle.as_str()))
             .collect();
         assert_eq!(
+            calls,
+            lines_holding(needle.as_str()),
+            "P3 equivalence: this file and the crate hold the same lines"
+        );
+        assert_eq!(
             calls.len(),
             1,
             "the aim is reached from one place, so there is one line to read"
@@ -112342,7 +112474,7 @@ mod focus_column_notch_tests {
     /// scrolled would move both.
     #[test]
     fn the_column_asks_the_ruling_before_it_scrolls() {
-        let scroll_rail = body("    fn scroll_rail(");
+        let scroll_rail = agreed_method("Runtime", "scroll_rail");
         let decision = scroll_rail
             .find(&["column_notch", "("].concat())
             .expect("the column's own wheel door names the ruling");
@@ -112369,7 +112501,7 @@ mod focus_column_notch_tests {
     /// exact shape of a defect no key test could ever have caught.
     #[test]
     fn the_column_reads_what_the_hand_is_holding() {
-        let scroll_rail = body("    fn scroll_rail(");
+        let scroll_rail = agreed_method("Runtime", "scroll_rail");
         let call = scroll_rail
             .lines()
             .map(str::trim)
@@ -112393,6 +112525,11 @@ mod focus_column_notch_tests {
             .filter(|line| line.contains(needle.as_str()))
             .collect();
         assert_eq!(
+            writes,
+            lines_holding(needle.as_str()),
+            "P3 equivalence: this file and the crate hold the same writes"
+        );
+        assert_eq!(
             writes.len(),
             1,
             "what is held is written down in one place, beside the one place the \
@@ -112403,9 +112540,9 @@ mod focus_column_notch_tests {
     /// The plain wheel never calls the card's content-position update.
     #[test]
     fn one_line_moves_a_cards_window() {
-        let aim = body("    fn aim_focus_card_window(");
+        let aim = agreed_method("Runtime", "aim_focus_card_window");
         assert!(aim.contains("aim_card_window(leaf, rows, steps, card)"));
-        let scroll = body("    fn scroll_rail(");
+        let scroll = agreed_method("Runtime", "scroll_rail");
         assert!(!scroll.contains("aim_card_window("));
     }
 }
