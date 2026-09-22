@@ -1702,6 +1702,17 @@ small.** What revision 2 did not supply, and R2-10 requires, is a bound.
    unrelated work continuing throughout.
 5. **Inside the window:** the moves, reviewed as one commit per theme, with each
    move's own visibility, import, pin-path, selector and arity edits in it.
+   **Granularity, ruled 2026-09-22 after the dry runs: every theme commit must
+   compile and pass the crate's tests on its own** (a reviewable, bisectable
+   history is the point of one commit per theme). Because a moved method still
+   called from the crate root is unreachable under `pub(in crate::runtime)`
+   until its callers move too, **during the window every moved method that is
+   still called from the root takes `pub(crate)`**, computed against the set
+   that has actually moved (a method whose callers all moved with it stays
+   private); **one closing commit** then narrows to the manifest's final column.
+   `scripts/dev/bt-app-move-topic.py` computes both. `runtime/mod.rs` declares
+   the topic modules and imports nothing, because twelve topic stems share a
+   name with a crate-root module.
 6. **Gate and thaw.** The batch is validated **on the tree it is actually merged
    into**, including after any conflict resolution — independent green commits
    on different bases do not compose. Record the merge base, the result and the
