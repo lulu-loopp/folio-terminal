@@ -115383,9 +115383,11 @@ mod textless_present_tests {
         assert_eq!(swapchain, 0, "no image is not a textless image");
     }
 
-    /// This file as text, for [`application_change_tests::SOURCE`]'s reason:
-    /// what is under test is which *arm* a variant lands in, and a
-    /// `WindowRuntime` is a surface, a compositor and four Win32 bridges.
+    /// This file as text. The reason is the one `application_change_tests` used
+    /// to give beside its own copy of this reader, before P3 migrated it: what
+    /// is under test is which *arm* a variant lands in, and a `WindowRuntime` is
+    /// a surface, a compositor and four Win32 bridges, so there is no value this
+    /// process can be handed for it without a screen.
     const SOURCE: &str = include_str!("main.rs");
 
     fn fn_body(name: &str) -> &'static str {
@@ -115530,22 +115532,20 @@ mod textless_present_tests {
 
 #[cfg(test)]
 mod application_change_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Three readers here asked this *file* for its text:
-    // six method bodies and the record's own field list. Nothing is deleted here
-    // — each computes its answer twice, once from the file and once from
-    // `bt-source`, and asserts the two agree.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Three readers here asked `main.rs` for its text — six method bodies and
+    // the record's own field list; every one of them now asks `bt-source` about
+    // an *item* of this crate, so no fact here is bound to the file it happens
+    // to be written in today. The commit before this one ran both readings side
+    // by side and asserted they agree; this is the one that deletes the older of
+    // the two (`docs/CONVENTIONS.md` §十 rule 4).
     //
     // `source`, `item_body` and `method_body` are `pty_drain_budget_tests`'
     // helpers word for word. **Two owners**: the five verbs are `Runtime`'s and
-    // the loop's door is `FolioApp`'s — `fn_body` took the first `\n    fn name(`
-    // in the file, which is a method of whatever `impl` comes first. The flag
-    // list stops being a top-level text cut and becomes the body of the struct
-    // identity, so a record that moved file would still be read.
-    //
-    // `agreed` is written for this module's finders, which **undershoot**: both
-    // stop at the closing brace instead of running past it, so the file's slice
-    // is the crate's body with its braces spent.
+    // the loop's door is `FolioApp`'s — the deleted `fn_body` took the first
+    // `\n    fn name(` in the file, which is a method of whatever `impl` comes
+    // first. The flag list stops being a top-level text cut and becomes the body
+    // of the struct identity, so a record that moved file is still read.
     use bt_source::{Index, ItemQuery};
 
     use super::ApplicationChange;
@@ -115554,53 +115554,23 @@ mod application_change_tests {
     const A: fn() -> WindowId = || WindowId::from(1_u64);
     const B: fn() -> WindowId = || WindowId::from(2_u64);
 
-    /// This file, read as text — the witness for the claims below that are
-    /// about *which function reaches which channel*. There is no value a unit
-    /// test could be handed for those: a `WindowRuntime` is a surface, a
-    /// compositor and four Win32 bridges, so "the other window redrew" is not a
-    /// sentence this process can say without a screen. What can be said without
-    /// one is that the verb hands its change to the application rather than
-    /// keeping it, and that the loop spends it before it sleeps.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The body of a method declared at an `impl`'s own indentation, which is
-    /// the shape of every function named below.
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!("\n    fn {name}(");
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n    }\n")
-                .expect("a method is closed by a `}` at its `impl`'s indentation");
-        &SOURCE[start..end]
-    }
-
-    /// The `bool` fields of [`ApplicationChange`], read off its declaration.
+    /// The `bool` fields of [`ApplicationChange`], read off its declaration —
+    /// **the record's own body, asked for by identity**.
+    ///
+    /// The witness for the claims below that are about *which function reaches
+    /// which channel*. There is no value a unit test could be handed for those:
+    /// a `WindowRuntime` is a surface, a compositor and four Win32 bridges, so
+    /// "the other window redrew" is not a sentence this process can say without
+    /// a screen. What can be said without one is that the verb hands its change
+    /// to the application rather than keeping it, and that the loop spends it
+    /// before it sleeps.
     ///
     /// Read rather than written out, because a list of flags kept beside the
     /// record is a list that stops matching it: the point of the pin below is
     /// that a *fourth* flag cannot be added without the sweep learning to spend
     /// it, and a hand-written list would go green on the day that happened.
     fn flags() -> Vec<&'static str> {
-        let head = "\nstruct ApplicationChange {\n";
-        let start = SOURCE
-            .find(head)
-            .expect("`struct ApplicationChange` is declared at the top level")
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n}\n")
-                .expect("a top-level struct is closed by a `}` in column zero");
-        let written = &SOURCE[start..end];
-        assert_eq!(
-            item_body(&ItemQuery::type_item("ApplicationChange")),
-            ["{\n", written, "\n}"].concat(),
-            "P3 equivalence: this file's cut and the crate's struct body are the same bytes"
-        );
-        written
+        item_body(&ItemQuery::type_item("ApplicationChange"))
             .lines()
             .filter_map(|line| line.trim_start().strip_suffix(": bool,"))
             .collect()
@@ -115624,42 +115594,6 @@ mod application_change_tests {
     /// The body of one inherent method of `owner`.
     fn method_body(owner: &str, name: &str) -> &'static str {
         item_body(&ItemQuery::method(owner, name))
-    }
-
-    /// **This file's slice and the crate's body, compared as bytes.**
-    ///
-    /// [`fn_body`] begins just after the opening parenthesis of the signature it
-    /// matched and stops at the `\n    }` that closes the method, so its slice
-    /// is the rest of the declaration and the body with **both** braces spent:
-    /// the opening one stands at the end of the declaration, and the closing one
-    /// is where the slice stops. [`Index::body_of`] hands back the braces and
-    /// what is between them, so the two agree when the file's slice ends with
-    /// the crate's body minus its first and last lines.
-    ///
-    /// What comes back is this file's slice, so this commit changes no
-    /// assertion; every assertion below was checked against the *narrowed* body
-    /// before this was written.
-    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
-        let inner = new
-            .strip_prefix('{')
-            .and_then(|body| body.strip_suffix("\n    }"))
-            .expect("a method's body opens on its brace and closes at its impl's indentation");
-        assert!(
-            old.ends_with(inner),
-            "`{what}`: this file's slice does not end with the body the crate returned"
-        );
-        let head = &old[..old.len() - inner.len()];
-        assert!(
-            head.ends_with('{') && !head[..head.len() - 1].contains(['{', '}']),
-            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
-             of its body"
-        );
-        old
-    }
-
-    /// One method pin's two readings, asserted to agree, the file's returned.
-    fn agreed_method(owner: &str, name: &str) -> &'static str {
-        agreed(fn_body(name), method_body(owner, name), name)
     }
 
     fn font(paid_by: WindowId) -> ApplicationChange {
@@ -115791,7 +115725,7 @@ mod application_change_tests {
     /// Red gate: delete the `change.caret` arm of `adopt_application_change`.
     #[test]
     fn the_sweep_spends_every_flag_the_record_can_carry() {
-        let sweep = agreed_method("Runtime", "adopt_application_change");
+        let sweep = method_body("Runtime", "adopt_application_change");
         let flags = flags();
         assert!(
             flags.contains(&"caret"),
@@ -115822,7 +115756,7 @@ mod application_change_tests {
             "apply_cursor_style",
         ] {
             assert!(
-                agreed_method("Runtime", verb).contains("note_application_change"),
+                method_body("Runtime", verb).contains("note_application_change"),
                 "`{verb}` moves a process static, so it owes every other window \
                  a re-derivation"
             );
@@ -115846,7 +115780,7 @@ mod application_change_tests {
     fn no_window_is_left_holding_yesterday_when_the_loop_goes_to_sleep() {
         // `about_to_wait_inner` and not `about_to_wait`: the outer one is the
         // heartbeat's three lines, and the turn itself is the body inside it.
-        let door = agreed_method("FolioApp", "about_to_wait_inner");
+        let door = method_body("FolioApp", "about_to_wait_inner");
         let settled = door
             .find("settle_application_change")
             .expect("the loop settles what the application changed");
