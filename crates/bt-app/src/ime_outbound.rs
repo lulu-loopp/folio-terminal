@@ -283,23 +283,127 @@ impl Runtime<'_> {
 mod tests {
     use super::*;
 
+    // ── what this module asks the crate ────────────────────
+    //
+    // **P3's deletion commit for this batch**
+    // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). The commit
+    // before this one took each reading twice — once from
+    // the window's file or this file's own text, once from `bt-source`
+    // — and asserted the two were the same answer; this one removes the older
+    // of the two, because two implementations of one judgement do not vouch
+    // for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `main.rs::pty_drain_budget_tests`' and is not
+    // re-derived**; that module's header carries the six points behind
+    // `source_index`, `item_body` and `method_body`.
+    //
+    // One reading changes shape. The caret's destruction was counted as zero in
+    // `main.rs` and then found by hand in this file's own product half — two
+    // readings of one claim, "the door is here and nowhere else". Asked of the
+    // package it is one number: **one** product site, and the body pin below
+    // says which method it stands in. A package-wide zero would have inverted
+    // the guard, because the door this module owns is itself a product site.
+    fn source_index() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4
+    /// rather than a line of a file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source_index()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole package, refusing loudly rather than
+    /// answering a smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source_index()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **How many of these occurrences a product build compiles.**
+    ///
+    /// Two grains, because this tree says "test" two ways and a reader that
+    /// took only one of them would count its own assertions. A file reached
+    /// through a `#[cfg(test)] mod x;` declaration is not compiled into the
+    /// product at all, which is `FileRecord::permits_product` over
+    /// `Index::file_at` (§2.3, the pilot's `in_product`). An inline
+    /// `#[cfg(test)] mod` inside a file the product *does* compile is not a
+    /// file, so §2.4's identity carries its predicate instead, which is
+    /// `clipboard_path_tests`' `in_product_items`. This module needs both: the
+    /// spellings counted here are written again in its own assertions — in
+    /// this commit, by the older of the two readings standing beside the newer
+    /// one — and again in whole test files elsewhere in the package.
+    ///
+    /// The owner is the smallest callable holding the match, which is
+    /// `Found::owners`' own rule taken one occurrence at a time so that the
+    /// file grain can stand beside it. An occurrence in no callable — an
+    /// `impl` header, a `const` — is left in, because nothing about a `cfg`
+    /// says otherwise and dropping it quietly is the failure this preparation
+    /// is about.
+    fn in_the_product(found: &bt_source::Found) -> usize {
+        let index = source_index();
+        found
+            .occurrences()
+            .iter()
+            .filter(|occurrence| {
+                index
+                    .file_at(occurrence.span.start())
+                    .is_some_and(bt_source::FileRecord::permits_product)
+                    && index
+                        .items()
+                        .iter()
+                        .filter(|record| occurrence.span.within(record.whole()))
+                        .min_by_key(|record| record.whole().len())
+                        .is_none_or(|record| {
+                            !record
+                                .variant()
+                                .predicates()
+                                .iter()
+                                .any(|predicate| predicate == "test")
+                        })
+            })
+            .count()
+    }
+
+    /// The same count of one raw needle — the view `include_str!` handed this
+    /// module.
+    fn in_the_product_raw(needle: bt_source::Needle) -> usize {
+        in_the_product(&found(needle, bt_source::View::Raw))
+    }
+
     #[test]
     fn ime_outbound_sites_keep_their_trace_calls() {
-        let source = include_str!("main.rs");
-        let body = |name: &str| {
-            source
-                .split(&format!("    fn {name}("))
-                .nth(1)
-                .unwrap()
-                .split("\n    }\n")
-                .next()
-                .unwrap()
-        };
-        assert_eq!(source.matches(".set_ime_allowed(").count(), 2);
-        assert_eq!(source.matches(".set_ime_cursor_area(").count(), 1);
-        assert_eq!(source.matches(".ime_system_caret.update(").count(), 1);
+        let body = |name: &str| method_body("Runtime", name);
         assert_eq!(
-            source.matches("ime_outbound::allowed_line(true,").count(),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                ".set_ime_allowed("
+            ))),
+            2
+        );
+        assert_eq!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                ".set_ime_cursor_area("
+            ))),
+            1
+        );
+        assert_eq!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                ".ime_system_caret.update("
+            ))),
+            1
+        );
+        assert_eq!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "ime_outbound::allowed_line(true,"
+            ))),
             2
         );
         for (method, trace) in [
@@ -331,8 +435,11 @@ mod tests {
         }
         let input = body("ime_input");
         assert!(input.find("trace_ime_ruling") < input.find("if !ruling.deliver"));
-        assert!(source.contains("self.trace_ime_frame(&terminal_frame, written)"));
-        assert_eq!(source.matches(".ime_system_caret.destroy()").count(), 0);
+        assert!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "self.trace_ime_frame(&terminal_frame, written)"
+            ))) > 0
+        );
         for reason in [
             "ime_disabled",
             "cancel_composition",
@@ -340,19 +447,24 @@ mod tests {
             "window_blur",
         ] {
             assert_eq!(
-                source
-                    .matches(&format!("destroy_ime_caret(\"{reason}\")"))
-                    .count(),
+                in_the_product_raw(bt_source::Needle::new(bt_source::Pattern::text(&format!(
+                    "destroy_ime_caret(\"{reason}\")"
+                )))),
                 1
             );
         }
-        // This module owns the shared platform door (including the portable no-op).
-        let helper = include_str!("ime_outbound.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
-        assert!(helper.contains("caret_line(\"destroy\", reason, None)"));
-        assert!(helper.contains("self.window.ime_system_caret.destroy()"));
+        // This module owns the shared platform door (including the portable
+        // no-op), and it owns it alone: the product destroys the caret exactly
+        // once, and the body pin says which method that one site stands in.
+        let door = method_body("Runtime", "destroy_ime_caret");
+        assert!(door.contains("caret_line(\"destroy\", reason, None)"));
+        assert!(door.contains("self.window.ime_system_caret.destroy()"));
+        assert_eq!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                ".ime_system_caret.destroy()"
+            ))),
+            1
+        );
     }
 
     #[test]

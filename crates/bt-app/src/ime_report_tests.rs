@@ -145,47 +145,150 @@ fn ime_self_report_format_has_facts_but_never_typed_text() {
     assert!(!printable_latin(None));
 }
 
+// ── what this module asks the crate ────────────────────────
+//
+// **P3's deletion commit for this batch** (`docs/plans/bt-app-split-prep.md`
+// §6.3, and §6.0 rule 3). The commit before this one took every reading
+// twice — once from the window's file, included as text, once from `bt-source`
+// — and asserted the two answered the same; this one removes the older of the
+// two, because two implementations of one judgement do not vouch for each
+// other (`docs/CONVENTIONS.md` §十 rule 4).
+//
+// **The pattern is `main.rs::pty_drain_budget_tests`' and is not re-derived**;
+// that module's header carries the six points behind `source_index`,
+// `item_body` and `method_body`. This module lives in another file than
+// `main.rs`, which changes neither: `needle!` records *this* file's site and
+// the index is the package's either way (§2.6).
+//
+// Two readings change shape rather than merely moving.
+//
+// * The two **arm cuts** — the focus arm and the composing prologue — took the
+//   first occurrence of a text in the whole file. The item that owns the arm is
+//   named now and the same cut is taken inside its body.
+//   `WindowEvent::Focused(true) => {` is spelled in `main.rs`'s own test
+//   modules too, so the old reading was right only by the order that file
+//   happens to be written in.
+// * The **constructor loop** walked every `.create_window(attributes)` in the
+//   file and read everything written after each. The two constructors are
+//   `Runtime::create` and `Runtime::open_window`, so they are named, and the
+//   order is asked inside each one's own body.
+
+/// **This crate, indexed once per process** — the workspace read, this
+/// package's own `src/` declared as the universe and lowered, on the first ask
+/// of the process, behind one call (`bt_source::Index::of_package`).
+///
+/// The package is named here and nowhere else in the module.
+fn source_index() -> &'static bt_source::Index {
+    bt_source::Index::of_package("bt-app")
+}
+
+/// The body of `owner::name`, braces included — the identity of §2.4 rather
+/// than a line of `main.rs`.
+fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+    source_index()
+        .body_of(query)
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// The body of one inherent method of `owner`.
+fn method_body(owner: &str, name: &str) -> &'static str {
+    item_body(&bt_source::ItemQuery::method(owner, name))
+}
+
+/// The body of one method of a trait's implementation — the window's own entry
+/// points, which are not inherent methods of anything.
+fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
+    item_body(&bt_source::ItemQuery::method(owner, name).of_trait(trait_name))
+}
+
+/// One search over the whole package, refusing loudly rather than
+/// answering a smaller question.
+fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+    source_index()
+        .search(&bt_source::Search::new(needle, view))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// How many of these occurrences stand in a file a product build compiles.
+///
+/// File-grained, and deliberately so: §2.3 computes product reachability
+/// per *declaration path to a file*, and an inline `#[cfg(test)] mod`
+/// inside a product file is not a file.
+fn in_product(found: &bt_source::Found) -> usize {
+    found
+        .occurrences()
+        .iter()
+        .filter(|occurrence| {
+            source_index()
+                .file_at(occurrence.span.start())
+                .is_some_and(bt_source::FileRecord::permits_product)
+        })
+        .count()
+}
+
+/// The package's product count of one raw needle — the view `include_str!`
+/// handed this module.
+fn in_product_raw(needle: bt_source::Needle) -> usize {
+    in_product(&found(needle, bt_source::View::Raw))
+}
+
 #[test]
 fn ime_self_report_startup_and_focus_source_pin() {
-    let source = include_str!("main.rs");
     assert_eq!(
-        source
-            .matches("ime_report.created(ime_report::now_ms());")
-            .count(),
+        in_product_raw(bt_source::needle!(bt_source::Pattern::text(
+            "ime_report.created(ime_report::now_ms());"
+        ))),
         2
     );
     assert_eq!(
-        source
-            .matches("ime_report.allowed(true, ime_report::now_ms());")
-            .count(),
+        in_product_raw(bt_source::needle!(bt_source::Pattern::text(
+            "ime_report.allowed(true, ime_report::now_ms());"
+        ))),
         2
     );
-    assert!(source.contains("self.window.ime_report.shown(ime_report::now_ms());"));
-    let focus = source
+    assert!(
+        in_product_raw(bt_source::needle!(bt_source::Pattern::text(
+            "self.window.ime_report.shown(ime_report::now_ms());"
+        ))) > 0
+    );
+    let focus_arm = trait_method_body("FolioApp", "ApplicationHandler", "window_event")
         .split("WindowEvent::Focused(true) => {")
         .nth(1)
-        .unwrap();
+        .expect("the window's event road carries the focus arm");
     assert!(
-        focus
+        focus_arm
             .split("runtime.set_cursor_focus(true")
             .next()
             .unwrap()
             .contains("runtime.observe_ime_focus(true)")
     );
-    assert!(source.contains("runtime.observe_ime_key(&event, is_synthetic);"));
-    let ime = source
-        .split("fn ime_input(&mut self, event: Ime)")
-        .nth(1)
-        .unwrap();
     assert!(
-        ime.split("let composing =")
+        in_product_raw(bt_source::needle!(bt_source::Pattern::text(
+            "runtime.observe_ime_key(&event, is_synthetic);"
+        ))) > 0
+    );
+    assert!(
+        method_body("Runtime", "ime_input")
+            .split("let composing =")
             .next()
             .unwrap()
             .contains("self.window.ime_report.ime(")
     );
-    assert!(source.contains("runtime.service_ime_report(now)"));
-    assert!(source.contains("earliest_deadline([wake_deadline, ime_deadline])"));
-    for constructor in source.split(".create_window(attributes)").skip(1) {
+    assert!(
+        in_product_raw(bt_source::needle!(bt_source::Pattern::text(
+            "runtime.service_ime_report(now)"
+        ))) > 0
+    );
+    assert!(
+        in_product_raw(bt_source::needle!(bt_source::Pattern::text(
+            "earliest_deadline([wake_deadline, ime_deadline])"
+        ))) > 0
+    );
+    for owner in ["create", "open_window"] {
+        let constructor = method_body("Runtime", owner)
+            .split(".create_window(attributes)")
+            .nth(1)
+            .unwrap_or_else(|| panic!("`Runtime::{owner}` constructs a window"));
         let created = constructor.find("ime_report.created(").unwrap();
         let allowed_call = constructor.find("window.set_ime_allowed(true)").unwrap();
         let allowed_record = constructor.find("ime_report.allowed(true,").unwrap();

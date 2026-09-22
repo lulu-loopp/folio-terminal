@@ -36427,18 +36427,22 @@ mod tests {",
         // MUTATION: drop the `HoverFloat::Flyout` arm and the first block here
         // names it; go back to reading `pane_menu` in `head_run` and the second
         // does.
-        const SOURCE: &str = include_str!("main.rs");
+        //
+        // **P3's deletion commit for this pin** (`docs/plans/bt-app-split-prep.md`
+        // §6.3, and §6.0 rule 3). The commit before this one read both
+        // derivations twice — once as a slice of `main.rs`, once as the body of
+        // an item of this crate — and asserted the two were the same bytes;
+        // this one removes the older of the two, because two implementations of
+        // one judgement do not vouch for each other (`docs/CONVENTIONS.md`
+        // §十 rule 4). The pattern is `main.rs::pty_drain_budget_tests`' and is
+        // not re-derived here. The owner is an argument now rather than
+        // whatever `impl` the first declaration of a name in the file belongs
+        // to.
+        let index = bt_source::Index::of_package("bt-app");
         let body = |name: &str| {
-            let head = format!("\n    fn {name}(");
-            let start = SOURCE
-                .find(&head)
-                .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
-                + head.len();
-            let end = start
-                + SOURCE[start..]
-                    .find("\n    }\n")
-                    .expect("a method is closed at the `impl`'s indentation");
-            &SOURCE[start..end]
+            index
+                .body_of(&bt_source::ItemQuery::method("Runtime", name))
+                .unwrap_or_else(|failure| panic!("{failure}"))
         };
         let derivation = body("head_that_raised_a_layer");
         for arm in [
@@ -36456,10 +36460,39 @@ mod tests {",
             body("head_run").contains("self.head_that_raised_a_layer()"),
             "the run's second arm is no longer the derivation"
         );
-        assert!(
-            SOURCE.contains("head_raised: self.head_that_raised_a_layer(),"),
-            "the paint is no longer handed the derivation"
-        );
+        // The product's own spelling of the paint, and only the product's:
+        // this file compiles into the product and carries the same text once
+        // more, as this reading's own needle. The file grain alone would be
+        // answered by that literal, which is the shape a migrated guard exists
+        // to stop being satisfied by.
+        let handed = index
+            .search(&bt_source::Search::new(
+                bt_source::needle!(bt_source::Pattern::text(
+                    "head_raised: self.head_that_raised_a_layer(),"
+                )),
+                bt_source::View::Raw,
+            ))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .occurrences()
+            .iter()
+            .any(|occurrence| {
+                index
+                    .file_at(occurrence.span.start())
+                    .is_some_and(bt_source::FileRecord::permits_product)
+                    && index
+                        .items()
+                        .iter()
+                        .filter(|record| occurrence.span.within(record.whole()))
+                        .min_by_key(|record| record.whole().len())
+                        .is_none_or(|record| {
+                            !record
+                                .variant()
+                                .predicates()
+                                .iter()
+                                .any(|predicate| predicate == "test")
+                        })
+            });
+        assert!(handed, "the paint is no longer handed the derivation");
     }
 
     /// PIN (user rulings, 2026-08-15 and 2026-08-16): **the `⌄` is a third box

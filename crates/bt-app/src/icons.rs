@@ -3099,13 +3099,24 @@ mod tests {
     /// pass, which is exactly what this reads for.
     #[test]
     fn the_tip_pass_walks_the_runs_instead_of_listing_the_buttons() {
-        const SOURCE: &str = include_str!("main.rs");
-        let at = SOURCE
-            .find("fn rebuild_tooltip_anchors(")
-            .expect("the window has a tip pass");
-        let pass = &SOURCE[at..];
-        let end = pass.find("\n    fn ").unwrap_or(pass.len());
-        let pass = &pass[..end];
+        // **P3's deletion commit for this pin**
+        // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). The commit
+        // before this one read the pass twice — once as a slice of `main.rs`,
+        // once as the body of an item of this crate — and asserted the two were
+        // the same bytes; this one removes the older of the two, because two
+        // implementations of one judgement do not vouch for each other
+        // (`docs/CONVENTIONS.md` §十 rule 4). The pattern is
+        // `main.rs::pty_drain_budget_tests`' and is not re-derived here.
+        //
+        // The owner is an argument and not a guess: the old reading took the
+        // first `fn rebuild_tooltip_anchors(` in the file, which is a method of
+        // whatever `impl` happens to come first. It is `Runtime`'s.
+        let pass = bt_source::Index::of_package("bt-app")
+            .body_of(&bt_source::ItemQuery::method(
+                "Runtime",
+                "rebuild_tooltip_anchors",
+            ))
+            .unwrap_or_else(|failure| panic!("{failure}"));
         for walk in [
             "seats::pane_control_boxes(",
             "seats::preview_head_tool_boxes(",
