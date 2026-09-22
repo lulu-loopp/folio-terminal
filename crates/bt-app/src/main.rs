@@ -114415,23 +114415,16 @@ mod quit_transaction_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// How many of these occurrences stand in a file a product build compiles.
+    /// **How many of these occurrences a product build contains** —
+    /// `bt_source::Found::in_the_product`, which owns that rule.
     ///
-    /// File-grained, and deliberately so: §2.3 computes product reachability per
-    /// *declaration path to a file*, and an inline `#[cfg(test)] mod` inside a
-    /// product file is not a file. Every needle this module counts is assembled
-    /// at run time, so no assertion of its own is among the occurrences and the
-    /// file is the right grain here.
+    /// It reads at two grains, the file of §2.3 and the item of §2.4, where
+    /// this module used to read only the first. The two answer the same number
+    /// here, measured needle by needle before the readings were joined: every
+    /// needle this module counts is assembled at run time, so none of its own
+    /// assertions is among the occurrences.
     fn in_product(found: &Found) -> usize {
-        found
-            .occurrences()
-            .iter()
-            .filter(|occurrence| {
-                source()
-                    .file_at(occurrence.span.start())
-                    .is_some_and(bt_source::FileRecord::permits_product)
-            })
-            .count()
+        found.in_the_product(source()).len()
     }
 
     /// **RED (shape) — a window is in the vault before it is asked what it looks like** (§7.53).
@@ -114939,21 +114932,15 @@ mod pty_drain_budget_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// How many of these occurrences stand in a file a product build compiles.
+    /// **How many of these occurrences a product build contains** —
+    /// `bt_source::Found::in_the_product`, which owns that rule.
     ///
-    /// File-grained, and deliberately so: §2.3 computes product reachability per
-    /// *declaration path to a file*, and an inline `#[cfg(test)] mod` inside a
-    /// product file is not a file. See this module's header.
+    /// It reads at two grains, the file of §2.3 and the item of §2.4, where
+    /// this module used to read only the first. The two answer the same number
+    /// here, measured needle by needle before the readings were joined. See
+    /// this module's header.
     fn in_product(found: &Found) -> usize {
-        found
-            .occurrences()
-            .iter()
-            .filter(|occurrence| {
-                source()
-                    .file_at(occurrence.span.start())
-                    .is_some_and(bt_source::FileRecord::permits_product)
-            })
-            .count()
+        found.in_the_product(source()).len()
     }
 
     /// The names of the items these occurrences stand in (§4.1) — the assertion
@@ -127661,11 +127648,15 @@ mod platform_gate_tests {
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
     // both readings side by side and asserted they agree.
     //
-    // `sources()` above is **not** part of that: that walk is the P10 row of
-    // the debt list (§6.3), it is the twin of
-    // `scripts/check-portable-core.ps1`'s array reader — allowlist entry 1 —
-    // and P10's acceptance is the agreement test between the two walks, which
-    // is P10's ticket and not this batch's. It is left exactly as it is.
+    // `sources()` above is **not** part of that, and stays a directory walk:
+    // it is the twin of `scripts/check-portable-core.ps1`, which walks the same
+    // directory and cannot ask a universe — the script exists to answer on a
+    // tree that does not compile, and it is `bt_source::FileScoped`'s first
+    // allowlist entry for that reason. P10's acceptance is the agreement
+    // between the two walks, and `the_gate_and_its_script_walk_the_same_files`
+    // below is it. Replacing this half with the declared universe would leave
+    // the script's walk with nothing to agree with, so the debt list keeps its
+    // row for this module and P20 is where it is answered.
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
     // module's header is where the six points behind `source`, `item_body` and
@@ -127744,6 +127735,99 @@ mod platform_gate_tests {
             silent.is_empty(),
             "these names are on the list and no longer name a platform, so the list is \
              promising less than it says: {silent:#?}"
+        );
+    }
+
+    /// The `.rs` files `scripts/check-portable-core.ps1` walks, asked of the
+    /// script itself.
+    ///
+    /// **A PowerShell is required and its absence is a refusal, not a skip.**
+    /// Both are tried because both run this gate in this tree — CI's steps take
+    /// PowerShell 7 and the ticket briefs run the Windows one — and a reader
+    /// that answered "there was nobody to ask" would be the quietly green thing
+    /// this preparation exists to remove.
+    fn script_walk(script: &Path) -> std::collections::BTreeSet<String> {
+        let mut refused = Vec::new();
+        for (shell, flags) in [
+            ("pwsh", &["-NoProfile", "-File"][..]),
+            (
+                "powershell",
+                &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"][..],
+            ),
+        ] {
+            let answer = bt_platform::quiet_command(shell)
+                .args(flags)
+                .arg(script)
+                .arg("-ListSources")
+                .output();
+            match answer {
+                Ok(run) if run.status.success() => {
+                    return String::from_utf8_lossy(&run.stdout)
+                        .lines()
+                        .map(|line| line.trim().to_owned())
+                        .filter(|line| !line.is_empty())
+                        .collect();
+                }
+                Ok(run) => refused.push(format!(
+                    "{shell}: {} — {}",
+                    run.status,
+                    String::from_utf8_lossy(&run.stderr)
+                )),
+                Err(error) => refused.push(format!("{shell}: {error}")),
+            }
+        }
+        panic!(
+            "neither PowerShell would list the files {} walks, so the two readers of this rule \
+             cannot be compared:\n{refused:#?}",
+            script.display()
+        );
+    }
+
+    /// RED — **the gate and its script walk the same files** (the plan's §6.3,
+    /// ticket P10).
+    ///
+    /// One rule, two readers. This module runs on every platform CI builds for
+    /// and names the file and the line; `scripts/check-portable-core.ps1`
+    /// answers in five seconds on a tree that does not compile, which is what
+    /// it is for, and reads this module's own array out of the source to do it
+    /// — it is `bt_source::FileScoped`'s first allowlist entry and P10 leaves
+    /// that reader exactly as it is.
+    ///
+    /// What neither of them can notice alone is that it has stopped *seeing* a
+    /// file. A rule read over two different sets of files is two rules, and
+    /// each half would go on passing: the script's walk gained the three
+    /// subdirectories under `src/` the day they were created and nothing said
+    /// so, and a walk that lost one would be as quiet.
+    ///
+    /// MUTATION: take `-Recurse` off the script's walk, or make `sources()`
+    /// skip a directory, and the four files under `attention/`,
+    /// `attention_words/` and `shell_integration/` are named by whichever side
+    /// still has them.
+    #[test]
+    fn the_gate_and_its_script_walk_the_same_files() {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("scripts")
+            .join("check-portable-core.ps1");
+        let listed = script_walk(&script);
+        let walked: std::collections::BTreeSet<String> = sources()
+            .into_iter()
+            .map(|(relative, _)| relative)
+            .collect();
+        assert!(
+            walked.len() > 40,
+            "this walk found the crate: {}",
+            walked.len()
+        );
+        let only_the_script: Vec<&String> = listed.difference(&walked).collect();
+        let only_this_gate: Vec<&String> = walked.difference(&listed).collect();
+        assert!(
+            only_the_script.is_empty() && only_this_gate.is_empty(),
+            "the two readers of the platform rule walk different files. Only \
+             scripts/check-portable-core.ps1 reads {only_the_script:#?}; only this module reads \
+             {only_this_gate:#?}. One list, two readers: whichever walk changed, the other has \
+             to change with it."
         );
     }
 
@@ -130239,18 +130323,20 @@ mod live_markdown_edit_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// How many of these occurrences stand in code a product build compiles —
-    /// **at item grain**, which is `clipboard_path_tests`' helper and this
-    /// module's own decision rather than the pilot's file-grained one.
+    /// **How many of these occurrences a product build compiles** —
+    /// `bt_source::Found::in_the_product`, which owns that rule at both of the
+    /// grains it takes.
     ///
-    /// Every needle counted below is written a second time in this module's own
-    /// assertions, and `needle!` excludes one construction expression rather
-    /// than every mention. §2.4's identity carries the `cfg` predicates written
-    /// on an enclosing inline `mod`, so the exclusion `window` performed by
-    /// cutting the file is a filter over the owners here.
+    /// This module needs the item grain: every needle counted below is written
+    /// a second time in its own assertions, and `needle!` excludes one
+    /// construction expression rather than every mention. §2.4's identity
+    /// carries the `cfg` predicates written on an enclosing inline `mod`, so
+    /// the exclusion `window` performed by cutting the file is a filter over
+    /// the owners here.
     ///
-    /// An occurrence in no callable at all is not a question this grain can
-    /// answer, so it is refused rather than quietly dropped.
+    /// An occurrence in no callable at all is not a question that grain can
+    /// answer, so it is refused here rather than quietly dropped — the one
+    /// thing this helper still decides for itself.
     fn in_product_items(found: &Found) -> usize {
         let index = source();
         assert_eq!(
@@ -130260,18 +130346,7 @@ mod live_markdown_edit_tests {
              the product compiles it:\n{}",
             found.report(index)
         );
-        found
-            .owners(index)
-            .into_iter()
-            .filter(|(identity, _)| {
-                !identity
-                    .variant
-                    .predicates()
-                    .iter()
-                    .any(|predicate| predicate == "test")
-            })
-            .map(|(_, count)| count)
-            .sum()
+        found.in_the_product(index).len()
     }
 
     /// **Entering is one door and it does all five things** (T5 ①).
@@ -131233,10 +131308,12 @@ mod clipboard_path_tests {
     /// construction expression rather than every mention. §2.4's identity
     /// carries the `cfg` predicates written on an enclosing inline `mod`, so the
     /// exclusion the old text prefix performed by accident is a filter over the
-    /// owners here.
+    /// owners here. The rule itself is
+    /// `bt_source::Found::in_the_product`'s, at both grains.
     ///
-    /// An occurrence in no callable at all is not a question this grain can
-    /// answer, so it is refused rather than quietly dropped.
+    /// An occurrence in no callable at all is not a question that grain can
+    /// answer, so it is refused here rather than quietly dropped — the one
+    /// thing this helper still decides for itself.
     fn in_product_items(found: &Found) -> usize {
         let index = source();
         assert_eq!(
@@ -131246,18 +131323,7 @@ mod clipboard_path_tests {
              the product compiles it:\n{}",
             found.report(index)
         );
-        found
-            .owners(index)
-            .into_iter()
-            .filter(|(identity, _)| {
-                !identity
-                    .variant
-                    .predicates()
-                    .iter()
-                    .any(|predicate| predicate == "test")
-            })
-            .map(|(_, count)| count)
-            .sum()
+        found.in_the_product(index).len()
     }
 
     struct MemoryClipboard {

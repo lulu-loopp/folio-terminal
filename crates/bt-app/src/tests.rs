@@ -152,22 +152,15 @@ fn free_calls_of(name: &str) -> Found {
         .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
-/// How many of these occurrences stand in a file a product build compiles.
+/// **How many of these occurrences a product build contains** —
+/// `bt_source::Found::in_the_product`, which owns that rule.
 ///
-/// File-grained, and deliberately so: §2.3 computes product reachability per
-/// *declaration path to a file*, and an inline `#[cfg(test)] mod` inside a
-/// product file is not a file. It is what replaces a count taken over
-/// `main.rs`, which stopped being this crate's product text on 2026-09-18.
+/// It is what replaces a count taken over `main.rs`, which stopped being this
+/// crate's product text on 2026-09-18. It reads at two grains, §2.3's file and
+/// §2.4's item, where this module used to read only the first; both answer the
+/// same number here, measured needle by needle before the readings were joined.
 fn in_product(found: &Found) -> usize {
-    found
-        .occurrences()
-        .iter()
-        .filter(|occurrence| {
-            source()
-                .file_at(occurrence.span.start())
-                .is_some_and(bt_source::FileRecord::permits_product)
-        })
-        .count()
+    found.in_the_product(source()).len()
 }
 
 /// The braces one type's members are written in, and what is between them.
@@ -217,16 +210,47 @@ fn a_local_folder() -> bt_term::PathVerdict {
 
 /// Runs the actual production queue in a disposable process. The watchdog
 /// kills only this test's child if a regression makes conversion infinite.
+///
+/// RED GATE: mis-aim the selector — rename this test, or misspell the name the
+/// child is given — and the first assertion names the selector and says how
+/// many tests it found. It used to be green: a filter that matches nothing
+/// makes the harness print `running 0 tests` and exit 0, and the parent reads
+/// only the exit status.
 #[test]
 fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
     const CHILD: &str = "BT_MATH_ROBUSTNESS_TEST_CHILD";
+    /// The name the child is told to run — written once, so that the proof
+    /// below and the run itself cannot be about two different tests.
+    const SELECTOR: &str = "tests::hostile_math_is_refused_and_the_real_decoration_worker_survives";
     if std::env::var_os(CHILD).is_none() {
+        // **A selector that matches nothing is not a pass**
+        // (`docs/plans/bt-app-split-prep.md` §6.3, P9). The harness answers a
+        // filter that names no test with `running 0 tests` and exit code 0, so
+        // a child spawned on a name this file had renamed or misspelled would
+        // be a green test that ran nothing at all — the whole of this case
+        // lives in the child, and the parent only reads its status. So the
+        // harness is asked what the selector names *before* it is run with it,
+        // and the answer has to be this one test. `--list` runs nothing, which
+        // is why the proof costs a process that exits at once rather than the
+        // minute the real run takes.
+        let listing = bt_platform::quiet_command(std::env::current_exe().unwrap())
+            .args(["--exact", SELECTOR, "--list"])
+            .output()
+            .expect("the harness can list its own tests");
+        let listed = String::from_utf8_lossy(&listing.stdout);
+        let named: Vec<&str> = listed
+            .lines()
+            .filter_map(|line| line.trim_end().strip_suffix(": test"))
+            .collect();
+        assert_eq!(
+            named,
+            [SELECTOR],
+            "the child selector `{SELECTOR}` names {} test(s) in this binary, and this case is \
+             the child's to run. The harness said:\n{listed}",
+            named.len()
+        );
         let mut child = bt_platform::quiet_command(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::hostile_math_is_refused_and_the_real_decoration_worker_survives",
-                "--nocapture",
-            ])
+            .args(["--exact", SELECTOR, "--nocapture"])
             .env(CHILD, "1")
             .spawn()
             .unwrap();
@@ -29379,7 +29403,9 @@ fn a_completion_that_changes_no_intrinsic_does_not_reflow_the_document() {
 ///
 /// MUTATION: leave `peek_pane` out of [`documents_held_in`] and the first
 /// assertion goes red; spell a `tab.preview_panes` walk into any of the three
-/// again and the second does.
+/// again and the second does; take the `documents_held` call out of one of them
+/// and the third does. A `tab.preview_panes` written in a *comment* inside one
+/// of the three is prose and leaves it green.
 #[test]
 fn the_glance_cards_document_is_in_the_awaited_set() {
     let file = PathBuf::from(r"D:\proj\shots/one.png");
@@ -29400,23 +29426,58 @@ fn the_glance_cards_document_is_in_the_awaited_set() {
         "and it stands on the file, so the watch follows it"
     );
 
-    // Built at run time so that this test's own text is not one of the sites
-    // it is counting.
-    let walk = format!("tab{}.preview_panes", ".");
+    // **The prohibition, asked of each door's own bytes.**
+    //
+    // It used to be `format!("tab{}.preview_panes", ".")`, assembled at run
+    // time so that this file's own text would not be one of the sites it
+    // counted — and the separator went on the wrong side, so the needle was
+    // `tab..preview_panes` and the half that was supposed to go red never
+    // could. `needle!` is what that assembly was reaching for: it excludes the
+    // one expression that built the needle (§2.6) and nothing else, so the
+    // spelling can be written the way the product would write it.
+    //
+    // `View::CodeKeepingLiterals`, because a sentence in a comment about the
+    // walk that used to be here is prose and not a walk.
     for door in [
         "markdown_pictures_awaited",
         "markdown_picture_files",
         "forget_the_picture_in",
     ] {
-        let text = method_body("Runtime", door);
-        assert!(
-            !text.contains(walk.as_str()),
-            "`{door}` walks the tabs' panes for itself, so the card is not \
-                 in it:\n{text}"
+        let walk = found_in(
+            needle!(Pattern::text("tab.preview_panes")),
+            View::CodeKeepingLiterals,
+            Scope::Item(ItemQuery::method("Runtime", door)),
         );
         assert!(
-            text.contains("documents_held"),
-            "`{door}` must be built from the one walk over every holder:\n{text}"
+            walk.is_empty(),
+            "`{door}` walks the tabs' panes for itself, so the card is not in \
+             it:\n{}",
+            walk.report(source())
+        );
+    }
+    // **And each door is built from the one walk, by the call it makes.**
+    // `contains("documents_held")` was the whole of this before, and it is a
+    // prefix of `documents_held_in` and of `documents_held_mut` — so it could
+    // not tell the walk that names the card from the two that do not.
+    for (door, call) in [
+        (
+            "markdown_pictures_awaited",
+            "pictures_awaited_by(self.documents_held())",
+        ),
+        (
+            "markdown_picture_files",
+            "picture_files_of(self.documents_held())",
+        ),
+        (
+            "forget_the_picture_in",
+            "forget_standing_answers(self.documents_held_mut(), path)",
+        ),
+    ] {
+        let text = method_body("Runtime", door);
+        assert!(
+            text.contains(call),
+            "`{door}` must be built from the one walk over every holder, as \
+             `{call}`:\n{text}"
         );
     }
     assert!(
@@ -46673,13 +46734,13 @@ fn a_playing_video_is_spelled_as_the_file_it_is() {
 /// way to play a video — which is exactly the state §7.23's own note warned
 /// this slice about when it wrote "一行都没有删".
 ///
-/// 1. **`player.rs` is not on the disk.** The module that wrote the page.
+/// 1. **`player.rs` is not one of this crate's files**, and is not lying
+///    undeclared beside them either. The module that wrote the page.
 /// 2. **No opening video element tag anywhere in the crate.** The element
 ///    the page existed to contain, and the one string that could not survive
-///    by accident. Named in prose and not spelled here, for the reason the
-///    needles below are spelled in halves: this doc comment is inside one of
-///    the files the walk reads, so a sentence quoting the tag would make the
-///    test its own counter-example.
+///    by accident. Named in prose and not spelled here: this doc comment is
+///    inside one of the files read, and a reader who has to work out that a
+///    comment is not counted has been given something to work out.
 /// 3. **`Mint::VideoShell` does not exist.** The note the gate carried about
 ///    a page standing in for a recording.
 /// 4. **No autoplay-policy argument.** It was written for one self-starting
@@ -46703,60 +46764,81 @@ fn a_playing_video_is_spelled_as_the_file_it_is() {
 /// but stopped calling it would pass the other four.
 #[test]
 fn the_shell_page_is_gone() {
+    let index = source();
     let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let relative = |path: &std::path::Path| {
+        bt_source::normalized(path)
+            .strip_prefix(bt_source::normalized(&source_dir))
+            .expect("a file under this crate's own src")
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+
+    // ── ① the module that wrote the page ──────────────────────────────────
+    //
+    // Twice, because a file this crate does not declare is still a file: no
+    // file the crate is made of is named `player.rs`, and neither is any `.rs`
+    // file lying on the disk beside the declarations. `Index::cross_check` is
+    // where the second kind is reported rather than lost, and the two together
+    // are wider than the `src/player.rs` existence check they replace, which
+    // never looked inside a subdirectory.
+    let is_the_module = |path: &std::path::Path| path.ends_with("player.rs");
     assert!(
-        !source_dir.join("player.rs").exists(),
-        "the module that wrote the shell page is still on the disk"
+        !index.files().iter().any(|file| is_the_module(file.path())),
+        "the module that wrote the shell page is declared again"
     );
-    let mut sources = Vec::new();
-    for entry in std::fs::read_dir(&source_dir).expect("this crate has a source directory") {
-        let path = entry.expect("a directory entry").path();
-        if path.extension().is_some_and(|ext| ext == "rs") {
-            let text = std::fs::read_to_string(&path).expect("a source file");
-            sources.push((path, text));
-        }
-    }
     assert!(
-        sources.len() > 40,
-        "the walk found the crate: {}",
-        sources.len()
+        !index
+            .cross_check()
+            .only_on_disk
+            .iter()
+            .any(|path| is_the_module(path)),
+        "the module that wrote the shell page is lying beside the declarations:\n{}",
+        index.cross_check().report()
     );
-    // **Asked of the code, and comment lines are dropped before it is
-    // asked** (2026-08-28).
+
+    assert!(
+        index.files().len() > 40,
+        "the declarations found the crate: {}",
+        index.files().len()
+    );
+
+    // ── ②–⑤, asked of every file the crate is made of ────────────────────
+    //
+    // **Asked of the code, and comments are dropped before it is asked**
+    // (2026-08-28).
     //
     // Not a loophole: the rule is about what this crate *does*, and a
     // paragraph explaining a route that was retired is not that route.
     // `preview.rs` carries four sentences about the page, `webhost.rs` one
     // about the accessor that read its mint, and this test's own doc comment
-    // would be another — a pin that forbade the prose would forbid the only
-    // record of why the code is gone. `bt-render`'s source pins drop
-    // comments for exactly this reason.
+    // is another — a pin that forbade the prose would forbid the only record
+    // of why the code is gone. `bt-render`'s source pins drop comments for
+    // exactly this reason, and `View::CodeKeepingLiterals` is that reading
+    // with the literals kept, which is where three of these four spellings
+    // would live if they came back.
     //
-    // Each needle is still spelled in halves, because this file is one of
-    // the ones walked and a needle written whole would be found in the array
-    // that looks for it.
-    let code_of = |text: &str| -> String {
-        text.lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let code: Vec<(&std::path::PathBuf, String)> = sources
-        .iter()
-        .map(|(path, text)| (path, code_of(text)))
-        .collect();
+    // The needles are spelled whole. This file is one of the files read, and
+    // a needle written whole used to be found by the array looking for it —
+    // which is why they were assembled from halves; `needle!` records where
+    // the expression that built it stands and excludes that one span (§2.6),
+    // which is the same rule said once instead of four times.
+    let mut said: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut elements: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for needle in [
-        concat!("Video", "Shell"),
-        concat!("--autoplay", "-policy"),
-        concat!("mint_player", "_shell"),
-        concat!("shell_", "html"),
+        needle!(Pattern::text("VideoShell")),
+        needle!(Pattern::text("--autoplay-policy")),
+        needle!(Pattern::text("mint_player_shell")),
+        needle!(Pattern::text("shell_html")),
     ] {
-        for (path, text) in &code {
-            assert!(
-                !text.contains(needle),
-                "{needle} is still in {}",
-                path.display()
-            );
+        let spelling = needle.pattern().spelling();
+        let answer = found(needle, View::CodeKeepingLiterals);
+        println!("{}", answer.report(index));
+        for occurrence in answer.occurrences() {
+            let file = index
+                .file_at(occurrence.span.start())
+                .expect("every match stands in a file of the universe");
+            said.insert(format!("{spelling} is still in {}", relative(file.path())));
         }
     }
     // **And the element, shaped like a tag rather than like four
@@ -46766,25 +46848,42 @@ fn the_shell_page_is_gone() {
     // cannot be written except by writing the element, and it is the whole
     // class: the bare tag, the tag with attributes, and the self-closing
     // one alike.
-    let opening = concat!("<", "video");
-    for (path, text) in &code {
-        for (at, _) in text.match_indices(opening) {
-            let after = text[at + opening.len()..].chars().next();
-            assert!(
-                !matches!(after, None | Some('>' | ' ' | '\t' | '\n' | '/')),
-                "an opening video element is back in {}",
-                path.display()
-            );
+    let openings = found(needle!(Pattern::text("<video")), View::CodeKeepingLiterals);
+    println!("{}", openings.report(index));
+    for occurrence in openings.occurrences() {
+        let file = index
+            .file_at(occurrence.span.start())
+            .expect("every match stands in a file of the universe");
+        let text = index.text(file.span());
+        let path = relative(file.path());
+        *elements.entry(path.clone()).or_default() += 1;
+        let after = text[occurrence.span.end() - file.span().start()..]
+            .chars()
+            .next();
+        if matches!(after, None | Some('>' | ' ' | '\t' | '\n' | '/')) {
+            said.insert(format!("an opening video element is back in {path}"));
         }
     }
-    // And the folder the shells lived in is written by nothing.
-    for (path, text) in &code {
-        assert!(
-            !text.contains(concat!("Folio", "\\", "player")),
+    // And the folder the shells lived in is written by nothing. The spelling
+    // is the one a `\` in a Rust literal is written with, which is what both
+    // readings look for in the bytes of a file.
+    let folder = found(
+        needle!(Pattern::text("Folio\\player")),
+        View::CodeKeepingLiterals,
+    );
+    println!("{}", folder.report(index));
+    for occurrence in folder.occurrences() {
+        let file = index
+            .file_at(occurrence.span.start())
+            .expect("every match stands in a file of the universe");
+        said.insert(format!(
             "the shell folder is still named in {}",
-            path.display()
-        );
+            relative(file.path())
+        ));
     }
+
+    println!("the element's spelling stands in: {elements:#?}");
+    assert!(said.is_empty(), "{said:#?}");
 }
 
 /// RED — **a tick whose only news is a decoded picture still reaches the

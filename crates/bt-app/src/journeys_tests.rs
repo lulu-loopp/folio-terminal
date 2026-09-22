@@ -1106,18 +1106,14 @@ fn a_wait_is_not_a_journey() {
 //   `View::Identifiers` is what makes that safe: `pace.rs` explains the
 //   retirement in a doc comment, and raw bytes over the package would have read
 //   that sentence as a second copy of the thing and inverted the guard.
-// * The two prohibitions on a renewable query-time deadline stay narrow — the
-//   crate root together with every module under `crate::runtime` for
-//   `PaneMotion`, `crate::termscroll` for the thumb — because both spellings are
-//   ones other hosts legitimately carry: three types in this package declare
-//   that exact `deadline` signature and nine spell `frame: Duration`. A
-//   package-wide zero would have inverted both. `PaneMotion` is not a method of
-//   either block Step 2a moves, so the root is still where it is declared
-//   afterwards — but what this forbids is code nobody has written yet, and after
-//   the move it could be written in any `runtime/*.rs`, which a scope naming
-//   only the root would never look at. So the negative names the same union the
-//   two register gates of `main.rs::arrival_wiring_tests` name, and
-//   `in_the_root_or_the_runtime` is what it is called here.
+// * The two prohibitions on a renewable query-time deadline stay inside one
+//   named scope each, because both spellings are ones other hosts legitimately
+//   carry: three types in this package declare that exact `deadline` signature
+//   and nine spell `frame: Duration`. A package-wide zero would have inverted
+//   both. `PaneMotion`'s is `Scope::Impls("PaneMotion")` — every `impl` block
+//   of that type, in every file and on every arm, which is what the claim is
+//   about and what it used to have to approximate with the module the blocks
+//   are written in today. The thumb's is `crate::termscroll`.
 
 /// **This crate, indexed once per process** — the workspace read, this
 /// package's own `src/` declared as the universe and lowered, on the first ask
@@ -1144,21 +1140,14 @@ fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
         .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
-/// How many of these occurrences stand in a file a product build compiles.
+/// **How many of these occurrences a product build contains** —
+/// `bt_source::Found::in_the_product`, which owns that rule.
 ///
-/// File-grained, and deliberately so: §2.3 computes product reachability
-/// per *declaration path to a file*, and an inline `#[cfg(test)] mod`
-/// inside a product file is not a file.
+/// It reads at two grains, §2.3's file and §2.4's item, where this module used
+/// to read only the first. Both answer the same number here, measured needle by
+/// needle before the readings were joined.
 fn in_product(found: &bt_source::Found) -> usize {
-    found
-        .occurrences()
-        .iter()
-        .filter(|occurrence| {
-            source_index()
-                .file_at(occurrence.span.start())
-                .is_some_and(bt_source::FileRecord::permits_product)
-        })
-        .count()
+    found.in_the_product(source_index()).len()
 }
 
 /// The package's product count of one raw needle — the view `include_str!`
@@ -1182,19 +1171,6 @@ fn found_in(
 /// line of `main.rs`, so a method that moves between files is the same method.
 fn method(name: &str) -> &'static str {
     method_body(name)
-}
-
-/// **Whether this universe holds a module of that path.**
-///
-/// `Index::modules()` is the record a named scope resolves against, so this asks
-/// the same question `Scope::Modules` asks one moment before it is asked — which
-/// is what tells "the module is not there yet" apart from "the module is there
-/// and holds nothing", two answers a negative reads as the same green.
-fn declares(module_path: &str) -> bool {
-    source_index()
-        .modules()
-        .iter()
-        .any(|module| module.module_paths().iter().any(|path| path == module_path))
 }
 
 /// One playback of `frames` frames, each standing a tenth of a second — the
@@ -1603,31 +1579,17 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
             && work.contains("(bar_moving || pane_moving).then_some(next_tick).flatten()"),
         "a pane in flight is assigned the strip's absolute window-clock tick:\n{work}"
     );
-    // The union, and the second member's state, exactly as
-    // `main.rs::arrival_wiring_tests::the_root_and_the_runtime` has it: the
-    // member is left out rather than written conditionally, because
-    // `crate::runtime` does not exist on this tree and a `ModuleSpec` that names
-    // no module is `QueryFailure::EmptyScope` on its own name. The assertion is
-    // what makes the flip a red test rather than a memory.
-    assert!(
-        !declares("crate::runtime"),
-        "`crate::runtime` is declared, so the relocation landed and this negative \
-         has to become `Scope::Modules(vec![ModuleSpec::exact(\"crate\"), \
-         ModuleSpec::tree(\"crate::runtime\")])` — the forbidden code can now be \
-         written in a file the root does not reach"
-    );
-    let in_the_root_or_the_runtime = |text: &str| {
+    let in_the_type = |text: &str| {
         found_in(
             bt_source::Needle::new(bt_source::Pattern::text(text)),
             bt_source::View::Raw,
-            bt_source::Scope::Modules(vec![bt_source::ModuleSpec::exact("crate")]),
+            bt_source::Scope::Impls("PaneMotion".to_owned()),
         )
         .is_empty()
     };
     assert!(
-        in_the_root_or_the_runtime(
-            "fn deadline(&self, now: Instant, motion: Motion, frame: Duration)"
-        ) && in_the_root_or_the_runtime("self.is_animating(now, motion).then(|| now + frame)"),
+        in_the_type("fn deadline(&self, now: Instant, motion: Motion, frame: Duration)")
+            && in_the_type("self.is_animating(now, motion).then(|| now + frame)"),
         "PaneMotion must not own a renewable query-time deadline"
     );
 

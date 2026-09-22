@@ -245,7 +245,6 @@ crates/bt-app/src/shell_integration.rs	shell_integration::tests::writing_the_pro
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::zsh_is_pointed_at_a_directory_and_never_handed_bashs_flag	include_str!	../../../scripts/shell-integration/folio.zsh	P14	no
 crates/bt-app/src/shell_integration/profile_runtime.rs	shell_integration::profile_runtime::tests::shell_integration_offer_predicate_never_grants_write_ownership	include_str!	add_profile_with_forms;offer_for	P14	no
 crates/bt-app/src/shortcuts.rs	shortcuts::tests::docs_shortcuts_md_is_the_bindings_table	fixture / manifest read	target	P14	no
-crates/bt-app/src/tests.rs	tests::the_shell_page_is_gone	directory walk	(the file it reads)	P7	yes
 crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_archive_has_ten_files_and_cleanup_only_wrapper	include_str!	../../../scripts/release/package.ps1	P17	no
 crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_door_precedes_every_startup_effect	include_str!	main	P17	no
 crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_purge_says_on_macos_that_held_data_cannot_be_told	include_str!	../../bt-platform/src/cleanup.rs	P17	no
