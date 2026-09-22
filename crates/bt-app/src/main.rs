@@ -126899,6 +126899,42 @@ mod platform_gate_tests {
 /// ever reads back.
 #[cfg(test)]
 mod cross_window_drag_tests {
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree — all 23
+    // body pins compared as bytes — and this is the one that deletes the older
+    // of the two, because two implementations of one judgement do not vouch for
+    // each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `free_fn_body` and `found` are that
+    // module's helpers word for word, and its header is where the six points
+    // behind them live. One shape none of the earlier batches had a consumer
+    // for is here: a body pin on a **trait** method. The device-loss `rebuild`
+    // is `<TheDeviceAndItsWindows as LostDevice>::rebuild`, so the query says
+    // the trait and `item_body` takes the `ItemQuery` whole, exactly as
+    // `palette_wiring_tests` does for a trait method of `FolioApp`.
+    //
+    // What the deleted finders did, recorded before they went: `fn_body` took
+    // the first `\n    fn name(` in this file — a method of *whatever `impl`
+    // happens to come first* — and stopped at the first `\n    }\n`, which is
+    // the body **minus** the line that closes it, with the signature's tail in
+    // front of it. The identities turn out to be three owners and not one:
+    // `Runtime` (ten of them), `FolioApp` (five) and
+    // `<TheDeviceAndItsWindows as LostDevice>` (one), beside two free
+    // functions. Every assertion here fell inside the item it names — the
+    // equivalence commit is what established that rather than assumed it.
+    //
+    // One reading here is not a body pin, and it is written down rather than
+    // inherited (§4.1): the reported backing colour took this file and now
+    // takes every file the package compiles, because a door written in
+    // `runtime/` is as much of one as a door written here. Recorded with it,
+    // because it is the reason the widening is also a repair: the deleted
+    // `SOURCE.contains` for that spelling was satisfied by **this module's own
+    // string literal**, so it stayed green with the product function renamed
+    // out from under it — which is the mutation that proved it.
     use std::time::Instant;
 
     use bt_layout::SeatId;
@@ -126910,20 +126946,47 @@ mod cross_window_drag_tests {
         profiles, seats, strip_insert_slot, tear_out_rect,
     };
 
-    const SOURCE: &str = include_str!("main.rs");
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// The body of a method declared at an `impl`'s own indentation.
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!("\n    fn {name}(");
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n    }\n")
-                .expect("a method is closed by a `}` at its `impl`'s indentation");
-        &SOURCE[start..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of one item, braces included — the identity of §2.4 rather than
+    /// a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    ///
+    /// The owner is an argument and not a guess. What the deleted `fn_body` did
+    /// was take the first `\n    fn name(` in this file, which is a method of
+    /// *whatever `impl` happens to come first* — and this module's pins turn
+    /// out to mean three owners, which the equivalence commit is what
+    /// established rather than assumed.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> bt_platform::WindowRect {
@@ -126964,21 +127027,9 @@ mod cross_window_drag_tests {
     /// and the layer being removed is the live one.
     #[test]
     fn a_rebuild_clears_the_old_layer_first() {
-        /// The body of a free function declared at column zero.
-        fn free_fn_body(name: &str) -> &'static str {
-            let head = format!("\nfn {name}(");
-            let start = SOURCE
-                .find(&head)
-                .unwrap_or_else(|| panic!("`fn {name}` is declared at column zero"))
-                + head.len();
-            let end = start
-                + SOURCE[start..]
-                    .find("\n}\n")
-                    .expect("a free function is closed by a `}` at column zero");
-            &SOURCE[start..end]
-        }
-
-        let rebuild = fn_body("rebuild");
+        let rebuild = item_body(
+            &ItemQuery::method("TheDeviceAndItsWindows", "rebuild").of_trait("LostDevice"),
+        );
         assert!(
             rebuild.contains("window_surface_target(&window.window, &window.compositor)"),
             "the device-loss rebuild names a surface door of its own instead of the one \
@@ -127106,7 +127157,7 @@ mod cross_window_drag_tests {
         }
 
         for constructor in ["create", "open_window"] {
-            let body = fn_body(constructor);
+            let body = method_body("Runtime", constructor);
             let mut fatal = propagated(body);
             fatal.retain(|name| !MAY_STILL_PROPAGATE.contains(&name.as_str()));
             assert!(
@@ -127134,7 +127185,13 @@ mod cross_window_drag_tests {
         }
 
         assert!(
-            SOURCE.contains("fn install_theme_class_background(window: &Window) {"),
+            !found(
+                needle!(Pattern::text(
+                    "fn install_theme_class_background(window: &Window) {"
+                )),
+                View::Raw
+            )
+            .is_empty(),
             "the window's backing colour is reported and not propagated: it returns nothing, so \
              there is no `?` for a caller to write"
         );
@@ -127212,7 +127269,7 @@ mod cross_window_drag_tests {
         // nothing folds into `ControlFlow::WaitUntil` is a clock that fires on
         // the next thing to twitch, which over a window that will hear nothing at
         // all is never.
-        let wait = fn_body("about_to_wait_inner");
+        let wait = method_body("FolioApp", "about_to_wait_inner");
         let (before, after) = wait
             .split_once("let mut wake_deadline = match self.drive_drag_broker(now)")
             .expect(
@@ -127344,19 +127401,19 @@ mod cross_window_drag_tests {
     /// holding one.
     #[test]
     fn a_row_crosses_a_boundary_as_a_path_and_is_spent_by_the_far_window() {
-        let open = fn_body("open_broker");
+        let open = method_body("Runtime", "open_broker");
         assert!(
             !open.contains("DragSource::Row"),
             "every payload opens a broker now — a row's is the cheapest of the \
              three, because a path needs nothing carried:\n{open}"
         );
-        let foreign = fn_body("foreign_strip_landing");
+        let foreign = method_body("Runtime", "foreign_strip_landing");
         assert!(
             foreign.contains("row_strip_landing("),
             "and the visitor's tab list answers it off the very same table its \
              own window's does:\n{foreign}"
         );
-        let settle = fn_body("settle_drag_handover");
+        let settle = method_body("FolioApp", "settle_drag_handover");
         assert!(
             settle.contains("runtime.commit_row_into_new_tab(&payload, slot)")
                 && settle.contains("runtime.commit_row_into_tab(&payload, tab)"),
@@ -127509,12 +127566,12 @@ mod cross_window_drag_tests {
     /// into the wrong window, with no drawing anywhere that says so.
     #[test]
     fn a_drag_over_somebody_elses_glass_offers_nothing_of_its_own() {
-        let body = fn_body("drive_drag");
+        let body = method_body("Runtime", "drive_drag");
         assert!(
             body.contains("pointer_is_on_our_own_glass"),
             "the survey is gated on whose window the pointer is actually over:\n{body}"
         );
-        let broker = fn_body("drive_drag_broker");
+        let broker = method_body("FolioApp", "drive_drag_broker");
         for (owed, why) in [
             (
                 "still_holds",
@@ -127555,8 +127612,8 @@ mod cross_window_drag_tests {
         // tab to have arrived before it can be run.
         let body = format!(
             "{}{}",
-            fn_body("settle_drag_handover"),
-            fn_body("settle_arrival")
+            method_body("FolioApp", "settle_drag_handover"),
+            method_body("FolioApp", "settle_arrival")
         );
         for (owed, why) in [
             (
@@ -127742,13 +127799,13 @@ mod cross_window_drag_tests {
         // And the arithmetic above is the arithmetic that actually runs: a
         // transcription nobody ties to its original is a test of the
         // transcription.
-        let arrival = fn_body("settle_arrival");
+        let arrival = method_body("FolioApp", "settle_arrival");
         assert!(
             arrival.contains("partition_clamped(&pinned, index, slot.min(pinned.len() - 1))"),
             "the arrival is *moved* to the landing's slot, and the only thing \
              allowed to overrule the hand there is the pinned partition:\n{arrival}"
         );
-        let survey = fn_body("foreign_strip_landing");
+        let survey = method_body("Runtime", "foreign_strip_landing");
         assert!(
             survey.contains("strip_insert_slot(raw, &pinned)")
                 && survey.contains("seats::insert_index_at(&mids, run.pos("),
@@ -127777,8 +127834,8 @@ mod cross_window_drag_tests {
     /// inside the door and the reader watches the wrong window first (third).
     #[test]
     fn a_torn_out_window_opens_where_it_will_stand_and_is_shown_holding_its_tab() {
-        let door = fn_body("open_window");
-        let settle = fn_body("settle_tear_out");
+        let door = method_body("Runtime", "open_window");
+        let settle = method_body("FolioApp", "settle_tear_out");
 
         assert!(
             door.contains("tear_out_rect(pointer, grip, dpi, work)"),
@@ -127833,13 +127890,13 @@ mod cross_window_drag_tests {
         // The *read*, not the word: an arm that still mentions a visitor while
         // no longer asking the window whether it has one is exactly the mutation
         // this pin exists to catch.
-        let stand_in = fn_body("strip_stand_in");
+        let stand_in = method_body("Runtime", "strip_stand_in");
         assert!(
             stand_in.contains("self.window.foreign"),
             "the stand-in a foreign tear-out draws is the stand-in a local one \
              draws:\n{stand_in}"
         );
-        let ghost = fn_body("drag_ghost_layer");
+        let ghost = method_body("Runtime", "drag_ghost_layer");
         assert!(
             ghost.contains("self.window.foreign"),
             "and the ghost over this window's glass is built here, at this \
@@ -127881,7 +127938,7 @@ mod cross_window_drag_tests {
     #[test]
     fn a_visitors_stand_in_card_draws_the_pane_in_the_hand() {
         // ① and ②.
-        let broker = fn_body("drive_drag_broker");
+        let broker = method_body("FolioApp", "drive_drag_broker");
         assert!(
             broker.contains("runtime.carried_pane_picture()")
                 && broker.contains("pane: cargo_pane.clone()"),
@@ -127890,7 +127947,7 @@ mod cross_window_drag_tests {
         );
         // ③ — the slot the drop is aiming at, filled from the payload rather than
         // from a tab this window does not have.
-        let chrome = fn_body("refresh_chrome_with_overlay");
+        let chrome = method_body("Runtime", "refresh_chrome_with_overlay");
         assert!(
             chrome.contains("foreign.pane.as_ref().map(|pane| seats::FocusThumbnail {"),
             "the visitor's slot is still handed a hole, which is the card the \
@@ -127898,13 +127955,13 @@ mod cross_window_drag_tests {
         );
         // ④ — the projection outlives the pointer leaving, and exists at all in a
         // window that draws no cards.
-        let carried = fn_body("carried_pane");
+        let carried = method_body("Runtime", "carried_pane");
         assert!(
             carried.contains("self.app.drag_broker") && carried.contains("broker.cargo.pane()"),
             "the pane in the hand is read off this window's own stand-in, which is \
              `None` from the moment the hand crosses onto another window:\n{carried}"
         );
-        let pass = fn_body("refresh_focus_thumbnails");
+        let pass = method_body("Runtime", "refresh_focus_thumbnails");
         assert!(
             pass.contains(".carried_pane()") && pass.contains("broker.guest_mini"),
             "the window holding the pane stops projecting it the moment the hand \
@@ -129713,8 +129770,112 @@ mod field_command_tests {
 
 #[cfg(test)]
 mod clipboard_path_tests {
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Nine readers here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree — fourteen
+    // body pins compared as bytes, eleven counts as numbers, one match arm as
+    // 106 bytes — and this is the one that deletes the older of the two, because
+    // two implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `found` are that module's helpers
+    // word for word, and its header is where the six points behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed and stopped at the next
+    // `\n    }`, which is the method's own closing brace — so unlike the earlier
+    // batches' finders it did not overshoot into the next item, but it still
+    // could not say which `impl` it had landed in, and it was handed a **text
+    // prefix of this file** rather than the file. All fourteen turned out to be
+    // methods of `Runtime`; the equivalence commit is what established that
+    // rather than assumed it. Two pins did not use it at all and sliced from a
+    // signature to a marker further down: `paste_from_clipboard_into`'s ran
+    // eighteen thousand bytes past the brace that closes it, so its two
+    // prohibitions were being asked of fifteen neighbouring methods as well.
+    //
+    // One shape the pilot had no consumer for is added here, and its header is
+    // where it was predicted: `in_product` there is **file**-grained, and says
+    // that an inline `#[cfg(test)] mod` inside a product file counts as product
+    // and that the next batch may not be so lucky. This is that batch —
+    // `in_product_items` is the same question at item grain.
     use super::*;
     use bt_platform::clipboard::{Candidate, ClipboardPort, ClipboardTypes};
+
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+
+    // ── what this module asks the crate instead ───────────────────────────
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// How many of these occurrences stand in code a product build compiles —
+    /// **at item grain**, which is this module's own decision and not the
+    /// pilot's.
+    ///
+    /// `pty_drain_budget_tests::in_product` asks the same question of the
+    /// *file*, and says in its header that an inline `#[cfg(test)] mod` inside a
+    /// product file counts as product, and that the next batch may not be so
+    /// lucky. This is that batch: the spellings counted below are written a
+    /// second time in this module's own assertions, and `needle!` excludes one
+    /// construction expression rather than every mention. §2.4's identity
+    /// carries the `cfg` predicates written on an enclosing inline `mod`, so the
+    /// exclusion the old text prefix performed by accident is a filter over the
+    /// owners here.
+    ///
+    /// An occurrence in no callable at all is not a question this grain can
+    /// answer, so it is refused rather than quietly dropped.
+    fn in_product_items(found: &Found) -> usize {
+        let index = source();
+        assert_eq!(
+            found.outside_items(index),
+            0,
+            "an occurrence stands in no callable, so nothing here says whether \
+             the product compiles it:\n{}",
+            found.report(index)
+        );
+        found
+            .owners(index)
+            .into_iter()
+            .filter(|(identity, _)| {
+                !identity
+                    .variant
+                    .predicates()
+                    .iter()
+                    .any(|predicate| predicate == "test")
+            })
+            .map(|(_, count)| count)
+            .sum()
+    }
 
     struct MemoryClipboard {
         files: Vec<PathBuf>,
@@ -129967,33 +130128,21 @@ mod clipboard_path_tests {
 
     #[test]
     fn terminal_is_the_only_new_clipboard_caller_and_k144_keeps_focus() {
-        let source = include_str!("main.rs");
-        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         assert_eq!(
-            before_this_fixture
-                .matches("bt_platform::clipboard_payload()")
-                .count(),
-            1
+            in_product_items(&found(
+                needle!(Pattern::text("bt_platform::clipboard_payload()")),
+                View::Raw
+            )),
+            1,
+            "the board is read in one place the product compiles"
         );
-        let paste = source
-            .split_once("    fn paste_from_clipboard_into(")
-            .unwrap()
-            .1
-            .split_once("    /// A composition event")
-            .unwrap()
-            .0;
+        let paste = method_body("Runtime", "paste_from_clipboard_into");
         assert!(paste.contains("bt_platform::clipboard_payload()"));
         assert!(paste.contains("hang_watch::Station::ClipboardRead"));
         assert!(paste.contains("leaf.paste_recipient.clone()"));
         assert!(!paste.contains("set_focus("));
         assert!(!paste.contains("set_files_keyboard("));
-        let k144 = source
-            .split_once("    fn insert_path_into_terminal(")
-            .unwrap()
-            .1
-            .split_once("    // ── the floating window")
-            .unwrap()
-            .0;
+        let k144 = method_body("Runtime", "insert_path_into_terminal");
         assert!(k144.contains("shell_literal::paths_text("));
         assert!(k144.contains("set_files_keyboard(None"));
         assert!(k144.contains("self.seats.set_focus(seat)"));
@@ -130137,8 +130286,6 @@ mod clipboard_path_tests {
     /// is the only thing that can say *where* a call is.
     #[test]
     fn a_drop_is_collected_in_the_dispatcher_and_spent_at_the_turn_boundary() {
-        let source = include_str!("main.rs");
-        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         for (once, what) in [
             (
                 "runtime.collect_dropped_file(path);",
@@ -130178,18 +130325,22 @@ mod clipboard_path_tests {
             ),
         ] {
             assert_eq!(
-                before_this_fixture.matches(once).count(),
+                in_product_items(&found(needle!(Pattern::text(once)), View::Raw)),
                 1,
                 "`{once}` — {what}"
             );
         }
-        let arm = before_this_fixture
-            .split_once("            WindowEvent::DroppedFile(path) => {")
-            .expect("the dispatcher answers a dropped file")
-            .1
-            .split_once("            WindowEvent::Resized(size)")
-            .expect("and the arm is closed by the one after it")
-            .0;
+        // The arm is not an item; the item it stands in is `window_event`, which
+        // `FolioApp` reaches through winit's own trait.
+        let arm = item_body(
+            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
+        )
+        .split_once("            WindowEvent::DroppedFile(path) => {")
+        .expect("the dispatcher answers a dropped file")
+        .1
+        .split_once("            WindowEvent::Resized(size)")
+        .expect("and the arm is closed by the one after it")
+        .0;
         assert!(
             !arm.contains("paste"),
             "the arm collects; pasting from it would be one command line per file"
@@ -130200,16 +130351,17 @@ mod clipboard_path_tests {
         // a third reader has to come and change this line and say who it is: the
         // door itself is one call and it is pinned as one above.
         assert_eq!(
-            before_this_fixture
-                .matches("self.platform_pointer_now()")
-                .count(),
+            in_product_items(&found(
+                needle!(Pattern::text("self.platform_pointer_now()")),
+                View::Raw
+            )),
             2,
             "the platform's cursor is read by the file that opens an external \
              drop and by the release of an internal one, and by nothing else"
         );
         // **The reading is on the arrival road and on no other** (X-10). The
         // collector is what the drop's arm calls.
-        let collecting = method_text(before_this_fixture, "    fn collect_dropped_file(");
+        let collecting = method_body("Runtime", "collect_dropped_file");
         assert!(
             collecting.contains("self.paste_target(seat)"),
             "the file that opens a drop no longer names the shell it was aimed at, \
@@ -130221,7 +130373,7 @@ mod clipboard_path_tests {
             "the file that opens a drop no longer reads the cursor as it arrives, \
              so the point is taken later than the release:\n{collecting}"
         );
-        let flushing = method_text(before_this_fixture, "    fn flush_dropped_files(");
+        let flushing = method_body("Runtime", "flush_dropped_files");
         // **The focus and the raise are behind the write's own answer, and both
         // are inside the one function that spends a whole batch** (owner's
         // ruling 2026-09-17). Three files let go of together are one drop, so
@@ -130340,9 +130492,7 @@ mod clipboard_path_tests {
     /// seat out of `RowVerb::PastePath(target)` again and the last row does.
     #[test]
     fn a_rows_centre_verbs_leave_by_three_doors() {
-        let source = include_str!("main.rs");
-        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
-        let commit = method_text(before_this_fixture, "    fn commit_layout_drop(");
+        let commit = method_body("Runtime", "commit_layout_drop");
         for (once, what) in [
             (
                 "RowVerb::Refused => return Ok(false),",
@@ -130423,7 +130573,7 @@ mod clipboard_path_tests {
         // the live tree** (review 2026-09-17 P1-a). A `Runtime` is not
         // constructible here, so which calls stand in this function is what says
         // that the release does not simply believe the drag.
-        let kept = method_text(before_this_fixture, "    fn paste_offer_kept(");
+        let kept = method_body("Runtime", "paste_offer_kept");
         for (once, what) in [
             (
                 "self.platform_pointer_now()?",
@@ -130466,7 +130616,7 @@ mod clipboard_path_tests {
         // And the offer the release compares against is taken on the pointer
         // move that drew the box, not recomputed at the release — two readings
         // of one function at two moments is the entire mechanism.
-        let driving = method_text(before_this_fixture, "    fn drive_drag(");
+        let driving = method_body("Runtime", "drive_drag");
         assert!(
             driving.contains("drag.paste_offer = self.paste_offer_at(drag.landing);"),
             "the box's promise is no longer recorded where the box is decided, so \
@@ -130732,12 +130882,7 @@ mod clipboard_path_tests {
         // And the door that releases the borrowers, by the one thing a test
         // without a window can read: which call stands where. Each line is one
         // row of the first list, and the files column's was there already.
-        let source = include_str!("main.rs");
-        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
-        let door = method_text(
-            before_this_fixture,
-            "    fn focus_the_pane_a_path_landed_in(",
-        );
+        let door = method_body("Runtime", "focus_the_pane_a_path_landed_in");
         for (call, what) in [
             (
                 "self.set_files_keyboard(None, FilesFocusArrival::Pointer)",
@@ -130801,9 +130946,7 @@ mod clipboard_path_tests {
         );
         // And the paste carries that answer out rather than reporting the
         // swallowing wrapper's success.
-        let source = include_str!("main.rs");
-        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
-        let deliver = method_text(before_this_fixture, "    fn deliver_paste(");
+        let deliver = method_body("Runtime", "deliver_paste");
         assert!(
             deliver.contains("offer_pty_input(pty.as_ref(), bytes, context)")
                 && deliver.contains("Ok(landed.queued())"),
@@ -130813,8 +130956,7 @@ mod clipboard_path_tests {
         // The three callers that must not change: a keystroke, the row menu and
         // the clipboard all go on through the swallowing door.
         assert!(
-            method_text(before_this_fixture, "    fn insert_path_into_terminal(")
-                .contains("write_pty_input("),
+            method_body("Runtime", "insert_path_into_terminal").contains("write_pty_input("),
             "K144 has been moved onto the answering door, which is a behaviour \
              change nobody asked for"
         );
@@ -130850,9 +130992,7 @@ mod clipboard_path_tests {
             composition_outlived_its_field(Some(ImeOwner::Shell), ImeOwner::Preview),
             "the control: it does still close every move between two kinds"
         );
-        let source = include_str!("main.rs");
-        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
-        let door = method_text(before_this_fixture, "    fn take_keyboard_into(");
+        let door = method_body("Runtime", "take_keyboard_into");
         assert!(
             door.contains("self.cancel_composition(ImeOwner::Shell, \"take_keyboard_into\")?;"),
             "the keyboard moves between two shells without ending the \
@@ -130864,8 +131004,8 @@ mod clipboard_path_tests {
             "the composition is settled after the keyboard has already moved, \
              which is the same defect one line later:\n{door}"
         );
-        for road in ["    fn focus_pane_at(", "    fn focus_seat("] {
-            let text = method_text(before_this_fixture, road);
+        for road in ["focus_pane_at", "focus_seat"] {
+            let text = method_body("Runtime", road);
             assert!(
                 text.contains("self.take_keyboard_into(seat)?;"),
                 "`{road}` no longer moves the keyboard through the door the \
@@ -131052,9 +131192,7 @@ mod clipboard_path_tests {
                 "{notice:?} reached the ruling, which is one way to lose the origin"
             );
         }
-        let source = include_str!("main.rs");
-        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
-        let door = method_text(before_this_fixture, "    fn ime_input(");
+        let door = method_body("Runtime", "ime_input");
         assert_eq!(
             door.matches("self.window.composing_in = ").count(),
             1,
@@ -131062,8 +131200,7 @@ mod clipboard_path_tests {
              allowed to set it:\n{door}"
         );
         assert!(
-            !method_text(before_this_fixture, "    fn cancel_composition(")
-                .contains("composing_in = "),
+            !method_body("Runtime", "cancel_composition").contains("composing_in = "),
             "the cancel clears the composition, which is the barrier taking \
              itself down at the moment it is needed"
         );
@@ -131164,9 +131301,7 @@ mod clipboard_path_tests {
         }
         // **And the rule stands in front of the ladder, not inside one of its
         // arms**, which is the placement every row above depends on.
-        let source = include_str!("main.rs");
-        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
-        let door = method_text(before_this_fixture, "    fn ime_input(");
+        let door = method_body("Runtime", "ime_input");
         let (ruled, routed) = (
             door.find("composition_ruling(&self.window.composing_in"),
             door.find("match ime_owner(self.keyboard_owner())"),
@@ -131203,9 +131338,7 @@ mod clipboard_path_tests {
     /// `take_keyboard_into` and the first assertion goes red.
     #[test]
     fn a_click_on_the_pane_that_already_has_the_keyboard_settles_no_ime_state() {
-        let source = include_str!("main.rs");
-        let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
-        let door = method_text(before_this_fixture, "    fn take_keyboard_into(");
+        let door = method_body("Runtime", "take_keyboard_into");
         assert!(
             door.contains("self.sessions.contains_key(&seat) && self.focused_leaf != seat"),
             "the door no longer asks whether the keyboard is actually moving, so \
@@ -131228,22 +131361,6 @@ mod clipboard_path_tests {
             seat: bt_layout::SeatId(seat),
             incarnation,
         }))
-    }
-
-    /// The body of one method, from its signature to the brace that closes it at
-    /// the `impl`'s own indentation — `layer_shape_tests::fn_body`'s reader,
-    /// borrowed for one pin. The doc comment above the signature is deliberately
-    /// outside it: these pins are about calls, and prose that *names* a call is
-    /// not one.
-    fn method_text<'a>(source: &'a str, signature: &str) -> &'a str {
-        let start = source
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &source[start + signature.len()..];
-        let end = rest
-            .find("\n    }\n")
-            .expect("a method is closed by a `}` at the `impl`'s indentation");
-        &rest[..end]
     }
 }
 

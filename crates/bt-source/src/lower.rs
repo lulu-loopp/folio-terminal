@@ -14,7 +14,9 @@
 //!    this one has to know only `//` and `/* */`, because the lexer has already
 //!    ruled out everywhere it could be wrong.
 //! 3. **The parse**, for item identity: module path, type owner, trait,
-//!    conditional variant, and the body's braces.
+//!    conditional variant, and the body's braces — for every `fn`, and for
+//!    every `struct`, `enum` and `union` with the fields or variants it
+//!    carries, each of those an identity owned by the type it is written in.
 //!
 //! Doc comments are the one place the first two readings meet. `proc_macro2`
 //! turns `/// x` into the tokens of `#[doc = " x"]`, and every one of those
@@ -805,6 +807,108 @@ impl Parsed<'_> {
                         Some(body),
                     );
                 }
+                syn::Item::Struct(definition) => {
+                    let (own, _) = cfg_predicates(&definition.attrs, self.text);
+                    let start = start_of(
+                        &definition.attrs,
+                        Some(&definition.vis),
+                        definition.struct_token.span.byte_range().start,
+                    );
+                    let body = fields_span(&definition.fields);
+                    let end = type_end(
+                        definition.semi_token,
+                        body.as_ref(),
+                        definition.ident.span().byte_range().end,
+                    );
+                    let name = definition.ident.to_string();
+                    self.record(
+                        module,
+                        predicates,
+                        own.clone(),
+                        None,
+                        None,
+                        name.clone(),
+                        ItemKind::Struct,
+                        start..end,
+                        body,
+                    );
+                    let depth = predicates.len();
+                    predicates.extend(own);
+                    self.members(module, predicates, &name, definition.fields.iter());
+                    predicates.truncate(depth);
+                }
+                syn::Item::Union(definition) => {
+                    let (own, _) = cfg_predicates(&definition.attrs, self.text);
+                    let start = start_of(
+                        &definition.attrs,
+                        Some(&definition.vis),
+                        definition.union_token.span.byte_range().start,
+                    );
+                    let body = braces(&definition.fields.brace_token);
+                    let name = definition.ident.to_string();
+                    self.record(
+                        module,
+                        predicates,
+                        own.clone(),
+                        None,
+                        None,
+                        name.clone(),
+                        ItemKind::Union,
+                        start..body.end,
+                        Some(body),
+                    );
+                    let depth = predicates.len();
+                    predicates.extend(own);
+                    self.members(module, predicates, &name, &definition.fields.named);
+                    predicates.truncate(depth);
+                }
+                syn::Item::Enum(definition) => {
+                    let (own, _) = cfg_predicates(&definition.attrs, self.text);
+                    let start = start_of(
+                        &definition.attrs,
+                        Some(&definition.vis),
+                        definition.enum_token.span.byte_range().start,
+                    );
+                    let body = braces(&definition.brace_token);
+                    let name = definition.ident.to_string();
+                    self.record(
+                        module,
+                        predicates,
+                        own.clone(),
+                        None,
+                        None,
+                        name.clone(),
+                        ItemKind::Enum,
+                        start..body.end,
+                        Some(body),
+                    );
+                    let depth = predicates.len();
+                    predicates.extend(own);
+                    for variant in &definition.variants {
+                        let (own, _) = cfg_predicates(&variant.attrs, self.text);
+                        let start = start_of(
+                            &variant.attrs,
+                            None,
+                            variant.ident.span().byte_range().start,
+                        );
+                        let body = variant_body(variant);
+                        let end = body
+                            .as_ref()
+                            .map_or_else(|| variant.ident.span().byte_range().end, |it| it.end);
+                        self.record(
+                            module,
+                            predicates,
+                            own,
+                            Some(name.clone()),
+                            None,
+                            variant.ident.to_string(),
+                            ItemKind::Variant,
+                            start..end,
+                            body,
+                        );
+                    }
+                    predicates.truncate(depth);
+                }
                 syn::Item::Impl(block) => {
                     let (own, _) = cfg_predicates(&block.attrs, self.text);
                     let depth = predicates.len();
@@ -893,6 +997,54 @@ impl Parsed<'_> {
             .iter()
             .map(|path| format!("{path}{suffix}"))
             .collect()
+    }
+
+    /// **A field is an identity of its own, owned by the type it is written
+    /// in** — the extension of §2.4 past the callables, and the reason is the
+    /// one §2.4 gives for methods: a guard that says "the counter lives on
+    /// `App`" has to name the field, or moving the field to another struct
+    /// keeps it green.
+    ///
+    /// The bytes are the **declaration and nothing else**: the attributes, the
+    /// visibility, the name and the type, stopping at the end of the type. The
+    /// comma after it separates two fields and belongs to neither, so a span
+    /// that swallowed it would make the last field of a list a different shape
+    /// from the others.
+    ///
+    /// A tuple field has no written name and is named by its position, which is
+    /// the name the language itself gives it: `self.0`. Its declaration begins
+    /// at its type, there being nothing else in front of it.
+    fn members<'f>(
+        &mut self,
+        module: &[String],
+        predicates: &[String],
+        owner: &str,
+        fields: impl IntoIterator<Item = &'f syn::Field>,
+    ) {
+        for (at, field) in fields.into_iter().enumerate() {
+            let (own, _) = cfg_predicates(&field.attrs, self.text);
+            let opens = field.ident.as_ref().map_or_else(
+                || field.ty.span().byte_range().start,
+                |name| name.span().byte_range().start,
+            );
+            let start = start_of(&field.attrs, Some(&field.vis), opens);
+            let end = field.ty.span().byte_range().end;
+            let name = field
+                .ident
+                .as_ref()
+                .map_or_else(|| at.to_string(), ToString::to_string);
+            self.record(
+                module,
+                predicates,
+                own,
+                Some(owner.to_owned()),
+                None,
+                name,
+                ItemKind::Field,
+                start..end,
+                None,
+            );
+        }
     }
 
     #[expect(
@@ -1038,6 +1190,44 @@ fn signature_start(signature: &syn::Signature) -> usize {
 /// A block's braces and everything between them.
 fn braces(brace: &syn::token::Brace) -> Range<usize> {
     brace.span.open().byte_range().start..brace.span.close().byte_range().end
+}
+
+/// A parenthesised list, the parentheses included.
+fn parentheses(paren: &syn::token::Paren) -> Range<usize> {
+    paren.span.open().byte_range().start..paren.span.close().byte_range().end
+}
+
+/// **The body of a data type is the list its members are written in** — the
+/// braces of a named field list, the parentheses of a tuple one. A unit struct
+/// has no list and therefore no body, the same answer a trait method with no
+/// default gets, and for the same reason: there is nothing between a pair of
+/// delimiters to hand back.
+fn fields_span(fields: &syn::Fields) -> Option<Range<usize>> {
+    match fields {
+        syn::Fields::Named(named) => Some(braces(&named.brace_token)),
+        syn::Fields::Unnamed(unnamed) => Some(parentheses(&unnamed.paren_token)),
+        syn::Fields::Unit => None,
+    }
+}
+
+/// A variant's own bytes after its name: its field list, else the discriminant
+/// it is fixed to, else nothing.
+fn variant_body(variant: &syn::Variant) -> Option<Range<usize>> {
+    fields_span(&variant.fields).or_else(|| {
+        variant
+            .discriminant
+            .as_ref()
+            .map(|(equals, value)| equals.span.byte_range().start..value.span().byte_range().end)
+    })
+}
+
+/// Where a `struct`, `enum` or `union` item ends: its semicolon when it has
+/// one — a tuple or unit struct — and otherwise the end of its field list.
+fn type_end(semi: Option<syn::token::Semi>, body: Option<&Range<usize>>, name_end: usize) -> usize {
+    semi.map_or_else(
+        || body.map_or(name_end, |list| list.end),
+        |token| token.span.byte_range().end,
+    )
 }
 
 #[cfg(test)]

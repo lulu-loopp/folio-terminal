@@ -33,7 +33,9 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::enumerate::FileOwner;
-use crate::index::{Certainty, FileRecord, Index, ItemIdentity, ItemRecord, LiteralValue, Span};
+use crate::index::{
+    Certainty, FileRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralValue, Span,
+};
 use crate::scope::FileScoped;
 
 /// Which bytes a query reads. **There is no default** (§2.1): the tree holds
@@ -405,6 +407,7 @@ pub struct ItemQuery {
     module_path: Option<String>,
     variant: Option<Vec<String>>,
     expected: Multiplicity,
+    looking: Looking,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -413,7 +416,8 @@ enum Owner {
     Free,
     /// Written in an `impl` block for this type, **named by its last path
     /// segment** with lifetimes and generic arguments ignored: `Runtime` is the
-    /// owner of `impl Runtime<'_>` and of `impl crate::Runtime<'_>` alike.
+    /// owner of `impl Runtime<'_>` and of `impl crate::Runtime<'_>` alike — or,
+    /// for a field or a variant, the type it is written inside.
     Type(String),
 }
 
@@ -422,6 +426,46 @@ enum Declaring {
     /// An inherent `impl`, or a free function — no trait either way.
     Inherent,
     Trait(String),
+}
+
+/// **Which sort of item is being asked for.** A kind is part of identity (§2.4)
+/// and therefore part of the question: `App::tab_ids` the field and
+/// `App::tab_ids` the method are two declarations of two things, and a query
+/// that did not say which it meant would find two and refuse — or, worse, find
+/// one and answer about the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Looking {
+    /// A `fn`, free or associated.
+    Callable,
+    /// A `struct`, an `enum` or a `union`.
+    Type,
+    /// One field of a `struct` or a `union`.
+    Field,
+    /// One variant of an `enum`.
+    Variant,
+}
+
+impl Looking {
+    const fn admits(self, kind: ItemKind) -> bool {
+        match self {
+            Self::Callable => kind.is_callable(),
+            Self::Type => kind.is_type(),
+            Self::Field => matches!(kind, ItemKind::Field),
+            Self::Variant => matches!(kind, ItemKind::Variant),
+        }
+    }
+
+    /// What a member of this sort is called, for a refusal's message.
+    ///
+    /// A `union`'s member is a field and so is a `struct`'s; the two that name
+    /// no owning type never reach a member refusal, and the arms are written
+    /// out rather than wildcarded so a fifth sort is a compile error here.
+    const fn member_word(self) -> &'static str {
+        match self {
+            Self::Variant => "variant",
+            Self::Callable | Self::Type | Self::Field => "field",
+        }
+    }
 }
 
 impl ItemQuery {
@@ -435,6 +479,7 @@ impl ItemQuery {
             module_path: None,
             variant: None,
             expected: Multiplicity::Exactly(1),
+            looking: Looking::Callable,
         }
     }
 
@@ -455,6 +500,85 @@ impl ItemQuery {
             module_path: None,
             variant: None,
             expected: Multiplicity::Exactly(1),
+            looking: Looking::Callable,
+        }
+    }
+
+    /// **A `struct`, an `enum` or a `union`, by its own name** — the identity
+    /// rule of §2.4 applied to the data a program keeps, for the same reason it
+    /// is applied to the code: a guard that reads a type's text is bound to the
+    /// file it is written in until it can name the type instead.
+    ///
+    /// The three are one constructor because a query about a declared type is
+    /// the same question whichever of them it turns out to be, and because a
+    /// `struct` that becomes an `enum` is a change to the program, not to the
+    /// pin that names it. The kind is on the record ([`ItemRecord::kind`]) for
+    /// a reader that cares.
+    ///
+    /// **Name the type, never the path to it**, exactly as
+    /// [`ItemQuery::method`] says: the module is
+    /// [`ItemQuery::in_module`]'s business.
+    #[must_use]
+    pub fn type_item(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            owner: Owner::Free,
+            declaring: Declaring::Inherent,
+            module_path: None,
+            variant: None,
+            expected: Multiplicity::Exactly(1),
+            looking: Looking::Type,
+        }
+    }
+
+    /// **One field of a `struct` or a `union`**, named by the type that carries
+    /// it — `ItemQuery::field("App", "tab_ids")`.
+    ///
+    /// The answer is the field's **declaration**: its attributes, its
+    /// visibility, its name and its type, stopping before the comma. There is
+    /// no body, so [`Index::declaration_of`] is what reads it and
+    /// [`Index::body_of`] refuses.
+    ///
+    /// A tuple field is named by its position, which is the name the language
+    /// gives it: `ItemQuery::field("Wrapper", "0")`.
+    ///
+    /// **The type's own declarations decide whether the answer is whole.** A
+    /// field carried by one `#[cfg]` arm of a type declared twice is
+    /// [`QueryFailure::Member`], naming the arms that carry it and the arms
+    /// that do not — because "this type has this field" is not true of a type
+    /// half of whose declarations do not.
+    #[must_use]
+    pub fn field(type_owner: &str, name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            owner: Owner::Type(type_owner.to_owned()),
+            declaring: Declaring::Inherent,
+            module_path: None,
+            variant: None,
+            expected: Multiplicity::Exactly(1),
+            looking: Looking::Field,
+        }
+    }
+
+    /// **One variant of an `enum`** — the same rule as [`ItemQuery::field`],
+    /// down to the refusals, because a variant is a member of a type in exactly
+    /// the way a field is.
+    ///
+    /// Its body is its own field list, or the discriminant it is fixed to, and
+    /// a fieldless variant with no discriminant has none. **A variant's fields
+    /// are not themselves identities**: a field of a variant would need an
+    /// owner naming both the enum and the variant, which is a second shape of
+    /// owner, and nothing asks for one yet.
+    #[must_use]
+    pub fn variant(type_owner: &str, name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            owner: Owner::Type(type_owner.to_owned()),
+            declaring: Declaring::Inherent,
+            module_path: None,
+            variant: None,
+            expected: Multiplicity::Exactly(1),
+            looking: Looking::Variant,
         }
     }
 
@@ -504,8 +628,30 @@ impl ItemQuery {
         self.expected
     }
 
+    /// The query for the type a member query is asked of: the same name the
+    /// member's owner is, narrowed the same way the member query is narrowed.
+    ///
+    /// The module and the conditional arm are carried over because both are
+    /// facts about where the *type* is written — a field inherits the
+    /// predicates standing on the `struct` that holds it — so a query that
+    /// pinned one arm of the member has pinned the same arm of the type.
+    fn owning_type(&self) -> Option<Self> {
+        match (self.looking, &self.owner) {
+            (Looking::Field | Looking::Variant, Owner::Type(owner)) => Some(Self {
+                name: owner.clone(),
+                owner: Owner::Free,
+                declaring: Declaring::Inherent,
+                module_path: self.module_path.clone(),
+                variant: self.variant.clone(),
+                expected: Multiplicity::OnePerVariant,
+                looking: Looking::Type,
+            }),
+            _ => None,
+        }
+    }
+
     fn selects(&self, record: &ItemRecord) -> bool {
-        if record.name() != self.name {
+        if record.name() != self.name || !self.looking.admits(record.kind()) {
             return false;
         }
         let owner = match &self.owner {
@@ -577,6 +723,30 @@ impl fmt::Display for Candidate {
     }
 }
 
+/// One declaration of a type, and what it carries — the rows a
+/// [`QueryFailure::Member`] is read by.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberSite {
+    /// The type's declaration, one row per module path it answers to.
+    pub declaration: Vec<Candidate>,
+    /// Whether this declaration carries the member the query asked for.
+    pub carries: bool,
+    /// The members it does carry, in the order they are written.
+    pub members: Vec<String>,
+}
+
+impl fmt::Display for MemberSite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rows: Vec<String> = self.declaration.iter().map(ToString::to_string).collect();
+        write!(
+            formatter,
+            "{}\n    carries: {}",
+            rows.join(" · "),
+            self.members.join(", ")
+        )
+    }
+}
+
 /// Why a query refused to answer.
 ///
 /// **Every one of these is a refusal in place of a smaller answer.** The whole
@@ -603,6 +773,36 @@ pub enum QueryFailure {
     },
     /// The identity resolved, and it is a signature with no body to return.
     NoBody { query: String, at: Vec<Candidate> },
+    /// **A field or a variant asked of a type that does not carry it, or does
+    /// not carry it in every declaration of itself.**
+    ///
+    /// Three conditions arrive here and the message names which:
+    ///
+    /// 1. nothing in this universe declares a `struct`, `enum` or `union` of
+    ///    that name — so the query is about a type that is not there, and
+    ///    "no such field" would have been the wrong diagnosis;
+    /// 2. the type is declared and no declaration carries a member of that
+    ///    name — and the refusal lists the members each declaration *does*
+    ///    carry, because "not found" plus the names beside it is a diagnosis
+    ///    and "not found" alone is not;
+    /// 3. the type is declared more than once and only some of the
+    ///    declarations carry it. **This is the quiet one.** A field written in
+    ///    one `#[cfg]` arm would otherwise answer a query that meant "this
+    ///    type has this field", and a guard resting on that answer would be
+    ///    green on one platform and about nothing on the other.
+    Member {
+        query: String,
+        /// The type the member was asked of.
+        owner: String,
+        /// What was asked for.
+        member: String,
+        /// Whether it was asked for as a field or as a variant, in the word the
+        /// message calls it by.
+        word: &'static str,
+        /// Every declaration of the owning type, in the order they are
+        /// written. Empty is condition 1.
+        declarations: Vec<MemberSite>,
+    },
     /// A pattern and a view that do not answer the same kind of question —
     /// plain bytes asked of [`View::Identifiers`], which would be a substring
     /// search inside token names.
@@ -673,6 +873,48 @@ impl fmt::Display for QueryFailure {
                 write!(formatter, "`{query}` has no body to read")?;
                 for candidate in at {
                     write!(formatter, "\n  declared: {candidate}")?;
+                }
+                Ok(())
+            }
+            Self::Member {
+                query,
+                owner,
+                member,
+                word,
+                declarations,
+            } => {
+                if declarations.is_empty() {
+                    return write!(
+                        formatter,
+                        "`{query}` asks for the {word} `{member}` of `{owner}`, and no `struct`, \
+                         `enum` or `union` called `{owner}` is declared in this universe"
+                    );
+                }
+                let carrying = declarations.iter().filter(|site| site.carries).count();
+                if carrying == 0 {
+                    write!(
+                        formatter,
+                        "`{owner}` is declared and carries no {word} called `{member}`"
+                    )?;
+                    for site in declarations {
+                        write!(formatter, "\n  declared: {site}")?;
+                    }
+                    return Ok(());
+                }
+                write!(
+                    formatter,
+                    "the {word} `{member}` is carried by {carrying} of the {} declarations of \
+                     `{owner}`, so `{query}` is a fact about some arms of `{owner}` and not about \
+                     `{owner}`",
+                    declarations.len()
+                )?;
+                for site in declarations {
+                    let verb = if site.carries {
+                        "carries it"
+                    } else {
+                        "does not"
+                    };
+                    write!(formatter, "\n  {verb}: {site}")?;
                 }
                 Ok(())
             }
@@ -1284,6 +1526,9 @@ impl Index {
             .iter()
             .filter(|record| query.selects(record))
             .collect();
+        if let Some(gap) = self.member_gap(query, &found) {
+            return Err(gap);
+        }
         let answered = match query.multiplicity() {
             Multiplicity::Exactly(expected) => found.len() == expected,
             Multiplicity::OnePerVariant => !found.is_empty(),
@@ -1371,6 +1616,20 @@ impl Index {
         }
     }
 
+    /// **The declaration of the one item `query` names**, as it is written.
+    ///
+    /// For a callable that is the attributes, the visibility and the signature —
+    /// [`ItemRecord::declaration`], the span §2.5's exemption removes. For a
+    /// field or a variant it is the whole of it, there being no body to stop in
+    /// front of: `pub tab_ids: TabIds`, without the comma.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Index::one`] refuses.
+    pub fn declaration_of(&self, query: &ItemQuery) -> Result<&str, QueryFailure> {
+        Ok(self.text(self.one(query)?.declaration()))
+    }
+
     /// Every declaration path that reaches the file holding `query`'s item —
     /// the ownership paths of §2.3, each with its `cfg` predicate spelling.
     ///
@@ -1380,6 +1639,63 @@ impl Index {
     pub fn owners_of(&self, query: &ItemQuery) -> Result<&[FileOwner], QueryFailure> {
         let record = self.one(query)?;
         Ok(self.file_of(record).owners())
+    }
+
+    /// **A member is asked of a type, and the type's own declarations decide
+    /// whether the answer is whole.**
+    ///
+    /// §2.4's rule for a callable is that expected multiplicity is an argument;
+    /// for a member the owning type's multiplicity is a *fact*, and the check is
+    /// that every declaration of the type answers the query the same way. A
+    /// field found in one of two `#[cfg]` arms is not "one declaration, as
+    /// expected" — it is a field the type has on one platform, and a guard that
+    /// took it for the type's would be about nothing on the other.
+    ///
+    /// `None` when the query is not a member query, or when every declaration of
+    /// the owning type carries it and the ordinary multiplicity machinery can
+    /// take it from here.
+    fn member_gap(&self, query: &ItemQuery, found: &[&ItemRecord]) -> Option<QueryFailure> {
+        let owning = query.owning_type()?;
+        let declarations: Vec<&ItemRecord> = self
+            .items()
+            .iter()
+            .filter(|record| owning.selects(record))
+            .collect();
+        let sites: Vec<MemberSite> = declarations
+            .iter()
+            .map(|declaration| MemberSite {
+                declaration: self.candidates(declaration),
+                carries: found
+                    .iter()
+                    .any(|member| member.whole().within(declaration.whole())),
+                members: self.members_of(declaration),
+            })
+            .collect();
+        if !sites.is_empty() && sites.iter().all(|site| site.carries) {
+            return None;
+        }
+        Some(QueryFailure::Member {
+            query: query.to_string(),
+            owner: owning.name.clone(),
+            member: query.name.clone(),
+            word: query.looking.member_word(),
+            declarations: sites,
+        })
+    }
+
+    /// The fields or variants written inside one declaration of a type, in the
+    /// order they are written.
+    ///
+    /// By containment and not by a back-reference: a member's bytes are inside
+    /// the bytes of the declaration that carries it, which is true of each arm
+    /// of a conditional type separately and is what tells the arms apart.
+    fn members_of(&self, declaration: &ItemRecord) -> Vec<String> {
+        self.items()
+            .iter()
+            .filter(|record| record.kind().is_member())
+            .filter(|record| record.whole().within(declaration.whole()))
+            .map(|record| record.name().to_owned())
+            .collect()
     }
 
     fn candidates(&self, record: &ItemRecord) -> Vec<Candidate> {
