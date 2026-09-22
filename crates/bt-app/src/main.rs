@@ -111875,25 +111875,33 @@ mod formula_tool_seat_tests {
 /// be asserted. The pin below is only about *who calls them*.
 #[cfg(test)]
 mod formula_copy_clock_tests {
-    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
-    // commit after this one deletes the older of the two. `source`, `item_body`
-    // and `method_body` are `pty_drain_budget_tests`' helpers word for word.
-    use bt_source::{Index, ItemQuery};
-
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Both readers here asked `main.rs` for its text; both now ask `bt-source`
+    // about an *item* of this crate, so no fact in this module is bound to the
+    // file it happens to be written in today. The commit before this one ran both
+    // readings side by side and asserted they agree; this is the one that deletes
+    // the older of the two, because two implementations of one judgement do not
+    // vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body` and `method_body` are that module's helpers word for
+    // word, and its header is where the six points behind them live.
+    //
+    // **One owner, established rather than assumed:** both are methods of
+    // `Runtime`. The deleted finder ran from the signature to the next
+    // `\n    fn `, which for `turn` was a 45,871-byte slice around a 44,426-byte
+    // body — a `contains` there could have been answered by the next method's doc
+    // comment. Narrowing to the body changes no verdict; the equivalence commit is
+    // what established that.
+    //
+    // **The advancer's name is still spelled in halves.** It is no longer this
+    // module's concern — a body query is not a text search — but the file is
+    // still read as text by readers this batch does not touch, and joining the
+    // halves would hand them one more occurrence to find. P18 is where the halves
+    // go.
     use super::*;
 
-    /// This file, read as text — `formula_tool_seat_tests`' own reader.
-    const SOURCE: &str = include_str!("main.rs");
-
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
+    use bt_source::{Index, ItemQuery};
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -112015,22 +112023,7 @@ mod formula_copy_clock_tests {
     /// the tick would stay drawn until something else repainted the band.
     #[test]
     fn the_turn_retires_the_tick_and_never_hands_the_loop_a_past_instant() {
-        let older_turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
         let turning = method_body("Runtime", "turn");
-        assert!(
-            older_turning.contains(turning),
-            "the older reading of `turn` does not carry the crate's body"
-        );
-        for probe in [
-            "math_copy_window(self.window.math_copied.as_ref()",
-            "map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK)",
-        ] {
-            assert_eq!(
-                older_turning.contains(probe),
-                turning.contains(probe),
-                "the two readings of `turn` disagree about `{probe}`"
-            );
-        }
         assert!(
             turning.contains("math_copy_window(self.window.math_copied.as_ref()"),
             "the deadline is the clock's own answer and not a second reading of it:\n{turning}"
@@ -112039,28 +112032,7 @@ mod formula_copy_clock_tests {
             !turning.contains("map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK)"),
             "the unconditional deadline is gone:\n{turning}"
         );
-        let older_advancer = body(
-            &[
-                "    fn advance_math_tools",
-                "_if_due(&mut self, now: Instant)",
-            ]
-            .concat(),
-        );
         let advancer = method_body("Runtime", &["advance_math_tools", "_if_due"].concat());
-        assert!(
-            older_advancer.contains(advancer),
-            "the older reading of the advancer does not carry the crate's body"
-        );
-        for probe in [
-            "retire_spent_math_copy(&mut self.window.math_copied, now)",
-            "moved || spent",
-        ] {
-            assert_eq!(
-                older_advancer.contains(probe),
-                advancer.contains(probe),
-                "the two readings of the advancer disagree about `{probe}`"
-            );
-        }
         assert!(
             advancer.contains("retire_spent_math_copy(&mut self.window.math_copied, now)"),
             "and the band's own turn is what takes the tick down:\n{advancer}"
