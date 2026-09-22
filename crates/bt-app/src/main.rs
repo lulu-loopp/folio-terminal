@@ -111875,6 +111875,12 @@ mod formula_tool_seat_tests {
 /// be asserted. The pin below is only about *who calls them*.
 #[cfg(test)]
 mod formula_copy_clock_tests {
+    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
+    // commit after this one deletes the older of the two. `source`, `item_body`
+    // and `method_body` are `pty_drain_budget_tests`' helpers word for word.
+    use bt_source::{Index, ItemQuery};
+
     use super::*;
 
     /// This file, read as text — `formula_tool_seat_tests`' own reader.
@@ -111887,6 +111893,26 @@ mod formula_copy_clock_tests {
         let rest = &SOURCE[start + signature.len()..];
         let end = rest.find("\n    fn ").unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
     }
 
     fn a_band() -> MathBlockAnchor {
@@ -111989,7 +112015,22 @@ mod formula_copy_clock_tests {
     /// the tick would stay drawn until something else repainted the band.
     #[test]
     fn the_turn_retires_the_tick_and_never_hands_the_loop_a_past_instant() {
-        let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        let older_turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        let turning = method_body("Runtime", "turn");
+        assert!(
+            older_turning.contains(turning),
+            "the older reading of `turn` does not carry the crate's body"
+        );
+        for probe in [
+            "math_copy_window(self.window.math_copied.as_ref()",
+            "map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK)",
+        ] {
+            assert_eq!(
+                older_turning.contains(probe),
+                turning.contains(probe),
+                "the two readings of `turn` disagree about `{probe}`"
+            );
+        }
         assert!(
             turning.contains("math_copy_window(self.window.math_copied.as_ref()"),
             "the deadline is the clock's own answer and not a second reading of it:\n{turning}"
@@ -111998,13 +112039,28 @@ mod formula_copy_clock_tests {
             !turning.contains("map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK)"),
             "the unconditional deadline is gone:\n{turning}"
         );
-        let advancer = body(
+        let older_advancer = body(
             &[
                 "    fn advance_math_tools",
                 "_if_due(&mut self, now: Instant)",
             ]
             .concat(),
         );
+        let advancer = method_body("Runtime", &["advance_math_tools", "_if_due"].concat());
+        assert!(
+            older_advancer.contains(advancer),
+            "the older reading of the advancer does not carry the crate's body"
+        );
+        for probe in [
+            "retire_spent_math_copy(&mut self.window.math_copied, now)",
+            "moved || spent",
+        ] {
+            assert_eq!(
+                older_advancer.contains(probe),
+                advancer.contains(probe),
+                "the two readings of the advancer disagree about `{probe}`"
+            );
+        }
         assert!(
             advancer.contains("retire_spent_math_copy(&mut self.window.math_copied, now)"),
             "and the band's own turn is what takes the tick down:\n{advancer}"
