@@ -34664,31 +34664,39 @@ mod drag_autoscroll_wiring_tests {
 
 #[cfg(test)]
 mod arrival_wiring_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Every reader in this module asked `main.rs` for its
-    // text — four body pins and two sweeps that name the functions allowed to
-    // read a register. Nothing is deleted here: each computes its answer twice,
-    // once from the file and once from `bt-source`, and asserts the two agree.
-    // The deletion is the commit after this one, because two implementations of
-    // one judgement do not vouch for each other (`docs/CONVENTIONS.md` §十
-    // rule 4).
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text — four body pins and two
+    // sweeps that name the functions allowed to read a register. Every one of
+    // them now asks `bt-source` about an *item* or a *module*, so no fact in this
+    // module is bound to the file it happens to be written in today. The commit
+    // before this one ran both readings side by side and asserted they agree;
+    // this is the one that deletes the older of the two, because two
+    // implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4).
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
     // `source`, `item_body` and `method_body` are that module's helpers word for
-    // word, `found_in` is `formula_tool_seat_tests`' and `agreed` is
-    // `tab_identity_tests`', whose finders are this one's shape exactly — they
-    // stop at the first `\n    }\n` after the signature, which is the method's
-    // own closing line, so the slice holds the tail of the declaration, the
-    // opening brace and the body, and not the closing brace.
+    // word and its header is where the six points behind them live; `found_in`
+    // is `formula_tool_seat_tests`'.
     //
     // **One owner, established rather than assumed.** All four pins are methods
     // of `Runtime`; the deleted finder took the first `\n    fn name(` in this
     // file, which is a method of whatever `impl` happens to come first.
+    //
+    // **The register gates read a module, not a file.** They used to scan this
+    // file for `.passages` / `.settling` and name the reader by searching
+    // backwards for the nearest `\n    fn `, which answers with the *previous*
+    // method for any occurrence that does not stand in a method's own body. They
+    // now ask `Found::owners` for the item each occurrence really stands in, over
+    // `Scope::Module("crate")` — this crate's root module, whatever file it is
+    // written in. The scope stays the module rather than widening to the package
+    // because `.settling` is spelled in four other modules of this crate for
+    // registers of their own (`float`, `keyhint`, `peek_strip`, `tooltip`), and a
+    // package-wide reading would invert the guard; `.passages` is scoped the same
+    // way so that the two twins stay twins.
     use bt_source::{Found, Index, ItemQuery, Scope, Search, View, needle};
 
     use super::{Layered, ModalBand, Popup, Travel};
-
-    const SOURCE: &str = include_str!("main.rs");
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -34736,67 +34744,6 @@ mod arrival_wiring_tests {
         names
     }
 
-    /// **This file's slice and the crate's body, compared as bytes.**
-    ///
-    /// [`fn_body`] stops at the first `\n    }\n` after the signature it
-    /// matched, which is the method's own closing line, so its slice is the tail
-    /// of the declaration, the opening brace and the body without its closing
-    /// brace. [`Index::body_of`] returns the braces and everything between them,
-    /// so the crate's answer with that closing line taken off has to be the tail
-    /// of this file's slice, standing there once, with no brace in front of it
-    /// and nothing after it.
-    fn agreed(old: &'static str, new: &'static str, what: &str, closing: &str) -> &'static str {
-        let opened = new.strip_suffix(closing).unwrap_or_else(|| {
-            panic!("`{what}`: the crate's body does not close where this file's finder stopped")
-        });
-        let at = old.find(opened).unwrap_or_else(|| {
-            panic!("`{what}`: this file's slice and the crate's body are not the same bytes")
-        });
-        assert_eq!(
-            old.rfind(opened),
-            Some(at),
-            "`{what}`: the crate's body stands twice inside this file's slice"
-        );
-        assert!(
-            !old[..at].contains('{'),
-            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
-             of its body"
-        );
-        assert_eq!(
-            old.len(),
-            at + opened.len(),
-            "`{what}`: this file's slice runs past the body the crate returned"
-        );
-        old
-    }
-
-    /// One method pin's two readings, asserted to agree, the file's returned.
-    fn agreed_method(owner: &str, name: &str) -> &'static str {
-        agreed(fn_body(name), method_body(owner, name), name, "\n    }")
-    }
-
-    /// The body of a top-level-in-`impl` `fn <name>(`, delimited by the one `}`
-    /// at that `fn`'s own indentation which follows it.
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!(
-            "
-    fn {name}("
-        );
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find(
-                    "
-    }
-",
-                )
-                .expect("a method is closed by a `}` at the `impl`'s indentation");
-        &SOURCE[start..end]
-    }
-
     /// RED GATE — **every one of the nine popups arrives and leaves.**
     ///
     /// The tenth popup's gate, and the animation slice's half of the one
@@ -34840,7 +34787,7 @@ mod arrival_wiring_tests {
     /// names the band that would go back to hard-cutting.
     #[test]
     fn every_band_that_passes_is_handed_over_by_the_overlay_build() {
-        let body = agreed_method("Runtime", "refresh_overlay_with_formula");
+        let body = method_body("Runtime", "refresh_overlay_with_formula");
         for spelling in [
             "ModalBand::Menu(Popup::Profile",
             "ModalBand::Menu(Popup::Root",
@@ -34864,7 +34811,7 @@ mod arrival_wiring_tests {
         // And the three submenus, which are staged by the one door the five
         // own-band menus go through.
         assert!(
-            agreed_method("Runtime", "stage_menu").contains("Layered::Submenu(popup)"),
+            method_body("Runtime", "stage_menu").contains("Layered::Submenu(popup)"),
             "a menu's child has no passage of its own"
         );
     }
@@ -34925,38 +34872,22 @@ mod arrival_wiring_tests {
         // declaration is not a reading, and `rustfmt` is entitled to put the
         // receiver on a line of its own.
         let needle = concat!(".", "passages");
-        let mut seen = Vec::new();
-        for (at, _) in SOURCE.match_indices(needle) {
-            let head = SOURCE[..at]
-                .rfind("\n    fn ")
-                .expect("every reader is inside a method");
-            let name = SOURCE[head + "\n    fn ".len()..]
-                .split('(')
-                .next()
-                .expect("a method's name ends at its parameter list");
+        let seen = reader_names(&found_in(
+            needle!(needle),
+            View::Raw,
+            Scope::Module("crate".to_owned()),
+        ));
+        for name in &seen {
             assert!(
-                ALLOWED.contains(&name),
+                ALLOWED.contains(&name.as_str()),
                 "`{name}` reads the arrival register: a picture that is fading is \
                  not a surface, and anything that asks it a question is asking a \
                  menu that has already closed"
             );
-            seen.push(name);
         }
-        let mut named = seen.clone();
-        named.sort_unstable();
-        named.dedup();
-        assert_eq!(
-            named,
-            reader_names(&found_in(
-                needle!(needle),
-                View::Raw,
-                Scope::Module("crate".to_owned())
-            )),
-            "P3 equivalence: this file and `crate` name the same readers"
-        );
         for reader in ALLOWED {
             assert!(
-                seen.contains(&reader),
+                seen.iter().any(|name| name == reader),
                 "`{reader}` no longer reads the register — the wiring has moved"
             );
         }
@@ -34974,7 +34905,7 @@ mod arrival_wiring_tests {
     /// woken frame returns without drawing.
     #[test]
     fn the_frame_schedule_knows_about_the_register() {
-        let deadline = agreed_method("Runtime", "strip_animation_work");
+        let deadline = method_body("Runtime", "strip_animation_work");
         assert!(
             deadline.contains("passages.moving(now, motion)"),
             "nothing wakes the loop for a menu that is still arriving"
@@ -34983,7 +34914,7 @@ mod arrival_wiring_tests {
             deadline.contains("|| passing"),
             "the reading is taken and then dropped: the fold never asks for the frame"
         );
-        let advance = agreed_method("Runtime", "advance_strip_animation");
+        let advance = method_body("Runtime", "advance_strip_animation");
         assert!(
             advance.contains("passages.drawn(now, motion, scale)"),
             "the woken frame does not ask what the register would paint"
@@ -35008,7 +34939,7 @@ mod arrival_wiring_tests {
     /// and the woken frame returns without drawing.
     #[test]
     fn the_frame_schedule_knows_about_the_fades_as_well() {
-        let deadline = agreed_method("Runtime", "strip_animation_work");
+        let deadline = method_body("Runtime", "strip_animation_work");
         assert!(
             deadline.contains("settling.moving(now, motion)"),
             "nothing wakes the loop for a fade that is still running"
@@ -35017,7 +34948,7 @@ mod arrival_wiring_tests {
             deadline.contains("|| fading"),
             "the reading is taken and then dropped: the fold never asks for the frame"
         );
-        let advance = agreed_method("Runtime", "advance_strip_animation");
+        let advance = method_body("Runtime", "advance_strip_animation");
         assert!(
             advance.contains("settling.drawn(now, motion)"),
             "the woken frame does not ask what the fades would paint"
@@ -35058,38 +34989,21 @@ mod arrival_wiring_tests {
         // Spelled in two halves for the register above's reason: this very line
         // must not be one of the readings it is looking for.
         let needle = concat!(".", "settling");
-        let mut seen: Vec<&str> = Vec::new();
-        for (at, _) in SOURCE.match_indices(needle) {
-            let head = SOURCE[..at]
-                .rfind("\n    fn ")
-                .expect("every reader is inside a method");
-            let name = SOURCE[head + "\n    fn ".len()..]
-                .split('(')
-                .next()
-                .expect("a method's name ends at its parameter list");
+        let seen = reader_names(&found_in(
+            needle!(needle),
+            View::Raw,
+            Scope::Module("crate".to_owned()),
+        ));
+        for name in &seen {
             assert!(
-                ALLOWED.contains(&name),
+                ALLOWED.contains(&name.as_str()),
                 "`{name}` reads the fade register, and only the paint and the \
                  frame clock may — see this test's own note"
             );
-            if !seen.contains(&name) {
-                seen.push(name);
-            }
         }
-        let mut named = seen.clone();
-        named.sort_unstable();
-        assert_eq!(
-            named,
-            reader_names(&found_in(
-                needle!(needle),
-                View::Raw,
-                Scope::Module("crate".to_owned())
-            )),
-            "P3 equivalence: this file and `crate` name the same readers"
-        );
         for reader in ALLOWED {
             assert!(
-                seen.contains(&reader),
+                seen.iter().any(|name| name == reader),
                 "`{reader}` no longer reads the register — the wiring has moved"
             );
         }
