@@ -34664,9 +34664,116 @@ mod drag_autoscroll_wiring_tests {
 
 #[cfg(test)]
 mod arrival_wiring_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Every reader in this module asked `main.rs` for its
+    // text — four body pins and two sweeps that name the functions allowed to
+    // read a register. Nothing is deleted here: each computes its answer twice,
+    // once from the file and once from `bt-source`, and asserts the two agree.
+    // The deletion is the commit after this one, because two implementations of
+    // one judgement do not vouch for each other (`docs/CONVENTIONS.md` §十
+    // rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body` and `method_body` are that module's helpers word for
+    // word, `found_in` is `formula_tool_seat_tests`' and `agreed` is
+    // `tab_identity_tests`', whose finders are this one's shape exactly — they
+    // stop at the first `\n    }\n` after the signature, which is the method's
+    // own closing line, so the slice holds the tail of the declaration, the
+    // opening brace and the body, and not the closing brace.
+    //
+    // **One owner, established rather than assumed.** All four pins are methods
+    // of `Runtime`; the deleted finder took the first `\n    fn name(` in this
+    // file, which is a method of whatever `impl` happens to come first.
+    use bt_source::{Found, Index, ItemQuery, Scope, Search, View, needle};
+
     use super::{Layered, ModalBand, Popup, Travel};
 
     const SOURCE: &str = include_str!("main.rs");
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over a named scope — a Rust path, never a file.
+    fn found_in(needle: bt_source::Needle, view: View, scope: Scope) -> Found {
+        source()
+            .search(&Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **The names of the items these occurrences stand in** (§4.1), each named
+    /// once and in one order.
+    ///
+    /// The two register gates below name their readers and do not count them, so
+    /// this is `pty_drain_budget_tests`' `owner_names` without the per-owner
+    /// count. What it replaces is a backwards search for the nearest
+    /// `\n    fn `, which answers with the *previous* method for any occurrence
+    /// that does not stand in a method's own body.
+    fn reader_names(found: &Found) -> Vec<String> {
+        let mut names: Vec<String> = found
+            .owners(source())
+            .into_keys()
+            .map(|identity| identity.name)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// **This file's slice and the crate's body, compared as bytes.**
+    ///
+    /// [`fn_body`] stops at the first `\n    }\n` after the signature it
+    /// matched, which is the method's own closing line, so its slice is the tail
+    /// of the declaration, the opening brace and the body without its closing
+    /// brace. [`Index::body_of`] returns the braces and everything between them,
+    /// so the crate's answer with that closing line taken off has to be the tail
+    /// of this file's slice, standing there once, with no brace in front of it
+    /// and nothing after it.
+    fn agreed(old: &'static str, new: &'static str, what: &str, closing: &str) -> &'static str {
+        let opened = new.strip_suffix(closing).unwrap_or_else(|| {
+            panic!("`{what}`: the crate's body does not close where this file's finder stopped")
+        });
+        let at = old.find(opened).unwrap_or_else(|| {
+            panic!("`{what}`: this file's slice and the crate's body are not the same bytes")
+        });
+        assert_eq!(
+            old.rfind(opened),
+            Some(at),
+            "`{what}`: the crate's body stands twice inside this file's slice"
+        );
+        assert!(
+            !old[..at].contains('{'),
+            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
+             of its body"
+        );
+        assert_eq!(
+            old.len(),
+            at + opened.len(),
+            "`{what}`: this file's slice runs past the body the crate returned"
+        );
+        old
+    }
+
+    /// One method pin's two readings, asserted to agree, the file's returned.
+    fn agreed_method(owner: &str, name: &str) -> &'static str {
+        agreed(fn_body(name), method_body(owner, name), name, "\n    }")
+    }
 
     /// The body of a top-level-in-`impl` `fn <name>(`, delimited by the one `}`
     /// at that `fn`'s own indentation which follows it.
@@ -34733,7 +34840,7 @@ mod arrival_wiring_tests {
     /// names the band that would go back to hard-cutting.
     #[test]
     fn every_band_that_passes_is_handed_over_by_the_overlay_build() {
-        let body = fn_body("refresh_overlay_with_formula");
+        let body = agreed_method("Runtime", "refresh_overlay_with_formula");
         for spelling in [
             "ModalBand::Menu(Popup::Profile",
             "ModalBand::Menu(Popup::Root",
@@ -34757,7 +34864,7 @@ mod arrival_wiring_tests {
         // And the three submenus, which are staged by the one door the five
         // own-band menus go through.
         assert!(
-            fn_body("stage_menu").contains("Layered::Submenu(popup)"),
+            agreed_method("Runtime", "stage_menu").contains("Layered::Submenu(popup)"),
             "a menu's child has no passage of its own"
         );
     }
@@ -34835,6 +34942,18 @@ mod arrival_wiring_tests {
             );
             seen.push(name);
         }
+        let mut named = seen.clone();
+        named.sort_unstable();
+        named.dedup();
+        assert_eq!(
+            named,
+            reader_names(&found_in(
+                needle!(needle),
+                View::Raw,
+                Scope::Module("crate".to_owned())
+            )),
+            "P3 equivalence: this file and `crate` name the same readers"
+        );
         for reader in ALLOWED {
             assert!(
                 seen.contains(&reader),
@@ -34855,7 +34974,7 @@ mod arrival_wiring_tests {
     /// woken frame returns without drawing.
     #[test]
     fn the_frame_schedule_knows_about_the_register() {
-        let deadline = fn_body("strip_animation_work");
+        let deadline = agreed_method("Runtime", "strip_animation_work");
         assert!(
             deadline.contains("passages.moving(now, motion)"),
             "nothing wakes the loop for a menu that is still arriving"
@@ -34864,7 +34983,7 @@ mod arrival_wiring_tests {
             deadline.contains("|| passing"),
             "the reading is taken and then dropped: the fold never asks for the frame"
         );
-        let advance = fn_body("advance_strip_animation");
+        let advance = agreed_method("Runtime", "advance_strip_animation");
         assert!(
             advance.contains("passages.drawn(now, motion, scale)"),
             "the woken frame does not ask what the register would paint"
@@ -34889,7 +35008,7 @@ mod arrival_wiring_tests {
     /// and the woken frame returns without drawing.
     #[test]
     fn the_frame_schedule_knows_about_the_fades_as_well() {
-        let deadline = fn_body("strip_animation_work");
+        let deadline = agreed_method("Runtime", "strip_animation_work");
         assert!(
             deadline.contains("settling.moving(now, motion)"),
             "nothing wakes the loop for a fade that is still running"
@@ -34898,7 +35017,7 @@ mod arrival_wiring_tests {
             deadline.contains("|| fading"),
             "the reading is taken and then dropped: the fold never asks for the frame"
         );
-        let advance = fn_body("advance_strip_animation");
+        let advance = agreed_method("Runtime", "advance_strip_animation");
         assert!(
             advance.contains("settling.drawn(now, motion)"),
             "the woken frame does not ask what the fades would paint"
@@ -34957,6 +35076,17 @@ mod arrival_wiring_tests {
                 seen.push(name);
             }
         }
+        let mut named = seen.clone();
+        named.sort_unstable();
+        assert_eq!(
+            named,
+            reader_names(&found_in(
+                needle!(needle),
+                View::Raw,
+                Scope::Module("crate".to_owned())
+            )),
+            "P3 equivalence: this file and `crate` name the same readers"
+        );
         for reader in ALLOWED {
             assert!(
                 seen.contains(&reader),
