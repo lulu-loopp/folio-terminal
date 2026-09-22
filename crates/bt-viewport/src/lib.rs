@@ -7836,12 +7836,23 @@ mod tests {
     /// the underline is a promise, and a promise about a file this window has not opened is a
     /// guess. What the frame does instead is remember the name, so the layer that owns a worker can
     /// go and look.
+    ///
+    /// # The question list learned the spaces (§7.30, the 2026-09-21 entry)
+    ///
+    /// The two assertions above are the red line and are unchanged. The third one is a **budget**,
+    /// not the rule — it says which names this frame hands the worker — and it used to be written
+    /// under the assumption that a rooted token stops at the first space. It no longer does: a
+    /// space is a seam, the token is read across it, and every space it crossed ends one shorter
+    /// reading (`MAX_PATH_SPACES` = 4, so five readings at the bound). The claim the old wording
+    /// made is intact and is still asserted — **`README` is never asked about on its own**, because
+    /// a bare word with no separator names nothing — what changed is that the sentence it stands in
+    /// is now read as four longer spellings of the drive-rooted name in front of it, each of which
+    /// the disk will deny. This fixture is the bound's worst case, spelled out: four spaces behind
+    /// a rooted token is four further questions and no more.
     #[test]
     fn an_unverified_printed_path_is_a_question_and_not_a_link() {
-        let (frame, probes) = live_frame_of_paths(
-            live_rows_of("D:\\src\\gone.md and README and docs/b.md", 48, 3),
-            verified(&[]),
-        );
+        let printed = "D:\\src\\gone.md and README and docs/b.md";
+        let (frame, probes) = live_frame_of_paths(live_rows_of(printed, 48, 3), verified(&[]));
         assert!(frame.hyperlink_at(0, 0).is_none(), "no link at rest");
         assert!(
             (0..48).all(|column| !dotted_at(&frame, 0, column)),
@@ -7851,9 +7862,25 @@ mod tests {
             probes,
             [
                 PathBuf::from(native("D:\\src\\docs\\b.md")),
-                PathBuf::from(native("D:\\src\\gone.md"))
+                PathBuf::from(native("D:\\src\\gone.md")),
+                PathBuf::from(native("D:\\src\\gone.md and")),
+                PathBuf::from(native("D:\\src\\gone.md and README")),
+                PathBuf::from(native("D:\\src\\gone.md and README and")),
+                PathBuf::from(native("D:\\src\\gone.md and README and docs/b.md")),
             ],
-            "the two shapes that name a file are asked about; the bare word `README` is prose"
+            "the two shapes that name a file are asked about, the rooted one in each of the \
+             readings its four spaces open; the bare word `README` is prose and is asked about in \
+             none of them on its own"
+        );
+        assert!(
+            !probes.contains(&PathBuf::from(native("D:\\src\\README"))),
+            "a bare word carries no separator and names nothing to ask about"
+        );
+        assert_eq!(
+            probes.len(),
+            1 + (bt_transcript::paths::MAX_PATH_SPACES + 1),
+            "one rooted token at the bound plus the relative reference — the whole of what this \
+             line costs the worker"
         );
     }
 
