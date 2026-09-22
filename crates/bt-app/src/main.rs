@@ -111841,27 +111841,23 @@ mod formula_copy_clock_tests {
 /// the only witness that can say "there are two".
 #[cfg(test)]
 mod focus_mode_door_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Every reader in this module asked a file for its
-    // text — `main.rs` for eight pins and three line sweeps, `cardhint.rs` for one
-    // negative. Nothing is deleted here: each computes its answer twice, once
-    // from the file and once from `bt-source`, and asserts the two agree. The
-    // deletion is the commit after this one.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked a *file* for its text — `main.rs` through
+    // `include_str!`, and `cardhint.rs` beside it. Every one of them now asks
+    // `bt-source` about an *item*, a *module* or the package, so no fact in this
+    // module is bound to the file it happens to be written in today. The commit
+    // before this one ran both readings side by side and asserted they agree;
+    // this is the one that deletes the older of the two, because two
+    // implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4). `source`, `item_body`, `method_body`,
+    // `found` and `found_in` are `pty_drain_budget_tests`' and
+    // `formula_tool_seat_tests`' helpers word for word, and the pilot's header is
+    // where the six points behind them live.
     //
-    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
-    // `source`, `item_body`, `method_body` and `found` are that module's helpers
-    // word for word and `found_in` is `formula_tool_seat_tests`'. Two shapes this
-    // batch needed and no example had:
-    //
-    // * `agreed` — the equivalence itself, deleted with the old reading. This
-    //   module's finder runs **past** the closing brace, to the next `\n    fn `,
-    //   which is the opposite of the batches that compared a tail, so the
-    //   comparison is written for that shape.
-    // * `lines_holding` — the three readings that collect whole *lines*. A line
-    //   is what those assertions are about, so the reading stays a line reading;
-    //   what changes is that the lines come from every file this package
-    //   compiles, each one found by a search and cut back to its own file's
-    //   boundaries.
+    // One shape those examples had no consumer for: `lines_holding`. Three pins
+    // here name a door by the *text of the line* it stands on, so the reading
+    // stays a line reading, over every file this package compiles rather than
+    // over this one.
     //
     // **Two owners, not one.** Seven pins are methods of `Runtime`;
     // `mini_source` is `TabState`'s. The deleted finder took the first
@@ -111869,9 +111865,6 @@ mod focus_mode_door_tests {
     // happens to come first, and the equivalence commit is what established the
     // owner rather than assumed it.
     use bt_source::{Found, Index, ItemQuery, Needle, Scope, Search, View, needle};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -111910,9 +111903,9 @@ mod focus_mode_door_tests {
 
     /// **The trimmed lines of this package that hold `needle`, in file order.**
     ///
-    /// The reading three pins here take of one file —
-    /// `SOURCE.lines().map(str::trim).filter(|line| line.contains(needle))` —
-    /// asked of every file the crate compiles. A line is genuinely what those
+    /// The reading three pins here used to take of one file — that file's text
+    /// split into lines, trimmed, and kept when it held the needle — asked of
+    /// every file the crate compiles instead. A line is genuinely what those
     /// assertions are about: they name the two doors by the text each stands on,
     /// so the answer stays a list of lines rather than becoming a count.
     ///
@@ -111946,57 +111939,6 @@ mod focus_mode_door_tests {
         lines
     }
 
-    /// **This file's slice and the crate's body, compared as bytes.**
-    ///
-    /// [`body`] hands back everything after the signature it matched up to the
-    /// next `\n    fn `, so its slice holds the rest of the declaration, the
-    /// whole body braces and all, and then whatever stands between that method
-    /// and the next one — the closing line, blank lines, and the next method's
-    /// doc comment. [`Index::body_of`] hands back the braces and everything
-    /// between them, so the crate's answer has to stand inside this file's
-    /// slice, once, with nothing but the rest of the declaration in front of it.
-    ///
-    /// What comes back is this file's slice, so this commit changes no
-    /// assertion — and every assertion below was checked against the *narrowed*
-    /// body before this was written, because narrowing a slice can only take a
-    /// positive away.
-    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
-        let at = old.find(new).unwrap_or_else(|| {
-            panic!("`{what}`: this file's slice does not hold the body the crate returned")
-        });
-        assert_eq!(
-            old.rfind(new),
-            Some(at),
-            "`{what}`: the crate's body stands twice inside this file's slice"
-        );
-        assert!(
-            !old[..at].contains('{'),
-            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
-             of its body"
-        );
-        old
-    }
-
-    /// One method pin's two readings, asserted to agree, the file's returned.
-    fn agreed_method(owner: &str, name: &str) -> &'static str {
-        agreed(
-            body(&format!("    fn {name}(")),
-            method_body(owner, name),
-            name,
-        )
-    }
-
-    /// The text of one method, from its signature to the next method's —
-    /// [`mouse_trace_station_tests`]' own reader.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
-
     /// **Every write of the bit, and there are two.**
     ///
     /// Both the needle **and the two lines it expects** are assembled at run
@@ -112006,16 +111948,7 @@ mod focus_mode_door_tests {
     #[test]
     fn only_the_chord_and_the_settings_row_write_the_bit() {
         let needle = ["self", ".", "set_focus_mode", "("].concat();
-        let doors: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
-        assert_eq!(
-            doors,
-            lines_holding(needle.as_str()),
-            "P3 equivalence: this file and the crate hold the same lines"
-        );
+        let doors = lines_holding(needle.as_str());
         let expected = [
             // `Appearance ▸ Focus mode: On/Off`, through `focus_mode_requested`.
             format!("{needle}on)?;"),
@@ -112037,7 +111970,7 @@ mod focus_mode_door_tests {
     #[test]
     fn the_key_ladder_has_no_rung_for_the_mode() {
         assert!(
-            !agreed_method("Runtime", "keyboard_input").contains("focus_mode"),
+            !method_body("Runtime", "keyboard_input").contains("focus_mode"),
             "the escape ladder mentions focus mode, so some key still leaves it"
         );
     }
@@ -112065,7 +111998,7 @@ mod focus_mode_door_tests {
     /// exists.
     #[test]
     fn the_card_arms_its_reads_only_behind_the_mode_gate() {
-        let arming = agreed_method("Runtime", "arm_card_reads");
+        let arming = method_body("Runtime", "arm_card_reads");
         for lane in ["claim_head_read", "DirRequest"] {
             assert!(
                 arming.contains(lane),
@@ -112076,22 +112009,13 @@ mod focus_mode_door_tests {
         // And that one place is reached from one call site, which stands below
         // the gate that answers "is there a card column at all".
         let needle = ["self", ".", "arm_card_reads", "("].concat();
-        let callers: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
-        assert_eq!(
-            callers,
-            lines_holding(needle.as_str()),
-            "P3 equivalence: this file and the crate hold the same caller lines"
-        );
+        let callers = lines_holding(needle.as_str());
         assert_eq!(
             callers.len(),
             1,
             "a second caller is a second answer to when a background tab loads"
         );
-        let pass = agreed_method("Runtime", "refresh_focus_thumbnails");
+        let pass = method_body("Runtime", "refresh_focus_thumbnails");
         let gate = pass
             .find("focus_rail_geometry_now")
             .expect("the projection pass opens by asking whether there is a column at all");
@@ -112133,16 +112057,7 @@ mod focus_mode_door_tests {
     #[test]
     fn the_guests_the_column_holds_room_for_are_counted_at_one_door() {
         let needle = ["self", ".", "strip_guests", "("].concat();
-        let readers: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
-        assert_eq!(
-            readers,
-            lines_holding(needle.as_str()),
-            "P3 equivalence: this file and the crate hold the same reader lines"
-        );
+        let readers = lines_holding(needle.as_str());
         assert_eq!(
             readers.len(),
             2,
@@ -112152,7 +112067,7 @@ mod focus_mode_door_tests {
         // And that door is the dressing's own answer rather than a second
         // reading of the drag — which is what makes the room reserved and the
         // card drawn the same card.
-        let counter = agreed_method("Runtime", "strip_guests");
+        let counter = method_body("Runtime", "strip_guests");
         assert!(
             counter.contains("strip_stand_in"),
             "the count is `is there a stand-in`, asked of the function that \
@@ -112177,7 +112092,7 @@ mod focus_mode_door_tests {
     /// tree.
     #[test]
     fn the_stand_ins_thumbnail_slot_carries_the_pane_rather_than_a_hole() {
-        let pass = agreed_method("Runtime", "refresh_chrome_with_overlay");
+        let pass = method_body("Runtime", "refresh_chrome_with_overlay");
         let insert = ["focus_thumbnails", ".insert("].concat();
         let at = pass
             .find(insert.as_str())
@@ -112204,7 +112119,7 @@ mod focus_mode_door_tests {
         );
         // And the picture is the projection the column already holds rather
         // than a second one minted for the card in the air.
-        let dressing = agreed_method("Runtime", "stand_in_pane");
+        let dressing = method_body("Runtime", "stand_in_pane");
         assert!(
             dressing.contains("StripExtract") && dressing.contains("DragSource::Pane"),
             "the pane whose picture the stand-in wears is the one the tear-out \
@@ -112226,11 +112141,7 @@ mod focus_mode_door_tests {
         // last frame in, so the needle stops at the name: a pin that matched the
         // parenthesis would fall through to this very literal further down the
         // file and read a body that is not the one it means to.
-        let source = agreed(
-            body("    fn mini_source"),
-            item_body(&ItemQuery::method("TabState", "mini_source")),
-            "mini_source",
-        );
+        let source = item_body(&ItemQuery::method("TabState", "mini_source"));
         assert!(
             source.contains("buffer.content.is_some()"),
             "the red line is 'is there text here already, without asking a disk'"
@@ -112273,16 +112184,7 @@ mod focus_mode_door_tests {
     fn the_cards_offer_is_spent_in_one_place_and_given_back_in_one() {
         let field = ["cards", "_gesture_hint_offer"].concat();
         let needle = ["settings", ".", field.as_str(), " ="].concat();
-        let writes: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
-        assert_eq!(
-            writes,
-            lines_holding(needle.as_str()),
-            "P3 equivalence: this file and the crate hold the same writes"
-        );
+        let writes = lines_holding(needle.as_str());
         assert_eq!(
             writes,
             [
@@ -112296,7 +112198,7 @@ mod focus_mode_door_tests {
 
         // The restore is on the Appearance page and no other: a reset of the
         // Terminal page's ground has nothing to say about a column of cards.
-        let reset = agreed_method("Runtime", "reset_advanced_group");
+        let reset = method_body("Runtime", "reset_advanced_group");
         assert!(
             reset.contains(needle.as_str()),
             "the restoring half lives in the reset verb",
@@ -112339,12 +112241,9 @@ mod focus_mode_door_tests {
     fn the_cards_bubble_is_drawn_and_never_pressed() {
         // The code and not the prose: this module's own paragraphs are allowed
         // to *say* the word "press", and a needle that could not tell the two
-        // apart would be a pin that fails on its own argument.
-        let module: String = include_str!("cardhint.rs")
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // apart would be a pin that fails on its own argument. That is
+        // `View::CodeKeepingLiterals` exactly — and it sees the block comments and
+        // the trailing ones the old line filter walked past.
         for reachable in [
             "ChromeTarget",
             "rect_holds",
@@ -112352,25 +112251,20 @@ mod focus_mode_door_tests {
             "ElementState",
             "pointer",
         ] {
-            let named = found_in(
-                needle!(reachable),
-                View::CodeKeepingLiterals,
-                Scope::Module("crate::cardhint".to_owned()),
-            );
-            assert_eq!(
-                module.contains(reachable),
-                !named.is_empty(),
-                "P3 equivalence: the file and `crate::cardhint` agree about {reachable}"
-            );
             assert!(
-                named.is_empty(),
+                found_in(
+                    needle!(reachable),
+                    View::CodeKeepingLiterals,
+                    Scope::Module("crate::cardhint".to_owned()),
+                )
+                .is_empty(),
                 "the bubble's own module names {reachable}, which is it becoming pressable",
             );
         }
         // And the window's one reading of what is under a pointer has never
         // heard of it.
         assert!(
-            !agreed_method("Runtime", "docked_chrome_target_at").contains("card_hint"),
+            !method_body("Runtime", "docked_chrome_target_at").contains("card_hint"),
             "the hit test knows the bubble exists, so a press can land on it",
         );
     }
