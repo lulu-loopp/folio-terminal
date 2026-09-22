@@ -126962,6 +126962,78 @@ mod platform_gate_tests {
         opens && PLATFORM_WORDS.iter().any(|word| line.contains(word))
     }
 
+    // ── what the capability pin asks the crate instead ────────────────────
+    //
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Nothing is deleted here:
+    // `the_caption_run_is_decided_by_one_capability_read` computes every one of
+    // its readings twice — once from `include_str!`, once from `bt-source` —
+    // and the two are asserted to agree. The deletion is the commit after this
+    // one.
+    //
+    // `sources()` above is **not** part of this: that walk is the P10 row of the
+    // debt list (§6.3), it is the twin of `scripts/check-portable-core.ps1`'s
+    // array reader — allowlist entry 1 — and P10's acceptance is the agreement
+    // test between the two walks, which is P10's ticket and not this batch's.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body`,
+    // `method_body` and `found` live.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// One search over a named scope — a Rust path, never a file.
+    fn found_in(
+        needle: bt_source::Needle,
+        view: bt_source::View,
+        scope: bt_source::Scope,
+    ) -> bt_source::Found {
+        source()
+            .search(&bt_source::Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// Where each of these occurrences stands **inside the file it is in**.
+    ///
+    /// The crate answers in offsets into the union of every file it enumerated;
+    /// the two `include_str!`s below are single files. Subtracting the file's
+    /// own start is what puts the two readings in one coordinate space, and it
+    /// is only meaningful while the answers stand in the file the constant
+    /// holds — which is what the comparison itself establishes.
+    fn in_file(found: &bt_source::Found) -> Vec<usize> {
+        let index = source();
+        found
+            .occurrences()
+            .iter()
+            .map(|occurrence| {
+                let file = index
+                    .file_at(occurrence.span.start())
+                    .expect("every occurrence stands in a file of the universe");
+                occurrence.span.start() - file.span().start()
+            })
+            .collect()
+    }
+
     /// RED — **no unlisted file, and no name on the list that has stopped
     /// asking.**
     ///
@@ -127076,6 +127148,20 @@ mod platform_gate_tests {
         // thing it counts, and this count has to be exact.
         const DOOR: &str = concat!("custom_window_frame", ".platform_chrome()");
         let reads: Vec<usize> = MAIN.match_indices(DOOR).map(|(at, _)| at).collect();
+        // **The same reads, asked of the crate.** This file's reading sees
+        // `main.rs`; the crate's sees every file the package declares, which is
+        // the scope the claim wants — a fourth reach for the frame written in
+        // another file is exactly the second opinion this counts.
+        let from_crate = found_in(
+            bt_source::Needle::new(bt_source::Pattern::text(DOOR)),
+            bt_source::View::Raw,
+            bt_source::Scope::Everything,
+        );
+        assert_eq!(
+            in_file(&from_crate),
+            reads,
+            "this file's reads of the chrome capability and the package's are not the same sites"
+        );
         assert_eq!(
             reads.len(),
             3,
@@ -127088,6 +127174,16 @@ mod platform_gate_tests {
             MAIN.contains("fn platform_chrome(&self) -> bt_platform::PlatformChrome {"),
             "and it is read there"
         );
+        // **The same accessor, asked of the crate**: the declaration of the one
+        // `Runtime::platform_chrome`, which is what the spelling above stands
+        // for.
+        assert!(
+            source()
+                .declaration_of(&bt_source::ItemQuery::method("Runtime", "platform_chrome"))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .contains("fn platform_chrome(&self) -> bt_platform::PlatformChrome "),
+            "the crate's declaration of the accessor is not the one this file found"
+        );
         // The accessor is the last of the three: the constructors stand above it
         // in the file, and each binds what it reads to the local every argument
         // below it is written off.
@@ -127096,6 +127192,24 @@ mod platform_gate_tests {
             .expect("the one accessor");
         let (in_accessor, in_constructors): (Vec<usize>, Vec<usize>) =
             reads.iter().partition(|at| **at > accessor);
+        // **The same partition, asked of the crate**, and asked as containment
+        // rather than as position: the accessor is an item with a body, and
+        // "inside it" is what the claim means — the file order it happens to
+        // stand in is not.
+        let accessor_body = source()
+            .one(&bt_source::ItemQuery::method("Runtime", "platform_chrome"))
+            .expect("the one accessor")
+            .body()
+            .expect("the accessor has a body");
+        let (inside, outside): (Vec<bt_source::Span>, Vec<bt_source::Span>) = from_crate
+            .spans()
+            .into_iter()
+            .partition(|span| span.within(accessor_body));
+        assert_eq!(
+            (inside.len(), outside.len()),
+            (in_accessor.len(), in_constructors.len()),
+            "this file's split of the reads and the crate's disagree"
+        );
         assert_eq!(in_accessor.len(), 1, "the accessor reads it once");
         for at in in_constructors {
             assert!(
@@ -127113,6 +127227,21 @@ mod platform_gate_tests {
             .match_indices("buttons_are_the_platforms")
             .map(|(at, _)| at)
             .collect();
+        // **The same occurrences, asked of the crate**, and asked of the module
+        // rather than of the file. The scope is `crate::seats` and not the
+        // package: the name is spelled three times in `main.rs` too — by this
+        // very test — and a package-wide reading would invert the claim.
+        let seats_decisions = found_in(
+            bt_source::Needle::new(bt_source::Pattern::text("buttons_are_the_platforms")),
+            bt_source::View::Raw,
+            bt_source::Scope::Module("crate::seats".to_owned()),
+        );
+        assert_eq!(
+            in_file(&seats_decisions),
+            decisions,
+            "this file's reading of `seats.rs` and the crate's reading of `crate::seats` are not \
+             the same sites"
+        );
         let body_of = |signature: &str| -> std::ops::Range<usize> {
             let at = SEATS
                 .find(signature)
@@ -127150,6 +127279,24 @@ mod platform_gate_tests {
                 1,
                 "`{name}` does not read the capability exactly once"
             );
+            // **The same containment, asked of the crate** — the reader is an
+            // item of `crate::seats` and its body is a span, so "inside it" is
+            // a question about the item rather than about two offsets a text
+            // search happened to find in one file.
+            let reader = source()
+                .one(&bt_source::ItemQuery::function(name).in_module("crate::seats"))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .body()
+                .unwrap_or_else(|| panic!("`{name}` has a body"));
+            assert_eq!(
+                seats_decisions
+                    .spans()
+                    .iter()
+                    .filter(|span| span.within(reader))
+                    .count(),
+                decisions.iter().filter(|at| body.contains(*at)).count(),
+                "`{name}`: this file's count of its reads and the crate's disagree"
+            );
         }
         let helper = decisions
             .iter()
@@ -127160,6 +127307,25 @@ mod platform_gate_tests {
             "the occurrence outside the two readers is not the test helper that states \
              the other arm"
         );
+        // And the same of the crate's own answer, read out of the union.
+        let crate_helper = seats_decisions
+            .spans()
+            .into_iter()
+            .find(|span| {
+                !readers.iter().any(|(name, _)| {
+                    source()
+                        .one(&bt_source::ItemQuery::function(name).in_module("crate::seats"))
+                        .ok()
+                        .and_then(bt_source::ItemRecord::body)
+                        .is_some_and(|body| span.within(body))
+                })
+            })
+            .expect("one occurrence outside the three readers");
+        assert!(
+            source().union()[crate_helper.start()..].starts_with("buttons_are_the_platforms: true"),
+            "the crate's occurrence outside the three readers is not the test helper that states \
+             the other arm"
+        );
 
         // **The fourth site: the state change** (§13.48). One answer to the
         // wake, and it asks the accessor rather than the frame.
@@ -127167,6 +127333,23 @@ mod platform_gate_tests {
             .match_indices(concat!("AppEvent::WindowChromeChanged", " =>"))
             .map(|(at, _)| at)
             .collect();
+        // **The same answer, asked of the crate**, over the whole package: a
+        // second answer written in another file is the second consequence this
+        // counts, and the file reading could not see one.
+        let crate_answers = found_in(
+            bt_source::Needle::new(bt_source::Pattern::text(concat!(
+                "AppEvent::WindowChromeChanged",
+                " =>"
+            ))),
+            bt_source::View::Raw,
+            bt_source::Scope::Everything,
+        );
+        assert_eq!(
+            in_file(&crate_answers),
+            answers,
+            "this file's answers to the chrome-changed wake and the package's are not the same \
+             sites"
+        );
         assert_eq!(
             answers.len(),
             1,
@@ -127184,6 +127367,18 @@ mod platform_gate_tests {
         );
         let at = MAIN.find(handler).expect("the fourth site");
         let body = &MAIN[at..at + MAIN[at..].find("\n    }\n").expect("its end")];
+        // **The same body, asked of the crate.** It is `FolioApp`'s, which this
+        // file's `find` could not say, and what it hands back stands at the
+        // tail of the slice above with the closing line taken off.
+        let from_crate = method_body("FolioApp", "adopt_platform_chrome");
+        assert!(
+            body.ends_with(
+                &from_crate[..from_crate
+                    .rfind('\n')
+                    .expect("a method's body is closed on a line of its own")]
+            ),
+            "this file's slice of the fourth site and the crate's body are not the same bytes"
+        );
         assert!(
             !body.contains(DOOR),
             "the fourth read goes through `Runtime::platform_chrome` like every other \
@@ -127198,6 +127393,21 @@ mod platform_gate_tests {
                 !SEATS.contains(gate),
                 "`seats.rs` names `{gate}`; the chrome is a capability and this file decides \
                  by the value it is handed"
+            );
+            // **The same prohibition, asked of the crate** — of the module
+            // `crate::seats` and of nothing wider. All three spellings stand in
+            // the files the platform list above admits, so a package-wide
+            // negative would be about nothing at all.
+            assert_eq!(
+                found_in(
+                    bt_source::Needle::new(bt_source::Pattern::text(gate)),
+                    bt_source::View::Raw,
+                    bt_source::Scope::Module("crate::seats".to_owned()),
+                )
+                .is_empty(),
+                !SEATS.contains(gate),
+                "this file's reading of `seats.rs` and the crate's of `crate::seats` disagree \
+                 about `{gate}`"
             );
         }
     }
