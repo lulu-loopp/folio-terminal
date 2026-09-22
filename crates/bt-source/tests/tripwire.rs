@@ -662,8 +662,8 @@ fn each_allowlist_entry_names_one_file_a_reason_and_a_reader() {
              shrinks, so the entry goes",
             entry.path()
         );
-        assert_eq!(Scope::File(entry).named_file(), entry.path());
-        assert_eq!(Scope::File(entry).entry(), entry);
+        assert_eq!(Scope::File(entry).named_file(), Some(entry.path()));
+        assert_eq!(Scope::File(entry).entry(), Some(entry));
     }
 }
 

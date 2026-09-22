@@ -126,38 +126,12 @@ impl FileScoped {
     }
 }
 
-/// What a reading is asked about.
-///
-/// One variant today. The named scopes of the plan's §2.5 and §4.1 —
-/// `Scope::Item` and `Scope::Module`, which are what almost every migrated
-/// reader will take — are P1c's, and they land here beside this one. What P2
-/// owns is the variant that names a file, and the fact that it cannot be built
-/// without naming which allowlist entry it is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Scope {
-    /// One named file, and the reason it is allowed to be one.
-    ///
-    /// There is no constructor taking a path, which is the enforcement: a reader
-    /// that wants a file has to add a variant to [`FileScoped`], and adding one
-    /// is a doc comment somebody reviews.
-    File(FileScoped),
-}
-
-impl Scope {
-    /// The allowlist entry this scope was built from.
-    #[must_use]
-    pub const fn entry(self) -> FileScoped {
-        match self {
-            Self::File(entry) => entry,
-        }
-    }
-
-    /// The file this scope names, from the workspace root.
-    #[must_use]
-    pub const fn named_file(self) -> &'static str {
-        self.entry().path()
-    }
-}
+// What a reading is asked about lives on [`crate::Scope`], which P1c owns and
+// which carries this list's file variant beside `Scope::Item` and
+// `Scope::Module`. P2 was written when that enum was not yet on `main` and
+// declared one of its own here; the two merged apart and the crate did not
+// compile, so the variant moved to where both tickets said it belonged and this
+// module kept the list itself.
 
 // The tests for this module are in `crates/bt-source/tests/tripwire.rs` and not
 // here, for a reason worth stating: asserting anything about this type means
