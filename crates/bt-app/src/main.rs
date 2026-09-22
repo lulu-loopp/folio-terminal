@@ -38908,6 +38908,13 @@ fn open_the_data_directorys_endpoints(proxy: &EventLoopProxy<AppEvent>) {
 /// platform.
 #[cfg(test)]
 mod endpoint_claim_tests {
+    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
+    // commit after this one deletes the older of the two. `source`, `item_body`,
+    // `method_body` and `free_fn_body` are `pty_drain_budget_tests`' helpers word
+    // for word.
+    use bt_source::{Index, ItemQuery};
+
     const SOURCE: &str = include_str!("main.rs");
 
     /// The text of one item, from its signature to the next one at the same
@@ -38921,6 +38928,31 @@ mod endpoint_claim_tests {
         &rest[..end]
     }
 
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
     /// RED — **every endpoint this process binds is bound inside the claim's
     /// gate, and there is one gate.**
     ///
@@ -38929,9 +38961,15 @@ mod endpoint_claim_tests {
     /// fails.
     #[test]
     fn only_the_writer_binds_the_data_directorys_endpoints() {
-        let door = body(
+        let older = body(
             "fn open_the_data_directorys_endpoints(proxy: &EventLoopProxy<AppEvent>) {",
             "\n}\n",
+        );
+        let door = free_fn_body("open_the_data_directorys_endpoints");
+        assert_eq!(
+            door,
+            ["{", older, "\n}"].concat(),
+            "the two readings of the door disagree"
         );
         let refusal = door
             .find("if !persist::is_storage_writer() {")
@@ -38954,8 +38992,19 @@ mod endpoint_claim_tests {
         // and asks for none. The needle is assembled so that this file's search
         // for it is not a match on itself.
         let bind = concat!("_wire", "::open(");
+        let older_create = body("    fn create(\n", "\n    fn ");
+        let create = method_body("Runtime", "create");
         assert!(
-            !body("    fn create(\n", "\n    fn ").contains(bind),
+            older_create.contains(create),
+            "the older reading of `Runtime::create` does not carry the crate's body"
+        );
+        assert_eq!(
+            older_create.contains(bind),
+            create.contains(bind),
+            "the two readings of `Runtime::create` disagree about the binding"
+        );
+        assert!(
+            !create.contains(bind),
             "an endpoint is bound in `Runtime::create` again, where nothing gates it"
         );
     }
