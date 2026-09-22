@@ -124880,17 +124880,52 @@ fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> 
 /// the watch's callback does nothing but nudge this loop.
 #[cfg(test)]
 mod system_preference_wiring_tests {
+    // **P14's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.5, §6.0 rule 3), taken with P3's because §6.0 rule 4 batches by module.
+    // Both readings stand here and are asserted to agree; the commit after this
+    // one deletes the older of the two. `source` and `item_body` are
+    // `pty_drain_budget_tests`' helpers word for word, `trait_method_body` is
+    // `resident_run_tests`'.
+    use bt_source::{Index, ItemQuery};
+
     const SOURCE: &str = include_str!("main.rs");
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one method of a trait's implementation — the platform's own
+    /// entry points, which are not inherent methods of anything.
+    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name).of_trait(trait_name))
+    }
 
     /// RED GATE — mutation: drop `adopt_system_canvas` from the arm and this
     /// names it; a reader on macOS who switches the desktop to dark then keeps
     /// the canvas their window was opened in until they restart.
     #[test]
     fn the_system_preference_event_re_reads_the_desktops_canvas() {
-        let arm = SOURCE
+        let older = SOURCE
             .find("AppEvent::SystemPreferencesChanged =>")
             .map(|at| &SOURCE[at..at + 200])
             .expect("the event has an arm in the loop's own match");
+        let events = trait_method_body("FolioApp", "ApplicationHandler", "user_event");
+        let arm = events
+            .find("AppEvent::SystemPreferencesChanged =>")
+            .map(|at| &events[at..at + 200])
+            .expect("the event has an arm in the loop's own match");
+        assert_eq!(older, arm, "the two readings of the arm disagree");
         assert!(
             arm.contains("adopt_motion_preference"),
             "the animation preference is no longer re-read on the event that says it moved:\n{arm}"
@@ -124900,9 +124935,21 @@ mod system_preference_wiring_tests {
             "the desktop's canvas is no longer re-read on the event that says it moved, and on \
              macOS that event is the only thing that says so:\n{arm}"
         );
-        assert!(
+        let reader = source()
+            .declaration_of(&ItemQuery::method("FolioApp", "adopt_system_canvas"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
             SOURCE.contains("fn adopt_system_canvas(&mut self) -> Result<()> {"),
-            "and the reader it names is this window's own"
+            reader
+                .trim_end()
+                .ends_with("fn adopt_system_canvas(&mut self) -> Result<()>"),
+            "the two readings of the declaration disagree"
+        );
+        assert!(
+            reader
+                .trim_end()
+                .ends_with("fn adopt_system_canvas(&mut self) -> Result<()>"),
+            "and the reader it names is this window's own:\n{reader}"
         );
     }
 }
