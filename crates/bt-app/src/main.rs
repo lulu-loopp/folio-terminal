@@ -129141,6 +129141,80 @@ mod quit_with_no_window_tests {
         &rest[..end]
     }
 
+    // ── what this module asks the crate instead ───────────────────────────
+    //
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Nothing is deleted here: every reading is computed
+    // twice — once from `include_str!("main.rs")`, once from `bt-source` — and
+    // the two are asserted to be the same bytes. The deletion is the commit
+    // after this one.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body`,
+    // `method_body` and `found` live. The owner is an argument here because the
+    // four doors are not one type's: three are `FolioApp`'s and the chord's is
+    // `Runtime`'s, which is a distinction the text finder could not make.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
+    ///
+    /// `body` hands back everything after the signature prefix it was given and
+    /// stops before the next `\n    fn `; `body_of` hands back the braces and
+    /// what is between them. So the crate's answer has to stand in this file's
+    /// slice at the head of the body, with nothing but the rest of the
+    /// declaration in front of it.
+    ///
+    /// What comes back is the file's slice, so this commit changes no assertion.
+    fn agreed(old: &'static str, owner: &str, name: &str) -> &'static str {
+        let new = method_body(owner, name);
+        let at = match old.find(new) {
+            Some(at) => at,
+            None => {
+                assert!(
+                    old.starts_with(&new[1..]),
+                    "`{owner}::{name}`: this file's slice and the crate's body are not the same \
+                     bytes"
+                );
+                0
+            }
+        };
+        assert!(
+            !old[..at].contains('{'),
+            "`{owner}::{name}`: the crate's body stands inside this file's slice rather than at \
+             the head of it"
+        );
+        old
+    }
+
     /// RED — **the application's own verbs are answered before a window is
     /// looked for.**
     ///
@@ -129156,7 +129230,11 @@ mod quit_with_no_window_tests {
     /// goes red — which is the bug, exactly.
     #[test]
     fn a_menu_quit_is_dispatched_before_the_landing_asks_for_a_window() {
-        let landing = body("    fn answer_a_menu_row(");
+        let landing = agreed(
+            body("    fn answer_a_menu_row("),
+            "FolioApp",
+            "answer_a_menu_row",
+        );
         // The needles are the code's own spelling and not the prose around it:
         // a comment that stayed put while the call moved would otherwise keep
         // this green.
@@ -129194,19 +129272,48 @@ mod quit_with_no_window_tests {
     #[test]
     fn every_door_onto_the_quit_records_the_same_debt() {
         assert!(
-            body("    fn run_a_verb_of_the_applications(").contains("app.ask_to_quit();"),
+            agreed(
+                body("    fn run_a_verb_of_the_applications("),
+                "FolioApp",
+                "run_a_verb_of_the_applications"
+            )
+            .contains("app.ask_to_quit();"),
             "the menu bar's Quit does not reach the quit transaction"
         );
         assert!(
-            body("    fn run_shortcut(").contains("self.app.ask_to_quit();"),
+            agreed(body("    fn run_shortcut("), "Runtime", "run_shortcut")
+                .contains("self.app.ask_to_quit();"),
             "the chord no longer records the debt through the one door"
         );
         assert!(
-            body("    fn begin_the_systems_quit(").contains("app.ask_to_quit();"),
+            agreed(
+                body("    fn begin_the_systems_quit("),
+                "FolioApp",
+                "begin_the_systems_quit"
+            )
+            .contains("app.ask_to_quit();"),
             "AppKit's own quit request no longer records it through the one door"
         );
         // And nothing writes the flag behind that door's back. The needle is
         // spelled in two halves so that this line is not itself an occurrence.
+        //
+        // **The same count, asked of the crate.** This file's reading sees
+        // `main.rs`; the crate's sees every file the package declares, which is
+        // the scope the claim wants — a second writer in another file is
+        // exactly "somewhere other than `App::ask_to_quit`", and the file
+        // reading could not see one.
+        assert_eq!(
+            found(
+                bt_source::Needle::new(bt_source::Pattern::text(concat!(
+                    "quit_requested",
+                    " = true"
+                ))),
+                bt_source::View::Raw,
+            )
+            .len(),
+            SOURCE.matches(concat!("quit_requested", " = true")).count(),
+            "this file's count of the writers of the flag and the package's disagree"
+        );
         assert_eq!(
             SOURCE.matches(concat!("quit_requested", " = true")).count(),
             1,
