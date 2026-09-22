@@ -3,5 +3,6 @@
 // only one of them stands on `test`.
 
 pub fn reached_two_ways() -> u8 {
+    let _ = "the_needle_this_fixture_counts";
     2
 }

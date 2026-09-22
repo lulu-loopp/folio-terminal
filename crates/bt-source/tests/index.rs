@@ -634,6 +634,108 @@ fn a_file_reached_two_ways_carries_the_gate_on_the_gated_path_only() {
     );
 }
 
+/// RED — **"how many times does the *product* do this" is one predicate the
+/// crate owns**, and it takes both grains to answer.
+///
+/// Six copies of this rule were written out by hand in `bt-app`, four of them
+/// word for word, and each of the two shapes was wrong in a way the other was
+/// not: the file-grained one counted an inline `#[cfg(test)] mod` and a
+/// `#[cfg(test)]` function as product, and the item-grained one counted a file
+/// reached by `#[cfg(test)] mod x;` as product. The fixture writes one needle
+/// once in each of those places, plus the case neither grain alone can answer —
+/// bytes standing in no item at all.
+///
+/// MUTATION: drop the file half and the two rows in `crate::gate` come back;
+/// drop the item half and `only_in_tests` and `inside_the_braces` do; read the
+/// item's own file text instead of its identity and `reached_by_a_gate`
+/// does — which is the tree as it read before the commit before this one.
+#[test]
+fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
+    let index = declaration_variant_fixture();
+    let counted = |scope: Scope| {
+        let found = index
+            .search(
+                &Search::new(
+                    Needle::new(Pattern::text("the_needle_this_fixture_counts")),
+                    View::Raw,
+                )
+                .in_scope(scope),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        (found.len(), found.in_the_product(&index).len())
+    };
+
+    assert_eq!(counted(Scope::Everything), (7, 3));
+    assert_eq!(
+        counted(Scope::Item(ItemQuery::function("at_the_root"))),
+        (1, 1),
+        "product bytes in a product file"
+    );
+    assert_eq!(
+        counted(Scope::Item(ItemQuery::function("only_in_tests"))),
+        (1, 0),
+        "a `#[cfg(test)]` function in a file a product build compiles"
+    );
+    assert_eq!(
+        counted(Scope::Item(
+            ItemQuery::function("inside_the_braces").in_module("crate::inline_gate")
+        )),
+        (1, 0),
+        "an inline `#[cfg(test)] mod`, which is not a file and does not move \
+         the file's answer"
+    );
+    assert_eq!(
+        counted(Scope::Item(ItemQuery::function("reached_by_a_gate"))),
+        (1, 0),
+        "a file reached by `#[cfg(test)] mod gate;`, which writes no gate of \
+         its own anywhere in it"
+    );
+    assert_eq!(
+        counted(Scope::Module("crate::gate".to_owned())),
+        (2, 0),
+        "and the bytes of that file that stand in no item at all, which only \
+         the file grain can answer for"
+    );
+    assert_eq!(
+        counted(Scope::Module("crate".to_owned())),
+        (4, 2),
+        "lib.rs: the `const` and the free function, and neither of the two \
+         gated items beside them"
+    );
+    assert_eq!(
+        counted(Scope::Item(ItemQuery::function("reached_two_ways"))),
+        (1, 1),
+        "a file reached both ways is product code through the path that is \
+         (§2.3), and so is an item in it"
+    );
+
+    // The narrowed answer is a `Found` and goes on answering as one: the owners
+    // of §4.1, what was excluded, where the needle came from, and a report that
+    // says which question it is the answer to.
+    let found = index
+        .search(&Search::new(
+            Needle::new(Pattern::text("the_needle_this_fixture_counts")),
+            View::Raw,
+        ))
+        .expect("a spelling of the fixture");
+    assert_eq!(found.outside_items(&index), 2, "the two `const`s");
+    let product = found.in_the_product(&index);
+    assert_eq!(product.outside_items(&index), 1, "one of them is product");
+    let mut names: Vec<String> = product
+        .owners(&index)
+        .into_keys()
+        .map(|identity| identity.name)
+        .collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(names, ["at_the_root", "reached_two_ways"]);
+    assert!(
+        product.report(&index).contains("in the product"),
+        "{}",
+        product.report(&index)
+    );
+}
+
 // ── one owner, however the move spelled it ────────────────────────────────
 
 fn self_type_fixture() -> Arc<Index> {

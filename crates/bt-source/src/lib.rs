@@ -87,6 +87,19 @@
 //!   smaller answer — the refusal that keeps "the counter lives on `App`" from
 //!   degrading to "this spelling is somewhere in this package".
 //!
+//! What P3's consumer batches found missing once they were written — each of
+//! them a rule a batch had to spell out for itself, and spell wrong:
+//!
+//! * **An item stands on the `cfg` written on the declaration that reaches its
+//!   file**, and not only on the ones written inside it ([`DeclarationPath`],
+//!   [`ItemRecord::identities`]). `#[cfg(test)] mod t;` and
+//!   `#[cfg(test)] mod t { … }` are one statement written two ways (§2.3), and
+//!   an identity that carried only the second called every item of a test-only
+//!   file unconditional.
+//! * [`Occurrence::in_the_product`] and [`Found::in_the_product`] — **what a
+//!   build of the shipped program contains**, at the two grains it takes, in
+//!   place of the six copies of that rule `bt-app` had written out.
+//!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
 //! only under `cfg(windows)` is enumerated on macOS too, because a guard that

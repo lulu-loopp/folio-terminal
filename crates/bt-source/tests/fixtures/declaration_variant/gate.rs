@@ -5,7 +5,11 @@
 #[path = "plain.rs"]
 mod plain_again;
 
+// Outside every item, in a file no product build compiles.
+pub const OUTSIDE_EVERY_ITEM_HERE: &str = "the_needle_this_fixture_counts";
+
 pub fn reached_by_a_gate() -> u8 {
+    let _ = "the_needle_this_fixture_counts";
     3
 }
 
