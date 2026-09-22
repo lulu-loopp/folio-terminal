@@ -270,6 +270,7 @@ dependencies = [
  "bt-platform",
  "bt-pty",
  "bt-render",
+ "bt-source",
  "bt-term",
  "bt-transcript",
  "bt-unicode",

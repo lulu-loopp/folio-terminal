@@ -113859,41 +113859,143 @@ mod quit_transaction_tests {
 /// (`bt_pty::tests::a_two_mib_burst_leaves_a_pane_a_turn_at_a_time_in_order`).
 #[cfg(test)]
 mod pty_drain_budget_tests {
+    // **P3's pilot batch** (`docs/plans/bt-app-split-prep.md` §6.3). Every
+    // reader in this module asked `main.rs` for its text; every one of them now
+    // asks `bt-source` about an *item* of this crate, so no fact here is bound
+    // to the file it happens to be written in today. The commit before this one
+    // ran both readings side by side and asserted they agree; this is the one
+    // that deletes the older of the two, because two implementations of one
+    // judgement do not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern below is the one the other thirty-nine batches copy.**
+    //
+    // 1. **One index per process** — `source`. The universe is
+    //    `universes::crate_sources("bt-app")`: this package's own `src/`,
+    //    reached through its declarations. It is not a default; there is none.
+    // 2. **A body pin names an identity, not a file** — `method_body` takes
+    //    the type that owns the method, because the tuple of §2.4 is what stays
+    //    the same when the method moves to another file. The assertions on the
+    //    body are unchanged: they still read a `&str` and still `find` in it.
+    // 3. **A whole-source count or negative becomes a `Search`** with its
+    //    view said out loud. Every reader here kept `View::Raw`, because raw
+    //    bytes are what `include_str!` gave them and a view change is a changed
+    //    contract (§4.2 rule 3) that belongs to whoever wants it, not to a
+    //    migration.
+    // 4. **`needle!` is how a reader stops matching itself.** It records the
+    //    caller's `file!`/`line!`/`column!`, and the search excludes the
+    //    expression that built it — nothing else. The `[..].concat()` halves in
+    //    this module are left exactly as they were: removing them is P18's
+    //    ticket and ~110 chances to get an edit wrong.
+    // 5. **"In the product" is a filter over the answer** — `in_product` —
+    //    because the two counts that wanted it used to take a text prefix of
+    //    this file, and a text prefix is the thing that does not survive a
+    //    move. It is a **file**-grained reading: an inline `#[cfg(test)] mod`
+    //    inside a file that compiles into the product counts as product. Both
+    //    readers below have zero such occurrences, so it costs nothing here and
+    //    is written down because the next batch may not be so lucky.
+    // 6. **A refusal is never an answer.** Every helper here `panic!`s on a
+    //    `bt_source::QueryFailure` and none of them falls back to a narrower
+    //    reading. An item that is not there, or not unique, is the failure this
+    //    whole preparation exists to make loud: the old finder answered
+    //    "not found" by panicking too, but it could not tell a method that had
+    //    moved from a method that had never existed, and the crate can.
+    //
+    // What later batches should NOT copy, because it is this batch's own cost:
+    // the `source` helper is fifteen lines that re-read the workspace
+    // manifests and re-declare the universe, and forty copies of it is forty
+    // places to get one wrong. It belongs behind one call in `bt-source`; that
+    // is a change to the shared mechanism, which §6.0 rule 4 serialises, so it
+    // is a finding for whoever owns the crate rather than something a consumer
+    // batch does on its way past.
+
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
 
-    /// This file as text, for [`application_change_tests::SOURCE`]'s reason.
-    const SOURCE: &str = include_str!("main.rs");
+    use bt_source::{
+        Found, Index, ItemQuery, Needle, Pattern, Search, Vendor, View, Workspace, needle, report,
+        universes,
+    };
 
-    /// The body of a free function declared at module level.
-    ///
-    /// [`textless_present_tests::fn_body`] reads methods, which are indented one
-    /// level further; the two are the same idea at two indentations and are kept
-    /// apart rather than generalised because a helper that guessed the
-    /// indentation would find the wrong `}`.
-    fn free_fn_body(name: &str) -> &'static str {
-        let head = format!("\nfn {name}(");
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared at module level"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n}\n")
-                .expect("a free function is closed by a `}` in column one");
-        &SOURCE[start..end]
+    /// **This crate, indexed once per process.** `bt-source` caches by universe,
+    /// so every module that declares this same universe shares the one index;
+    /// the [`OnceLock`] here saves re-reading the workspace manifests per test.
+    fn source() -> &'static Index {
+        static INDEX: OnceLock<Arc<Index>> = OnceLock::new();
+        INDEX.get_or_init(|| {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..");
+            let workspace = Workspace::read(&root)
+                .unwrap_or_else(|rejection| panic!("this workspace: {rejection}"));
+            let package = workspace
+                .package("bt-app")
+                .unwrap_or_else(|rejection| panic!("this package: {rejection}"));
+            let universe = universes::crate_sources(package, Vendor::Excluded)
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+            Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
+        })
     }
 
-    fn method_body(name: &str) -> &'static str {
-        let head = format!("\n    fn {name}(");
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n    }\n")
-                .expect("a method is closed by a `}` at its `impl`'s indentation");
-        &SOURCE[start..end]
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    ///
+    /// The owner is an argument and not a guess. What the deleted local finder
+    /// did was take the first `\n    fn name(` in this file, which is a method
+    /// of *whatever `impl` happens to come first* — every one of this module's
+    /// pins turned out to mean `Runtime`, and the equivalence commit is what
+    /// established that rather than assumed it.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// How many of these occurrences stand in a file a product build compiles.
+    ///
+    /// File-grained, and deliberately so: §2.3 computes product reachability per
+    /// *declaration path to a file*, and an inline `#[cfg(test)] mod` inside a
+    /// product file is not a file. See this module's header.
+    fn in_product(found: &Found) -> usize {
+        found
+            .occurrences()
+            .iter()
+            .filter(|occurrence| {
+                source()
+                    .file_at(occurrence.span.start())
+                    .is_some_and(bt_source::FileRecord::permits_product)
+            })
+            .count()
+    }
+
+    /// The names of the items these occurrences stand in (§4.1) — the assertion
+    /// that survives a move, because relocating a caller changes no key.
+    fn owner_names(found: &Found) -> Vec<String> {
+        let index = source();
+        let mut names: Vec<String> = found
+            .owners(index)
+            .into_iter()
+            .map(|(identity, count)| format!("{}×{count}", identity.name))
+            .collect();
+        names.sort();
+        names
     }
 
     /// PIN (user report, 2026-08-24) — **a pane that prints faster than the
@@ -113964,7 +114066,7 @@ mod pty_drain_budget_tests {
     /// mid-sentence until something unrelated wakes the loop.
     #[test]
     fn a_pane_with_more_to_say_is_a_turn_the_window_asks_itself_for() {
-        let body = method_body("drain_pty");
+        let body = method_body("Runtime", "drain_pty");
         let merged = body
             .find("outcome.pending")
             .expect("`drain_pty` reads each tab's leftover");
@@ -114040,7 +114142,7 @@ mod pty_drain_budget_tests {
     /// Mutation: move the reset into the publish arm, or past `coalesce::decide`.
     #[test]
     fn the_caret_is_revealed_when_output_arrives_and_not_when_it_is_drawn() {
-        let drain = method_body("drain_pty");
+        let drain = method_body("Runtime", "drain_pty");
         let reset = drain
             .find("self.reset_cursor_blink(now)")
             .expect("the drain reveals the caret on output");
@@ -114090,7 +114192,7 @@ mod pty_drain_budget_tests {
     /// at the publish door, drop the release from the turn, or drop the deadline from the fold.
     #[test]
     fn the_bounded_publication_wait_is_armed_settled_released_and_woken_once_each() {
-        let drain = method_body("drain_pty");
+        let drain = method_body("Runtime", "drain_pty");
         assert!(
             drain.contains("coalesce::decide("),
             "the drain is where a turn's picture is deferred or published"
@@ -114100,15 +114202,16 @@ mod pty_drain_budget_tests {
             "and the deferral is written down where the loop's fold can find it"
         );
 
-        // Spelled in two halves so that these assertions are not themselves two of the matches
-        // they are counting.
+        // Spelled in two halves because it was written before `needle!`, which
+        // is what keeps this assertion from being one of the matches it counts.
+        // Writing it whole is P18's ticket and not this one's.
         let settle = format!("pty_coalesce.{}", "settle();");
         assert!(
-            method_body("publish_frame_inner").contains(&settle),
+            method_body("Runtime", "publish_frame_inner").contains(&settle),
             "every publish comes through this door, so the debt is settled at it"
         );
         assert_eq!(
-            SOURCE.matches(&settle).count(),
+            found(needle!(Pattern::text(&settle)), View::Raw).len(),
             1,
             "one settle and no other: a second one is a caller taking on a \
              responsibility the door already has, and a third is the one that \
@@ -114116,17 +114219,23 @@ mod pty_drain_budget_tests {
         );
 
         assert!(
-            method_body("turn").contains("self.finish_pty_coalesce_if_due(now)"),
+            method_body("Runtime", "turn").contains("self.finish_pty_coalesce_if_due(now)"),
             "a wait that has run out is paid on the very next turn, whatever woke it"
         );
         assert!(
-            method_body("finish_pty_coalesce_if_due")
+            method_body("Runtime", "finish_pty_coalesce_if_due")
                 .contains("self.window.pty_coalesce.until = None;"),
             "and paying it disarms it, before anything can fail on the way to the glass"
         );
 
         assert!(
-            SOURCE.contains("\n            self.window.pty_coalesce.until,\n"),
+            !found(
+                needle!(Pattern::text(
+                    "\n            self.window.pty_coalesce.until,\n"
+                )),
+                View::Raw,
+            )
+            .is_empty(),
             "the deadline stands in the window's fold, which is what books the \
              wake that pays it"
         );
@@ -114216,7 +114325,7 @@ mod pty_drain_budget_tests {
             }
         }
         // Pin the production loop to the same scope exercised above.
-        let body = method_body("drain_pty");
+        let body = method_body("Runtime", "drain_pty");
         let scope = body.find("in_drain_feed_turn(").unwrap();
         let slices = body.find("let pending = loop {").unwrap();
         assert!(scope < slices);
@@ -114244,7 +114353,7 @@ mod pty_drain_budget_tests {
     /// `deliver_osc_attention` back inside it.
     #[test]
     fn the_drain_repeats_under_the_budget_and_settles_up_once() {
-        let body = method_body("drain_pty");
+        let body = method_body("Runtime", "drain_pty");
         let gate = body
             .find("drain_may_take_another_slice(")
             .expect("`drain_pty` asks the budget whether it may go round again");
@@ -114282,7 +114391,7 @@ mod pty_drain_budget_tests {
     /// Command Prompt card is back to catching up at its next prompt.
     #[test]
     fn a_pane_that_spoke_puts_its_own_card_on_the_clock() {
-        let drain = method_body("drain_pty");
+        let drain = method_body("Runtime", "drain_pty");
         let gathered = drain
             .find("spoke.push(index)")
             .expect("`drain_pty` notes which tabs spoke");
@@ -114304,11 +114413,11 @@ mod pty_drain_budget_tests {
              nothing at all"
         );
         assert!(
-            method_body("collecting_card_speakers")
+            method_body("Runtime", "collecting_card_speakers")
                 .contains("self.window.focus_mode && !self.window.cards.owes_frame()"),
             "and that is what those two words mean"
         );
-        let spoke = method_body("panes_spoke");
+        let spoke = method_body("Runtime", "panes_spoke");
         let asked = spoke
             .find("card_is_in_view")
             .expect("the one function asks whether any of them has a card on screen");
@@ -114344,7 +114453,7 @@ mod pty_drain_budget_tests {
     /// nothing wakes the loop to spend it.
     #[test]
     fn the_tick_that_draws_the_cards_is_reached_when_a_card_is_behind() {
-        let advance = method_body("advance_strip_animation");
+        let advance = method_body("Runtime", "advance_strip_animation");
         let read = advance
             .find("let cards_owe = self.window.cards.owes_frame();")
             .expect("the tick asks whether a card is behind its pane");
@@ -114377,7 +114486,7 @@ mod pty_drain_budget_tests {
     /// ran" rather than on the gates, and one of these goes red.
     #[test]
     fn the_frame_schedule_knows_about_the_card_column() {
-        let deadline = method_body("strip_animation_work");
+        let deadline = method_body("Runtime", "strip_animation_work");
         assert!(
             deadline.contains("self.window.cards.owes_frame()"),
             "nothing wakes the loop for a card that is behind its pane"
@@ -114386,7 +114495,7 @@ mod pty_drain_budget_tests {
             deadline.contains("|| cards_behind"),
             "the reading is taken and then dropped: the fold never asks for the frame"
         );
-        let pass = method_body("refresh_focus_thumbnails");
+        let pass = method_body("Runtime", "refresh_focus_thumbnails");
         let before = pass
             .find("let gates_before = self.window.focus_thumbs.stats()")
             .expect("the pass reads the gates before it spends them");
@@ -114457,14 +114566,23 @@ mod pty_drain_budget_tests {
     #[test]
     fn a_focus_report_is_never_spelled_where_a_keystroke_could_reach_it() {
         // Assembled rather than written out, so that this assertion is not the
-        // hit it is looking for.
+        // hit it is looking for. `needle!` now excludes the construction too, so
+        // the assembly is belt and braces until P18 unpicks it.
+        //
+        // **The prohibition is the crate's, not this file's.** It used to read
+        // `main.rs` alone, which left a spelling in any of the other hundred and
+        // twenty-three files of this package unread — and the two sequences
+        // `bt-term` mints have to be unspellable wherever `send_user_input` can
+        // be reached from, which is everywhere in `bt-app`.
         let escape = char::from(0x5c);
         for direction in ['I', 'O'] {
             let spelling = format!("{escape}x1b[{direction}");
+            let hits = found(needle!(Pattern::text(&spelling)), View::Raw);
             assert!(
-                !SOURCE.contains(&spelling),
+                hits.is_empty(),
                 "`{spelling}` is `bt-term`'s to write; spelling it here is the \
-                 first half of sending it as user input"
+                 first half of sending it as user input\n{}",
+                hits.report(source())
             );
         }
         let drain = free_fn_body("drain_leaf_pty");
@@ -114523,29 +114641,39 @@ mod pty_drain_budget_tests {
             "a refusal turned back into an `Err` reaches `App::fail` and ends the process over \
              one wedged shell"
         );
+        let forgiving = ["write_pty_", "input"].concat();
         assert!(
-            free_fn_body(&["write_pty_", "input"].concat())
-                .contains(&[&door, "(pty, bytes, what).map(drop)"].concat()),
+            free_fn_body(&forgiving).contains(&[&door, "(pty, bytes, what).map(drop)"].concat()),
             "the forgiving spelling has grown a body of its own, so there are two places that \
              know what a refusal is"
         );
-        // Every other `.write(` in this file is a test's, a clipboard's, or a `writeln!`; what
-        // this counts is the product's calls onto a `PtySession`. The cut is the *declaration*
-        // of the module that left for `tests.rs` on 2026-09-18 — it stands exactly where the
-        // module stood, so the slice above it is the same text it has always been, and what is
-        // below it is still the fifty-four test modules this file kept.
-        let product = &SOURCE[..SOURCE
-            .find("\n#[cfg(test)]\nmod tests;")
-            .expect("the declaration of this file's big test module")];
+        // Every other `.write(` in this package is a test's, a clipboard's, or a `writeln!`; what
+        // this counts is the product's calls onto a `PtySession`. It used to count them over a
+        // text prefix of this file, cut at the declaration of the module that left for `tests.rs`
+        // on 2026-09-18 — a cut that means nothing the moment either side of it moves. What the
+        // crate answers instead is which files a product build compiles, from the declarations
+        // that compile them, and `tests.rs` is wholly test code by its own.
+        let with_reason = ["pty.", "write_with_reason("].concat();
+        let plain = ["pty.", "write("].concat();
+        let reasoned = found(needle!(Pattern::text(&with_reason)), View::Raw);
         assert_eq!(
-            product
-                .matches(&["pty.", "write_with_reason("].concat())
-                .count(),
+            in_product(&reasoned),
             1,
-            "one door in the product, and it is inside `write_pty_input`"
+            // The message said `write_pty_input` until P3 asked the crate which
+            // item the occurrence stands in and was told `offer_pty_input`. The
+            // doc comment above has said so since the review of 2026-09-17 —
+            // `offer_pty_input` is where the pipe is touched and the forgiving
+            // spelling delegates to it — so what was wrong was the sentence.
+            "one door in the product, and it is inside `offer_pty_input`"
         );
         assert_eq!(
-            product.matches(&["pty.", "write("].concat()).count(),
+            owner_names(&reasoned),
+            ["offer_pty_input×1"],
+            "§4.1: the door is named by the item it stands in, not by a line of a file — \
+             relocate this call and the total does not move but this does"
+        );
+        assert_eq!(
+            in_product(&found(needle!(Pattern::text(&plain)), View::Raw)),
             0,
             "every product write must carry its reason into the input dump"
         );
@@ -114567,12 +114695,13 @@ mod pty_drain_budget_tests {
     fn the_only_road_from_a_solved_rectangle_to_conpty_is_the_quiet_window() {
         let call = ["commit_leaf_", "resize("].concat();
         assert_eq!(
-            SOURCE.matches(call.as_str()).count(),
-            // Its declaration and the one production release, counted over the whole of
-            // `main.rs`. It was 7 until 2026-09-18: the five test callers — the card's deferred
-            // resize fixture, the two anchor-debt fixtures, the leaf-dispatch one, and
-            // `ResizeGateHarness::tick`, which runs the production commit rather than modelling
-            // it — went to `tests.rs` with `mod tests`, and this count does not read that file.
+            in_product(&found(needle!(Pattern::text(&call)), View::Raw)),
+            // Its declaration and the one production release, counted over every file a
+            // product build of this package compiles. The number was the same when the
+            // reading was "the whole of `main.rs`", and for a reason that had nothing to
+            // do with the rule: the six test callers are in `tests.rs`, which that
+            // reading did not open. Now they are not counted because the declaration that
+            // reaches that file is `#[cfg(test)]`, which is the fact meant all along.
             2,
             "the commit has one caller in the product, and that caller is the release"
         );
@@ -114580,7 +114709,7 @@ mod pty_drain_budget_tests {
             free_fn_body("release_due_leaf_resize").contains(call.as_str()),
             "and the release is it"
         );
-        let solve = method_body("resize_leaves_to_layout");
+        let solve = method_body("Runtime", "resize_leaves_to_layout");
         assert!(
             !solve.contains(call.as_str()),
             "a layout solve schedules; it does not commit — the sibling panes committing here \
@@ -114615,10 +114744,11 @@ mod pty_drain_budget_tests {
     #[test]
     fn a_window_resize_reaches_the_tabs_nobody_is_looking_at() {
         assert!(
-            method_body("resize_leaves_to_layout").contains("self.resize_hidden_leaves_to_layout("),
+            method_body("Runtime", "resize_leaves_to_layout")
+                .contains("self.resize_hidden_leaves_to_layout("),
             "only the stage is solved, so the tabs behind it keep the size they were born with"
         );
-        let hidden = method_body("resize_hidden_leaves_to_layout");
+        let hidden = method_body("Runtime", "resize_hidden_leaves_to_layout");
         assert!(
             hidden.contains("self.window.seat_viewport"),
             "a tab off the stage is solved into the box the stage was solved into, never into one \
@@ -114656,13 +114786,13 @@ mod pty_drain_budget_tests {
     /// is back, cut from the display being left.
     #[test]
     fn a_scale_change_hands_no_pane_a_grid_from_the_rectangle_it_is_leaving() {
-        let announced = method_body("scale_factor_changed");
+        let announced = method_body("Runtime", "scale_factor_changed");
         assert!(
             announced.contains("self.window.dpi_rectangle.announced();"),
             "the event that carries a scale without its rectangle must say so"
         );
 
-        let leaves = method_body("resize_leaves_to_layout");
+        let leaves = method_body("Runtime", "resize_leaves_to_layout");
         let gate = leaves
             .find("if !self.window.dpi_rectangle.may_cut_a_grid() {")
             .expect("no pane is handed a grid while the rectangle is in flight");
@@ -114674,24 +114804,35 @@ mod pty_drain_budget_tests {
             "a refused walk must not write the ledger that says the shells were told"
         );
 
+        // Until P3 this read `main.rs` for this text, and the needle it read with
+        // was this very line — same bytes, same file — so it was satisfied by
+        // itself and would have stayed green with the arm deleted. `needle!`
+        // records where the needle was written and the search removes that
+        // construction and nothing else, so what is left is the road.
         assert!(
-            SOURCE.contains("WindowEvent::Resized(size) => runtime.resized(size),"),
+            !found(
+                needle!(Pattern::text(
+                    "WindowEvent::Resized(size) => runtime.resized(size),"
+                )),
+                View::Raw,
+            )
+            .is_empty(),
             "a rectangle from the OS is the one road on which the flag comes down"
         );
         assert!(
-            method_body("resized").contains("self.window.dpi_rectangle.arrived();"),
+            method_body("Runtime", "resized").contains("self.window.dpi_rectangle.arrived();"),
             "and `resized` is where it comes down"
         );
         assert!(
-            !method_body("resize").contains("dpi_rectangle"),
+            !method_body("Runtime", "resize").contains("dpi_rectangle"),
             "`resize` is called by the scale road too, so it may not answer the announcement"
         );
 
         assert!(
-            method_body("turn").contains("self.settle_dpi_rectangle()?;"),
+            method_body("Runtime", "turn").contains("self.settle_dpi_rectangle()?;"),
             "a scale change no rectangle followed is spent on the first turn after it"
         );
-        let settled = method_body("settle_dpi_rectangle");
+        let settled = method_body("Runtime", "settle_dpi_rectangle");
         assert!(
             settled.contains("self.resize_leaves_to_layout("),
             "and spending it is the grids it was owed"
@@ -114708,7 +114849,7 @@ mod pty_drain_budget_tests {
     /// Mutation: put `self.shell_mut()` or `self.focused()` back in and the walk is gone.
     #[test]
     fn the_release_asks_every_pane_and_not_the_one_holding_the_keyboard() {
-        let body = method_body("flush_pending_pty_resize");
+        let body = method_body("Runtime", "flush_pending_pty_resize");
         assert!(
             body.contains("self.window.tabs.iter_mut()"),
             "the release walks every tab"
@@ -114748,12 +114889,12 @@ mod pty_drain_budget_tests {
     /// back to showing its own LaTeX.
     #[test]
     fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
-        let deadline = method_body("live_stability_deadline");
+        let deadline = method_body("Runtime", "live_stability_deadline");
         assert!(
             deadline.contains("leaves()"),
             "the window wakes at the earliest settle any pane on screen owes"
         );
-        let due = method_body("advance_live_math_if_due");
+        let due = method_body("Runtime", "advance_live_math_if_due");
         assert!(
             due.contains("leaves_mut()"),
             "and when it wakes, every pane of the tab on screen settles"
@@ -114765,7 +114906,7 @@ mod pty_drain_budget_tests {
                  ran the command"
             );
         }
-        let redraw = method_body("redraw");
+        let redraw = method_body("Runtime", "redraw");
         assert!(
             redraw.contains("schedule_visible_artifacts("),
             "and the pass that projects the panes nobody is typing in is the pass that schedules \
@@ -114793,7 +114934,7 @@ mod pty_drain_budget_tests {
     /// focused one's column count.
     #[test]
     fn a_metric_that_moved_re_keys_every_pane() {
-        let sync = method_body("sync_math_layout_key");
+        let sync = method_body("Runtime", "sync_math_layout_key");
         assert!(
             sync.contains("self.window.tabs.iter_mut()"),
             "every tab, because a background tab is switched to and not rebuilt"
@@ -114823,14 +114964,14 @@ mod pty_drain_budget_tests {
     /// are worth a frame.
     #[test]
     fn a_picture_that_moved_tells_the_cards_whichever_road_moved_it() {
-        let spoke = method_body("panes_spoke");
+        let spoke = method_body("Runtime", "panes_spoke");
         assert!(
             spoke.contains("card_is_in_view"),
             "a card nobody can see is not worth a frame"
         );
         assert!(spoke.contains("cards.pane_spoke()"), "and one that is, is");
         for road in ["drain_pty", "finish_synchronized_update_if_due"] {
-            let body = method_body(road);
+            let body = method_body("Runtime", road);
             assert!(
                 body.contains("self.panes_spoke("),
                 "`{road}` moves a pane's picture, so it says so"
