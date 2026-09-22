@@ -14525,20 +14525,19 @@ mod layer_shape_tests {
     // and `found` are `pty_drain_budget_tests`' helpers word for word, and that
     // module's header is where the six points behind them live.
     //
-    // **The four struct pins below are not migrated and keep their debt rows.**
-    // `bt-source` indexes callable items: a `struct`'s fields are not an identity
-    // it can be asked for, so there is no scope that means "inside
-    // `WindowRuntime`'s field lines". Widening those four to the package would
-    // not widen the guard, it would invert it — every name `WindowRuntime` may
-    // not hold is a name `App` holds a few lines away, so a package-wide negative
-    // would be red on a correct tree. They are migrated by the consumer ticket
-    // that follows `ItemQuery::field` into the crate, and [`SOURCE`],
-    // [`struct_fields`] and [`struct_body`] stay for them.
-    use bt_source::{Found, Index, ItemQuery, Needle, Search, View, needle};
-
-    /// This file, read as text — the only witness that can answer "what is *not*
-    /// in that struct".
-    const SOURCE: &str = include_str!("main.rs");
+    // **The four struct pins are type-scoped**, which is what the batch that
+    // left them behind did not have. A negative about what a struct holds is a
+    // `Search` whose scope is `Scope::Item(ItemQuery::type_item(…))` — the
+    // struct's own declaration and nothing beyond it (§4.1: where the concern
+    // is genuinely one item, the scope says so and the reading does not widen).
+    // A package-wide negative would not have widened those guards, it would
+    // have inverted them: every name `WindowRuntime` may not hold is a name
+    // `App` holds a few lines away. A positive is
+    // `Index::declaration_of(ItemQuery::field(owner, name))`, the field's
+    // attributes, visibility, name and type, stopping before the comma. The
+    // view is `View::Identifiers`, and [`inside`] is where that choice is
+    // argued — under raw bytes one of the four is red on a correct tree.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -14568,44 +14567,42 @@ mod layer_shape_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// **The declarations of a top-level struct, with its prose taken out.**
+    /// **One search inside one type's own bytes** — the scope of §4.1, which is
+    /// the struct's whole declaration and nothing beside it, so `App`'s fields a
+    /// few lines below `WindowRuntime`'s are outside the reading rather than
+    /// inverting it.
     ///
-    /// Prose, because these pins read the body as text and a doc comment is text
-    /// too: `App`'s own doc names `WindowRenderer` in the sentence explaining why
-    /// a device is shared and a surface is not, and a pin that searched the whole
-    /// body would read that as a surface on the application (multiwindow slice
-    /// C — it did, the first time this ran). What the pins are about is what the
-    /// struct *holds*, so what they are given is its field lines and nothing
-    /// else.
-    fn struct_fields(name: &str) -> String {
-        struct_body(name)
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// **`View::Identifiers`, and not `View::Raw`.** A scope over an item starts
+    /// at the item's first attribute, so raw bytes would read the prose written
+    /// inside the struct as well — and `App` documents its device field with the
+    /// sentence naming `WindowRenderer::apply_font_change`, which is exactly the
+    /// occurrence the deleted text finder cut comment lines out to avoid — under
+    /// raw bytes this file's last pin is red on a correct tree. The
+    /// identifier view never sees it: a `///` comment is masked whole and its
+    /// synthesized tokens are not lowered, so the reading is the names this
+    /// struct is *written from* rather than the words written about it. It also
+    /// buys the boundary check the text reading never had — `GpuContext` is not
+    /// `GpuContextHandle`.
+    fn inside(type_name: &str, pattern: &Pattern) -> Found {
+        source()
+            .search(
+                &Search::new(needle!(pattern.clone()), View::Identifiers)
+                    .in_scope(Scope::Item(ItemQuery::type_item(type_name))),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// The body of a top-level `struct <name> { … }`, which is delimited by the
-    /// one `}` in column zero that follows it.
-    fn struct_body(name: &str) -> &'static str {
-        let head = format!(
-            "
-struct {name} {{
-"
-        );
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`struct {name}` is declared at the top level"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find(
-                    "
-}
-",
-                )
-                .expect("a top-level struct is closed by a `}` in column zero");
-        &SOURCE[start..end]
+    /// **The declaration of one field of `owner`** — its attributes, its
+    /// visibility, its name and its type, stopping before the comma.
+    ///
+    /// A field the type does not carry, and a field only one `#[cfg]` arm of a
+    /// type declared twice carries, are both `QueryFailure::Member` and both
+    /// panic here: neither `App` nor `WindowRuntime` is declared twice, and the
+    /// day one of them is, this says so instead of answering about one arm.
+    fn field_declaration(owner: &str, name: &str) -> &'static str {
+        source()
+            .declaration_of(&ItemQuery::field(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// PIN (multiwindow slice B) — **the window layer holds nothing the
@@ -14620,38 +14617,40 @@ struct {name} {{
     /// Red gate: move any one of these fields back and the test names it.
     #[test]
     fn the_window_layer_owns_nothing_the_application_owns() {
-        let body = struct_fields("WindowRuntime");
         for owned_by_the_app in [
             // The device layer, which slice C moved up: one `wgpu::Device`, one
             // atlas and — the saving that is not on the GPU at all — one
             // `FontSystem` for every window in the process (§2.2).
-            "GpuContext",
+            Pattern::identifier("GpuContext"),
             // And with it, who decides what losing that device costs
             // (§7.1.3m ⑤′). There is one device, so there is one episode of
             // losing it however many windows notice; a pilot per window would
             // number the same rebuild twice and would let two windows each fetch
             // a device, the second thrown away with every surface the first had
             // just built.
-            "DeviceLossPilot",
-            "persist::SessionStore",
-            "persist::SettingsStore",
-            "persist::KeybindingsStore",
-            "persist::ProfilesStore",
-            "pins::PinsStore",
-            "seed::SeedVault",
-            "shortcuts::Shortcuts",
-            "profiles::ProfilePrograms",
-            "MathWorker",
-            "files::FilesWorker",
-            "preview::PreviewWorker",
-            "git::GitWorker",
-            "git_watch::GitWatch",
-            "scheme_watch::SchemeWatch",
-            "storage_watch::StorageWatch",
+            Pattern::identifier("DeviceLossPilot"),
+            Pattern::path("persist::SessionStore"),
+            Pattern::path("persist::SettingsStore"),
+            Pattern::path("persist::KeybindingsStore"),
+            Pattern::path("persist::ProfilesStore"),
+            Pattern::path("pins::PinsStore"),
+            Pattern::path("seed::SeedVault"),
+            Pattern::path("shortcuts::Shortcuts"),
+            Pattern::path("profiles::ProfilePrograms"),
+            Pattern::identifier("MathWorker"),
+            Pattern::path("files::FilesWorker"),
+            Pattern::path("preview::PreviewWorker"),
+            Pattern::path("git::GitWorker"),
+            Pattern::path("git_watch::GitWatch"),
+            Pattern::path("scheme_watch::SchemeWatch"),
+            Pattern::path("storage_watch::StorageWatch"),
         ] {
+            let held = inside("WindowRuntime", &owned_by_the_app);
             assert!(
-                !body.contains(owned_by_the_app),
-                "`{owned_by_the_app}` is a fact about this program, not about one window"
+                held.is_empty(),
+                "{owned_by_the_app} is a fact about this program, not about one \
+                 window:\n{}",
+                held.report(source())
             );
         }
     }
@@ -14672,15 +14671,16 @@ struct {name} {{
     #[test]
     fn the_device_is_the_applications_and_the_surface_is_the_windows() {
         assert!(
-            struct_fields("App").contains("gpu: GpuContext,"),
+            field_declaration("App", "gpu").ends_with("gpu: GpuContext"),
             "one device, one atlas, one font database, for the whole process"
         );
         assert!(
-            struct_fields("WindowRuntime").contains("renderer: WindowRenderer,"),
+            field_declaration("WindowRuntime", "renderer").ends_with("renderer: WindowRenderer"),
             "a surface and the caches keyed by its pixel sizes are one window's"
         );
         assert!(
-            struct_fields("App").contains("device_loss_pilot: DeviceLossPilot,"),
+            field_declaration("App", "device_loss_pilot")
+                .ends_with("device_loss_pilot: DeviceLossPilot"),
             "and one device is one episode of losing it, however many windows notice \
              (§7.1.3m ⑤′)"
         );
@@ -14702,23 +14702,28 @@ struct {name} {{
     /// through the door slice D opened.
     #[test]
     fn the_session_file_is_written_by_the_application_and_never_by_a_window() {
-        let app = struct_fields("App");
         assert!(
-            app.contains("session_store: persist::SessionStore,"),
+            field_declaration("App", "session_store")
+                .ends_with("session_store: persist::SessionStore"),
             "one store, on the layer there is one of"
         );
         assert!(
-            app.contains("window_pictures: Vec<(WindowId, SessionWindowV1)>,"),
+            field_declaration("App", "window_pictures")
+                .ends_with("window_pictures: Vec<(WindowId, SessionWindowV1)>"),
             "the document is assembled from every window's own paragraph"
         );
-        let window = struct_fields("WindowRuntime");
+        let store = inside("WindowRuntime", &Pattern::identifier("session_store"));
         assert!(
-            !window.contains("session_store"),
-            "a window with a store of its own is a window that can race the others"
+            store.is_empty(),
+            "a window with a store of its own is a window that can race the \
+             others:\n{}",
+            store.report(source())
         );
+        let pictures = inside("WindowRuntime", &Pattern::identifier("window_pictures"));
         assert!(
-            !window.contains("window_pictures"),
-            "the list of windows is not a fact any one window holds"
+            pictures.is_empty(),
+            "the list of windows is not a fact any one window holds:\n{}",
+            pictures.report(source())
         );
     }
 
@@ -14730,24 +14735,34 @@ struct {name} {{
     /// the moment a second window opened.
     #[test]
     fn the_application_layer_owns_nothing_one_window_owns() {
-        let body = struct_fields("App");
         for owned_by_a_window in [
             // The window layer of the renderer, and pointedly not the device
             // layer beside it: `GpuContext` on `App` is the whole of slice C's
             // renderer move, and a `WindowRenderer` there would be the first
             // window's surface owning every later window's.
-            "WindowRenderer",
-            "Arc<Window>",
-            "bt_platform::Compositor",
-            "bt_platform::CustomWindowFrame",
-            "bt_platform::ImeSystemCaret",
-            "bt_platform::FolderPicker",
-            "bt_platform::MathContextMenu",
-            "Vec<TabState>",
+            Pattern::identifier("WindowRenderer"),
+            // **Two of these are asked wider than they used to be written**
+            // (§4.2 rule 3: a changed selector carries its own mutation). They
+            // were `Arc<Window>` and `Vec<TabState>`, spellings of a type
+            // *application*; the identifier view reads names, so what it can be
+            // asked is the name inside — which forbids `Rc<Window>` and
+            // `BTreeMap<TabId, TabState>` too. That is the sentence this pin was
+            // always making, said without the container: a window handle or a
+            // tree of tabs on `App` is a field a second window would have to
+            // un-share again.
+            Pattern::identifier("Window"),
+            Pattern::path("bt_platform::Compositor"),
+            Pattern::path("bt_platform::CustomWindowFrame"),
+            Pattern::path("bt_platform::ImeSystemCaret"),
+            Pattern::path("bt_platform::FolderPicker"),
+            Pattern::path("bt_platform::MathContextMenu"),
+            Pattern::identifier("TabState"),
         ] {
+            let held = inside("App", &owned_by_a_window);
             assert!(
-                !body.contains(owned_by_a_window),
-                "`{owned_by_a_window}` is a fact about one window"
+                held.is_empty(),
+                "{owned_by_a_window} is a fact about one window:\n{}",
+                held.report(source())
             );
         }
     }
