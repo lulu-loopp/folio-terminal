@@ -34643,6 +34643,13 @@ impl MenuPaint {
 /// auto-scroll was left behind in a function the spring had already left.
 #[cfg(test)]
 mod drag_autoscroll_wiring_tests {
+    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
+    // commit after this one deletes the older of the two. `source` and `found`
+    // are `pty_drain_budget_tests`' helpers word for word, `reader_names` is
+    // `arrival_wiring_tests`'.
+    use bt_source::{Found, Index, Needle, Search, View, needle};
+
     const SOURCE: &str = include_str!("main.rs");
 
     /// Which method holds the first call spelled `needle`.
@@ -34664,6 +34671,34 @@ mod drag_autoscroll_wiring_tests {
             .expect("a method's name ends at its parameter list")
     }
 
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **The names of the items these occurrences stand in** (§4.1), each named
+    /// once and in one order.
+    fn reader_names(found: &Found) -> Vec<String> {
+        let mut names: Vec<String> = found
+            .owners(source())
+            .into_keys()
+            .map(|identity| identity.name)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// RED GATE — the tick runs where the spring's tick runs, and the deadline
     /// stands in the wake set the spring's deadline stands in.
     ///
@@ -34674,7 +34709,15 @@ mod drag_autoscroll_wiring_tests {
     /// that never fires.
     #[test]
     fn the_auto_scroll_turns_on_the_clock_the_spring_turns_on() {
-        let tick = |name: &str| holder(&format!("self.{name}(now)"));
+        let tick =
+            |name: &str| reader_names(&found(needle!(format!("self.{name}(now)")), View::Raw));
+        for name in ["service_drag_autoscroll", "advance_drag_spring"] {
+            assert_eq!(
+                vec![holder(&format!("self.{name}(now)")).to_owned()],
+                tick(name),
+                "the two readings of `{name}`'s holder disagree"
+            );
+        }
         assert_eq!(
             tick("service_drag_autoscroll"),
             tick("advance_drag_spring"),
@@ -34682,9 +34725,26 @@ mod drag_autoscroll_wiring_tests {
              spring: both fire under a hand that has stopped moving, which is \
              the one thing a pointer-driven path cannot do"
         );
+        let autoscroll_deadline = reader_names(&found(
+            needle!(format!("self.{}(now),", "drag_autoscroll_deadline")),
+            View::Raw,
+        ));
+        let spring_deadline = reader_names(&found(
+            needle!(format!("self.{}(),", "drag_spring_deadline")),
+            View::Raw,
+        ));
         assert_eq!(
-            holder(&format!("self.{}(now),", "drag_autoscroll_deadline")),
-            holder(&format!("self.{}(),", "drag_spring_deadline")),
+            vec![holder(&format!("self.{}(now),", "drag_autoscroll_deadline")).to_owned()],
+            autoscroll_deadline,
+            "the two readings of the auto-scroll deadline's holder disagree"
+        );
+        assert_eq!(
+            vec![holder(&format!("self.{}(),", "drag_spring_deadline")).to_owned()],
+            spring_deadline,
+            "the two readings of the spring deadline's holder disagree"
+        );
+        assert_eq!(
+            autoscroll_deadline, spring_deadline,
             "and it has to be in the same wake set: a deadline nobody folds in \
              is a frame the loop sleeps through"
         );
