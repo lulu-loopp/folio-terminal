@@ -285,27 +285,8 @@ crates/bt-app/src/shell_integration.rs	shell_integration::tests::zsh_is_pointed_
 crates/bt-app/src/shell_integration/profile_runtime.rs	shell_integration::profile_runtime::tests::shell_integration_offer_predicate_never_grants_write_ownership	include_str!	add_profile_with_forms;offer_for	P14	no
 crates/bt-app/src/shortcuts.rs	shortcuts::tests::docs_shortcuts_md_is_the_bindings_table	fixture / manifest read	target	P14	no
 crates/bt-app/src/tests.rs	tests::a_frame_shape_stop_records_its_cause_before_announcing	fixture / manifest read	(the file it reads)	P14	no
-crates/bt-app/src/tests.rs	tests::a_redraw_asked_for_by_a_tab_with_no_shell_is_always_a_present	include_str!	a_bare_redraw_still_owes_a_present;redraw	P3	yes
-crates/bt-app/src/tests.rs	tests::a_refusal_the_commit_raised_is_shown_in_the_box	include_str!	create_files_row;dress_files_tree_editor;finish_rename;notes;open_files_row_new	P3	yes
-crates/bt-app/src/tests.rs	tests::a_refused_address_is_a_field_that_can_still_be_left	include_str!	fn;press_web_page	P3	yes
-crates/bt-app/src/tests.rs	tests::a_remembered_line_comes_only_from_a_mark_the_reader_was_at	include_str!	main.rs	P3	yes
 crates/bt-app/src/tests.rs	tests::a_resize_reflows_the_markdown_without_re_measuring_it	include_str!	../../../docs/UI-UX.md	P14	no
-crates/bt-app/src/tests.rs	tests::a_retirement_asks_for_one_frame_and_not_one_per_turn	include_str!	advance_web_page	P3	yes
-crates/bt-app/src/tests.rs	tests::a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone	include_str!	activate_tab;chrome_mouse_input;fn;press_tab	P3	yes
-crates/bt-app/src/tests.rs	tests::a_right_press_on_the_columns_ground_raises_the_roots_menu	include_str!	files_ground_under;fn	P3	yes
-crates/bt-app/src/tests.rs	tests::a_row_on_an_entry_opens_through_that_tabs_own_doors	include_str!	commit_row_into_tab	P3	yes
-crates/bt-app/src/tests.rs	tests::a_rows_strip_arm_asks_the_run_and_never_the_window	include_str!	survey_strip	P3	yes
-crates/bt-app/src/tests.rs	tests::a_rows_two_landings_are_spent_by_its_own_two_commits	include_str!	commit_strip_adopt;commit_strip_extract	P3	yes
-crates/bt-app/src/tests.rs	tests::a_seat_that_changes_content_drops_its_video	include_str!	self;sweep_video_seats	P3	yes
-crates/bt-app/src/tests.rs	tests::a_second_playback_on_one_surface_is_a_second_name_for_the_renderer	include_str!	video_layers	P3	yes
-crates/bt-app/src/tests.rs	tests::a_tab_switch_leaves_no_menu_standing	include_str!	close_every_popup;fn	P3	yes
-crates/bt-app/src/tests.rs	tests::a_theme_flip_asks_every_markdown_page_to_lay_out_again	include_str!	adopt_new_palette	P3	yes
-crates/bt-app/src/tests.rs	tests::a_video_frame_alone_is_enough_to_present	include_str!	fn;service_pictures	P3	yes
-crates/bt-app/src/tests.rs	tests::an_animation_crosses_a_tab_boundary_because_it_is_keyed_by_its_file	include_str!	animation_path_of;animation_running_on	P3	yes
 crates/bt-app/src/tests.rs	tests::an_edit_to_one_block_keeps_every_other_blocks_measurement	include_str!	../../../docs/UI-UX.md	P14	no
-crates/bt-app/src/tests.rs	tests::an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present	include_str!	pane_draws;present_retained_picture;present_seats_and_commit;publish_frame_inner	P3	yes
-crates/bt-app/src/tests.rs	tests::an_opened_animation_starts_over_and_a_revealed_one_resumes	include_str!	request_animations	P3	yes
-crates/bt-app/src/tests.rs	tests::both_pointer_doors_tell_the_chevron_clocks_where_the_hand_is	include_str!	fn;pointer_left;turn	P3	yes
 crates/bt-app/src/tests.rs	tests::cancelling_a_composition_goes_through_one_door	include_str!	cancel_composition	P3	yes
 crates/bt-app/src/tests.rs	tests::deadline_owners_do_not_manufacture_appointments_from_the_query_time	include_str!	drag_autoscroll_deadline;startup	P3	yes
 crates/bt-app/src/tests.rs	tests::delete_resolves_its_key_against_the_live_tree	include_str!	delete_files_row;open_files_row_rename	P3	yes
