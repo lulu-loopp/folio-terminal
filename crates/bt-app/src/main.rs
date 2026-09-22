@@ -130245,26 +130245,14 @@ mod live_markdown_edit_tests {
 mod refused_preview_card_tests {
     use super::{PictureRefusal, i18n, refused_preview_card, seats};
 
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The body of a method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    }
-
-    // ── what this module asks the crate instead ───────────────────────────
+    // ── what this module asks the crate ───────────────────────────────────
     //
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Nothing is deleted here: every pin is read twice
-    // — once from `include_str!("main.rs")`, once from `bt-source` — and
-    // `agreed` asserts the two are the same bytes. The deletion is the commit
-    // after this one, so that a reviewer sees the agreement and a bisect can
-    // land between them.
+    // Eleven of the joints below are wiring, and wiring has no value to assert
+    // without a window — so they are held as source pins. They used to read
+    // `include_str!("main.rs")`; they now ask `bt-source` about an *item* of
+    // this crate, so no claim here is bound to the file the method happens to
+    // be written in today (`docs/plans/bt-app-split-prep.md` §6.3). The commit
+    // before this one ran both readings side by side and asserted they agree.
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
     // module's header is where the six points behind `source`, `item_body`,
@@ -130298,37 +130286,6 @@ mod refused_preview_card_tests {
         source()
             .search(&bt_source::Search::new(needle, view))
             .unwrap_or_else(|failure| panic!("{failure}"))
-    }
-
-    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
-    ///
-    /// `body` hands back everything after the signature prefix it was given and
-    /// stops before the next `\n    fn `: the rest of the declaration, then the
-    /// body, then whatever stands between the closing brace and the next
-    /// method's `fn `. `body_of` hands back the braces and what is between them.
-    /// So the crate's answer has to stand in this file's slice at the head of
-    /// the body, with nothing but the rest of the declaration in front of it.
-    ///
-    /// What comes back is the file's slice, so this commit changes no assertion.
-    fn agreed(old: &'static str, name: &str) -> &'static str {
-        let new = method_body("Runtime", name);
-        let at = match old.find(new) {
-            Some(at) => at,
-            None => {
-                assert!(
-                    old.starts_with(&new[1..]),
-                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
-                     bytes"
-                );
-                0
-            }
-        };
-        assert!(
-            !old[..at].contains('{'),
-            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
-             the head of it"
-        );
-        old
     }
 
     /// Every refusal the picture lane can put on a pane with nothing on it.
@@ -130432,37 +130389,24 @@ mod refused_preview_card_tests {
     /// nothing at all.
     #[test]
     fn the_refused_and_unknown_pages_share_one_card() {
-        // **The same count, asked of the crate.** This file's reading sees
-        // `main.rs`; the crate's sees every file the package declares, which is
-        // the scope the claim wants — a second builder in another file is the
-        // defect this counts, and the file reading could not see one.
-        let declarations = found(
-            bt_source::Needle::new(bt_source::Pattern::text(concat!(
-                "fn ",
-                "refused_preview_card("
-            ))),
-            bt_source::View::Raw,
-        );
+        // Counted over the package and not over one file: a second builder is
+        // the defect, and it could be written anywhere. The needle stays in two
+        // pieces for P18 to join.
         assert_eq!(
-            declarations.len(),
-            SOURCE
-                .matches(concat!("fn ", "refused_preview_card("))
-                .count(),
-            "this file's count of the card's builders and the package's disagree"
-        );
-        assert_eq!(
-            SOURCE
-                .matches(concat!("fn ", "refused_preview_card("))
-                .count(),
+            found(
+                bt_source::Needle::new(bt_source::Pattern::text(concat!(
+                    "fn ",
+                    "refused_preview_card("
+                ))),
+                bt_source::View::Raw,
+            )
+            .len(),
             1,
             "the card is built in more than one place, or nowhere"
         );
         // ① the pane's dressing pass builds both of its cards there — the
         //    picture it would not draw, and the document nothing here reads.
-        let dressing = agreed(
-            body(concat!("    fn ", "refresh_chrome_with_overlay(")),
-            "refresh_chrome_with_overlay",
-        );
+        let dressing = method_body("Runtime", "refresh_chrome_with_overlay");
         assert_eq!(
             dressing
                 .matches(concat!("refused_preview_card", "("))
@@ -130475,10 +130419,7 @@ mod refused_preview_card_tests {
             "the pane's card builder never asks the picture lane, so a refused picture is a bare sentence again"
         );
         // ② and a window's two, through the same function.
-        let window = agreed(
-            body(concat!("    fn ", "float_refusal_words(")),
-            "float_refusal_words",
-        );
+        let window = method_body("Runtime", "float_refusal_words");
         assert_eq!(
             window.matches(concat!("refused_preview_card", "(")).count(),
             2,
@@ -130486,27 +130427,20 @@ mod refused_preview_card_tests {
         );
         // ③ both hosts paint through the painter they already shared.
         assert!(
-            agreed(
-                body(concat!("    fn ", "push_float_refusal_card(")),
-                "push_float_refusal_card"
-            )
-            .contains(concat!("seats::", "push_preview_card(")),
+            method_body("Runtime", "push_float_refusal_card")
+                .contains(concat!("seats::", "push_preview_card(")),
             "a window draws the card with something other than the pane's painter"
         );
         // ④ the pane's paint and its hit test read one geometry — the pane's
         //    card button is sized by the words this frame dressed.
         assert!(
-            agreed(
-                body(concat!("    fn ", "docked_chrome_target_at(")),
-                "docked_chrome_target_at"
-            )
-            .contains(concat!("preview_card", "_verbs")),
+            method_body("Runtime", "docked_chrome_target_at")
+                .contains(concat!("preview_card", "_verbs")),
             "the pane's card button is hit from something other than the words it was drawn with"
         );
         // ⑤ and the window's hit test asks the same question its paint asked.
         assert!(
-            agreed(body(concat!("    fn ", "float_hit_at(")), "float_hit_at")
-                .contains(concat!("float_refusal_words", "(")),
+            method_body("Runtime", "float_hit_at").contains(concat!("float_refusal_words", "(")),
             "the window's card button is hit from a second reading of what is refused"
         );
     }
@@ -130525,42 +130459,30 @@ mod refused_preview_card_tests {
     fn pressing_the_button_on_a_refused_page_runs_the_same_verb_as_the_unknown_page() {
         // The pane's button and the window's reach the same verb.
         assert!(
-            agreed(
-                body(concat!("    fn ", "chrome_mouse_input(")),
-                "chrome_mouse_input"
-            )
-            .contains(concat!("ChromeTarget::", "PreviewOpenButton(_) => {")),
+            method_body("Runtime", "chrome_mouse_input")
+                .contains(concat!("ChromeTarget::", "PreviewOpenButton(_) => {")),
             "the pane's card button no longer takes a press"
         );
         assert!(
-            agreed(
-                body(concat!("    fn ", "open_preview_externally(")),
-                "open_preview_externally"
-            )
-            .contains(concat!("open_preview_externally_on", "(")),
+            method_body("Runtime", "open_preview_externally")
+                .contains(concat!("open_preview_externally_on", "(")),
             "the pane's button has grown a second verb of its own"
         );
         assert!(
-            agreed(body(concat!("    fn ", "press_float(")), "press_float").contains(concat!(
+            method_body("Runtime", "press_float").contains(concat!(
                 "open_preview_externally_on(",
                 "PreviewSurface::Float(id))"
             )),
             "the window's card button no longer reaches the pane's verb"
         );
         // And that one verb names the file through both lanes.
-        let verb = agreed(
-            body(concat!("    fn ", "open_preview_externally_on(")),
-            "open_preview_externally_on",
-        );
+        let verb = method_body("Runtime", "open_preview_externally_on");
         assert!(
             verb.contains(concat!("preview_file_on(", "surface)"))
                 && verb.contains(concat!("open_path_in_default_app", "(")),
             "the verb no longer asks this surface for its file, or no longer hands it over"
         );
-        let file = agreed(
-            body(concat!("    fn ", "preview_file_on(")),
-            "preview_file_on",
-        );
+        let file = method_body("Runtime", "preview_file_on");
         assert!(
             file.contains(concat!("preview_buffer_on(", "surface)"))
                 && file.contains(concat!("preview_picture(", "surface)")),
@@ -130568,11 +130490,8 @@ mod refused_preview_card_tests {
         );
         // One launcher, and it is the door it has always been.
         assert!(
-            agreed(
-                body(concat!("    fn ", "open_path_in_default_app(")),
-                "open_path_in_default_app"
-            )
-            .contains(concat!("self.", "open_local_path(path)")),
+            method_body("Runtime", "open_path_in_default_app")
+                .contains(concat!("self.", "open_local_path(path)")),
             "the card's button no longer goes through this window's one door"
         );
     }
