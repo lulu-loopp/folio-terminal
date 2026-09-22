@@ -36,7 +36,7 @@
 // and the equivalence commit compared the two readings on the body's interior,
 // the text they really share.
 
-use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
 
 /// **This crate, indexed once per process** — the workspace read, this
 /// package's own `src/` declared as the universe and lowered, on the first ask
@@ -84,6 +84,94 @@ fn squeezed(text: &str) -> String {
 /// One inherent method's body, squeezed.
 fn squeezed_body(owner: &str, name: &str) -> String {
     squeezed(method_body(owner, name))
+}
+
+/// **The old reading and the new one are the same text** — the equivalence
+/// half of §6.0 rule 3, asserted rather than asserted about.
+///
+/// The whole interior of the item's body, as the crate reports it, stands
+/// verbatim inside the slice the finder being deleted returned. What the two
+/// do not share is the part of the signature the old finder began inside of,
+/// the closing brace it stopped in front of, and — in every overshooting
+/// finder — the neighbouring items it ran on into. None of that is the item.
+fn agreed(old: &str, new: &str) {
+    let body = new
+        .strip_prefix('{')
+        .expect("an item's body is written in braces");
+    let interior = &body[..body
+        .rfind('\n')
+        .expect("and closed by a brace on a line of its own")];
+    assert!(
+        old.contains(interior),
+        "the deleted finder's slice ({} bytes) does not hold this item's body \
+         ({} bytes):\n--- old\n{old}\n--- new\n{new}",
+        old.len(),
+        new.len()
+    );
+}
+
+/// The same agreement for the readers that squeeze the text before reading it.
+///
+/// Squeezing is line-local — a comment is cut at its own `//` and whitespace
+/// goes wherever it stands — and the interior begins and ends on a line
+/// boundary, so squeezing the parts and squeezing the whole agree.
+fn agreed_squeezed(old: &str, new: &str) {
+    let body = new
+        .strip_prefix('{')
+        .expect("an item's body is written in braces");
+    let interior = &body[..body
+        .rfind('\n')
+        .expect("and closed by a brace on a line of its own")];
+    let wanted = squeezed(interior);
+    assert!(
+        old.contains(wanted.as_str()),
+        "the deleted finder's squeezed slice does not hold this item's:\n--- old\n{old}\n--- new\n{wanted}"
+    );
+}
+
+/// One search over a named scope — a Rust path, never a file.
+fn found_in(needle: Needle, view: View, scope: Scope) -> Found {
+    source()
+        .search(&Search::new(needle, view).in_scope(scope))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// One search over a named scope of **another** package of this workspace —
+/// the reading that used to be a relative path from this file to that crate's
+/// source. The scope is a Rust path in *that* crate, so `crate` is
+/// `bt-platform`'s root module however its file is spelled.
+fn found_in_package(package: &str, needle: Needle, view: View, scope: Scope) -> Found {
+    Index::of_package(package)
+        .search(&Search::new(needle, view).in_scope(scope))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// The body of one item of another package of this workspace.
+fn package_item_body(package: &str, query: &ItemQuery) -> &'static str {
+    Index::of_package(package)
+        .body_of(query)
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// Every call of one free function of this crate, with the line that declares
+/// it left out (§2.5) — [`calls_of`] for an owner that is no type.
+fn free_calls_of(name: &str) -> Found {
+    source()
+        .search(
+            &Search::new(needle!(Pattern::call(name)), View::Identifiers)
+                .exempting_declarations_of(ItemQuery::function(name)),
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// The name of the method a signature-shaped selector was naming.
+fn named_in(signature: &str) -> &str {
+    signature
+        .trim_start()
+        .trim_start_matches("fn ")
+        .split('(')
+        .next()
+        .expect("a signature names a method before its arguments")
 }
 
 /// The declaration of one item — its attributes, its visibility and its
@@ -1653,6 +1741,12 @@ fn the_crumb_and_the_tree_row_open_the_head_s_own_rename() {
     assert_eq!(row.selection(), 0..5, "a tree row is seeded the same way");
     assert_eq!(row.caret(), row.selection().end);
 
+    for name in ["finish_rename", "run_file_menu_row"] {
+        agreed(
+            body(&format!("    fn {name}(")),
+            method_body("Runtime", name),
+        );
+    }
     assert!(
         body("    fn finish_rename(").contains("RenameSubject::PreviewCrumb"),
         "the crumb's draft is committed by the one exit every draft leaves by"
@@ -2855,6 +2949,18 @@ fn the_files_menus_second_batch_makes_a_row_and_recycles_one() {
         let rest = &SOURCE[start + signature.len()..];
         &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
     };
+
+    for name in [
+        "delete_files_row",
+        "run_file_menu_row",
+        "create_files_row",
+        "finish_rename",
+    ] {
+        agreed(
+            body(&format!("    fn {name}(")),
+            method_body("Runtime", name),
+        );
+    }
 
     let delete = body("    fn delete_files_row(");
     assert!(
@@ -8106,6 +8212,7 @@ fn the_canvas_is_in_force_before_the_window_is_made() {
         )
         .unwrap_or(rest.len())];
 
+    agreed(body, method_body("Runtime", "create"));
     let themed = body
         .find("set_theme(resolved_theme)")
         .expect("`Runtime::create` puts a canvas in force");
@@ -8343,6 +8450,10 @@ fn the_deferred_half_of_a_dpi_change_is_asked_about_late_and_spent_on_a_turn() {
     };
 
     let reconcile = body("    fn reconcile_authoritative_dpi(&mut self, stage: &'static str)");
+    agreed(
+        reconcile,
+        method_body("Runtime", "reconcile_authoritative_dpi"),
+    );
     let solved = reconcile
         .find("self.resolve_seat_layout(render_physical);")
         .expect("the seat rectangles are re-solved against the new surface");
@@ -8358,6 +8469,10 @@ fn the_deferred_half_of_a_dpi_change_is_asked_about_late_and_spent_on_a_turn() {
              by a window that has stopped moving"
     );
 
+    agreed(
+        body("    fn turn(&mut self, now: Instant, application_clocks: bool)"),
+        method_body("Runtime", "turn"),
+    );
     assert!(
         body("    fn turn(&mut self, now: Instant, application_clocks: bool)")
             .contains("self.settle_deferred_dpi()?;"),
@@ -12750,6 +12865,7 @@ fn ten_notches_on_a_preview_alone_in_a_tab_are_ten_presents() {
     // The wheel reaches the funnel: a notch that moved the document ends in
     // the funnel and in nothing else.
     let wheel = method_text("    fn scroll_preview_body(");
+    agreed_squeezed(&wheel, method_body("Runtime", "scroll_preview_body"));
     assert!(
         wheel.contains("self.present_chrome_change()"),
         "a preview's wheel asks for its frame through the chrome funnel:\n{wheel}"
@@ -12757,6 +12873,7 @@ fn ten_notches_on_a_preview_alone_in_a_tab_are_ten_presents() {
     // And the funnel files no debt — it re-queues a picture, and a tab with
     // no shell has none.
     let funnel = method_text("    fn present_chrome_change(&mut self) -> Result<()> {");
+    agreed_squeezed(&funnel, method_body("Runtime", "present_chrome_change"));
     assert!(
         funnel.contains("letSome(frame)=self.window.last_presented_frame.clone()"),
         "the funnel's whole answer is the picture already on the glass:\n{funnel}"
@@ -13518,6 +13635,7 @@ fn the_clock_runs_only_where_an_animation_is_drawn() {
         "    fn ",
         "request_animations(&mut self, drawn: &[DrawnAnimation]) {"
     ));
+    agreed_squeezed(&asking, method_body("Runtime", "request_animations"));
     assert!(
         asking.contains("foranimationindrawn{"),
         "the refill walks the drawn list:\n{asking}"
@@ -13530,6 +13648,7 @@ fn the_clock_runs_only_where_an_animation_is_drawn() {
         "    fn ",
         "advance_animations(&mut self, now: Instant) -> bool {"
     ));
+    agreed_squeezed(&ticking, method_body("Runtime", "advance_animations"));
     assert!(
         ticking.contains("&self.window.animations_drawn,"),
         "and the clock reads the record of what was presented:\n{ticking}"
@@ -16328,6 +16447,11 @@ fn no_zoom_gesture_reaches_past_the_door_that_knows_a_video() {
     // the surface half is asked and then AND-ed with the content's.
     let surface_half = format!("surface_takes_image_zoom{}", "(surface)");
     assert_eq!(
+        in_product(&free_calls_of("surface_takes_image_zoom")),
+        SOURCE.matches(&surface_half).count(),
+        "the crate and the file count the same askers of the surface half"
+    );
+    assert_eq!(
         SOURCE.matches(&surface_half).count(),
         1,
         "a zoom gesture is asking the surface half alone — it must ask \
@@ -16343,6 +16467,7 @@ fn no_zoom_gesture_reaches_past_the_door_that_knows_a_video() {
             .unwrap_or_else(|| panic!("{gate} is declared in this file"));
         let rest = &SOURCE[start + gate.len()..];
         let body = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+        agreed(body, method_body("Runtime", named_in(gate)));
         assert!(
             body.contains("self.picture_takes_zoom(surface)"),
             "{gate} must ask the content-aware door"
@@ -33015,6 +33140,7 @@ fn the_empty_page_and_a_gap_take_the_prose_face() {
         .map(|at| &SOURCE[at..])
         .and_then(|rest| rest.find(END).map(|end| &rest[..end]))
         .expect("the one place a caret's seat is decided");
+    agreed(seat, method_body("Runtime", "preview_markdown_caret"));
     assert!(
         seat.contains("preview_markdown_metrics(scale).line_height"),
         "the gap's empty line is a body line, not a source line",
@@ -33049,6 +33175,7 @@ fn the_carets_prose_block_is_read_in_one_geometry() {
         ("fn move_preview_caret(", "Up and Down"),
         ("fn reveal_live_markdown_caret(", "the scroll"),
     ] {
+        agreed(body(reader), method_body("Runtime", named_in(reader)));
         assert!(
             body(reader).contains("md_prose"),
             "{what} reads the prose block's one geometry",
@@ -33056,6 +33183,10 @@ fn the_carets_prose_block_is_read_in_one_geometry() {
     }
     // And the one pass that fills it is the one that drew the block: the
     // paragraphs it measures come from the painter's own function.
+    agreed(
+        body("fn preview_prose_geometry("),
+        method_body("Runtime", "preview_prose_geometry"),
+    );
     assert!(
         body("fn preview_prose_geometry(").contains("markdown_prose_paragraphs("),
         "the geometry is measured off the very paragraphs that are drawn",
@@ -33683,6 +33814,17 @@ fn cancelling_a_composition_goes_through_one_door() {
     const SOURCE: &str = include_str!("main.rs");
     const PLATFORM: &str = include_str!("../../bt-platform/src/lib.rs");
     assert_eq!(
+        found_in_package(
+            "bt-platform",
+            needle!(Pattern::identifier("NI_COMPOSITIONSTR")),
+            View::Identifiers,
+            Scope::Module("crate".to_owned()),
+        )
+        .len(),
+        PLATFORM.matches("NI_COMPOSITIONSTR").count(),
+        "the crate and the file count the same notifications"
+    );
+    assert_eq!(
         PLATFORM.matches("NI_COMPOSITIONSTR").count(),
         2,
         "named where it is imported and where it is called, and nowhere else",
@@ -33697,9 +33839,27 @@ fn cancelling_a_composition_goes_through_one_door() {
                 .is_some_and(|body| body.contains("NI_COMPOSITIONSTR"))),
         "and the place it is called is the door",
     );
+    assert!(
+        package_item_body(
+            "bt-platform",
+            &ItemQuery::function("cancel_composition").in_module("crate::windows_impl"),
+        )
+        .contains("NI_COMPOSITIONSTR"),
+        "and the crate says the same of the door it names",
+    );
     // Spelled in two pieces so that this line is not itself one of the
     // matches it is counting — the needle is one string at compile time and
     // two in the file.
+    assert_eq!(
+        in_product(&found(
+            needle!(Pattern::path("bt_platform::cancel_composition")),
+            View::Identifiers,
+        )),
+        SOURCE
+            .matches(concat!("bt_platform::", "cancel_composition("))
+            .count(),
+        "the crate and the file agree about the one road out"
+    );
     assert_eq!(
         SOURCE
             .matches(concat!("bt_platform::", "cancel_composition("))
@@ -33716,6 +33876,7 @@ fn cancelling_a_composition_goes_through_one_door() {
         &rest[..rest.find(END).unwrap_or(rest.len())]
     };
     let door = body("fn cancel_composition(");
+    agreed(door, method_body("Runtime", "cancel_composition"));
     for (cleared, what) in [
         ("bt_platform::cancel_composition", "the method's own state"),
         ("self.window.preedit = None", "the letters"),
@@ -33737,6 +33898,13 @@ fn cancelling_a_composition_goes_through_one_door() {
     );
     // The one place that notices is the tail of the pass, which is where
     // every way of moving the keyboard has already happened.
+    assert_eq!(
+        in_product(&calls_of("Runtime", "settle_composition_owner")),
+        SOURCE
+            .matches(concat!("self.settle_", "composition_owner()"))
+            .count(),
+        "the crate and the file count the same watchers"
+    );
     assert_eq!(
         SOURCE
             .matches(concat!("self.settle_", "composition_owner()"))
@@ -37671,6 +37839,7 @@ fn a_menus_rows_are_the_rows_its_host_can_perform() {
 #[test]
 fn delete_resolves_its_key_against_the_live_tree() {
     let delete = runtime_fn_body("    fn delete_files_row(");
+    agreed(delete, method_body("Runtime", "delete_files_row"));
     let looked_up = delete
         .find(".files_trees(")
         .expect("Delete asks the live tree whether this key still names a row");
@@ -37688,6 +37857,10 @@ fn delete_resolves_its_key_against_the_live_tree() {
     );
     // The same question, asked the same way, by the other verb that acts on
     // one row — so neither can be the one that drifts.
+    agreed(
+        runtime_fn_body("    fn open_files_row_rename("),
+        method_body("Runtime", "open_files_row_rename"),
+    );
     assert!(
         runtime_fn_body("    fn open_files_row_rename(").contains("row.key == key"),
         "which is Rename's own guard, and the reason this one exists"
@@ -39352,6 +39525,7 @@ fn the_disk_news_reaches_the_glass_by_both_roads() {
     }
 
     let watched = fn_body("fn watched_preview_files(&self) -> BTreeSet<PathBuf> {");
+    agreed(watched, method_body("Runtime", "watched_preview_files"));
     assert!(
         watched.contains("files_a_tab_stands_on"),
         "the window's set is the fold of the per-tab answer the tests above check"
@@ -39360,6 +39534,7 @@ fn the_disk_news_reaches_the_glass_by_both_roads() {
         "fn refresh_preview_file",
         "(&mut self, news: &preview_watch::FileNews) -> Result<()> {"
     ));
+    agreed(refresh, method_body("Runtime", "refresh_preview_file"));
     assert!(
         refresh.contains("note_disk_moved(news.present, news.modified)"),
         "and the watcher's news goes through the one door that knows the three cases apart"
@@ -39387,6 +39562,7 @@ fn the_disk_news_reaches_the_glass_by_both_roads() {
     // — the rule itself is pinned on the buffer in `preview.rs`, and this is
     // the one line that puts this window's answers through it.
     let landing = fn_body("fn apply_preview_results(");
+    agreed(landing, method_body("Runtime", "apply_preview_results"));
     assert!(
         landing.contains("land_read(outcome, base)"),
         "a read answers the body it was issued for, and a reader who typed \
@@ -39402,17 +39578,36 @@ fn the_disk_news_reaches_the_glass_by_both_roads() {
         "fn open_preview_image_on(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {",
         "fn request_revived_previews(&mut self, index: usize) {",
     ] {
+        agreed(fn_body(door), method_body("Runtime", named_in(door)));
         assert!(
             fn_body(door).contains("self.forget_the_picture_in("),
             "{door} draws a picture out of memory instead of off the disk"
         );
     }
     let settle = fn_body("fn settle_pane_notices(&mut self) -> Result<()> {");
+    agreed(settle, method_body("Runtime", "settle_pane_notices"));
     assert!(
         settle.contains("self.seats.preview_seats()"),
         "and a preview seat is one of the seats that can wear the strip"
     );
     // The fallback's two moments (rule 4).
+    assert_eq!(
+        !found_in(
+            needle!(Pattern::call("ask_the_unwatched_preview_files")),
+            View::Identifiers,
+            Scope::Item(
+                ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler")
+            ),
+        )
+        .is_empty(),
+        SOURCE
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .contains("runtime\n.ask_the_unwatched_preview_files()"),
+        "the crate and the file agree that the window's own door asks"
+    );
     assert!(
         SOURCE
             .lines()
@@ -39430,6 +39625,7 @@ fn the_disk_news_reaches_the_glass_by_both_roads() {
         "        name: String,\n",
         "    ) -> Result<()> {"
     ));
+    agreed(land, method_body("Runtime", "land_preview_source_on"));
     assert!(
         land.contains("self.ask_the_unwatched_preview_files()?;"),
         "and so does a document being brought to the front"
@@ -41133,6 +41329,7 @@ fn one_door_decides_which_decoder_a_hover_and_a_pane_ask() {
     // sites it is counting.
     let lane = |variant: &str| format!("MathWorkerRequest::{variant} {{");
     let door = body("fn request_peek_pixels(");
+    agreed(door, method_body("Runtime", "request_peek_pixels"));
     for variant in ["PeekImage", "PeekVideoFrame"] {
         assert!(
             door.contains(&lane(variant)),
@@ -41144,6 +41341,7 @@ fn one_door_decides_which_decoder_a_hover_and_a_pane_ask() {
     // them is where the card and the pane come to disagree.
     for surface in ["fn refit_preview_picture(", "fn file_peek_fitted_pixels("] {
         let text = body(surface);
+        agreed(text, method_body("Runtime", named_in(surface)));
         for variant in ["PeekImage", "PeekVideoFrame"] {
             assert!(
                 !text.contains(&lane(variant)),
@@ -43371,12 +43569,14 @@ fn the_focus_column_refuses_the_layout_peek_through_one_predicate() {
         &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
     };
     let predicate = body("    fn layout_peek_eligible(");
+    agreed(predicate, method_body("Runtime", "layout_peek_eligible"));
     assert!(
         predicate.contains("self.rail_posture().draws_focus_rail(),"),
         "the peek's one predicate is told whether this window's cards are \
              unfolded, and told it by the posture every other geometry reads"
     );
     let arming = body("    fn layout_peek_target_at(");
+    agreed(arming, method_body("Runtime", "layout_peek_target_at"));
     assert!(
         arming.contains("self.layout_peek_eligible(tab)"),
         "the arming path asks the one predicate"
@@ -45760,6 +45960,7 @@ fn a_row_on_an_entry_opens_through_that_tabs_own_doors() {
 #[test]
 fn the_edge_autoscroll_no_longer_asks_what_is_in_the_hand() {
     let text = row_strip_method("drag_autoscroll_aim");
+    agreed(text, method_body("Runtime", "drag_autoscroll_aim"));
     assert!(
         !text.contains("DragSource::"),
         "every payload the surfaces accept is offered the band, and they \
@@ -47844,6 +48045,7 @@ fn every_door_that_lands_a_source_opens_a_page_as_a_page() {
         .expect("the pool's own door is declared in this file");
     let rest = &SOURCE[start + SIGNATURE.len()..];
     let door = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+    agreed(door, method_body("Runtime", "open_preview_source_on"));
     assert!(
         door.contains("source_opens_as_a_page(&source)")
             && door.contains("self.open_preview_web_file_on(surface, path)"),
@@ -47862,6 +48064,7 @@ fn every_door_that_lands_a_source_opens_a_page_as_a_page() {
         .expect("the rename door is declared in this file");
     let rest = &SOURCE[start + RENAME.len()..];
     let rename = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+    agreed(rename, method_body("Runtime", "rename_preview_file"));
     assert!(
         rename.contains("source_opens_as_a_page(&preview::PreviewSource::file(&new))")
             && rename.contains("self.open_preview_web_file_on(surface, path)"),
@@ -48543,15 +48746,31 @@ fn deadline_owners_do_not_manufacture_appointments_from_the_query_time() {
         ),
         ("pane motion fold entry", "pane_motion.deadline("),
     ] {
+        assert_eq!(
+            in_product(&found(needle!(Pattern::text(retired_form)), View::Raw)) == 0,
+            !runtime.contains(retired_form),
+            "the crate and the file agree that `{retired_form}` is gone"
+        );
         assert!(
             !runtime.contains(retired_form),
             "{owners} still renew from the fold query time via `{retired_form}`",
         );
     }
     let drag = function("    fn drag_autoscroll_deadline(");
+    agreed(drag, method_body("Runtime", "drag_autoscroll_deadline"));
     assert!(
         !drag.contains(".map_or(now") && !drag.contains(".unwrap_or(now"),
         "drag auto-scroll still renews from the fold query time:\n{drag}",
+    );
+    assert_eq!(
+        found_in(
+            needle!("Instant::now() + SESSION_DEBOUNCE"),
+            View::Raw,
+            Scope::Module("crate::persist".to_owned()),
+        )
+        .is_empty(),
+        !include_str!("persist.rs").contains("Instant::now() + SESSION_DEBOUNCE"),
+        "the crate and the file agree about the session's own deadline"
     );
     assert!(
         !include_str!("persist.rs").contains("Instant::now() + SESSION_DEBOUNCE"),
