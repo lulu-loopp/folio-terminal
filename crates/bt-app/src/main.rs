@@ -109195,6 +109195,23 @@ mod recent_folder_door_tests {
 /// that stamped and walked away is the defect this whole module is about.
 #[cfg(test)]
 mod hold_station_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Every reader here asked this *file* for its text.
+    // Nothing is deleted here — each computes its answer twice, once from the
+    // file and once from `bt-source`, and asserts the two agree. The deletion is
+    // the commit after this one.
+    //
+    // `source`, `item_body`, `method_body` and `free_fn_body` are
+    // `pty_drain_budget_tests`' helpers word for word and `trait_method_body` is
+    // `resident_run_tests`'. **Three owners, and neither finder could tell them
+    // apart**: six pins are `Runtime`'s inherent methods, the dispatcher is
+    // `<FolioApp as ApplicationHandler>::window_event`, and the station table is
+    // a free function. The two spelled-in-halves signatures were written that
+    // way because this module stands *above* the door it reads and the finder
+    // takes the first match in the file; an identity has no such hazard, so the
+    // halves go with the finder.
+    use bt_source::{Index, ItemQuery};
+
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -109231,6 +109248,101 @@ mod hold_station_tests {
         &rest[..end]
     }
 
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one method of `owner`'s implementation of `trait_name`.
+    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name).of_trait(trait_name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
+    /// **This file's slice and the crate's body, compared as bytes.**
+    ///
+    /// [`body`] hands back everything after the signature it matched up to the
+    /// next `\n    fn `, so its slice holds the rest of the declaration, the
+    /// whole body, and then whatever stands between this method and the next.
+    /// [`Index::body_of`] hands back the braces and everything between them, so
+    /// the crate's body **minus its opening brace** has to stand in this file's
+    /// slice, once, with nothing in front of it but the rest of the declaration
+    /// — which is empty when the matched signature carried the brace itself.
+    ///
+    /// What comes back is this file's slice, so this commit changes no
+    /// assertion; every assertion below was checked against the *narrowed* body
+    /// before this was written, because narrowing a slice can only take a
+    /// positive away.
+    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
+        let inner = new
+            .strip_prefix('{')
+            .expect("a body the crate hands back opens on its brace");
+        let at = old.find(inner).unwrap_or_else(|| {
+            panic!("`{what}`: this file's slice does not hold the body the crate returned")
+        });
+        assert_eq!(
+            old.rfind(inner),
+            Some(at),
+            "`{what}`: the crate's body stands twice inside this file's slice"
+        );
+        let head = &old[..at];
+        assert!(
+            head.is_empty()
+                || (head.ends_with('{') && !head[..head.len() - 1].contains(['{', '}'])),
+            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
+             of its body"
+        );
+        old
+    }
+
+    /// One method pin's two readings, asserted to agree, the file's returned.
+    fn agreed_method(signature: &str, owner: &str, name: &str) -> &'static str {
+        agreed(body(signature), method_body(owner, name), name)
+    }
+
+    /// **[`free_body`]'s slice and the crate's body, compared as bytes.**
+    ///
+    /// That reader stops **at** the closing brace rather than past it, so this
+    /// file's slice is the crate's body with both of its braces spent: the
+    /// opening one stands at the end of the declaration the slice begins in, and
+    /// the closing one is where the slice stops.
+    fn agreed_free(old: &'static str, new: &'static str, what: &str) -> &'static str {
+        let inner = new
+            .strip_prefix('{')
+            .and_then(|body| body.strip_suffix("\n}"))
+            .expect("a free function's body opens on its brace and closes in column zero");
+        assert!(
+            old.ends_with(inner),
+            "`{what}`: this file's slice does not end with the body the crate returned"
+        );
+        let head = &old[..old.len() - inner.len()];
+        assert!(
+            head.ends_with('{') && !head[..head.len() - 1].contains(['{', '}']),
+            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
+             of its body"
+        );
+        old
+    }
+
     /// The `WindowEvent` kinds a match answers, read off its arm heads.
     ///
     /// An arm starts with the kind after whitespace; comments and the guards
@@ -109255,7 +109367,11 @@ mod hold_station_tests {
     /// that names the wrong lane — silently, which is the whole problem.
     #[test]
     fn a_turn_enters_its_stations_where_the_work_begins() {
-        let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        let turning = agreed_method(
+            "    fn turn(&mut self, now: Instant, application_clocks: bool)",
+            "Runtime",
+            "turn",
+        );
         // (the station, the first call it claims) — in the order `turn` runs them.
         let run = [
             ("Station::DpiSettle", "self.settle_deferred_dpi()?;"),
@@ -109314,13 +109430,25 @@ mod hold_station_tests {
     /// `window_event`, and every keystroke paid for it.
     #[test]
     fn a_scoped_station_hands_the_callers_back() {
-        for signature in [
-            "    fn flush_wheel(&mut self) -> Result<()> {",
-            "    fn flush_dropped_files(&mut self) -> Result<()> {",
-            "    fn refresh_chrome_with_overlay(",
-            "    fn refresh_search(&mut self, forced: bool) -> Result<()> {",
+        for (signature, name) in [
+            (
+                "    fn flush_wheel(&mut self) -> Result<()> {",
+                "flush_wheel",
+            ),
+            (
+                "    fn flush_dropped_files(&mut self) -> Result<()> {",
+                "flush_dropped_files",
+            ),
+            (
+                "    fn refresh_chrome_with_overlay(",
+                "refresh_chrome_with_overlay",
+            ),
+            (
+                "    fn refresh_search(&mut self, forced: bool) -> Result<()> {",
+                "refresh_search",
+            ),
         ] {
-            let text = body(signature);
+            let text = agreed_method(signature, "Runtime", name);
             let entered = text.matches("hang_watch::enter(").count();
             assert!(entered > 0, "{signature} no longer names its own work");
             assert_eq!(
@@ -109335,7 +109463,11 @@ mod hold_station_tests {
         // Spelled in two pieces because this pin stands *above* the door it
         // reads, and a whole signature written here would be the first match in
         // the file — the reader takes the first, so it would read this line.
-        let event = body(&["    fn window", "_event("].concat());
+        let event = agreed(
+            body(&["    fn window", "_event("].concat()),
+            trait_method_body("FolioApp", "ApplicationHandler", "window_event"),
+            "window_event",
+        );
         assert!(
             event.contains("hang_watch::at(hang_watch::Station::Event);"),
             "the event's own name has left the door it is about"
@@ -109368,8 +109500,16 @@ mod hold_station_tests {
     /// everything. That is the decay this pin is here to catch.
     #[test]
     fn every_event_kind_the_dispatcher_answers_names_its_own_handler() {
-        let dispatch = body(&["    fn window", "_event("].concat());
-        let naming = free_body(&["fn window_event", "_station("].concat());
+        let dispatch = agreed(
+            body(&["    fn window", "_event("].concat()),
+            trait_method_body("FolioApp", "ApplicationHandler", "window_event"),
+            "window_event",
+        );
+        let naming = agreed_free(
+            free_body(&["fn window_event", "_station("].concat()),
+            free_fn_body("window_event_station"),
+            "window_event_station",
+        );
         let mut kinds = arms(dispatch);
         assert!(
             kinds.len() > 10,
