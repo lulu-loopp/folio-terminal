@@ -115530,6 +115530,24 @@ mod textless_present_tests {
 
 #[cfg(test)]
 mod application_change_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Three readers here asked this *file* for its text:
+    // six method bodies and the record's own field list. Nothing is deleted here
+    // — each computes its answer twice, once from the file and once from
+    // `bt-source`, and asserts the two agree.
+    //
+    // `source`, `item_body` and `method_body` are `pty_drain_budget_tests`'
+    // helpers word for word. **Two owners**: the five verbs are `Runtime`'s and
+    // the loop's door is `FolioApp`'s — `fn_body` took the first `\n    fn name(`
+    // in the file, which is a method of whatever `impl` comes first. The flag
+    // list stops being a top-level text cut and becomes the body of the struct
+    // identity, so a record that moved file would still be read.
+    //
+    // `agreed` is written for this module's finders, which **undershoot**: both
+    // stop at the closing brace instead of running past it, so the file's slice
+    // is the crate's body with its braces spent.
+    use bt_source::{Index, ItemQuery};
+
     use super::ApplicationChange;
     use winit::window::WindowId;
 
@@ -115576,10 +115594,72 @@ mod application_change_tests {
             + SOURCE[start..]
                 .find("\n}\n")
                 .expect("a top-level struct is closed by a `}` in column zero");
-        SOURCE[start..end]
+        let written = &SOURCE[start..end];
+        assert_eq!(
+            item_body(&ItemQuery::type_item("ApplicationChange")),
+            ["{\n", written, "\n}"].concat(),
+            "P3 equivalence: this file's cut and the crate's struct body are the same bytes"
+        );
+        written
             .lines()
             .filter_map(|line| line.trim_start().strip_suffix(": bool,"))
             .collect()
+    }
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of the one item `query` names, braces included — the identity of
+    /// §2.4 rather than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// **This file's slice and the crate's body, compared as bytes.**
+    ///
+    /// [`fn_body`] begins just after the opening parenthesis of the signature it
+    /// matched and stops at the `\n    }` that closes the method, so its slice
+    /// is the rest of the declaration and the body with **both** braces spent:
+    /// the opening one stands at the end of the declaration, and the closing one
+    /// is where the slice stops. [`Index::body_of`] hands back the braces and
+    /// what is between them, so the two agree when the file's slice ends with
+    /// the crate's body minus its first and last lines.
+    ///
+    /// What comes back is this file's slice, so this commit changes no
+    /// assertion; every assertion below was checked against the *narrowed* body
+    /// before this was written.
+    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
+        let inner = new
+            .strip_prefix('{')
+            .and_then(|body| body.strip_suffix("\n    }"))
+            .expect("a method's body opens on its brace and closes at its impl's indentation");
+        assert!(
+            old.ends_with(inner),
+            "`{what}`: this file's slice does not end with the body the crate returned"
+        );
+        let head = &old[..old.len() - inner.len()];
+        assert!(
+            head.ends_with('{') && !head[..head.len() - 1].contains(['{', '}']),
+            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
+             of its body"
+        );
+        old
+    }
+
+    /// One method pin's two readings, asserted to agree, the file's returned.
+    fn agreed_method(owner: &str, name: &str) -> &'static str {
+        agreed(fn_body(name), method_body(owner, name), name)
     }
 
     fn font(paid_by: WindowId) -> ApplicationChange {
@@ -115711,7 +115791,7 @@ mod application_change_tests {
     /// Red gate: delete the `change.caret` arm of `adopt_application_change`.
     #[test]
     fn the_sweep_spends_every_flag_the_record_can_carry() {
-        let sweep = fn_body("adopt_application_change");
+        let sweep = agreed_method("Runtime", "adopt_application_change");
         let flags = flags();
         assert!(
             flags.contains(&"caret"),
@@ -115742,7 +115822,7 @@ mod application_change_tests {
             "apply_cursor_style",
         ] {
             assert!(
-                fn_body(verb).contains("note_application_change"),
+                agreed_method("Runtime", verb).contains("note_application_change"),
                 "`{verb}` moves a process static, so it owes every other window \
                  a re-derivation"
             );
@@ -115766,7 +115846,7 @@ mod application_change_tests {
     fn no_window_is_left_holding_yesterday_when_the_loop_goes_to_sleep() {
         // `about_to_wait_inner` and not `about_to_wait`: the outer one is the
         // heartbeat's three lines, and the turn itself is the body inside it.
-        let door = fn_body("about_to_wait_inner");
+        let door = agreed_method("FolioApp", "about_to_wait_inner");
         let settled = door
             .find("settle_application_change")
             .expect("the loop settles what the application changed");
