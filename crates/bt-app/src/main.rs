@@ -108913,6 +108913,12 @@ mod git_hover_heal_tests {
 /// deliberately not, because a press is the whole of what it is for.
 #[cfg(test)]
 mod git_header_selection_tests {
+    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
+    // commit after this one deletes the older of the two. `source`, `item_body`
+    // and `method_body` are `pty_drain_budget_tests`' helpers word for word.
+    use bt_source::{Index, ItemQuery};
+
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -108926,26 +108932,65 @@ mod git_header_selection_tests {
         &rest[..end]
     }
 
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
     /// Each host asks `seats_the_keyboard` before it writes the selection, and
     /// writes it nowhere else in the press.
     #[test]
     fn neither_host_seats_the_keyboard_on_the_row_a_press_may_not_land_it_on() {
-        for (signature, writer) in [
-            ("    fn press_git_row(", "self.select_git_row(seat, index);"),
+        for (host, writer) in [
+            ("press_git_row", "self.select_git_row(seat, index);"),
             (
-                "    fn press_float_git_row(",
+                "press_float_git_row",
                 "self.select_float_git_row(id, index);",
             ),
         ] {
-            let text = body(signature);
+            let older = body(&["    fn ", host, "("].concat());
+            let text = method_body("Runtime", host);
+            assert!(
+                older.contains(text),
+                "the older reading of `{host}` does not carry the crate's body"
+            );
+            for probe in [
+                "git_panel::GitRow::seats_the_keyboard",
+                writer,
+                "git_panel::GitRow::is_furniture",
+            ] {
+                assert_eq!(
+                    older.contains(probe),
+                    text.contains(probe),
+                    "the two readings of `{host}` disagree about `{probe}`"
+                );
+            }
+            assert_eq!(
+                older.matches(writer).count(),
+                text.matches(writer).count(),
+                "the two readings of `{host}` disagree about how many doors write the selection"
+            );
             let asked = text
                 .find("git_panel::GitRow::seats_the_keyboard")
-                .unwrap_or_else(|| {
-                    panic!("{signature} asks which rows take the selection:\n{text}")
-                });
+                .unwrap_or_else(|| panic!("`{host}` asks which rows take the selection:\n{text}"));
             let wrote = text
                 .find(writer)
-                .unwrap_or_else(|| panic!("{signature} still moves the selection:\n{text}"));
+                .unwrap_or_else(|| panic!("`{host}` still moves the selection:\n{text}"));
             assert!(
                 asked < wrote,
                 "the guard stands in front of the write, or it is not a guard:\n{text}"
@@ -108959,7 +109004,7 @@ mod git_header_selection_tests {
             // not reach the page's furniture at all (2026-08-25).
             let furniture = text
                 .find("git_panel::GitRow::is_furniture")
-                .unwrap_or_else(|| panic!("{signature} still turns furniture away:\n{text}"));
+                .unwrap_or_else(|| panic!("`{host}` still turns furniture away:\n{text}"));
             assert!(
                 furniture < asked,
                 "furniture is refused before the selection is decided:\n{text}"
