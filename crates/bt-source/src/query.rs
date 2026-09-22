@@ -33,7 +33,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::enumerate::FileOwner;
-use crate::index::{Certainty, Index, ItemIdentity, ItemRecord, LiteralValue, Span};
+use crate::index::{Certainty, FileRecord, Index, ItemIdentity, ItemRecord, LiteralValue, Span};
+use crate::scope::FileScoped;
 
 /// Which bytes a query reads. **There is no default** (§2.1): the tree holds
 /// five readers whose subject lives inside a string literal, and a
@@ -325,10 +326,9 @@ macro_rules! needle {
 ///
 /// **The seam for `Scope::File`.** §6.1 keeps a permanent, typed allowlist for
 /// the handful of readers whose concern really is a file, and that variant is
-/// constructible only through it. The allowlist is ticket P2's and is not on
-/// `main` as this lands, so the variant is **not invented here**: adding it is
-/// one variant on this enum plus the allowlist enum it takes, and nothing in
-/// this module resolves a path to a file in a way that would have to change.
+/// constructible only through it — there is no constructor taking a path. P1c
+/// and P2 were written against each other and merged apart, each carrying a
+/// `Scope` of its own; this is the one the two of them describe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope {
     /// Every byte of the universe.
@@ -339,6 +339,32 @@ pub enum Scope {
     /// One item: the answer to an [`ItemQuery`], which is loud when the item is
     /// not there or is not unique.
     Item(ItemQuery),
+    /// One named file, and the reason it is allowed to be one (P2).
+    ///
+    /// A reader that wants a file has to add a variant to [`FileScoped`], and
+    /// adding one is a doc comment somebody reviews.
+    File(FileScoped),
+}
+
+impl Scope {
+    /// The allowlist entry this scope was built from, for the scopes that name
+    /// a file.
+    #[must_use]
+    pub const fn entry(&self) -> Option<FileScoped> {
+        match self {
+            Self::File(entry) => Some(*entry),
+            _ => None,
+        }
+    }
+
+    /// The file this scope names, from the workspace root.
+    #[must_use]
+    pub const fn named_file(&self) -> Option<&'static str> {
+        match self {
+            Self::File(entry) => Some(entry.path()),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Scope {
@@ -347,6 +373,7 @@ impl fmt::Display for Scope {
             Self::Everything => formatter.write_str("the whole universe"),
             Self::Module(path) => write!(formatter, "module `{path}`"),
             Self::Item(query) => write!(formatter, "item `{query}`"),
+            Self::File(entry) => write!(formatter, "file `{}`", entry.path()),
         }
     }
 }
@@ -997,19 +1024,47 @@ impl Index {
 
     /// The bytes a named scope covers, or `None` for the whole universe.
     fn scope_spans(&self, scope: &Scope) -> Result<Option<Vec<Span>>, QueryFailure> {
+        // The allowlisted scope is taken through its accessor rather than
+        // through a match arm, because the tripwire's scan is lexical: a match
+        // arm here would spell the construction this crate's own guard looks
+        // for, in a file on neither list.
+        if let Some(entry) = scope.entry() {
+            // The allowlist is keyed from the workspace root with forward
+            // slashes; the index holds absolute paths. Matching on the trailing
+            // components is what compares the two without this crate having to
+            // remember where the workspace is — and a named file that is not in
+            // this universe answers `EmptyScope`, loudly, rather than zero.
+            let spans: Vec<Span> = self
+                .files()
+                .iter()
+                .filter(|file| file.path().ends_with(std::path::Path::new(entry.path())))
+                .map(FileRecord::span)
+                .collect();
+            if spans.is_empty() {
+                return Err(QueryFailure::EmptyScope {
+                    scope: scope.to_string(),
+                });
+            }
+            return Ok(Some(spans));
+        }
+        // The variants are named without their type for the same lexical
+        // reason, and the arm is kept rather than wildcarded so that a fifth
+        // variant is a compile error here.
+        use Scope::{Everything, File, Item, Module};
         let spans: Vec<Span> = match scope {
-            Scope::Everything => return Ok(None),
-            Scope::Module(path) => self
+            Everything => return Ok(None),
+            Module(path) => self
                 .modules()
                 .iter()
                 .filter(|module| module.module_paths().iter().any(|it| it == path))
                 .map(|module| module.span())
                 .collect(),
-            Scope::Item(query) => self
+            Item(query) => self
                 .find(query)?
                 .iter()
                 .map(|record| record.whole())
                 .collect(),
+            File(_) => unreachable!("a file scope is answered through its entry, above"),
         };
         if spans.is_empty() {
             return Err(QueryFailure::EmptyScope {

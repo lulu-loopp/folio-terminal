@@ -98,5 +98,5 @@ pub use query::{
     QueryFailure, Scope, Search, Site, View, Why,
 };
 pub use reject::{Position, Rejection, report};
-pub use scope::{FileScoped, Scope};
+pub use scope::FileScoped;
 pub use universe::{DiskScope, Universe, Vendor, is_vendored, targets_of};
