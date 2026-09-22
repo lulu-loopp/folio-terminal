@@ -580,6 +580,8 @@ that lands removes rows.
 | --- | --- | ---: | --- |
 | **P11** | **The dry run.** Move the smallest topic with real pinned subjects on a throwaway branch off the prep tip. `quake` is the choice: eight methods, `crates/bt-app/src/quake.rs` carries two `include_str!("main.rs")` pins and one whole-source negative, and `quake::the_summon_claim_is_asked_for_on_every_platform_at_every_turn` is a genuine cross-file source pin — a pin in one file whose subject moves to another, the exact shape this preparation exists to neutralise. Confirm against the **final** manifest before committing to it. | **5–8** | the seven steps of §7.3 |
 
+**Correction, 2026-09-22 (after the run).** The sentence above about `quake::the_summon_claim_is_asked_for_on_every_platform_at_every_turn` is wrong: its subject is `FolioApp::settle_quake`, a `FolioApp` method that strict 2a does not move (`MIGRATION-DEBT.tsv` marks the row `2a disturbs it: no`). The cross-file pin that carried the run was `floated_page_tests::a_summoned_window_is_not_shown_by_the_door_that_opens_it` in `main.rs`, which body-pins `show_quake_window` and `hide_quake_window` through `bt-source` and went red under mutation reading `src/runtime/quake.rs`. The manifest's one row of class *subject moves: retarget atomically* (`uninstall_tests::uninstall_source_guard_pins_known_writers_and_inventory`, subject `add_to_profile`) was a name collision — the guard reads `shell_integration::add_to_profile`, a free function — so that class is **empty**; the generator now refuses a subject whose declarations disagree about the move. The run itself, and a second over the `profiles` topic (23 methods), both declared pure under §7.5. Two things the run proved must land before 2a: **P7** (`the_shell_page_is_gone` is blind to `src/runtime/`) and the `Scope::Modules([exact("crate"), tree("crate::runtime")])` re-scoping of `arrival_wiring_tests`' two register gates and `journeys_tests`' root negative.
+
 Then the relocation commit itself, under `bt-app-split.md` §6.5's bounded
 freeze. That freeze is the only one.
 
@@ -698,6 +700,7 @@ the three audits beside it:
 | Audit | Question |
 | --- | --- |
 | **Body comparison** | is each moved body token-for-token what it was, literals preserved, with every permitted change named individually rather than waved through by a regex exemption? |
+| **Declaration comparison** | is each moved declaration verbatim apart from the one permitted visibility prefix — **allowing rustfmt to re-wrap a signature that the prefix pushed past 100 columns** (two of the 23 `profiles` signatures did; the re-wrap is reported by name, never waved through)? |
 | **Import and visibility** | which `use` bindings changed, which items gained `pub(crate)`, and does any of it change resolution — a name that resolved to one item at the crate root and another inside `runtime::`? |
 | **Inherited attributes** | what did each item inherit from its old module that its new module does not supply, or supplies differently — `#![allow]`, `#[cfg]`, lint levels? |
 | **Relative inputs** | every `include_str!`, `include_bytes!` and `#[path]` in a moved item, whose resolution is relative to the *declaring file* and therefore changes when the file changes. |

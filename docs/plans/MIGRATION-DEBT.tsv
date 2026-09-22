@@ -40,6 +40,22 @@
 # disturbed_by_2a: the census's own answer, from the `impact` column of the pins
 # TSV. It is not a prediction that the reader will turn red — see §5 of
 # `bt-app-split-inventory-2026-09-21.md`, which is about exactly that confusion.
+#
+# subject: the census's lexical output — the names a reader's own literals
+# spell. **A name is not a resolution**, and one row is on record as the proof:
+# `uninstall_tests::uninstall_source_guard_pins_known_writers_and_inventory`'s
+# `add_to_profile` is `shell_integration.rs`'s free function, which that
+# reader's `syn` walk really does parse, and not `Runtime::add_to_profile`,
+# which it has never read. The package declares the name twice and the
+# generator answered with the first one in `main.rs`. It refuses on the
+# collision now (`scripts/dev/bt-app-split-freshness.py`, P11 dry run
+# 2026-09-22) rather than picking, and the row's `disturbed_by_2a` is `no` on
+# that reading: neither `shell_integration::add_to_profile` nor `main.rs`'s free
+# `install_panic_log_hook` is a `Runtime` method, and Step 2a moves neither. The
+# cell still says `yes` because `scripts/ci/check-migration-debt.ps1` compares
+# rows whole — correcting one is an added row, and this list only shrinks. The
+# correction lives here, where the header is not compared, until the ticket that
+# may remove the row carries it.
 file	owner	mechanism	subject	ticket	disturbed_by_2a
 crates/bt-app/src/animation.rs	animation::tests::a_declared_screen_this_window_will_not_hold_is_refused_before_it_is_allocated	include_str!	open	P14	no
 crates/bt-app/src/animation.rs	animation::tests::a_gif_past_the_encoded_cap_is_not_read_whole	include_str!	decode;file_source	P14	no

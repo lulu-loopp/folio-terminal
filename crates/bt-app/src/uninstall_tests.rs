@@ -2,6 +2,45 @@
 use super::*;
 use std::fs;
 
+// ── `bt-source`, for the one reader in this file that used to ask `main.rs`
+//    for its text (`docs/plans/bt-app-split-prep.md` §6.3, ticket P17)
+//
+// **The pattern is `main.rs::pty_drain_budget_tests`' and is not re-derived**;
+// only the three helpers that reader needs are copied. Its six points hold
+// here word for word — one index per process, a body pin that names an
+// identity rather than a file, and a `QueryFailure` that panics instead of
+// narrowing the question.
+//
+// **This file is reached by `#[path]`** from `uninstall.rs`, so its own text is
+// inside the universe `Index::of_package("bt-app")` declares (§2.6): a reader
+// here that searched the crate would have to exclude its own needle. The pin
+// below is a *body* reading of one named method, so the literal it looks for
+// never meets the copy of itself written on this page — which is the other half
+// of why a body pin is the right shape for a call-site fact.
+
+/// **This crate, indexed once per process** — the workspace read, this
+/// package's own `src/` declared as the universe and lowered, on the first ask
+/// of the process, behind one call.
+///
+/// The package is named here and nowhere else in this file.
+fn source() -> &'static bt_source::Index {
+    bt_source::Index::of_package("bt-app")
+}
+
+/// The body of `owner::name`, braces included — the identity of §2.4 rather
+/// than a line of whatever file holds it today.
+fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+    source()
+        .body_of(query)
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// The body of one inherent method of `owner`. The owner is an argument and
+/// not a guess.
+fn method_body(owner: &str, name: &str) -> &'static str {
+    item_body(&bt_source::ItemQuery::method(owner, name))
+}
+
 fn sandbox(tag: &str) -> (PathBuf, Scope) {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -675,7 +714,19 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         include_str!("psreadline.rs")
             .contains("marks.psreadline_module_roots.push(root.to_owned())")
     );
-    assert!(include_str!("main.rs").contains("psreadline::apply_recorded("));
+    // And that the one caller of the recording writer is the row's own press.
+    // This used to be `include_str!("main.rs").contains(…)` — a positive over a
+    // whole file, which says *somewhere in that file* and goes silent the day
+    // the method it means moves out of it. The subject is
+    // `Runtime::apply_psreadline`, whose Step 2a destination is
+    // `runtime/first_run.rs`, so the identity is what is asked for and the file
+    // is not mentioned.
+    assert!(
+        method_body("Runtime", "apply_psreadline").contains("psreadline::apply_recorded("),
+        "`Runtime::apply_psreadline` no longer reaches `psreadline::apply_recorded`, \
+         which is the call that records the module root this door later reads out of \
+         `integration-marks.json` to remove"
+    );
     for name in ["Folio", "BetterTerminal"] {
         assert!(INVENTORY.iter().any(|m| matches!(m.remover, Remover::Data(HostPlatform::Windows, Base::Roaming, relative) if relative == name)));
     }
