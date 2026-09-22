@@ -25839,6 +25839,107 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// PIN (owner report 2026-09-21, on the 0.4.3 candidate) — **a printed path with spaces in it
+    /// is a link when the file is there**, walked from the printed row to the real disk.
+    ///
+    /// The report was `D:\Developer\trace\验收 next85\中文 说明.md`: no mark, no click, while the
+    /// same tree without the spaces was an ordinary link. The lexer's half of the fix is pinned in
+    /// `bt_transcript::paths` by `a_bare_path_is_read_across_the_spaces_a_filename_may_hold` — the
+    /// row offers the whole spelling first and one shorter reading per space behind it. **This is
+    /// the half that decides.** Readings settle nothing on their own; §7.30 has the disk arbitrate,
+    /// and what makes the long one the link here is that a real worker read a real filesystem and
+    /// found it. The second half of this test is the same printed line over a disk holding only the
+    /// short name, and it answers the other way with nothing changed but the files.
+    ///
+    /// MUTATION: take `token_end_across_spaces` back out of `detect_rooted_candidates` and the
+    /// first half goes red on its first assertion — the worker is never asked about `a b\c d.md` at
+    /// all, and the row is as blank as the owner photographed it.
+    #[test]
+    fn a_printed_path_with_spaces_is_a_link_when_the_file_is_there() {
+        // The disk that holds the long name: `<temp>\a b\c d.md`, two spaces inside one path.
+        let (directory, spare) = temporary_ordinary_file();
+        assert!(
+            !directory.to_string_lossy().contains(' '),
+            "the fixture's own directory must be spaceless, or the bound is spent before the name \
+             under test begins: {}",
+            directory.display()
+        );
+        let folder = directory.join("a b");
+        std::fs::create_dir(&folder).unwrap();
+        let long = folder.join("c d.md");
+        std::fs::write(&long, b"# c d\n").unwrap();
+        let short = directory.join("a");
+
+        let printed = format!("see {} for details", long.to_string_lossy());
+        let mut session = DualPlaneSession::new(nz(240), nz(6));
+        enable_path_detection(&mut session);
+        session.feed(format!("{printed}\r\n").as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        assert!(
+            session.path_is_verified(&long),
+            "the worker read the file whose name holds the spaces"
+        );
+        assert!(
+            !session.path_is_verified(&short),
+            "and nothing is called `a` on that disk, so the reading the space used to be the whole \
+             of is denied"
+        );
+        let hit = frame
+            .hyperlink_at(0, 4)
+            .expect("the name with the spaces in it is a link");
+        assert_eq!(
+            hit.uri,
+            bt_transcript::paths::local_path_to_file_uri(&long),
+            "the target is the whole name, spaces and all"
+        );
+        assert!(
+            frame
+                .hyperlink_at(0, 4 + long.to_string_lossy().chars().count() as u32 + 1)
+                .is_none(),
+            "and the prose behind it, which was read and denied, is not part of the link"
+        );
+
+        // The same line over a disk holding only the short name. Nothing about the text changes —
+        // the readings are the same readings in the same order — and the answer changes because
+        // the filesystem does.
+        let (other, other_spare) = temporary_ordinary_file();
+        let only_short = other.join("a");
+        std::fs::write(&only_short, b"a\n").unwrap();
+        let reversed = format!("see {}\\a b\\c d.md for details", other.to_string_lossy());
+        let mut session = DualPlaneSession::new(nz(240), nz(6));
+        enable_path_detection(&mut session);
+        session.feed(format!("{reversed}\r\n").as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        assert!(
+            session.path_is_verified(&only_short),
+            "the short reading is the one this disk holds"
+        );
+        assert!(
+            !session.path_is_verified(&other.join("a b").join("c d.md")),
+            "and the long one was asked about and denied"
+        );
+        let hit = frame
+            .hyperlink_at(0, 4)
+            .expect("the reading the disk holds is the link");
+        assert_eq!(
+            hit.uri,
+            bt_transcript::paths::local_path_to_file_uri(&only_short),
+            "longest first, and the longest one the disk holds is this one"
+        );
+
+        std::fs::remove_file(&only_short).unwrap();
+        std::fs::remove_file(&other_spare).unwrap();
+        std::fs::remove_dir(&other).unwrap();
+        std::fs::remove_file(&long).unwrap();
+        std::fs::remove_dir(&folder).unwrap();
+        std::fs::remove_file(&spare).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
     /// PIN (user report 2026-08-21) — **a path the terminal wrapped is still one link**, asked of
     /// the real vendor grid rather than of a hand-built one.
     ///

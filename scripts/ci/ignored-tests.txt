@@ -10,14 +10,15 @@
 #     cargo test --workspace --locked -- --ignored --list
 #
 # Why any of them are ignored at all — the policy this list exists to state.
-# Thirty of the thirty-three are **probes**, not regressions:
+# All but a few of these are **probes**, not regressions:
 #
 #   * nineteen in `bt-pty` drive real ConPTY sessions against a real PowerShell
 #     and read what comes back. Their assertions are about host timing and about
 #     upstream PSReadLine versions, so they answer "what does this machine do",
 #     which is a question with a different right answer on every machine.
-#   * two in `bt-transcript` are the reference-resolution probes over a printed
-#     scrollback.
+#   * one in `bt-transcript` is the reference-resolution probe over a printed
+#     scrollback. Its neighbour, the unquoted space-cut prefix, left this list on
+#     2026-09-21 when §7.30 gained the readings that settle it.
 #   * seven in `bt-app`: one writes a picture for a person to look at, two
 #     are the large-document typing benchmarks (T-MD-TYPING-PATH; the eager one is the reference), which time
 #     the whole input-to-layout path on docs/DESIGN.md and prints a table --
@@ -51,7 +52,7 @@
 #     probes ask. Run it with
 #     `cargo test -p bt-platform -- --ignored --nocapture`.
 #
-# The thirty-first is neither a probe nor a regression: it is a **writer**, like
+# One is neither a probe nor a regression: it is a **writer**, like
 # the symbol sheet above it. `highlight::tests::regenerate_the_powershell_packdump`
 # rebuilds `assets/syntaxes/PowerShell.packdump` from the `.sublime-syntax`
 # beside it, and it is ignored because a test that writes into the source tree
@@ -85,7 +86,6 @@ hang_watch::tests::measure_cpu_sampler_and_station_cost
 highlight::tests::regenerate_the_powershell_packdump
 marks::tests::the_symbol_sheet_is_written_for_a_person_to_look_at
 paths::tests::a_scrollback_relative_reference_keeps_the_directory_it_was_printed_under
-paths::tests::an_unquoted_path_cut_at_a_space_does_not_link_its_prefix
 preview_typing::md_typing_path_benchmark
 preview_typing::md_typing_path_eager_benchmark
 preview::tests::md_loading_worker_benchmark

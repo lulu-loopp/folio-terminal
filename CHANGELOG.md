@@ -17,6 +17,8 @@ All notable changes to Folio are recorded here. The format follows
   now reaches Folio the way it reaches other Windows programs: a tap is a
   click, and press-and-hold opens the menu. Windows does the translating.
 
+- A printed path with spaces in it is a link when the file is there.
+
 ## 0.4.3-preview — 2026-09-21
 
 ### Added

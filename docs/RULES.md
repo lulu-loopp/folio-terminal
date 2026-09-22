@@ -120,8 +120,9 @@ a path a program printed*, *a name printed again is asked about again*, *a press
 asks what a pointer move asks*; trailing entries 2026-09-21 *correction: what a
 reveal must still know*, *correction: the component-by-component link walk is
 withdrawn*, *correction: the worker produces the door's input with the door's own
-function*; and the project owner's ruling of 2026-09-21 that Ctrl+click on a
-printed path opens it, as before.
+function*, *a printed path may hold spaces; the disk still says which reading is
+real*; and the project owner's ruling of 2026-09-21 that Ctrl+click on a printed
+path opens it, as before.
 **Overrides.** The owner's 2026-09-21 ruling withdrew the 2026-09-20 reveal-only
 rule and removed the volume question it had introduced. The per-component link
 walk, its hop limit and its locality type were withdrawn the same day. The
