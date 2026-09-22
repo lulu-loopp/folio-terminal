@@ -122393,8 +122393,14 @@ mod resize_skirt_order_tests {
             .unwrap_or_else(|| panic!("{signature} is declared in this file"));
         let rest = &SOURCE[start + signature.len()..];
         let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        rest[..end]
-            .lines()
+        normalised(&rest[..end])
+    }
+
+    /// The statements of a run of source, with everything that is not one
+    /// taken out — the reading both `body` and the crate's answer are put
+    /// through, so that the two are compared on the same terms.
+    fn normalised(text: &str) -> String {
+        text.lines()
             .map(|line| match line.find("//") {
                 Some(at) => &line[..at],
                 None => line,
@@ -122405,6 +122411,74 @@ mod resize_skirt_order_tests {
             .collect()
     }
 
+    // ── what this module asks the crate instead ───────────────────────────
+    //
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Nothing is deleted here: each of the two pins is
+    // read twice — once from `include_str!("main.rs")`, once from `bt-source` —
+    // and `agreed` asserts the two are the same bytes once both have been put
+    // through `normalised`. The deletion is the commit after this one.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// **`body`'s answer and the crate's, compared as bytes.**
+    ///
+    /// `body` hands back everything after the signature prefix it was given and
+    /// stops before the next `\n    fn `: the rest of the declaration, then the
+    /// braces and what is between them, then whatever stands after the closing
+    /// brace. The crate hands back the braces and what is between them. So the
+    /// crate's answer has to stand in this file's slice with nothing but the
+    /// rest of the declaration in front of it — and where the signature this
+    /// file was given already ended in the opening brace, the slice begins
+    /// inside the body and holds its interior instead.
+    ///
+    /// What comes back is the file's slice, so this commit changes no assertion.
+    fn agreed(old: String, name: &str) -> String {
+        let new = normalised(method_body("Runtime", name));
+        let interior = &new[1..new.len() - 1];
+        let at = match old.find(new.as_str()) {
+            Some(at) => at,
+            None => {
+                assert!(
+                    old.starts_with(interior),
+                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
+                     bytes"
+                );
+                0
+            }
+        };
+        assert!(
+            !old[..at].contains('{'),
+            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
+             the head of it"
+        );
+        old
+    }
+
     /// Red gate: move the `set_window_size` call below the `renderer.resize`
     /// that follows it — or anywhere else in the handler — and this goes red.
     /// That is the shipped build of 2026-08-24, where the strip outside the old
@@ -122412,7 +122486,10 @@ mod resize_skirt_order_tests {
     /// through Folio's own frame.
     #[test]
     fn the_resize_handler_covers_the_new_strip_before_it_does_anything_else() {
-        let handler = body("fn resize(&mut self, physical: PhysicalSize<u32>) -> Result<()> {");
+        let handler = agreed(
+            body("fn resize(&mut self, physical: PhysicalSize<u32>) -> Result<()> {"),
+            "resize",
+        );
         // Plain needles: `body` hands back one method's text, so this test's own
         // source is not among the things being searched.
         let told = handler
@@ -122447,7 +122524,10 @@ mod resize_skirt_order_tests {
     /// swapchain that had caught up.
     #[test]
     fn the_present_funnel_shrinks_the_skirt_and_asks_for_the_frame_that_does_it() {
-        let funnel = body("fn present_seats_and_commit(");
+        let funnel = agreed(
+            body("fn present_seats_and_commit("),
+            "present_seats_and_commit",
+        );
         let shrunk = funnel
             .find(".set_covered_size(covered_width,covered_height)")
             .expect("the funnel tells the compositor what the swapchain now covers");
