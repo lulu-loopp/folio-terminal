@@ -13,10 +13,12 @@
 # row is an added row. The commented header is not compared, so the prose above
 # the list can be rewritten freely.
 #
-# It passes, loudly, when there is nothing to compare against — no `origin/main`
-# in the clone, no merge base, or no list at the base (which is how the commit
-# that introduces the list passes). CI gives it the history: the jobs that run
-# it check out with `fetch-depth: 0`.
+# It passes, loudly, when the base has no list — that is how the commit that
+# introduces the list passes. It does not pass when there is no base at all: no
+# `origin/main` in the clone, or no merge base, means the comparison did not
+# happen, and a check that did not run must not look like a check that agreed.
+# CI never reaches that: both jobs that run it check out with `fetch-depth: 0`.
+# Locally it is one `git fetch origin main` away.
 #
 # Prove it fires before trusting it: add a row to the list and this must go red.
 # `.github/workflows/ci.yml` does exactly that, in `gates-can-fail`.
@@ -55,13 +57,21 @@ try {
     $base = $null
     & git rev-parse --verify --quiet refs/remotes/origin/main *> $null
     if ($LASTEXITCODE -eq 0) {
-        $base = (& git merge-base HEAD origin/main 2>$null | Select-Object -First 1)
-        if ($LASTEXITCODE -ne 0) { $base = $null }
+        # git's own status, read before any other stage can stand on it. Piping
+        # a native command into `Select-Object -First 1` stops it mid-stream,
+        # and Windows PowerShell 5.1 answers that stop by throwing the output
+        # away and setting $LASTEXITCODE to -1. This check spent that reading as
+        # "no merge base" and exited green on every clone that had one, under
+        # the very shell the ticket briefs invoke it with.
+        $found = & git merge-base HEAD origin/main 2>$null
+        $status = $LASTEXITCODE
+        if ($status -eq 0) { $base = @($found)[0] }
     }
 
     if (-not $base) {
-        Write-Host "no merge base with origin/main in this clone - $relative has nothing to be compared against, and $($now.Count) rows."
-        exit 0
+        Write-Host "no merge base with origin/main in this clone - $relative has $($now.Count) rows and nothing to compare them against."
+        Write-Host "This is not a pass: the comparison did not happen. Run 'git fetch origin main' and try again."
+        exit 2
     }
 
     $text = (& git show "${base}:${relative}" 2>$null) | Out-String

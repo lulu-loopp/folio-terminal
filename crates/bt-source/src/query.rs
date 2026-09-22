@@ -411,8 +411,9 @@ pub struct ItemQuery {
 enum Owner {
     /// Written at module level, belonging to no type.
     Free,
-    /// Written in an `impl` block for this type, lifetimes and generic
-    /// arguments ignored.
+    /// Written in an `impl` block for this type, **named by its last path
+    /// segment** with lifetimes and generic arguments ignored: `Runtime` is the
+    /// owner of `impl Runtime<'_>` and of `impl crate::Runtime<'_>` alike.
     Type(String),
 }
 
@@ -438,8 +439,13 @@ impl ItemQuery {
     }
 
     /// A method of `type_owner`'s inherent `impl` blocks — the narrowing §2.4
-    /// gives `method_body(self_ty, name)`, where `Runtime<'_>` and `Runtime<'a>`
-    /// are the same type.
+    /// gives `method_body(self_ty, name)`, where `Runtime<'_>`, `Runtime<'a>`
+    /// and `crate::Runtime<'_>` are the same type.
+    ///
+    /// **Name the type, never the path to it**: `"Runtime"` and not
+    /// `"crate::Runtime"`, because the owner is the `impl`'s self type reduced
+    /// to its last segment (§2.4) and the module the block is written in is
+    /// [`ItemQuery::in_module`]'s business.
     #[must_use]
     pub fn method(type_owner: &str, name: &str) -> Self {
         Self {
