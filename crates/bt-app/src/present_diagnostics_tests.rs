@@ -168,20 +168,54 @@ fn attempt_format_round_trips_numbers_and_unknown_native_facts() {
     assert_eq!(reconstructed, text);
 }
 
+// ── what these two pins ask the crate ─────────────────────
+//
+// **P3's deletion commit for this batch** (`docs/plans/bt-app-split-prep.md`
+// §6.3, and §6.0 rule 3). The commit before this one cut every body twice —
+// once out of a named file, once out of the body of the item of the package
+// that owns it — and asserted the two were the same bytes; this one removes
+// the older of the two, because two implementations of one judgement do not
+// vouch for each other (`docs/CONVENTIONS.md` §十 rule 4). The pattern is
+// `main.rs::pty_drain_budget_tests`', not re-derived here.
+//
+// Two readings leave `main.rs` for a package rather than for an item. The
+// prohibition on user text is about the diagnostics **module**, so it is asked
+// of `crate::present_diagnostics` by its Rust path. The three facts about the
+// renderer were reached by a relative path out of this crate's directory into
+// another one's `lib.rs`; they are asked of the `bt-render` package now, which
+// is that crate however its files are spelled.
+
+/// **This crate, indexed once per process** — the workspace read, this
+/// package's own `src/` declared as the universe and lowered, on the first ask
+/// of the process, behind one call (`bt_source::Index::of_package`).
+fn source_index() -> &'static bt_source::Index {
+    bt_source::Index::of_package("bt-app")
+}
+
+/// The body of one inherent method of `owner`, braces included — the identity
+/// of §2.4 rather than a line of `main.rs`.
+fn method_body(owner: &str, name: &str) -> &'static str {
+    source_index()
+        .body_of(&bt_source::ItemQuery::method(owner, name))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// One search over a named scope of a package of this workspace — the reading
+/// that used to be a relative path from this file into that crate's source.
+fn found_in_package(
+    package: &str,
+    needle: bt_source::Needle,
+    scope: bt_source::Scope,
+) -> bt_source::Found {
+    bt_source::Index::of_package(package)
+        .search(&bt_source::Search::new(needle, bt_source::View::Raw).in_scope(scope))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
 #[test]
 fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
-    let source = include_str!("main.rs");
     for name in ["present_retained_picture", "redraw"] {
-        let start = source
-            .find(&format!("    fn {name}(&mut self) -> Result<()> {{"))
-            .unwrap();
-        let tail = &source[start + 5..];
-        let end = [tail.find("\n    ///"), tail.find("\n    fn ")]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap();
-        let body = &source[start..start + 5 + end];
+        let body = method_body("Runtime", name);
         assert!(body.contains("begin_present_attempt("), "{name}");
         assert!(
             body.contains("let result = (|| {") || body.contains("let result = hang_watch::during"),
@@ -196,8 +230,7 @@ fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
                 > body.rfind("Self::present_seats_and_commit").unwrap()
         );
     }
-    let start = source.find("    fn present_seats_and_commit(").unwrap();
-    let body = &source[start..source[start..].find("\n    ///").unwrap() + start];
+    let body = method_body("Runtime", "present_seats_and_commit");
     for outcome in [
         "Unchanged",
         "Presented",
@@ -209,10 +242,23 @@ fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
         assert!(body.contains(&format!("Outcome::{outcome}")), "{outcome}");
     }
     assert!(
-        source.contains("let owed = owed || self.picture_is_owed();"),
+        source_index()
+            .search(&bt_source::Search::new(
+                bt_source::needle!(bt_source::Pattern::text(
+                    "let owed = owed || self.picture_is_owed();"
+                )),
+                bt_source::View::Raw,
+            ))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .occurrences()
+            .iter()
+            .any(|occurrence| {
+                source_index()
+                    .file_at(occurrence.span.start())
+                    .is_some_and(bt_source::FileRecord::permits_product)
+            }),
         "an empty redraw must not restart standing debt"
     );
-    let module = include_str!("present_diagnostics.rs");
     for forbidden in [
         ".title()",
         ".display()",
@@ -221,7 +267,12 @@ fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
         "{error:#}",
     ] {
         assert!(
-            !module.contains(forbidden),
+            found_in_package(
+                "bt-app",
+                bt_source::Needle::new(bt_source::Pattern::text(forbidden)),
+                bt_source::Scope::Module("crate::present_diagnostics".to_owned()),
+            )
+            .is_empty(),
             "diagnostics must accept no user text: {forbidden}"
         );
     }
@@ -319,23 +370,23 @@ fn existing_hidden_callers_keep_the_same_fused_value() {
 
 #[test]
 fn attempt_generation_is_carried_by_configure_and_native_reads_are_line_gated() {
-    let source = include_str!("main.rs");
-    let start = source.find("    fn finish_present_attempt(").unwrap();
-    let body = &source[start
-        ..source[start..]
-            .find("    fn check_picture_freshness(")
-            .unwrap()
-            + start];
+    let body = method_body("Runtime", "finish_present_attempt");
     assert!(
         body.find("if self.app.trace_perf").unwrap() < body.find("native_present_facts").unwrap()
     );
-    let start = source.find("    fn check_picture_freshness(").unwrap();
-    let body = &source[start..source[start..].find("    ///").unwrap() + start];
+    let body = method_body("Runtime", "check_picture_freshness");
     assert!(body.find("if let Some(line)").unwrap() < body.find("native_present_facts").unwrap());
-    let render = include_str!("../../bt-render/src/lib.rs");
-    assert!(render.contains("phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));"));
-    assert_eq!(render.matches("let present_wait = descriptor").count(), 3);
-    assert!(render.contains("self.present_wait = present_wait;"));
+    let in_render = |text: &str| {
+        found_in_package(
+            "bt-render",
+            bt_source::Needle::new(bt_source::Pattern::text(text)),
+            bt_source::Scope::Everything,
+        )
+        .len()
+    };
+    assert!(in_render("phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));") > 0);
+    assert_eq!(in_render("let present_wait = descriptor"), 3);
+    assert!(in_render("self.present_wait = present_wait;") > 0);
 }
 
 #[test]

@@ -15437,13 +15437,132 @@ mod tests {
         assert!(panel.take_agents_open_edge(true), "Escape rearms it too");
 
         // And the edge is joined to the three reads: the window asks on it and nowhere else.
-        let window = include_str!("main.rs");
-        assert!(window.contains("take_agents_open_edge(content.shows_agents("));
-        assert_eq!(window.matches("self.refresh_agent_rows();").count(), 1);
+        assert!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "take_agents_open_edge(content.shows_agents("
+            ))) > 0
+        );
         assert_eq!(
-            window.matches("fn refresh_agent_rows(&mut self)").count(),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "self.refresh_agent_rows();"
+            ))),
             1
         );
+        assert_eq!(
+            source_index()
+                .find(&bt_source::ItemQuery::method(
+                    "Runtime",
+                    "refresh_agent_rows"
+                ))
+                .map_or(0, |declarations| declarations.len()),
+            1
+        );
+    }
+
+    // ── what these two pins ask the crate ─────────────────
+    //
+    // **P3's deletion commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). The commit before this one took every reading
+    // above and below twice — once from `include_str!("main.rs")`, once from
+    // `bt-source` — and asserted the two answered the same; this one removes
+    // the older of the two, because two implementations of one judgement do
+    // not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4). The
+    // pattern is `main.rs::pty_drain_budget_tests`', not re-derived here.
+    //
+    // The counts widen from one file to the package, which is the scope each
+    // claim wants: a second refresh written in another file is exactly the
+    // second owner these numbers exist to refuse, and the file reading could
+    // not have seen one. What that widening has to be careful of is written on
+    // `in_the_product`, and this module is where it bites twice over — the test
+    // harness below implements the same pointer host and calls the same
+    // function, and the older reading standing beside the newer one spells
+    // every counted text a second time, all inside a file the product compiles.
+    //
+    // Two readings are not counts at all. The refresh's **declaration** is an
+    // identity, so it is asked for as one and a second declaration is a refusal
+    // naming both. The production handler is an `impl` header, which stands in
+    // no callable and so has no owner to ask about; it keeps the scope the old
+    // reading had — module `crate` — and says so here.
+    fn source_index() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of one inherent method of `owner`, braces included — the
+    /// identity of §2.4 rather than a line of `main.rs`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        source_index()
+            .body_of(&bt_source::ItemQuery::method(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// One search over the whole package, refusing loudly rather than
+    /// answering a smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source_index()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// One search over a named scope — a Rust path, never a file.
+    fn found_in(
+        needle: bt_source::Needle,
+        view: bt_source::View,
+        scope: bt_source::Scope,
+    ) -> bt_source::Found {
+        source_index()
+            .search(&bt_source::Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **How many of these occurrences a product build compiles.**
+    ///
+    /// Two grains, because this tree says "test" two ways and a reader that
+    /// took only one of them would count its own assertions. A file reached
+    /// through a `#[cfg(test)] mod x;` declaration is not compiled into the
+    /// product at all, which is `FileRecord::permits_product` over
+    /// `Index::file_at` (§2.3, the pilot's `in_product`). An inline
+    /// `#[cfg(test)] mod` inside a file the product *does* compile is not a
+    /// file, so §2.4's identity carries its predicate instead, which is
+    /// `clipboard_path_tests`' `in_product_items`. This module needs both: the
+    /// spellings counted here are written again in its own assertions — in
+    /// this commit, by the older of the two readings standing beside the newer
+    /// one — and again in whole test files elsewhere in the package.
+    ///
+    /// The owner is the smallest callable holding the match, which is
+    /// `Found::owners`' own rule taken one occurrence at a time so that the
+    /// file grain can stand beside it. An occurrence in no callable — an
+    /// `impl` header, a `const` — is left in, because nothing about a `cfg`
+    /// says otherwise and dropping it quietly is the failure this preparation
+    /// is about.
+    fn in_the_product(found: &bt_source::Found) -> usize {
+        let index = source_index();
+        found
+            .occurrences()
+            .iter()
+            .filter(|occurrence| {
+                index
+                    .file_at(occurrence.span.start())
+                    .is_some_and(bt_source::FileRecord::permits_product)
+                    && index
+                        .items()
+                        .iter()
+                        .filter(|record| occurrence.span.within(record.whole()))
+                        .min_by_key(|record| record.whole().len())
+                        .is_none_or(|record| {
+                            !record
+                                .variant()
+                                .predicates()
+                                .iter()
+                                .any(|predicate| predicate == "test")
+                        })
+            })
+            .count()
+    }
+
+    /// The same count of one raw needle — the view `include_str!` handed this
+    /// module.
+    fn in_the_product_raw(needle: bt_source::Needle) -> usize {
+        in_the_product(&found(needle, bt_source::View::Raw))
     }
 
     struct SettingsPointerHarness {
@@ -15572,22 +15691,32 @@ mod tests {
 
     #[test]
     fn settings_pointer_production_wiring_uses_the_counted_handler_and_owner() {
-        let source = include_str!("main.rs");
-        let body = |name: &str| {
-            let tail = source.split_once(name).unwrap().1;
-            tail.split("\n    fn ").next().unwrap()
-        };
-        let pointer = body("    fn pointer_moved(&mut self, position:");
+        let body = |name: &str| method_body("Runtime", name);
+        let pointer = body("pointer_moved");
         assert!(
             pointer.contains("settings::geometry::pointer_moved(self, position.x, position.y)?")
         );
-        let layout = body("    fn settings_layout(&mut self)");
+        let layout = body("settings_layout");
         assert!(layout.contains("self.window.settings_geometry.read(inputs,"));
         assert!(layout.contains("self.window.settings_geometry.clear();"));
-        assert_eq!(source.matches("inputs.layout(&mut measure)").count(), 1);
+        assert_eq!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "inputs.layout(&mut measure)"
+            ))),
+            1
+        );
         // The test host substitutes only window/GPU effects, not the handler.
-        assert!(source.contains("impl settings::geometry::PointerHost for Runtime<'_>"));
-        let content = body("    fn settings_dialog<'a>(");
+        assert!(
+            !found_in(
+                bt_source::needle!(bt_source::Pattern::text(
+                    "impl settings::geometry::PointerHost for Runtime<'_>"
+                )),
+                bt_source::View::Raw,
+                bt_source::Scope::Module("crate".to_owned()),
+            )
+            .is_empty()
+        );
+        let content = body("settings_dialog");
         assert!(content.contains(".advanced_reveal_sample"));
         assert!(!content.contains("tween.sample(Instant::now()"));
     }
