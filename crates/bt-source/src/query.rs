@@ -331,6 +331,21 @@ macro_rules! needle {
 /// constructible only through it — there is no constructor taking a path. P1c
 /// and P2 were written against each other and merged apart, each carrying a
 /// `Scope` of its own; this is the one the two of them describe.
+///
+/// # Which claim each shape expresses
+///
+/// A scope is not a filter the query happens to apply: it is the half of the
+/// guard's sentence that says *where*, and picking the wrong shape is how a
+/// guard goes on being green about a smaller program than it means.
+///
+/// | Shape | The claim it expresses |
+/// | --- | --- |
+/// | [`Everything`](Self::Everything) | "nowhere in this universe" — the whole-source negative |
+/// | [`Module`](Self::Module) | "in the bytes one module is written in": one file, or one pair of braces |
+/// | [`Modules`](Self::Modules) | "here, and everywhere under there" — a union of named modules, each reaching its own bytes or its whole tree |
+/// | [`Item`](Self::Item) | "inside this one item", whatever file it is written in today |
+/// | [`Impls`](Self::Impls) | "in any `impl` block of this type", wherever they are written and on whatever arm |
+/// | [`File`](Self::File) | "in this named file" — and only for a reader whose subject really is one (§6.1) |
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope {
     /// Every byte of the universe.
@@ -338,6 +353,27 @@ pub enum Scope {
     /// One module, by its Rust path: `crate`, `crate::preview_select`. The
     /// module's bytes are its file, or its braces when it is written inline.
     Module(String),
+    /// **A union of named modules**, each of them either its own bytes or its
+    /// whole tree — the scope of a claim that is about more than one module and
+    /// not about the universe.
+    ///
+    /// [`Module`](Self::Module) is exact equality on one path, and the day a
+    /// type's methods are cut out of the crate root into `crate::runtime` a
+    /// guard that meant "the root and everything the root grew" has no scope at
+    /// all: the one path answers about the bytes that stayed behind, and
+    /// [`Everything`](Self::Everything) inverts the guard, because the spelling
+    /// it forbids is legitimately written in modules that were never its
+    /// subject. `[ModuleSpec::exact("crate"),
+    /// ModuleSpec::tree("crate::runtime")]` is that claim written down, and it
+    /// is still the claim after the next relocation.
+    ///
+    /// **Every member has to name something.** A member that names no module in
+    /// this universe is [`QueryFailure::EmptyScope`] naming that member — a
+    /// moved or misspelled path is exactly the silence a union is built to
+    /// survive, and swallowing it would make the union answer a smaller
+    /// question than it was asked. An empty union is the same refusal, because
+    /// a scope over no bytes holds about everything.
+    Modules(Vec<ModuleSpec>),
     /// One item: the answer to an [`ItemQuery`], which is loud when the item is
     /// not there or is not unique.
     Item(ItemQuery),
@@ -363,6 +399,91 @@ pub enum Scope {
     /// A reader that wants a file has to add a variant to [`FileScoped`], and
     /// adding one is a doc comment somebody reviews.
     File(FileScoped),
+}
+
+/// One member of a [`Scope::Modules`] union: a module path, and how far down
+/// its own declarations the member reaches.
+///
+/// The two are different claims and neither implies the other, so the
+/// constructor says which: [`exact`](Self::exact) is the bytes the module is
+/// written in, [`tree`](Self::tree) is those bytes and every module declared
+/// under them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleSpec {
+    path: String,
+    reach: Reach,
+}
+
+/// How far down a [`ModuleSpec`] reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Reach {
+    /// The module's own bytes: its file, or its braces when it is written
+    /// inline — which is what [`Scope::Module`] has always meant.
+    Itself,
+    /// The module and every module its declarations reach, however deep, out of
+    /// line and inline alike, on every `#[cfg]` arm they stand on.
+    AndEverythingUnder,
+}
+
+impl ModuleSpec {
+    /// **This module's own bytes**, and nothing a declaration in it reaches:
+    /// `exact("crate")` is the crate root's file and not the files it declares.
+    #[must_use]
+    pub fn exact(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            reach: Reach::Itself,
+        }
+    }
+
+    /// **This module and everything under it**: `tree("crate::runtime")` is
+    /// `runtime/mod.rs`, every file it declares, every file those declare, and
+    /// every `mod x { … }` written in any of them.
+    #[must_use]
+    pub fn tree(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            reach: Reach::AndEverythingUnder,
+        }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[must_use]
+    pub const fn reach(&self) -> Reach {
+        self.reach
+    }
+
+    /// Whether a module answering to `module_path` is inside this member.
+    fn covers(&self, module_path: &str) -> bool {
+        match self.reach {
+            Reach::Itself => module_path == self.path,
+            // What makes a path a descendant is the separator and not the
+            // prefix: `crate::runtimes` is not under `crate::runtime`, and a
+            // plain `starts_with` would quietly take in a sibling whose name
+            // begins with this one's.
+            Reach::AndEverythingUnder => {
+                module_path == self.path
+                    || module_path
+                        .strip_prefix(self.path.as_str())
+                        .is_some_and(|under| under.starts_with("::"))
+            }
+        }
+    }
+}
+
+impl fmt::Display for ModuleSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.reach {
+            Reach::Itself => write!(formatter, "module `{}`", self.path),
+            Reach::AndEverythingUnder => {
+                write!(formatter, "module `{}` and everything under it", self.path)
+            }
+        }
+    }
 }
 
 impl Scope {
@@ -391,6 +512,19 @@ impl fmt::Display for Scope {
         match self {
             Self::Everything => formatter.write_str("the whole universe"),
             Self::Module(path) => write!(formatter, "module `{path}`"),
+            Self::Modules(specs) if specs.is_empty() => {
+                formatter.write_str("the union of no modules at all")
+            }
+            Self::Modules(specs) => {
+                formatter.write_str("the union of ")?;
+                for (at, spec) in specs.iter().enumerate() {
+                    if at > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(formatter, "{spec}")?;
+                }
+                Ok(())
+            }
             Self::Item(query) => write!(formatter, "item `{query}`"),
             Self::Impls(type_name) => write!(formatter, "every `impl` of `{type_name}`"),
             Self::File(entry) => write!(formatter, "file `{}`", entry.path()),
@@ -1407,7 +1541,7 @@ impl Index {
         // The variants are named without their type for the same lexical
         // reason, and every arm is written out rather than wildcarded so that a
         // new variant is a compile error here.
-        use Scope::{Everything, File, Impls, Item, Module};
+        use Scope::{Everything, File, Impls, Item, Module, Modules};
         let spans: Vec<Span> = match scope {
             Everything => return Ok(None),
             Module(path) => self
@@ -1416,6 +1550,30 @@ impl Index {
                 .filter(|module| module.module_paths().iter().any(|it| it == path))
                 .map(|module| module.span())
                 .collect(),
+            // A union: each member resolved against the same module records,
+            // and a member that names nothing refuses on its own name rather
+            // than leaving the union to answer about the others. The spans may
+            // overlap — `tree("crate")` holds every module under it — which
+            // costs nothing, because a match is kept if it lies within any one
+            // of them.
+            Modules(specs) => {
+                let mut union: Vec<Span> = Vec::new();
+                for spec in specs {
+                    let before = union.len();
+                    union.extend(
+                        self.modules()
+                            .iter()
+                            .filter(|module| module.module_paths().iter().any(|it| spec.covers(it)))
+                            .map(|module| module.span()),
+                    );
+                    if union.len() == before {
+                        return Err(QueryFailure::EmptyScope {
+                            scope: spec.to_string(),
+                        });
+                    }
+                }
+                union
+            }
             Item(query) => self
                 .find(query)?
                 .iter()

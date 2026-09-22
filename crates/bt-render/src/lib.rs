@@ -17056,6 +17056,7 @@ pub fn measure_preview_text_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
     use bt_transcript::CapturedCell;
     use bt_viewport::horizontal::HorizontalProjection;
 
@@ -18188,11 +18189,15 @@ mod tests {
         }
 
         // ③ One function answers for every chip.
-        let source = include_str!("lib.rs");
+        //
+        // Asked of the crate and not of this file (P8): a chip struck from a
+        // second place is a third occurrence wherever that place is written,
+        // and `scheme.rs` and `theme.rs` are where somebody would write it.
         // Spelled in two halves so this line is not itself a fourth occurrence.
+        let spelling = concat!("float_tag_rects", "(");
+        let struck = found(needle!(Pattern::text(spelling)), View::Raw).len();
         assert_eq!(
-            source.matches(concat!("float_tag_rects", "(")).count(),
-            2,
+            struck, 2,
             "one definition and one call site — a chip that struck its own \
              colours would be a third"
         );
@@ -20391,33 +20396,45 @@ mod tests {
     /// wrong in every split window.
     #[test]
     fn the_band_accessors_are_given_a_seat_and_never_take_one() {
-        let source = include_str!("lib.rs");
-        for opening in [
-            "pub fn math_tool_boxes(",
-            "pub fn math_band_face(",
-            "pub fn math_band_trace(",
-            "pub fn math_hit_test(",
-            "fn math_failure_geometry(",
+        // The last of the six is the one that does the arithmetic: it takes the
+        // seat too, so nothing below the other five can quietly reach for the
+        // field again.
+        for name in [
+            "math_tool_boxes",
+            "math_band_face",
+            "math_band_trace",
+            "math_hit_test",
+            "math_failure_geometry",
+            "math_block_geometry",
         ] {
-            let block = block_beginning_with(source, opening);
-            assert!(!block.is_empty(), "{opening} is declared in this file");
-            assert!(
-                block.contains("seat: SeatViewport"),
-                "{opening} takes the band's own pane:\n{block}"
+            // The item, not a slice of a file (P8), and a refusal rather than
+            // an empty string when it is not declared.
+            // `View::CodeKeepingLiterals` and not `View::Raw` because an item's
+            // bytes begin at its first attribute, so the raw reading would take
+            // these accessors' own doc comments as code — the prose above
+            // `math_band_trace` names the field this forbids.
+            let item = Scope::Item(ItemQuery::method("WindowRenderer", name));
+            let handed = found_in(
+                needle!(Pattern::text("seat: SeatViewport")),
+                View::CodeKeepingLiterals,
+                item.clone(),
+            );
+            let reaches = found_in(
+                needle!(Pattern::text("self.seat")),
+                View::CodeKeepingLiterals,
+                item,
             );
             assert!(
-                !block.contains("self.seat"),
-                "{opening} reads the focused pane's rectangle instead of the one it was \
-                 handed:\n{block}"
+                !handed.is_empty(),
+                "{name} does not take the band's own pane"
+            );
+            assert!(
+                reaches.is_empty(),
+                "{name} reads the focused pane's rectangle instead of the one it \
+                 was handed:\n{}",
+                reaches.report(source())
             );
         }
-        // And the one that does the arithmetic takes it too, so nothing below
-        // these three can quietly reach for the field again.
-        let geometry = block_beginning_with(source, "fn math_block_geometry(");
-        assert!(
-            geometry.contains("seat: SeatViewport") && !geometry.contains("self.seat"),
-            "the block's own geometry is a function of the seat it is handed:\n{geometry}"
-        );
     }
 
     /// PIN (owner's report 2026-09-14, re-ruled 2026-09-20 by
@@ -21458,83 +21475,146 @@ mod tests {
         headless_device(format, true, None).ok()
     }
 
-    /// Every `#[cfg(test)]` module in one file's source, joined — the region a
-    /// rule about *test* code is allowed to be checked against, so that the
-    /// production constructors and their own definitions are out of scope.
+    // ── the crate asked, instead of the directory listed (P8) ─────────────
+    //
+    // `docs/plans/bt-app-split-prep.md` §3.3 named the `crate_sources` walker
+    // that stood here as one of three non-recursive walkers: it read
+    // `crates/bt-render/src/` one directory deep, which was every file of this
+    // crate while that directory was flat and none of the files in the first
+    // subdirectory anybody added. The same sentence was true of the ten
+    // bindings under it that read this file's own text — a fact that moves to
+    // a file beside this one stops being read, silently and without changing a
+    // verdict. What stands here instead is the universe this crate's own `mod`
+    // declarations describe, and a file on the disk that no declaration reaches
+    // is reported rather than skipped.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call.
+    fn source() -> &'static Index {
+        Index::of_package("bt-render")
+    }
+
+    /// One search over every file this crate's declarations reach, refusing
+    /// loudly rather than answering a smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The same, narrowed to one named scope — a Rust path, never a file.
+    fn found_in(needle: Needle, view: View, scope: Scope) -> Found {
+        source()
+            .search(&Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **Where the one occurrence of `needle` stands**, as a byte offset into
+    /// the union of this crate's sources.
     ///
-    /// Comment lines go first, so that a sentence naming a constructor can never
-    /// look like a call to it.
-    fn test_code_in(source: &str) -> String {
-        let lines: Vec<&str> = source
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect();
-        let mut collected = Vec::new();
-        let mut index = 0;
-        while index < lines.len() {
-            let opens_a_test_module = lines[index].trim() == concat!("#[cfg(", "test)]")
-                && lines
-                    .get(index + 1)
-                    .is_some_and(|line| line.trim_start().starts_with("mod "));
-            if !opens_a_test_module {
-                index += 1;
+    /// The three order gates below used to take `source.find(…)` over one
+    /// file's text; a union offset is the same fact said about the crate. Two
+    /// offsets are comparable for the reason §2.2 gives: the union is the files
+    /// laid out in path order with their boundaries recorded, and no match may
+    /// cross one, so two sites inside one file order exactly as that file does.
+    /// More than one match is a refusal and not a first: an order gate whose
+    /// landmark stopped being unique is asking about a place it cannot name.
+    fn only(needle: Needle, view: View, what: &str) -> usize {
+        let hits = found(needle, view);
+        assert_eq!(
+            hits.len(),
+            1,
+            "{what} has to stand exactly once for its place to mean anything\n{}",
+            hits.report(source())
+        );
+        hits.spans()[0].start()
+    }
+
+    /// Whether an identity is declared inside test code.
+    ///
+    /// **Item grain and not file grain.** Every test module in this crate is an
+    /// inline `#[cfg(test)] mod` inside a file the product compiles, so
+    /// `FileRecord::permits_product` answers "product" for all of them; the
+    /// predicate written on the enclosing inline module is what tells the two
+    /// halves of `lib.rs` apart, and it is carried on the identity (§2.4).
+    fn is_test_code(identity: &bt_source::ItemIdentity) -> bool {
+        identity
+            .variant
+            .predicates()
+            .iter()
+            .any(|predicate| predicate == "test")
+    }
+
+    /// **One module's own code, with every comment masked out and every space
+    /// taken out with them.**
+    ///
+    /// The replacement for the reading of this file's own text that this module
+    /// used to squeeze: a module is a Rust path and not a file, so the day this
+    /// crate's root is split the path still resolves, and the comment masking is
+    /// `View::CodeKeepingLiterals`' (§2.1) rather than a line filter's — which
+    /// is a repair, because the filter dropped whole `//` lines and left every
+    /// trailing one, so a sentence written after a semicolon could answer a
+    /// question about code.
+    ///
+    /// A module's bytes are contiguous inside one file, so nothing squeezed
+    /// here can match across a file boundary (§2.2 rule 3).
+    fn module_code_without_space(path: &str) -> String {
+        let index = source();
+        let module = index
+            .modules()
+            .iter()
+            .find(|module| module.module_paths().iter().any(|it| it == path))
+            .unwrap_or_else(|| panic!("this crate declares no module `{path}`"));
+        let span = module.span();
+        let mut code = String::with_capacity(span.len());
+        let mut at = span.start();
+        for comment in index.comments() {
+            if comment.span().start() < at || comment.span().end() > span.end() {
                 continue;
             }
-            index += 1;
-            let indent = indent_of(lines[index]);
-            let closing = format!("{}}}", " ".repeat(indent));
-            while index < lines.len() {
-                collected.push(lines[index]);
-                if lines[index] == closing {
-                    break;
-                }
-                index += 1;
-            }
-            index += 1;
+            code.extend(
+                index.union()[at..comment.span().start()]
+                    .chars()
+                    .filter(|character| !character.is_whitespace()),
+            );
+            at = comment.span().end();
         }
-        collected.join("\n")
+        code.extend(
+            index.union()[at..span.end()]
+                .chars()
+                .filter(|character| !character.is_whitespace()),
+        );
+        code
     }
 
-    /// The body of the item whose first line begins with `opening`, from that
-    /// line to the `}` at the same indent. Empty when there is no such item.
-    fn block_beginning_with(source: &str, opening: &str) -> String {
-        let lines: Vec<&str> = source.lines().collect();
-        let Some(start) = lines
-            .iter()
-            .position(|line| line.trim_start().starts_with(opening))
-        else {
-            return String::new();
-        };
-        let closing = format!("{}}}", " ".repeat(indent_of(lines[start])));
-        let end = lines[start..]
-            .iter()
-            .position(|line| *line == closing)
-            .map_or(lines.len(), |offset| start + offset + 1);
-        lines[start..end].join("\n")
-    }
-
-    fn indent_of(line: &str) -> usize {
-        line.len() - line.trim_start().len()
-    }
-
-    /// This crate's `src`, file by file.
-    fn crate_sources() -> Vec<(String, String)> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files: Vec<(String, String)> = std::fs::read_dir(&root)
-            .expect("this crate's src directory")
-            .map(|entry| entry.expect("a directory entry").path())
-            .filter(|path| path.extension().is_some_and(|kind| kind == "rs"))
-            .map(|path| {
-                let name = path
-                    .file_name()
-                    .expect("a file name")
-                    .to_string_lossy()
-                    .into_owned();
-                (name, std::fs::read_to_string(&path).expect("a source file"))
-            })
-            .collect();
-        files.sort();
-        files
+    /// **The evidence §3.2 asks a migrated walker to ship**, kept rather than
+    /// spent: the declared file set, printed in full, and the cross-check that
+    /// says the disk holds nothing the declarations do not reach.
+    ///
+    /// This is what the deleted directory listing meant by seeing the crate,
+    /// said about declarations instead of about a listing, and it is also what
+    /// makes a `.rs` file dropped into `src/` with no `mod` for it a red test
+    /// rather than a file every gate below silently skips.
+    #[test]
+    fn every_file_of_the_renderer_is_reached_by_a_declaration() {
+        let index = source();
+        // Printed, not only compared: §3.2 asks for the sorted list of paths
+        // and not a count, and `--nocapture` is where a ticket takes it from.
+        for file in index.files() {
+            println!("declared: {}", file.path().display());
+        }
+        assert!(
+            index.cross_check().agrees(),
+            "a `.rs` file under this crate's `src/` is reached by no \
+             declaration, so no gate below is read against it:\n{}",
+            index.cross_check().report()
+        );
+        assert!(
+            index.files().len() >= 12,
+            "the reading must actually see the crate, saw {}",
+            index.files().len()
+        );
     }
 
     /// PIN (§7.37) — **no test in this crate stands up a headless device except
@@ -21568,43 +21648,68 @@ mod tests {
             concat!("headless_", "on("),
             concat!("headless_under_a_", "texture_ceiling("),
         ];
-        let doorway = block_beginning_with(
-            &test_code_in(include_str!("lib.rs")),
-            concat!("fn headless_", "device("),
-        );
-        assert!(
-            !doorway.is_empty(),
-            "the one door has to exist before anything can be held to it"
-        );
-        assert_eq!(
-            doorway.matches(constructors[0]).count(),
-            1,
-            "the door asks for this machine's adapter exactly once"
-        );
-        assert_eq!(
-            doorway.matches(constructors[1]).count(),
-            1,
-            "and for the software adapter exactly once"
-        );
-        assert_eq!(
-            doorway.matches(constructors[3]).count(),
-            1,
-            "and for a device under a texture ceiling exactly once"
-        );
+        // The door is an item of this crate and not a stretch of this file
+        // (P8): a door moved into `src/headless/` is the same door, and the
+        // query refuses out loud rather than answering about no bytes at all.
+        let door = Scope::Item(ItemQuery::function(concat!("headless_", "device")));
+        for (which, what) in [
+            (0, "this machine's adapter"),
+            (1, "the software adapter"),
+            (3, "a device under a texture ceiling"),
+        ] {
+            let asked = found_in(
+                needle!(Pattern::text(constructors[which])),
+                View::CodeKeepingLiterals,
+                door.clone(),
+            )
+            .len();
+            assert_eq!(asked, 1, "the door asks for {what} exactly once");
+        }
 
-        for (name, source) in crate_sources() {
-            let outside_the_door = test_code_in(&source).replace(&doorway, "");
-            for constructor in constructors {
-                assert_eq!(
-                    outside_the_door.matches(constructor).count(),
-                    0,
-                    "{name}: a test stands up a headless device with \
-                     `{constructor}` instead of going through the one door — \
-                     that device takes no lock, and two unlocked devices in one \
-                     process is `STATUS_ACCESS_VIOLATION`"
-                );
+        // **The same claim as an owner set** (§4.1): every item that names one
+        // of the four constructors in test code, and how often. A total cannot
+        // say this — "no test builds a device" is a statement about *which*
+        // items name the constructors, and the door is one of them.
+        //
+        // **P8 reconciliation, written down rather than adjusted away** (§6.0
+        // rule 5). The walk this replaces took "test code" to be `#[cfg(test)]
+        // mod` blocks, which is how it is spelled in a file; this reading takes
+        // it to be the `#[cfg(test)]` an item stands under, wherever it is
+        // written (§2.4). The two disagree by one item, and it is a real one:
+        // `GpuContext::headless_under_a_texture_ceiling` is itself
+        // `#[cfg(test)]`, and the walk never looked inside it. Its two
+        // occurrences are its own declaration and the single call to the one
+        // real constructor that every one of these four makes — the plumbing
+        // the door stands on, not a test standing up a device. It is named
+        // here so that a second such helper is a red test rather than a number
+        // that grew.
+        let mut owners: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for constructor in constructors {
+            for (owner, count) in found(
+                needle!(Pattern::text(constructor)),
+                View::CodeKeepingLiterals,
+            )
+            .owners(source())
+            {
+                if is_test_code(&owner) {
+                    *owners.entry(owner.name.clone()).or_default() += count;
+                }
             }
         }
+        assert_eq!(
+            owners,
+            std::collections::BTreeMap::from([
+                (concat!("headless_", "device").to_owned(), 3),
+                (
+                    concat!("headless_under_a_", "texture_ceiling").to_owned(),
+                    2
+                ),
+            ]),
+            "a test stands up a headless device somewhere other than the one \
+             door — that device takes no lock, and two unlocked devices in one \
+             process is `STATUS_ACCESS_VIOLATION`"
+        );
     }
 
     /// PIN (§7.1.6c-4b) — the ground's two percentages are clamped where the
@@ -23171,18 +23276,17 @@ mod tests {
         );
     }
 
-    /// This file with every comment line and every space taken out — the shape
-    /// of what it *does*, so that a sentence about a rule can never satisfy the
-    /// test that guards the rule.
-    fn source_without_prose() -> String {
-        include_str!("lib.rs")
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect()
+    /// **This crate's root module with every comment masked out and every space
+    /// taken out** — the shape of what it *does*, so that a sentence about a
+    /// rule can never satisfy the test that guards the rule.
+    ///
+    /// Asked of the module path `crate` and not read off `lib.rs` (P8), so the
+    /// binding survives a split of this file, and masked by
+    /// `View::CodeKeepingLiterals`' rule rather than by a line filter's.
+    /// Squeezed once per process: nine gates below ask for it.
+    fn source_without_prose() -> &'static str {
+        static SQUEEZED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        SQUEEZED.get_or_init(|| module_code_without_space("crate"))
     }
 
     /// The same, with this file's own tests cut off the end.
@@ -23191,12 +23295,12 @@ mod tests {
     /// checked against production code alone: a gate that says "there is one
     /// exit" and searches the whole file counts the two string literals in its
     /// own body and reports three.
-    fn production_source() -> String {
+    fn production_source() -> &'static str {
         let source = source_without_prose();
         let tests = source
             .find(concat!("#[cfg(", "test)]modtests{"))
             .expect("this file's own test module");
-        source[..tests].to_owned()
+        &source[..tests]
     }
 
     /// PIN (§7.36) — **a window has one glyphon `Viewport`, and every batch of
@@ -24580,16 +24684,17 @@ mod tests {
              level — and the one `TextRenderer::new` a new overlay level needs, all naming \
              `gpu.atlas` and nothing else"
         );
-        let context = block_beginning_with(include_str!("lib.rs"), "pub struct GpuContext {");
-        assert!(
-            !context.is_empty(),
-            "the device context has to exist before anything can be held to it"
-        );
-        assert_eq!(
-            context.matches("TextAtlas").count(),
-            1,
-            "one device context, one atlas"
-        );
+        // The type, not the lines under a signature (P8), and a refusal rather
+        // than an empty string when it is not declared. Its bytes begin at its
+        // first attribute, so the reading masks comments and keeps literals:
+        // the prose over this struct names its atlas twice.
+        let atlases = found_in(
+            needle!(Pattern::text("TextAtlas")),
+            View::CodeKeepingLiterals,
+            Scope::Item(ItemQuery::type_item("GpuContext")),
+        )
+        .len();
+        assert_eq!(atlases, 1, "one device context, one atlas");
     }
 
     /// RED — **a label nobody can see does not cast its bitmaps**
@@ -25062,27 +25167,40 @@ mod tests {
             0,
             "the re-pack counter is bumped somewhere that is not the line that reports it"
         );
-        let minting = block_beginning_with(
-            include_str!("lib.rs"),
-            concat!("fn note_a_", "repack(refits: &mut u64)"),
-        );
-        assert!(
-            minting.contains("*refits += 1;"),
-            "the one place that counts a re-pack has to be the one that names it: {minting}"
-        );
-        let closing = block_beginning_with(
-            include_str!("lib.rs"),
-            concat!("fn close_the_", "frame(&mut self,"),
-        );
+        // Both are items of this crate and not lines of this file (P8): the
+        // counter and the sentence stay one statement wherever the two
+        // functions are written.
+        let mint = Scope::Item(ItemQuery::function(concat!("note_a_", "repack")));
+        let close = Scope::Item(ItemQuery::method(
+            "GpuContext",
+            concat!("close_the_", "frame"),
+        ));
+        let counted = found_in(
+            needle!(Pattern::text("*refits += 1;")),
+            View::CodeKeepingLiterals,
+            mint.clone(),
+        )
+        .len();
+        let sentences = found_in(
+            needle!(Pattern::text("format!(")),
+            View::CodeKeepingLiterals,
+            mint,
+        )
+        .len();
+        let spent = found_in(
+            needle!(Pattern::text(concat!("note_a_", "repack("))),
+            View::CodeKeepingLiterals,
+            close,
+        )
+        .len();
         assert_eq!(
-            minting.matches("format!(").count(),
-            1,
-            "one sentence, built once"
+            counted, 1,
+            "the one place that counts a re-pack has to be the one that names it"
         );
+        assert_eq!(sentences, 1, "one sentence, built once");
         assert_eq!(
-            closing.matches(concat!("note_a_", "repack(")).count(),
-            1,
-            "the frame's closing verb spends the pair exactly once: {closing}"
+            spent, 1,
+            "the frame's closing verb spends the pair exactly once"
         );
     }
 
@@ -27675,28 +27793,39 @@ mod tests {
     /// the picture is painted straight back over the selection.
     #[test]
     fn the_wash_is_struck_over_the_picture_and_under_the_blocks_own_chrome() {
-        let source: String = include_str!("lib.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        let wash = source
-            .find(concat!("self.math_selection_wash_", "rectangles(frame);"))
-            .expect("the wash's own list");
-        let chrome = source
-            .find(concat!(
+        // Four places in this crate's sources rather than four offsets into
+        // this file (P8). Each landmark is required to be unique rather than
+        // taken first: an order gate whose landmark stopped being the only one
+        // of itself is asking about a place it cannot name.
+        let wash = only(
+            needle!(Pattern::text(concat!(
+                "self.math_selection_wash_",
+                "rectangles(frame);"
+            ))),
+            View::Raw,
+            "the wash's own list",
+        );
+        let chrome = only(
+            needle!(Pattern::text(concat!(
                 "math_overlays.extend(self.math_overlay_",
                 "rectangles(frame));"
-            ))
-            .expect("the block's chrome joining the same list");
-        let tiles = source
-            .find(concat!("fordrawin&seat.", "math_draws{"))
-            .expect("the seat's math tile draws");
-        let overlay = source
-            .find(concat!(
-                "pass.draw(0..6,0..seat.",
-                "math_overlay_countasu32);"
-            ))
-            .expect("the overlay buffer's draw");
+            ))),
+            View::Raw,
+            "the block's chrome joining the same list",
+        );
+        let tiles = only(
+            needle!(Pattern::text(concat!("for draw in &seat.", "math_draws {"))),
+            View::Raw,
+            "the seat's math tile draws",
+        );
+        let overlay = only(
+            needle!(Pattern::text(concat!(
+                "pass.draw(0..6, 0..seat.",
+                "math_overlay_count as u32);"
+            ))),
+            View::Raw,
+            "the overlay buffer's draw",
+        );
         assert!(
             wash < chrome,
             "the wash goes in first, so the fades and the buttons stand over it"
@@ -28791,6 +28920,9 @@ mod tests {
     /// The web preview block's slice ①: the hole a hosted page is seen through.
     mod web_holes {
         use super::super::*;
+        use bt_source::{Pattern, View, needle};
+
+        use super::only;
 
         /// PIN — **a hole is the absence of the window, whatever colour is
         /// handed in.**
@@ -28843,28 +28975,39 @@ mod tests {
         /// that issues them.
         #[test]
         fn the_hole_is_drawn_over_the_seat_and_under_everything_over_the_window() {
-            let source: String = include_str!("lib.rs")
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect();
-            let hole = source
-                .find(concat!(
-                    "pass.set_vertex_buffer(0,",
-                    "buffer.slice(..));pass.draw(0..6,0..web_hole_rects"
-                ))
-                .expect("the hole draw");
-            let body = source
-                .find(concat!("pass.draw(0..6,0..", "preview_body_rects.len()"))
-                .expect("the preview body draw");
-            let peek = source
-                .find(concat!("pass.draw(0..6,0..", "peek_rects.len()"))
-                .expect("the peek flyout draw");
-            let overlay = source
-                .find(concat!(
+            // Four places in this crate's sources, each required to be the only
+            // one of itself (P8). The hole's landmark is the draw's own count
+            // rather than the two statements the squeezed file reading could
+            // join across a line break: `web_hole_rects` is named once.
+            let hole = only(
+                needle!(Pattern::text(concat!("0..web_hole_", "rects"))),
+                View::Raw,
+                "the hole draw",
+            );
+            let body = only(
+                needle!(Pattern::text(concat!(
+                    "pass.draw(0..6, 0..",
+                    "preview_body_rects.len()"
+                ))),
+                View::Raw,
+                "the preview body draw",
+            );
+            let peek = only(
+                needle!(Pattern::text(concat!(
+                    "pass.draw(0..6, 0..",
+                    "peek_rects.len()"
+                ))),
+                View::Raw,
+                "the peek flyout draw",
+            );
+            let overlay = only(
+                needle!(Pattern::text(concat!(
                     "pass.set_pipeline(&gpu.",
                     "ground_fade_rect_pipeline);"
-                ))
-                .expect("the overlay's own grounds");
+                ))),
+                View::Raw,
+                "the overlay's own grounds",
+            );
             assert!(body < hole, "the hole covers the seat's own body");
             assert!(hole < peek, "a floating window covers the hole");
             assert!(hole < overlay, "a scrim covers the hole");
@@ -28900,22 +29043,40 @@ mod tests {
         ///    every hole is back to being punched under the whole stack.
         #[test]
         fn a_layers_own_hole_is_punched_after_the_face_that_layer_draws() {
-            let source: String = include_str!("lib.rs")
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect();
-            let ground = source
-                .find(concat!("pass.draw(0..6,0..", "layer.ground_count"))
-                .expect("the overlay layer's ground draw");
-            let rects = source
-                .find(concat!("pass.draw(0..6,0..", "layer.rect_count"))
-                .expect("the overlay layer's fill draw");
-            let hole = source
-                .find(concat!("pass.draw(0..6,0..", "layer.hole_count"))
-                .expect("the overlay layer's hole draw");
-            let loop_ = source
-                .find("for(index,layer)inoverlay_draws.iter().enumerate()")
-                .expect("the overlay stack's own loop");
+            // Four places in this crate's sources, each required to be the only
+            // one of itself (P8).
+            let ground = only(
+                needle!(Pattern::text(concat!(
+                    "pass.draw(0..6, 0..",
+                    "layer.ground_count"
+                ))),
+                View::Raw,
+                "the overlay layer's ground draw",
+            );
+            let rects = only(
+                needle!(Pattern::text(concat!(
+                    "pass.draw(0..6, 0..",
+                    "layer.rect_count"
+                ))),
+                View::Raw,
+                "the overlay layer's fill draw",
+            );
+            let hole = only(
+                needle!(Pattern::text(concat!(
+                    "pass.draw(0..6, 0..",
+                    "layer.hole_count"
+                ))),
+                View::Raw,
+                "the overlay layer's hole draw",
+            );
+            let loop_ = only(
+                needle!(Pattern::text(concat!(
+                    "for (index, layer) in ",
+                    "overlay_draws.iter().enumerate()"
+                ))),
+                View::Raw,
+                "the overlay stack's own loop",
+            );
             assert!(
                 ground < hole,
                 "a layer's ground is painted over its own hole"

@@ -40,6 +40,22 @@
 # disturbed_by_2a: the census's own answer, from the `impact` column of the pins
 # TSV. It is not a prediction that the reader will turn red — see §5 of
 # `bt-app-split-inventory-2026-09-21.md`, which is about exactly that confusion.
+#
+# subject: the census's lexical output — the names a reader's own literals
+# spell. **A name is not a resolution**, and one row is on record as the proof:
+# `uninstall_tests::uninstall_source_guard_pins_known_writers_and_inventory`'s
+# `add_to_profile` is `shell_integration.rs`'s free function, which that
+# reader's `syn` walk really does parse, and not `Runtime::add_to_profile`,
+# which it has never read. The package declares the name twice and the
+# generator answered with the first one in `main.rs`. It refuses on the
+# collision now (`scripts/dev/bt-app-split-freshness.py`, P11 dry run
+# 2026-09-22) rather than picking, and the row's `disturbed_by_2a` is `no` on
+# that reading: neither `shell_integration::add_to_profile` nor `main.rs`'s free
+# `install_panic_log_hook` is a `Runtime` method, and Step 2a moves neither. The
+# cell still says `yes` because `scripts/ci/check-migration-debt.ps1` compares
+# rows whole — correcting one is an added row, and this list only shrinks. The
+# correction lives here, where the header is not compared, until the ticket that
+# may remove the row carries it.
 file	owner	mechanism	subject	ticket	disturbed_by_2a
 crates/bt-app/src/animation.rs	animation::tests::a_declared_screen_this_window_will_not_hold_is_refused_before_it_is_allocated	include_str!	open	P14	no
 crates/bt-app/src/animation.rs	animation::tests::a_gif_past_the_encoded_cap_is_not_read_whole	include_str!	decode;file_source	P14	no
@@ -110,34 +126,13 @@ crates/bt-app/src/file_reads_doors.txt	git.rs: drain: .read_to_end	ledger key na
 crates/bt-app/src/file_reads_doors.txt	git_watch.rs: sync_with: open	ledger key naming a file	sync_with (1 site(s), open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	hang_watch.rs: append_healed: .open	ledger key naming a file	append_healed (1 site(s), .open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	main.rs: append_panic_report: .open	ledger key naming a file	append_panic_report (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: commit_web_page: .open	ledger key naming a file	commit_web_page (1 site(s), .open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: create: GpuContext::open	ledger key naming a file	create (1 site(s), GpuContext::open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: create: persist::KeybindingsStore::open	ledger key naming a file	create (1 site(s), persist::KeybindingsStore::open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: create: persist::ProfilesStore::open	ledger key naming a file	create (1 site(s), persist::ProfilesStore::open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: create: persist::SessionStore::open	ledger key naming a file	create (1 site(s), persist::SessionStore::open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: create: persist::SettingsStore::open	ledger key naming a file	create (1 site(s), persist::SettingsStore::open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: create: pins::PinsStore::open	ledger key naming a file	create (1 site(s), pins::PinsStore::open)	P6	yes
 crates/bt-app/src/file_reads_doors.txt	main.rs: create_leaf_session: .output	ledger key naming a file	create_leaf_session (1 site(s), .output)	P16	no
 crates/bt-app/src/file_reads_doors.txt	main.rs: dump_chrome_frame: .open	ledger key naming a file	dump_chrome_frame (1 site(s), .open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	main.rs: dump_overlay_frame: .open	ledger key naming a file	dump_overlay_frame (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: land_page_source_on: .open	ledger key naming a file	land_page_source_on (1 site(s), .open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: land_preview_source_on: .open	ledger key naming a file	land_preview_source_on (1 site(s), .open)	P6	yes
 crates/bt-app/src/file_reads_doors.txt	main.rs: new_window_runtime: .open	ledger key naming a file	new_window_runtime (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: open_rename: TabRename::open	ledger key naming a file	open_rename (1 site(s), TabRename::open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: open_search: .open	ledger key naming a file	open_search (1 site(s), .open)	P6	yes
 crates/bt-app/src/file_reads_doors.txt	main.rs: open_the_data_directorys_endpoints: attention_wire::open	ledger key naming a file	open_the_data_directorys_endpoints (1 site(s), attention_wire::open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	main.rs: open_the_data_directorys_endpoints: launch_wire::open	ledger key naming a file	open_the_data_directorys_endpoints (1 site(s), launch_wire::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: open_web_page_on: webhost::WebSeat::open	ledger key naming a file	open_web_page_on (1 site(s), webhost::WebSeat::open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: place_float: .open	ledger key naming a file	place_float (1 site(s), .open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: play_video_file_on: .open	ledger key naming a file	play_video_file_on (1 site(s), .open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: pop_out_preview: .open	ledger key naming a file	pop_out_preview (1 site(s), .open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: promote_file_peek: .open	ledger key naming a file	promote_file_peek (1 site(s), .open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: raise_dirty_gate: .open	ledger key naming a file	raise_dirty_gate (1 site(s), .open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: raise_first_run_if_due: .open	ledger key naming a file	raise_first_run_if_due (1 site(s), .open)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: raise_psreadline_invite_if_due: .open	ledger key naming a file	raise_psreadline_invite_if_due (1 site(s), .open)	P6	yes
 crates/bt-app/src/file_reads_doors.txt	main.rs: say_at_the_front_door: persist::SettingsStore::open	ledger key naming a file	say_at_the_front_door (1 site(s), persist::SettingsStore::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: settings_layout: .read	ledger key naming a file	settings_layout (1 site(s), .read)	P6	yes
-crates/bt-app/src/file_reads_doors.txt	main.rs: turn: .open	ledger key naming a file	turn (1 site(s), .open)	P6	yes
 crates/bt-app/src/file_reads_doors.txt	pdf.rs: count_pages: .read	ledger key naming a file	count_pages (1 site(s), .read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	pdf.rs: read_capped: .read_to_end	ledger key naming a file	read_capped (1 site(s), .read_to_end)	P16	no
 crates/bt-app/src/file_reads_doors.txt	persist.rs: open: SessionWriter::open	ledger key naming a file	open (1 site(s), SessionWriter::open)	P16	no
@@ -265,8 +260,6 @@ crates/bt-app/src/webhost.rs	webhost::machine_tests::the_host_asks_its_own_gate_
 crates/bt-app/src/webhost.rs	webhost::refusal_card_tests::the_engine_is_only_ever_told_what_the_door_answered	include_str!	webhost.rs	P14	no
 crates/bt-app/src/webnav.rs	webnav::file_url_tests::no_file_url_is_compared_as_text	directory walk	(the file it reads)	P13	yes
 crates/bt-app/src/wsl.rs	wsl::tests::nothing_in_this_module_boots_a_distribution	runtime fs read	(the file it reads)	P14	no
-crates/bt-layout/tests/red_lines.rs	sources	dir walk	bt-layout/src, NON-recursive (plan 3.3, latent)	P8	no
-crates/bt-layout/tests/red_lines.rs	the_solver_uses_no_floating_point	dir walk	f32/f64 in the solver	P8	no
 crates/bt-platform/src/app_delegate.rs	tests::PROVIDER	include_str!	macos_services.rs	P14	no
 crates/bt-platform/src/hang.rs	tests::SOURCE	include_str!	hang.rs	P14	no
 crates/bt-platform/src/ime_observation.rs	tests::ime_observation_reads_only_the_supplied_window	include_str!	ime_observation.rs	P14	no
@@ -335,16 +328,6 @@ crates/bt-platform/src/msix.rs	tests::every_deployment_this_module_makes_announc
 crates/bt-platform/src/webview.rs	third_door_shape_tests::DOOR	include_str!	macos_webview.rs	P14	no
 crates/bt-pty/src/lib.rs	tests::SOURCE	include_str!	lib.rs	P14	no
 crates/bt-pty/src/lib.rs	tests::input_dump_off_write_path_has_only_the_option_gate	include_str!	lib.rs	P14	no
-crates/bt-render/src/lib.rs	tests::crate_sources	dir walk	bt-render/src, NON-recursive (plan 3.3, latent)	P8	no
-crates/bt-render/src/lib.rs	tests::every_chip_the_renderer_floats_over_a_body_is_struck_from_the_palette	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::every_headless_device_in_a_test_is_taken_through_the_lock	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::every_lane_prepares_into_the_one_shared_atlas	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::nothing_but_the_line_may_count_a_repack	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::source_without_prose	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::the_band_accessors_are_given_a_seat_and_never_take_one	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::the_wash_is_struck_over_the_picture_and_under_the_blocks_own_chrome	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	web_holes::a_layers_own_hole_is_punched_after_the_face_that_layer_draws	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	web_holes::the_hole_is_drawn_over_the_seat_and_under_everything_over_the_window	include_str!	lib.rs	P8	no
 crates/bt-term/tests/shell_integration_cmd.rs	shell_integration_source	runtime fs read	../../crates/bt-app/src/shell_integration.rs	P17	no
 crates/bt-term/tests/shell_integration_wsl.rs	shell_integration_source	runtime fs read	../../crates/bt-app/src/shell_integration.rs	P17	no
 scripts/check-adapter-boundary.ps1	the file list at the head of the script	script: named file list	crates/bt-term/src/adapter.rs;crates/bt-term/src/cell_capture.rs	P17	no
