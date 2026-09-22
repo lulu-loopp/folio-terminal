@@ -129460,8 +129460,135 @@ mod field_command_tests {
 
 #[cfg(test)]
 mod clipboard_path_tests {
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Nine readers here asked `main.rs` for its text; this commit adds the
+    // reading that asks `bt-source` about an *item* of this crate and asserts
+    // the two agree on today's tree, and the commit after it deletes the older
+    // of the two. The pattern is [`super::pty_drain_budget_tests`]' — its header
+    // states the six points and this module copies them rather than restating
+    // them.
+    //
+    // One thing that module's header warned about is true here, and it is why
+    // this module carries a helper none of the earlier batches needed. Every
+    // count below used to be taken over a **text prefix of this file** ending at
+    // this module's own `mod` line, so what it excluded was the test modules
+    // written under it — and five of these eleven spellings are written a second
+    // time in this module's own assertions. A file-grained "in the product"
+    // counts those, because an inline `#[cfg(test)] mod` lives in a file the
+    // product compiles. `in_product_items` is the same question asked at item
+    // grain, which §2.4's identity can answer because it carries the predicates
+    // written on an enclosing inline `mod`.
     use super::*;
     use bt_platform::clipboard::{Candidate, ClipboardPort, ClipboardTypes};
+
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+
+    // ── what this module asks the crate instead ───────────────────────────
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// How many of these occurrences stand in code a product build compiles —
+    /// **at item grain**, which is this module's own decision and not the
+    /// pilot's.
+    ///
+    /// `pty_drain_budget_tests::in_product` asks the same question of the
+    /// *file*, and says in its header that an inline `#[cfg(test)] mod` inside a
+    /// product file counts as product, and that the next batch may not be so
+    /// lucky. This is that batch: the spellings counted below are written a
+    /// second time in this module's own assertions, and `needle!` excludes one
+    /// construction expression rather than every mention. §2.4's identity
+    /// carries the `cfg` predicates written on an enclosing inline `mod`, so the
+    /// exclusion the old text prefix performed by accident is a filter over the
+    /// owners here.
+    ///
+    /// An occurrence in no callable at all is not a question this grain can
+    /// answer, so it is refused rather than quietly dropped.
+    fn in_product_items(found: &Found) -> usize {
+        let index = source();
+        assert_eq!(
+            found.outside_items(index),
+            0,
+            "an occurrence stands in no callable, so nothing here says whether \
+             the product compiles it:\n{}",
+            found.report(index)
+        );
+        found
+            .owners(index)
+            .into_iter()
+            .filter(|(identity, _)| {
+                !identity
+                    .variant
+                    .predicates()
+                    .iter()
+                    .any(|predicate| predicate == "test")
+            })
+            .map(|(_, count)| count)
+            .sum()
+    }
+
+    // ── P3's equivalence commit: the two readings, asserted to agree ──────
+
+    /// **The crate's body is these bytes of this file's slice.**
+    ///
+    /// The slice starts after the signature it was handed, so the crate's answer
+    /// stands inside it once, with nothing but the rest of the signature — no
+    /// opening brace — before it.
+    fn same_body(old: &str, new: &str, what: &str) {
+        let at = old.find(new).unwrap_or_else(|| {
+            panic!("`{what}`: the crate's body is not bytes of this file's slice")
+        });
+        assert_eq!(
+            old.rfind(new),
+            Some(at),
+            "`{what}`: the crate's body stands twice inside this file's slice"
+        );
+        assert!(
+            !old[..at].contains('{'),
+            "`{what}`: this file's slice had already opened a brace before the body the crate \
+             returned, so the two readings are not reading one item"
+        );
+    }
+
+    /// One [`method_text`] pin's two readings, asserted to agree.
+    ///
+    /// This module's finder stops **before** the `\n    }` that closes the
+    /// method, so the crate's body carries six bytes this file's slice does not
+    /// and everything else has to be the same bytes.
+    fn same_method_text(old: &str, owner: &str, name: &str) {
+        let body = method_body(owner, name);
+        let inside = body.strip_suffix("\n    }").unwrap_or_else(|| {
+            panic!("`{name}`: the crate's body is not closed at the `impl`'s own indentation")
+        });
+        same_body(old, inside, name);
+    }
 
     struct MemoryClipboard {
         files: Vec<PathBuf>,
@@ -129722,6 +129849,19 @@ mod clipboard_path_tests {
                 .count(),
             1
         );
+        // P3 equivalence. The prefix of this file stopped where this module
+        // begins; the crate counts every file it declares and takes the test
+        // modules back out at item grain.
+        assert_eq!(
+            in_product_items(&found(
+                needle!(Pattern::text("bt_platform::clipboard_payload()")),
+                View::Raw
+            )),
+            before_this_fixture
+                .matches("bt_platform::clipboard_payload()")
+                .count(),
+            "the two readings disagree about how many places read the board"
+        );
         let paste = source
             .split_once("    fn paste_from_clipboard_into(")
             .unwrap()
@@ -129729,6 +129869,16 @@ mod clipboard_path_tests {
             .split_once("    /// A composition event")
             .unwrap()
             .0;
+        // P3 equivalence. This slice is not one item: it runs from the
+        // signature to a doc comment eighteen thousand bytes below the brace
+        // that closes the method, so the two negatives under it were being
+        // asked of fifteen neighbouring methods as well. The crate's body is
+        // the method and nothing else.
+        same_body(
+            paste,
+            method_body("Runtime", "paste_from_clipboard_into"),
+            "paste_from_clipboard_into",
+        );
         assert!(paste.contains("bt_platform::clipboard_payload()"));
         assert!(paste.contains("hang_watch::Station::ClipboardRead"));
         assert!(paste.contains("leaf.paste_recipient.clone()"));
@@ -129741,6 +129891,12 @@ mod clipboard_path_tests {
             .split_once("    // ── the floating window")
             .unwrap()
             .0;
+        // P3 equivalence.
+        same_body(
+            k144,
+            method_body("Runtime", "insert_path_into_terminal"),
+            "insert_path_into_terminal",
+        );
         assert!(k144.contains("shell_literal::paths_text("));
         assert!(k144.contains("set_files_keyboard(None"));
         assert!(k144.contains("self.seats.set_focus(seat)"));
@@ -129929,6 +130085,14 @@ mod clipboard_path_tests {
                 1,
                 "`{once}` — {what}"
             );
+            // P3 equivalence. Six of these nine spellings are written a second
+            // time in this module's own assertions, which is what
+            // `in_product_items` takes back out.
+            assert_eq!(
+                in_product_items(&found(needle!(Pattern::text(once)), View::Raw)),
+                before_this_fixture.matches(once).count(),
+                "`{once}` — the two readings disagree"
+            );
         }
         let arm = before_this_fixture
             .split_once("            WindowEvent::DroppedFile(path) => {")
@@ -129937,6 +130101,21 @@ mod clipboard_path_tests {
             .split_once("            WindowEvent::Resized(size)")
             .expect("and the arm is closed by the one after it")
             .0;
+        // P3 equivalence. An arm is not an item; the item it stands in is
+        // `window_event`, which `FolioApp` reaches through winit's own trait.
+        assert_eq!(
+            arm,
+            item_body(
+                &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler")
+            )
+            .split_once("            WindowEvent::DroppedFile(path) => {")
+            .expect("the dispatcher answers a dropped file")
+            .1
+            .split_once("            WindowEvent::Resized(size)")
+            .expect("and the arm is closed by the one after it")
+            .0,
+            "the two readings cut a different arm out of the dispatcher"
+        );
         assert!(
             !arm.contains("paste"),
             "the arm collects; pasting from it would be one command line per file"
@@ -129954,9 +130133,22 @@ mod clipboard_path_tests {
             "the platform's cursor is read by the file that opens an external \
              drop and by the release of an internal one, and by nothing else"
         );
+        // P3 equivalence. This one is spelled three more times in this module.
+        assert_eq!(
+            in_product_items(&found(
+                needle!(Pattern::text("self.platform_pointer_now()")),
+                View::Raw
+            )),
+            before_this_fixture
+                .matches("self.platform_pointer_now()")
+                .count(),
+            "the two readings disagree about who reads the platform's cursor"
+        );
         // **The reading is on the arrival road and on no other** (X-10). The
         // collector is what the drop's arm calls.
         let collecting = method_text(before_this_fixture, "    fn collect_dropped_file(");
+        // P3 equivalence.
+        same_method_text(collecting, "Runtime", "collect_dropped_file");
         assert!(
             collecting.contains("self.paste_target(seat)"),
             "the file that opens a drop no longer names the shell it was aimed at, \
@@ -129969,6 +130161,8 @@ mod clipboard_path_tests {
              so the point is taken later than the release:\n{collecting}"
         );
         let flushing = method_text(before_this_fixture, "    fn flush_dropped_files(");
+        // P3 equivalence.
+        same_method_text(flushing, "Runtime", "flush_dropped_files");
         // **The focus and the raise are behind the write's own answer, and both
         // are inside the one function that spends a whole batch** (owner's
         // ruling 2026-09-17). Three files let go of together are one drop, so
@@ -130090,6 +130284,8 @@ mod clipboard_path_tests {
         let source = include_str!("main.rs");
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         let commit = method_text(before_this_fixture, "    fn commit_layout_drop(");
+        // P3 equivalence.
+        same_method_text(commit, "Runtime", "commit_layout_drop");
         for (once, what) in [
             (
                 "RowVerb::Refused => return Ok(false),",
@@ -130171,6 +130367,8 @@ mod clipboard_path_tests {
         // constructible here, so which calls stand in this function is what says
         // that the release does not simply believe the drag.
         let kept = method_text(before_this_fixture, "    fn paste_offer_kept(");
+        // P3 equivalence.
+        same_method_text(kept, "Runtime", "paste_offer_kept");
         for (once, what) in [
             (
                 "self.platform_pointer_now()?",
@@ -130214,6 +130412,8 @@ mod clipboard_path_tests {
         // move that drew the box, not recomputed at the release — two readings
         // of one function at two moments is the entire mechanism.
         let driving = method_text(before_this_fixture, "    fn drive_drag(");
+        // P3 equivalence.
+        same_method_text(driving, "Runtime", "drive_drag");
         assert!(
             driving.contains("drag.paste_offer = self.paste_offer_at(drag.landing);"),
             "the box's promise is no longer recorded where the box is decided, so \
@@ -130485,6 +130685,8 @@ mod clipboard_path_tests {
             before_this_fixture,
             "    fn focus_the_pane_a_path_landed_in(",
         );
+        // P3 equivalence.
+        same_method_text(door, "Runtime", "focus_the_pane_a_path_landed_in");
         for (call, what) in [
             (
                 "self.set_files_keyboard(None, FilesFocusArrival::Pointer)",
@@ -130551,6 +130753,13 @@ mod clipboard_path_tests {
         let source = include_str!("main.rs");
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         let deliver = method_text(before_this_fixture, "    fn deliver_paste(");
+        // P3 equivalence.
+        same_method_text(deliver, "Runtime", "deliver_paste");
+        same_method_text(
+            method_text(before_this_fixture, "    fn insert_path_into_terminal("),
+            "Runtime",
+            "insert_path_into_terminal",
+        );
         assert!(
             deliver.contains("offer_pty_input(pty.as_ref(), bytes, context)")
                 && deliver.contains("Ok(landed.queued())"),
@@ -130600,6 +130809,8 @@ mod clipboard_path_tests {
         let source = include_str!("main.rs");
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         let door = method_text(before_this_fixture, "    fn take_keyboard_into(");
+        // P3 equivalence.
+        same_method_text(door, "Runtime", "take_keyboard_into");
         assert!(
             door.contains("self.cancel_composition(ImeOwner::Shell, \"take_keyboard_into\")?;"),
             "the keyboard moves between two shells without ending the \
@@ -130611,8 +130822,13 @@ mod clipboard_path_tests {
             "the composition is settled after the keyboard has already moved, \
              which is the same defect one line later:\n{door}"
         );
-        for road in ["    fn focus_pane_at(", "    fn focus_seat("] {
+        for (road, name) in [
+            ("    fn focus_pane_at(", "focus_pane_at"),
+            ("    fn focus_seat(", "focus_seat"),
+        ] {
             let text = method_text(before_this_fixture, road);
+            // P3 equivalence.
+            same_method_text(text, "Runtime", name);
             assert!(
                 text.contains("self.take_keyboard_into(seat)?;"),
                 "`{road}` no longer moves the keyboard through the door the \
@@ -130802,6 +131018,13 @@ mod clipboard_path_tests {
         let source = include_str!("main.rs");
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         let door = method_text(before_this_fixture, "    fn ime_input(");
+        // P3 equivalence.
+        same_method_text(door, "Runtime", "ime_input");
+        same_method_text(
+            method_text(before_this_fixture, "    fn cancel_composition("),
+            "Runtime",
+            "cancel_composition",
+        );
         assert_eq!(
             door.matches("self.window.composing_in = ").count(),
             1,
@@ -130914,6 +131137,8 @@ mod clipboard_path_tests {
         let source = include_str!("main.rs");
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         let door = method_text(before_this_fixture, "    fn ime_input(");
+        // P3 equivalence.
+        same_method_text(door, "Runtime", "ime_input");
         let (ruled, routed) = (
             door.find("composition_ruling(&self.window.composing_in"),
             door.find("match ime_owner(self.keyboard_owner())"),
@@ -130953,6 +131178,8 @@ mod clipboard_path_tests {
         let source = include_str!("main.rs");
         let before_this_fixture = source.split_once("mod clipboard_path_tests {").unwrap().0;
         let door = method_text(before_this_fixture, "    fn take_keyboard_into(");
+        // P3 equivalence.
+        same_method_text(door, "Runtime", "take_keyboard_into");
         assert!(
             door.contains("self.sessions.contains_key(&seat) && self.focused_leaf != seat"),
             "the door no longer asks whether the keyboard is actually moving, so \
