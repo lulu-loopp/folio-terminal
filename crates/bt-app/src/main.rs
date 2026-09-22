@@ -34643,33 +34643,34 @@ impl MenuPaint {
 /// auto-scroll was left behind in a function the spring had already left.
 #[cfg(test)]
 mod drag_autoscroll_wiring_tests {
-    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
-    // commit after this one deletes the older of the two. `source` and `found`
-    // are `pty_drain_budget_tests`' helpers word for word, `reader_names` is
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // The one reader here asked `main.rs` for its text and named the method a
+    // call stands in by searching backwards for the nearest `\n    fn `, which
+    // answers with the *previous* method for any occurrence that does not stand
+    // in a method's own body. It now asks `bt-source` which item each occurrence
+    // really stands in, over this package, so no fact in this module is bound to
+    // the file it happens to be written in today. The commit before this one ran
+    // both readings side by side and asserted they agree; this is the one that
+    // deletes the older of the two, because two implementations of one judgement
+    // do not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source` and `found` are that module's helpers word for word and its header
+    // is where the six points behind them live; `reader_names` is
     // `arrival_wiring_tests`'.
+    //
+    // **The scope is the package rather than this file**, and it costs nothing
+    // today: each of the four calls is spelled exactly once in everything
+    // `bt-app` compiles. It is the package because the claim — that the edge
+    // scroll is advanced from the pass that advances the spring — is about the
+    // program, and after the move the two calls need not be written in the same
+    // file for it to be true.
+    //
+    // **One owner, established rather than assumed:** all four calls stand in
+    // `Runtime::turn`. The needles are still assembled rather than written out;
+    // `needle!` excludes the expression that built one, and the halves are P18's
+    // ticket rather than this batch's.
     use bt_source::{Found, Index, Needle, Search, View, needle};
-
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// Which method holds the first call spelled `needle`.
-    ///
-    /// The needles are assembled rather than written out, for
-    /// `nothing_but_the_paint_and_the_frame_clock_reads_the_register`'s reason:
-    /// a literal here would be a call site of its own as far as a search over
-    /// this very file is concerned.
-    fn holder(needle: &str) -> &'static str {
-        let at = SOURCE
-            .find(needle)
-            .unwrap_or_else(|| panic!("`{needle}` is nowhere in this window"));
-        let head = SOURCE[..at]
-            .rfind("\n    fn ")
-            .expect("every call site is inside a method");
-        SOURCE[head + "\n    fn ".len()..]
-            .split('(')
-            .next()
-            .expect("a method's name ends at its parameter list")
-    }
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -34702,22 +34703,15 @@ mod drag_autoscroll_wiring_tests {
     /// RED GATE — the tick runs where the spring's tick runs, and the deadline
     /// stands in the wake set the spring's deadline stands in.
     ///
-    /// Mutation: delete either call and the `expect` inside [`holder`] names the
-    /// one that went; move either to a function of its own — a "drag pass", say
-    /// — and the two halves stop agreeing, which is exactly the drift this gate
-    /// exists to catch, because a clock the loop is not asked about is a clock
-    /// that never fires.
+    /// Mutation: delete either call and the search finds nothing and the two
+    /// halves stop agreeing; move either to a function of its own — a "drag
+    /// pass", say — and they stop agreeing again, which is exactly the drift this
+    /// gate exists to catch, because a clock the loop is not asked about is a
+    /// clock that never fires.
     #[test]
     fn the_auto_scroll_turns_on_the_clock_the_spring_turns_on() {
         let tick =
             |name: &str| reader_names(&found(needle!(format!("self.{name}(now)")), View::Raw));
-        for name in ["service_drag_autoscroll", "advance_drag_spring"] {
-            assert_eq!(
-                vec![holder(&format!("self.{name}(now)")).to_owned()],
-                tick(name),
-                "the two readings of `{name}`'s holder disagree"
-            );
-        }
         assert_eq!(
             tick("service_drag_autoscroll"),
             tick("advance_drag_spring"),
@@ -34725,26 +34719,15 @@ mod drag_autoscroll_wiring_tests {
              spring: both fire under a hand that has stopped moving, which is \
              the one thing a pointer-driven path cannot do"
         );
-        let autoscroll_deadline = reader_names(&found(
-            needle!(format!("self.{}(now),", "drag_autoscroll_deadline")),
-            View::Raw,
-        ));
-        let spring_deadline = reader_names(&found(
-            needle!(format!("self.{}(),", "drag_spring_deadline")),
-            View::Raw,
-        ));
         assert_eq!(
-            vec![holder(&format!("self.{}(now),", "drag_autoscroll_deadline")).to_owned()],
-            autoscroll_deadline,
-            "the two readings of the auto-scroll deadline's holder disagree"
-        );
-        assert_eq!(
-            vec![holder(&format!("self.{}(),", "drag_spring_deadline")).to_owned()],
-            spring_deadline,
-            "the two readings of the spring deadline's holder disagree"
-        );
-        assert_eq!(
-            autoscroll_deadline, spring_deadline,
+            reader_names(&found(
+                needle!(format!("self.{}(now),", "drag_autoscroll_deadline")),
+                View::Raw
+            )),
+            reader_names(&found(
+                needle!(format!("self.{}(),", "drag_spring_deadline")),
+                View::Raw
+            )),
             "and it has to be in the same wake set: a deadline nobody folds in \
              is a frame the loop sleeps through"
         );
