@@ -15445,14 +15445,18 @@ mod tab_identity_tests {
     // what is between them; the equivalence commit established that every
     // assertion here falls inside it, all twenty-five and not a sample.
     //
-    // **Two scopes widen, decided here rather than inherited (§4.1).** The
+    // **One scope widens, decided here rather than inherited (§4.1).** The
     // retired transfer probe's three names were forbidden in this file and are
     // forbidden in every file this package compiles, because a probe standing in
-    // any of them is the same second door onto the transaction. The per-window
-    // tab counter was read out of the text of three structs and is now asked for
-    // as an **identifier** over the whole package: `bt-source` indexes callable
-    // items, so a struct's fields are not an identity it can be asked for, and
-    // this is the one reading in this module that could not stay type-scoped.
+    // any of them is the same second door onto the transaction. The other
+    // widening has since been given back: the per-window tab counter is two
+    // halves, and only one of them is about the package. The half that says the
+    // application keeps the counter names a **field of `App`** — §2.4's identity
+    // rule reaches a type's members now, so that half is type-scoped, and it is
+    // narrower than the three structs of text it was read out of before. The
+    // half that says no *window* keeps one is a claim about a name nobody
+    // declares, which no type can be asked, so it stays an **identifier** search
+    // over the whole package.
     use super::*;
 
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
@@ -15484,6 +15488,14 @@ mod tab_identity_tests {
     /// The body of one free function of this crate.
     fn free_fn_body(name: &str) -> &'static str {
         item_body(&ItemQuery::function(name))
+    }
+
+    /// The declaration of one field of `owner`, attributes included — the
+    /// identity of §2.4 rather than a line of this file.
+    fn field_declaration(owner: &str, name: &str) -> &'static str {
+        source()
+            .declaration_of(&ItemQuery::field(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// One search over the whole crate, refusing loudly rather than answering a
@@ -15808,13 +15820,13 @@ mod tab_identity_tests {
     /// opened.
     #[test]
     fn no_window_keeps_a_tab_counter_of_its_own() {
-        // The one reading in this module the crate cannot keep type-scoped:
-        // `bt-source` indexes callable items, so a struct's fields are not an
-        // identity it can be asked for, and both halves widen from the text of
-        // three structs in this file to every file this package compiles
-        // (§4.1). The name is asked for as an **identifier**, which is what a
-        // field is: the spelling standing in the two doc comments that tell this
-        // story is not a counter, and nothing written in prose can answer this.
+        // The negative half, and the one reading in this module that stays
+        // package-wide: a counter no window keeps is a claim about a name
+        // nobody declares, so there is no type to ask it of and the universe is
+        // every file this package compiles (§4.1). The name is asked for as an
+        // **identifier**, which is what a counter is: the spelling standing in
+        // the two doc comments that tell this story is not a counter, and
+        // nothing written in prose can answer this.
         let counter = found(
             needle!(Pattern::identifier("next_tab_id")),
             View::Identifiers,
@@ -15825,13 +15837,16 @@ mod tab_identity_tests {
              window — nor the parts one is assembled from — mints one again\n{}",
             counter.report(source())
         );
+        // The positive half is type-scoped (§2.4): the counter that replaced it
+        // is a *field of `App`* and is asked for as one, so the query refuses —
+        // loudly, rather than answering a smaller question — if `App` is not
+        // declared, if it carries no `tab_ids`, or if it carries one in only
+        // some of its `#[cfg]` arms. Moving the field to another struct is the
+        // second of those.
+        let application = field_declaration("App", "tab_ids");
         assert!(
-            !found(
-                needle!(Pattern::text("tab_ids: TabIds")),
-                View::CodeKeepingLiterals
-            )
-            .is_empty(),
-            "and the one that replaced it is the application's"
+            application.ends_with("tab_ids: TabIds"),
+            "and the one that replaced it is the application's:\n{application}"
         );
     }
 
