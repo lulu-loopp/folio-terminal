@@ -109305,6 +109305,15 @@ mod hold_station_tests {
 /// true.
 #[cfg(test)]
 mod files_locate_door_tests {
+    // **P3's second batch** (`docs/plans/bt-app-split-prep.md` §6.3). Every
+    // reader below asked `main.rs` for its text; this commit adds the reading
+    // that asks `bt-source` about an *item* of this crate and asserts the two
+    // agree on today's tree, and the commit after it deletes the older of the
+    // two. The pattern is [`super::pty_drain_budget_tests`]' — its header states
+    // the six points and this module copies them rather than restating them.
+
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -109317,6 +109326,80 @@ mod files_locate_door_tests {
         let rest = &SOURCE[start + signature.len()..];
         let end = rest.find("\n    fn ").unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    // ── what this module asks the crate instead ───────────────────────────
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    // ── P3's equivalence commit: the two readings, asserted to agree ──────
+
+    /// **The crate's body is these bytes of this file's slice.**
+    ///
+    /// [`body`] starts after the signature it was handed and stops before the
+    /// next method's own `fn`, so it holds the tail of the signature, the
+    /// braces, and whatever stands between this item and the next one — a doc
+    /// comment included, which is why one reader below trims one off.
+    /// [`Index::body_of`] returns the braces and everything between them. So the
+    /// crate's answer stands inside this file's slice, once, with nothing but
+    /// the rest of the signature — no opening brace — before it.
+    fn same_body(old: &str, new: &str, what: &str) {
+        let at = old.find(new).unwrap_or_else(|| {
+            panic!("`{what}`: the crate's body is not bytes of this file's slice")
+        });
+        assert_eq!(
+            old.rfind(new),
+            Some(at),
+            "`{what}`: the crate's body stands twice inside this file's slice"
+        );
+        assert!(
+            !old[..at].contains('{'),
+            "`{what}`: this file's slice had already opened a brace before the body the crate \
+             returned, so the two readings are not reading one item"
+        );
+    }
+
+    /// One method pin's two readings, asserted to agree.
+    fn same_method_body(signature: &str, owner: &str, name: &str) {
+        same_body(body(signature), method_body(owner, name), name);
+    }
+
+    /// One free function pin's two readings, asserted to agree.
+    fn same_free_fn_body(signature: &str, name: &str) {
+        same_body(body(signature), free_fn_body(name), name);
     }
 
     /// RED — **trying to edit a read-only page floats the reason for two
@@ -109341,6 +109424,21 @@ mod files_locate_door_tests {
     ///    since `3af60fa`, and offers it before anything else the pill can say.
     #[test]
     fn trying_to_edit_a_read_only_page_floats_the_reason_for_two_seconds_with_a_way_out() {
+        // P3 equivalence: this file's slice and the crate's body, for each of
+        // the six identities this pin reads.
+        for (signature, name) in [
+            ("    fn press_preview_body(", "press_preview_body"),
+            ("    fn preview_browse_key(", "preview_browse_key"),
+            ("    fn refuse_preview_edit(", "refuse_preview_edit"),
+            (
+                "    fn turn(&mut self, now: Instant, application_clocks: bool)",
+                "turn",
+            ),
+            ("    fn preview_pill_say(", "preview_pill_say"),
+            ("    fn press_notice(", "press_notice"),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
         // ① The press. The gate is `preview_edit_body`, and the refusal is
         // raised in the arm that gate sends a read-only body down.
         let press = body("    fn press_preview_body(");
@@ -109426,6 +109524,19 @@ mod files_locate_door_tests {
     /// opened its debt over.
     #[test]
     fn an_animation_refusal_is_a_lock_with_its_reason() {
+        // P3 equivalence. The tip's text is a free function of this crate and
+        // not a method, which is why this pin's signature carries no indent.
+        for (signature, name) in [
+            ("    fn preview_standing_fact(", "preview_standing_fact"),
+            ("    fn dress_preview_rail(", "dress_preview_rail"),
+            (
+                "    fn preview_rail_tip_anchors(",
+                "preview_rail_tip_anchors",
+            ),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
+        same_free_fn_body("fn preview_rail_tip_text(", "preview_rail_tip_text");
         let fact = body("    fn preview_standing_fact(");
         assert!(
             fact.contains("self.animation_refusal_notice(surface)"),
@@ -109471,6 +109582,24 @@ mod files_locate_door_tests {
     /// missed starts fading.
     #[test]
     fn the_disk_change_pill_stays_until_acted_on_and_a_save_confirmation_expires() {
+        // P3 equivalence.
+        for (signature, name) in [
+            ("    fn preview_pill_say(", "preview_pill_say"),
+            ("    fn close_pane_notice(", "close_pane_notice"),
+            (
+                "    fn reload_preview_from_disk(",
+                "reload_preview_from_disk",
+            ),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
+        // And the trim at the end of this test is exactly [`body`]'s overshoot:
+        // `read_only_notice` stands in the doc comment of the *next* item, which
+        // this file's slice runs into and the crate's body stops before.
+        assert!(
+            !method_body("Runtime", "preview_pill_say").contains("\n    ///"),
+            "P3 equivalence: the crate's body carries none of the doc comment the trim cuts off"
+        );
         let say = body("    fn preview_pill_say(");
         assert!(
             say.contains("if let Some(state) = self.preview_disk_notice_on(surface) {")
@@ -109533,6 +109662,14 @@ mod files_locate_door_tests {
     /// list of its own — to admit or to refuse.
     #[test]
     fn one_predicate_says_whether_a_card_has_a_window_to_become() {
+        // P3 equivalence.
+        for (signature, name) in [
+            ("    fn press_file_peek(", "press_file_peek"),
+            ("    fn file_peek_head_grasp(", "file_peek_head_grasp"),
+            ("    fn file_peek_promotes(", "file_peek_promotes"),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
         // Assembled, so the pin cannot match its own text.
         let asks = ["file_peek", "_promotes()"].concat();
         for signature in ["    fn press_file_peek(", "    fn file_peek_head_grasp("] {
@@ -109576,6 +109713,20 @@ mod files_locate_door_tests {
     ///    is a chassis with no page, which is a placeholder.
     #[test]
     fn an_html_card_torn_out_carries_the_engine_the_pop_out_button_gives() {
+        // P3 equivalence.
+        for (signature, name) in [
+            ("    fn file_peek_promotes(", "file_peek_promotes"),
+            (
+                "    fn open_preview_web_file_on(",
+                "open_preview_web_file_on",
+            ),
+            (
+                "    fn open_minted_page_on_float(",
+                "open_minted_page_on_float",
+            ),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
         // ① The card promotes a page: the refusal arm is gone.
         assert!(
             !body("    fn file_peek_promotes(").contains("path_opens_as_a_page"),
@@ -109630,6 +109781,13 @@ mod files_locate_door_tests {
     /// stands on top of it — the build the user photographed.
     #[test]
     fn a_reference_under_a_float_is_not_hovered_through_it() {
+        // P3 equivalence.
+        for (signature, name) in [
+            ("    fn pane_hit_context(", "pane_hit_context"),
+            ("    fn pointer_over_a_float(", "pointer_over_a_float"),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
         let context = body("    fn pane_hit_context(");
         assert!(
             context.contains("if self.pointer_over_a_float(position)")
@@ -109666,6 +109824,15 @@ mod files_locate_door_tests {
     ///    over.
     #[test]
     fn a_file_nobody_previews_wears_the_same_card_in_a_float_as_in_a_pane() {
+        // P3 equivalence.
+        for (signature, name) in [
+            ("    fn preview_float_layer(", "preview_float_layer"),
+            ("    fn push_float_refusal_card(", "push_float_refusal_card"),
+            ("    fn float_hit_at(", "float_hit_at"),
+            ("    fn press_float(", "press_float"),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
         let layer = body("    fn preview_float_layer(");
         // **Through the window's own card door** since the owner's ruling of
         // 2026-09-12, which gave the picture lane a card as well: the two arms
@@ -109725,6 +109892,22 @@ mod files_locate_door_tests {
     ///    two hosts spend one verb rather than two implementations of it.
     #[test]
     fn a_document_in_a_float_says_what_the_disk_did_the_way_a_pane_does() {
+        // P3 equivalence, for each of the seven identities this pin reads.
+        for (signature, name) in [
+            ("    fn settle_pane_notices(", "settle_pane_notices"),
+            ("    fn notice_layers(", "notice_layers"),
+            ("    fn float_head_tools(", "float_head_tools"),
+            ("    fn float_notice_layer(", "float_notice_layer"),
+            ("    fn float_layer(", "float_layer"),
+            ("    fn mouse_input(", "mouse_input"),
+            ("    fn close_pane_notice(", "close_pane_notice"),
+            (
+                "    fn reload_preview_from_disk(",
+                "reload_preview_from_disk",
+            ),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
         // ① Both registers of what exists, in the one settle. A second settler
         // for the window half would be a second answer to "who is wearing this".
         let settle = body("    fn settle_pane_notices(");
@@ -109810,6 +109993,14 @@ mod files_locate_door_tests {
     /// float's rendered document stops selecting while a docked one still does.
     #[test]
     fn a_document_in_a_float_selects_the_way_it_does_in_a_pane() {
+        // P3 equivalence.
+        for (signature, name) in [
+            ("    fn press_float(", "press_float"),
+            ("    fn chrome_mouse_input(", "chrome_mouse_input"),
+            ("    fn drag_preview_text(", "drag_preview_text"),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
         // One selection path, reached from both hosts — the float's press and the
         // docked router's — so the window and the pane cannot come to select
         // differently.
@@ -109857,6 +110048,13 @@ mod files_locate_door_tests {
     /// 2026-08-28 was built from.
     #[test]
     fn a_player_in_a_float_answers_the_hand_the_way_a_pane_does() {
+        // P3 equivalence.
+        for (signature, name) in [
+            ("    fn press_float(", "press_float"),
+            ("    fn chrome_mouse_input(", "chrome_mouse_input"),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
         for signature in ["    fn press_float(", "    fn chrome_mouse_input("] {
             assert!(
                 body(signature).contains("self.press_video_at(position)"),
@@ -109915,6 +110113,8 @@ mod files_locate_door_tests {
     /// the state every build before 2026-08-28 was in.
     #[test]
     fn a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does() {
+        // P3 equivalence.
+        same_method_body("    fn press_file_peek(", "Runtime", "press_file_peek");
         let press = body("    fn press_file_peek(");
         assert!(
             press.contains("self.press_video_at(position)"),
@@ -109966,6 +110166,12 @@ mod files_locate_door_tests {
     /// the binary photographed on 2026-08-28 was built from.
     #[test]
     fn a_card_withdraws_its_still_for_a_recording_the_way_it_does_for_an_animation() {
+        // P3 equivalence.
+        same_method_body(
+            "    fn file_peek_card_layers(",
+            "Runtime",
+            "file_peek_card_layers",
+        );
         let layers = body("    fn file_peek_card_layers(");
         let clause = layers
             .find("let moving = ")
@@ -110029,6 +110235,13 @@ mod files_locate_door_tests {
     /// host fails.
     #[test]
     fn a_recording_on_an_overlay_host_is_drawn_into_a_layer_of_its_own() {
+        // P3 equivalence.
+        for (signature, name) in [
+            ("    fn float_layer(", "float_layer"),
+            ("    fn file_peek_layer(", "file_peek_layer"),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
         for (signature, ledger) in [
             ("    fn float_layer(", ".float_video_level"),
             (
@@ -110099,6 +110312,8 @@ mod files_locate_door_tests {
     #[test]
     fn a_closed_window_stops_the_recording_it_was_showing() {
         use crate::{TabId, float};
+        // P3 equivalence.
+        same_method_body("    fn sweep_video_seats(", "Runtime", "sweep_video_seats");
         // ① a dismissed window is still drawn, and no longer live.
         let mut host = float::FloatHost::default();
         let now = std::time::Instant::now();
@@ -110155,6 +110370,17 @@ mod files_locate_door_tests {
     /// "helpfully follow the file" change somebody will one day want to make.
     #[test]
     fn opening_a_file_never_moves_the_files_tree() {
+        // P3 equivalence, for each of the six doors this pin reads.
+        for (signature, name) in [
+            ("    fn open_preview(", "open_preview"),
+            ("    fn open_preview_at(", "open_preview_at"),
+            ("    fn open_preview_file(", "open_preview_file"),
+            ("    fn open_preview_file_on(", "open_preview_file_on"),
+            ("    fn open_preview_source_on(", "open_preview_source_on"),
+            ("    fn activate_files_row(", "activate_files_row"),
+        ] {
+            same_method_body(signature, "Runtime", name);
+        }
         // Assembled rather than written out, so a pin that scans the file it
         // lives in cannot match its own text.
         let verbs = [
@@ -110198,11 +110424,32 @@ mod files_locate_door_tests {
     fn re_rooting_is_reached_only_after_the_question_about_range() {
         let hard = ["self.show_folder", "_in_files_column("].concat();
         let soft = ["    fn locate_folder", "_in_files_column("].concat();
+        // P3 equivalence. The body pin first, then the count: this file's lines
+        // that hold the hard verb and the crate's occurrences of it are the same
+        // number. The scope widens from this file to every file `bt-app`
+        // declares, which is the migration's own decision (§4.1) — both
+        // readings answer 2, and the crate is the one that will still be right
+        // when the caller moves to a file beside this one.
+        same_method_body(soft.as_str(), "Runtime", "locate_folder_in_files_column");
+        let crate_calls = found(needle!(Pattern::text(hard.as_str())), View::Raw);
         let calls: Vec<&str> = SOURCE
             .lines()
             .map(str::trim)
             .filter(|line| line.contains(hard.as_str()))
             .collect();
+        assert_eq!(
+            crate_calls.len(),
+            calls.len(),
+            "P3 equivalence: this file's lines and the crate's occurrences do not agree on how \
+             often the hard verb is called"
+        );
+        assert_eq!(
+            method_body("Runtime", "locate_folder_in_files_column")
+                .matches(hard.as_str())
+                .count(),
+            body(soft.as_str()).matches(hard.as_str()).count(),
+            "P3 equivalence: the two readings of the soft verb's own body do not agree"
+        );
         assert_eq!(
             calls.len(),
             2,
