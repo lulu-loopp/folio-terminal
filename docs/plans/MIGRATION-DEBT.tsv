@@ -285,7 +285,6 @@ crates/bt-app/src/schemes.rs	schemes::tests::the_default_is_looked_up_canvas_fir
 crates/bt-app/src/schemes.rs	schemes::tests::the_user_files_list_is_the_folder_and_only_the_folder	include_str!	../../../assets/schemes/dracula.json;../../../assets/schemes/folio-dark.json;../../../assets/schemes/folio-light.json;../../../assets/schemes/gruvbox-dark.json;../../../assets/schemes/gruvbox-light.json;../../../assets/schemes/nord.json;../../../assets/schemes/one-half-dark.json;../../../assets/schemes/one-half-light.json;../../../assets/schemes/solarized-dark.json;../../../assets/schemes/solarized-light.json	P14	no
 crates/bt-app/src/seats.rs	seats::reveal_tests::a_tab_handover_moves_colour_and_never_geometry	include_str!	tab_strip_geometry	P14	no
 crates/bt-app/src/seats.rs	seats::reveal_tests::the_hit_test_never_asks_how_faded_a_control_is	include_str!	seats.rs	P14	no
-crates/bt-app/src/seats.rs	seats::tests::a_head_stays_lit_while_the_float_it_raised_is_open	include_str!	head_run;head_that_raised_a_layer	P3	yes
 crates/bt-app/src/seats.rs	seats::tests::one_function_draws_every_inline_name_editors_caret	include_str!	seats.rs	P14	no
 crates/bt-app/src/seats.rs	seats::tests::one_ladder_says_where_every_surfaces_badge_docks	include_str!	seats.rs	P14	no
 crates/bt-app/src/seats.rs	seats::tests::one_predicate_says_which_trailing_controls_a_tab_wears	include_str!	seats.rs	P14	no
