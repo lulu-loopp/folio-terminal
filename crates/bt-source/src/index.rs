@@ -36,6 +36,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::declarations::Compilation;
 use crate::enumerate::{FileOwner, FileSetDiff};
 use crate::reject::Rejection;
 use crate::universe::Universe;
@@ -255,13 +256,30 @@ impl ItemKind {
 /// [`crate::DeclarationStep::predicates`] gives: a query is about what the code
 /// says.
 ///
-/// The predicates are those written **inside the file**, outermost first — on an
-/// enclosing inline `mod`, on the `impl` block, and on the item itself. The
-/// predicates on the declarations that reach the file are a property of the path
-/// to the file and live on [`FileRecord::owners`].
-#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// **Two stretches of source decide an item's arm, and both are in here** when
+/// the variant is one of [`ItemIdentity`]'s: the predicates written on the
+/// declarations that *reach* the file ([`DeclarationPath::predicates`]),
+/// outermost first, and then the ones written **inside** it — on an enclosing
+/// inline `mod`, on the `impl` block, and on the item itself.
+/// `#[cfg(test)] mod t;` and `#[cfg(test)] mod t { … }` are the same statement
+/// written two ways (§2.3), so an item in `t.rs` stands on `test` exactly as one
+/// written between the braces does. [`ItemRecord::variant`] is the second half
+/// alone, because that half is the same whichever path reaches the file.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConditionalVariant {
     pub(crate) predicates: Vec<String>,
+    pub(crate) compilation: Compilation,
+}
+
+impl Default for ConditionalVariant {
+    /// Unconditional: nothing is written on it, and nothing about `test` keeps
+    /// it out of a product build.
+    fn default() -> Self {
+        Self {
+            predicates: Vec::new(),
+            compilation: Compilation::AlwaysInProduct,
+        }
+    }
 }
 
 impl ConditionalVariant {
@@ -273,6 +291,25 @@ impl ConditionalVariant {
     #[must_use]
     pub fn is_unconditional(&self) -> bool {
         self.predicates.is_empty()
+    }
+
+    /// What the conjunction of these predicates says about a product build.
+    ///
+    /// **Three-valued and read once** (§2.3): the answer comes from the same
+    /// evaluation of the same attribute the enumeration made, so
+    /// `all(test, windows)` is out of the product and `any(test, windows)` is
+    /// not — neither of which a comparison against the spelling `"test"` can
+    /// tell apart.
+    #[must_use]
+    pub const fn compilation(&self) -> Compilation {
+        self.compilation
+    }
+
+    /// Whether a build of the shipped program can contain an item standing on
+    /// this arm.
+    #[must_use]
+    pub const fn permits_product(&self) -> bool {
+        self.compilation.permits_product()
     }
 }
 
@@ -309,6 +346,9 @@ pub struct ItemIdentity {
     pub trait_name: Option<String>,
     pub name: String,
     pub kind: ItemKind,
+    /// **Everything this declaration stands on**: the predicates on the `mod`
+    /// declarations that reach its file, then the ones written inside it. See
+    /// [`ConditionalVariant`].
     pub variant: ConditionalVariant,
 }
 
@@ -329,18 +369,66 @@ impl fmt::Display for ItemIdentity {
     }
 }
 
+/// **One way a declaration reaches an item**: the module path it is named by
+/// along that path, and what the declarations on the way say about it (§2.3).
+///
+/// The path is the file's ([`FileRecord::owners`]) with the item's inline
+/// ancestry appended, and the predicates are the `cfg` spellings standing on the
+/// `mod` declarations of that path, outermost first. A file reached both ways
+/// has one of these per path, so the same bytes answer to two identities — one
+/// gated and one not — which is a fact about the tree and not a duplication.
+///
+/// **This is the half of an item's conditional variant that a reading bound to
+/// the file's text cannot see.** `#[cfg(test)] mod t;` writes nothing in `t.rs`,
+/// and an identity that carried only what `t.rs` says would call every item in
+/// it unconditional.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeclarationPath {
+    pub(crate) module_path: String,
+    pub(crate) predicates: Vec<String>,
+    pub(crate) compilation: Compilation,
+}
+
+impl DeclarationPath {
+    /// `crate`, `crate::twin`, `crate::gate::plain_again` — the ownership path
+    /// of §2.3, inline ancestry included.
+    #[must_use]
+    pub fn module_path(&self) -> &str {
+        &self.module_path
+    }
+
+    /// The `cfg` spellings standing on the declarations of this path, outermost
+    /// first, byte for byte as they are written.
+    #[must_use]
+    pub fn predicates(&self) -> &[String] {
+        &self.predicates
+    }
+
+    /// What this path says about a product build — the target's own kind
+    /// included, which no predicate spells.
+    #[must_use]
+    pub const fn compilation(&self) -> Compilation {
+        self.compilation
+    }
+}
+
 /// One item, lowered: who it is, and where its bytes are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemRecord {
     pub(crate) file: usize,
-    /// One per owning declaration path of the file (§2.3). A file reached both
-    /// ways has two module paths and therefore two identities for the same
-    /// bytes; that is a fact about the tree and not a duplication.
-    pub(crate) module_paths: Vec<String>,
+    /// One per owning declaration path of the file (§2.3), each with this item's
+    /// inline ancestry appended. A file reached both ways has two of these and
+    /// therefore two identities for the same bytes; that is a fact about the
+    /// tree and not a duplication.
+    pub(crate) declared: Vec<DeclarationPath>,
     pub(crate) type_owner: Option<String>,
     pub(crate) trait_name: Option<String>,
     pub(crate) name: String,
     pub(crate) kind: ItemKind,
+    /// The arm written **inside the file**, which is the same whichever
+    /// declaration path reaches it. The whole arm — the reaching declarations'
+    /// predicates in front of these — is on each of
+    /// [`ItemRecord::identities`]'s identities.
     pub(crate) variant: ConditionalVariant,
     /// Everything from the first attribute to the closing brace or semicolon —
     /// and, for a field or a variant, **up to and excluding the comma after it**,
@@ -375,14 +463,31 @@ impl ItemRecord {
         self.kind
     }
 
+    /// The arm written **inside the file**: the predicates on an enclosing
+    /// inline `mod`, on the `impl` block and on the item itself.
+    ///
+    /// **This is half of what an item stands on.** The other half is written on
+    /// the declarations that reach the file, is different for each path that
+    /// does, and is therefore on the identity rather than here — see
+    /// [`ItemRecord::identities`] and [`DeclarationPath`].
     #[must_use]
     pub const fn variant(&self) -> &ConditionalVariant {
         &self.variant
     }
 
+    /// Every declaration path that names this item, in module-path order.
     #[must_use]
-    pub fn module_paths(&self) -> &[String] {
-        &self.module_paths
+    pub fn declaration_paths(&self) -> &[DeclarationPath] {
+        &self.declared
+    }
+
+    /// The module paths this item answers to, one per declaration path.
+    #[must_use]
+    pub fn module_paths(&self) -> Vec<&str> {
+        self.declared
+            .iter()
+            .map(|path| path.module_path.as_str())
+            .collect()
     }
 
     #[must_use]
@@ -414,15 +519,32 @@ impl ItemRecord {
         }
     }
 
-    /// Every identity these bytes answer to — one per owning module path.
+    /// Every identity these bytes answer to — one per declaration path that
+    /// reaches them.
+    ///
+    /// **The variant is the whole of what the item stands on**: the predicates
+    /// written on the declarations of that path, then the ones written inside
+    /// the file. The two halves are one statement said in two places (§2.3), so
+    /// an item in a file reached by `#[cfg(test)] mod t;` stands on `test` just
+    /// as one written inside `#[cfg(test)] mod t { … }` does — and a reading
+    /// that kept only the second half would call it unconditional while the
+    /// difference stayed invisible at the call site.
     pub fn identities(&self) -> impl Iterator<Item = ItemIdentity> + '_ {
-        self.module_paths.iter().map(|module_path| ItemIdentity {
-            module_path: module_path.clone(),
+        self.declared.iter().map(|path| ItemIdentity {
+            module_path: path.module_path.clone(),
             type_owner: self.type_owner.clone(),
             trait_name: self.trait_name.clone(),
             name: self.name.clone(),
             kind: self.kind,
-            variant: self.variant.clone(),
+            variant: ConditionalVariant {
+                predicates: path
+                    .predicates
+                    .iter()
+                    .chain(&self.variant.predicates)
+                    .cloned()
+                    .collect(),
+                compilation: path.compilation.and(self.variant.compilation),
+            },
         })
     }
 }
@@ -937,12 +1059,12 @@ impl Index {
         }
         total += self.items.capacity() * size_of::<ItemRecord>();
         for item in &self.items {
-            total += item.module_paths.capacity() * size_of::<String>();
-            total += item
-                .module_paths
-                .iter()
-                .map(String::capacity)
-                .sum::<usize>();
+            total += item.declared.capacity() * size_of::<DeclarationPath>();
+            for path in &item.declared {
+                total += path.module_path.capacity();
+                total += path.predicates.capacity() * size_of::<String>();
+                total += path.predicates.iter().map(String::capacity).sum::<usize>();
+            }
             total += item.type_owner.as_ref().map_or(0, String::capacity);
             total += item.trait_name.as_ref().map_or(0, String::capacity);
             total += item.name.capacity();

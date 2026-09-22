@@ -603,6 +603,14 @@ impl ItemQuery {
 
     /// Narrow to one conditional arm, by the `cfg` spellings standing on it —
     /// the other way to make one of the eleven a unique identity.
+    ///
+    /// **The spellings written inside the file** ([`ItemRecord::variant`]): an
+    /// arm is a thing one file declares twice, and the predicates on the
+    /// declarations that *reach* the file stand on every item in it alike, so
+    /// they never tell two of them apart. They are on the identity
+    /// ([`ItemIdentity::variant`]) and are narrowed by
+    /// [`ItemQuery::in_module`], which is the component of §2.4's tuple that
+    /// does vary with the path.
     #[must_use]
     pub fn in_variant(mut self, predicates: &[&str]) -> Self {
         self.variant = Some(predicates.iter().map(|it| (*it).to_owned()).collect());
@@ -664,12 +672,10 @@ impl ItemQuery {
                 .trait_name()
                 .is_some_and(|actual| actual == wanted || bare_trait(actual) == wanted),
         };
-        let module = self.module_path.as_ref().is_none_or(|wanted| {
-            record
-                .module_paths()
-                .iter()
-                .any(|path| path.as_str() == wanted.as_str())
-        });
+        let module = self
+            .module_path
+            .as_ref()
+            .is_none_or(|wanted| record.module_paths().contains(&wanted.as_str()));
         let variant = self
             .variant
             .as_ref()

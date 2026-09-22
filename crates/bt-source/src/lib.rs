@@ -110,9 +110,10 @@ pub mod universes;
 pub use declarations::{Compilation, DeclarationStep, ModuleBody, ReachedModule};
 pub use enumerate::{Enumeration, FileFacts, FileOwner, FileSetDiff, Unreached, enumerate};
 pub use index::{
-    Certainty, CommentKind, CommentRecord, ConditionalVariant, FileRecord, Index, ItemIdentity,
-    ItemKind, ItemRecord, LiteralRecord, LiteralValue, Location, MacroKind, MacroRecord,
-    MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord, UnsupportedMacroShape,
+    Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord, Index,
+    ItemIdentity, ItemKind, ItemRecord, LiteralRecord, LiteralValue, Location, MacroKind,
+    MacroRecord, MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord,
+    UnsupportedMacroShape,
 };
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};

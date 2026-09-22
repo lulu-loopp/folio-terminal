@@ -203,6 +203,26 @@ fn the_lowering_leaves_nothing_of_the_universe_behind() {
         *by_kind.entry(format!("{:?}", item.kind())).or_default() += 1;
     }
     println!("bt-app items by kind: {by_kind:?}");
+
+    // **What §2.3 adds to §2.4, counted on the real tree.** The second number is
+    // the items whose own file writes a gate on them; the first is the items
+    // that stand on one at all, the declarations that reach their file
+    // included. The difference is what an identity built from a file's own text
+    // could not see.
+    let out_of_the_product = index
+        .items()
+        .iter()
+        .filter(|item| !item.identities().any(|it| it.variant.permits_product()))
+        .count();
+    let written_in_the_file = index
+        .items()
+        .iter()
+        .filter(|item| !item.variant().permits_product())
+        .count();
+    println!(
+        "bt-app items no product build contains: {out_of_the_product}, of which \
+         {written_in_the_file} say so in their own file"
+    );
     println!(
         "bt-app: {} files, {} lines, {} bytes, {} items, {} identifier tokens, {} literals, \
          {} comment masks",
@@ -477,6 +497,143 @@ fn identity_separates_an_inherent_method_from_a_trait_one() {
     );
 }
 
+// ── what the declaration that reaches a file stands on ────────────────────
+
+fn declaration_variant_fixture() -> Arc<Index> {
+    Index::shared(&fixture_universe("declaration_variant")).expect("the fixture lowers")
+}
+
+/// Every identity the items called `name` answer to, printed.
+fn identities_of(index: &Index, name: &str) -> Vec<String> {
+    index
+        .items()
+        .iter()
+        .filter(|record| record.name() == name)
+        .flat_map(|record| record.identities())
+        .map(|identity| identity.to_string())
+        .collect()
+}
+
+/// RED — **a `#[cfg]` written on the declaration that reaches a file stands on
+/// every item in that file**, exactly as one written on an inline `mod` does
+/// (§2.3 into §2.4).
+///
+/// `#[cfg(test)] mod t;` and `#[cfg(test)] mod t { … }` are the same statement
+/// written two ways. The inline spelling pushes its predicates onto the walk's
+/// own stack and always has; the out-of-line one writes nothing in `t.rs` at
+/// all, so an identity built from that file's text alone called every item in it
+/// unconditional — and the difference was invisible at the call site, which is
+/// what made it worth a ticket rather than a note.
+///
+/// MUTATION: build the identities from the file's text alone and the three
+/// gated rows lose their `#[cfg(test)]` while the inline row keeps it — which
+/// is the tree as it read before this.
+#[test]
+fn a_declaration_that_reaches_a_file_stands_on_every_item_in_it() {
+    let index = declaration_variant_fixture();
+
+    assert_eq!(
+        identities_of(&index, "reached_by_a_gate"),
+        ["crate::gate::reached_by_a_gate #[cfg(test)]"],
+        "`#[cfg(test)] mod gate;` is written in lib.rs and stands on gate.rs"
+    );
+    assert_eq!(
+        identities_of(&index, "reached_by_a_path"),
+        ["crate::by_path::reached_by_a_path #[cfg(test)]"],
+        "a `#[path]` declaration carries its gate the same way"
+    );
+    assert_eq!(
+        identities_of(&index, "inside_the_braces"),
+        ["crate::inline_gate::inside_the_braces #[cfg(test)]"],
+        "the inline spelling of the same statement"
+    );
+    assert_eq!(
+        identities_of(&index, "at_the_root"),
+        ["crate::at_the_root"],
+        "nothing stands on the crate root"
+    );
+
+    // **The two halves are kept apart and joined in one order**: what the
+    // declarations outside the file write, then what the file writes itself.
+    assert_eq!(
+        identities_of(&index, "gated_twice"),
+        ["crate::gate::gated_twice #[cfg(test)]#[cfg(windows)]"]
+    );
+    let gated_twice = index
+        .one(&ItemQuery::function("gated_twice").in_module("crate::gate"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        gated_twice.variant().predicates(),
+        ["windows"],
+        "the record's own variant is the half written inside the file, which is \
+         what `in_variant` narrows by"
+    );
+    assert_eq!(
+        gated_twice.declaration_paths()[0].predicates(),
+        ["test"],
+        "and the other half is on the path that reaches it"
+    );
+}
+
+/// RED — **a file reached two ways answers to two identities, and the gate is
+/// on one of them** (§2.3: reachability is a property of a path to the byte).
+///
+/// `plain.rs` is declared unconditionally by `lib.rs` and again, through the
+/// test gate, by a `#[path]` in `gate.rs`. A reading that put the gate on the
+/// bytes rather than on the path would take a product file out of every guard
+/// that skips test code the moment a test module happened to name it.
+///
+/// MUTATION: fold the paths' predicates together and the first row grows a
+/// `#[cfg(test)]` it has no business carrying.
+#[test]
+fn a_file_reached_two_ways_carries_the_gate_on_the_gated_path_only() {
+    let index = declaration_variant_fixture();
+    assert_eq!(
+        identities_of(&index, "reached_two_ways"),
+        [
+            "crate::gate::plain_again::reached_two_ways #[cfg(test)]",
+            "crate::plain::reached_two_ways",
+        ],
+        "one set of bytes, one identity per path to them"
+    );
+
+    let record = index
+        .one(&ItemQuery::function("reached_two_ways"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        record.module_paths(),
+        ["crate::gate::plain_again", "crate::plain"]
+    );
+    assert!(
+        record.variant().is_unconditional(),
+        "the file itself writes nothing on it"
+    );
+
+    // **What the predicates say, three-valued and read once** (§2.3). The gated
+    // path is out of the product; the other is in it; and the file permits
+    // product compilation because one path does.
+    let permits: Vec<bool> = record
+        .identities()
+        .map(|identity| identity.variant.permits_product())
+        .collect();
+    assert_eq!(permits, [false, true]);
+    assert!(index.file_of(record).permits_product());
+
+    // And a gate that is not about `test` is not a gate: `#[cfg(windows)]`
+    // leaves the door open, which is the answer the evaluator gives and a
+    // comparison against the spelling `"test"` cannot.
+    let gated_twice = index
+        .one(&ItemQuery::function("gated_twice").in_module("crate::gate"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert!(gated_twice.variant().permits_product());
+    assert!(
+        !gated_twice
+            .identities()
+            .any(|identity| identity.variant.permits_product()),
+        "the whole arm is `test` and `windows`, and `test` closes it"
+    );
+}
+
 // ── one owner, however the move spelled it ────────────────────────────────
 
 fn self_type_fixture() -> Arc<Index> {
@@ -539,7 +696,7 @@ fn one_owner_spelled_three_ways_answers_three_times() {
             .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(record.type_owner(), Some("Runtime"));
         assert_eq!(record.trait_name(), None);
-        modules.push(record.module_paths()[0].as_str());
+        modules.push(record.module_paths()[0]);
     }
     assert_eq!(modules, ["crate", "crate::runtime", "crate::peek"]);
 

@@ -33,11 +33,11 @@ use std::str::FromStr;
 use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use syn::spanned::Spanned;
 
-use crate::declarations::cfg_predicates;
+use crate::declarations::{Compilation, cfg_predicates};
 use crate::index::{
-    CommentKind, CommentRecord, ConditionalVariant, FileRecord, Index, ItemKind, ItemRecord,
-    LiteralRecord, LiteralValue, MacroKind, MacroRecord, MacroShape, ModuleRecord, ModuleShape,
-    Span, TokenKind, TokenRecord, UnsupportedMacroShape,
+    CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord, Index, ItemKind,
+    ItemRecord, LiteralRecord, LiteralValue, MacroKind, MacroRecord, MacroShape, ModuleRecord,
+    ModuleShape, Span, TokenKind, TokenRecord, UnsupportedMacroShape,
 };
 use crate::reject::Rejection;
 use crate::universe::Universe;
@@ -102,10 +102,33 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
             .file(path)
             .map(|facts| facts.owners().to_vec())
             .unwrap_or_default();
-        let module_paths: Vec<String> = {
-            let mut found: Vec<String> = owners
+        // **The declaration that reaches a file carries its `cfg` to every item
+        // in it** (§2.3): `#[cfg(test)] mod t;` and `#[cfg(test)] mod t { … }`
+        // are one statement written two ways, and the inline spelling pushes its
+        // predicates onto the stack below. So the out-of-line spelling's
+        // predicates are collected here, per path, and stand in front of
+        // whatever the file itself writes on an item.
+        let declared: Vec<DeclarationPath> = {
+            let mut found: Vec<DeclarationPath> = owners
                 .iter()
-                .map(|owner| owner.module_path.clone())
+                .map(|owner| DeclarationPath {
+                    module_path: owner.module_path.clone(),
+                    predicates: owner
+                        .steps
+                        .iter()
+                        .flat_map(|step| step.predicates.iter().cloned())
+                        .collect(),
+                    compilation: owner.compilation,
+                })
+                .collect();
+            found.sort();
+            found.dedup();
+            found
+        };
+        let module_paths: Vec<String> = {
+            let mut found: Vec<String> = declared
+                .iter()
+                .map(|path| path.module_path.clone())
                 .collect();
             found.sort();
             found.dedup();
@@ -155,11 +178,18 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
                     text: &text,
                     base,
                     file: at,
-                    module_paths: &module_paths,
+                    declared: &declared,
                     items: &mut items,
                     modules: &mut modules,
                 };
-                parsed_items.walk(&parsed.items, &mut Vec::new(), &mut Vec::new());
+                // The stack opens empty and unconditional: what stands *outside*
+                // this file is on `declared`, one entry per path to it.
+                parsed_items.walk(
+                    &parsed.items,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    Compilation::AlwaysInProduct,
+                );
             }
             Err(error) => rejections.push(Rejection::UnparsableFile {
                 file: path.clone(),
@@ -742,7 +772,9 @@ struct Parsed<'a> {
     text: &'a str,
     base: usize,
     file: usize,
-    module_paths: &'a [String],
+    /// Every declaration path that reaches this file, with what each one writes
+    /// on the items inside it (§2.3).
+    declared: &'a [DeclarationPath],
     items: &'a mut Vec<ItemRecord>,
     modules: &'a mut Vec<ModuleRecord>,
 }
@@ -756,12 +788,19 @@ impl Parsed<'_> {
     }
 
     /// `module` is the inline-module path inside this file; `predicates` are the
-    /// `cfg` spellings standing between the file and here, outermost first.
+    /// `cfg` spellings standing between the file and here, outermost first, and
+    /// `gate` is what those spellings say about a product build.
+    ///
+    /// The two travel together and are carried apart because they are two
+    /// different facts: the spellings are what the code *says* (§2.1) and the
+    /// gate is the three-valued reading of it (§2.3), taken once where the
+    /// attribute is parsed rather than recovered from the strings later.
     fn walk(
         &mut self,
         items: &[syn::Item],
         module: &mut Vec<String>,
         predicates: &mut Vec<String>,
+        gate: Compilation,
     ) {
         for item in items {
             match item {
@@ -769,7 +808,7 @@ impl Parsed<'_> {
                     let Some((brace, inner)) = &declaration.content else {
                         continue;
                     };
-                    let (own, _) = cfg_predicates(&declaration.attrs, self.text);
+                    let (own, compilation) = cfg_predicates(&declaration.attrs, self.text);
                     let depth = predicates.len();
                     predicates.extend(own);
                     module.push(declaration.ident.to_string());
@@ -783,12 +822,12 @@ impl Parsed<'_> {
                         span,
                         body: ModuleShape::Inline,
                     });
-                    self.walk(inner, module, predicates);
+                    self.walk(inner, module, predicates, gate.and(compilation));
                     module.pop();
                     predicates.truncate(depth);
                 }
                 syn::Item::Fn(function) => {
-                    let (own, _) = cfg_predicates(&function.attrs, self.text);
+                    let own = cfg_predicates(&function.attrs, self.text);
                     let start = start_of(
                         &function.attrs,
                         Some(&function.vis),
@@ -798,6 +837,7 @@ impl Parsed<'_> {
                     self.record(
                         module,
                         predicates,
+                        gate,
                         own,
                         None,
                         None,
@@ -808,7 +848,7 @@ impl Parsed<'_> {
                     );
                 }
                 syn::Item::Struct(definition) => {
-                    let (own, _) = cfg_predicates(&definition.attrs, self.text);
+                    let (own, compilation) = cfg_predicates(&definition.attrs, self.text);
                     let start = start_of(
                         &definition.attrs,
                         Some(&definition.vis),
@@ -824,7 +864,8 @@ impl Parsed<'_> {
                     self.record(
                         module,
                         predicates,
-                        own.clone(),
+                        gate,
+                        (own.clone(), compilation),
                         None,
                         None,
                         name.clone(),
@@ -834,11 +875,17 @@ impl Parsed<'_> {
                     );
                     let depth = predicates.len();
                     predicates.extend(own);
-                    self.members(module, predicates, &name, definition.fields.iter());
+                    self.members(
+                        module,
+                        predicates,
+                        gate.and(compilation),
+                        &name,
+                        definition.fields.iter(),
+                    );
                     predicates.truncate(depth);
                 }
                 syn::Item::Union(definition) => {
-                    let (own, _) = cfg_predicates(&definition.attrs, self.text);
+                    let (own, compilation) = cfg_predicates(&definition.attrs, self.text);
                     let start = start_of(
                         &definition.attrs,
                         Some(&definition.vis),
@@ -849,7 +896,8 @@ impl Parsed<'_> {
                     self.record(
                         module,
                         predicates,
-                        own.clone(),
+                        gate,
+                        (own.clone(), compilation),
                         None,
                         None,
                         name.clone(),
@@ -859,11 +907,17 @@ impl Parsed<'_> {
                     );
                     let depth = predicates.len();
                     predicates.extend(own);
-                    self.members(module, predicates, &name, &definition.fields.named);
+                    self.members(
+                        module,
+                        predicates,
+                        gate.and(compilation),
+                        &name,
+                        &definition.fields.named,
+                    );
                     predicates.truncate(depth);
                 }
                 syn::Item::Enum(definition) => {
-                    let (own, _) = cfg_predicates(&definition.attrs, self.text);
+                    let (own, compilation) = cfg_predicates(&definition.attrs, self.text);
                     let start = start_of(
                         &definition.attrs,
                         Some(&definition.vis),
@@ -874,7 +928,8 @@ impl Parsed<'_> {
                     self.record(
                         module,
                         predicates,
-                        own.clone(),
+                        gate,
+                        (own.clone(), compilation),
                         None,
                         None,
                         name.clone(),
@@ -884,8 +939,9 @@ impl Parsed<'_> {
                     );
                     let depth = predicates.len();
                     predicates.extend(own);
+                    let inside = gate.and(compilation);
                     for variant in &definition.variants {
-                        let (own, _) = cfg_predicates(&variant.attrs, self.text);
+                        let own = cfg_predicates(&variant.attrs, self.text);
                         let start = start_of(
                             &variant.attrs,
                             None,
@@ -898,6 +954,7 @@ impl Parsed<'_> {
                         self.record(
                             module,
                             predicates,
+                            inside,
                             own,
                             Some(name.clone()),
                             None,
@@ -910,9 +967,10 @@ impl Parsed<'_> {
                     predicates.truncate(depth);
                 }
                 syn::Item::Impl(block) => {
-                    let (own, _) = cfg_predicates(&block.attrs, self.text);
+                    let (own, compilation) = cfg_predicates(&block.attrs, self.text);
                     let depth = predicates.len();
                     predicates.extend(own);
+                    let inside = gate.and(compilation);
                     let owner = self.type_owner(&block.self_ty);
                     let trait_name = block
                         .trait_
@@ -922,7 +980,7 @@ impl Parsed<'_> {
                         let syn::ImplItem::Fn(function) = member else {
                             continue;
                         };
-                        let (own, _) = cfg_predicates(&function.attrs, self.text);
+                        let own = cfg_predicates(&function.attrs, self.text);
                         let start = start_of(
                             &function.attrs,
                             Some(&function.vis),
@@ -932,6 +990,7 @@ impl Parsed<'_> {
                         self.record(
                             module,
                             predicates,
+                            inside,
                             own,
                             Some(owner.clone()),
                             trait_name.clone(),
@@ -944,15 +1003,16 @@ impl Parsed<'_> {
                     predicates.truncate(depth);
                 }
                 syn::Item::Trait(definition) => {
-                    let (own, _) = cfg_predicates(&definition.attrs, self.text);
+                    let (own, compilation) = cfg_predicates(&definition.attrs, self.text);
                     let depth = predicates.len();
                     predicates.extend(own);
+                    let inside = gate.and(compilation);
                     let trait_name = definition.ident.to_string();
                     for member in &definition.items {
                         let syn::TraitItem::Fn(function) = member else {
                             continue;
                         };
-                        let (own, _) = cfg_predicates(&function.attrs, self.text);
+                        let own = cfg_predicates(&function.attrs, self.text);
                         let start = start_of(&function.attrs, None, signature_start(&function.sig));
                         let body = function
                             .default
@@ -969,6 +1029,7 @@ impl Parsed<'_> {
                         self.record(
                             module,
                             predicates,
+                            inside,
                             own,
                             None,
                             Some(trait_name.clone()),
@@ -989,13 +1050,33 @@ impl Parsed<'_> {
     /// owning declaration path of the file (§2.3), each with the inline
     /// ancestry appended.
     fn paths_for(&self, module: &[String]) -> Vec<String> {
+        let mut found: Vec<String> = self
+            .declarations_for(module)
+            .into_iter()
+            .map(|path| path.module_path)
+            .collect();
+        found.dedup();
+        found
+    }
+
+    /// The declaration paths an item written under `module` answers to: the
+    /// file's own, each with the inline ancestry appended to the module path.
+    ///
+    /// The predicates are unchanged, because they are what stands **outside**
+    /// this file; the inline ones are on the walk's own stack and are added by
+    /// [`Parsed::record`].
+    fn declarations_for(&self, module: &[String]) -> Vec<DeclarationPath> {
         let suffix = module
             .iter()
             .map(|part| format!("::{part}"))
             .collect::<String>();
-        self.module_paths
+        self.declared
             .iter()
-            .map(|path| format!("{path}{suffix}"))
+            .map(|path| DeclarationPath {
+                module_path: format!("{}{suffix}", path.module_path),
+                predicates: path.predicates.clone(),
+                compilation: path.compilation,
+            })
             .collect()
     }
 
@@ -1018,11 +1099,12 @@ impl Parsed<'_> {
         &mut self,
         module: &[String],
         predicates: &[String],
+        gate: Compilation,
         owner: &str,
         fields: impl IntoIterator<Item = &'f syn::Field>,
     ) {
         for (at, field) in fields.into_iter().enumerate() {
-            let (own, _) = cfg_predicates(&field.attrs, self.text);
+            let own = cfg_predicates(&field.attrs, self.text);
             let opens = field.ident.as_ref().map_or_else(
                 || field.ty.span().byte_range().start,
                 |name| name.span().byte_range().start,
@@ -1036,6 +1118,7 @@ impl Parsed<'_> {
             self.record(
                 module,
                 predicates,
+                gate,
                 own,
                 Some(owner.to_owned()),
                 None,
@@ -1047,6 +1130,10 @@ impl Parsed<'_> {
         }
     }
 
+    /// One item, with the two halves of what it stands on kept apart: `outer`
+    /// and `gate` are what the file writes around it, `own` is what it writes on
+    /// itself, and [`Parsed::declared`] is what the declarations outside the
+    /// file write on all of it.
     #[expect(
         clippy::too_many_arguments,
         reason = "the identity of §2.4 is six components and the bytes are two more; naming them \
@@ -1056,7 +1143,8 @@ impl Parsed<'_> {
         &mut self,
         module: &[String],
         outer: &[String],
-        own: Vec<String>,
+        gate: Compilation,
+        own: (Vec<String>, Compilation),
         type_owner: Option<String>,
         trait_name: Option<String>,
         name: String,
@@ -1064,19 +1152,23 @@ impl Parsed<'_> {
         whole: Range<usize>,
         body: Option<Range<usize>>,
     ) {
+        let (spellings, compilation) = own;
         let mut predicates = outer.to_vec();
-        predicates.extend(own);
-        let module_paths = self.paths_for(module);
+        predicates.extend(spellings);
+        let declared = self.declarations_for(module);
         let whole = self.span(whole);
         let body = body.map(|range| self.span(range));
         self.items.push(ItemRecord {
             file: self.file,
-            module_paths,
+            declared,
             type_owner,
             trait_name,
             name,
             kind,
-            variant: ConditionalVariant { predicates },
+            variant: ConditionalVariant {
+                predicates,
+                compilation: gate.and(compilation),
+            },
             whole,
             body,
         });
@@ -1431,7 +1523,7 @@ mod tests {
             text,
             base: 0,
             file: 0,
-            module_paths: &[],
+            declared: &[],
             items: &mut items,
             modules: &mut modules,
         };
