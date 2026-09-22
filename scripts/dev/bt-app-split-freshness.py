@@ -264,15 +264,22 @@ def census(a, base, moves):
         reads_main=any('"main.rs"' in s for s in srcs)
         witnesses={}
         for s in subjects:
-            candidates=[x for x in defs if x['file']=='src/main.rs' and x['kind']=='function_item' and x['name']==s]
+            # **The whole package, not `main.rs`.** A subject is a name, and the
+            # declaration it names is what decides whether 2a moves it; looking
+            # for that declaration in one file answers with a same-named
+            # neighbour when the real one lives elsewhere, and cannot see a
+            # collision at all. Every declaration of the name is recorded, and
+            # `main` refuses on the rows where they disagree.
+            candidates=[x for x in defs if x['kind']=='function_item' and x['name']==s]
             explicit=[v.lstrip() for v in literals if re.match(r'(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+'+re.escape(s)+r'\b',v.lstrip())]
             if explicit:
                 matched=[x for x in candidates if any(x['body'].startswith(v) for v in explicit)]
                 if matched: candidates=matched
-            # The current helpers use first textual find, not type resolution.
-            # Retain all candidates to expose duplicate-subject evidence needs.
-            witnesses[s]=[{'symbol':x['symbol'],'start':x['start'],'end':x['end'],'moves':x['id'] in {m['id'] for m in a['methods']}} for x in candidates]
-        moved=[s for s in subjects if s in moves and (not witnesses[s] or min(witnesses[s],key=lambda x:x['start'])['moves'])]
+            witnesses[s]=[{'file':x['file'],'symbol':x['symbol'],'start':x['start'],'end':x['end'],'moves':x['id'] in {m['id'] for m in a['methods']}} for x in candidates]
+        # The declarations' own answer, unanimous or not at all — never the one
+        # with the lowest line number, which is a file's ordering standing in
+        # for a resolution.
+        moved=[s for s in subjects if s in moves and all(w['moves'] for w in witnesses[s])]
         whole_neg=bool(re.search(r'!\s*(?:SOURCE|MAIN|before_this_fixture)\s*\.\s*contains',d['body']) or re.search(r'!\s*source\s*\.\s*contains',d['body']) and re.search(r'let source[^=]*=\s*include_str!',d['body']))
         neg=bool(re.search(r'!\s*\w+\s*\.\s*contains',d['body']))
         arity=bool(re.search(r'\.matches\([\s\S]*?\.count\(\)',d['body']))
@@ -376,6 +383,27 @@ def main():
     tsv(OUT/f'{STEM}2a-manifest-{DATE}.tsv', rows, ['commit','name','start','end','lines','destination','visibility','evidence','unresolved_callers','callers'])
     tsv(OUT/f'{STEM}method-delta-{DATE}.tsv', delta, ['name','status','was_destination','is_destination','was_lines','is_lines','moved_topic'])
     pins=census(new,old,moves)
+    # **A subject name that several declarations answer to is not an answer.**
+    # Taking the first of them is how
+    # `uninstall_tests::uninstall_source_guard_pins_known_writers_and_inventory`
+    # came to be recorded against the `Runtime` method `add_to_profile` — which
+    # it does not read — instead of `shell_integration.rs`'s free function of
+    # that name, which it does (P11 dry run, 2026-09-22).
+    # `bt_source::Index::one` answers a query that several items satisfy by
+    # naming every one of them and refusing, and so does this: a silent pick is
+    # a wrong answer wearing a right one's clothes.
+    #
+    # The refusal is on **disagreement**, which is the whole of what the census
+    # takes from the binding: whether Step 2a moves the subject. Where every
+    # declaration of the name gives that the same answer the row is determined
+    # however many there are — a test literal that happens to read `open` is not
+    # made ambiguous by twenty-seven unrelated `open`s — and where they differ
+    # the row has no answer and no amount of ordering supplies one.
+    ambiguous=[(p['test'],s,[f"{w['file']}:{w['start']} {w['symbol']} moves={w['moves']}" for w in sorted(ws,key=lambda w:(w['file'],w['start']))])
+               for p in pins for s,ws in sorted(p['subject_witnesses'].items()) if len({w['moves'] for w in ws})>1]
+    assert not ambiguous, 'subject names whose declarations disagree about the 2a move:\n'+'\n'.join(
+        f'  {test}: `{subject}` is declared {len(declarations)} times —\n'+'\n'.join(f'      {x}' for x in declarations)
+        for test,subject,declarations in ambiguous)
     tsv(OUT/f'{STEM}pins-{DATE}.tsv',pins,['commit','file','test','start','end','new','classes','sources','subjects','subject_witnesses','destinations','impact','evidence','bindings','needles'])
     Path('target').mkdir(exist_ok=True)
     Path('target/bt-app-pin-bodies.txt').write_text('\n\n'.join(f"{r['file']}:{r['start']} {r['test']} [{r['impact']}]\n{r['_body']}" for r in pins),encoding='utf-8',newline='\n')
