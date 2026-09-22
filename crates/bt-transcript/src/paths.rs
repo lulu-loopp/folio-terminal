@@ -1754,7 +1754,7 @@ fn release_prose_tail(text: &str, start: usize, end: usize) -> usize {
     end
 }
 
-/// The ASCII characters a **seam** may sit on — §7.30.
+/// The characters a **seam** may sit on — §7.30.
 ///
 /// **A class, not a table** (user ruling 2026-08-28; the same discipline §7.1.5h ⑤ settled for
 /// URLs' trailing punctuation and [`release_prose_tail`] settled for CJK stops). It was once the
@@ -1766,14 +1766,39 @@ fn release_prose_tail(text: &str, start: usize, end: usize) -> usize {
 /// [`is_opening_delimiter`] — so they no longer reach this test at all; the class is what admitted
 /// them in the first place, and it is stated here unchanged.)
 ///
-/// The class is: **ASCII punctuation a path is never spelled with.** [`is_ascii_punctuation`] minus
-/// the path-structure characters `/ \ . - _ ~` — everything else, from the sentence separators to
-/// `"`, `'`, `=`, `+`, `*`, `#`, `@`, `&`, `%` and `|`, is a mark a name is glued to, not part of
-/// the name.
+/// The class is: **a mark a path is never spelled with.** Not [`is_path_tail_char`] and not
+/// whitespace — everything from the sentence separators to `"`, `'`, `=`, `+`, `*`, `#`, `@`, `&`,
+/// `%` and `|` is a mark a name is glued to, not part of the name. Whitespace is held out because
+/// a separator is a mark *inside* a token and [`token_end`] has already ended the token on any
+/// space; saying so here rather than leaning on the one call site that filters terminators is what
+/// keeps every ASCII answer this function used to give exactly as it was.
 ///
-/// [`is_ascii_punctuation`]: char::is_ascii_punctuation
+/// # The separator is written on the keyboard the prose is written on (owner report 2026-09-22)
+///
+/// It used to read `is_ascii_punctuation`, and that word was the defect. An agent printed
+/// `  - docs/a.png：六个臂各一格` into a pane standing in the folder that holds the file, and the
+/// reference went dark: the token runs to the row's blank tail, [`release_prose_tail`] cannot
+/// release the prose because every CJK character in it **is** `is_alphanumeric` and therefore a
+/// path character, and the one reading left carries `：` — so [`bare_candidate_opens_at`] refuses
+/// it and no shorter form was ever offered.
+///
+/// `：` is the full-width form of the very mark this class was invented for, and a person typing
+/// Chinese types the full-width form: the half-width `:` and the full-width `：` are one separator
+/// spelled on two keyboards. [`a_binding_colon_stands_before`] already reads this transition from
+/// its other side — "a colon with another script in front of it has made nothing absolute" — and
+/// this is the same sentence said at the name's other end.
+///
+/// **Reading the class off [`is_path_tail_char`] is what keeps it a class.** For every ASCII
+/// character the answer is unchanged, because the two spellings differ only on the control
+/// characters and the space, and neither can be inside a token. What changes is that `：`, `，`,
+/// `、`, `。` and the rest of another script's punctuation now sit in the class their ASCII twins
+/// have always been in — which is one word of this function, not a list to be added to per report.
+///
+/// Boundary table row 19 is untouched, and it is [`prose_seam_ends`] that keeps it so: a seam needs
+/// **both** halves of the transition, and `D:\资料\A、B.md` has an ASCII `B` behind its `、`, so
+/// there is no seam there and the name is still read whole.
 fn is_seam_separator(character: char) -> bool {
-    character.is_ascii_punctuation() && !matches!(character, '/' | '\\' | '.' | '-' | '_' | '~')
+    !is_path_tail_char(character) && !character.is_whitespace()
 }
 
 /// The ASCII marks that end a **sentence** rather than a name, read only where a token ends —
@@ -1809,8 +1834,15 @@ fn is_seam_separator(character: char) -> bool {
 /// middle of it opens, a second reference lying across the quoted one's own span. A `'` is not that
 /// mark here (it doubles as an apostrophe inside filenames and closes nothing), so it peels like
 /// any other.
+/// **ASCII, and the word is load-bearing** (owner report 2026-09-22). This test is about the mark
+/// that could be *part of a name* and therefore has to be asked about together with the reading it
+/// stands behind — that is the trailing `.` of row 16, and every other mark on this list is ASCII
+/// for the same reason. A `。` is not such a mark: [`release_prose_tail`] takes it off whatever the
+/// row looks like, so no cut can counterfeit it into a name, and letting it into the truncation
+/// gate's own run of stops would press down a reference that ends a row behind one. When
+/// [`is_seam_separator`] stopped being an ASCII-only class, this kept the word it had always had.
 fn is_sentence_stop(character: char) -> bool {
-    (is_seam_separator(character) || character == '.') && character != '"'
+    character.is_ascii() && (is_seam_separator(character) || character == '.') && character != '"'
 }
 
 /// Whether a token can carry a seam at all — the cheap per-token test that keeps an ordinary
@@ -1867,10 +1899,11 @@ fn prose_seam_ends(token: &str, limit: usize) -> Vec<usize> {
         if offset > limit {
             break;
         }
-        // `offset + 1` is a character boundary: every separator is one ASCII byte.
+        // Past the separator's **own** width, which since 2026-09-22 is not always one byte: the
+        // class is a mark a path is not spelled with ([`is_seam_separator`]) and `：` is three.
         let seams_here = offset >= stops_from
             || (is_seam_separator(character)
-                && token[offset + 1..]
+                && token[offset + character.len_utf8()..]
                     .chars()
                     .next()
                     .is_some_and(|next| !next.is_ascii()));
@@ -5493,12 +5526,25 @@ mod tests {
             "中文D:\\x\\a.md",
             "README",
             "file://server/share/a.md",
-            "见 D:\\x\\a.md，然后",
             "docs/a.md:abc",
         ] {
             assert_eq!(linked(&links, line, None), []);
             assert_eq!(linked(&links, line, last_cell_of(line)), []);
         }
+        // Row 19's sentence left that list on 2026-09-22 and is the one row whose two placements
+        // **must** differ — which is both rulings working rather than either bending. The
+        // full-width `，` is a seam now ([`is_seam_separator`]), so the token has two readings.
+        // Inside the row the longer one is nobody's answer yet, and a shorter reading is never
+        // drawn in front of a longer one still waiting for the disk, so the line draws nothing and
+        // asks. With the reference's own last cell being the row's, §7.1.5k ① presses the longer
+        // reading down before either the ledger or the probe queue may decide it — and the mark
+        // that ended the name is then the evidence the shorter reading is whole.
+        let row_19 = "见 D:\\x\\a.md，然后";
+        assert_eq!(linked(&links, row_19, None), []);
+        assert_eq!(
+            linked(&links, row_19, last_cell_of(row_19)),
+            [("D:\\x\\a.md", "file:///D:/x/a.md".to_owned())]
+        );
     }
 
     /// Scenario 1 and 2 — **the conflict this module recorded, and the entry that settled it**
@@ -6162,11 +6208,16 @@ mod tests {
         // Interior punctuation is a filename's own: only the tail is released, so a name that
         // really carries a `、` in the middle of it is still read whole.
         assert_eq!(spans("D:\\资料\\A、B.md"), ["D:\\资料\\A、B.md"]);
-        // And the limit of that, written down rather than discovered: a sentence that goes on
-        // **past** the punctuation puts its own words inside the token, and words are what a
-        // filename is made of. The token is then a name nothing on the disk carries, so the line
-        // offers no link — the same safe "not recognized" this whole boundary table is built on.
-        assert_eq!(spans("见 D:\\x\\a.md，然后"), ["D:\\x\\a.md，然后"]);
+        // A sentence that goes on **past** the punctuation puts its own words inside the token, and
+        // words are what a filename is made of — so the whole token is a reading, and it is the
+        // first one asked about. What used to be written here as the limit of that ("the line
+        // offers no link") was the owner's 2026-09-22 defect: the mark between the name and the
+        // prose is a separator whichever keyboard wrote it, so the name in front of it is now
+        // offered behind the long form and the disk chooses between them.
+        assert_eq!(
+            spans("见 D:\\x\\a.md，然后"),
+            ["D:\\x\\a.md，然后", "D:\\x\\a.md"]
+        );
     }
 
     /// Boundary table row 16 as the 2026-09-05 ruling leaves it, nailed down so the row above
@@ -6504,9 +6555,14 @@ mod tests {
         assert!(!names_a_dos_device("COM0"));
     }
 
-    /// §7.30, boundary table rows 42 and 43 — the two transitions that are **not** seams, kept
-    /// beside the one that is: ASCII to ASCII is a filename's own punctuation (row 16's discipline
-    /// on a comma), and a non-ASCII stop is released whole by row 17 and cuts nothing.
+    /// §7.30, boundary table row 42 — the transition that is **not** a seam, kept beside the ones
+    /// that are: ASCII to ASCII is a filename's own punctuation (row 16's discipline on a comma).
+    ///
+    /// Row 43 was the second half of this test until 2026-09-22, when the owner's report showed it
+    /// was the defect rather than the rule: it asked for a full-width separator to weld the
+    /// sentence behind it onto the name. Both halves of the transition are still load-bearing —
+    /// what changed is that the separator is read as a mark a path is not spelled with rather than
+    /// as an ASCII byte ([`is_seam_separator`]).
     #[test]
     fn a_seam_is_one_character_class_transition_and_not_a_list_of_stops() {
         // Row 42: `,b` is as much a name as `.md` is, so nothing is cut and the token stands whole.
@@ -6514,9 +6570,16 @@ mod tests {
         // The bare spelling of the same text offers nothing at all, exactly as it did before this
         // slice: a comma is not a path character, so the run rule refuses the opening.
         assert!(spans("docs/a.md,b").is_empty());
-        // Row 43 is boundary table row 19 unmoved: a full-width comma is not an ASCII separator,
-        // so the sentence behind it stays welded to the token and the line offers no link.
-        assert_eq!(spans("见 D:\\x\\a.md，然后"), ["D:\\x\\a.md，然后"]);
+        // And the half that keeps row 19 whole is the **other** one: `、` is a separator now, but
+        // what stands behind it is the ASCII `B` of somebody's filename, so there is no transition
+        // and no seam.
+        assert_eq!(spans("D:\\资料\\A、B.md"), ["D:\\资料\\A、B.md"]);
+        // Row 43, as the report leaves it: the name in front of the full-width separator is a
+        // reading of its own, offered behind the whole token.
+        assert_eq!(
+            spans("见 D:\\x\\a.md，然后"),
+            ["D:\\x\\a.md，然后", "D:\\x\\a.md"]
+        );
     }
 
     /// §7.30, boundary table row 40 at the disk: the shorter form is a link the moment the disk

@@ -19,6 +19,10 @@ All notable changes to Folio are recorded here. The format follows
 
 - A printed path with spaces in it is a link when the file is there.
 
+- A relative path an agent prints with a full-width colon or comma right
+  behind it (`experiments/plot.png：…`) is a link again when the file is in
+  the pane's folder.
+
 ## 0.4.3-preview — 2026-09-21
 
 ### Added
