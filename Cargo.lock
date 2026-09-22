@@ -411,6 +411,7 @@ dependencies = [
  "bt-doc",
  "bt-math",
  "bt-platform",
+ "bt-source",
  "bt-term",
  "bt-transcript",
  "bt-unicode",
