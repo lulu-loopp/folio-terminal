@@ -21,7 +21,8 @@ to `folded` in the same commit. Never cite a line number.
 
 The subsystem list is the one the 2026-09-21 breadth survey opened: its
 fifty-one rows, plus two cross-cutting rows (doors, threads and lanes) that are
-not a subsystem but are a rule.
+not a subsystem but are a rule. Row 54, the look of the window, was added on
+2026-09-22 with the written UI spec.
 
 ---
 
@@ -676,12 +677,48 @@ produced 200 false reports out of its first 205.
 **Open.** Which calls may be made on the window thread, the wait-budget table and
 the result-return contract are ruled in `docs/ARCHITECTURE.md` §5, not here.
 
+### 54. The look of the window — `folded`
+**Rule.** **The current UI is the baseline** (2026-09-22): `docs/design/UI-SPEC.md`
+describes the look as it ships, value by value, and does not redesign it. A rule
+there is the value most surfaces already use, or the value a ruling below chose;
+every constant that differs is a row in `docs/design/UI-DEVIATIONS.md`, and
+bringing it into line is the whole of the work — no new values, components or
+layout ride along. Four rulings of the same date close the questions the product
+used to answer two ways:
+- **The terminal pane is square at rest** (2026-09-22). Radius 0, panes flush on a
+  1-pt hairline; only while a divider is held do the panes inset 5 and become r8
+  cards (`SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX`). The change of shape is the drag
+  signal.
+- **Two boolean controls, each in its place** (2026-09-22). Settings uses a combo
+  reading `On` / `Off` for every boolean and has no switch; the first-run card uses
+  switches, with an accent track when on. That track is the one persistent state the
+  accent marks.
+- **The icon-to-label gap is 8, everywhere** (2026-09-22). The 6s (files row, files
+  foot, float head, focus-card head, peek head, git badge), the 7s (pane head, drag
+  ghost, palette dot), the 9s (palette row, graph row) and the menus' 10 are
+  deviations to 8.
+- **Every head title is 11** (2026-09-22). The pane head's 11.5
+  (`SEAT_TITLE_FONT_LOGICAL_PX`) is a deviation to 11, the float and glance heads'
+  `HEAD_TITLE_FONT_LOGICAL_PX`; 11.5 is not on the type ladder.
+**From.** trailing entry 2026-09-22 *The current UI gets its written
+specification*; `docs/UI-UX.md` §二 (accent is attention, not position), §六 (the
+divider drag); §7.28 *the small tags floating over the text wear one outfit: one
+face, one hairline, one legible ink*; §7.18 *the icon system: one verb table, one
+slot table, one optical gate*; §7.18 *motion tokens: three steps, one travel
+distance, two curves, and a register that forbids a fourth* (two entries share
+the number).
+**Overrides.** The two redesign proposals of 2026-09-22 were declined; nothing of
+them is a rule. The motion entry's "two curves" predates `GRAB_EASE`; the code's
+three are the rule.
+**Open.** The deviations are scheduled for 0.4.4 and 0.4.5 by the ticket groups at
+the end of `docs/design/UI-DEVIATIONS.md`.
+
 ---
 
 ## What is folded, and what is not
 
-**Folded (18 rows):** 4, 5, 6, 8, 9, 18, 19, 22, 23, 29, 30, 33, 38, 41, 42, 43,
-52, 53. Row 46 is folded for the layering rule only.
+**Folded (19 rows):** 4, 5, 6, 8, 9, 18, 19, 22, 23, 29, 30, 33, 38, 41, 42, 43,
+52, 53, 54. Row 46 is folded for the layering rule only.
 
 **Not yet folded (35 rows):** everything else. For those rows the entries listed
 are still the authority, and a ticket that depends on one of them folds it — into
