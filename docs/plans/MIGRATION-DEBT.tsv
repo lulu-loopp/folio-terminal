@@ -242,8 +242,6 @@ crates/bt-app/src/main.rs	system_preference_wiring_tests::the_system_preference_
 crates/bt-app/src/main.rs	textless_present_tests::a_textless_present_is_a_frame_the_window_still_owes	include_str!	present_retained_picture;redraw	P3	yes
 crates/bt-app/src/main.rs	textless_present_tests::a_window_that_is_not_on_screen_stops_asking_and_is_woken_once	include_str!	present_retained_picture;publish_frame;redraw	P3	yes
 crates/bt-app/src/persist.rs	persist::tests::the_only_thread_that_fsyncs_session_json_is_the_writer	include_str!	flush_if_due;hand_over	P14	no
-crates/bt-app/src/present_diagnostics_tests.rs	present_diagnostics_tests::attempt_generation_is_carried_by_configure_and_native_reads_are_line_gated	include_str!	check_picture_freshness;finish_present_attempt	P3	yes
-crates/bt-app/src/present_diagnostics_tests.rs	present_diagnostics_tests::every_present_caller_closes_its_record_outside_all_outcome_arms	include_str!	begin_present_attempt;finish_present_attempt;present_retained_picture;present_seats_and_commit;redraw	P3	yes
 crates/bt-app/src/present_diagnostics_tests.rs	present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value	include_str!	window_is_hidden	P14	no
 crates/bt-app/src/preview.rs	preview::tests::a_save_is_written_by_the_writer_that_keeps_what_the_file_carried	include_str!	save	P14	no
 crates/bt-app/src/preview.rs	preview::tests::md_loading_design_document_has_no_read_only_badge	fixture / manifest read	(the file it reads)	P14	no
