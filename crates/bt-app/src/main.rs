@@ -113042,6 +113042,90 @@ mod page_under_a_laden_hand_tests {
         &SOURCE[start..end]
     }
 
+    // ── what this module asks the crate instead ───────────────────────────
+    //
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Nothing is deleted here: the two body pins and
+    // the two struct readings are computed twice — once from
+    // `include_str!("main.rs")`, once from `bt-source` — and the two are
+    // asserted to agree. The deletion is the commit after this one.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live. The struct half is `layer_shape_tests`' —
+    // `declaration_of` over `ItemQuery::type_item`, which is the type's own
+    // declaration wherever it is written and whatever indentation it is written
+    // at, rather than a `struct` keyword in column zero.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// The braces one type's members are written in, and what is between them.
+    fn type_body(name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::type_item(name))
+    }
+
+    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
+    ///
+    /// `body` hands back everything after the signature prefix it was given and
+    /// stops before the next `\n    fn `; `body_of` hands back the braces and
+    /// what is between them. So the crate's answer has to stand in this file's
+    /// slice at the head of the body, with nothing but the rest of the
+    /// declaration in front of it.
+    fn agreed(old: &'static str, name: &str) -> &'static str {
+        let new = method_body("Runtime", name);
+        let at = match old.find(new) {
+            Some(at) => at,
+            None => {
+                assert!(
+                    old.starts_with(&new[1..]),
+                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
+                     bytes"
+                );
+                0
+            }
+        };
+        assert!(
+            !old[..at].contains('{'),
+            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
+             the head of it"
+        );
+        old
+    }
+
+    /// **`struct_fields`' answer and the crate's, compared as bytes.**
+    ///
+    /// `struct_fields` hands back what stands between the opening brace's line
+    /// and the closing brace in column zero; the crate hands back the braces
+    /// and what is between them, which is the same bytes with those braces and
+    /// their two line breaks around them.
+    fn agreed_fields(old: &'static str, name: &str) -> &'static str {
+        assert!(
+            type_body(name).contains(old),
+            "`struct {name}`: this file's field lines do not stand inside the crate's body"
+        );
+        old
+    }
+
     /// **The carry is asked, and asked before any rectangle is.**
     ///
     /// Red gate: this is the defect. Before the repair `web_page_at` subtracted
@@ -113054,7 +113138,7 @@ mod page_under_a_laden_hand_tests {
     /// the scan, and this goes red by name.
     #[test]
     fn the_hand_is_asked_before_any_page_is() {
-        let web_page_at = body("    fn web_page_at(");
+        let web_page_at = agreed(body("    fn web_page_at("), "web_page_at");
         let asked = web_page_at
             .find("self.a_gesture_holds_the_pointer()")
             .expect("the page's door subtracts a hand that is already carrying");
@@ -113079,10 +113163,13 @@ mod page_under_a_laden_hand_tests {
     /// MUTATION: drop any one `…_drag` arm from the predicate and this names it.
     #[test]
     fn every_carry_this_window_can_hold_is_named_by_the_one_predicate() {
-        let predicate = body("    fn a_gesture_holds_the_pointer(");
+        let predicate = agreed(
+            body("    fn a_gesture_holds_the_pointer("),
+            "a_gesture_holds_the_pointer",
+        );
         let mut found = 0;
         for owner in ["WindowRuntime", "TabState"] {
-            for line in struct_fields(owner).lines() {
+            for line in agreed_fields(struct_fields(owner), owner).lines() {
                 let field = line.trim_start();
                 let Some((name, _)) = field.split_once(": Option<") else {
                     continue;
