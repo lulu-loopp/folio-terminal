@@ -204,7 +204,6 @@ crates/bt-app/src/main.rs	application_change_tests::the_sweep_spends_every_flag_
 crates/bt-app/src/main.rs	edit_menu_clipboard_tests::a_declined_clipboard_row_lands_where_every_other_menu_row_lands	include_str!	answer_a_menu_row;run_an_application_menu_verb	P3	yes
 crates/bt-app/src/main.rs	edit_menu_clipboard_tests::every_surface_the_menu_defers_to_stands_above_the_clipboard_rung	include_str!	a_surface_above_the_clipboard_rung_holds_the_keyboard	P3	yes
 crates/bt-app/src/main.rs	edit_menu_clipboard_tests::the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors	include_str!	preview_key;run_an_application_menu_verb;write_terminal_clipboard_text	P3	yes
-crates/bt-app/src/main.rs	endpoint_claim_tests::only_the_writer_binds_the_data_directorys_endpoints	include_str!	an;create;open_the_data_directorys_endpoints	P3	yes
 crates/bt-app/src/main.rs	field_command_tests::a_command_chord_never_types_its_letter_into_a_field	include_str!	git_menu_key;graph_search_key;palette_key;rename_key;search_field_key;settings_field_key	P3	yes
 crates/bt-app/src/main.rs	field_command_tests::the_default_menu_does_not_own_command_q	include_str!	main	P14	no
 crates/bt-app/src/main.rs	field_command_tests::the_option_policy_is_applied_at_one_door	include_str!	adopt_option_as_alt;window_event	P3	yes

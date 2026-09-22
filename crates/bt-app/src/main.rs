@@ -38908,25 +38908,31 @@ fn open_the_data_directorys_endpoints(proxy: &EventLoopProxy<AppEvent>) {
 /// platform.
 #[cfg(test)]
 mod endpoint_claim_tests {
-    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
-    // commit after this one deletes the older of the two. `source`, `item_body`,
-    // `method_body` and `free_fn_body` are `pty_drain_budget_tests`' helpers word
-    // for word.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Both readers here asked `main.rs` for its text; both now ask `bt-source`
+    // about an *item* of this crate, so no fact in this module is bound to the
+    // file it happens to be written in today. The commit before this one ran both
+    // readings side by side and asserted they agree; this is the one that deletes
+    // the older of the two, because two implementations of one judgement do not
+    // vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `free_fn_body` are that module's
+    // helpers word for word, and its header is where the six points behind them
+    // live.
+    //
+    // **Two owners, not one.** The door is a free function of this crate and
+    // `create` is a method of `Runtime`; the deleted finder took the first text
+    // that looked like each signature and could not have told the difference.
+    //
+    // **End-of-body semantics of the deleted finder, recorded before it went:**
+    // it ran from the signature to a caller-supplied terminator — `\n}\n` for the
+    // free function, which is its own closing brace, and `\n    fn ` for
+    // `create`, which is *not* the method's end: that slice carried 1,745 bytes
+    // of the next method's doc comment behind it, and the prohibition below was
+    // being asked of that prose as well. The equivalence commit established that
+    // narrowing to the body changes no verdict.
     use bt_source::{Index, ItemQuery};
-
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one item, from its signature to the next one at the same
-    /// indentation — the same reader the rest of this file's source pins use.
-    fn body(signature: &str, ends_at: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find(ends_at).unwrap_or(rest.len());
-        &rest[..end]
-    }
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -38961,16 +38967,7 @@ mod endpoint_claim_tests {
     /// fails.
     #[test]
     fn only_the_writer_binds_the_data_directorys_endpoints() {
-        let older = body(
-            "fn open_the_data_directorys_endpoints(proxy: &EventLoopProxy<AppEvent>) {",
-            "\n}\n",
-        );
         let door = free_fn_body("open_the_data_directorys_endpoints");
-        assert_eq!(
-            door,
-            ["{", older, "\n}"].concat(),
-            "the two readings of the door disagree"
-        );
         let refusal = door
             .find("if !persist::is_storage_writer() {")
             .expect("the door refuses a process that does not hold the claim");
@@ -38992,19 +38989,8 @@ mod endpoint_claim_tests {
         // and asks for none. The needle is assembled so that this file's search
         // for it is not a match on itself.
         let bind = concat!("_wire", "::open(");
-        let older_create = body("    fn create(\n", "\n    fn ");
-        let create = method_body("Runtime", "create");
         assert!(
-            older_create.contains(create),
-            "the older reading of `Runtime::create` does not carry the crate's body"
-        );
-        assert_eq!(
-            older_create.contains(bind),
-            create.contains(bind),
-            "the two readings of `Runtime::create` disagree about the binding"
-        );
-        assert!(
-            !create.contains(bind),
+            !method_body("Runtime", "create").contains(bind),
             "an endpoint is bound in `Runtime::create` again, where nothing gates it"
         );
     }
