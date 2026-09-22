@@ -4339,6 +4339,12 @@ fn surfaces_reading(
 /// `docs/DESIGN.md` §7.45 ②).
 #[cfg(test)]
 mod card_answer_route_tests {
+    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
+    // commit after this one deletes the older of the two. `source`, `item_body`
+    // and `method_body` are `pty_drain_budget_tests`' helpers word for word.
+    use bt_source::{Index, ItemQuery};
+
     use super::*;
 
     const SOURCE: &str = include_str!("main.rs");
@@ -4364,6 +4370,26 @@ mod card_answer_route_tests {
                 )
                 .expect("a method is closed by a `}` at the `impl`'s indentation");
         &SOURCE[start..end]
+    }
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
     }
 
     fn on(path: &str) -> PreviewPane {
@@ -4473,7 +4499,22 @@ mod card_answer_route_tests {
     /// says so.
     #[test]
     fn a_landed_head_read_leaves_by_one_door() {
-        let lane = fn_body("apply_preview_results");
+        let older_lane = fn_body("apply_preview_results");
+        let lane = method_body("Runtime", "apply_preview_results");
+        assert!(
+            [older_lane, "\n    }"].concat().ends_with(lane),
+            "the two readings of `apply_preview_results` disagree"
+        );
+        for probe in [
+            "self.settle_landed_head(index, &response.source, content, carded)",
+            "is_reading(",
+        ] {
+            assert_eq!(
+                older_lane.contains(probe),
+                lane.contains(probe),
+                "the two readings of `apply_preview_results` disagree about `{probe}`"
+            );
+        }
         assert!(
             lane.contains("self.settle_landed_head(index, &response.source, content, carded)"),
             "the head arm files the answer and leaves; who was reading it is not \
@@ -4484,7 +4525,19 @@ mod card_answer_route_tests {
             "and it does not walk the readers itself: a second walk is a second \
              answer, and the second answer is the one that forgot the card"
         );
-        let door = fn_body("settle_landed_head");
+        let older_door = fn_body("settle_landed_head");
+        let door = method_body("Runtime", "settle_landed_head");
+        assert!(
+            [older_door, "\n    }"].concat().ends_with(door),
+            "the two readings of `settle_landed_head` disagree"
+        );
+        for probe in ["surfaces_reading(", "peek_pane"] {
+            assert_eq!(
+                older_door.contains(probe),
+                door.contains(probe),
+                "the two readings of `settle_landed_head` disagree about `{probe}`"
+            );
+        }
         assert!(
             door.contains("surfaces_reading("),
             "the door asks the one walk"
