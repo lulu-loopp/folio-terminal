@@ -369,6 +369,46 @@ fn a_construction_that_cannot_be_located_inside_the_universe_is_loud() {
     );
 }
 
+/// RED — **the refusal above names the stale test binary**, which is what
+/// actually causes it.
+///
+/// P3's pilot met this failure twice, both times because a comment edited above
+/// a `needle!` moved the expression while the test binary went on naming the
+/// line `line!()` had been baked with. The message described the other cause
+/// only — a needle built outside the file its site names — so the reader's next
+/// move was to go looking for a wrong site instead of typing `cargo test`
+/// again. A refusal that does not say what to do about it costs the same as no
+/// refusal.
+///
+/// MUTATION: take the rebuild sentence out and this goes red; it is asserted on
+/// the message rather than on the variant because the variant was never the
+/// thing that was wrong.
+#[test]
+fn the_lost_construction_refusal_says_to_rebuild_the_test() {
+    let said = QueryFailure::NeedleConstructionLost {
+        file: std::path::PathBuf::from("crates/bt-app/src/main.rs"),
+        line: 114_000,
+        column: 29,
+    }
+    .to_string();
+    assert!(
+        said.contains("rebuild"),
+        "the stale binary is the usual cause and rebuilding is the answer: {said}"
+    );
+    assert!(
+        said.contains("line!()") && said.contains("stale test binary"),
+        "the message has to say why the line no longer matches the source: {said}"
+    );
+    assert!(
+        said.contains("outside the file its site names"),
+        "and the second cause is still in it: {said}"
+    );
+    assert!(
+        said.contains("main.rs") && said.contains("114000") && said.contains("29"),
+        "with the site it was given: {said}"
+    );
+}
+
 /// RED — **`file!()` that resolves to nothing is a panic**, not an exclusion of
 /// nothing.
 #[test]
