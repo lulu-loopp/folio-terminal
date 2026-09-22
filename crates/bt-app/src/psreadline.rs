@@ -1782,29 +1782,172 @@ mod tests {
         std::fs::remove_dir_all(documents).unwrap();
     }
 
+    // ── what these two pins ask the crate instead ─────────────────────────
+    //
+    // **P3's equivalence commit for this module**
+    // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). Every body is
+    // read twice — once as a slice of a named file, once as the body of an item
+    // of this crate — and `agreed` requires the two to be the same bytes;
+    // `agree` does the same for the counts. The deletion is the commit after
+    // this one. The pattern is `main.rs::pty_drain_budget_tests`' and is not
+    // re-derived here.
+    //
+    // Two readings change shape.
+    //
+    // * The app's **fact** was a line of `main.rs` matched as text; it is a
+    //   field of `App`, so it is asked for as one and the refusal names the
+    //   fields the type does carry if it ever stops carrying this one.
+    // * The count of the refresh edges widens from `main.rs` to the package,
+    //   and is filtered by `in_the_product` — both grains, for the reason
+    //   written there. This file compiles into the product and its own
+    //   assertions below spell the call five more times; `needle!` excludes one
+    //   construction expression rather than every mention.
+    fn source_index() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4
+    /// rather than a line of a file.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        source_index()
+            .body_of(&bt_source::ItemQuery::method(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        source_index()
+            .body_of(&bt_source::ItemQuery::function(name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **A file's slice and a crate body, compared as bytes.** `Head` is a
+    /// slice that runs from after a signature prefix to the next declaration,
+    /// so the crate's body stands at its head; `Tail` is a slice cut at the
+    /// closing brace's own line, so it is the body without that last line.
+    fn agreed(old: &'static str, what: &str, whole: &'static str, cut: Cut) -> &'static str {
+        let new = match cut {
+            Cut::Head => whole,
+            Cut::Tail => &whole[..whole.rfind('\n').expect("a body spans lines")],
+        };
+        let at = old.find(new).unwrap_or_else(|| {
+            panic!("`{what}`: the file's slice and the crate's body are not the same bytes")
+        });
+        assert!(
+            !old[..at].contains('{'),
+            "`{what}`: the crate's body stands inside the file's slice rather than at the head of it"
+        );
+        old
+    }
+
+    /// Which end of the crate's body a file reading cut off.
+    #[derive(Clone, Copy)]
+    enum Cut {
+        Head,
+        Tail,
+    }
+
+    /// **The file's answer and the crate's, compared**, handing the file's back
+    /// so the assertion after it is the one that was always there.
+    fn agree<T: std::fmt::Debug + PartialEq>(what: &str, file: T, crate_reading: T) -> T {
+        assert_eq!(
+            file, crate_reading,
+            "{what}: this module's reading of the file and the crate's disagree"
+        );
+        file
+    }
+
+    /// One search over the whole package, refusing loudly rather than
+    /// answering a smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source_index()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **How many of these occurrences a product build compiles.**
+    ///
+    /// Two grains, because this tree says "test" two ways and a reader that
+    /// took only one of them would count its own assertions. A file reached
+    /// through a `#[cfg(test)] mod x;` declaration is not compiled into the
+    /// product at all, which is `FileRecord::permits_product` over
+    /// `Index::file_at` (§2.3, the pilot's `in_product`). An inline
+    /// `#[cfg(test)] mod` inside a file the product *does* compile is not a
+    /// file, so §2.4's identity carries its predicate instead, which is
+    /// `clipboard_path_tests`' `in_product_items`. This module needs both: the
+    /// spellings counted here are written again in its own assertions — in
+    /// this commit, by the older of the two readings standing beside the newer
+    /// one — and again in whole test files elsewhere in the package.
+    ///
+    /// The owner is the smallest callable holding the match, which is
+    /// `Found::owners`' own rule taken one occurrence at a time so that the
+    /// file grain can stand beside it. An occurrence in no callable — an
+    /// `impl` header, a `const` — is left in, because nothing about a `cfg`
+    /// says otherwise and dropping it quietly is the failure this preparation
+    /// is about.
+    fn in_the_product(found: &bt_source::Found) -> usize {
+        let index = source_index();
+        found
+            .occurrences()
+            .iter()
+            .filter(|occurrence| {
+                index
+                    .file_at(occurrence.span.start())
+                    .is_some_and(bt_source::FileRecord::permits_product)
+                    && index
+                        .items()
+                        .iter()
+                        .filter(|record| occurrence.span.within(record.whole()))
+                        .min_by_key(|record| record.whole().len())
+                        .is_none_or(|record| {
+                            !record
+                                .variant()
+                                .predicates()
+                                .iter()
+                                .any(|predicate| predicate == "test")
+                        })
+            })
+            .count()
+    }
+
+    /// The same count of one raw needle — the view `include_str!` handed this
+    /// module.
+    fn in_the_product_raw(needle: bt_source::Needle) -> usize {
+        in_the_product(&found(needle, bt_source::View::Raw))
+    }
+
     #[test]
     fn psreadline_clock_run_source_has_an_unread_edge() {
         let main = include_str!("main.rs");
-        let body = main
-            .split("    fn raise_psreadline_invite_if_due(")
-            .nth(1)
-            .unwrap()
-            .split("\n    fn ")
-            .next()
-            .unwrap();
+        let body = agreed(
+            main.split("    fn raise_psreadline_invite_if_due(")
+                .nth(1)
+                .unwrap()
+                .split("\n    fn ")
+                .next()
+                .unwrap(),
+            "Runtime::raise_psreadline_invite_if_due",
+            method_body("Runtime", "raise_psreadline_invite_if_due"),
+            Cut::Head,
+        );
         assert!(
             !body.contains("self.refresh_psreadline_installed()"),
             "the turn must enter the shared unread gate, never refresh directly"
         );
         assert!(body.contains("psreadline::installed_on_probe("));
         let source = include_str!("psreadline.rs");
-        let gate = source
-            .split("pub fn installed_on_probe(")
-            .nth(1)
-            .unwrap()
-            .split("\n}")
-            .next()
-            .unwrap();
+        let gate = agreed(
+            source
+                .split("pub fn installed_on_probe(")
+                .nth(1)
+                .unwrap()
+                .split("\n}")
+                .next()
+                .unwrap(),
+            "installed_on_probe",
+            free_fn_body("installed_on_probe"),
+            Cut::Tail,
+        );
         assert!(gate.contains("if cache.is_none() && probe.is_some() {\n        refresh_installed(cache, documents);\n    }"));
         assert_eq!(gate.matches("refresh_installed(").count(), 1);
         assert!(!body.contains("installed_copy("));
@@ -1815,22 +1958,35 @@ mod tests {
     fn psreadline_readers_and_refresh_edges_are_wired_to_the_app_fact() {
         let source = include_str!("main.rs");
         let body = |name: &str| {
-            source
-                .split_once(name)
+            let slice = source
+                .split_once(&format!("    fn {name}("))
                 .unwrap()
                 .1
                 .split("\n    fn ")
                 .next()
-                .unwrap()
+                .unwrap();
+            agreed(
+                slice,
+                &format!("Runtime::{name}"),
+                method_body("Runtime", name),
+                Cut::Head,
+            )
         };
-        assert!(source.contains("psreadline_installed: Option<psreadline::InstalledCopy>"));
-        let row = body("    fn psreadline_row_state(");
+        assert!(agree(
+            "the app's own fact",
+            source.contains("psreadline_installed: Option<psreadline::InstalledCopy>"),
+            source_index()
+                .declaration_of(&bt_source::ItemQuery::field("App", "psreadline_installed"))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .contains("psreadline_installed: Option<psreadline::InstalledCopy>"),
+        ));
+        let row = body("psreadline_row_state");
         assert!(row.contains("self.app.psreadline_installed.unwrap_or_default()"));
         assert!(!row.contains("installed_copy("));
-        let refresh = body("    fn refresh_psreadline_installed(");
+        let refresh = body("refresh_psreadline_installed");
         assert!(refresh.contains("psreadline::refresh_installed("));
         assert!(refresh.contains("&mut self.app.psreadline_installed"));
-        let apply = body("    fn apply_psreadline(");
+        let apply = body("apply_psreadline");
         assert_eq!(
             apply
                 .matches("self.refresh_psreadline_installed();")
@@ -1849,7 +2005,7 @@ mod tests {
                     .contains("self.refresh_psreadline_installed();")
             );
         }
-        let layout = body("    fn settings_layout(");
+        let layout = body("settings_layout");
         let compact: String = layout.split_whitespace().collect();
         assert!(compact.contains("self.window.settings.take_psreadline_open_edge("));
         assert!(layout.contains("if psreadline_opened {"));
@@ -1868,9 +2024,15 @@ mod tests {
             .unwrap();
         assert!(edge.contains("self.refresh_psreadline_installed();"));
         assert_eq!(
-            source
-                .matches("self.refresh_psreadline_installed();")
-                .count(),
+            agree(
+                "the refresh edges",
+                source
+                    .matches("self.refresh_psreadline_installed();")
+                    .count(),
+                in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                    "self.refresh_psreadline_installed();"
+                ))),
+            ),
             3,
             "only install, remove, and Terminal-page open refresh the disk fact"
         );
