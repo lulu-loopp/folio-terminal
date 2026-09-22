@@ -128944,6 +128944,25 @@ mod summon_key_wiring_tests {
 /// that it is the one being asked.
 #[cfg(test)]
 mod live_markdown_edit_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Every reader in this module asked `main.rs` for its
+    // text. Nothing is deleted here: each body pin now computes its answer twice
+    // — once from `include_str!("main.rs")`, once from `bt-source` — and asserts
+    // the two are the same bytes, and each of the four counts asserts the two
+    // answer the same number. The deletion is the commit after this one, so that
+    // a reviewer sees the agreement and a bisect can land between them.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `found` are that module's helpers
+    // word for word, and its header is where the six points behind them live.
+    // `in_product_items` is `clipboard_path_tests`', word for word, and it is
+    // the shape the counts here need: this module spells every counted needle a
+    // second time in its own assertions and `needle!` excludes one construction
+    // expression rather than every mention, so the grain has to be the item and
+    // not the file. `agreed` is the equivalence itself and goes with the old
+    // reading.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -128955,6 +128974,107 @@ mod live_markdown_edit_tests {
         let rest = &SOURCE[start + signature.len()..];
         let end = rest.find("\n    fn ").unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    // ── what this module asks the crate instead ───────────────────────────
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// How many of these occurrences stand in code a product build compiles —
+    /// **at item grain**, which is `clipboard_path_tests`' helper and this
+    /// module's own decision rather than the pilot's file-grained one.
+    ///
+    /// Every needle counted below is written a second time in this module's own
+    /// assertions, and `needle!` excludes one construction expression rather
+    /// than every mention. §2.4's identity carries the `cfg` predicates written
+    /// on an enclosing inline `mod`, so the exclusion `window` performed by
+    /// cutting the file is a filter over the owners here.
+    ///
+    /// An occurrence in no callable at all is not a question this grain can
+    /// answer, so it is refused rather than quietly dropped.
+    fn in_product_items(found: &Found) -> usize {
+        let index = source();
+        assert_eq!(
+            found.outside_items(index),
+            0,
+            "an occurrence stands in no callable, so nothing here says whether \
+             the product compiles it:\n{}",
+            found.report(index)
+        );
+        found
+            .owners(index)
+            .into_iter()
+            .filter(|(identity, _)| {
+                !identity
+                    .variant
+                    .predicates()
+                    .iter()
+                    .any(|predicate| predicate == "test")
+            })
+            .map(|(_, count)| count)
+            .sum()
+    }
+
+    // ── the two readings of one body, asserted to agree ───────────────────
+
+    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
+    ///
+    /// `body` hands back everything after the signature prefix it was given and
+    /// stops before the next `\n    fn `: the rest of the declaration, then the
+    /// body, then whatever stands between the closing brace and the next
+    /// method's `fn `, which in this file is that method's doc comment.
+    /// `body_of` hands back the braces and what is between them. So the crate's
+    /// answer has to stand in this file's slice at the head of the body, with
+    /// nothing but the rest of the declaration in front of it.
+    ///
+    /// What comes back is the file's slice, so this commit changes no assertion.
+    fn agreed(old: &'static str, name: &str) -> &'static str {
+        let new = method_body("Runtime", name);
+        let at = match old.find(new) {
+            Some(at) => at,
+            None => {
+                assert!(
+                    old.starts_with(&new[1..]),
+                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
+                     bytes"
+                );
+                0
+            }
+        };
+        assert!(
+            !old[..at].contains('{'),
+            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
+             the head of it"
+        );
+        old
     }
 
     /// **The window, without the pins that read it.**
@@ -128980,7 +129100,7 @@ mod live_markdown_edit_tests {
     /// block nothing can be typed into.
     #[test]
     fn entering_writes_all_five_things_in_one_place() {
-        let door = body("    fn seat_preview_caret(");
+        let door = agreed(body("    fn seat_preview_caret("), "seat_preview_caret");
         for promise in [
             "caret.place(&content, offset, extend)",
             "pane.md_select = None",
@@ -128993,6 +129113,15 @@ mod live_markdown_edit_tests {
                 "entering no longer does `{promise}`"
             );
         }
+        assert_eq!(
+            window().matches("pane.md_caret = true").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("pane.md_caret = true")),
+                View::Raw
+            )),
+            "this file cut at this module, and the package at item grain, \
+             disagree about how many places enter",
+        );
         assert_eq!(
             window().matches("pane.md_caret = true").count(),
             1,
@@ -129028,30 +129157,46 @@ mod live_markdown_edit_tests {
     /// and a press on a link renders the page it is standing in.
     #[test]
     fn leaving_is_one_door_that_escape_the_ground_and_a_blur_all_reach() {
-        for (door, what) in [
-            ("    fn preview_key(", "`Esc`"),
+        for (door, name, what) in [
+            ("    fn preview_key(", "preview_key", "`Esc`"),
             (
                 "    fn spend_preview_press(",
+                "spend_preview_press",
                 "a press on the page's empty ground, spent at the release",
             ),
             (
                 "    fn chrome_mouse_input(",
+                "chrome_mouse_input",
                 "losing the keyboard to a press elsewhere",
             ),
         ] {
             assert!(
-                body(door).contains("leave_preview_page("),
+                agreed(body(door), name).contains("leave_preview_page("),
                 "{what} no longer renders the page again",
             );
         }
         assert!(
-            body("    fn press_preview_text(").contains("live && caret_at.is_none()"),
+            agreed(body("    fn press_preview_text("), "press_preview_text")
+                .contains("live && caret_at.is_none()"),
             "empty ground is a press that named no byte of the file — asked of \
              `caret_at`, because a press on a link names one and is the link's",
         );
         assert!(
-            body("    fn leave_preview_buffer_in(").contains("pane.md_caret = false"),
+            agreed(
+                body("    fn leave_preview_buffer_in("),
+                "leave_preview_buffer_in"
+            )
+            .contains("pane.md_caret = false"),
             "and handing this surface a different file still leaves the page",
+        );
+        assert_eq!(
+            window().matches("md_caret = false").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("md_caret = false")),
+                View::Raw
+            )),
+            "this file cut at this module, and the package at item grain, \
+             disagree about how many places leave",
         );
         assert_eq!(
             window().matches("md_caret = false").count(),
@@ -129059,7 +129204,8 @@ mod live_markdown_edit_tests {
             "one door and the file swap, counted here on purpose",
         );
         assert!(
-            !body("    fn leave_preview_page(").contains("pane.caret ="),
+            !agreed(body("    fn leave_preview_page("), "leave_preview_page")
+                .contains("pane.caret ="),
             "and leaving keeps the caret: it is a byte offset, and the flip to \
              the source face finds it where this left it",
         );
@@ -129076,8 +129222,18 @@ mod live_markdown_edit_tests {
     #[test]
     fn a_floated_page_takes_the_caret_through_the_docked_press() {
         assert!(
-            body("    fn press_float(").contains("self.press_preview_text(position)"),
+            agreed(body("    fn press_float("), "press_float")
+                .contains("self.press_preview_text(position)"),
             "the float's body branch no longer reaches the rendered page's press",
+        );
+        assert_eq!(
+            window().matches("self.place_preview_caret_on(").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("self.place_preview_caret_on(")),
+                View::Raw
+            )),
+            "this file cut at this module, and the package at item grain, \
+             disagree about how many places put the caret down",
         );
         assert_eq!(
             window().matches("self.place_preview_caret_on(").count(),
@@ -129097,8 +129253,11 @@ mod live_markdown_edit_tests {
     #[test]
     fn the_glance_card_refuses_the_caret_by_name() {
         assert!(
-            body("    fn preview_caret_takes_the_press(")
-                .contains("matches!(surface, PreviewSurface::Peek)"),
+            agreed(
+                body("    fn preview_caret_takes_the_press("),
+                "preview_caret_takes_the_press"
+            )
+            .contains("matches!(surface, PreviewSurface::Peek)"),
             "the card is no longer refused where the press decides",
         );
     }
@@ -129116,7 +129275,7 @@ mod live_markdown_edit_tests {
     /// height and lands the caret nowhere near the pointer.
     #[test]
     fn the_quick_edits_press_declines_a_rendered_page() {
-        let press = body("    fn press_preview_body(");
+        let press = agreed(body("    fn press_preview_body("), "press_preview_body");
         assert!(
             press.contains("if self.preview_shows_live_markdown(surface) {"),
             "the quick edit's press no longer stands aside for the rendered page",
@@ -129146,19 +129305,21 @@ mod live_markdown_edit_tests {
     /// and draw another.
     #[test]
     fn the_caret_answers_before_the_piece_selection_everywhere() {
-        for (signature, first, second) in [
+        for (signature, name, first, second) in [
             (
                 "    fn preview_selected_text(",
+                "preview_selected_text",
                 "self.preview_live_caret(surface)",
                 "pane.md_select?",
             ),
             (
                 "    fn preview_caret_selection_places(",
+                "preview_caret_selection_places",
                 "self.preview_live_caret(surface)?",
                 "preview_provenance::place_of(",
             ),
         ] {
-            let text = body(signature);
+            let text = agreed(body(signature), name);
             let one = text
                 .find(first)
                 .unwrap_or_else(|| panic!("{signature} no longer asks `{first}`"));
@@ -129168,7 +129329,11 @@ mod live_markdown_edit_tests {
             assert!(one < two, "{signature} asks the two in the wrong order");
         }
         assert!(
-            body("    fn preview_selected_text(").contains("caret.selected(content)"),
+            agreed(
+                body("    fn preview_selected_text("),
+                "preview_selected_text"
+            )
+            .contains("caret.selected(content)"),
             "and a caret selection copies the file's own bytes",
         );
     }
@@ -129198,7 +129363,7 @@ mod live_markdown_edit_tests {
     /// wrong.
     #[test]
     fn a_press_on_a_rendered_page_changes_no_blocks_face() {
-        let press = body("    fn press_preview_text(");
+        let press = agreed(body("    fn press_preview_text("), "press_preview_text");
         for wrote in [
             "self.place_preview_caret_on(",
             "self.seat_preview_caret(",
@@ -129249,7 +129414,7 @@ mod live_markdown_edit_tests {
     /// spent nothing.
     #[test]
     fn the_release_spends_the_record_and_the_drag_holds_its_seat() {
-        let release = body("    fn release_preview_text(");
+        let release = agreed(body("    fn release_preview_text("), "release_preview_text");
         for reaches in ["pressed.spend(!click, head)", "self.spend_preview_press("] {
             assert!(
                 release.contains(reaches),
@@ -129257,7 +129422,7 @@ mod live_markdown_edit_tests {
                  answered",
             );
         }
-        let drag = body("    fn drag_preview_text(");
+        let drag = agreed(body("    fn drag_preview_text("), "drag_preview_text");
         assert_eq!(
             drag.matches("self.place_preview_caret_on(").count(),
             1,
@@ -129291,12 +129456,12 @@ mod live_markdown_edit_tests {
     /// [`Runtime::settle_preview_caret`].
     #[test]
     fn the_grain_and_the_owed_caret_both_ride_on_the_record() {
-        let press = body("    fn press_preview_text(");
+        let press = agreed(body("    fn press_preview_text("), "press_preview_text");
         assert!(
             press.contains("let grain = preview_text_grain(clicks);"),
             "the press no longer classifies the repeat count it is recording",
         );
-        let spend = body("    fn spend_preview_press(");
+        let spend = agreed(body("    fn spend_preview_press("), "spend_preview_press");
         assert!(
             spend.contains("self.widen_preview_caret(surface, grain)"),
             "the release no longer grows the caret to the grain the press asked \
@@ -129309,11 +129474,21 @@ mod live_markdown_edit_tests {
         );
         assert_eq!(
             window().matches("md_caret_wanted = Some(").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("md_caret_wanted = Some(")),
+                View::Raw
+            )),
+            "this file cut at this module, and the package at item grain, \
+             disagree about how many places owe the caret",
+        );
+        assert_eq!(
+            window().matches("md_caret_wanted = Some(").count(),
             1,
             "one place owes the caret, counted here on purpose",
         );
         assert!(
-            body("    fn settle_preview_caret(").contains("md_caret_wanted"),
+            agreed(body("    fn settle_preview_caret("), "settle_preview_caret")
+                .contains("md_caret_wanted"),
             "and nothing spends it when the body lands",
         );
     }
@@ -129329,7 +129504,7 @@ mod live_markdown_edit_tests {
     /// still opened by the same `preview_press_opens_its_link` gate it was.
     #[test]
     fn a_press_on_a_link_records_no_caret_and_the_release_still_follows_it() {
-        let press = body("    fn press_preview_text(");
+        let press = agreed(body("    fn press_preview_text("), "press_preview_text");
         assert!(
             press.contains("let placing = caret_at.filter(|_| link.is_none() || shift);"),
             "a plain press on a link no longer declines the caret",
@@ -129339,7 +129514,7 @@ mod live_markdown_edit_tests {
             "the record is built from something other than `placing`, so a link \
              press may now put a caret in the page",
         );
-        let release = body("    fn release_preview_text(");
+        let release = agreed(body("    fn release_preview_text("), "release_preview_text");
         let gate = release
             .find("preview_press_opens_its_link(&drag.latch)")
             .expect("the release still asks the latch which gesture this was");
