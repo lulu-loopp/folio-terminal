@@ -341,6 +341,23 @@ pub enum Scope {
     /// One item: the answer to an [`ItemQuery`], which is loud when the item is
     /// not there or is not unique.
     Item(ItemQuery),
+    /// **Every `impl` block of one type**, by the type's own name — the bodies
+    /// of the inherent blocks and the trait ones alike, in every file they are
+    /// written in and on every `#[cfg]` arm they stand on.
+    ///
+    /// The scope a prohibition about a type wants: "no `impl` of `PaneMotion`
+    /// declares a renewable deadline" is a claim about that type's blocks and
+    /// about nothing else. Without it the nearest scope is the module the
+    /// blocks are written in today — which is right until one of them moves,
+    /// and too wide meanwhile: three types in `bt-app` declare the same
+    /// `deadline` signature, so a package-wide zero would invert the guard.
+    ///
+    /// The name is the type's, not a path to it, exactly as
+    /// [`ItemQuery::method`]'s owner is: `impl Gate`, `impl crate::Gate<'_>`
+    /// and `impl super::Gate` are one type (§2.4). A type with no `impl` at all
+    /// is [`QueryFailure::EmptyScope`] naming it, because a prohibition over no
+    /// bytes holds about everything.
+    Impls(String),
     /// One named file, and the reason it is allowed to be one (P2).
     ///
     /// A reader that wants a file has to add a variant to [`FileScoped`], and
@@ -375,6 +392,7 @@ impl fmt::Display for Scope {
             Self::Everything => formatter.write_str("the whole universe"),
             Self::Module(path) => write!(formatter, "module `{path}`"),
             Self::Item(query) => write!(formatter, "item `{query}`"),
+            Self::Impls(type_name) => write!(formatter, "every `impl` of `{type_name}`"),
             Self::File(entry) => write!(formatter, "file `{}`", entry.path()),
         }
     }
@@ -603,6 +621,14 @@ impl ItemQuery {
 
     /// Narrow to one conditional arm, by the `cfg` spellings standing on it —
     /// the other way to make one of the eleven a unique identity.
+    ///
+    /// **The spellings written inside the file** ([`ItemRecord::variant`]): an
+    /// arm is a thing one file declares twice, and the predicates on the
+    /// declarations that *reach* the file stand on every item in it alike, so
+    /// they never tell two of them apart. They are on the identity
+    /// ([`ItemIdentity::variant`]) and are narrowed by
+    /// [`ItemQuery::in_module`], which is the component of §2.4's tuple that
+    /// does vary with the path.
     #[must_use]
     pub fn in_variant(mut self, predicates: &[&str]) -> Self {
         self.variant = Some(predicates.iter().map(|it| (*it).to_owned()).collect());
@@ -664,12 +690,10 @@ impl ItemQuery {
                 .trait_name()
                 .is_some_and(|actual| actual == wanted || bare_trait(actual) == wanted),
         };
-        let module = self.module_path.as_ref().is_none_or(|wanted| {
-            record
-                .module_paths()
-                .iter()
-                .any(|path| path.as_str() == wanted.as_str())
-        });
+        let module = self
+            .module_path
+            .as_ref()
+            .is_none_or(|wanted| record.module_paths().contains(&wanted.as_str()));
         let variant = self
             .variant
             .as_ref()
@@ -968,6 +992,47 @@ pub struct Occurrence {
     pub certainty: Certainty,
 }
 
+impl Occurrence {
+    /// **Whether a build of the shipped program contains these bytes.**
+    ///
+    /// The question nearly every prohibition in this tree really asks — "how
+    /// many times does the *product* do this" — and it is answered at two
+    /// grains, because neither one answers it alone:
+    ///
+    /// * **The file** ([`FileRecord::permits_product`], §2.3): whether any
+    ///   declaration path reaches this file without passing a test gate. It is
+    ///   the only grain there is for bytes that stand in no item — inside a
+    ///   `const`, an attribute, a module's own header — because there is no item
+    ///   whose arm could be read instead.
+    /// * **The item** ([`ItemIdentity::variant`], §2.4): whether the innermost
+    ///   item holding these bytes stands on an arm some product build compiles.
+    ///   It is the only grain that sees an inline `#[cfg(test)] mod` or a
+    ///   `#[cfg(test)]` function, neither of which is a file and neither of
+    ///   which moves the file's answer.
+    ///
+    /// An item is in the product if **any** of its identities is, which is
+    /// §2.3's "any owning path" said one level down: a product file that a test
+    /// declaration also reaches is product code, and so is an item in it.
+    ///
+    /// **The item grain is exact only because the declarations that reach a
+    /// file are on the identity.** An item in a file reached by
+    /// `#[cfg(test)] mod t;` writes no gate of its own, so a reading of `t.rs`'s
+    /// own text calls it unconditional — which is how four copies of this rule
+    /// in `bt-app` came to count a test-only file's literals as product.
+    #[must_use]
+    pub fn in_the_product(self, index: &Index) -> bool {
+        let file_permits = index
+            .file_at(self.span.start())
+            .is_some_and(FileRecord::permits_product);
+        let item_permits = innermost_item(index, self.span).is_none_or(|record| {
+            record
+                .identities()
+                .any(|identity| identity.variant.permits_product())
+        });
+        file_permits && item_permits
+    }
+}
+
 /// Why a span is in the answer's excluded list rather than its occurrences.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Why {
@@ -1042,6 +1107,36 @@ impl Found {
             .filter(|found| found.certainty == Certainty::Candidate)
             .count();
         (self.occurrences.len() - candidates, candidates)
+    }
+
+    /// **The same answer, narrowed to what a build of the shipped program
+    /// contains** — [`Occurrence::in_the_product`] over every match.
+    ///
+    /// The rule and both of its grains are on that method; this is the filter,
+    /// and it hands back a [`Found`] rather than a count so that
+    /// [`Found::owners`], [`Found::report`] and the rest go on working on the
+    /// narrowed answer. What was excluded and where the needle came from are
+    /// carried over unchanged: they are facts about the query, not about which
+    /// build compiles the result.
+    ///
+    /// ```text
+    /// index.search(&search)?.in_the_product(index).len()
+    /// ```
+    #[must_use]
+    pub fn in_the_product(&self, index: &Index) -> Self {
+        Self {
+            query: self.query.clone(),
+            view: self.view,
+            scope: format!("{}, in the product", self.scope),
+            occurrences: self
+                .occurrences
+                .iter()
+                .copied()
+                .filter(|found| found.in_the_product(index))
+                .collect(),
+            excluded: self.excluded.clone(),
+            provenance: self.provenance.clone(),
+        }
     }
 
     /// The spans this query removed, and why.
@@ -1310,9 +1405,9 @@ impl Index {
             return Ok(Some(spans));
         }
         // The variants are named without their type for the same lexical
-        // reason, and the arm is kept rather than wildcarded so that a fifth
-        // variant is a compile error here.
-        use Scope::{Everything, File, Item, Module};
+        // reason, and every arm is written out rather than wildcarded so that a
+        // new variant is a compile error here.
+        use Scope::{Everything, File, Impls, Item, Module};
         let spans: Vec<Span> = match scope {
             Everything => return Ok(None),
             Module(path) => self
@@ -1325,6 +1420,15 @@ impl Index {
                 .find(query)?
                 .iter()
                 .map(|record| record.whole())
+                .collect(),
+            // Every block of that type, whatever file it is written in and
+            // whatever arm it stands on: the reading is `cfg`-blind (§2.4), so
+            // a block behind `#[cfg(windows)]` is read on every runner.
+            Impls(type_name) => self
+                .impls()
+                .iter()
+                .filter(|block| block.type_owner() == type_name)
+                .map(crate::index::ImplRecord::body)
                 .collect(),
             File(_) => unreachable!("a file scope is answered through its entry, above"),
         };

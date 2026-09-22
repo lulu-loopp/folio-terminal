@@ -44,7 +44,7 @@ use crate::reject::{Position, Rejection};
 /// compiled in a product build on Windows and not off it, and a reading that
 /// collapsed that to "test" would exempt a platform door from every guard that
 /// skips test code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Compilation {
     /// No build of the shipped program contains this — `cfg(test)`, or an `all`
     /// that holds one.
@@ -69,7 +69,7 @@ impl Compilation {
 
     /// Whether a build of the shipped program can contain this.
     #[must_use]
-    pub fn permits_product(self) -> bool {
+    pub const fn permits_product(self) -> bool {
         !matches!(self, Self::NeverInProduct)
     }
 }
