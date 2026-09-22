@@ -108332,20 +108332,19 @@ mod popover_trigger_tests {
 
 #[cfg(test)]
 mod launch_landing_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Four of this module's five readers asked `main.rs`
-    // for its text — ten body pins over ten methods; the fifth calls
-    // `most_recently_active_window` and is left alone. Nothing is deleted here:
-    // each pin computes its answer twice, once from the file and once from
-    // `bt-source`, and asserts the two are the same bytes. The deletion is the
-    // commit after this one, because two implementations of one judgement do not
-    // vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Four of this module's five readers asked `main.rs` for its text — ten body
+    // pins over ten methods; the fifth calls `most_recently_active_window` and is
+    // left alone. Every pin now asks `bt-source` about an *item*, so no fact in
+    // this module is bound to the file it happens to be written in today. The
+    // commit before this one ran both readings side by side and asserted they
+    // agree; this is the one that deletes the older of the two, because two
+    // implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4).
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
     // `source`, `item_body` and `method_body` are that module's helpers word for
-    // word and `agreed` is `focus_mode_door_tests`', whose finder is this one's
-    // shape exactly — it runs **past** the closing brace, to the next
-    // `\n    fn `.
+    // word, and its header is where the six points behind them live.
     //
     // **One owner, and it is not the one this file's order suggests.** Every one
     // of the ten is a method of `FolioApp`, not of `Runtime`: this module stands
@@ -108353,23 +108352,6 @@ mod launch_landing_tests {
     // reach, and a finder cannot say which `impl` it landed in. The equivalence
     // commit is what established the owner rather than assumed it.
     use bt_source::{Index, ItemQuery};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The body of a method, from its signature to the next method's.
-    ///
-    /// **Every caller spells the signature through `concat!`**, because this
-    /// module stands *above* the methods it reads: a needle written as one
-    /// literal would be found here first, and the test would assert against
-    /// itself.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    }
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -108389,47 +108371,6 @@ mod launch_landing_tests {
     /// The body of one inherent method of `owner`.
     fn method_body(owner: &str, name: &str) -> &'static str {
         item_body(&ItemQuery::method(owner, name))
-    }
-
-    /// **This file's slice and the crate's body, compared as bytes.**
-    ///
-    /// [`body`] hands back everything after the signature it matched up to the
-    /// next `\n    fn `, so its slice holds the rest of the declaration, the
-    /// whole body braces and all, and then whatever stands between that method
-    /// and the next one. [`Index::body_of`] hands back the braces and everything
-    /// between them, so the crate's answer has to stand inside this file's
-    /// slice, once, with nothing but the rest of the declaration in front of it.
-    ///
-    /// What comes back is this file's slice, so this commit changes no
-    /// assertion — and every assertion below was checked against the *narrowed*
-    /// body before this was written, because narrowing a slice can only take a
-    /// positive away.
-    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
-        let at = old.find(new).unwrap_or_else(|| {
-            panic!("`{what}`: this file's slice does not hold the body the crate returned")
-        });
-        assert_eq!(
-            old.rfind(new),
-            Some(at),
-            "`{what}`: the crate's body stands twice inside this file's slice"
-        );
-        assert!(
-            !old[..at].contains('{'),
-            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
-             of its body"
-        );
-        old
-    }
-
-    /// One method pin's two readings, asserted to agree, the file's returned.
-    ///
-    /// The signature is assembled at run time for [`body`]'s reason.
-    fn agreed_method(owner: &str, name: &str) -> &'static str {
-        agreed(
-            body(&format!("    fn {name}(")),
-            method_body(owner, name),
-            name,
-        )
     }
 
     /// **RED (§7.59) — a launch lands in the window the reader was last in, and
@@ -108492,7 +108433,7 @@ mod launch_landing_tests {
     /// translated once.
     #[test]
     fn a_request_opens_its_tab_where_it_asked_and_raises_the_window() {
-        let tab = agreed_method("FolioApp", "open_a_tab_for_a_launch");
+        let tab = method_body("FolioApp", "open_a_tab_for_a_launch");
         assert!(
             tab.contains("runtime.new_tab_with_profile(&profile, request.cwd.clone())"),
             "the tab door is not reached with the request's own folder:\n{tab}"
@@ -108507,13 +108448,13 @@ mod launch_landing_tests {
         // over the wire stayed above, and *where one request lands* — which is
         // the whole of what this case is about — moved down one function so
         // that both doors reach the same rule rather than each keeping a copy.
-        let settle = agreed_method("FolioApp", "settle_launch_requests");
+        let settle = method_body("FolioApp", "settle_launch_requests");
         assert!(
             settle.contains("launch_wire::take()")
                 && settle.contains("self.land_one_launch_request(event_loop, &request)?"),
             "the wire is drained by something other than the one landing door:\n{settle}"
         );
-        let landing = agreed_method("FolioApp", "land_one_launch_request");
+        let landing = method_body("FolioApp", "land_one_launch_request");
         assert!(
             landing.contains("most_recently_active_window("),
             "the window is chosen by some rule other than the one that is \
@@ -108524,7 +108465,7 @@ mod launch_landing_tests {
             "a tab opens and the window it opened in stays behind whatever the \
              reader was looking at:\n{landing}"
         );
-        let raise = agreed_method("FolioApp", "raise_for_a_launch");
+        let raise = method_body("FolioApp", "raise_for_a_launch");
         let restore = raise.find("set_minimized(false)").unwrap_or(usize::MAX);
         let front = raise.find("give_foreground_to(").unwrap_or(0);
         assert!(
@@ -108551,7 +108492,7 @@ mod launch_landing_tests {
     #[test]
     fn a_window_asked_for_by_a_second_start_is_opened_by_this_process() {
         // One function down since M3-1 — see the case above for why.
-        let settle = agreed_method("FolioApp", "land_one_launch_request");
+        let settle = method_body("FolioApp", "land_one_launch_request");
         // **Since 2026-09-11 the flag is read through the table and not here**
         // (§7.59): `--new-window` is one row of `launch_wire::landing`, whose
         // other rows are `--tab`, the two launcher origins and the reader's own
@@ -108571,7 +108512,7 @@ mod launch_landing_tests {
             settle.contains("self.open_a_window_for_a_launch(event_loop, target, request)"),
             "a request that asked for a window has no door to it:\n{settle}"
         );
-        let door = agreed_method("FolioApp", "open_a_window_for_a_launch");
+        let door = method_body("FolioApp", "open_a_window_for_a_launch");
         assert!(
             door.contains("app.pending_new_windows.push(plan)")
                 && door.contains("self.open_pending_window(event_loop)?"),
@@ -108612,7 +108553,7 @@ mod launch_landing_tests {
     /// which is the one case nobody would notice until they used it.
     #[test]
     fn a_service_opens_the_folder_and_a_document_opens_itself() {
-        let settle = agreed_method("FolioApp", "settle_app_delegate_events");
+        let settle = method_body("FolioApp", "settle_app_delegate_events");
         assert!(
             settle.contains("AppDelegateOrigin::Services")
                 && settle.contains("self.open_one_place_for_a_service(event_loop, &path)?")
@@ -108620,7 +108561,7 @@ mod launch_landing_tests {
             "one list of paths is landed two ways and the origin is what tells \
              them apart:\n{settle}"
         );
-        let service = agreed_method("FolioApp", "open_one_place_for_a_service");
+        let service = method_body("FolioApp", "open_one_place_for_a_service");
         assert!(
             service.contains("explorer_menu::folder_for(path, cli::machine_path_kind(path))"),
             "the Service's folder rule is not the one Explorer's row already \
@@ -108631,7 +108572,7 @@ mod launch_landing_tests {
             "a place handed over by a Service does not land through the door a \
              `--tab <folder>` launch lands through:\n{service}"
         );
-        let document = agreed_method("FolioApp", "open_one_path_for_the_delegate");
+        let document = method_body("FolioApp", "open_one_path_for_the_delegate");
         assert!(
             document.contains("runtime.open_preview(path)?"),
             "a document handed over by Finder no longer opens on a preview \
@@ -108661,7 +108602,7 @@ mod launch_landing_tests {
     /// straight back off it.
     #[test]
     fn a_dock_row_lands_where_the_reader_was_and_makes_a_window_when_there_is_none() {
-        let landing = agreed_method("FolioApp", "answer_a_menu_row");
+        let landing = method_body("FolioApp", "answer_a_menu_row");
         assert!(
             landing.contains("origin == bt_platform::AppDelegateOrigin::Dock"),
             "the two surfaces are answered the same way:\n{landing}"
@@ -108689,7 +108630,7 @@ mod launch_landing_tests {
         );
         // And which surface a press came from is decided in one place: the one
         // sender the bar and the Dock share.
-        let install = agreed_method("FolioApp", "install_main_menu");
+        let install = method_body("FolioApp", "install_main_menu");
         assert!(
             install.contains("MenuSurface::Bar => bt_platform::AppDelegateOrigin::Menu")
                 && install.contains("MenuSurface::Dock => bt_platform::AppDelegateOrigin::Dock"),
