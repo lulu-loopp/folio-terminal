@@ -1,6 +1,20 @@
 # Exact AST inventory; new raw/generic read or open sites fail the source guard.
 # Non-content entries are domain open/read verbs, locks, metadata handles or write-only opens.
 # Content adapters and their lane owners are checked separately in file_reads_source_tests.rs.
+#
+# A row is `<count> <key>`, and the key names the owner one of two ways.
+#   Runtime::turn: .open       — the item: the type the impl is for, the trait
+#     if there is one, and the name. It says nothing about which file the item
+#     is written in, so it does not change when the item moves. Every one of
+#     these is put to the crate by file_reads_source_tests.rs, and a key naming
+#     no declaration, or two, is a refusal rather than a merged count.
+#   trace.rs: create: .open    — the file, the bare name of the function the
+#     door stands in, the door. A row like this goes quiet the day its owner
+#     moves to another file; these are the rows still on
+#     docs/plans/MIGRATION-DEBT.tsv, and P16 of docs/plans/bt-app-split-prep.md
+#     is the ticket that re-keys them.
+# A file-keyed key's first segment ends in .rs, which is how the two are told
+# apart. Order is not part of the comparison; the rows are a set.
 1 attention_copilot.rs: run_probe: .output
 1 psreadline.rs: run_probe: .output
 # The installed-module seam: both are the seam's own verb; its production arm reads
@@ -28,33 +42,33 @@
 1 git_watch.rs: sync_with: open
 1 hang_watch.rs: append_healed: .open
 1 main.rs: append_panic_report: .open
-1 main.rs: commit_web_page: .open
-1 main.rs: create: GpuContext::open
+1 Runtime::commit_web_page: .open
+1 Runtime::create: GpuContext::open
 1 main.rs: open_the_data_directorys_endpoints: attention_wire::open
 1 main.rs: open_the_data_directorys_endpoints: launch_wire::open
-1 main.rs: create: persist::KeybindingsStore::open
-1 main.rs: create: persist::ProfilesStore::open
-1 main.rs: create: persist::SessionStore::open
-1 main.rs: create: persist::SettingsStore::open
-1 main.rs: create: pins::PinsStore::open
+1 Runtime::create: persist::KeybindingsStore::open
+1 Runtime::create: persist::ProfilesStore::open
+1 Runtime::create: persist::SessionStore::open
+1 Runtime::create: persist::SettingsStore::open
+1 Runtime::create: pins::PinsStore::open
 1 main.rs: dump_chrome_frame: .open
 1 main.rs: dump_overlay_frame: .open
-1 main.rs: land_page_source_on: .open
-1 main.rs: land_preview_source_on: .open
+1 Runtime::land_page_source_on: .open
+1 Runtime::land_preview_source_on: .open
 1 main.rs: new_window_runtime: .open
-1 main.rs: open_rename: TabRename::open
-1 main.rs: open_search: .open
-1 main.rs: open_web_page_on: webhost::WebSeat::open
-1 main.rs: place_float: .open
-1 main.rs: play_video_file_on: .open
-1 main.rs: pop_out_preview: .open
-1 main.rs: promote_file_peek: .open
-1 main.rs: raise_dirty_gate: .open
-1 main.rs: raise_first_run_if_due: .open
-1 main.rs: raise_psreadline_invite_if_due: .open
+1 Runtime::open_rename: TabRename::open
+1 Runtime::open_search: .open
+1 Runtime::open_web_page_on: webhost::WebSeat::open
+1 Runtime::place_float: .open
+1 Runtime::play_video_file_on: .open
+1 Runtime::pop_out_preview: .open
+1 Runtime::promote_file_peek: .open
+1 Runtime::raise_dirty_gate: .open
+1 Runtime::raise_first_run_if_due: .open
+1 Runtime::raise_psreadline_invite_if_due: .open
 1 main.rs: say_at_the_front_door: persist::SettingsStore::open
-1 main.rs: settings_layout: .read
-1 main.rs: turn: .open
+1 Runtime::settings_layout: .read
+1 Runtime::turn: .open
 1 pdf.rs: count_pages: .read
 1 pdf.rs: read_capped: .read_to_end
 1 persist.rs: open: SessionWriter::open
