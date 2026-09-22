@@ -122234,25 +122234,82 @@ mod resize_skirt_order_tests {
 /// **A page popped out into a float still has a pane** (§7.14a).
 #[cfg(test)]
 mod floated_page_tests {
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before this
+    // one ran both readings side by side and asserted they agree — all 35 body
+    // pins compared as bytes — and this is the one that deletes the older of the
+    // two, because two implementations of one judgement do not vouch for each
+    // other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `free_fn_body` and `found` are that
+    // module's helpers word for word, and its header is where the six points
+    // behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took the first
+    // `\n    fn name(` in this file — a method of *whatever `impl` came first* —
+    // and stopped before the next one, which is not the end of the method. The
+    // identities turn out to be four owners and not one: `Runtime`, `App`,
+    // `FolioApp` and `<FolioApp as ApplicationHandler>`. The slices ran long:
+    // 103 bytes against 5,265 for `a_run_ends_with_its_last_visible_window`, 57
+    // against 1,248 for `float_body_rect`. Every assertion here fell inside the
+    // item it names, so the narrowing changes no verdict, and a `contains`
+    // satisfied by the next method's prose is no longer possible.
+    //
+    // Three of these readings are not body pins, and each is written down rather
+    // than inherited (§4.1): the two doors' dressing and the four withdrawn
+    // notification-area spellings took this file and now take every file the
+    // package compiles — a door or a re-reached mechanism written in `runtime/`
+    // is as much of one as a door written here; and the summon's `×` and the
+    // gear are *parts* of bodies, so what replaces the file is the body each is
+    // cut out of, with the cut unchanged.
     use super::{a_page_still_has_a_pane, a_run_ends_with_its_last_visible_window, marks};
 
-    const SOURCE: &str = include_str!("main.rs");
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// The body of a method declared at an `impl`'s own indentation.
+    // ── what this module asks the crate ───────────────────────────────────
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
     ///
-    /// **Every caller spells the signature through `concat!`**, and that is not
-    /// decoration: this module is *below* the methods it reads, so a needle
-    /// written as one literal would also be found inside this file's own call to
-    /// `fn_body` — the first match would be the test, the "body" would be the
-    /// assertion standing right after it, and the test would cheerfully assert
-    /// against itself. Split in two, the needle exists only where the method
-    /// does.
-    fn fn_body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    ///
+    /// The owner is an argument and not a guess. What `fn_body` does is take the
+    /// first `\n    fn name(` in this file, which is a method of *whatever
+    /// `impl` happens to come first* — and this module's pins turn out to mean
+    /// three different types, which the equivalence commit is what establishes
+    /// rather than assumes.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// RED — **the float answers for a page whose seat is gone**, which is the
@@ -122575,10 +122632,7 @@ mod floated_page_tests {
             Some(before),
             "a save the watcher cannot see is a page that never reloads"
         );
-        let refresh = fn_body(concat!(
-            "fn refresh_preview_file",
-            "(&mut self, news: &preview_watch::FileNews) -> Result<()> {"
-        ));
+        let refresh = method_body("Runtime", "refresh_preview_file");
         assert!(
             refresh.contains("web.reload(&window.compositor)"),
             "and a watched file that a page is standing on takes an ordinary reload"
@@ -122587,7 +122641,7 @@ mod floated_page_tests {
         // window's answer is the fold of one tab's — so the sentence is asked of
         // the half that names files, which is where a page's own file is picked
         // up.
-        let watched = fn_body("fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {");
+        let watched = free_fn_body("files_a_tab_stands_on");
         assert!(
             watched.contains(concat!("LocalFile", "Url::parse")),
             "which requires a local page's own file to be on the watched list"
@@ -122595,20 +122649,14 @@ mod floated_page_tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         // ① again, at the surface: the refusal is gone.
-        let editable = fn_body(concat!(
-            "fn preview_is_editable",
-            "(&self, surface: PreviewSurface) -> bool {"
-        ));
+        let editable = method_body("Runtime", "preview_is_editable");
         assert!(
             !editable.contains("page_source_shown_on"),
             "a page's source face is not special-cased into read-only any more"
         );
 
         // ② The keyboard.
-        let keyboard = fn_body(concat!(
-            "fn page_with_the_keyboard",
-            "(&self) -> Option<LeafId> {"
-        ));
+        let keyboard = method_body("Runtime", "page_with_the_keyboard");
         assert!(
             keyboard.contains("page_source_shown_on(surface).is_some()"),
             "and typing over a source face is not typing into the page under it"
@@ -122722,7 +122770,7 @@ mod floated_page_tests {
         // actually asks which float is carrying the page. `hole_for` is honest
         // about whatever it is handed, so a caller handing it `None` for every
         // page is exactly the shipped build the user photographed.
-        let sync = fn_body(concat!("    fn ", "sync_web_page("));
+        let sync = method_body("Runtime", "sync_web_page");
         assert!(
             sync.contains("floated.and_then(|id| self.float_hole_level(id))"),
             "the placement does not ask which float is carrying this page, so \
@@ -122746,11 +122794,11 @@ mod floated_page_tests {
             "a floated page's engine does not read the float's inset body:\n{sync}"
         );
         assert!(
-            fn_body("    fn float_inset_body_rect(").contains(".content_body(scale)"),
+            method_body("Runtime", "float_inset_body_rect").contains(".content_body(scale)"),
             "the engine's rectangle is not the inset one, so the page and a document's scrollbar reach the window's rounded floor"
         );
         assert!(
-            fn_body("    fn float_body_rect(").contains("?.body"),
+            method_body("Runtime", "float_body_rect").contains("?.body"),
             "a float's body is still inset for every tenant, so the ruling's foot-less document does not reach the bottom edge"
         );
     }
@@ -122854,7 +122902,7 @@ mod floated_page_tests {
     ///    is ever the focused preview surface, so ① has nothing to answer with.
     #[test]
     fn a_page_carried_into_a_float_is_what_typing_goes_into() {
-        let holder = fn_body(concat!("    fn ", "page_with_the_keyboard("));
+        let holder = method_body("Runtime", "page_with_the_keyboard");
         assert!(
             holder.contains(concat!(
                 "PreviewSurface::Float(id) => ",
@@ -122864,14 +122912,14 @@ mod floated_page_tests {
              tree alone, where a popped-out page has no seat:\n{holder}"
         );
 
-        let target = fn_body(concat!("    fn ", "page_is_the_typing_target("));
+        let target = method_body("Runtime", "page_is_the_typing_target");
         assert!(
             target.contains(concat!("self.page_with_the_keyboard()", " == Some(leaf)")),
             "the settling loop judges a floated page by a seat it does not have, \
              so the keyboard is taken back from it every frame:\n{target}"
         );
 
-        let press = fn_body(concat!("    fn ", "press_web_page("));
+        let press = method_body("Runtime", "press_web_page");
         let raise = press
             .find("self.raise_the_float_holding(leaf)?")
             .unwrap_or(usize::MAX);
@@ -122910,7 +122958,7 @@ mod floated_page_tests {
     /// sentence it is a copy of.
     #[test]
     fn a_press_on_a_pane_takes_the_keyboard_back_from_every_float() {
-        let focus = fn_body(concat!("    fn ", "focus_pane_at("));
+        let focus = method_body("Runtime", "focus_pane_at");
         let blur = focus
             .find("self.window.float.blur()")
             .unwrap_or_else(|| panic!("a press on a pane never blurs the floats:\n{focus}"));
@@ -122946,12 +122994,12 @@ mod floated_page_tests {
     /// in both and the second goes red (two places to forget it).
     #[test]
     fn a_window_that_is_shut_leaves_the_screen_before_the_process_does() {
-        let letting_go = fn_body(concat!("    fn ", "let_go_of_this_window("));
+        let letting_go = method_body("Runtime", "let_go_of_this_window");
         assert!(
             letting_go.contains("self.window.window.set_visible(false)"),
             "a shut window is left on the screen for Windows to ghost:\n{letting_go}"
         );
-        let retire = fn_body(concat!("    fn ", "retire_window("));
+        let retire = method_body("Runtime", "retire_window");
         assert!(
             !retire.contains("set_visible"),
             "the hide is said twice, so there are two places to forget it:\n{retire}"
@@ -122990,12 +123038,12 @@ mod floated_page_tests {
     /// other programs are entitled to move.
     #[test]
     fn a_summoned_window_is_not_shown_by_the_door_that_opens_it() {
-        let door = fn_body(concat!("    fn ", "open_window("));
+        let door = method_body("Runtime", "open_window");
         assert!(
             door.contains("if plan.receives.is_none() && !plan.quake {"),
             "the door that opens a window shows the one a key summons:\n{door}"
         );
-        let summon = fn_body(concat!("    fn ", "show_quake_window("));
+        let summon = method_body("Runtime", "show_quake_window");
         // **Through the one door and not by doing the arithmetic here** (§7.54e ③).
         // `quake::Quake::placement` is where the rules are and
         // `quake::SummonScreen::under_the_pointer` is where the machine is read; what
@@ -123020,7 +123068,7 @@ mod floated_page_tests {
             "the posture is not re-stated, so a window that has been hidden and \
              shown again may arrive behind what it was called over:\n{summon}"
         );
-        let hide = fn_body(concat!("    fn ", "hide_quake_window("));
+        let hide = method_body("Runtime", "hide_quake_window");
         assert!(
             hide.contains("set_visible(false)") && !hide.contains("window_shown = false"),
             "a summon that is sent away is closed rather than hidden, or forgets \
@@ -123054,20 +123102,27 @@ mod floated_page_tests {
     /// does.
     #[test]
     fn every_window_this_process_opens_wears_its_band_before_it_is_shown() {
+        // **Over every file this package compiles**, and not over the one this
+        // module is written in (§4.1): a third door written in `runtime/` would
+        // be as much a door as these two, and a reading watching one file could
+        // not say so.
+        //
+        // Spelled in two halves because it was written before `needle!`, which
+        // now records where the needle was written and excludes that
+        // construction; the assembly is belt and braces until P18 unpicks it.
+        let dressed = concat!("dress_new_window", "(native)?;");
         assert_eq!(
-            SOURCE
-                .matches(concat!("dress_new_window", "(native)?;"))
-                .count(),
+            found(needle!(Pattern::text(dressed)), View::Raw).len(),
             2,
             "the two doors that open a window are not both dressing it"
         );
-        let dressing = fn_body(concat!("    fn ", "dress_new_window("));
+        let dressing = method_body("Runtime", "dress_new_window");
         assert!(
             dressing.contains(concat!("self.follow_the_window_band", "()?;")),
             "a window is dressed without being given the band its layout asks \
              for:\n{dressing}"
         );
-        let showing = fn_body(concat!("    fn ", "show_new_window("));
+        let showing = method_body("Runtime", "show_new_window");
         assert!(
             showing.contains(concat!("put_the_window_on_the_glass", "(")),
             "the door that shows a window no longer shows it:\n{showing}"
@@ -123094,7 +123149,10 @@ mod floated_page_tests {
     /// three-tab window coming back with none of them.
     #[test]
     fn the_document_a_quit_wrote_is_not_written_over_by_the_teardown() {
-        let door = fn_body(concat!("    fn ", "record_session("));
+        // `record_session` is `App`'s and not `Runtime`'s — which the equivalence
+        // establishes rather than assumes, because the finder this replaces took
+        // the first `\n    fn record_session(` in the file and could not tell.
+        let door = method_body("App", "record_session");
         assert!(
             door.contains(concat!("quit::Quit::document_is", "_written")),
             "the one door onto the document does not ask whether the quit has \
@@ -123136,7 +123194,7 @@ mod floated_page_tests {
     /// from never comes back to the front.
     #[test]
     fn the_foreground_is_read_before_the_summon_and_handed_back_after_it() {
-        let up = fn_body(concat!("    fn ", "summon_quake("));
+        let up = method_body("FolioApp", "summon_quake");
         let read = up
             .find("foreground_holder()")
             .expect("the summon reads who had the keyboard");
@@ -123148,7 +123206,7 @@ mod floated_page_tests {
             "the foreground is read after the window is up, by which time it is \
              the window:\n{up}"
         );
-        let down = fn_body(concat!("    fn ", "dismiss_quake("));
+        let down = method_body("FolioApp", "dismiss_quake");
         let hide = down
             .find("hide_quake_window()")
             .expect("the dismissal hides the window");
@@ -123194,19 +123252,19 @@ mod floated_page_tests {
     /// hidden window in the registry for ever.
     #[test]
     fn a_window_nobody_can_see_does_not_keep_the_run_alive() {
-        let count = fn_body(concat!("    fn ", "windows_left_after("));
+        let count = method_body("FolioApp", "windows_left_after");
         assert!(
             count.contains("app.quake.window()") && count.contains("Some(*id) != summon"),
             "a summoned window is counted as a window on the glass, so closing the last visible \
              one is not the end of the run:\n{count}"
         );
-        let shut = fn_body(concat!("    fn ", "close("));
+        let shut = method_body("FolioApp", "close");
         assert!(
             shut.contains("self.retire_the_summon_with_the_run(leaving_at)"),
             "nothing tells the summoned window that the run it belongs to has \
              ended:\n{shut}"
         );
-        let retire = fn_body(concat!("    fn ", "retire_the_summon_with_the_run("));
+        let retire = method_body("FolioApp", "retire_the_summon_with_the_run");
         assert!(
             retire.contains("runtime.close_window(true)"),
             "it leaves by some road other than the one every other window leaves \
@@ -123237,10 +123295,18 @@ mod floated_page_tests {
     /// summoned window back its minimise or maximise button and the last assertion names it.
     #[test]
     fn the_summoned_terminals_close_button_is_the_chords_own_bit() {
-        let arm = SOURCE
+        // This arm is a *part* of a body, so what it is cut out of is the body —
+        // `FolioApp`'s `window_event`, by the tuple of §2.4 and not by a line of
+        // a file — and the cut itself is what it always was. The deleted reading
+        // split the whole of `main.rs`, whose separators include this very test's
+        // own string literals; a body cannot contain them.
+        let door = item_body(
+            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
+        );
+        let arm = door
             .split("WindowEvent::CloseRequested")
             .nth(1)
-            .expect("the close arm is in this file");
+            .expect("the close arm is in the door that receives it");
         let arm = &arm[..arm.find("WindowEvent::KeyboardInput").unwrap_or(arm.len())];
         assert!(
             arm.contains("runtime.app.quake.press()"),
@@ -123289,10 +123355,16 @@ mod floated_page_tests {
     /// terminal's rows back under `General` and the second assertion names the page.
     #[test]
     fn the_gear_on_the_summoned_terminal_opens_the_page_about_it() {
-        let arm = SOURCE
+        // The same cut, taken out of the body the arm belongs to. **What the
+        // deleted reading could not tell**: it split the whole of `main.rs`, and
+        // the second separator in this file was this test's own string literal
+        // three lines above the split — so the arm it returned ran to a line of
+        // this module. The press's body cannot contain it.
+        let press = method_body("Runtime", "chrome_mouse_input");
+        let arm = press
             .split("seats::ChromeTarget::Settings => {")
             .nth(1)
-            .expect("the gear's arm is in this file");
+            .expect("the gear's arm is in the press it belongs to");
         let arm = &arm[..arm
             .find("seats::ChromeTarget::PanelToggle")
             .unwrap_or(arm.len())];
@@ -123387,7 +123459,7 @@ mod floated_page_tests {
         }
         // And the rule this page keeps is that value and not a second reading of
         // the same question.
-        let rule = fn_body(concat!("fn ", "a_run_ends_with_its_last_visible_window("));
+        let rule = free_fn_body("a_run_ends_with_its_last_visible_window");
         assert!(
             rule.contains("an_application_outlives_its_last_window()"),
             "the rule decides for itself whether a run outlives its windows:\n{rule}"
@@ -123415,7 +123487,7 @@ mod floated_page_tests {
         // which is the half of this that decides the ruling: `windows_left_after`
         // takes the summon out, so "no visible windows" is true on exactly the
         // turn the reader closed the last thing they could see.
-        let counted = fn_body(concat!("    fn ", "windows_left_after("));
+        let counted = method_body("FolioApp", "windows_left_after");
         assert!(
             counted.contains("Some(*id) != summon && *id != going"),
             "the summoned terminal is being counted as a window the reader asked for, so a run \
@@ -123428,13 +123500,13 @@ mod floated_page_tests {
              state §7.54 refuses reachable: close every ordinary window while it is up, then \
              press the key:\n{counted}"
         );
-        let retire = fn_body(concat!("    fn ", "retire_the_summon_with_the_run("));
+        let retire = method_body("FolioApp", "retire_the_summon_with_the_run");
         assert!(
             !retire.contains("is_showing"),
             "a summoned terminal that was on the screen when the run ended is left behind, \
              unclosed and holding the registry open:\n{retire}"
         );
-        let shut = fn_body(concat!("    fn ", "close("));
+        let shut = method_body("FolioApp", "close");
         assert!(
             shut.contains("a_run_ends_with_its_last_visible_window(self.windows_left_after(id))"),
             "the shut door decides residency for itself instead of reading the one rule, so it \
@@ -123445,7 +123517,7 @@ mod floated_page_tests {
             "the run ends and the hidden summoned terminal is left behind it, unclosed and \
              unwritten:\n{shut}"
         );
-        let reap = fn_body(concat!("    fn ", "reap_leaving_windows("));
+        let reap = method_body("FolioApp", "reap_leaving_windows");
         assert!(
             reap.contains("a_run_ends_with_its_last_visible_window(self.windows.len())"),
             "the other road to an empty registry decides residency for itself:\n{reap}"
@@ -123454,18 +123526,25 @@ mod floated_page_tests {
         // source gate rather than an assertion about behaviour: what the ruling
         // withdrew is a mechanism, and a mechanism that is merely unreachable is
         // one somebody re-reaches.
-        const MAIN: &str = include_str!("main.rs");
-        // Spelled in halves, because this file reads itself: a gate written as one
-        // literal is a gate that always trips on its own text.
+        //
+        // **Over every file this package compiles** (§4.1): a withdrawn
+        // mechanism re-reached from `runtime/` is as re-reached as one written
+        // here, and the reading this replaces watched one file.
+        //
+        // Spelled in halves, because a gate written as one literal is a gate
+        // that trips on its own text — which `needle!` now also answers, by
+        // excluding the construction it records.
         for withdrawn in [
             concat!("tray_keeps", "_the_run_alive"),
             concat!("Tray", "Icon"),
             concat!("a_run_worth", "_keeping"),
             concat!("bt_platform::", "tray"),
         ] {
+            let hits = found(needle!(Pattern::text(withdrawn)), View::Raw);
             assert!(
-                !MAIN.contains(withdrawn),
-                "`{withdrawn}` is the withdrawn notification-area icon, and it is still here"
+                hits.is_empty(),
+                "`{withdrawn}` is the withdrawn notification-area icon, and it is still here\n{}",
+                hits.report(source())
             );
         }
     }
@@ -123496,7 +123575,7 @@ mod floated_page_tests {
     /// is the whole difference between a bound and a promise.
     #[test]
     fn a_closed_window_is_dropped_only_once_its_pages_have_gone_or_the_bound_has() {
-        let close = fn_body(concat!("    fn ", "close("));
+        let close = method_body("FolioApp", "close");
         assert!(
             !close.contains("self.windows.remove("),
             "the shut destroys the HWND while a browser still has a child under \
@@ -123513,7 +123592,7 @@ mod floated_page_tests {
              opening it again is met by a restore prompt about a run that \
              finished perfectly:\n{close}"
         );
-        let reap = fn_body(concat!("    fn ", "reap_leaving_windows("));
+        let reap = method_body("FolioApp", "reap_leaving_windows");
         assert!(
             reap.contains("runtime.pages_are_gone()"),
             "the reap lets go of a window without asking whether its pages \
@@ -123551,7 +123630,7 @@ mod floated_page_tests {
     /// draws frames and drains shells it no longer has.
     #[test]
     fn a_closed_window_keeps_the_loop_turning_and_takes_no_turn_of_its_own() {
-        let door = fn_body(concat!("    fn ", "about_to_wait_inner("));
+        let door = method_body("FolioApp", "about_to_wait_inner");
         let reap = door
             .find("self.reap_leaving_windows(event_loop, now)")
             .unwrap_or_else(|| panic!("the loop never turns a closed window's clock:\n{door}"));
@@ -123570,7 +123649,7 @@ mod floated_page_tests {
         // And the walk every other door in the application uses says the same
         // thing, because a quit that photographed a closed window would put it
         // back into `session.json` and open it again next launch.
-        let walk = fn_body(concat!("    fn ", "for_each_window("));
+        let walk = method_body("FolioApp", "for_each_window");
         assert!(
             walk.contains("runtime.window.leaving.is_none()"),
             "every sweep over the windows still answers for the ones that have \
@@ -123593,13 +123672,7 @@ mod floated_page_tests {
     /// after the process has been told to stop is a last line nobody will read.
     #[test]
     fn the_process_leaves_by_the_one_road_a_webview2_host_may_take() {
-        let start = SOURCE
-            .find(concat!("\nfn ", "main() -> Result<()> {"))
-            .expect("`fn main` is declared once, at column zero");
-        let body = &SOURCE[start..];
-        let body = &body[..body
-            .find("\n}\n")
-            .expect("`fn main` is closed by a `}` at column zero")];
+        let body = free_fn_body("main");
         let leaves = body
             .find("bt_platform::leave_process(code)")
             .unwrap_or_else(|| {
@@ -123636,13 +123709,7 @@ mod floated_page_tests {
     /// window hidden after `TerminateProcess` is a window never hidden.
     #[test]
     fn a_panic_leaves_by_the_same_road_as_a_shut() {
-        // A free function at column zero, so it is cut at the `}` in that column
-        // rather than at `fn_body`'s next `impl` method.
-        let start = SOURCE
-            .find(concat!("\nfn install_", "panic_log_hook() {"))
-            .expect("the hook is declared once, at column zero");
-        let hook = &SOURCE[start..];
-        let hook = &hook[..hook.find("\n}\n").expect("and closed at column zero")];
+        let hook = free_fn_body("install_panic_log_hook");
         let leaves = hook
             .find(concat!("bt_platform::leave_", "process(PANIC_EXIT_CODE)"))
             .unwrap_or_else(|| {
@@ -123673,26 +123740,37 @@ mod floated_page_tests {
              to cut each other's alert off:\n{hook}"
         );
         // The exit code is the one a caller already reads.
+        //
+        // **The reading this replaces was satisfied by its own argument**: it
+        // asked whether this file contained the declaration's text, and the
+        // literal it asked with is itself an occurrence of that text — deleting
+        // the declaration would have left it green. `needle!` records where the
+        // needle was written and the search removes that construction and nothing
+        // else, so what is left to answer is the declaration.
         assert!(
-            SOURCE.contains("const PANIC_EXIT_CODE: i32 = 101;"),
+            !found(
+                needle!(Pattern::text("const PANIC_EXIT_CODE: i32 = 101;")),
+                View::Raw,
+            )
+            .is_empty(),
             "a crash reports something other than 101"
         );
         // **And release ships no way to ask for one.** `in-guest.ps1` asserts
         // that `--panic-selftest` is refused as an unknown flag, so the switch
         // that makes this measurable on a machine is a debug-only one.
-        let selftest = SOURCE
-            .find(concat!(
-                "fn panic_",
-                "selftest_if_due() {\n    let Some(after)"
-            ))
-            .expect("the debug half of the selftest");
-        let guard = SOURCE[..selftest]
-            .rfind("#[cfg(debug_assertions)]")
-            .expect("and its guard");
+        //
+        // The reading this replaces measured the *distance* from a
+        // `#[cfg(debug_assertions)]` to a declaration; the crate is asked for the
+        // declaration that carries the predicate — one of the two
+        // `panic_selftest_if_due` written under mutually exclusive arms (§2.4),
+        // named by its own arm, so the other one cannot answer for it.
+        let debug_half = item_body(
+            &ItemQuery::function("panic_selftest_if_due").in_variant(&["debug_assertions"]),
+        );
         assert!(
-            SOURCE[guard..selftest].lines().count() <= 3,
+            debug_half.contains("let Some(after)"),
             "the controlled fault is not behind `debug_assertions`, so a release \
-             build ships an entry gate 5 requires it not to have"
+             build ships an entry gate 5 requires it not to have:\n{debug_half}"
         );
     }
 
