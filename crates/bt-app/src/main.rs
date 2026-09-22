@@ -14513,9 +14513,98 @@ const _: fn(Runtime<'_>) = |Runtime { app: _, window: _ }| ();
 
 #[cfg(test)]
 mod layer_shape_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). The four body pins and the four whole-source counts
+    // in this module asked `main.rs` for its text. Nothing is deleted here: each
+    // computes its answer twice, once from this file and once from `bt-source`,
+    // and asserts the two agree. The deletion is the commit after this one.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `found` are that module's helpers
+    // word for word; `agreed` is `tab_identity_tests`', for the same finder shape
+    // — [`fn_body`] stops **before** the closing brace.
+    //
+    // **The four struct pins stay on the debt list**, and this is the one thing
+    // this batch could not do. `bt-source` indexes callable items: a `struct`'s
+    // fields are not an identity it can be asked for, so there is no scope that
+    // means "inside `WindowRuntime`'s fields". Widening those four to the package
+    // would not be a widening, it would be the opposite of the guard — every one
+    // of the sixteen names `WindowRuntime` may not hold is a name `App` holds a
+    // line away. They are migrated by the ticket that follows struct identity
+    // into the crate, and [`struct_fields`] and [`struct_body`] stay for them.
+    use bt_source::{Found, Index, ItemQuery, Needle, Search, View, needle};
+
     /// This file, read as text — the only witness that can answer "what is *not*
     /// in that struct".
     const SOURCE: &str = include_str!("main.rs");
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **This file's slice and the crate's body, compared as bytes.**
+    ///
+    /// [`fn_body`] hands back everything after the `fn name(` it matched up to
+    /// the first `\n    }\n` — the rest of the declaration, the opening brace,
+    /// the body, and **not** the closing brace line, which is the line it
+    /// stopped on. [`Index::body_of`] hands back the braces and everything
+    /// between them. So the crate's answer, with that closing line taken off,
+    /// has to be the *tail* of this file's slice.
+    ///
+    /// What comes back is this file's slice, so this commit changes no assertion.
+    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
+        let opened = new.strip_suffix("\n    }").unwrap_or_else(|| {
+            panic!("`{what}`: the crate's body does not close where this file's finder stopped")
+        });
+        let at = old.find(opened).unwrap_or_else(|| {
+            panic!("`{what}`: this file's slice and the crate's body are not the same bytes")
+        });
+        assert_eq!(
+            old.rfind(opened),
+            Some(at),
+            "`{what}`: the crate's body stands twice inside this file's slice"
+        );
+        assert!(
+            !old[..at].contains('{'),
+            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
+             of its body"
+        );
+        assert_eq!(
+            old.len(),
+            at + opened.len(),
+            "`{what}`: this file's slice runs past the body the crate returned"
+        );
+        old
+    }
+
+    /// One method pin's two readings, asserted to agree, the file's returned.
+    fn agreed_method(owner: &str, name: &str) -> &'static str {
+        agreed(fn_body(name), method_body(owner, name), name)
+    }
 
     /// **The declarations of a top-level struct, with its prose taken out.**
     ///
@@ -14756,11 +14845,16 @@ struct {name} {{
         let tracking = concat!("GitWriteVerb::", "CheckoutTracking { name: ");
         let column = concat!("self.checkout_", "from_column(");
         let graph = concat!("self.checkout_", "in_graph(");
-        let performs = fn_body("checkout_at");
+        let performs = agreed_method("Runtime", "checkout_at");
         for spelling in [tracking, column, graph] {
+            let issued = found(needle!(spelling), View::Raw).len();
             assert_eq!(
                 SOURCE.matches(spelling).count(),
-                1,
+                issued,
+                "P3 equivalence: this file and the crate count `{spelling}` the same"
+            );
+            assert_eq!(
+                issued, 1,
                 "`{spelling}` is written in more than one place, so one of them is \
                  a door that has not answered the tiers"
             );
@@ -14772,11 +14866,16 @@ struct {name} {{
 
         // And `checkout_at` is reached from exactly two places: the question, and
         // the gate's confirmed answer — which *is* that question, answered.
-        let asks = fn_body("ask_to_checkout");
+        let asks = agreed_method("Runtime", "ask_to_checkout");
         let performing = concat!("self.checkout", "_at(");
+        let callers = found(needle!(performing), View::Raw).len();
         assert_eq!(
             SOURCE.matches(performing).count(),
-            2,
+            callers,
+            "P3 equivalence: this file and the crate count the callers the same"
+        );
+        assert_eq!(
+            callers, 2,
             "a third caller of `checkout_at` is a third chance to skip the gate"
         );
         assert!(asks.contains(performing), "{asks}");
@@ -14812,7 +14911,7 @@ struct {name} {{
     /// and this test is what says so.
     #[test]
     fn a_re_read_does_not_throw_the_picture_away_before_its_answer_exists() {
-        let rereads = fn_body("reread_git_origin");
+        let rereads = agreed_method("Runtime", "reread_git_origin");
         assert!(
             !rereads.contains(concat!("invalid", "ate(")),
             "a re-read does not know yet whether the history moved, so it may not \
@@ -14859,7 +14958,7 @@ struct {name} {{
             "apply_git_results",
             "apply_math_results",
         ] {
-            let body = fn_body(lane);
+            let body = agreed_method("Runtime", lane);
             assert!(
                 !body.contains("try_recv"),
                 "`{lane}` is one window's, and a receiver it drains is every \
@@ -14889,7 +14988,7 @@ struct {name} {{
             "apply_git_results",
             "apply_math_results",
         ] {
-            let body = fn_body(lane);
+            let body = agreed_method("Runtime", lane);
             assert!(
                 body.contains("self.owns("),
                 "`{lane}` takes its own out of the batch by asking whether this \
