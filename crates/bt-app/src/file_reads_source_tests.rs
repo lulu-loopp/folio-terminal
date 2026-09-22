@@ -3,34 +3,35 @@
 //! receiver types Rust syntax alone cannot establish. Their exact counts and
 //! the counting adapter in the same owner are pinned together.
 //!
-//! # Who wrote a door, and how this module says so
+//! # Who wrote a door, and how a row says so
 //!
 //! A row of `file_reads_doors.txt` is `<count> <key>`, and the key names the
-//! owner. Today every key spells a **file** — `main.rs: turn: .open` — and a
-//! key that spells a file goes quiet the day its owner moves to another file:
-//! the walk finds the door under a different name, and the row it used to match
-//! is simply absent from a map nobody compares by owner. That is the defect
-//! `docs/plans/bt-app-split-prep.md` exists to remove, and P6 removes it for the
-//! twenty-one rows whose owner is a method of one of the two `impl Runtime<'_>`
-//! blocks Step 2a moves.
+//! owner one of two ways.
 //!
-//! The replacement key is the **item**: the identity of plan §2.4 without its
-//! module path — the type the `impl` is for, the trait if there is one, and the
-//! name. `Runtime::turn`, `<FileAnimationSource as Read>::read`, `read_up_to`.
+//! * **Item-keyed** — `Runtime::turn: .open`. The owner is the identity of the
+//!   plan's §2.4 without its module path: the type the `impl` is for, the trait
+//!   if there is one, the name. It says nothing about which file the item is
+//!   written in, so it does not change when the item moves.
+//! * **File-keyed** — `trace.rs: create: .open`. The old spelling: the file,
+//!   the bare name of the function the door stands in, the door. A row like
+//!   this goes quiet the day its owner moves to another file — the walk finds
+//!   the door under a different name and the row it used to match is simply
+//!   absent from a map nobody compares by owner. These are the rows still on
+//!   `docs/plans/MIGRATION-DEBT.tsv`, and P16 is the ticket that re-keys them.
 //!
-//! **The module path is deliberately not in it.** Step 2a moves those methods
-//! into a newly declared `src/runtime/`, where the same method answers to
-//! `crate::runtime` instead of `crate`; a key carrying the module path would
-//! change on the one move it exists to survive. `bt-source` drops the self
-//! type's qualification for exactly that reason ([`bt_source::ItemQuery`]), and
-//! what keeps the shorter key honest is that it is not merely asserted here:
-//! [`file_reads_every_item_keyed_door_answers_to_one_item`] resolves every one
-//! of them against the crate, and a key naming no item, or two, is a loud
+//! A file-keyed key's first segment ends in `.rs`, which is how the two are
+//! told apart here and in the manifest.
+//!
+//! **The module path is deliberately not in an item key.** Step 2a moves the
+//! two `impl Runtime<'_>` blocks into a newly declared `src/runtime/`, where
+//! the same method answers to `crate::runtime` instead of `crate`; a key
+//! carrying the module path would change on the one move it exists to survive.
+//! `bt-source` drops the self type's qualification for exactly that reason
+//! ([`bt_source::ItemQuery`]). What keeps the shorter key honest is that it is
+//! not merely asserted here:
+//! [`file_reads_every_item_keyed_door_answers_to_one_item`] puts every one of
+//! them to the crate, and a key naming no declaration, or two, is a loud
 //! refusal rather than a quiet merge.
-//!
-//! This is the **equivalence commit** of §6.0 rule 3: the item reading is added
-//! beside the file reading and the two are asserted to agree row by row. The
-//! manifest is untouched here; the deletion commit re-keys it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -110,6 +111,32 @@ impl Owner {
         }
     }
 
+    /// The owner a key spells, read back. `Owner::parse(key).key() == key` for
+    /// every key this module writes, which is asserted rather than assumed.
+    fn parse(key: &str) -> Self {
+        if let Some(rest) = key.strip_prefix('<') {
+            let (type_owner, rest) = rest.split_once(" as ").expect("<Type as Trait>::name");
+            let (trait_name, name) = rest.split_once(">::").expect("<Type as Trait>::name");
+            return Self {
+                type_owner: Some(type_owner.to_owned()),
+                trait_name: Some(trait_name.to_owned()),
+                name: name.to_owned(),
+            };
+        }
+        match key.rsplit_once("::") {
+            Some((type_owner, name)) => Self {
+                type_owner: Some(type_owner.to_owned()),
+                trait_name: None,
+                name: name.to_owned(),
+            },
+            None => Self {
+                type_owner: None,
+                trait_name: None,
+                name: key.to_owned(),
+            },
+        }
+    }
+
     /// The same owner, as a question for the crate.
     fn query(&self) -> bt_source::ItemQuery {
         let query = match &self.type_owner {
@@ -133,13 +160,6 @@ struct Door {
     file: String,
     owner: Owner,
     door: String,
-}
-
-/// One owner that calls the counting adapter, the same way.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Counted {
-    file: String,
-    owner: Owner,
 }
 
 #[derive(Default)]
@@ -321,7 +341,7 @@ impl<'ast> Visit<'ast> for Doors {
     }
 }
 
-fn scan(path: &Path, found: &mut BTreeMap<Door, usize>, counted: &mut BTreeMap<Counted, usize>) {
+fn scan(path: &Path, found: &mut BTreeMap<Door, usize>, counted: &mut BTreeMap<Owner, usize>) {
     let source = std::fs::read_to_string(path).unwrap();
     let syntax = syn::parse_file(&source).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let mut doors = Doors::default();
@@ -341,12 +361,7 @@ fn scan(path: &Path, found: &mut BTreeMap<Door, usize>, counted: &mut BTreeMap<C
             .or_default() += count;
     }
     for (owner, count) in doors.counted {
-        *counted
-            .entry(Counted {
-                file: relative.clone(),
-                owner,
-            })
-            .or_default() += count;
+        *counted.entry(owner).or_default() += count;
     }
     let directory = if matches!(
         path.file_name().unwrap().to_str().unwrap(),
@@ -372,7 +387,7 @@ fn scan(path: &Path, found: &mut BTreeMap<Door, usize>, counted: &mut BTreeMap<C
 }
 
 /// The whole walk, from the crate root through every product `mod`.
-fn walk() -> (BTreeMap<Door, usize>, BTreeMap<Counted, usize>) {
+fn walk() -> (BTreeMap<Door, usize>, BTreeMap<Owner, usize>) {
     let mut found = BTreeMap::new();
     let mut counted = BTreeMap::new();
     scan(
@@ -410,27 +425,28 @@ fn verb_of(door: &str) -> Option<&str> {
     )
 }
 
-/// **The owners Step 2a moves** — the sixteen methods of the two
-/// `impl Runtime<'_>` blocks that hold a door, carrying twenty-one rows between
-/// them. P6's subject, and nothing else: the rest of the manifest is P16's.
-const MOVING_OWNERS: [&str; 16] = [
-    "commit_web_page",
-    "create",
-    "land_page_source_on",
-    "land_preview_source_on",
-    "open_rename",
-    "open_search",
-    "open_web_page_on",
-    "place_float",
-    "play_video_file_on",
-    "pop_out_preview",
-    "promote_file_peek",
-    "raise_dirty_gate",
-    "raise_first_run_if_due",
-    "raise_psreadline_invite_if_due",
-    "settings_layout",
-    "turn",
-];
+/// **The owners the manifest keys by item** — every row whose first segment is
+/// not a file name. The manifest is the list: a row is migrated by being
+/// written that way, and there is no second place saying which.
+fn item_keyed_owners(manifest: &BTreeMap<String, usize>) -> BTreeSet<String> {
+    manifest
+        .keys()
+        .filter_map(|key| key.split_once(": "))
+        .filter(|(head, _)| !head.ends_with(".rs"))
+        .map(|(head, _)| head.to_owned())
+        .collect()
+}
+
+/// The key one walked door is compared under: its item where the manifest has
+/// been re-keyed, the file it happens to be written in where it has not.
+fn key_of(door: &Door, item_keyed: &BTreeSet<String>) -> String {
+    let item = door.owner.key();
+    if item_keyed.contains(&item) {
+        format!("{item}: {}", door.door)
+    } else {
+        format!("{}: {}: {}", door.file, door.owner.name, door.door)
+    }
+}
 
 /// This crate, indexed once per process — the workspace read, this package's
 /// own `src/` declared as the universe and lowered on the first ask.
@@ -458,34 +474,38 @@ fn occurrences_inside(owner: &Owner, pattern: bt_source::Pattern) -> usize {
 #[test]
 fn file_reads_every_product_content_door_has_a_lane() {
     let (walked, counted) = walk();
+    let expected = manifest();
+    let item_keyed = item_keyed_owners(&expected);
     let mut actual: BTreeMap<String, usize> = BTreeMap::new();
     for (door, count) in &walked {
-        *actual
-            .entry(format!("{}: {}: {}", door.file, door.owner.name, door.door))
-            .or_default() += count;
+        *actual.entry(key_of(door, &item_keyed)).or_default() += count;
     }
     assert_eq!(
-        actual,
-        manifest(),
+        actual, expected,
         "a content or generic read/open door changed; classify it and pin its counting owner"
     );
-    let adapters: BTreeSet<String> = counted
-        .keys()
-        .map(|entry| format!("{}: {}", entry.file, entry.owner.name))
-        .collect();
-    for owner in [
-        "preview.rs: read_up_to",
-        "pdf.rs: read_capped",
-        "pdf.rs: page_count",
-        "attention_words.rs: lede_in_tail",
-        "attention_wire.rs: payload_on_stdin",
-        "git.rs: drain",
-        "shell_integration.rs: read_profile_for_edit",
-        "animation.rs: read",
+    // The counting adapters are named by item too, and each is put to the crate
+    // before it is looked for: `contains` over a merged key would be answered
+    // by any other item of the same name, which is the silent merge an item key
+    // exists to make impossible.
+    for key in [
+        "read_up_to",
+        "read_capped",
+        "page_count",
+        "lede_in_tail",
+        "payload_on_stdin",
+        "drain",
+        "read_profile_for_edit",
+        "<FileAnimationSource as Read>::read",
     ] {
+        let owner = Owner::parse(key);
+        assert_eq!(owner.key(), key, "{key} does not read back as itself");
+        source_index()
+            .one(&owner.query())
+            .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(
-            adapters.contains(owner),
-            "{owner} lost its counting adapter"
+            counted.contains_key(&owner),
+            "{key} lost its counting adapter"
         );
     }
     let animation = include_str!("animation.rs");
@@ -494,64 +514,54 @@ fn file_reads_every_product_content_door_has_a_lane() {
     assert!(animation.contains("Lane::Peek"));
 }
 
-/// **The equivalence of §6.0 rule 3**, for the twenty-one rows P6 re-keys.
+/// **Every item-keyed row is a fact about an item, asked of the crate.**
 ///
-/// The walk says a door was written in `main.rs`, inside a function of some
-/// name. The crate is asked the same question as an item: which declaration
-/// carries that name, what type owns it, which file it is written in, and how
-/// many times the verb is called inside its bytes. The two readings have to
-/// agree on every row, and a disagreement is a finding and not a number to
-/// adjust.
+/// The walk derives the key from the syntax it is standing in. That alone would
+/// make the key a string this module invented, so each one is put to
+/// `bt-source`: it has to read back as itself, to resolve to exactly one
+/// declaration — a key naming two is a refusal naming both, never a merged
+/// count — and the doors the walk recorded under it have to be the calls the
+/// crate finds inside that declaration's bytes, wherever they are written.
+///
+/// Nothing here names a file, which is the point: the same assertions hold
+/// after the two `impl Runtime<'_>` blocks move.
 #[test]
 fn file_reads_every_item_keyed_door_answers_to_one_item() {
     let (walked, _) = walk();
     let index = source_index();
-    let moving: BTreeSet<&str> = MOVING_OWNERS.into_iter().collect();
-    let mut rows = 0_usize;
+    let item_keyed = item_keyed_owners(&manifest());
+    assert!(
+        !item_keyed.is_empty(),
+        "no row is keyed to an item any more; P6 re-keyed twenty-one of them"
+    );
     let mut owners: BTreeMap<Owner, BTreeMap<String, usize>> = BTreeMap::new();
     for (door, count) in &walked {
-        if door.file != "main.rs" || !moving.contains(door.owner.name.as_str()) {
-            continue;
+        if item_keyed.contains(&door.owner.key()) {
+            *owners
+                .entry(door.owner.clone())
+                .or_default()
+                .entry(door.door.clone())
+                .or_default() += count;
         }
-        rows += 1;
-        *owners
-            .entry(door.owner.clone())
-            .or_default()
-            .entry(door.door.clone())
-            .or_default() += count;
     }
-    assert_eq!(rows, 21, "P6's rows");
-    assert_eq!(owners.len(), 16, "P6's owners");
+    let walked_owners: BTreeSet<String> = owners.keys().map(Owner::key).collect();
+    assert_eq!(
+        walked_owners, item_keyed,
+        "an item-keyed row names an owner this walk found no door in"
+    );
 
     for (owner, doors) in &owners {
+        let key = owner.key();
+        assert_eq!(
+            Owner::parse(&key).key(),
+            key,
+            "{key} does not read back as itself"
+        );
         // The item exists, once. This is what refuses a key that names two
         // declarations instead of merging them.
-        let record = index
+        index
             .one(&owner.query())
             .unwrap_or_else(|failure| panic!("{failure}"));
-        // The old reading and the new one name the same declaration.
-        assert_eq!(
-            record.name(),
-            owner.name,
-            "{} answers to another name",
-            owner.key()
-        );
-        assert_eq!(
-            record.type_owner(),
-            Some("Runtime"),
-            "{} is not a method of `Runtime`",
-            owner.key()
-        );
-        assert_eq!(
-            index
-                .file_of(record)
-                .path()
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str),
-            Some("main.rs"),
-            "{} is not written where its row says",
-            owner.key()
-        );
         // Every call of the verb inside the item's bytes, whichever way it is
         // written: the completeness half, which goes red on a door the walk
         // never saw as well as on one it saw twice.
