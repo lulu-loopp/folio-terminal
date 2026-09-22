@@ -86,6 +86,83 @@ fn squeezed_body(owner: &str, name: &str) -> String {
     squeezed(method_body(owner, name))
 }
 
+/// **The old reading and the new one are the same text** — the equivalence
+/// half of §6.0 rule 3, asserted rather than asserted about.
+///
+/// The whole interior of the item's body, as the crate reports it, stands
+/// verbatim inside the slice the finder being deleted returned. What the two
+/// do not share is the part of the signature the old finder began inside of,
+/// the closing brace it stopped in front of, and — in every overshooting
+/// finder — the neighbouring items it ran on into. None of that is the item.
+fn agreed(old: &str, new: &str) {
+    let body = new
+        .strip_prefix('{')
+        .expect("an item's body is written in braces");
+    let interior = &body[..body
+        .rfind('\n')
+        .expect("and closed by a brace on a line of its own")];
+    assert!(
+        old.contains(interior),
+        "the deleted finder's slice ({} bytes) does not hold this item's body \
+         ({} bytes):\n--- old\n{old}\n--- new\n{new}",
+        old.len(),
+        new.len()
+    );
+}
+
+/// The same agreement for the readers that squeeze the text before reading it.
+fn agreed_squeezed(old: &str, new: &str) {
+    let body = new
+        .strip_prefix('{')
+        .expect("an item's body is written in braces");
+    let interior = &body[..body
+        .rfind('\n')
+        .expect("and closed by a brace on a line of its own")];
+    let wanted = squeezed(interior);
+    assert!(
+        old.contains(wanted.as_str()),
+        "the deleted finder's squeezed slice does not hold this item's:\n--- old\n{old}\n--- new\n{wanted}"
+    );
+}
+
+/// The braces one type's members are written in, and what is between them.
+fn type_body(name: &str) -> &'static str {
+    item_body(&ItemQuery::type_item(name))
+}
+
+/// **The declaration of one field of `owner`** — its attributes, its
+/// visibility, its name and its type, stopping before the comma.
+fn field_declaration(owner: &str, name: &str) -> &'static str {
+    item_declaration(&ItemQuery::field(owner, name))
+}
+
+/// **The names of the items these occurrences stand in** (§4.1), each named
+/// once and in one order.
+///
+/// What it replaces is a backwards search for the nearest `\n    fn `, which
+/// answers with the *previous* method for any occurrence that does not stand
+/// in a method's own body.
+fn reader_names(found: &Found) -> Vec<String> {
+    let mut names: Vec<String> = found
+        .owners(source())
+        .into_keys()
+        .map(|identity| identity.name)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The name of the method a signature-shaped selector was naming.
+fn named_in(signature: &str) -> &str {
+    signature
+        .trim_start()
+        .trim_start_matches("fn ")
+        .split('(')
+        .next()
+        .expect("a signature names a method before its arguments")
+}
+
 /// The declaration of one item — its attributes, its visibility and its
 /// signature, stopping in front of the body.
 ///
@@ -8077,6 +8154,7 @@ fn the_theme_row_writes_settings_and_the_session_file_names_no_theme() {
     fn ",
         )
         .unwrap_or(rest.len())];
+    agreed(body, method_body("Runtime", "apply_theme_mode"));
     assert!(
         body.contains("settings_store.store("),
         "the theme row's choice is written to `settings.json` and nowhere else:
@@ -8772,6 +8850,7 @@ fn the_scale_change_arm_restates_the_cards_columns_scroll() {
         .find("\n    /// **How far the panel's list")
         .unwrap_or(rest.len())];
 
+    agreed(body, method_body("Runtime", "apply_scale_factor"));
     let read = body
         .find("let measured_at = self.window.renderer.metrics().scale_factor;")
         .expect("the scale the panel's lists were measured at is read");
@@ -14941,10 +15020,15 @@ fn wheel_flush_at_a_clamp_still_publishes_changed_content() {
 #[test]
 fn wheel_flush_runtime_skips_unchanged_panes_but_keeps_thumb_frames() {
     let repaint = method_text("    fn repaint_pane_change_inner(");
+    agreed_squeezed(
+        &repaint,
+        method_body("Runtime", "repaint_pane_change_inner"),
+    );
     assert!(repaint.contains("self.publish_frame_inner(trigger,wheel_view_moved.is_some())?"));
     assert!(repaint.contains("||seat==self.focused_leaf||wheel_view_moved==Some(false)"));
     assert!(repaint.contains("self.represent_on_screen_frame(trigger)"));
     let scroll = method_text("    fn scroll_view_exact_in(");
+    agreed_squeezed(&scroll, method_body("Runtime", "scroll_view_exact_in"));
     assert!(scroll.contains("letbefore=leaf.projection.scroll_offset_subpixels();"));
     assert!(scroll.contains("letmoved=leaf.projection.scroll_offset_subpixels()!=before;"));
     let publish = scroll
@@ -14956,6 +15040,7 @@ fn wheel_flush_runtime_skips_unchanged_panes_but_keeps_thumb_frames() {
         "the thumb shares a moved view's queued frame"
     );
     let wake = method_text("    fn woke_terminal_thumb(&mut self, seat: SeatId) -> Result<()> {");
+    agreed_squeezed(&wake, method_body("Runtime", "woke_terminal_thumb"));
     assert!(wake.contains("ifself.refresh_overlay(){self.present_chrome_change()?;"));
 }
 
@@ -16092,6 +16177,14 @@ fn the_reduction_happens_on_the_worker_not_the_window_thread() {
     // here. The needle is still spelled in two pieces, which now costs nothing.
     let decoder = concat!("InlineImage", "Decoder");
     assert_eq!(
+        in_product(&found(
+            needle!(Pattern::path("InlineImageDecoder::default")),
+            View::Identifiers,
+        )),
+        SOURCE.matches(&format!("{decoder}::default()")).count(),
+        "the crate and the file count the same decoders"
+    );
+    assert_eq!(
         SOURCE.matches(&format!("{decoder}::default()")).count(),
         1,
         "this window builds more than one picture decoder"
@@ -16123,6 +16216,10 @@ fn the_reduction_happens_on_the_worker_not_the_window_thread() {
             at > worker && at < ends,
             "{what} stands outside the decoration worker's closure"
         );
+        assert!(
+            free_fn_body("run_decoration_worker").contains(&needle),
+            "and the crate says the same: {what}"
+        );
     }
     // And the pass itself is made where the decode is, rather than handed
     // back to whoever asked: an answer that came back as an errand would be
@@ -16132,9 +16229,24 @@ fn the_reduction_happens_on_the_worker_not_the_window_thread() {
         .nth(1)
         .and_then(|rest| rest.split("\n}\n").next())
         .expect("the picture lane is declared in that file");
+    agreed(
+        lane,
+        package_item_body("bt-term", &ItemQuery::function("decode_local_image_bytes")),
+    );
     assert!(
         lane.contains("scale_inline_image(&InlineImageScaleTask {"),
         "the reduction is not made where the decode is:\n{lane}"
+    );
+    assert_eq!(
+        found_in_package(
+            "bt-term",
+            needle!(Pattern::call("decode_local_image_bytes")),
+            View::Identifiers,
+            Scope::Module("crate::inline_image".to_owned()),
+        )
+        .len(),
+        DECODER.matches("decode_local_image_bytes(").count(),
+        "the crate and the file count the same lane"
     );
     assert_eq!(
         DECODER.matches("decode_local_image_bytes(").count(),
@@ -16172,6 +16284,9 @@ fn the_markdown_page_and_the_glance_card_read_the_same_caps() {
     let page = body("fn answer_one_picture(", "\n}\n");
     let card = body("fn file_peek_fitted_pixels(", "\n    }\n");
     let pane = body("fn refit_preview_picture(", "\n    }\n");
+    agreed(page, free_fn_body("answer_one_picture"));
+    agreed(card, method_body("Runtime", "file_peek_fitted_pixels"));
+    agreed(pane, method_body("Runtime", "refit_preview_picture"));
     for (surface, text) in [("the page", page), ("the card", card), ("the pane", pane)] {
         assert!(
             text.contains("peek_cache"),
@@ -18494,6 +18609,19 @@ fn the_tab_menus_subject_is_an_id_resolved_when_the_verb_runs() {
 
     // ① the state carries the identity and not the place.
     let state = between("struct TabMenuState {", "\n}\n");
+    agreed(state, type_body("TabMenuState"));
+    for name in [
+        "run_tab_menu_row",
+        "duplicate_tab",
+        "move_tab_to_new_window",
+        "move_tab_to_window",
+        "open_tab_menu_at",
+    ] {
+        agreed(
+            body(&format!("    fn {name}(")),
+            method_body("Runtime", name),
+        );
+    }
     assert!(
         state.contains("tab: TabId,"),
         "the menu's subject is the tab's identity"
@@ -18704,6 +18832,7 @@ fn the_rail_zone_is_asked_before_a_gesture_can_swallow_the_move() {
         .expect("pointer_moved is declared in this file");
     let rest = &SOURCE[start + SIGNATURE.len()..];
     let body = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+    agreed(body, method_body("Runtime", "pointer_moved"));
 
     let asked = body
         .find("self.drive_rail_zone(Some(position));")
@@ -29472,6 +29601,7 @@ fn the_glance_cards_document_is_in_the_awaited_set() {
         "fn forget_the_picture_in(",
     ] {
         let text = body(door);
+        agreed(text, method_body("Runtime", named_in(door)));
         assert!(
             !text.contains(walk.as_str()),
             "{door} walks the tabs' panes for itself, so the card is not in \
@@ -29482,6 +29612,10 @@ fn the_glance_cards_document_is_in_the_awaited_set() {
             "{door} must be built from the one walk over every holder:\n{text}"
         );
     }
+    agreed(
+        body("fn documents_held("),
+        method_body("Runtime", "documents_held"),
+    );
     assert!(
         body("fn documents_held(").contains("peek_pane"),
         "and the one walk is the one that names the card"
@@ -33379,6 +33513,19 @@ fn the_preview_publishes_the_caret_of_the_surface_its_letters_go_to() {
             .map(|at| &SOURCE[at..])
             .and_then(|rest| rest.find(END).map(|end| &rest[..end]))
             .expect("the door this test is about")
+    }
+    for (name, signature) in [
+        (
+            "keyboard_owner",
+            "fn keyboard_owner(&self) -> KeyboardOwner {",
+        ),
+        (
+            "preview_ime_cursor_area",
+            "fn preview_ime_cursor_area(&self) -> Option<ImeCursorArea> {",
+        ),
+        ("edit_preview", "    fn edit_preview("),
+    ] {
+        agreed(body(signature), method_body("Runtime", name));
     }
     assert!(
         body("fn keyboard_owner(&self) -> KeyboardOwner {")
@@ -37451,6 +37598,7 @@ fn a_hover_over_a_floating_trees_row_is_that_rows_hover() {
 #[test]
 fn the_pane_under_a_float_is_not_the_hovered_pane() {
     let hover = runtime_fn_body("    fn update_chrome_hover(");
+    agreed(hover, method_body("Runtime", "update_chrome_hover"));
     let pane = hover
         .find("seats::pane_at(")
         .expect("`.pane:hover` is resolved against the seat layout");
@@ -37502,6 +37650,14 @@ fn the_press_and_the_hover_ask_one_router() {
     }
     arms.sort_unstable();
     assert_eq!(
+        reader_names(&calls_of("Runtime", "float_hit_at"))
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        arms,
+        "the crate and the file name the same askers"
+    );
+    assert_eq!(
         arms,
         [
             "close_hover_floats_except",
@@ -37522,9 +37678,18 @@ fn the_press_and_the_hover_ask_one_router() {
     );
     let ladder = ladder_call();
     assert_eq!(
+        in_product(&calls_of("Runtime", "docked_chrome_target_at")),
+        SOURCE.matches(ladder.as_str()).count(),
+        "the crate and the file count the same roads to the docked ladder"
+    );
+    assert_eq!(
         SOURCE.matches(ladder.as_str()).count(),
         1,
         "and the docked ladder is reached through the router and nowhere else"
+    );
+    agreed(
+        runtime_fn_body(router_signature().as_str()),
+        method_body("Runtime", "pointer_target_at"),
     );
     assert!(
         runtime_fn_body(router_signature().as_str()).contains(ladder.as_str()),
@@ -42901,6 +43066,7 @@ fn the_two_step_route_to_a_new_tab_is_untouched() {
         let rest = &source[start + signature.len()..];
         &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
     };
+    agreed(body, method_body("Runtime", "move_pane_to_new_tab"));
     assert!(
         body.contains("self.extract_pane_into_new_tab(leaf, slot)"),
         "one verb, two doors: the row calls the same function the drag's \
@@ -43189,6 +43355,19 @@ fn the_rails_open_and_the_chevrons_share_one_hover_open_path() {
         let rest = &SOURCE[start + signature.len()..];
         &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
     };
+    for name in ["observe_chevrons", "advance_chevrons", "press_preview_rail"] {
+        agreed(
+            body(&format!("    fn {name}(")),
+            method_body("Runtime", name),
+        );
+    }
+    // A field's declaration begins at its first attribute, and a `///` comment
+    // is one — so this is the prose above the field and then the field. The
+    // claim is about the field, so it is asked of the end of it.
+    assert!(
+        field_declaration("ChevronGates", "rail").ends_with("rail: profiles::ChevronGate"),
+        "the pill's clock is the chevron's own type, named as a field"
+    );
     assert!(
         SOURCE.contains("    rail: profiles::ChevronGate,"),
         "the pill's clock is the chevron's own type — a second kind of clock \
@@ -43347,6 +43526,12 @@ fn the_third_exit_is_the_drags_own_errand_and_the_ring_is_the_targets_own_mark()
         let rest = &SOURCE[start + signature.len()..];
         &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
     };
+    for name in ["move_pane_to_window", "window_ring_layer", "aim_at_window"] {
+        agreed(
+            body(&format!("    fn {name}(")),
+            method_body("Runtime", name),
+        );
+    }
     let row = body("    fn move_pane_to_window(");
     assert!(
         row.contains("self.app.pending_handover = Some(DragHandover {"),
@@ -43665,6 +43850,7 @@ fn the_folder_card_stays_up_under_the_glance_it_raised_and_that_glance_raises_no
     };
 
     let hover = body_of("    fn drive_float_hover(");
+    agreed(hover, method_body("Runtime", "drive_float_hover"));
     let asked = hover
         .find("self.pointer_is_in_the_peeks_own_glance(position)")
         .expect("the peek's region includes the glance its own row raised");
@@ -43679,6 +43865,7 @@ fn the_folder_card_stays_up_under_the_glance_it_raised_and_that_glance_raises_no
     );
 
     let observe = body_of("    fn observe_file_peek(");
+    agreed(observe, method_body("Runtime", "observe_file_peek"));
     let held = observe
         .find("Some(file_peek::Life::Held) => return self.keep_file_peek(),")
         .expect("a pointer inside the card is inside the card");
@@ -43700,6 +43887,7 @@ fn the_folder_card_stays_up_under_the_glance_it_raised_and_that_glance_raises_no
     // standing where its folder card used to be is about a place the reader
     // can no longer see, and has no frame left to be placed against.
     let forget = body_of("    fn forget_dead_float_gestures(");
+    agreed(forget, method_body("Runtime", "forget_dead_float_gestures"));
     assert!(
         forget.contains("Some(RowHost::Float(id)) = self.window.file_peek.as_ref()"),
         "a glance raised inside a float is one of that float's gestures"
@@ -45579,6 +45767,7 @@ fn a_rows_two_landings_are_spent_by_its_own_two_commits() {
 #[test]
 fn the_tab_a_file_row_makes_is_activated_and_owns_the_buffer_it_opens() {
     let text = row_strip_method("commit_row_into_new_tab");
+    agreed(text, method_body("Runtime", "commit_row_into_new_tab"));
     assert!(
         text.contains("bt_layout::SeatKind::Preview"),
         "a file's tab is one preview pane:\n{text}"
@@ -47078,6 +47267,7 @@ fn the_tick_that_empties_the_picture_list_still_hands_it_over() {
     // these lines out of the tick and above the display gate; the property
     // is unchanged and so is the order it is about.
     let tick = body("fn service_pictures(");
+    agreed(tick, method_body("Runtime", "service_pictures"));
     let guard = tick
         .find("let anything_moving =")
         .expect("the service still gates the picture list");
@@ -47665,6 +47855,15 @@ fn the_speaker_is_a_second_channel_and_takes_you_to_the_sound() {
         .find(concat!("ChromeTarget::TabSpeaker", "(index) => {"))
         .expect("the speaker has a press");
     let arm = &SOURCE[start..start + 200];
+    let router = method_body("Runtime", "chrome_mouse_input");
+    let at = router
+        .find(concat!("ChromeTarget::TabSpeaker", "(index) => {"))
+        .expect("the speaker has a press");
+    assert_eq!(
+        &router[at..at + 200],
+        arm,
+        "the two readings take the same two hundred bytes"
+    );
     assert!(
         arm.contains("self.activate_tab("),
         "the speaker takes you to the tab that is making the sound:\n{arm}"
@@ -47939,6 +48138,7 @@ fn the_glance_card_says_what_the_row_opens_as() {
         .expect("the glance's own arming is declared in this file");
     let rest = &SOURCE[start + SIGNATURE.len()..];
     let arming = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+    agreed(arming, method_body("Runtime", "mature_file_peek"));
     assert!(
         arming.contains("preview::PreviewBuffer::glancing("),
         "the glance arms itself with a pane's buffer, so a page's source is \
@@ -48265,6 +48465,16 @@ fn the_windows_address_door_mints_a_page_and_can_be_taken_back() {
         &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
     };
 
+    for name in [
+        "open_address_here",
+        "mint_a_blank_page_and_open_its_address",
+        "finish_rename",
+    ] {
+        agreed(
+            body(&format!("    fn {name}(")),
+            method_body("Runtime", name),
+        );
+    }
     let door = body("    fn open_address_here(");
     assert!(
         door.contains("self.page_on_the_landing_pane()")
