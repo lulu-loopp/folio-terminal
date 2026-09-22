@@ -948,22 +948,10 @@ fn a_periodic_is_its_condition_and_never_a_latch() {
     // And the reading is the condition itself: the strip asks the seats and the
     // drawn-animation register on every turn, so there is no state in between
     // for a stopped decoder to be remembered in.
-    let source: &str = include_str!("main.rs");
-    let fold = source
-        .split("fn strip_animation_work(")
-        .nth(1)
-        .expect("the strip answers its two questions from one walk");
-    // The same walk, asked for as an item of this crate rather than as
-    // everything written after the first `fn strip_animation_work(` in one
-    // file. See this module's header for the batch this belongs to.
-    let walk = method_body("strip_animation_work");
-    let at = fold
-        .find(walk)
-        .expect("this file's slice of the fold and the crate's body are not the same bytes");
-    assert!(
-        !fold[..at].contains('{'),
-        "the crate's body stands inside this file's slice rather than at the head of it"
-    );
+    // The walk, asked for as an item of this crate rather than as everything
+    // written after the first `fn strip_animation_work(` in one file. See this
+    // module's header for the batch this belongs to.
+    let fold = method("strip_animation_work");
     assert!(
         fold.contains("self.window.video.any_playing() || self.an_animation_is_running()"),
         "the condition is read where it is used, and never remembered:\n{fold}"
@@ -1091,20 +1079,16 @@ fn a_wait_is_not_a_journey() {
 
 // ── the third thing an advancer does ────────────────────────────────────────
 
-/// `main.rs`, read as text, for the properties that are about **where a
-/// statement stands** rather than about what it computes.
-const SOURCE: &str = include_str!("main.rs");
-const TERMSCROLL_SOURCE: &str = include_str!("termscroll.rs");
-
-// ── what this module asks the crate instead ───────────────────────────────
+// ── what this module asks the crate ────────────────────────
 //
-// **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-// §6.3, and §6.0 rule 3). Nothing is deleted here: every body is read twice —
-// once as a slice of `main.rs`, once as the body of an item of this crate — and
-// `method` is where the two are required to be the same bytes; `agree` does the
-// same for the counts and the prohibitions. The deletion is the commit after
-// this one, and the pattern is `main.rs::pty_drain_budget_tests`', not
-// re-derived here.
+// **P3's deletion commit for this batch** (`docs/plans/bt-app-split-prep.md`
+// §6.3, and §6.0 rule 3). The commit before this one read every body twice —
+// once as a slice of `main.rs`, once as the body of an item of this crate —
+// and asserted the two were the same bytes, and did the same for the counts
+// and the prohibitions; this one removes the older of the two, because two
+// implementations of one judgement do not vouch for each other
+// (`docs/CONVENTIONS.md` §十 rule 4). The pattern is
+// `main.rs::pty_drain_budget_tests`', not re-derived here.
 //
 // **The owner is an argument now and not a guess**: the slice below is the
 // first match for a signature prefix anywhere in the file, which is a method of
@@ -1190,41 +1174,10 @@ fn found_in(
         .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
-/// **The file's answer and the crate's, compared**, handing the file's back so
-/// the assertion after it is the one that was always there.
-fn agree<T: std::fmt::Debug + PartialEq>(what: &str, file: T, crate_reading: T) -> T {
-    assert_eq!(
-        file, crate_reading,
-        "{what}: this module's reading of the file and the crate's disagree"
-    );
-    file
-}
-
-/// The text of one method of `main.rs`, from its signature to the next one's —
-/// and the crate's body of the same method, asserted to be the same bytes.
-fn method(signature: &str, name: &str) -> &'static str {
-    let start = SOURCE
-        .find(signature)
-        .unwrap_or_else(|| panic!("{signature} is declared in main.rs"));
-    let rest = &SOURCE[start + signature.len()..];
-    let old = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
-    let new = method_body(name);
-    // A signature prefix that ends in the opening brace has already taken the
-    // first byte of the crate's body with it, so the slice begins one byte
-    // inside it. Both shapes are here because this module writes both.
-    if !old.starts_with(&new[1..]) {
-        let at = old.find(new).unwrap_or_else(|| {
-            panic!(
-                "`Runtime::{name}`: this file's slice and the crate's body are not the same bytes"
-            )
-        });
-        assert!(
-            !old[..at].contains('{'),
-            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
-             the head of it"
-        );
-    }
-    old
+/// The body of one method of `Runtime` — the identity of §2.4 rather than a
+/// line of `main.rs`, so a method that moves between files is the same method.
+fn method(name: &str) -> &'static str {
+    method_body(name)
 }
 
 /// One playback of `frames` frames, each standing a tenth of a second — the
@@ -1376,10 +1329,7 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
     assert_eq!(standing_frame(&idle, "in another tab"), 0);
 
     // ── ④ and both services are wired above the gate ─────────────────────────
-    let pictures = method(
-        "    fn service_pictures(&mut self, now: Instant) {",
-        "service_pictures",
-    );
+    let pictures = method("service_pictures");
     assert!(
         pictures.contains("self.window.video.pump(now) | self.advance_animations(now)")
             && !pictures.contains("animation_frame_is_due"),
@@ -1387,18 +1337,12 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
     );
     assert!(
         pictures.contains("if self.window.video.is_empty() {") || {
-            let sweep = method(
-                "    fn sweep_video_seats(&mut self) -> bool {",
-                "sweep_video_seats",
-            );
+            let sweep = method("sweep_video_seats");
             sweep.contains("if self.window.video.is_empty() {")
         },
         "a service that runs on every turn is free when nothing is live"
     );
-    let turning = method(
-        "    fn turn(&mut self, now: Instant, application_clocks: bool)",
-        "turn",
-    );
+    let turning = method("turn");
     let serviced = turning
         .find("self.service_pictures(now)")
         .expect("the turn services the pictures");
@@ -1409,10 +1353,7 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
         serviced < strip,
         "the service runs before the tick that can be refused:\n{turning}"
     );
-    let carry = method(
-        "    fn carry_live_journeys(&mut self, now: Instant) {",
-        "carry_live_journeys",
-    );
+    let carry = method("carry_live_journeys");
     assert!(
         carry
             .find("self.service_pictures(now);")
@@ -1426,19 +1367,13 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
         pictures.contains("self.window.pictures_owe_a_frame = true;"),
         "a frame that arrived during a refused turn is still owed:\n{pictures}"
     );
-    let tick = method(
-        "    fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {",
-        "advance_strip_animation",
-    );
+    let tick = method("advance_strip_animation");
     assert!(
         tick.contains("std::mem::take(&mut self.window.pictures_owe_a_frame)")
             && !tick.contains("self.window.video.pump(now)"),
         "and the tick pays that debt rather than doing the service itself:\n{tick}"
     );
-    let autoscroll = method(
-        "    fn service_drag_autoscroll(&mut self, now: Instant) -> Result<()> {",
-        "service_drag_autoscroll",
-    );
+    let autoscroll = method("service_drag_autoscroll");
     assert!(
         !autoscroll.contains("animation_frame_is_due"),
         "the auto-scroll integrates true elapsed time and must not be refused:\n{autoscroll}"
@@ -1451,39 +1386,24 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
     // and behind the gate a printing pane keeps a tip from ever appearing, a
     // notice from ever leaving and a flyout from ever opening. What stays paced
     // is the fade each of them starts.
-    for (advancer, name, clock) in [
+    for (name, clock) in [
         (
-            "    fn advance_toasts(&mut self, now: Instant) -> Result<()> {",
             "advance_toasts",
             "self.window.toasts.advance(now, self.app.motion)",
         ),
         (
-            "    fn advance_tooltip_if_due(&mut self, now: Instant) -> Result<()> {",
             "advance_tooltip_if_due",
             "self.window.tooltip.activate_if_due(now)",
         ),
         (
-            "    fn advance_key_hint_if_due(&mut self, now: Instant) -> Result<()> {",
             "advance_key_hint_if_due",
             "self.window.key_hint.activate_if_due(now)",
         ),
-        (
-            "    fn advance_card_hint(&mut self, now: Instant) -> Result<()> {",
-            "advance_card_hint",
-            "self.window.card_hint.expire(now)",
-        ),
-        (
-            "    fn advance_file_peek(&mut self, now: Instant) -> Result<()> {",
-            "advance_file_peek",
-            "self.switch_file_peek(now)",
-        ),
-        (
-            "    fn advance_float(&mut self, now: Instant) -> Result<()> {",
-            "advance_float",
-            "self.window.float.take_due(now)",
-        ),
+        ("advance_card_hint", "self.window.card_hint.expire(now)"),
+        ("advance_file_peek", "self.switch_file_peek(now)"),
+        ("advance_float", "self.window.float.take_due(now)"),
     ] {
-        let body = method(advancer, name);
+        let body = method(name);
         let state = body
             .find(clock)
             .unwrap_or_else(|| panic!("`{clock}` is this advancer's state clock:\n{body}"));
@@ -1567,10 +1487,7 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
     );
 
     // ── ③ and the wiring says so ────────────────────────────────────────────
-    let work = method(
-        "    fn strip_animation_work(&self, now: Instant) -> AnimationWork {",
-        "strip_animation_work",
-    );
+    let work = method("strip_animation_work");
     let deadline = work
         .find("deadline: [")
         .expect("the strip answers when it next needs waking");
@@ -1589,10 +1506,7 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
         work.contains("self.window.frame_clock.interval()"),
         "and the strip asks for its next frame on the window's one rate:\n{work}"
     );
-    let tick = method(
-        "    fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {",
-        "advance_strip_animation",
-    );
+    let tick = method("advance_strip_animation");
     let guard = tick
         .find("strip_animation_tick_is_due(")
         .expect("the strip still enforces a rate");
@@ -1617,11 +1531,7 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
     // pin on the same line is not counted as a second taker.
     let taken = "let pictures_owe = std::mem::take(&mut self.window.pictures_owe_a_frame);";
     assert_eq!(
-        agree(
-            "the debt's one taker",
-            SOURCE.matches(taken).count(),
-            in_product_raw(bt_source::Needle::new(bt_source::Pattern::text(taken))),
-        ),
+        in_product_raw(bt_source::Needle::new(bt_source::Pattern::text(taken))),
         1,
         "one taker, and it is the tick that presents"
     );
@@ -1643,38 +1553,22 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
     // nowhere at all on the road a frame is asked for: two rates in one window
     // is a door that admits and a door that refuses at the same instant.
     assert_eq!(
-        agree(
-            "the retired constant",
-            SOURCE.matches("STRIP_ANIMATION_FRAME").count(),
-            found_in(
-                bt_source::Needle::new(bt_source::Pattern::identifier("STRIP_ANIMATION_FRAME")),
-                bt_source::View::Identifiers,
-                bt_source::Scope::Everything,
-            )
-            .len(),
-        ),
+        found_in(
+            bt_source::Needle::new(bt_source::Pattern::identifier("STRIP_ANIMATION_FRAME")),
+            bt_source::View::Identifiers,
+            bt_source::Scope::Everything,
+        )
+        .len(),
         0,
         "the strip's own sixteen milliseconds is retired, not merely unused"
     );
-    for (asker, name) in [
-        (
-            "    fn strip_animation_work(&self, now: Instant) -> AnimationWork {",
-            "strip_animation_work",
-        ),
-        (
-            "    fn drag_autoscroll_deadline(&self, now: Instant) -> Option<Instant> {",
-            "drag_autoscroll_deadline",
-        ),
-        (
-            "    fn next_animation_frame(&self, now: Instant) -> Instant {",
-            "next_animation_frame",
-        ),
-        (
-            "    fn next_animation_deadline(&self) -> Option<Instant> {",
-            "next_animation_deadline",
-        ),
+    for name in [
+        "strip_animation_work",
+        "drag_autoscroll_deadline",
+        "next_animation_frame",
+        "next_animation_deadline",
     ] {
-        let body = method(asker, name);
+        let body = method(name);
         assert!(
             body.contains("frame_clock"),
             "this has to ask the clock that reads the display:\n{body}"
@@ -1701,23 +1595,15 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
         .is_empty()
     };
     assert!(
-        agree(
-            "PaneMotion's renewable deadline",
-            !SOURCE.contains("fn deadline(&self, now: Instant, motion: Motion, frame: Duration)")
-                && !SOURCE.contains("self.is_animating(now, motion).then(|| now + frame)"),
-            in_the_root("fn deadline(&self, now: Instant, motion: Motion, frame: Duration)")
-                && in_the_root("self.is_animating(now, motion).then(|| now + frame)"),
-        ),
+        in_the_root("fn deadline(&self, now: Instant, motion: Motion, frame: Duration)")
+            && in_the_root("self.is_animating(now, motion).then(|| now + frame)"),
         "PaneMotion must not own a renewable query-time deadline"
     );
 
     // The terminal thumb has the same ownership split. `termscroll` reports
     // the absolute end of its full-strength rest and whether the fade is live;
     // the window assigns a live fade its shared absolute frame appointment.
-    let thumbs = method(
-        "    fn terminal_thumb_work(&self, now: Instant) -> AnimationWork {",
-        "terminal_thumb_work",
-    );
+    let thumbs = method("terminal_thumb_work");
     assert!(
         thumbs.contains("if termscroll::fade_is_moving(rest, now, motion) {")
             && thumbs.contains("self.next_animation_deadline()")
@@ -1733,12 +1619,7 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
         .is_empty()
     };
     assert!(
-        agree(
-            "the thumb's renewable frame",
-            !TERMSCROLL_SOURCE.contains("frame: Duration")
-                && !TERMSCROLL_SOURCE.contains("Some(now + frame)"),
-            in_termscroll("frame: Duration") && in_termscroll("Some(now + frame)"),
-        ),
+        in_termscroll("frame: Duration") && in_termscroll("Some(now + frame)"),
         "termscroll must not manufacture a renewable query-time frame"
     );
 }
@@ -1813,10 +1694,7 @@ fn a_service_that_finds_nothing_changed_hands_nothing_over() {
         "and the frame a travelling box has just stopped on is the one that \
          carries where it stopped"
     );
-    let service = method(
-        "    fn service_pictures(&mut self, now: Instant) {",
-        "service_pictures",
-    );
+    let service = method("service_pictures");
     assert!(
         service.contains("if !pictures_need_handing_over(")
             && service.contains("boxes_are_moving,")
@@ -1842,24 +1720,12 @@ fn a_service_that_finds_nothing_changed_hands_nothing_over() {
     // ── ④ and the per-turn float passes are free with nothing open ──────────
     let host = float::FloatHost::default();
     assert!(host.is_empty() && host.drawn().count() == 0);
-    for (pass, signature, name) in [
-        (
-            "resize",
-            "    fn resize_floats_to_content(&mut self) -> bool {",
-            "resize_floats_to_content",
-        ),
-        (
-            "directories",
-            "    fn ask_float_directories(&mut self) {",
-            "ask_float_directories",
-        ),
-        (
-            "git",
-            "    fn ask_git_for_floats(&mut self) {",
-            "ask_git_for_floats",
-        ),
+    for (pass, name) in [
+        ("resize", "resize_floats_to_content"),
+        ("directories", "ask_float_directories"),
+        ("git", "ask_git_for_floats"),
     ] {
-        let body = method(signature, name);
+        let body = method(name);
         let empty = body
             .find("self.window.float.is_empty()")
             .expect("every per-turn float pass asks whether there is a float at all");
