@@ -64,6 +64,15 @@
 //!   traversal of §2.7, with [`Certainty`] telling a name the parser placed from
 //!   one found inside a macro's token tree.
 //!
+//! What P3's pilot batch asked for, having written the alternative out
+//! fifteen lines at a time:
+//!
+//! * [`Index::of_package`] — one call for the universe nearly every consumer
+//!   wants, "this package's own `src/`", read from the workspace and lowered
+//!   once per process per package. A migrated test module's must-read set is
+//!   that entry, [`ItemQuery`] and [`Search`], and the entry's own doc comment
+//!   says so.
+//!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
 //! only under `cfg(windows)` is enumerated on macOS too, because a guard that

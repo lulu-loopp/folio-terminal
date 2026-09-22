@@ -13,7 +13,9 @@
 //! 3. **Spans round-trip**: the union sliced at an item's span re-parses as that
 //!    item, with that name.
 //! 4. **One index per process per universe**, the same object for the same
-//!    universe and a different one for a different universe.
+//!    universe and a different one for a different universe — and the
+//!    one-call entry for a package shares that object rather than lowering a
+//!    universe of its own.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -296,6 +298,46 @@ fn one_universe_is_lowered_once_and_shared() {
     );
     assert_eq!(first.universe().name(), "the lowering fixture");
     assert_eq!(other.universe().name(), "the ownership fixture");
+}
+
+/// RED — **one call names a package and gets the index the long way builds**,
+/// the same object and not a second lowering of the same files.
+///
+/// `Index::of_package` is the fifteen lines every consumer batch would otherwise
+/// write out — read the workspace, find the member, declare
+/// `universes::crate_sources`, lower it — and the claim that matters is that it
+/// is those lines and not a universe of its own: a second universe would answer
+/// the same questions from a second 23 MB index, and the two would drift the
+/// day one of them was changed.
+///
+/// MUTATION: declare `whole_package` instead of `crate_sources` inside the
+/// entry, or build rather than share, and the pointers differ.
+#[test]
+fn one_call_names_a_package_and_shares_the_index_the_long_way_builds() {
+    let entry = Index::of_package("bt-app");
+    let long_way = bt_app_index(&workspace());
+    assert!(
+        std::ptr::eq(entry, Arc::as_ptr(&long_way)),
+        "the entry lowered a universe of its own: it holds {} file(s) against the long way's {}",
+        entry.files().len(),
+        long_way.files().len()
+    );
+    assert!(
+        std::ptr::eq(entry, Index::of_package("bt-app")),
+        "two asks for one package are one answer"
+    );
+    assert_eq!(entry.universe().name(), "bt-app's own sources");
+}
+
+/// RED — **a package the workspace does not have is loud**, not an index of no
+/// files.
+///
+/// The one refusal a consumer can reach by writing the wrong word, and the
+/// answer to it is [`bt_source::Rejection::NoSuchPackage`]'s own sentence.
+#[test]
+#[should_panic(expected = "is not a package of this workspace")]
+fn a_package_this_workspace_does_not_have_is_loud() {
+    let _ = Index::of_package("bt-nothing-is-called-this");
 }
 
 // ── the queries, on the fixture ───────────────────────────────────────────

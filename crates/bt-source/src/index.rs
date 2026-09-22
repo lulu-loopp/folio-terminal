@@ -958,4 +958,58 @@ impl Index {
     pub fn shared(universe: &Universe) -> Result<std::sync::Arc<Self>, Vec<Rejection>> {
         crate::cache::shared(universe)
     }
+
+    /// **One workspace package's own sources, indexed once per process** — the
+    /// one call a migrated guard makes before it asks anything.
+    ///
+    /// `package` is a member's package name, `"bt-app"`. The universe is
+    /// [`crate::universes::crate_sources`] with [`crate::Vendor::Excluded`]:
+    /// that package's own `src/`, reached through the `mod` declarations of
+    /// every target it compiles, `cfg`-blind. It is the same index
+    /// [`Index::shared`] hands out for that universe, so a reader that declares
+    /// it the long way shares this one rather than lowering a second.
+    ///
+    /// # What a consumer has to read
+    ///
+    /// **This entry, [`crate::ItemQuery`] and [`crate::Search`]** — that is the
+    /// whole of it, and it is the point of the preparation. A body pin is
+    ///
+    /// ```text
+    /// Index::of_package("bt-app").body_of(&ItemQuery::method("Runtime", "turn"))
+    /// ```
+    ///
+    /// and a count or a negative is
+    ///
+    /// ```text
+    /// Index::of_package("bt-app").search(&Search::new(needle!(pattern), View::Raw))
+    /// ```
+    ///
+    /// where [`crate::Search`] brings [`crate::Pattern`], [`crate::View`] and
+    /// [`crate::needle`] with it. The workspace, the package, the universe and
+    /// the lowering are behind this call; a module that asks one question does
+    /// not name any of them.
+    ///
+    /// **What it does not decide for the caller.** Which refusals of a *query*
+    /// are fatal, and what "in the product" means for a given reader, stay with
+    /// the reader: [`Index::body_of`] and [`Index::search`] return a
+    /// [`crate::QueryFailure`], and file-grained product reachability is
+    /// [`FileRecord::permits_product`] over [`Index::file_at`]. This entry is
+    /// loud about the universe it was asked for and silent about everything
+    /// after it.
+    ///
+    /// # Panics
+    ///
+    /// When the workspace cannot be read, when it has no package of that name
+    /// ([`Rejection::NoSuchPackage`]), when the universe is refused, or when the
+    /// lowering is — each with the [`Rejection`]s that refused it. A universe
+    /// that cannot be declared does not become declarable on the second ask, so
+    /// a later caller is told the same thing rather than handed a smaller
+    /// answer. A vendored package is one of these refusals
+    /// ([`Rejection::VendorNotDeclared`]): a reading that covers upstream code
+    /// is a decision, so it declares its own universe and calls
+    /// [`Index::shared`].
+    #[must_use]
+    pub fn of_package(package: &str) -> &'static Self {
+        crate::cache::of_package(package)
+    }
 }

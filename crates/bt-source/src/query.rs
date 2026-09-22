@@ -607,6 +607,15 @@ pub enum QueryFailure {
     /// The needle's own site is inside the queried universe and the expression
     /// that built it could not be found there. §2.6's hard failure: an
     /// exclusion that silently excludes nothing.
+    ///
+    /// **Two causes are known, and the message names both.** The usual one is a
+    /// stale test binary: the site's line comes from `line!()`, which is baked
+    /// in when the test is compiled, so an edit anywhere above it — a comment
+    /// will do — moves the expression while the binary goes on naming the line
+    /// it used to be on. P3's pilot met this one, and met it as a refusal whose
+    /// message described the second cause only. The other is a site that names
+    /// a file the needle was not built in, which is a wrong site rather than an
+    /// old one.
     NeedleConstructionLost {
         file: PathBuf,
         line: usize,
@@ -674,9 +683,14 @@ impl fmt::Display for QueryFailure {
             ),
             Self::NeedleConstructionLost { file, line, column } => write!(
                 formatter,
-                "the needle was built at {}:{line}:{column}, which is inside the queried \
-                 universe, and the expression that built it is not there — excluding nothing \
-                 would leave the reader matching itself",
+                "the needle's site is {}:{line}:{column}, which is inside the queried universe, \
+                 and no expression that builds a needle stands there. Two things do this. The \
+                 usual one is a stale test binary: the line comes from `line!()` and is baked in \
+                 at compile time, so an edit above it — a comment will do — moves the expression \
+                 while the binary goes on naming the old line; rebuild the test and ask again. \
+                 The other is a needle built outside the file its site names, which is a wrong \
+                 site rather than an old one. Excluding nothing is not the third option: it would \
+                 leave the reader matching itself.",
                 file.display()
             ),
             Self::LexicalCandidate { query, at } => {
