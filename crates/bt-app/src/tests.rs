@@ -217,16 +217,47 @@ fn a_local_folder() -> bt_term::PathVerdict {
 
 /// Runs the actual production queue in a disposable process. The watchdog
 /// kills only this test's child if a regression makes conversion infinite.
+///
+/// RED GATE: mis-aim the selector — rename this test, or misspell the name the
+/// child is given — and the first assertion names the selector and says how
+/// many tests it found. It used to be green: a filter that matches nothing
+/// makes the harness print `running 0 tests` and exit 0, and the parent reads
+/// only the exit status.
 #[test]
 fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
     const CHILD: &str = "BT_MATH_ROBUSTNESS_TEST_CHILD";
+    /// The name the child is told to run — written once, so that the proof
+    /// below and the run itself cannot be about two different tests.
+    const SELECTOR: &str = "tests::hostile_math_is_refused_and_the_real_decoration_worker_survives";
     if std::env::var_os(CHILD).is_none() {
+        // **A selector that matches nothing is not a pass**
+        // (`docs/plans/bt-app-split-prep.md` §6.3, P9). The harness answers a
+        // filter that names no test with `running 0 tests` and exit code 0, so
+        // a child spawned on a name this file had renamed or misspelled would
+        // be a green test that ran nothing at all — the whole of this case
+        // lives in the child, and the parent only reads its status. So the
+        // harness is asked what the selector names *before* it is run with it,
+        // and the answer has to be this one test. `--list` runs nothing, which
+        // is why the proof costs a process that exits at once rather than the
+        // minute the real run takes.
+        let listing = bt_platform::quiet_command(std::env::current_exe().unwrap())
+            .args(["--exact", SELECTOR, "--list"])
+            .output()
+            .expect("the harness can list its own tests");
+        let listed = String::from_utf8_lossy(&listing.stdout);
+        let named: Vec<&str> = listed
+            .lines()
+            .filter_map(|line| line.trim_end().strip_suffix(": test"))
+            .collect();
+        assert_eq!(
+            named,
+            [SELECTOR],
+            "the child selector `{SELECTOR}` names {} test(s) in this binary, and this case is \
+             the child's to run. The harness said:\n{listed}",
+            named.len()
+        );
         let mut child = bt_platform::quiet_command(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::hostile_math_is_refused_and_the_real_decoration_worker_survives",
-                "--nocapture",
-            ])
+            .args(["--exact", SELECTOR, "--nocapture"])
             .env(CHILD, "1")
             .spawn()
             .unwrap();
