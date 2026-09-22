@@ -109306,29 +109306,30 @@ mod hold_station_tests {
 #[cfg(test)]
 mod files_locate_door_tests {
     // **P3's second batch** (`docs/plans/bt-app-split-prep.md` §6.3). Every
-    // reader below asked `main.rs` for its text; this commit adds the reading
-    // that asks `bt-source` about an *item* of this crate and asserts the two
-    // agree on today's tree, and the commit after it deletes the older of the
-    // two. The pattern is [`super::pty_drain_budget_tests`]' — its header states
-    // the six points and this module copies them rather than restating them.
+    // reader below asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact here is bound to the
+    // file it happens to be written in today. The commit before this one ran
+    // both readings side by side and asserted they agree; this is the one that
+    // deletes the older of the two, because two implementations of one judgement
+    // do not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is [`super::pty_drain_budget_tests`]'**, and its six points
+    // are stated in that module's header rather than restated here. Two of them
+    // are what this batch is: a body pin names an identity and not a file, and a
+    // whole-source count becomes a `Search` with its view said out loud. The
+    // helpers below are that module's, unchanged.
+    //
+    // What the deleted finder did, recorded because the equivalence commit is
+    // what established it rather than assumed it: it took the first
+    // `\n    fn name(` in this file, which is a method of *whatever `impl`
+    // happens to come first* — thirty-nine of these forty identities turned out
+    // to mean `Runtime` and the fortieth is a free function — and it ran on past
+    // the closing brace to the next method's own `fn`, so its slice carried the
+    // doc comment of the item after. One reader here had to trim that doc
+    // comment off before it could forbid a spelling that stands in it. The crate
+    // stops at the closing brace, so the trim is gone with the finder.
 
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's —
-    /// [`super::mouse_trace_station_tests`]' own reader.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
-
-    // ── what this module asks the crate instead ───────────────────────────
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -109365,43 +109366,6 @@ mod files_locate_door_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    // ── P3's equivalence commit: the two readings, asserted to agree ──────
-
-    /// **The crate's body is these bytes of this file's slice.**
-    ///
-    /// [`body`] starts after the signature it was handed and stops before the
-    /// next method's own `fn`, so it holds the tail of the signature, the
-    /// braces, and whatever stands between this item and the next one — a doc
-    /// comment included, which is why one reader below trims one off.
-    /// [`Index::body_of`] returns the braces and everything between them. So the
-    /// crate's answer stands inside this file's slice, once, with nothing but
-    /// the rest of the signature — no opening brace — before it.
-    fn same_body(old: &str, new: &str, what: &str) {
-        let at = old.find(new).unwrap_or_else(|| {
-            panic!("`{what}`: the crate's body is not bytes of this file's slice")
-        });
-        assert_eq!(
-            old.rfind(new),
-            Some(at),
-            "`{what}`: the crate's body stands twice inside this file's slice"
-        );
-        assert!(
-            !old[..at].contains('{'),
-            "`{what}`: this file's slice had already opened a brace before the body the crate \
-             returned, so the two readings are not reading one item"
-        );
-    }
-
-    /// One method pin's two readings, asserted to agree.
-    fn same_method_body(signature: &str, owner: &str, name: &str) {
-        same_body(body(signature), method_body(owner, name), name);
-    }
-
-    /// One free function pin's two readings, asserted to agree.
-    fn same_free_fn_body(signature: &str, name: &str) {
-        same_body(body(signature), free_fn_body(name), name);
-    }
-
     /// RED — **trying to edit a read-only page floats the reason for two
     /// seconds, with a way out** (owner's ruling 2026-09-12; §7.1.3x ③).
     ///
@@ -109424,24 +109388,9 @@ mod files_locate_door_tests {
     ///    since `3af60fa`, and offers it before anything else the pill can say.
     #[test]
     fn trying_to_edit_a_read_only_page_floats_the_reason_for_two_seconds_with_a_way_out() {
-        // P3 equivalence: this file's slice and the crate's body, for each of
-        // the six identities this pin reads.
-        for (signature, name) in [
-            ("    fn press_preview_body(", "press_preview_body"),
-            ("    fn preview_browse_key(", "preview_browse_key"),
-            ("    fn refuse_preview_edit(", "refuse_preview_edit"),
-            (
-                "    fn turn(&mut self, now: Instant, application_clocks: bool)",
-                "turn",
-            ),
-            ("    fn preview_pill_say(", "preview_pill_say"),
-            ("    fn press_notice(", "press_notice"),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
         // ① The press. The gate is `preview_edit_body`, and the refusal is
         // raised in the arm that gate sends a read-only body down.
-        let press = body("    fn press_preview_body(");
+        let press = method_body("Runtime", "press_preview_body");
         assert!(
             press.contains("self.refuse_preview_edit(surface)"),
             "a press that cannot seat a caret says nothing about why:\n{press}"
@@ -109451,7 +109400,7 @@ mod files_locate_door_tests {
             "the refusal swallowed the press, so the rungs under it stopped answering"
         );
         // ② The key, and only a key that would have inserted.
-        let key = body("    fn preview_browse_key(");
+        let key = method_body("Runtime", "preview_browse_key");
         assert!(
             key.contains("self.refuse_preview_edit(surface)")
                 && key.contains("preview_edit::EditCommand::Insert(_)")
@@ -109471,7 +109420,7 @@ mod files_locate_door_tests {
             super::PREVIEW_REFUSAL_HOLD,
             std::time::Duration::from_secs(2)
         );
-        let raise = body("    fn refuse_preview_edit(");
+        let raise = method_body("Runtime", "refuse_preview_edit");
         assert!(
             raise.contains("self.window.preview_refusal = Some((surface, now));"),
             "an attempt inside the two seconds does not restart the clock:\n{raise}"
@@ -109484,12 +109433,11 @@ mod files_locate_door_tests {
         // And the loop is up for the instant it is due to go away, the way every
         // other acknowledgement in this window is.
         assert!(
-            body("    fn turn(&mut self, now: Instant, application_clocks: bool)")
-                .contains("self.preview_refusal_deadline(),"),
+            method_body("Runtime", "turn").contains("self.preview_refusal_deadline(),"),
             "nothing wakes the window when the reason is due to go, so the pill stands until              something else happens to repaint"
         );
         // ④ The way out, first among what the pill can say.
-        let say = body("    fn preview_pill_say(");
+        let say = method_body("Runtime", "preview_pill_say");
         let refusal = say
             .find("preview_refusal_reason")
             .expect("the pill asks whether an edit was just refused");
@@ -109506,7 +109454,7 @@ mod files_locate_door_tests {
             "the reason floats with no way out of it:\n{say}"
         );
         assert!(
-            body("    fn press_notice(")
+            method_body("Runtime", "press_notice")
                 .contains("self.open_preview_externally_on(self.notice_surface(host))?"),
             "pressing that way out does not hand the file to the machine"
         );
@@ -109524,20 +109472,7 @@ mod files_locate_door_tests {
     /// opened its debt over.
     #[test]
     fn an_animation_refusal_is_a_lock_with_its_reason() {
-        // P3 equivalence. The tip's text is a free function of this crate and
-        // not a method, which is why this pin's signature carries no indent.
-        for (signature, name) in [
-            ("    fn preview_standing_fact(", "preview_standing_fact"),
-            ("    fn dress_preview_rail(", "dress_preview_rail"),
-            (
-                "    fn preview_rail_tip_anchors(",
-                "preview_rail_tip_anchors",
-            ),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
-        same_free_fn_body("fn preview_rail_tip_text(", "preview_rail_tip_text");
-        let fact = body("    fn preview_standing_fact(");
+        let fact = method_body("Runtime", "preview_standing_fact");
         assert!(
             fact.contains("self.animation_refusal_notice(surface)"),
             "a still `.gif` is not among the facts this surface can be owed:\n{fact}"
@@ -109547,21 +109482,21 @@ mod files_locate_door_tests {
             "and neither is a read-only body:\n{fact}"
         );
         // One derivation: the padlock is reserved from it, and the tip says it.
-        let rail = body("    fn dress_preview_rail(");
+        let rail = method_body("Runtime", "dress_preview_rail");
         assert!(
             rail.contains("frame.measure.lock = self")
                 && rail.contains("preview_standing_fact(surface, Instant::now())"),
             "the row reserves its padlock from something other than the one standing \
              fact:\n{rail}"
         );
-        let tips = body("    fn preview_rail_tip_anchors(");
+        let tips = method_body("Runtime", "preview_rail_tip_anchors");
         assert!(
             tips.contains("preview_standing_fact(surface, Instant::now())"),
             "the padlock's tip is derived a second time, so a mark and its own reason can \
              come to disagree:\n{tips}"
         );
         assert!(
-            body("fn preview_rail_tip_text(")
+            free_fn_body("preview_rail_tip_text")
                 .contains("seats::PreviewRailTip::Lock => lock.to_owned()"),
             "the padlock's tip says something other than the reason"
         );
@@ -109582,25 +109517,7 @@ mod files_locate_door_tests {
     /// missed starts fading.
     #[test]
     fn the_disk_change_pill_stays_until_acted_on_and_a_save_confirmation_expires() {
-        // P3 equivalence.
-        for (signature, name) in [
-            ("    fn preview_pill_say(", "preview_pill_say"),
-            ("    fn close_pane_notice(", "close_pane_notice"),
-            (
-                "    fn reload_preview_from_disk(",
-                "reload_preview_from_disk",
-            ),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
-        // And the trim at the end of this test is exactly [`body`]'s overshoot:
-        // `read_only_notice` stands in the doc comment of the *next* item, which
-        // this file's slice runs into and the crate's body stops before.
-        assert!(
-            !method_body("Runtime", "preview_pill_say").contains("\n    ///"),
-            "P3 equivalence: the crate's body carries none of the doc comment the trim cuts off"
-        );
-        let say = body("    fn preview_pill_say(");
+        let say = method_body("Runtime", "preview_pill_say");
         assert!(
             say.contains("if let Some(state) = self.preview_disk_notice_on(surface) {")
                 && say.contains("return Some((state.text().to_owned(), state.verbs()));"),
@@ -109617,13 +109534,10 @@ mod files_locate_door_tests {
         );
         // And it is taken down by being answered, through the one door both
         // hosts spend.
-        for signature in [
-            "    fn close_pane_notice(",
-            "    fn reload_preview_from_disk(",
-        ] {
+        for name in ["close_pane_notice", "reload_preview_from_disk"] {
             assert!(
-                body(signature).contains("self.notice_surface(host)"),
-                "{signature} resolves its buffer from a seat, so a window's own verb finds \
+                method_body("Runtime", name).contains("self.notice_surface(host)"),
+                "{name} resolves its buffer from a seat, so a window's own verb finds \
                  nothing to spend"
             );
         }
@@ -109631,9 +109545,8 @@ mod files_locate_door_tests {
         // without having asked for it is the padlock's, and the only way a
         // standing fact reaches this slot is through the refusal above — a
         // gesture the reader has just made.
-        let code = say.split("\n    ///").next().unwrap_or(say);
         assert!(
-            !code.contains("read_only_notice") && !code.contains("animation_refusal_notice"),
+            !say.contains("read_only_notice") && !say.contains("animation_refusal_notice"),
             "a standing fact is being floated as news unasked, which is the band this ruling \
              retired wearing a new shape"
         );
@@ -109662,23 +109575,15 @@ mod files_locate_door_tests {
     /// list of its own — to admit or to refuse.
     #[test]
     fn one_predicate_says_whether_a_card_has_a_window_to_become() {
-        // P3 equivalence.
-        for (signature, name) in [
-            ("    fn press_file_peek(", "press_file_peek"),
-            ("    fn file_peek_head_grasp(", "file_peek_head_grasp"),
-            ("    fn file_peek_promotes(", "file_peek_promotes"),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
         // Assembled, so the pin cannot match its own text.
         let asks = ["file_peek", "_promotes()"].concat();
-        for signature in ["    fn press_file_peek(", "    fn file_peek_head_grasp("] {
+        for name in ["press_file_peek", "file_peek_head_grasp"] {
             assert!(
-                body(signature).contains(&asks),
-                "{signature} decides about the card's head without asking whether it has a window"
+                method_body("Runtime", name).contains(&asks),
+                "{name} decides about the card's head without asking whether it has a window"
             );
         }
-        let predicate = body("    fn file_peek_promotes(");
+        let predicate = method_body("Runtime", "file_peek_promotes");
         for spelling in [".pdf", ".html", ".htm", "extension", "path_opens_as_a_page"] {
             assert!(
                 !predicate.contains(spelling),
@@ -109713,23 +109618,9 @@ mod files_locate_door_tests {
     ///    is a chassis with no page, which is a placeholder.
     #[test]
     fn an_html_card_torn_out_carries_the_engine_the_pop_out_button_gives() {
-        // P3 equivalence.
-        for (signature, name) in [
-            ("    fn file_peek_promotes(", "file_peek_promotes"),
-            (
-                "    fn open_preview_web_file_on(",
-                "open_preview_web_file_on",
-            ),
-            (
-                "    fn open_minted_page_on_float(",
-                "open_minted_page_on_float",
-            ),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
         // ① The card promotes a page: the refusal arm is gone.
         assert!(
-            !body("    fn file_peek_promotes(").contains("path_opens_as_a_page"),
+            !method_body("Runtime", "file_peek_promotes").contains("path_opens_as_a_page"),
             "file_peek_promotes still refuses the page class, so a .pdf card cannot become a window"
         );
 
@@ -109738,7 +109629,7 @@ mod files_locate_door_tests {
         //    `open_preview_web_file_on` with §7.14f — the fork above it now
         //    passes the surface through whole instead of matching on it — so the
         //    claim is read where the match now lives.
-        let fork = body("    fn open_preview_web_file_on(");
+        let fork = method_body("Runtime", "open_preview_web_file_on");
         assert!(
             fork.contains("PreviewSurface::Float(id) => self.open_minted_page_on_float(id, mint)"),
             "a page promoted onto a float falls back to a pane of the tab behind it, and the float opens empty"
@@ -109746,7 +109637,7 @@ mod files_locate_door_tests {
 
         // ③ The float's opener carries the page and opens the engine on it — the
         //    same tenant shape pop_out_preview produces.
-        let opener = body("    fn open_minted_page_on_float(");
+        let opener = method_body("Runtime", "open_minted_page_on_float");
         assert!(
             opener.contains("preview.page = Some(leaf)"),
             "the float is never told to carry the page, so page_carried_by finds none and the window is a placeholder"
@@ -109781,14 +109672,7 @@ mod files_locate_door_tests {
     /// stands on top of it — the build the user photographed.
     #[test]
     fn a_reference_under_a_float_is_not_hovered_through_it() {
-        // P3 equivalence.
-        for (signature, name) in [
-            ("    fn pane_hit_context(", "pane_hit_context"),
-            ("    fn pointer_over_a_float(", "pointer_over_a_float"),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
-        let context = body("    fn pane_hit_context(");
+        let context = method_body("Runtime", "pane_hit_context");
         assert!(
             context.contains("if self.pointer_over_a_float(position)")
                 && context.contains("return None;"),
@@ -109796,7 +109680,7 @@ mod files_locate_door_tests {
         );
         // And the guard reads every drawn float's own frame — the pinned window,
         // the peek and the one mid-drag — rather than a second list of rectangles.
-        let guard = body("    fn pointer_over_a_float(");
+        let guard = method_body("Runtime", "pointer_over_a_float");
         assert!(
             guard.contains("self.window.float.drawn()"),
             "the occlusion is measured against a rectangle list of its own instead of the live floats:\n{guard}"
@@ -109824,16 +109708,7 @@ mod files_locate_door_tests {
     ///    over.
     #[test]
     fn a_file_nobody_previews_wears_the_same_card_in_a_float_as_in_a_pane() {
-        // P3 equivalence.
-        for (signature, name) in [
-            ("    fn preview_float_layer(", "preview_float_layer"),
-            ("    fn push_float_refusal_card(", "push_float_refusal_card"),
-            ("    fn float_hit_at(", "float_hit_at"),
-            ("    fn press_float(", "press_float"),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
-        let layer = body("    fn preview_float_layer(");
+        let layer = method_body("Runtime", "preview_float_layer");
         // **Through the window's own card door** since the owner's ruling of
         // 2026-09-12, which gave the picture lane a card as well: the two arms
         // that can be refused — a document and a picture — both send their words
@@ -109846,16 +109721,16 @@ mod files_locate_door_tests {
             "a refused document or picture in a float does not draw the pane's card, so the window is blank"
         );
         assert!(
-            body("    fn push_float_refusal_card(").contains("seats::push_preview_card("),
+            method_body("Runtime", "push_float_refusal_card").contains("seats::push_preview_card("),
             "the window's card is drawn by something other than the pane's own painter"
         );
-        let hit = body("    fn float_hit_at(");
+        let hit = method_body("Runtime", "float_hit_at");
         assert!(
             hit.contains("float::FloatPart::CardButton")
                 && hit.contains("preview_card_geometry(geometry.body, Some(open_button_px)"),
             "the float's no-preview button is not hit where the card drew it"
         );
-        let press = body("    fn press_float(");
+        let press = method_body("Runtime", "press_float");
         assert!(
             press.contains("float::FloatPart::CardButton")
                 && press.contains("open_preview_externally_on(PreviewSurface::Float(id))"),
@@ -109892,25 +109767,9 @@ mod files_locate_door_tests {
     ///    two hosts spend one verb rather than two implementations of it.
     #[test]
     fn a_document_in_a_float_says_what_the_disk_did_the_way_a_pane_does() {
-        // P3 equivalence, for each of the seven identities this pin reads.
-        for (signature, name) in [
-            ("    fn settle_pane_notices(", "settle_pane_notices"),
-            ("    fn notice_layers(", "notice_layers"),
-            ("    fn float_head_tools(", "float_head_tools"),
-            ("    fn float_notice_layer(", "float_notice_layer"),
-            ("    fn float_layer(", "float_layer"),
-            ("    fn mouse_input(", "mouse_input"),
-            ("    fn close_pane_notice(", "close_pane_notice"),
-            (
-                "    fn reload_preview_from_disk(",
-                "reload_preview_from_disk",
-            ),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
         // ① Both registers of what exists, in the one settle. A second settler
         // for the window half would be a second answer to "who is wearing this".
-        let settle = body("    fn settle_pane_notices(");
+        let settle = method_body("Runtime", "settle_pane_notices");
         assert!(
             settle.contains("self.seats.preview_seats()")
                 && settle.contains("self.preview_float_ids()")
@@ -109924,7 +109783,7 @@ mod files_locate_door_tests {
         // shape along: there is a rectangle for the window's own news, derived
         // from the window's own content, so the sentence is never drawn over a
         // row that does not exist.
-        let layers = body("    fn notice_layers(");
+        let layers = method_body("Runtime", "notice_layers");
         assert!(
             layers.contains("seats::news_pill_box(body, scale, content)"),
             "the pass that lays the news out does not cut a pill out of the body it floats over, so a torn-off document has nowhere to say what the disk did:\n{layers}"
@@ -109932,14 +109791,14 @@ mod files_locate_door_tests {
         // And the chassis reserves nothing for it, which is that ruling's other
         // half: a band standing in the layout would move the document every time
         // the news arrived and left.
-        let tools = body("    fn float_head_tools(");
+        let tools = method_body("Runtime", "float_head_tools");
         assert!(
             !tools.contains("notice:"),
             "the window's chassis is still reserving a row for the strip:\n{tools}"
         );
         // ③ One measurement, two lanes. The float's layer is *built* from the
         // rectangle the settle wrote — the box you can press is the box you can see.
-        let float_layer = body("    fn float_notice_layer(");
+        let float_layer = method_body("Runtime", "float_notice_layer");
         assert!(
             float_layer.contains("self.window.notice_layouts.get(&host)"),
             "the window's band is measured a second time instead of read, so what is drawn \
@@ -109948,7 +109807,7 @@ mod files_locate_door_tests {
         // And the band is chained onto that window's own lane — above its face,
         // under any window in front of it. The pane lane is *below* the floats,
         // so a strip left there would be drawn under the very window it is about.
-        let lane = body("    fn float_layer(");
+        let lane = method_body("Runtime", "float_layer");
         assert!(
             lane.contains("self.float_notice_layer(id)"),
             "the window's band is not drawn in the float's own lane, so it lands under \
@@ -109960,19 +109819,16 @@ mod files_locate_door_tests {
         // asked above the chrome router entirely, off the very rectangle the
         // pill was drawn in; remove that rung and the words stop answering on
         // both hosts at once.
-        let router = body("    fn mouse_input(");
+        let router = method_body("Runtime", "mouse_input");
         assert!(
             router.contains("self.press_notice(position)?"),
             "the press router does not reach the strip's own door before the chrome, so the words on a window's pill land in the document instead of answering it"
         );
         // ⑤ One verb, one buffer, whichever host was pressed.
-        for signature in [
-            "    fn close_pane_notice(",
-            "    fn reload_preview_from_disk(",
-        ] {
+        for name in ["close_pane_notice", "reload_preview_from_disk"] {
             assert!(
-                body(signature).contains("self.notice_surface(host)"),
-                "{signature} resolves its buffer from a seat, so the window's own verb \
+                method_body("Runtime", name).contains("self.notice_surface(host)"),
+                "{name} resolves its buffer from a seat, so the window's own verb \
                  finds nothing to spend"
             );
         }
@@ -109993,28 +109849,20 @@ mod files_locate_door_tests {
     /// float's rendered document stops selecting while a docked one still does.
     #[test]
     fn a_document_in_a_float_selects_the_way_it_does_in_a_pane() {
-        // P3 equivalence.
-        for (signature, name) in [
-            ("    fn press_float(", "press_float"),
-            ("    fn chrome_mouse_input(", "chrome_mouse_input"),
-            ("    fn drag_preview_text(", "drag_preview_text"),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
         // One selection path, reached from both hosts — the float's press and the
         // docked router's — so the window and the pane cannot come to select
         // differently.
-        for signature in ["    fn press_float(", "    fn chrome_mouse_input("] {
+        for name in ["press_float", "chrome_mouse_input"] {
             assert!(
-                body(signature).contains("self.press_preview_text(position)"),
-                "{signature} does not reach the rendered-page selection path, so a document \
+                method_body("Runtime", name).contains("self.press_preview_text(position)"),
+                "{name} does not reach the rendered-page selection path, so a document \
                  selects on one host and not the other"
             );
         }
         // And the drag that draws the selection is keyed on the press's own
         // surface, not on which pane the pointer is over — the one model, shared.
         assert!(
-            body("    fn drag_preview_text(").contains("self.preview_text_drag"),
+            method_body("Runtime", "drag_preview_text").contains("self.preview_text_drag"),
             "the float's selection drag spins up a second model instead of the pane's own"
         );
     }
@@ -110048,21 +109896,14 @@ mod files_locate_door_tests {
     /// 2026-08-28 was built from.
     #[test]
     fn a_player_in_a_float_answers_the_hand_the_way_a_pane_does() {
-        // P3 equivalence.
-        for (signature, name) in [
-            ("    fn press_float(", "press_float"),
-            ("    fn chrome_mouse_input(", "chrome_mouse_input"),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
-        for signature in ["    fn press_float(", "    fn chrome_mouse_input("] {
+        for name in ["press_float", "chrome_mouse_input"] {
             assert!(
-                body(signature).contains("self.press_video_at(position)"),
-                "{signature} does not reach the player's press path, so a recording starts \
+                method_body("Runtime", name).contains("self.press_video_at(position)"),
+                "{name} does not reach the player's press path, so a recording starts \
                  on one host and not the other"
             );
         }
-        let press = body("    fn press_float(");
+        let press = method_body("Runtime", "press_float");
         let player = press
             .find("self.press_video_at(position)")
             .expect("the float's press asks the player");
@@ -110113,9 +109954,7 @@ mod files_locate_door_tests {
     /// the state every build before 2026-08-28 was in.
     #[test]
     fn a_player_on_a_glance_card_answers_the_hand_the_way_a_pane_does() {
-        // P3 equivalence.
-        same_method_body("    fn press_file_peek(", "Runtime", "press_file_peek");
-        let press = body("    fn press_file_peek(");
+        let press = method_body("Runtime", "press_file_peek");
         assert!(
             press.contains("self.press_video_at(position)"),
             "the card's press does not reach the player's press path, so its own play disc \
@@ -110166,13 +110005,7 @@ mod files_locate_door_tests {
     /// the binary photographed on 2026-08-28 was built from.
     #[test]
     fn a_card_withdraws_its_still_for_a_recording_the_way_it_does_for_an_animation() {
-        // P3 equivalence.
-        same_method_body(
-            "    fn file_peek_card_layers(",
-            "Runtime",
-            "file_peek_card_layers",
-        );
-        let layers = body("    fn file_peek_card_layers(");
+        let layers = method_body("Runtime", "file_peek_card_layers");
         let clause = layers
             .find("let moving = ")
             .map(|at| &layers[at..])
@@ -110235,38 +110068,28 @@ mod files_locate_door_tests {
     /// host fails.
     #[test]
     fn a_recording_on_an_overlay_host_is_drawn_into_a_layer_of_its_own() {
-        // P3 equivalence.
-        for (signature, name) in [
-            ("    fn float_layer(", "float_layer"),
-            ("    fn file_peek_layer(", "file_peek_layer"),
+        for (name, ledger) in [
+            ("float_layer", ".float_video_level"),
+            ("file_peek_layer", "self.window.file_peek_level = Some("),
         ] {
-            same_method_body(signature, "Runtime", name);
-        }
-        for (signature, ledger) in [
-            ("    fn float_layer(", ".float_video_level"),
-            (
-                "    fn file_peek_layer(",
-                "self.window.file_peek_level = Some(",
-            ),
-        ] {
-            let source = body(signature);
+            let drawn = method_body("Runtime", name);
             // The *last* mention, because both ledgers are cleared at the top of
             // the pass that rebuilds them — a record of what this frame drew is
             // wrong the moment it is stale — and the write is the one that
             // matters here.
-            let at = source
+            let at = drawn
                 .rfind(ledger)
-                .unwrap_or_else(|| panic!("{signature} writes {ledger}"));
-            let after = &source[at..];
+                .unwrap_or_else(|| panic!("{name} writes {ledger}"));
+            let after = &drawn[at..];
             let push = after.find("layers.push(").unwrap_or_else(|| {
                 panic!(
-                    "{signature} names a recording's layer and pushes none, so the stage is \
+                    "{name} names a recording's layer and pushes none, so the stage is \
                      the host's own face and the body well is painted over the picture"
                 )
             });
             assert!(
                 after[push..].starts_with("layers.push(marks::OverlayLayer::default())"),
-                "{signature} points a recording's stage at a layer that draws fills, so the \
+                "{name} points a recording's stage at a layer that draws fills, so the \
                  host's own body well is painted over the picture it is showing"
             );
         }
@@ -110312,8 +110135,6 @@ mod files_locate_door_tests {
     #[test]
     fn a_closed_window_stops_the_recording_it_was_showing() {
         use crate::{TabId, float};
-        // P3 equivalence.
-        same_method_body("    fn sweep_video_seats(", "Runtime", "sweep_video_seats");
         // ① a dismissed window is still drawn, and no longer live.
         let mut host = float::FloatHost::default();
         let now = std::time::Instant::now();
@@ -110341,7 +110162,7 @@ mod files_locate_door_tests {
         );
 
         // ② the sweep asks the live list, and asks it first.
-        let sweep = body("    fn sweep_video_seats(");
+        let sweep = method_body("Runtime", "sweep_video_seats");
         let float_arm = sweep
             .find("PreviewSurface::Float(id) if self.window.float.live(*id).is_none()")
             .expect(
@@ -110370,17 +110191,6 @@ mod files_locate_door_tests {
     /// "helpfully follow the file" change somebody will one day want to make.
     #[test]
     fn opening_a_file_never_moves_the_files_tree() {
-        // P3 equivalence, for each of the six doors this pin reads.
-        for (signature, name) in [
-            ("    fn open_preview(", "open_preview"),
-            ("    fn open_preview_at(", "open_preview_at"),
-            ("    fn open_preview_file(", "open_preview_file"),
-            ("    fn open_preview_file_on(", "open_preview_file_on"),
-            ("    fn open_preview_source_on(", "open_preview_source_on"),
-            ("    fn activate_files_row(", "activate_files_row"),
-        ] {
-            same_method_body(signature, "Runtime", name);
-        }
         // Assembled rather than written out, so a pin that scans the file it
         // lives in cannot match its own text.
         let verbs = [
@@ -110388,19 +110198,19 @@ mod files_locate_door_tests {
             ["show_folder", "_in_files_column"].concat(),
             ["locate_folder", "_in_files_column"].concat(),
         ];
-        for signature in [
-            "    fn open_preview(",
-            "    fn open_preview_at(",
-            "    fn open_preview_file(",
-            "    fn open_preview_file_on(",
-            "    fn open_preview_source_on(",
-            "    fn activate_files_row(",
+        for name in [
+            "open_preview",
+            "open_preview_at",
+            "open_preview_file",
+            "open_preview_file_on",
+            "open_preview_source_on",
+            "activate_files_row",
         ] {
-            let text = body(signature);
+            let text = method_body("Runtime", name);
             for verb in &verbs {
                 assert!(
                     !text.contains(verb.as_str()),
-                    "{signature} moves the files tree by calling `{verb}` — \
+                    "{name} moves the files tree by calling `{verb}` — \
                      opening a file has no side effect on the tree"
                 );
             }
@@ -110422,43 +110232,24 @@ mod files_locate_door_tests {
     /// double click — each of which *names a root* rather than a place to go).
     #[test]
     fn re_rooting_is_reached_only_after_the_question_about_range() {
+        // Assembled, so neither half of this pin matches its own text. The
+        // scope is every file `bt-app` declares and not this one: a caller that
+        // moves to a file beside this one is still a caller.
         let hard = ["self.show_folder", "_in_files_column("].concat();
-        let soft = ["    fn locate_folder", "_in_files_column("].concat();
-        // P3 equivalence. The body pin first, then the count: this file's lines
-        // that hold the hard verb and the crate's occurrences of it are the same
-        // number. The scope widens from this file to every file `bt-app`
-        // declares, which is the migration's own decision (§4.1) — both
-        // readings answer 2, and the crate is the one that will still be right
-        // when the caller moves to a file beside this one.
-        same_method_body(soft.as_str(), "Runtime", "locate_folder_in_files_column");
-        let crate_calls = found(needle!(Pattern::text(hard.as_str())), View::Raw);
-        let calls: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(hard.as_str()))
-            .collect();
-        assert_eq!(
-            crate_calls.len(),
-            calls.len(),
-            "P3 equivalence: this file's lines and the crate's occurrences do not agree on how \
-             often the hard verb is called"
-        );
-        assert_eq!(
-            method_body("Runtime", "locate_folder_in_files_column")
-                .matches(hard.as_str())
-                .count(),
-            body(soft.as_str()).matches(hard.as_str()).count(),
-            "P3 equivalence: the two readings of the soft verb's own body do not agree"
-        );
+        let soft = ["locate_folder", "_in_files_column"].concat();
+        let calls = found(needle!(Pattern::text(hard.as_str())), View::Raw);
         assert_eq!(
             calls.len(),
             2,
             "the hard verb is called from two places — the soft verb's two arms \
-             — and here it is called from {}:\n{calls:#?}",
-            calls.len()
+             — and here it is called from {}:\n{}",
+            calls.len(),
+            calls.report(source())
         );
         assert_eq!(
-            body(soft.as_str()).matches(hard.as_str()).count(),
+            method_body("Runtime", soft.as_str())
+                .matches(hard.as_str())
+                .count(),
             2,
             "and both of them are inside the verb that asks whether the folder \
              is inside the tree first"
