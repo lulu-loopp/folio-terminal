@@ -203,6 +203,26 @@ fn the_lowering_leaves_nothing_of_the_universe_behind() {
         *by_kind.entry(format!("{:?}", item.kind())).or_default() += 1;
     }
     println!("bt-app items by kind: {by_kind:?}");
+
+    // **What §2.3 adds to §2.4, counted on the real tree.** The second number is
+    // the items whose own file writes a gate on them; the first is the items
+    // that stand on one at all, the declarations that reach their file
+    // included. The difference is what an identity built from a file's own text
+    // could not see.
+    let out_of_the_product = index
+        .items()
+        .iter()
+        .filter(|item| !item.identities().any(|it| it.variant.permits_product()))
+        .count();
+    let written_in_the_file = index
+        .items()
+        .iter()
+        .filter(|item| !item.variant().permits_product())
+        .count();
+    println!(
+        "bt-app items no product build contains: {out_of_the_product}, of which \
+         {written_in_the_file} say so in their own file"
+    );
     println!(
         "bt-app: {} files, {} lines, {} bytes, {} items, {} identifier tokens, {} literals, \
          {} comment masks",
@@ -477,6 +497,369 @@ fn identity_separates_an_inherent_method_from_a_trait_one() {
     );
 }
 
+// ── what the declaration that reaches a file stands on ────────────────────
+
+fn declaration_variant_fixture() -> Arc<Index> {
+    Index::shared(&fixture_universe("declaration_variant")).expect("the fixture lowers")
+}
+
+/// Every identity the items called `name` answer to, printed.
+fn identities_of(index: &Index, name: &str) -> Vec<String> {
+    index
+        .items()
+        .iter()
+        .filter(|record| record.name() == name)
+        .flat_map(|record| record.identities())
+        .map(|identity| identity.to_string())
+        .collect()
+}
+
+/// RED — **a `#[cfg]` written on the declaration that reaches a file stands on
+/// every item in that file**, exactly as one written on an inline `mod` does
+/// (§2.3 into §2.4).
+///
+/// `#[cfg(test)] mod t;` and `#[cfg(test)] mod t { … }` are the same statement
+/// written two ways. The inline spelling pushes its predicates onto the walk's
+/// own stack and always has; the out-of-line one writes nothing in `t.rs` at
+/// all, so an identity built from that file's text alone called every item in it
+/// unconditional — and the difference was invisible at the call site, which is
+/// what made it worth a ticket rather than a note.
+///
+/// MUTATION: build the identities from the file's text alone and the three
+/// gated rows lose their `#[cfg(test)]` while the inline row keeps it — which
+/// is the tree as it read before this.
+#[test]
+fn a_declaration_that_reaches_a_file_stands_on_every_item_in_it() {
+    let index = declaration_variant_fixture();
+
+    assert_eq!(
+        identities_of(&index, "reached_by_a_gate"),
+        ["crate::gate::reached_by_a_gate #[cfg(test)]"],
+        "`#[cfg(test)] mod gate;` is written in lib.rs and stands on gate.rs"
+    );
+    assert_eq!(
+        identities_of(&index, "reached_by_a_path"),
+        ["crate::by_path::reached_by_a_path #[cfg(test)]"],
+        "a `#[path]` declaration carries its gate the same way"
+    );
+    assert_eq!(
+        identities_of(&index, "inside_the_braces"),
+        ["crate::inline_gate::inside_the_braces #[cfg(test)]"],
+        "the inline spelling of the same statement"
+    );
+    assert_eq!(
+        identities_of(&index, "at_the_root"),
+        ["crate::at_the_root"],
+        "nothing stands on the crate root"
+    );
+
+    // **The two halves are kept apart and joined in one order**: what the
+    // declarations outside the file write, then what the file writes itself.
+    assert_eq!(
+        identities_of(&index, "gated_twice"),
+        ["crate::gate::gated_twice #[cfg(test)]#[cfg(windows)]"]
+    );
+    let gated_twice = index
+        .one(&ItemQuery::function("gated_twice").in_module("crate::gate"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        gated_twice.variant().predicates(),
+        ["windows"],
+        "the record's own variant is the half written inside the file, which is \
+         what `in_variant` narrows by"
+    );
+    assert_eq!(
+        gated_twice.declaration_paths()[0].predicates(),
+        ["test"],
+        "and the other half is on the path that reaches it"
+    );
+}
+
+/// RED — **a file reached two ways answers to two identities, and the gate is
+/// on one of them** (§2.3: reachability is a property of a path to the byte).
+///
+/// `plain.rs` is declared unconditionally by `lib.rs` and again, through the
+/// test gate, by a `#[path]` in `gate.rs`. A reading that put the gate on the
+/// bytes rather than on the path would take a product file out of every guard
+/// that skips test code the moment a test module happened to name it.
+///
+/// MUTATION: fold the paths' predicates together and the first row grows a
+/// `#[cfg(test)]` it has no business carrying.
+#[test]
+fn a_file_reached_two_ways_carries_the_gate_on_the_gated_path_only() {
+    let index = declaration_variant_fixture();
+    assert_eq!(
+        identities_of(&index, "reached_two_ways"),
+        [
+            "crate::gate::plain_again::reached_two_ways #[cfg(test)]",
+            "crate::plain::reached_two_ways",
+        ],
+        "one set of bytes, one identity per path to them"
+    );
+
+    let record = index
+        .one(&ItemQuery::function("reached_two_ways"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        record.module_paths(),
+        ["crate::gate::plain_again", "crate::plain"]
+    );
+    assert!(
+        record.variant().is_unconditional(),
+        "the file itself writes nothing on it"
+    );
+
+    // **What the predicates say, three-valued and read once** (§2.3). The gated
+    // path is out of the product; the other is in it; and the file permits
+    // product compilation because one path does.
+    let permits: Vec<bool> = record
+        .identities()
+        .map(|identity| identity.variant.permits_product())
+        .collect();
+    assert_eq!(permits, [false, true]);
+    assert!(index.file_of(record).permits_product());
+
+    // And a gate that is not about `test` is not a gate: `#[cfg(windows)]`
+    // leaves the door open, which is the answer the evaluator gives and a
+    // comparison against the spelling `"test"` cannot.
+    let gated_twice = index
+        .one(&ItemQuery::function("gated_twice").in_module("crate::gate"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert!(gated_twice.variant().permits_product());
+    assert!(
+        !gated_twice
+            .identities()
+            .any(|identity| identity.variant.permits_product()),
+        "the whole arm is `test` and `windows`, and `test` closes it"
+    );
+}
+
+/// RED — **"how many times does the *product* do this" is one predicate the
+/// crate owns**, and it takes both grains to answer.
+///
+/// Six copies of this rule were written out by hand in `bt-app`, four of them
+/// word for word, and each of the two shapes was wrong in a way the other was
+/// not: the file-grained one counted an inline `#[cfg(test)] mod` and a
+/// `#[cfg(test)]` function as product, and the item-grained one counted a file
+/// reached by `#[cfg(test)] mod x;` as product. The fixture writes one needle
+/// once in each of those places, plus the case neither grain alone can answer —
+/// bytes standing in no item at all.
+///
+/// MUTATION: drop the file half and the two rows in `crate::gate` come back;
+/// drop the item half and `only_in_tests` and `inside_the_braces` do; read the
+/// item's own file text instead of its identity and `reached_by_a_gate`
+/// does — which is the tree as it read before the commit before this one.
+#[test]
+fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
+    let index = declaration_variant_fixture();
+    let counted = |scope: Scope| {
+        let found = index
+            .search(
+                &Search::new(
+                    Needle::new(Pattern::text("the_needle_this_fixture_counts")),
+                    View::Raw,
+                )
+                .in_scope(scope),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        (found.len(), found.in_the_product(&index).len())
+    };
+
+    assert_eq!(counted(Scope::Everything), (7, 3));
+    assert_eq!(
+        counted(Scope::Item(ItemQuery::function("at_the_root"))),
+        (1, 1),
+        "product bytes in a product file"
+    );
+    assert_eq!(
+        counted(Scope::Item(ItemQuery::function("only_in_tests"))),
+        (1, 0),
+        "a `#[cfg(test)]` function in a file a product build compiles"
+    );
+    assert_eq!(
+        counted(Scope::Item(
+            ItemQuery::function("inside_the_braces").in_module("crate::inline_gate")
+        )),
+        (1, 0),
+        "an inline `#[cfg(test)] mod`, which is not a file and does not move \
+         the file's answer"
+    );
+    assert_eq!(
+        counted(Scope::Item(ItemQuery::function("reached_by_a_gate"))),
+        (1, 0),
+        "a file reached by `#[cfg(test)] mod gate;`, which writes no gate of \
+         its own anywhere in it"
+    );
+    assert_eq!(
+        counted(Scope::Module("crate::gate".to_owned())),
+        (2, 0),
+        "and the bytes of that file that stand in no item at all, which only \
+         the file grain can answer for"
+    );
+    assert_eq!(
+        counted(Scope::Module("crate".to_owned())),
+        (4, 2),
+        "lib.rs: the `const` and the free function, and neither of the two \
+         gated items beside them"
+    );
+    assert_eq!(
+        counted(Scope::Item(ItemQuery::function("reached_two_ways"))),
+        (1, 1),
+        "a file reached both ways is product code through the path that is \
+         (§2.3), and so is an item in it"
+    );
+
+    // The narrowed answer is a `Found` and goes on answering as one: the owners
+    // of §4.1, what was excluded, where the needle came from, and a report that
+    // says which question it is the answer to.
+    let found = index
+        .search(&Search::new(
+            Needle::new(Pattern::text("the_needle_this_fixture_counts")),
+            View::Raw,
+        ))
+        .expect("a spelling of the fixture");
+    assert_eq!(found.outside_items(&index), 2, "the two `const`s");
+    let product = found.in_the_product(&index);
+    assert_eq!(product.outside_items(&index), 1, "one of them is product");
+    let mut names: Vec<String> = product
+        .owners(&index)
+        .into_keys()
+        .map(|identity| identity.name)
+        .collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(names, ["at_the_root", "reached_two_ways"]);
+    assert!(
+        product.report(&index).contains("in the product"),
+        "{}",
+        product.report(&index)
+    );
+}
+
+// ── every impl of one type ────────────────────────────────────────────────
+
+fn impls_fixture() -> Arc<Index> {
+    Index::shared(&fixture_universe("impls")).expect("the fixture lowers")
+}
+
+/// RED — **a scope over every `impl` of a type reads that type's blocks,
+/// wherever they are written and whatever arm they stand on** — and reads
+/// nothing else.
+///
+/// `journeys_tests` holds two prohibitions of this shape — "no `impl` of
+/// `PaneMotion` declares a renewable deadline" — and both settle for
+/// `Scope::Module("crate")`, with a note saying a scope over a type's blocks is
+/// what they mean and that this crate has none. A module is right only while
+/// every block stays in it, which is the binding Step 2a breaks, and it is too
+/// wide meanwhile: the needle a prohibition forbids is a spelling other types
+/// legitimately carry, so the free function below would invert the guard.
+///
+/// MUTATION: resolve the scope to the whole of each block's file and both
+/// scoped rows become five; take the trait blocks out and the first becomes
+/// three; filter the `#[cfg]` arm out and it becomes three the other way.
+#[test]
+fn a_scope_over_a_types_impls_reads_every_block_of_it_and_nothing_else() {
+    let index = impls_fixture();
+    let counted = |scope: Scope| {
+        index
+            .search(
+                &Search::new(Needle::new(Pattern::text("renewable_deadline")), View::Raw)
+                    .in_scope(scope),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .len()
+    };
+
+    assert_eq!(
+        counted(Scope::Everything),
+        5,
+        "four blocks and the free function"
+    );
+    assert_eq!(
+        counted(Scope::Impls("Gate".to_owned())),
+        4,
+        "the two inherent blocks, the trait one, and the `#[cfg(windows)]` arm \
+         — and not the free function, which is the occurrence that would \
+         invert the prohibition"
+    );
+    assert_eq!(
+        counted(Scope::Module("crate".to_owned())),
+        4,
+        "the module the blocks happen to be written in today answers about \
+         `second.rs` not at all, and about the free function as though it were \
+         one of them"
+    );
+
+    // The blocks the scope is built from: one record each, in union order,
+    // named by the type and not by the path a file spells it with.
+    let blocks: Vec<(&str, Option<&str>, String)> = index
+        .impls()
+        .iter()
+        .map(|block| {
+            (
+                block.type_owner(),
+                block.trait_name(),
+                block.variant().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        blocks,
+        [
+            ("Gate", None, String::new()),
+            ("Gate", Some("fmt::Display"), String::new()),
+            ("Gate", None, "#[cfg(windows)]".to_owned()),
+            ("Gate", None, String::new()),
+        ],
+        "`impl super::Gate` in the second file is the same owner (§2.4)"
+    );
+    let body = index.text(index.impls()[0].body());
+    assert!(
+        body.starts_with('{') && body.ends_with('}') && body.contains("fn open"),
+        "a block's body is its braces and what is between them: {body}"
+    );
+
+    // **A type with no block at all is a refusal naming it**, because a
+    // prohibition over no bytes holds about everything.
+    let empty = index
+        .search(
+            &Search::new(Needle::new(Pattern::text("renewable_deadline")), View::Raw)
+                .in_scope(Scope::Impls("Lonely".to_owned())),
+        )
+        .expect_err("`Lonely` is declared and implemented nowhere");
+    let QueryFailure::EmptyScope { scope } = &empty else {
+        panic!("{empty}");
+    };
+    assert_eq!(scope, "every `impl` of `Lonely`");
+    assert!(empty.to_string().contains("would answer zero"), "{empty}");
+
+    // And a scope over the type **itself** is unchanged: an item is its own
+    // bytes, which is a different question from where its methods are written.
+    let seat = |scope: Scope| {
+        index
+            .search(
+                &Search::new(
+                    Needle::new(Pattern::identifier("gate_seat")),
+                    View::Identifiers,
+                )
+                .in_scope(scope),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .len()
+    };
+    assert_eq!(seat(Scope::Everything), 3);
+    assert_eq!(
+        seat(Scope::Item(ItemQuery::type_item("Gate"))),
+        1,
+        "the field's declaration, and neither of the two readers of it"
+    );
+    assert_eq!(
+        seat(Scope::Impls("Gate".to_owned())),
+        1,
+        "and the blocks hold the one inside `open`"
+    );
+}
+
 // ── one owner, however the move spelled it ────────────────────────────────
 
 fn self_type_fixture() -> Arc<Index> {
@@ -539,7 +922,7 @@ fn one_owner_spelled_three_ways_answers_three_times() {
             .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(record.type_owner(), Some("Runtime"));
         assert_eq!(record.trait_name(), None);
-        modules.push(record.module_paths()[0].as_str());
+        modules.push(record.module_paths()[0]);
     }
     assert_eq!(modules, ["crate", "crate::runtime", "crate::peek"]);
 
