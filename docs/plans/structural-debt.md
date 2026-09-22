@@ -634,3 +634,7 @@ finding is not lost.
   saturated with line-number locators, against `CONVENTIONS` §十 rule 7 — which
   was written because of this split — and the preparation's §5 cites the wrong
   section for the heavy-operation rule, which lives in §十 rule 8.
+
+## D-18 — the inventory's subject extraction reads a query's argument as a file-bound subject (2026-09-22)
+
+`scripts/dev/bt-app-split-freshness.py`'s census extracts a reader's subjects lexically, so a migrated body pin such as `method_body("Runtime", "apply_psreadline")` is counted as if the test still read `apply_psreadline` out of a file, and the row's impact reads *subject moves: retarget atomically* although the reading follows the item. This is §2.6's "a reader's own needle is not an occurrence" one level up, in subject extraction rather than search exclusion, and it will misclassify every migrated pin that names a `Runtime` method. The generator also bound a subject by bare name until 2026-09-22 (`add_to_profile`, `graph_filter_branches` — each declared twice); it now refuses a name whose declarations disagree about the move. Owed: subject extraction that tells a `bt-source` query argument from a file reading's needle, or a census that asks `bt-source` for the reader's subjects instead of scanning text.
