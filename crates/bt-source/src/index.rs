@@ -260,9 +260,14 @@ impl fmt::Display for ConditionalVariant {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ItemIdentity {
     pub module_path: String,
-    /// The type an `impl` block is for, printed without lifetimes or generic
-    /// arguments, so `Runtime<'_>` and `Runtime<'a>` are one type. `None` for a
-    /// free function.
+    /// The type an `impl` block is for, printed as the **last segment** of its
+    /// path without lifetimes or generic arguments, so `Runtime<'_>`,
+    /// `Runtime<'a>` and `crate::Runtime<'_>` are one type. `None` for a free
+    /// function.
+    ///
+    /// The qualification is dropped because a move is what writes it, and
+    /// because [`ItemIdentity::module_path`] beside it already says where the
+    /// `impl` is — printing both gave `crate::runtime::crate::Runtime::…`.
     pub type_owner: Option<String>,
     /// The trait, for a trait `impl` or a trait's own default method. `None` for
     /// an inherent `impl`.
