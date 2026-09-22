@@ -112907,6 +112907,12 @@ mod pages_are_plural_tests {
 /// seat the drop minted" is not a sentence this process can say without a screen.
 #[cfg(test)]
 mod a_page_lands_where_it_was_aimed_tests {
+    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
+    // commit after this one deletes the older of the two. `source`, `item_body`
+    // and `method_body` are `pty_drain_budget_tests`' helpers word for word.
+    use bt_source::{Index, ItemQuery};
+
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -112928,25 +112934,63 @@ mod a_page_lands_where_it_was_aimed_tests {
         &rest[..end]
     }
 
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// **The two readings of one door, asserted to agree, and the newer one
+    /// returned.**
+    ///
+    /// The deleted finder's slice runs from the signature to the first `}` in
+    /// column four inclusive, which is the tail of the parameter list followed by
+    /// the method's body followed by one newline. So the agreement is a byte
+    /// equality and not a sample: whatever `Runtime::name`'s body is, the old
+    /// slice ends with it.
+    fn agreed(name: &str) -> &'static str {
+        let old = body(&["    fn ", name, "("].concat());
+        let new = method_body("Runtime", name);
+        assert!(
+            old.ends_with(&[new, "\n"].concat()),
+            "the two readings of `{name}` disagree:\nold:\n{old}\nnew:\n{new}"
+        );
+        new
+    }
+
     /// **Every door that was *told* which surface to work on**, in the order a
     /// drop walks them: the row's opener, the two lanes it forks into, the page
     /// lane's own two halves, the engine door under them, and the two landings
     /// that write a buffer.
     const NAMED_DOORS: &[&str] = &[
-        "    fn open_preview_onto(",
-        "    fn open_preview_file_on(",
-        "    fn open_preview_source_on(",
-        "    fn open_preview_web_file_on(",
-        "    fn open_minted_page_on_float(",
-        "    fn open_minted_page_on(",
-        "    fn open_web_page_on(",
-        "    fn open_preview_image_on(",
-        "    fn land_preview_source_on(",
-        "    fn land_page_refusal_on(",
+        "open_preview_onto",
+        "open_preview_file_on",
+        "open_preview_source_on",
+        "open_preview_web_file_on",
+        "open_minted_page_on_float",
+        "open_minted_page_on",
+        "open_web_page_on",
+        "open_preview_image_on",
+        "land_preview_source_on",
+        "land_page_refusal_on",
         // The door that changes a name without landing a source. It carries a
         // surface for the toast it may have to raise, and since the day a name
         // can say *page* it carries one for the page too.
-        "    fn rename_preview_file(",
+        "rename_preview_file",
     ];
     /// **The spellings that choose a surface for themselves.** Each is the door
     /// a caller reaches when it has no surface of its own; reaching one from a
@@ -112971,12 +113015,18 @@ mod a_page_lands_where_it_was_aimed_tests {
     /// the minted seat empty.
     #[test]
     fn a_door_that_was_told_a_surface_never_chooses_another() {
-        for signature in NAMED_DOORS {
-            let text = body(signature);
+        for &door in NAMED_DOORS {
+            let old = body(&["    fn ", door, "("].concat());
+            let text = agreed(door);
             for chooser in CHOOSERS {
+                assert_eq!(
+                    old.contains(chooser),
+                    text.contains(chooser),
+                    "the two readings of `{door}` disagree about `{chooser}`"
+                );
                 assert!(
                     !text.contains(chooser),
-                    "{signature} was handed a surface and still reaches `{chooser}` — \
+                    "`{door}` was handed a surface and still reaches `{chooser}` — \
                      the pane the caller aimed at is not the pane the file lands on:\n{text}"
                 );
             }
@@ -112991,7 +113041,18 @@ mod a_page_lands_where_it_was_aimed_tests {
     /// and this fails.
     #[test]
     fn the_page_lane_opens_on_the_surface_it_was_handed() {
-        let fork = body("    fn open_preview_source_on(");
+        let old = body("    fn open_preview_source_on(");
+        let fork = agreed("open_preview_source_on");
+        for probe in [
+            "source_opens_as_a_page(&source)",
+            "return self.open_preview_web_file_on(surface, path);",
+        ] {
+            assert_eq!(
+                old.contains(probe),
+                fork.contains(probe),
+                "the two readings disagree about `{probe}`"
+            );
+        }
         assert!(
             fork.contains("source_opens_as_a_page(&source)")
                 && fork.contains("return self.open_preview_web_file_on(surface, path);"),
@@ -113010,7 +113071,23 @@ mod a_page_lands_where_it_was_aimed_tests {
     /// disk's sentence appears in a pane the reader never aimed at.
     #[test]
     fn the_named_page_door_opens_on_the_surface_and_refuses_on_it_too() {
-        let door = body("    fn open_preview_web_file_on(");
+        let old = body("    fn open_preview_web_file_on(");
+        let door = agreed("open_preview_web_file_on");
+        for probe in [
+            "PreviewSurface::Seat(leaf) => self.open_minted_page_on(leaf, mint)",
+            "PreviewSurface::Float(id) => self.open_minted_page_on_float(id, mint)",
+        ] {
+            assert_eq!(
+                old.contains(probe),
+                door.contains(probe),
+                "the two readings disagree about `{probe}`"
+            );
+        }
+        assert_eq!(
+            old.matches("self.land_page_refusal_on(").count(),
+            door.matches("self.land_page_refusal_on(").count(),
+            "the two readings disagree about how many refusals the door lands"
+        );
         assert!(
             door.contains("PreviewSurface::Seat(leaf) => self.open_minted_page_on(leaf, mint)"),
             "a page named onto a pane does not reach that pane's engine:\n{door}"
@@ -113035,16 +113112,22 @@ mod a_page_lands_where_it_was_aimed_tests {
     /// double-clicked `.html` reaches a `match` on a surface nobody chose.
     #[test]
     fn the_doors_with_no_surface_are_the_ones_that_ask_the_landing_rule() {
-        for signature in [
-            "    fn open_preview_file(",
-            "    fn open_preview_image(",
-            "    fn open_preview_web_file(",
-            "    fn open_web_page_with(",
+        for door in [
+            "open_preview_file",
+            "open_preview_image",
+            "open_preview_web_file",
+            "open_web_page_with",
         ] {
-            let text = body(signature);
+            let old = body(&["    fn ", door, "("].concat());
+            let text = agreed(door);
+            assert_eq!(
+                old.contains("self.preview_landing_surface()"),
+                text.contains("self.preview_landing_surface()"),
+                "the two readings of `{door}` disagree about the landing rule"
+            );
             assert!(
                 text.contains("self.preview_landing_surface()"),
-                "{signature} has no surface of its own and no longer asks the \
+                "`{door}` has no surface of its own and no longer asks the \
                  landing rule for one:\n{text}"
             );
         }
