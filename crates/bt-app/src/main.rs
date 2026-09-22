@@ -126779,6 +126779,42 @@ mod platform_gate_tests {
 /// ever reads back.
 #[cfg(test)]
 mod cross_window_drag_tests {
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree — all 23
+    // body pins compared as bytes — and this is the one that deletes the older
+    // of the two, because two implementations of one judgement do not vouch for
+    // each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `free_fn_body` and `found` are that
+    // module's helpers word for word, and its header is where the six points
+    // behind them live. One shape none of the earlier batches had a consumer
+    // for is here: a body pin on a **trait** method. The device-loss `rebuild`
+    // is `<TheDeviceAndItsWindows as LostDevice>::rebuild`, so the query says
+    // the trait and `item_body` takes the `ItemQuery` whole, exactly as
+    // `palette_wiring_tests` does for a trait method of `FolioApp`.
+    //
+    // What the deleted finders did, recorded before they went: `fn_body` took
+    // the first `\n    fn name(` in this file — a method of *whatever `impl`
+    // happens to come first* — and stopped at the first `\n    }\n`, which is
+    // the body **minus** the line that closes it, with the signature's tail in
+    // front of it. The identities turn out to be three owners and not one:
+    // `Runtime` (ten of them), `FolioApp` (five) and
+    // `<TheDeviceAndItsWindows as LostDevice>` (one), beside two free
+    // functions. Every assertion here fell inside the item it names — the
+    // equivalence commit is what established that rather than assumed it.
+    //
+    // One reading here is not a body pin, and it is written down rather than
+    // inherited (§4.1): the reported backing colour took this file and now
+    // takes every file the package compiles, because a door written in
+    // `runtime/` is as much of one as a door written here. Recorded with it,
+    // because it is the reason the widening is also a repair: the deleted
+    // `SOURCE.contains` for that spelling was satisfied by **this module's own
+    // string literal**, so it stayed green with the product function renamed
+    // out from under it — which is the mutation that proved it.
     use std::time::Instant;
 
     use bt_layout::SeatId;
@@ -126790,22 +126826,6 @@ mod cross_window_drag_tests {
         profiles, seats, strip_insert_slot, tear_out_rect,
     };
 
-    const SOURCE: &str = include_str!("main.rs");
-
-    // ── what this module asks the crate ───────────────────────────────────
-    //
-    // **The equivalence half of P3's batch for this module**
-    // (`docs/plans/bt-app-split-prep.md` §6.3, §6.0 rule 3). Every body pin
-    // below is read twice: once by the local text finders, which take a slice
-    // of this file, and once by `bt-source`, which is asked about an *item* of
-    // this crate. `agrees` asserts the two are the same bytes. The commit after
-    // this one deletes the older of the two, because two implementations of one
-    // judgement do not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
-    //
-    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
-    // `source`, `item_body`, `method_body` and `found` are that module's
-    // helpers word for word, and its header is where the six points behind them
-    // live.
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
     /// **This crate, indexed once per process** — the workspace read, this
@@ -126827,13 +126847,18 @@ mod cross_window_drag_tests {
 
     /// The body of one inherent method of `owner`.
     ///
-    /// The owner is an argument and not a guess. What `fn_body` does is take
-    /// the first `\n    fn name(` in this file, which is a method of *whatever
-    /// `impl` happens to come first* — and this module's pins turn out to mean
-    /// three owners, which the equivalence below is what establishes rather
-    /// than assumes.
+    /// The owner is an argument and not a guess. What the deleted `fn_body` did
+    /// was take the first `\n    fn name(` in this file, which is a method of
+    /// *whatever `impl` happens to come first* — and this module's pins turn
+    /// out to mean three owners, which the equivalence commit is what
+    /// established rather than assumed.
     fn method_body(owner: &str, name: &str) -> &'static str {
         item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
     }
 
     /// One search over the whole crate, refusing loudly rather than answering a
@@ -126842,51 +126867,6 @@ mod cross_window_drag_tests {
         source()
             .search(&Search::new(needle, view))
             .unwrap_or_else(|failure| panic!("{failure}"))
-    }
-
-    /// The bytes a method's body ends with — the brace that closes it at its
-    /// `impl`'s indentation, which is the line `fn_body` stopped before.
-    const METHOD_CLOSE: &str = "\n    }";
-
-    /// The same for a free function, closed at column zero.
-    const FREE_CLOSE: &str = "\n}";
-
-    /// **The deleted finder's slice against the crate's body of the same item**
-    /// — equivalence, byte for byte over everything the two both cover.
-    ///
-    /// The local finders begin *after* `fn name(` and stop *before* the line
-    /// that closes the item, so what they hand back is the signature's tail
-    /// followed by the body without its closing line. The crate hands back the
-    /// braces and what is between them. So the old slice ends with the new body
-    /// minus `closing`, and what precedes that is the signature between the
-    /// finder's head and the opening brace.
-    fn agrees(old: &str, body: &str, closing: &str) {
-        let overlap = body
-            .strip_suffix(closing)
-            .unwrap_or_else(|| panic!("a body ends with the line that closes it:\n{body}"));
-        assert!(
-            old.ends_with(overlap),
-            "the slice this file's text finder took and the body the crate hands back for the \
-             same item are not the same bytes"
-        );
-        assert!(
-            !overlap.is_empty(),
-            "an empty body is a finder that found nothing, not an agreement"
-        );
-    }
-
-    /// The body of a method declared at an `impl`'s own indentation.
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!("\n    fn {name}(");
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n    }\n")
-                .expect("a method is closed by a `}` at its `impl`'s indentation");
-        &SOURCE[start..end]
     }
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> bt_platform::WindowRect {
@@ -126927,27 +126907,8 @@ mod cross_window_drag_tests {
     /// and the layer being removed is the live one.
     #[test]
     fn a_rebuild_clears_the_old_layer_first() {
-        /// The body of a free function declared at column zero.
-        fn free_fn_body(name: &str) -> &'static str {
-            let head = format!("\nfn {name}(");
-            let start = SOURCE
-                .find(&head)
-                .unwrap_or_else(|| panic!("`fn {name}` is declared at column zero"))
-                + head.len();
-            let end = start
-                + SOURCE[start..]
-                    .find("\n}\n")
-                    .expect("a free function is closed by a `}` at column zero");
-            &SOURCE[start..end]
-        }
-
-        let rebuild = fn_body("rebuild");
-        agrees(
-            rebuild,
-            item_body(
-                &ItemQuery::method("TheDeviceAndItsWindows", "rebuild").of_trait("LostDevice"),
-            ),
-            METHOD_CLOSE,
+        let rebuild = item_body(
+            &ItemQuery::method("TheDeviceAndItsWindows", "rebuild").of_trait("LostDevice"),
         );
         assert!(
             rebuild.contains("window_surface_target(&window.window, &window.compositor)"),
@@ -126962,11 +126923,6 @@ mod cross_window_drag_tests {
         );
 
         let chooser = free_fn_body("window_surface_target");
-        agrees(
-            chooser,
-            item_body(&ItemQuery::function("window_surface_target")),
-            FREE_CLOSE,
-        );
         assert!(
             !chooser.contains("clear_surface_layers"),
             "the clearing belongs one level down, in `folios_own_metal_view`, so that the \
@@ -126978,11 +126934,6 @@ mod cross_window_drag_tests {
         );
 
         let view = free_fn_body("folios_own_metal_view");
-        agrees(
-            view,
-            item_body(&ItemQuery::function("folios_own_metal_view")),
-            FREE_CLOSE,
-        );
         let makes = view
             .find("bt_platform::surface_view(")
             .expect("the view is made, or found again, here");
@@ -127086,8 +127037,7 @@ mod cross_window_drag_tests {
         }
 
         for constructor in ["create", "open_window"] {
-            let body = fn_body(constructor);
-            agrees(body, method_body("Runtime", constructor), METHOD_CLOSE);
+            let body = method_body("Runtime", constructor);
             let mut fatal = propagated(body);
             fatal.retain(|name| !MAY_STILL_PROPAGATE.contains(&name.as_str()));
             assert!(
@@ -127114,9 +127064,7 @@ mod cross_window_drag_tests {
             );
         }
 
-        let reported = SOURCE.contains("fn install_theme_class_background(window: &Window) {");
-        assert_eq!(
-            reported,
+        assert!(
             !found(
                 needle!(Pattern::text(
                     "fn install_theme_class_background(window: &Window) {"
@@ -127124,10 +127072,6 @@ mod cross_window_drag_tests {
                 View::Raw
             )
             .is_empty(),
-            "this file's answer about the reported backing colour and the crate's agree"
-        );
-        assert!(
-            reported,
             "the window's backing colour is reported and not propagated: it returns nothing, so \
              there is no `?` for a caller to write"
         );
@@ -127205,12 +127149,7 @@ mod cross_window_drag_tests {
         // nothing folds into `ControlFlow::WaitUntil` is a clock that fires on
         // the next thing to twitch, which over a window that will hear nothing at
         // all is never.
-        let wait = fn_body("about_to_wait_inner");
-        agrees(
-            wait,
-            method_body("FolioApp", "about_to_wait_inner"),
-            METHOD_CLOSE,
-        );
+        let wait = method_body("FolioApp", "about_to_wait_inner");
         let (before, after) = wait
             .split_once("let mut wake_deadline = match self.drive_drag_broker(now)")
             .expect(
@@ -127342,30 +127281,19 @@ mod cross_window_drag_tests {
     /// holding one.
     #[test]
     fn a_row_crosses_a_boundary_as_a_path_and_is_spent_by_the_far_window() {
-        let open = fn_body("open_broker");
-        agrees(open, method_body("Runtime", "open_broker"), METHOD_CLOSE);
+        let open = method_body("Runtime", "open_broker");
         assert!(
             !open.contains("DragSource::Row"),
             "every payload opens a broker now — a row's is the cheapest of the \
              three, because a path needs nothing carried:\n{open}"
         );
-        let foreign = fn_body("foreign_strip_landing");
-        agrees(
-            foreign,
-            method_body("Runtime", "foreign_strip_landing"),
-            METHOD_CLOSE,
-        );
+        let foreign = method_body("Runtime", "foreign_strip_landing");
         assert!(
             foreign.contains("row_strip_landing("),
             "and the visitor's tab list answers it off the very same table its \
              own window's does:\n{foreign}"
         );
-        let settle = fn_body("settle_drag_handover");
-        agrees(
-            settle,
-            method_body("FolioApp", "settle_drag_handover"),
-            METHOD_CLOSE,
-        );
+        let settle = method_body("FolioApp", "settle_drag_handover");
         assert!(
             settle.contains("runtime.commit_row_into_new_tab(&payload, slot)")
                 && settle.contains("runtime.commit_row_into_tab(&payload, tab)"),
@@ -127518,18 +127446,12 @@ mod cross_window_drag_tests {
     /// into the wrong window, with no drawing anywhere that says so.
     #[test]
     fn a_drag_over_somebody_elses_glass_offers_nothing_of_its_own() {
-        let body = fn_body("drive_drag");
-        agrees(body, method_body("Runtime", "drive_drag"), METHOD_CLOSE);
+        let body = method_body("Runtime", "drive_drag");
         assert!(
             body.contains("pointer_is_on_our_own_glass"),
             "the survey is gated on whose window the pointer is actually over:\n{body}"
         );
-        let broker = fn_body("drive_drag_broker");
-        agrees(
-            broker,
-            method_body("FolioApp", "drive_drag_broker"),
-            METHOD_CLOSE,
-        );
+        let broker = method_body("FolioApp", "drive_drag_broker");
         for (owed, why) in [
             (
                 "still_holds",
@@ -127570,18 +127492,8 @@ mod cross_window_drag_tests {
         // tab to have arrived before it can be run.
         let body = format!(
             "{}{}",
-            fn_body("settle_drag_handover"),
-            fn_body("settle_arrival")
-        );
-        agrees(
-            fn_body("settle_drag_handover"),
             method_body("FolioApp", "settle_drag_handover"),
-            METHOD_CLOSE,
-        );
-        agrees(
-            fn_body("settle_arrival"),
-            method_body("FolioApp", "settle_arrival"),
-            METHOD_CLOSE,
+            method_body("FolioApp", "settle_arrival")
         );
         for (owed, why) in [
             (
@@ -127767,23 +127679,13 @@ mod cross_window_drag_tests {
         // And the arithmetic above is the arithmetic that actually runs: a
         // transcription nobody ties to its original is a test of the
         // transcription.
-        let arrival = fn_body("settle_arrival");
-        agrees(
-            arrival,
-            method_body("FolioApp", "settle_arrival"),
-            METHOD_CLOSE,
-        );
+        let arrival = method_body("FolioApp", "settle_arrival");
         assert!(
             arrival.contains("partition_clamped(&pinned, index, slot.min(pinned.len() - 1))"),
             "the arrival is *moved* to the landing's slot, and the only thing \
              allowed to overrule the hand there is the pinned partition:\n{arrival}"
         );
-        let survey = fn_body("foreign_strip_landing");
-        agrees(
-            survey,
-            method_body("Runtime", "foreign_strip_landing"),
-            METHOD_CLOSE,
-        );
+        let survey = method_body("Runtime", "foreign_strip_landing");
         assert!(
             survey.contains("strip_insert_slot(raw, &pinned)")
                 && survey.contains("seats::insert_index_at(&mids, run.pos("),
@@ -127812,14 +127714,8 @@ mod cross_window_drag_tests {
     /// inside the door and the reader watches the wrong window first (third).
     #[test]
     fn a_torn_out_window_opens_where_it_will_stand_and_is_shown_holding_its_tab() {
-        let door = fn_body("open_window");
-        let settle = fn_body("settle_tear_out");
-        agrees(door, method_body("Runtime", "open_window"), METHOD_CLOSE);
-        agrees(
-            settle,
-            method_body("FolioApp", "settle_tear_out"),
-            METHOD_CLOSE,
-        );
+        let door = method_body("Runtime", "open_window");
+        let settle = method_body("FolioApp", "settle_tear_out");
 
         assert!(
             door.contains("tear_out_rect(pointer, grip, dpi, work)"),
@@ -127874,23 +127770,13 @@ mod cross_window_drag_tests {
         // The *read*, not the word: an arm that still mentions a visitor while
         // no longer asking the window whether it has one is exactly the mutation
         // this pin exists to catch.
-        let stand_in = fn_body("strip_stand_in");
-        agrees(
-            stand_in,
-            method_body("Runtime", "strip_stand_in"),
-            METHOD_CLOSE,
-        );
+        let stand_in = method_body("Runtime", "strip_stand_in");
         assert!(
             stand_in.contains("self.window.foreign"),
             "the stand-in a foreign tear-out draws is the stand-in a local one \
              draws:\n{stand_in}"
         );
-        let ghost = fn_body("drag_ghost_layer");
-        agrees(
-            ghost,
-            method_body("Runtime", "drag_ghost_layer"),
-            METHOD_CLOSE,
-        );
+        let ghost = method_body("Runtime", "drag_ghost_layer");
         assert!(
             ghost.contains("self.window.foreign"),
             "and the ghost over this window's glass is built here, at this \
@@ -127932,12 +127818,7 @@ mod cross_window_drag_tests {
     #[test]
     fn a_visitors_stand_in_card_draws_the_pane_in_the_hand() {
         // ① and ②.
-        let broker = fn_body("drive_drag_broker");
-        agrees(
-            broker,
-            method_body("FolioApp", "drive_drag_broker"),
-            METHOD_CLOSE,
-        );
+        let broker = method_body("FolioApp", "drive_drag_broker");
         assert!(
             broker.contains("runtime.carried_pane_picture()")
                 && broker.contains("pane: cargo_pane.clone()"),
@@ -127946,12 +127827,7 @@ mod cross_window_drag_tests {
         );
         // ③ — the slot the drop is aiming at, filled from the payload rather than
         // from a tab this window does not have.
-        let chrome = fn_body("refresh_chrome_with_overlay");
-        agrees(
-            chrome,
-            method_body("Runtime", "refresh_chrome_with_overlay"),
-            METHOD_CLOSE,
-        );
+        let chrome = method_body("Runtime", "refresh_chrome_with_overlay");
         assert!(
             chrome.contains("foreign.pane.as_ref().map(|pane| seats::FocusThumbnail {"),
             "the visitor's slot is still handed a hole, which is the card the \
@@ -127959,23 +127835,13 @@ mod cross_window_drag_tests {
         );
         // ④ — the projection outlives the pointer leaving, and exists at all in a
         // window that draws no cards.
-        let carried = fn_body("carried_pane");
-        agrees(
-            carried,
-            method_body("Runtime", "carried_pane"),
-            METHOD_CLOSE,
-        );
+        let carried = method_body("Runtime", "carried_pane");
         assert!(
             carried.contains("self.app.drag_broker") && carried.contains("broker.cargo.pane()"),
             "the pane in the hand is read off this window's own stand-in, which is \
              `None` from the moment the hand crosses onto another window:\n{carried}"
         );
-        let pass = fn_body("refresh_focus_thumbnails");
-        agrees(
-            pass,
-            method_body("Runtime", "refresh_focus_thumbnails"),
-            METHOD_CLOSE,
-        );
+        let pass = method_body("Runtime", "refresh_focus_thumbnails");
         assert!(
             pass.contains(".carried_pane()") && pass.contains("broker.guest_mini"),
             "the window holding the pane stops projecting it the moment the hand \
