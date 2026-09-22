@@ -113869,9 +113869,11 @@ mod pty_drain_budget_tests {
     //
     // **The pattern below is the one the other thirty-nine batches copy.**
     //
-    // 1. **One index per process** — `source`. The universe is
-    //    `universes::crate_sources("bt-app")`: this package's own `src/`,
-    //    reached through its declarations. It is not a default; there is none.
+    // 1. **One index per process** — `source`, which is
+    //    `bt_source::Index::of_package("bt-app")`: this package's own `src/`,
+    //    reached through its declarations. The universe is not a default —
+    //    there is none — it is the one that entry declares, and a reader that
+    //    wants another declares it and asks `Index::shared`.
     // 2. **A body pin names an identity, not a file** — `method_body` takes
     //    the type that owns the method, because the tuple of §2.4 is what stays
     //    the same when the method moves to another file. The assertions on the
@@ -113900,40 +113902,32 @@ mod pty_drain_budget_tests {
     //    "not found" by panicking too, but it could not tell a method that had
     //    moved from a method that had never existed, and the crate can.
     //
-    // What later batches should NOT copy, because it is this batch's own cost:
-    // the `source` helper is fifteen lines that re-read the workspace
-    // manifests and re-declare the universe, and forty copies of it is forty
-    // places to get one wrong. It belongs behind one call in `bt-source`; that
-    // is a change to the shared mechanism, which §6.0 rule 4 serialises, so it
-    // is a finding for whoever owns the crate rather than something a consumer
-    // batch does on its way past.
+    // What the pilot left behind for the crate to fix, now fixed: the `source`
+    // helper used to be fifteen lines that re-read the workspace manifests and
+    // re-declared the universe, and forty copies of that is forty places to get
+    // one wrong. `bt_source::Index::of_package` is those fifteen lines, once,
+    // in the crate that owns them. What a reader of this module has to open in
+    // `bt-source` is that entry, `ItemQuery` and `Search`.
+    //
+    // What stays here, and why it is not in the crate either: each helper
+    // below carries a decision that belongs to the consumer. Which query
+    // refusals are fatal is one — `body_of` and `search` answer with a
+    // `QueryFailure` and this module panics on every one of them, which is the
+    // rule of point 6 above and not a rule the crate can take for a reader that
+    // has not made it. What "in the product" means is the other, and point 5
+    // says which grain this module chose.
 
-    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
 
-    use bt_source::{
-        Found, Index, ItemQuery, Needle, Pattern, Search, Vendor, View, Workspace, needle, report,
-        universes,
-    };
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// **This crate, indexed once per process.** `bt-source` caches by universe,
-    /// so every module that declares this same universe shares the one index;
-    /// the [`OnceLock`] here saves re-reading the workspace manifests per test.
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
     fn source() -> &'static Index {
-        static INDEX: OnceLock<Arc<Index>> = OnceLock::new();
-        INDEX.get_or_init(|| {
-            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("..");
-            let workspace = Workspace::read(&root)
-                .unwrap_or_else(|rejection| panic!("this workspace: {rejection}"));
-            let package = workspace
-                .package("bt-app")
-                .unwrap_or_else(|rejection| panic!("this package: {rejection}"));
-            let universe = universes::crate_sources(package, Vendor::Excluded)
-                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
-            Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
-        })
+        Index::of_package("bt-app")
     }
 
     /// The body of `owner::name`, braces included — the identity of §2.4 rather
