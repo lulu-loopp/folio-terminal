@@ -115326,6 +115326,73 @@ mod textless_present_tests {
         &SOURCE[start..end]
     }
 
+    // ── what this module asks the crate instead ───────────────────────────
+    //
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Nothing is deleted here: each reading below is
+    // computed twice — once from `include_str!("main.rs")`, once from
+    // `bt-source` — and the two are asserted to be the same bytes. The deletion
+    // is the commit after this one, so that a reviewer sees the agreement and a
+    // bisect can land between them.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// The body of one method written in a `impl <trait> for <owner>` block.
+    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name).of_trait(trait_name))
+    }
+
+    /// **`fn_body`'s answer and the crate's, compared as bytes**, on every call.
+    ///
+    /// `fn_body` undershoots at both ends: it starts after `\n    fn name(`, so
+    /// it keeps the rest of the declaration, and it stops at the `\n    }\n`
+    /// that closes the method, so it drops the closing line the crate's body
+    /// ends with. What the crate hands back therefore stands at the *tail* of
+    /// this file's slice with the closing line taken off, and nothing but the
+    /// rest of the declaration in front of it.
+    ///
+    /// What comes back is the file's slice, so this commit changes no assertion.
+    fn agreed(old: &'static str, name: &str) -> &'static str {
+        let body = method_body("Runtime", name);
+        let head = &body[..body
+            .rfind('\n')
+            .expect("a method's body is closed on a line of its own")];
+        assert!(
+            old.ends_with(head),
+            "`Runtime::{name}`: this file's slice and the crate's body are not the same bytes"
+        );
+        assert!(
+            !old[..old.len() - head.len()].contains('{'),
+            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
+             the head of it"
+        );
+        old
+    }
+
     /// PIN — **a picture that lost its characters is re-filed and asked for
     /// again, not recorded as delivered.**
     ///
@@ -115348,7 +115415,7 @@ mod textless_present_tests {
     #[test]
     fn a_textless_present_is_a_frame_the_window_still_owes() {
         for method in ["redraw", "present_retained_picture"] {
-            let body = fn_body(method);
+            let body = agreed(fn_body(method), method);
             let owed = body
                 .find("PresentOutcome::PresentedWithoutText(_)")
                 .unwrap_or_else(|| panic!("`{method}` must name the textless outcome"));
@@ -115415,7 +115482,7 @@ mod textless_present_tests {
 
         // ② Both present sites still owe the picture.
         for method in ["redraw", "present_retained_picture"] {
-            let body = fn_body(method);
+            let body = agreed(fn_body(method), method);
             let owed = body
                 .find("PresentOutcome::SkippedNotVisible")
                 .unwrap_or_else(|| {
@@ -115445,6 +115512,28 @@ mod textless_present_tests {
             .expect("the event loop answers the window that came back on screen");
         let arm = &SOURCE[woken..];
         let end = arm.find("_ => Ok(())").expect("the dispatch default arm");
+        // **The same arm, asked of the crate.** The dispatch it stands in is
+        // `<FolioApp as ApplicationHandler<AppEvent>>::window_event`, which is
+        // an identity this file's `find` could not name — and the default arm
+        // the slice stops at is spelled seven times in this file and once in
+        // `hang_watch.rs`, so the item is also what makes "the next one" mean
+        // this dispatch's.
+        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let from_crate = {
+            let at = dispatch
+                .find(concat!(
+                    "WindowEvent::Occluded(false) => runtime.",
+                    "publish_frame(FrameTrigger {"
+                ))
+                .expect("the event loop answers the window that came back on screen");
+            let rest = &dispatch[at..];
+            &rest[..rest.find("_ => Ok(())").expect("the dispatch default arm")]
+        };
+        assert_eq!(
+            &arm[..end],
+            from_crate,
+            "this file's slice of the woken arm and the crate's are not the same bytes"
+        );
         assert_eq!(
             arm[..end].matches("publish_frame").count(),
             1,
