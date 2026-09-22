@@ -127607,11 +127607,15 @@ mod platform_gate_tests {
     // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
     // both readings side by side and asserted they agree.
     //
-    // `sources()` above is **not** part of that: that walk is the P10 row of
-    // the debt list (§6.3), it is the twin of
-    // `scripts/check-portable-core.ps1`'s array reader — allowlist entry 1 —
-    // and P10's acceptance is the agreement test between the two walks, which
-    // is P10's ticket and not this batch's. It is left exactly as it is.
+    // `sources()` above is **not** part of that, and stays a directory walk:
+    // it is the twin of `scripts/check-portable-core.ps1`, which walks the same
+    // directory and cannot ask a universe — the script exists to answer on a
+    // tree that does not compile, and it is `bt_source::FileScoped`'s first
+    // allowlist entry for that reason. P10's acceptance is the agreement
+    // between the two walks, and `the_gate_and_its_script_walk_the_same_files`
+    // below is it. Replacing this half with the declared universe would leave
+    // the script's walk with nothing to agree with, so the debt list keeps its
+    // row for this module and P20 is where it is answered.
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
     // module's header is where the six points behind `source`, `item_body` and
@@ -127690,6 +127694,99 @@ mod platform_gate_tests {
             silent.is_empty(),
             "these names are on the list and no longer name a platform, so the list is \
              promising less than it says: {silent:#?}"
+        );
+    }
+
+    /// The `.rs` files `scripts/check-portable-core.ps1` walks, asked of the
+    /// script itself.
+    ///
+    /// **A PowerShell is required and its absence is a refusal, not a skip.**
+    /// Both are tried because both run this gate in this tree — CI's steps take
+    /// PowerShell 7 and the ticket briefs run the Windows one — and a reader
+    /// that answered "there was nobody to ask" would be the quietly green thing
+    /// this preparation exists to remove.
+    fn script_walk(script: &Path) -> std::collections::BTreeSet<String> {
+        let mut refused = Vec::new();
+        for (shell, flags) in [
+            ("pwsh", &["-NoProfile", "-File"][..]),
+            (
+                "powershell",
+                &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"][..],
+            ),
+        ] {
+            let answer = bt_platform::quiet_command(shell)
+                .args(flags)
+                .arg(script)
+                .arg("-ListSources")
+                .output();
+            match answer {
+                Ok(run) if run.status.success() => {
+                    return String::from_utf8_lossy(&run.stdout)
+                        .lines()
+                        .map(|line| line.trim().to_owned())
+                        .filter(|line| !line.is_empty())
+                        .collect();
+                }
+                Ok(run) => refused.push(format!(
+                    "{shell}: {} — {}",
+                    run.status,
+                    String::from_utf8_lossy(&run.stderr)
+                )),
+                Err(error) => refused.push(format!("{shell}: {error}")),
+            }
+        }
+        panic!(
+            "neither PowerShell would list the files {} walks, so the two readers of this rule \
+             cannot be compared:\n{refused:#?}",
+            script.display()
+        );
+    }
+
+    /// RED — **the gate and its script walk the same files** (the plan's §6.3,
+    /// ticket P10).
+    ///
+    /// One rule, two readers. This module runs on every platform CI builds for
+    /// and names the file and the line; `scripts/check-portable-core.ps1`
+    /// answers in five seconds on a tree that does not compile, which is what
+    /// it is for, and reads this module's own array out of the source to do it
+    /// — it is `bt_source::FileScoped`'s first allowlist entry and P10 leaves
+    /// that reader exactly as it is.
+    ///
+    /// What neither of them can notice alone is that it has stopped *seeing* a
+    /// file. A rule read over two different sets of files is two rules, and
+    /// each half would go on passing: the script's walk gained the three
+    /// subdirectories under `src/` the day they were created and nothing said
+    /// so, and a walk that lost one would be as quiet.
+    ///
+    /// MUTATION: take `-Recurse` off the script's walk, or make `sources()`
+    /// skip a directory, and the four files under `attention/`,
+    /// `attention_words/` and `shell_integration/` are named by whichever side
+    /// still has them.
+    #[test]
+    fn the_gate_and_its_script_walk_the_same_files() {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("scripts")
+            .join("check-portable-core.ps1");
+        let listed = script_walk(&script);
+        let walked: std::collections::BTreeSet<String> = sources()
+            .into_iter()
+            .map(|(relative, _)| relative)
+            .collect();
+        assert!(
+            walked.len() > 40,
+            "this walk found the crate: {}",
+            walked.len()
+        );
+        let only_the_script: Vec<&String> = listed.difference(&walked).collect();
+        let only_this_gate: Vec<&String> = walked.difference(&listed).collect();
+        assert!(
+            only_the_script.is_empty() && only_this_gate.is_empty(),
+            "the two readers of the platform rule walk different files. Only \
+             scripts/check-portable-core.ps1 reads {only_the_script:#?}; only this module reads \
+             {only_this_gate:#?}. One list, two readers: whichever walk changed, the other has \
+             to change with it."
         );
     }
 

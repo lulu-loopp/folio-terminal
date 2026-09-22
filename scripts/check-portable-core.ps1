@@ -32,9 +32,49 @@
 # that needs a build, and this one has to be able to run in five seconds on a
 # tree that does not compile.
 
+param(
+    # **Print the `.rs` files the bt-app half of this gate walks, one per line
+    # from `crates/bt-app/src`, and do nothing else.**
+    #
+    # `bt_app::platform_gate_tests::the_gate_and_its_script_walk_the_same_files`
+    # is what asks for it (`docs/plans/bt-app-split-prep.md` §6.3, P10): there
+    # are two readers of one rule, this one and the Rust twin, and a rule read
+    # over two different sets of files is two rules. The twin runs this switch
+    # and compares the answer with its own walk, so a file either of them stops
+    # seeing is a red test rather than a gate that quietly covers less.
+    #
+    # It is not a change to the array reader below, which P10 leaves exactly as
+    # it is: nothing here reads `main.rs`. It is `-ListSources` rather than
+    # `-List` for the same reason — that reader's own answer is held in `$list`,
+    # and a parameter of that name would be the variable it assigns to. `-List`
+    # still reaches it, being an unambiguous prefix.
+    [switch]$ListSources
+)
+
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
+
+# **The `.rs` files of `bt-app`, walked in one place.** Both the second check
+# below and `-ListSources` ask for them here rather than each writing the walk
+# out, because two walks is the drift the agreement test exists to catch.
+$appSource = Join-Path $repo "crates/bt-app/src"
+
+function Get-AppSourceFiles {
+    Get-ChildItem -Path $script:appSource -Recurse -File -Filter *.rs |
+        Sort-Object FullName |
+        ForEach-Object {
+            [pscustomobject]@{
+                Path = $_.FullName
+                Name = $_.FullName.Substring($script:appSource.Length + 1).Replace("\", "/")
+            }
+        }
+}
+
+if ($ListSources) {
+    Get-AppSourceFiles | ForEach-Object { $_.Name }
+    exit 0
+}
 
 # **The portable core, named one crate at a time.** A list rather than "every
 # crate except bt-app", because the difference between the two is the whole
@@ -214,7 +254,6 @@ Write-Host "the $($portable.Count) portable crates name no Win32 outside a #[cfg
 # `debug_assertions` and `feature = "..."` are not statements about a machine and
 # are not counted.
 
-$appSource = Join-Path $repo "crates/bt-app/src"
 $pin = Join-Path $appSource "main.rs"
 if (-not (Test-Path -LiteralPath $pin)) {
     throw "crates/bt-app/src/main.rs is not in the tree - there is no list to read"
@@ -565,9 +604,9 @@ $platformWords = @("windows", "unix", "macos", "target_os", "target_family")
 $asking = @{}
 $strangers = @()
 
-foreach ($file in Get-ChildItem -Path $appSource -Recurse -File -Filter *.rs) {
-    $relative = $file.FullName.Substring($appSource.Length + 1).Replace("\", "/")
-    $lines = [IO.File]::ReadAllLines($file.FullName)
+foreach ($file in Get-AppSourceFiles) {
+    $relative = $file.Name
+    $lines = [IO.File]::ReadAllLines($file.Path)
     for ($index = 0; $index -lt $lines.Length; $index++) {
         # A comment is prose about a rule and not a use of it - the same reading
         # the walk above takes, and the same one the Rust twin takes.
