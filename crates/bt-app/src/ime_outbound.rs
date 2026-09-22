@@ -283,14 +283,15 @@ impl Runtime<'_> {
 mod tests {
     use super::*;
 
-    // ── what this module asks the crate instead ───────────────────────────
+    // ── what this module asks the crate ────────────────────
     //
-    // **P3's equivalence commit for this batch**
-    // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). Nothing is
-    // deleted here: each reading is taken twice — once from
-    // `include_str!("main.rs")` or from this file's own text, once from
-    // `bt-source` — and `agree`/`agreed` are where the two are required to be
-    // the same answer. The deletion is the commit after this one.
+    // **P3's deletion commit for this batch**
+    // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). The commit
+    // before this one took each reading twice — once from
+    // the window's file or this file's own text, once from `bt-source`
+    // — and asserted the two were the same answer; this one removes the older
+    // of the two, because two implementations of one judgement do not vouch
+    // for each other (`docs/CONVENTIONS.md` §十 rule 4).
     //
     // **The pattern is `main.rs::pty_drain_budget_tests`' and is not
     // re-derived**; that module's header carries the six points behind
@@ -378,89 +379,31 @@ mod tests {
         in_the_product(&found(needle, bt_source::View::Raw))
     }
 
-    /// **The file's answer and the crate's, compared**, handing the file's
-    /// back so the assertion after it is the one that was always there.
-    fn agree<T: std::fmt::Debug + PartialEq>(what: &str, file: T, crate_reading: T) -> T {
-        assert_eq!(
-            file, crate_reading,
-            "{what}: this module's reading of the file and the crate's disagree"
-        );
-        file
-    }
-
-    /// **`body`'s answer and the crate's, compared as bytes.** `body` hands
-    /// back everything after `    fn name(` and stops before the closing
-    /// `\n    }\n`, so the crate's body minus that closing line has to stand in
-    /// the slice with nothing but the rest of the declaration in front of it.
-    fn agreed(old: &'static str, name: &str) -> &'static str {
-        let new = method_body("Runtime", name);
-        let trimmed = &new[..new.rfind('\n').expect("a method's body spans lines")];
-        let at = old.find(trimmed).unwrap_or_else(|| {
-            panic!(
-                "`Runtime::{name}`: this file's slice and the crate's body are not the same bytes"
-            )
-        });
-        assert!(
-            !old[..at].contains('{'),
-            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
-             the head of it"
-        );
-        old
-    }
-
     #[test]
     fn ime_outbound_sites_keep_their_trace_calls() {
-        let source = include_str!("main.rs");
-        let body = |name: &str| {
-            agreed(
-                source
-                    .split(&format!("    fn {name}("))
-                    .nth(1)
-                    .unwrap()
-                    .split("\n    }\n")
-                    .next()
-                    .unwrap(),
-                name,
-            )
-        };
+        let body = |name: &str| method_body("Runtime", name);
         assert_eq!(
-            agree(
-                "the allowed door",
-                source.matches(".set_ime_allowed(").count(),
-                in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
-                    ".set_ime_allowed("
-                ))),
-            ),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                ".set_ime_allowed("
+            ))),
             2
         );
         assert_eq!(
-            agree(
-                "the cursor-area door",
-                source.matches(".set_ime_cursor_area(").count(),
-                in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
-                    ".set_ime_cursor_area("
-                ))),
-            ),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                ".set_ime_cursor_area("
+            ))),
             1
         );
         assert_eq!(
-            agree(
-                "the system caret's update",
-                source.matches(".ime_system_caret.update(").count(),
-                in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
-                    ".ime_system_caret.update("
-                ))),
-            ),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                ".ime_system_caret.update("
+            ))),
             1
         );
         assert_eq!(
-            agree(
-                "the allowed line",
-                source.matches("ime_outbound::allowed_line(true,").count(),
-                in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
-                    "ime_outbound::allowed_line(true,"
-                ))),
-            ),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "ime_outbound::allowed_line(true,"
+            ))),
             2
         );
         for (method, trace) in [
@@ -492,14 +435,11 @@ mod tests {
         }
         let input = body("ime_input");
         assert!(input.find("trace_ime_ruling") < input.find("if !ruling.deliver"));
-        assert!(agree(
-            "the frame trace",
-            source.contains("self.trace_ime_frame(&terminal_frame, written)"),
+        assert!(
             in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
                 "self.trace_ime_frame(&terminal_frame, written)"
-            ))) > 0,
-        ));
-        assert_eq!(source.matches(".ime_system_caret.destroy()").count(), 0);
+            ))) > 0
+        );
         for reason in [
             "ime_disabled",
             "cancel_composition",
@@ -507,29 +447,15 @@ mod tests {
             "window_blur",
         ] {
             assert_eq!(
-                agree(
-                    "a reasoned destruction",
-                    source
-                        .matches(&format!("destroy_ime_caret(\"{reason}\")"))
-                        .count(),
-                    in_the_product_raw(bt_source::Needle::new(bt_source::Pattern::text(&format!(
-                        "destroy_ime_caret(\"{reason}\")"
-                    )))),
-                ),
+                in_the_product_raw(bt_source::Needle::new(bt_source::Pattern::text(&format!(
+                    "destroy_ime_caret(\"{reason}\")"
+                )))),
                 1
             );
         }
-        // This module owns the shared platform door (including the portable no-op).
-        let helper = include_str!("ime_outbound.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
-        assert!(helper.contains("caret_line(\"destroy\", reason, None)"));
-        assert!(helper.contains("self.window.ime_system_caret.destroy()"));
-        // The same two facts, asked of the door rather than of this file's text
-        // above its own tests, and joined to the count that used to be taken of
-        // `main.rs` alone: the product destroys the caret exactly once, and the
-        // method that does it is this module's own.
+        // This module owns the shared platform door (including the portable
+        // no-op), and it owns it alone: the product destroys the caret exactly
+        // once, and the body pin says which method that one site stands in.
         let door = method_body("Runtime", "destroy_ime_caret");
         assert!(door.contains("caret_line(\"destroy\", reason, None)"));
         assert!(door.contains("self.window.ime_system_caret.destroy()"));
@@ -537,9 +463,7 @@ mod tests {
             in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
                 ".ime_system_caret.destroy()"
             ))),
-            source.matches(".ime_system_caret.destroy()").count()
-                + usize::from(helper.contains("self.window.ime_system_caret.destroy()")),
-            "the package's product sites are `main.rs`'s none plus this module's own door"
+            1
         );
     }
 
