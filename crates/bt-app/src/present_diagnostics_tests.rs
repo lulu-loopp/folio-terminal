@@ -168,6 +168,65 @@ fn attempt_format_round_trips_numbers_and_unknown_native_facts() {
     assert_eq!(reconstructed, text);
 }
 
+// ── what these two pins ask the crate instead ─────────────────────────────
+//
+// **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+// §6.3, and §6.0 rule 3). Nothing is deleted here: every body is cut twice —
+// once out of a named file, once out of the body of an item of the package that
+// owns it — and `agreed` requires the two to be the same bytes. The deletion is
+// the commit after this one, and the pattern is
+// `main.rs::pty_drain_budget_tests`', not re-derived here.
+//
+// Two readings leave `main.rs` for a package rather than for an item. The
+// prohibition on user text is about the diagnostics **module**, so it is asked
+// of `crate::present_diagnostics` by its Rust path. The three facts about the
+// renderer were reached by a relative path out of this crate's directory into
+// another one's `lib.rs`; they are asked of the `bt-render` package now, which
+// is that crate however its files are spelled.
+
+/// **This crate, indexed once per process** — the workspace read, this
+/// package's own `src/` declared as the universe and lowered, on the first ask
+/// of the process, behind one call (`bt_source::Index::of_package`).
+fn source_index() -> &'static bt_source::Index {
+    bt_source::Index::of_package("bt-app")
+}
+
+/// The body of one inherent method of `owner`, braces included — the identity
+/// of §2.4 rather than a line of `main.rs`.
+fn method_body(owner: &str, name: &str) -> &'static str {
+    source_index()
+        .body_of(&bt_source::ItemQuery::method(owner, name))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// **A slice of `main.rs` and the crate's body, compared as bytes.** Every
+/// slice here starts at a declaration and stops at whatever comes next, so the
+/// crate's body stands inside it with nothing but the declaration in front.
+fn agreed(old: &'static str, name: &str) -> &'static str {
+    let new = method_body("Runtime", name);
+    let at = old.find(new).unwrap_or_else(|| {
+        panic!("`Runtime::{name}`: this file's slice and the crate's body are not the same bytes")
+    });
+    assert!(
+        !old[..at].contains('{'),
+        "`Runtime::{name}`: the crate's body stands inside the file's slice rather than at the \
+         head of it"
+    );
+    old
+}
+
+/// One search over a named scope of a package of this workspace — the reading
+/// that used to be a relative path from this file into that crate's source.
+fn found_in_package(
+    package: &str,
+    needle: bt_source::Needle,
+    scope: bt_source::Scope,
+) -> bt_source::Found {
+    bt_source::Index::of_package(package)
+        .search(&bt_source::Search::new(needle, bt_source::View::Raw).in_scope(scope))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
 #[test]
 fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
     let source = include_str!("main.rs");
@@ -181,7 +240,7 @@ fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
             .flatten()
             .min()
             .unwrap();
-        let body = &source[start..start + 5 + end];
+        let body = agreed(&source[start..start + 5 + end], name);
         assert!(body.contains("begin_present_attempt("), "{name}");
         assert!(
             body.contains("let result = (|| {") || body.contains("let result = hang_watch::during"),
@@ -197,7 +256,10 @@ fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
         );
     }
     let start = source.find("    fn present_seats_and_commit(").unwrap();
-    let body = &source[start..source[start..].find("\n    ///").unwrap() + start];
+    let body = agreed(
+        &source[start..source[start..].find("\n    ///").unwrap() + start],
+        "present_seats_and_commit",
+    );
     for outcome in [
         "Unchanged",
         "Presented",
@@ -208,6 +270,24 @@ fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
     ] {
         assert!(body.contains(&format!("Outcome::{outcome}")), "{outcome}");
     }
+    let standing = source_index()
+        .search(&bt_source::Search::new(
+            bt_source::needle!(bt_source::Pattern::text(
+                "let owed = owed || self.picture_is_owed();"
+            )),
+            bt_source::View::Raw,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let in_the_product = standing.occurrences().iter().any(|occurrence| {
+        source_index()
+            .file_at(occurrence.span.start())
+            .is_some_and(bt_source::FileRecord::permits_product)
+    });
+    assert_eq!(
+        in_the_product,
+        source.contains("let owed = owed || self.picture_is_owed();"),
+        "this file's reading of `main.rs` and the package's disagree about standing debt"
+    );
     assert!(
         source.contains("let owed = owed || self.picture_is_owed();"),
         "an empty redraw must not restart standing debt"
@@ -220,6 +300,17 @@ fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
         "{error}",
         "{error:#}",
     ] {
+        assert_eq!(
+            found_in_package(
+                "bt-app",
+                bt_source::Needle::new(bt_source::Pattern::text(forbidden)),
+                bt_source::Scope::Module("crate::present_diagnostics".to_owned()),
+            )
+            .is_empty(),
+            !module.contains(forbidden),
+            "this file's reading of `present_diagnostics.rs` and the module's disagree \
+             about {forbidden}"
+        );
         assert!(
             !module.contains(forbidden),
             "diagnostics must accept no user text: {forbidden}"
@@ -321,18 +412,55 @@ fn existing_hidden_callers_keep_the_same_fused_value() {
 fn attempt_generation_is_carried_by_configure_and_native_reads_are_line_gated() {
     let source = include_str!("main.rs");
     let start = source.find("    fn finish_present_attempt(").unwrap();
-    let body = &source[start
-        ..source[start..]
-            .find("    fn check_picture_freshness(")
-            .unwrap()
-            + start];
+    let body = agreed(
+        &source[start
+            ..source[start..]
+                .find("    fn check_picture_freshness(")
+                .unwrap()
+                + start],
+        "finish_present_attempt",
+    );
     assert!(
         body.find("if self.app.trace_perf").unwrap() < body.find("native_present_facts").unwrap()
     );
     let start = source.find("    fn check_picture_freshness(").unwrap();
-    let body = &source[start..source[start..].find("    ///").unwrap() + start];
+    let body = agreed(
+        &source[start..source[start..].find("    ///").unwrap() + start],
+        "check_picture_freshness",
+    );
     assert!(body.find("if let Some(line)").unwrap() < body.find("native_present_facts").unwrap());
     let render = include_str!("../../bt-render/src/lib.rs");
+    let in_render = |text: &str| {
+        found_in_package(
+            "bt-render",
+            bt_source::Needle::new(bt_source::Pattern::text(text)),
+            bt_source::Scope::Everything,
+        )
+        .len()
+    };
+    for (text, file_count) in [
+        (
+            "phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));",
+            render
+                .matches("phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));")
+                .count(),
+        ),
+        (
+            "let present_wait = descriptor",
+            render.matches("let present_wait = descriptor").count(),
+        ),
+        (
+            "self.present_wait = present_wait;",
+            render.matches("self.present_wait = present_wait;").count(),
+        ),
+    ] {
+        assert_eq!(
+            in_render(text),
+            file_count,
+            "this file's reading of the renderer's `lib.rs` and the package's disagree about \
+             {text}"
+        );
+    }
     assert!(render.contains("phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));"));
     assert_eq!(render.matches("let present_wait = descriptor").count(), 3);
     assert!(render.contains("self.present_wait = present_wait;"));
