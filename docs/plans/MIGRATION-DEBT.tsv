@@ -209,7 +209,6 @@ crates/bt-app/src/main.rs	field_command_tests::the_default_menu_does_not_own_com
 crates/bt-app/src/main.rs	field_command_tests::the_option_policy_is_applied_at_one_door	include_str!	adopt_option_as_alt;window_event	P3	yes
 crates/bt-app/src/main.rs	file_peek_fade_tests::the_cards_fade_is_the_tips_rule_read_once_and_reaches_every_layer	include_str!	advance_file;advance_file_peek;cubic_bezier;file_peek;file_peek_layer;file_peek_opacity	P3	yes
 crates/bt-app/src/main.rs	file_peek_fade_tests::the_fade_owes_frames_while_it_climbs_and_the_card_leaves_at_once	include_str!	file_peek;file_peek_deadline;hide_file;hide_file_peek;opacity	P3	yes
-crates/bt-app/src/main.rs	files_turn_wake_tests::a_turning_triangle_wakes_the_loop_from_every_tree_that_can_draw_one	include_str!	files;let;strip_animation_work	P3	yes
 crates/bt-app/src/main.rs	formula_copy_clock_tests::the_turn_retires_the_tick_and_never_hands_the_loop_a_past_instant	include_str!	advance_math_tools;turn	P3	yes
 crates/bt-app/src/main.rs	git_header_selection_tests::neither_host_seats_the_keyboard_on_the_row_a_press_may_not_land_it_on	include_str!	press_float_git_row;press_git_row	P3	yes
 crates/bt-app/src/main.rs	git_hover_heal_tests::the_git_pages_hover_is_healed_against_the_page_it_is_drawn_from	include_str!	refresh_chrome_with_overlay	P3	yes

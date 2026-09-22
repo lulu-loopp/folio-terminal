@@ -121627,10 +121627,23 @@ fn tab_surface_tip_boxes(
 
 #[cfg(test)]
 mod files_turn_wake_tests {
-    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
-    // commit after this one deletes the older of the two. `source`, `item_body`
-    // and `method_body` are `pty_drain_budget_tests`' helpers word for word.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // The one reader here asked `main.rs` for its text; it now asks `bt-source`
+    // about an *item* of this crate, so no fact in this module is bound to the
+    // file it happens to be written in today. The commit before this one ran both
+    // readings side by side and asserted they agree — the question they cut out
+    // compared as bytes — and this is the one that deletes the older of the two,
+    // because two implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body` and `method_body` are that module's helpers word for
+    // word, and its header is where the six points behind them live.
+    //
+    // **One owner, established rather than assumed:** `strip_animation_work` is a
+    // method of `Runtime`. The deleted finder ran from the signature to the next
+    // `\n    fn `, which is 1,317 bytes past the method's closing brace; the
+    // statement this test cuts out of it is the same either way.
     use bt_source::{Index, ItemQuery};
 
     /// **This crate, indexed once per process** — the workspace read, this
@@ -121651,15 +121664,6 @@ mod files_turn_wake_tests {
     /// The body of one inherent method of `owner`.
     fn method_body(owner: &str, name: &str) -> &'static str {
         item_body(&ItemQuery::method(owner, name))
-    }
-
-    /// The statement the deadline asks its question in, cut out of a body.
-    fn question(body: &str) -> &str {
-        let turning = body
-            .find("let files_turning")
-            .expect("the deadline asks whether a triangle is turning");
-        let question = &body[turning..];
-        &question[..question.find(";\n").unwrap_or(question.len())]
     }
 
     /// RED — **every tree that can turn a triangle is asked whether one is
@@ -121687,24 +121691,12 @@ mod files_turn_wake_tests {
     /// the docked columns.
     #[test]
     fn a_turning_triangle_wakes_the_loop_from_every_tree_that_can_draw_one() {
-        const SOURCE: &str = include_str!("main.rs");
-        let at = SOURCE
-            .find("fn strip_animation_work(")
-            .expect("the window has an animation deadline");
-        let older = &SOURCE[at..];
-        let end = older.find("\n    fn ").unwrap_or(older.len());
-        let older = &older[..end];
         let body = method_body("Runtime", "strip_animation_work");
-        assert!(
-            older.contains(body),
-            "the older reading does not carry the crate's body"
-        );
-        assert_eq!(
-            question(older),
-            question(body),
-            "the two readings disagree about the question the deadline asks"
-        );
-        let question = question(body);
+        let turning = body
+            .find("let files_turning")
+            .expect("the deadline asks whether a triangle is turning");
+        let question = &body[turning..];
+        let question = &question[..question.find(";\n").unwrap_or(question.len())];
         assert!(
             question.contains("file_trees"),
             "the docked columns' caches are still asked:\n{question}"
