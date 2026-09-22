@@ -36427,7 +36427,20 @@ mod tests {",
         // MUTATION: drop the `HoverFloat::Flyout` arm and the first block here
         // names it; go back to reading `pane_menu` in `head_run` and the second
         // does.
+        //
+        // **P3's equivalence commit for this pin** (`docs/plans/bt-app-split-prep.md`
+        // §6.3, and §6.0 rule 3). Both derivations are read twice — once as a
+        // slice of `main.rs`, once as the body of an item of this crate — and
+        // the two are required to be the same bytes; the deletion is the commit
+        // after this one. The pattern is `main.rs::pty_drain_budget_tests`' and
+        // is not re-derived here. The owner is an argument now rather than
+        // "whatever `impl` the first `\n    fn name(` in the file belongs to".
         const SOURCE: &str = include_str!("main.rs");
+        let crate_body = |name: &str| {
+            bt_source::Index::of_package("bt-app")
+                .body_of(&bt_source::ItemQuery::method("Runtime", name))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+        };
         let body = |name: &str| {
             let head = format!("\n    fn {name}(");
             let start = SOURCE
@@ -36438,7 +36451,22 @@ mod tests {",
                 + SOURCE[start..]
                     .find("\n    }\n")
                     .expect("a method is closed at the `impl`'s indentation");
-            &SOURCE[start..end]
+            let slice = &SOURCE[start..end];
+            // The file's slice runs from after the signature's `(` to before the
+            // closing `\n    }`, so the crate's body without that closing line
+            // has to stand in it with nothing but the rest of the declaration in
+            // front.
+            let whole = crate_body(name);
+            let trimmed = &whole[..whole.rfind('\n').expect("a method's body spans lines")];
+            let at = slice.find(trimmed).unwrap_or_else(|| {
+                panic!("`Runtime::{name}`: this file's slice and the crate's body are not the same bytes")
+            });
+            assert!(
+                !slice[..at].contains('{'),
+                "`Runtime::{name}`: the crate's body stands inside this file's slice rather than \
+                 at the head of it"
+            );
+            slice
         };
         let derivation = body("head_that_raised_a_layer");
         for arm in [
@@ -36455,6 +36483,44 @@ mod tests {",
         assert!(
             body("head_run").contains("self.head_that_raised_a_layer()"),
             "the run's second arm is no longer the derivation"
+        );
+        // The product's own spelling of the paint, and only the product's:
+        // this file compiles into it and carries the same text twice more in
+        // this test — once as the older reading above, once as the needle. The
+        // file grain alone would be answered by either of them, which is the
+        // shape a migrated guard exists to stop being satisfied by.
+        let index = bt_source::Index::of_package("bt-app");
+        let handed = index
+            .search(&bt_source::Search::new(
+                bt_source::needle!(bt_source::Pattern::text(
+                    "head_raised: self.head_that_raised_a_layer(),"
+                )),
+                bt_source::View::Raw,
+            ))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .occurrences()
+            .iter()
+            .any(|occurrence| {
+                index
+                    .file_at(occurrence.span.start())
+                    .is_some_and(bt_source::FileRecord::permits_product)
+                    && index
+                        .items()
+                        .iter()
+                        .filter(|record| occurrence.span.within(record.whole()))
+                        .min_by_key(|record| record.whole().len())
+                        .is_none_or(|record| {
+                            !record
+                                .variant()
+                                .predicates()
+                                .iter()
+                                .any(|predicate| predicate == "test")
+                        })
+            });
+        assert_eq!(
+            handed,
+            SOURCE.contains("head_raised: self.head_that_raised_a_layer(),"),
+            "this file's reading of `main.rs` and the package's disagree about the paint"
         );
         assert!(
             SOURCE.contains("head_raised: self.head_that_raised_a_layer(),"),
