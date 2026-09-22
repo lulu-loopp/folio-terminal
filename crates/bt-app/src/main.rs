@@ -108913,24 +108913,25 @@ mod git_hover_heal_tests {
 /// deliberately not, because a press is the whole of what it is for.
 #[cfg(test)]
 mod git_header_selection_tests {
-    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
-    // commit after this one deletes the older of the two. `source`, `item_body`
-    // and `method_body` are `pty_drain_budget_tests`' helpers word for word.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Both readers here asked `main.rs` for its text; both now ask `bt-source`
+    // about an *item* of this crate, so no fact in this module is bound to the
+    // file it happens to be written in today. The commit before this one ran both
+    // readings side by side and asserted they agree; this is the one that deletes
+    // the older of the two, because two implementations of one judgement do not
+    // vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body` and `method_body` are that module's helpers word for
+    // word, and its header is where the six points behind them live.
+    //
+    // **One owner, established rather than assumed:** both hosts are methods of
+    // `Runtime`. The deleted finder ran from the signature to the next
+    // `\n    fn `, which is 1,160 bytes past `press_git_row`'s closing brace and
+    // 117 past `press_float_git_row`'s — so the count of "one door onto the
+    // selection" was being taken over the neighbour as well. Narrowing to the
+    // body changes no verdict; the equivalence commit is what established that.
     use bt_source::{Index, ItemQuery};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -108963,28 +108964,7 @@ mod git_header_selection_tests {
                 "self.select_float_git_row(id, index);",
             ),
         ] {
-            let older = body(&["    fn ", host, "("].concat());
             let text = method_body("Runtime", host);
-            assert!(
-                older.contains(text),
-                "the older reading of `{host}` does not carry the crate's body"
-            );
-            for probe in [
-                "git_panel::GitRow::seats_the_keyboard",
-                writer,
-                "git_panel::GitRow::is_furniture",
-            ] {
-                assert_eq!(
-                    older.contains(probe),
-                    text.contains(probe),
-                    "the two readings of `{host}` disagree about `{probe}`"
-                );
-            }
-            assert_eq!(
-                older.matches(writer).count(),
-                text.matches(writer).count(),
-                "the two readings of `{host}` disagree about how many doors write the selection"
-            );
             let asked = text
                 .find("git_panel::GitRow::seats_the_keyboard")
                 .unwrap_or_else(|| panic!("`{host}` asks which rows take the selection:\n{text}"));
