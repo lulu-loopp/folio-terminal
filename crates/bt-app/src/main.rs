@@ -4343,8 +4343,9 @@ mod card_answer_route_tests {
 
     const SOURCE: &str = include_str!("main.rs");
 
-    /// [`layer_shape_tests::fn_body`]'s reader, kept beside the pins that use it
-    /// for the reason that module keeps its own.
+    /// `layer_shape_tests::fn_body`'s reader, kept beside the pins that use it
+    /// for the reason that module keeps its own. (That finder is gone — P3
+    /// migrated its consumers — so this names it rather than linking to it.)
     fn fn_body(name: &str) -> &'static str {
         let head = format!(
             "
@@ -14513,25 +14514,26 @@ const _: fn(Runtime<'_>) = |Runtime { app: _, window: _ }| ();
 
 #[cfg(test)]
 mod layer_shape_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). The four body pins and the four whole-source counts
-    // in this module asked `main.rs` for its text. Nothing is deleted here: each
-    // computes its answer twice, once from this file and once from `bt-source`,
-    // and asserts the two agree. The deletion is the commit after this one.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // The four readers that pinned a method body or counted a spelling over this
+    // file now ask `bt-source` about an *item* of this crate, so no fact among
+    // them is bound to the file it happens to be written in today. The commit
+    // before this one ran both readings side by side and asserted they agree;
+    // this is the one that deletes the older of the two, because two
+    // implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4). `source`, `item_body`, `method_body`
+    // and `found` are `pty_drain_budget_tests`' helpers word for word, and that
+    // module's header is where the six points behind them live.
     //
-    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
-    // `source`, `item_body`, `method_body` and `found` are that module's helpers
-    // word for word; `agreed` is `tab_identity_tests`', for the same finder shape
-    // — [`fn_body`] stops **before** the closing brace.
-    //
-    // **The four struct pins stay on the debt list**, and this is the one thing
-    // this batch could not do. `bt-source` indexes callable items: a `struct`'s
-    // fields are not an identity it can be asked for, so there is no scope that
-    // means "inside `WindowRuntime`'s fields". Widening those four to the package
-    // would not be a widening, it would be the opposite of the guard — every one
-    // of the sixteen names `WindowRuntime` may not hold is a name `App` holds a
-    // line away. They are migrated by the ticket that follows struct identity
-    // into the crate, and [`struct_fields`] and [`struct_body`] stay for them.
+    // **The four struct pins below are not migrated and keep their debt rows.**
+    // `bt-source` indexes callable items: a `struct`'s fields are not an identity
+    // it can be asked for, so there is no scope that means "inside
+    // `WindowRuntime`'s field lines". Widening those four to the package would
+    // not widen the guard, it would invert it — every name `WindowRuntime` may
+    // not hold is a name `App` holds a few lines away, so a package-wide negative
+    // would be red on a correct tree. They are migrated by the consumer ticket
+    // that follows `ItemQuery::field` into the crate, and [`SOURCE`],
+    // [`struct_fields`] and [`struct_body`] stay for them.
     use bt_source::{Found, Index, ItemQuery, Needle, Search, View, needle};
 
     /// This file, read as text — the only witness that can answer "what is *not*
@@ -14564,46 +14566,6 @@ mod layer_shape_tests {
         source()
             .search(&Search::new(needle, view))
             .unwrap_or_else(|failure| panic!("{failure}"))
-    }
-
-    /// **This file's slice and the crate's body, compared as bytes.**
-    ///
-    /// [`fn_body`] hands back everything after the `fn name(` it matched up to
-    /// the first `\n    }\n` — the rest of the declaration, the opening brace,
-    /// the body, and **not** the closing brace line, which is the line it
-    /// stopped on. [`Index::body_of`] hands back the braces and everything
-    /// between them. So the crate's answer, with that closing line taken off,
-    /// has to be the *tail* of this file's slice.
-    ///
-    /// What comes back is this file's slice, so this commit changes no assertion.
-    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
-        let opened = new.strip_suffix("\n    }").unwrap_or_else(|| {
-            panic!("`{what}`: the crate's body does not close where this file's finder stopped")
-        });
-        let at = old.find(opened).unwrap_or_else(|| {
-            panic!("`{what}`: this file's slice and the crate's body are not the same bytes")
-        });
-        assert_eq!(
-            old.rfind(opened),
-            Some(at),
-            "`{what}`: the crate's body stands twice inside this file's slice"
-        );
-        assert!(
-            !old[..at].contains('{'),
-            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
-             of its body"
-        );
-        assert_eq!(
-            old.len(),
-            at + opened.len(),
-            "`{what}`: this file's slice runs past the body the crate returned"
-        );
-        old
-    }
-
-    /// One method pin's two readings, asserted to agree, the file's returned.
-    fn agreed_method(owner: &str, name: &str) -> &'static str {
-        agreed(fn_body(name), method_body(owner, name), name)
     }
 
     /// **The declarations of a top-level struct, with its prose taken out.**
@@ -14790,28 +14752,6 @@ struct {name} {{
         }
     }
 
-    /// The body of a top-level-in-`impl` `fn <name>(`, delimited by the one `}`
-    /// at that `fn`'s own indentation which follows it.
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!(
-            "
-    fn {name}("
-        );
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find(
-                    "
-    }
-",
-                )
-                .expect("a method is closed by a `}` at the `impl`'s indentation");
-        &SOURCE[start..end]
-    }
-
     /// PIN (user report, 2026-08-19) — **every spelling of a checkout is issued
     /// from one place, so the three tiers cannot be answered by two doors and
     /// skipped by the third.**
@@ -14845,16 +14785,11 @@ struct {name} {{
         let tracking = concat!("GitWriteVerb::", "CheckoutTracking { name: ");
         let column = concat!("self.checkout_", "from_column(");
         let graph = concat!("self.checkout_", "in_graph(");
-        let performs = agreed_method("Runtime", "checkout_at");
+        let performs = method_body("Runtime", "checkout_at");
         for spelling in [tracking, column, graph] {
-            let issued = found(needle!(spelling), View::Raw).len();
             assert_eq!(
-                SOURCE.matches(spelling).count(),
-                issued,
-                "P3 equivalence: this file and the crate count `{spelling}` the same"
-            );
-            assert_eq!(
-                issued, 1,
+                found(needle!(spelling), View::Raw).len(),
+                1,
                 "`{spelling}` is written in more than one place, so one of them is \
                  a door that has not answered the tiers"
             );
@@ -14866,16 +14801,11 @@ struct {name} {{
 
         // And `checkout_at` is reached from exactly two places: the question, and
         // the gate's confirmed answer — which *is* that question, answered.
-        let asks = agreed_method("Runtime", "ask_to_checkout");
+        let asks = method_body("Runtime", "ask_to_checkout");
         let performing = concat!("self.checkout", "_at(");
-        let callers = found(needle!(performing), View::Raw).len();
         assert_eq!(
-            SOURCE.matches(performing).count(),
-            callers,
-            "P3 equivalence: this file and the crate count the callers the same"
-        );
-        assert_eq!(
-            callers, 2,
+            found(needle!(performing), View::Raw).len(),
+            2,
             "a third caller of `checkout_at` is a third chance to skip the gate"
         );
         assert!(asks.contains(performing), "{asks}");
@@ -14911,7 +14841,7 @@ struct {name} {{
     /// and this test is what says so.
     #[test]
     fn a_re_read_does_not_throw_the_picture_away_before_its_answer_exists() {
-        let rereads = agreed_method("Runtime", "reread_git_origin");
+        let rereads = method_body("Runtime", "reread_git_origin");
         assert!(
             !rereads.contains(concat!("invalid", "ate(")),
             "a re-read does not know yet whether the history moved, so it may not \
@@ -14958,7 +14888,7 @@ struct {name} {{
             "apply_git_results",
             "apply_math_results",
         ] {
-            let body = agreed_method("Runtime", lane);
+            let body = method_body("Runtime", lane);
             assert!(
                 !body.contains("try_recv"),
                 "`{lane}` is one window's, and a receiver it drains is every \
@@ -14988,7 +14918,7 @@ struct {name} {{
             "apply_git_results",
             "apply_math_results",
         ] {
-            let body = agreed_method("Runtime", lane);
+            let body = method_body("Runtime", lane);
             assert!(
                 body.contains("self.owns("),
                 "`{lane}` takes its own out of the batch by asking whether this \
