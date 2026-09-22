@@ -113020,29 +113020,22 @@ mod page_under_a_laden_hand_tests {
 /// is precisely the defect this slice repairs.
 #[cfg(test)]
 mod page_under_the_tab_list_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Every reader here asked this *file* for its text:
-    // three body pins and one whole-file count. Nothing is deleted here — each
-    // computes its answer twice, once from the file and once from `bt-source`,
-    // and asserts the two agree. The deletion is the commit after this one.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text — three body pins and one
+    // whole-file count; every one of them now asks `bt-source` about an *item*
+    // of this crate or about the crate itself, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree; this is
+    // the one that deletes the older of the two (`docs/CONVENTIONS.md` §十
+    // rule 4).
     //
     // `source`, `item_body`, `method_body` and `found` are
-    // `pty_drain_budget_tests`' helpers word for word; `agreed` is this batch's
-    // own shape and is described on the helper. All three pins are `Runtime`'s.
+    // `pty_drain_budget_tests`' helpers word for word. All three pins are
+    // `Runtime`'s. The count of each axis' one caller was a count over this file
+    // and is now a count over the package, which is the wider and the right
+    // reading: a second caller written into another file of this crate was
+    // invisible to it and is not invisible to this.
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -113072,46 +113065,6 @@ mod page_under_the_tab_list_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// **This file's slice and the crate's body, compared as bytes.**
-    ///
-    /// [`body`] hands back everything after the signature it matched up to the
-    /// next `\n    fn `, so its slice holds the rest of the declaration, the
-    /// whole body, and then whatever stands between this method and the next.
-    /// [`Index::body_of`] hands back the braces and everything between them, so
-    /// the crate's body **minus its opening brace** has to stand in this file's
-    /// slice, once, with nothing in front of it but the rest of the declaration.
-    ///
-    /// What comes back is this file's slice, so this commit changes no
-    /// assertion; every assertion below was checked against the *narrowed* body
-    /// before this was written, because narrowing a slice can only take a
-    /// positive away.
-    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
-        let inner = new
-            .strip_prefix('{')
-            .expect("a body the crate hands back opens on its brace");
-        let at = old.find(inner).unwrap_or_else(|| {
-            panic!("`{what}`: this file's slice does not hold the body the crate returned")
-        });
-        assert_eq!(
-            old.rfind(inner),
-            Some(at),
-            "`{what}`: the crate's body stands twice inside this file's slice"
-        );
-        let head = &old[..at];
-        assert!(
-            head.is_empty()
-                || (head.ends_with('{') && !head[..head.len() - 1].contains(['{', '}'])),
-            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
-             of its body"
-        );
-        old
-    }
-
-    /// One method pin's two readings, asserted to agree, the file's returned.
-    fn agreed_method(signature: &str, owner: &str, name: &str) -> &'static str {
-        agreed(body(signature), method_body(owner, name), name)
-    }
-
     /// **The tab list is asked, and asked before the pages are.**
     ///
     /// Red gate: this is the defect. Before the repair `web_page_at` subtracted
@@ -113121,7 +113074,7 @@ mod page_under_the_tab_list_tests {
     /// already given away.
     #[test]
     fn the_tab_list_is_asked_before_any_page_is() {
-        let web_page_at = agreed_method("    fn web_page_at(", "Runtime", "web_page_at");
+        let web_page_at = method_body("Runtime", "web_page_at");
         let asked = web_page_at
             .find("tab_list_target_at")
             .expect("the page's door subtracts the tab list");
@@ -113141,19 +113094,10 @@ mod page_under_the_tab_list_tests {
     /// "the tab list is over this pixel" one answer rather than two.
     #[test]
     fn every_axis_of_the_tab_list_is_reached_from_one_place() {
-        let door = agreed_method(
-            "    fn tab_list_target_at(",
-            "Runtime",
-            "tab_list_target_at",
-        );
+        let door = method_body("Runtime", "tab_list_target_at");
         for hit in ["hit_rail_chrome", "hit_tab_chrome", "hit_focus_rail"] {
             let needle = ["seats", "::", hit, "("].concat();
-            let calls = SOURCE.matches(needle.as_str()).count();
-            assert_eq!(
-                calls,
-                found(needle!(Pattern::text(needle.as_str())), View::Raw).len(),
-                "P3 equivalence: this file and the crate count the same calls to {hit}"
-            );
+            let calls = found(needle!(Pattern::text(needle.as_str())), View::Raw).len();
             assert_eq!(calls, 1, "{hit} is called from {calls} places, not one");
             assert!(
                 door.contains(needle.as_str()),
@@ -113167,11 +113111,7 @@ mod page_under_the_tab_list_tests {
     /// every click on an open rail to whatever is underneath it (R1).
     #[test]
     fn the_chrome_ladder_still_begins_with_the_tab_list() {
-        let chrome_target_at = agreed_method(
-            "    fn docked_chrome_target_at(",
-            "Runtime",
-            "docked_chrome_target_at",
-        );
+        let chrome_target_at = method_body("Runtime", "docked_chrome_target_at");
         let list = chrome_target_at
             .find("tab_list_target_at")
             .expect("the chrome ladder asks the tab list");
