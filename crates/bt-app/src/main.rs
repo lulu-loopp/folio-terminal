@@ -112907,32 +112907,37 @@ mod pages_are_plural_tests {
 /// seat the drop minted" is not a sentence this process can say without a screen.
 #[cfg(test)]
 mod a_page_lands_where_it_was_aimed_tests {
-    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
-    // commit after this one deletes the older of the two. `source`, `item_body`
-    // and `method_body` are `pty_drain_budget_tests`' helpers word for word.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before this
+    // one ran both readings side by side and asserted they agree — all fifteen
+    // bodies compared as bytes — and this is the one that deletes the older of
+    // the two, because two implementations of one judgement do not vouch for each
+    // other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body` and `method_body` are that module's helpers word for
+    // word, and its header is where the six points behind them live.
+    //
+    // **One owner, established rather than assumed.** All fifteen doors are
+    // methods of `Runtime`; the deleted finder took the first `    fn name(` in
+    // this file, which is a method of whatever `impl` happens to come first.
+    //
+    // **The doors are named, not spelled.** `NAMED_DOORS` held signatures; it
+    // holds names now, because the identity of §2.4 is what stays the same when a
+    // method moves. Eleven of those signatures were also occurrences of
+    // themselves — the spelling `    fn rename_preview_file(` is written here as
+    // well as in the `impl` — so the day a door left this file the finder would
+    // have answered with this module's own literal and every claim below would
+    // have been about a string.
+    //
+    // **End-of-body semantics of the deleted finder, recorded before it went:**
+    // from the signature to the first `}` in column four, inclusive — which is
+    // the method's own closing brace, with the tail of the parameter list in
+    // front of it. The equivalence commit asserted exactly that: the old slice
+    // ends with the crate's body and a newline, for all fifteen.
     use bt_source::{Index, ItemQuery};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, **from its signature to its own closing brace** —
-    /// the first `}` in column four.
-    ///
-    /// Deliberately not the neighbouring modules' "run to the next `fn`": that
-    /// slice swallows the *next* function's doc comment, and every claim below
-    /// is about what a body does **not** say. A door that had been repaired and
-    /// whose neighbour's prose still named the old question would read as
-    /// unrepaired.
-    fn body(signature: &str) -> &'static str {
-        const CLOSE: &str = "\n    }\n";
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find(CLOSE).map_or(rest.len(), |at| at + CLOSE.len());
-        &rest[..end]
-    }
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -112952,24 +112957,6 @@ mod a_page_lands_where_it_was_aimed_tests {
     /// The body of one inherent method of `owner`.
     fn method_body(owner: &str, name: &str) -> &'static str {
         item_body(&ItemQuery::method(owner, name))
-    }
-
-    /// **The two readings of one door, asserted to agree, and the newer one
-    /// returned.**
-    ///
-    /// The deleted finder's slice runs from the signature to the first `}` in
-    /// column four inclusive, which is the tail of the parameter list followed by
-    /// the method's body followed by one newline. So the agreement is a byte
-    /// equality and not a sample: whatever `Runtime::name`'s body is, the old
-    /// slice ends with it.
-    fn agreed(name: &str) -> &'static str {
-        let old = body(&["    fn ", name, "("].concat());
-        let new = method_body("Runtime", name);
-        assert!(
-            old.ends_with(&[new, "\n"].concat()),
-            "the two readings of `{name}` disagree:\nold:\n{old}\nnew:\n{new}"
-        );
-        new
     }
 
     /// **Every door that was *told* which surface to work on**, in the order a
@@ -113015,15 +113002,9 @@ mod a_page_lands_where_it_was_aimed_tests {
     /// the minted seat empty.
     #[test]
     fn a_door_that_was_told_a_surface_never_chooses_another() {
-        for &door in NAMED_DOORS {
-            let old = body(&["    fn ", door, "("].concat());
-            let text = agreed(door);
+        for door in NAMED_DOORS {
+            let text = method_body("Runtime", door);
             for chooser in CHOOSERS {
-                assert_eq!(
-                    old.contains(chooser),
-                    text.contains(chooser),
-                    "the two readings of `{door}` disagree about `{chooser}`"
-                );
                 assert!(
                     !text.contains(chooser),
                     "`{door}` was handed a surface and still reaches `{chooser}` — \
@@ -113041,18 +113022,7 @@ mod a_page_lands_where_it_was_aimed_tests {
     /// and this fails.
     #[test]
     fn the_page_lane_opens_on_the_surface_it_was_handed() {
-        let old = body("    fn open_preview_source_on(");
-        let fork = agreed("open_preview_source_on");
-        for probe in [
-            "source_opens_as_a_page(&source)",
-            "return self.open_preview_web_file_on(surface, path);",
-        ] {
-            assert_eq!(
-                old.contains(probe),
-                fork.contains(probe),
-                "the two readings disagree about `{probe}`"
-            );
-        }
+        let fork = method_body("Runtime", "open_preview_source_on");
         assert!(
             fork.contains("source_opens_as_a_page(&source)")
                 && fork.contains("return self.open_preview_web_file_on(surface, path);"),
@@ -113071,23 +113041,7 @@ mod a_page_lands_where_it_was_aimed_tests {
     /// disk's sentence appears in a pane the reader never aimed at.
     #[test]
     fn the_named_page_door_opens_on_the_surface_and_refuses_on_it_too() {
-        let old = body("    fn open_preview_web_file_on(");
-        let door = agreed("open_preview_web_file_on");
-        for probe in [
-            "PreviewSurface::Seat(leaf) => self.open_minted_page_on(leaf, mint)",
-            "PreviewSurface::Float(id) => self.open_minted_page_on_float(id, mint)",
-        ] {
-            assert_eq!(
-                old.contains(probe),
-                door.contains(probe),
-                "the two readings disagree about `{probe}`"
-            );
-        }
-        assert_eq!(
-            old.matches("self.land_page_refusal_on(").count(),
-            door.matches("self.land_page_refusal_on(").count(),
-            "the two readings disagree about how many refusals the door lands"
-        );
+        let door = method_body("Runtime", "open_preview_web_file_on");
         assert!(
             door.contains("PreviewSurface::Seat(leaf) => self.open_minted_page_on(leaf, mint)"),
             "a page named onto a pane does not reach that pane's engine:\n{door}"
@@ -113118,13 +113072,7 @@ mod a_page_lands_where_it_was_aimed_tests {
             "open_preview_web_file",
             "open_web_page_with",
         ] {
-            let old = body(&["    fn ", door, "("].concat());
-            let text = agreed(door);
-            assert_eq!(
-                old.contains("self.preview_landing_surface()"),
-                text.contains("self.preview_landing_surface()"),
-                "the two readings of `{door}` disagree about the landing rule"
-            );
+            let text = method_body("Runtime", door);
             assert!(
                 text.contains("self.preview_landing_surface()"),
                 "`{door}` has no surface of its own and no longer asks the \
