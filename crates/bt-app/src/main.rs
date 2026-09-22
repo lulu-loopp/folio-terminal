@@ -113541,10 +113541,6 @@ mod quit_transaction_tests {
 
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// This file, read as text — the witness for the claims below that are about
-    /// *where* something is and is not written.
-    const SOURCE: &str = include_str!("main.rs");
-
     fn window(cwd: &str) -> SessionWindowV1 {
         SessionWindowV1 {
             tabs: vec![super::seeded_tab(&seed::Seed::Term {
@@ -113556,36 +113552,34 @@ mod quit_transaction_tests {
         }
     }
 
-    /// The body of one function of this file, as text.
-    ///
-    /// The signature is handed over **in pieces and joined here**, on
-    /// `only_one_line_in_this_file_hands_the_store_a_document`'s own rule: this
-    /// module stands earlier in the file than the code it reads, so a needle
-    /// written out whole would find *this test's own prose* first and every
-    /// assertion below would be about a string literal.
-    fn body(signature: &[&str]) -> &'static str {
-        let signature = signature.concat();
-        let start = SOURCE
-            .find(signature.as_str())
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    }
-
-    // ── what this module asks the crate instead ───────────────────────────
+    // ── what this module asks the crate ───────────────────────────────────
     //
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Nothing is deleted here: each body pin computes
-    // its answer twice — once from `include_str!("main.rs")`, once from
-    // `bt-source` — and `agreed` asserts the two are the same bytes; each
-    // whole-file count asserts the two answer the same number. The deletion is
-    // the commit after this one.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate. The commit before this one ran
+    // both readings side by side and asserted they agree — eight body pins
+    // compared as bytes, two counts as numbers — and this is the one that
+    // deletes the older of the two, because two implementations of one
+    // judgement do not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
     // `source`, `item_body`, `method_body`, `found` and `in_product` are that
     // module's helpers word for word, and its header is where the six points
-    // behind them live. `agreed` is the equivalence itself and goes with the
-    // old reading.
+    // behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed — spelled in pieces, because
+    // this module stands earlier in the file than the code it read and a whole
+    // needle would have found this module's own prose first — and stopped
+    // before the next `\n    fn `, which is not the end of the method.
+    // `exiting`'s slice was 62,842 bytes around a body of 883, because the next
+    // `fn ` at that indentation is far below the trait implementation.
+    //
+    // It also could not say which `impl` it had landed in, and here that
+    // mattered: the pins name four owners. `retire_all_shells` is a method of
+    // [`super::TabState`], not of `Runtime`; `settle_quit` is [`super::FolioApp`]'s;
+    // `exiting` is the `ApplicationHandler` implementation's. The equivalence
+    // commit is what established that rather than assumed it.
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -113636,38 +113630,6 @@ mod quit_transaction_tests {
             .count()
     }
 
-    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
-    ///
-    /// `body` hands back everything after the signature prefix it was given and
-    /// stops before the next `\n    fn `: the rest of the declaration, then the
-    /// body, then whatever stands between the closing brace and the next
-    /// method's `fn `. `body_of` hands back the braces and what is between them.
-    /// So the crate's answer has to stand in this file's slice at the head of
-    /// the body, with nothing but the rest of the declaration in front of it.
-    ///
-    /// The owner is an argument because this module's pins turn out to name
-    /// four of them, which the equivalence is what establishes rather than
-    /// assumes. What comes back is the file's slice, so this commit changes no
-    /// assertion.
-    fn agreed(old: &'static str, new: &'static str, label: &str) -> &'static str {
-        let at = match old.find(new) {
-            Some(at) => at,
-            None => {
-                assert!(
-                    old.starts_with(&new[1..]),
-                    "`{label}`: this file's slice and the crate's body are not the same bytes"
-                );
-                0
-            }
-        };
-        assert!(
-            !old[..at].contains('{'),
-            "`{label}`: the crate's body stands inside this file's slice rather than at the head \
-             of it"
-        );
-        old
-    }
-
     /// **RED (shape) — a window is in the vault before it is asked what it looks like** (§7.53).
     ///
     /// [`Runtime::window_snapshot`] measures a rectangle only while a window is normal; the other
@@ -113680,18 +113642,15 @@ mod quit_transaction_tests {
     /// `FolioApp::resumed` seeds its picture with the paragraph it opened from.
     ///
     /// Held against the source for this module's own reason: it is a claim about *when* something
-    /// is written, which no value in the program carries.
+    /// is written, which no value in the program carries. The source is asked for by identity —
+    /// `Runtime::open_window` — so the claim follows the door rather than this file.
     ///
     /// Red gate: delete the `record_window` call, or move it below `new_window_runtime`, and this
     /// goes red. Move the snapshot after `show_new_window` and the last assertion does — a
     /// maximized window photographed after `SW_MAXIMIZE` has no normal rectangle left to measure.
     #[test]
     fn a_window_is_in_the_vault_before_it_is_asked_what_it_looks_like() {
-        let door = agreed(
-            body(&["fn open_", "window(\n        event_loop: &ActiveEventLoop,"]),
-            method_body("Runtime", "open_window"),
-            "Runtime::open_window",
-        );
+        let door = method_body("Runtime", "open_window");
         let seeded = door
             .find("app.record_window(")
             .expect("the door puts this window's opening rectangle in the vault");
@@ -113799,7 +113758,7 @@ mod quit_transaction_tests {
     ///
     /// The structural half of `quit_writes_every_window_and_vaults_none`, checked
     /// where it can actually be broken: `vault_this_window` is called from
-    /// exactly one place in this file, that place is the branch `close_window`
+    /// exactly one place in this package, that place is the branch `close_window`
     /// takes when the shut is *not* the process ending, and the quit's own
     /// teardown names neither it nor the store.
     ///
@@ -113809,32 +113768,16 @@ mod quit_transaction_tests {
     fn the_only_door_into_the_vault_is_a_window_the_user_closed() {
         let door = ["vault_this_", "window("].concat();
         assert_eq!(
-            SOURCE.matches(door.as_str()).count(),
             found(needle!(Pattern::text(&door)), View::Raw).len(),
-            "this file's count of the vault's door and the package's do not agree"
-        );
-        assert_eq!(
-            SOURCE.matches(door.as_str()).count(),
             2,
             "one definition and one call site"
         );
-        let close = agreed(
-            body(&[
-                "    fn close_",
-                "window(&mut self, ending: bool) -> Result<()> {",
-            ]),
-            method_body("Runtime", "close_window"),
-            "Runtime::close_window",
-        );
+        let close = method_body("Runtime", "close_window");
         assert!(
             close.contains(&["} else {\n            self.", door.as_str()].concat()),
             "the vault is the branch a shut that is *not* the process ending takes"
         );
-        let retire = agreed(
-            body(&["    fn retire_", "window(&mut self) -> Result<()> {"]),
-            method_body("Runtime", "retire_window"),
-            "Runtime::retire_window",
-        );
+        let retire = method_body("Runtime", "retire_window");
         assert!(
             !retire.contains("vault") && !retire.contains("mark_session_dirty"),
             "a quit's teardown neither files a window away nor re-records one"
@@ -113851,7 +113794,7 @@ mod quit_transaction_tests {
     /// seconds"; taking every step off this thread is what makes the click
     /// answer at once. There is one road now and it is
     /// `bt_pty::retire_session`, so this checks that `PtySession::shutdown` is
-    /// not called from this file at all.
+    /// not called from anywhere the product compiles.
     ///
     /// Red gate: put a synchronous shutdown back into any of the three doors and
     /// the count names it.
@@ -113866,52 +113809,28 @@ mod quit_transaction_tests {
         // product build compiles, which is the question this pin was always
         // asking and the one `include_str!("main.rs")` could only approximate.
         assert_eq!(
-            SOURCE.matches(on_this_thread.as_str()).count(),
             in_product(&found(needle!(Pattern::text(&on_this_thread)), View::Raw)),
-            "this file's count of synchronous shutdowns and the package's, over \
-             the files a product build compiles, do not agree"
-        );
-        assert_eq!(
-            found(needle!(Pattern::text(&on_this_thread)), View::Raw).len(),
-            1,
-            "the one synchronous shutdown left in this package is the fixture in \
-             `tests.rs`, which no product build compiles"
-        );
-        assert_eq!(
-            SOURCE.matches(on_this_thread.as_str()).count(),
-            // None at all, counted over the whole of `main.rs`. It was 1 until 2026-09-18,
-            // when `mod tests` moved to `tests.rs` and took with it the one test that drives
-            // a shutdown by hand; this file is now the product plus fifty-four smaller test
-            // modules, and not one of them takes a session apart on the window thread.
+            // None at all, counted over every file a product build of this package
+            // compiles. The one written anywhere in the package is the fixture in
+            // `tests.rs`, which `mod tests` took with it on 2026-09-18 and which the
+            // declaration reaching that file gates behind `#[cfg(test)]` — so it is
+            // not counted, which is the fact this pin meant all along.
             0,
-            "a synchronous shutdown is written in this file again"
+            "a synchronous shutdown is written in the product again"
         );
-        for (door, owner, name) in [
-            (
-                "    fn retire_all_shells(&mut self) {",
-                "TabState",
-                "retire_all_shells",
-            ),
-            ("    fn let_go_of_this_", "Runtime", "let_go_of_this_window"),
+        for (owner, name) in [
+            ("TabState", "retire_all_shells"),
+            ("Runtime", "let_go_of_this_window"),
         ] {
-            let text = agreed(
-                body(&[door]),
-                method_body(owner, name),
-                &format!("{owner}::{name}"),
-            );
+            let text = method_body(owner, name);
             assert!(
                 !text.contains(&on_this_thread),
-                "`{door}` hands the session over rather than taking it apart here"
+                "`{owner}::{name}` hands the session over rather than taking it apart here"
             );
         }
         let handed = ["bt_pty::retire_", "session("].concat();
         assert!(
-            agreed(
-                body(&["    fn retire_all_shells(&mut self) {"]),
-                method_body("TabState", "retire_all_shells"),
-                "TabState::retire_all_shells",
-            )
-            .contains(handed.as_str()),
+            method_body("TabState", "retire_all_shells").contains(handed.as_str()),
             "and the hand-over is what it does instead"
         );
     }
@@ -113928,14 +113847,7 @@ mod quit_transaction_tests {
     /// before the process starts hiding windows over a file it never wrote.
     #[test]
     fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
-        let settle = agreed(
-            body(&[
-                "    fn settle_",
-                "quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {",
-            ]),
-            method_body("FolioApp", "settle_quit"),
-            "FolioApp::settle_quit",
-        );
+        let settle = method_body("FolioApp", "settle_quit");
         assert!(
             settle.contains("app.session_store.flush_judged()"),
             "the quit's write is the judged one"
@@ -113968,27 +113880,14 @@ mod quit_transaction_tests {
     /// call.
     #[test]
     fn the_quit_and_the_loops_own_backstop_stay_two_machines() {
-        let settle = agreed(
-            body(&[
-                "    fn settle_",
-                "quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {",
-            ]),
-            method_body("FolioApp", "settle_quit"),
-            "FolioApp::settle_quit",
-        );
+        let settle = method_body("FolioApp", "settle_quit");
         let shut = ["close_", "window"].concat();
         assert!(
             !settle.contains(shut.as_str()),
             "a quit never spends the per-window shut"
         );
-        let exiting = agreed(
-            body(&[
-                "    fn exit",
-                "ing(&mut self, _event_loop: &ActiveEventLoop) {",
-            ]),
-            item_body(&ItemQuery::method("FolioApp", "exiting").of_trait("ApplicationHandler")),
-            "<FolioApp as ApplicationHandler>::exiting",
-        );
+        let exiting =
+            item_body(&ItemQuery::method("FolioApp", "exiting").of_trait("ApplicationHandler"));
         assert!(
             exiting.contains(&[shut.as_str(), "(true)"].concat()),
             "and the backstop for a loop stopped by something else is untouched"
