@@ -225,6 +225,9 @@ crates/bt-app/src/main.rs	page_under_the_tab_list_tests::every_axis_of_the_tab_l
 crates/bt-app/src/main.rs	page_under_the_tab_list_tests::the_chrome_ladder_still_begins_with_the_tab_list	include_str!	docked_chrome_target_at;tab_list_target_at	P3	yes
 crates/bt-app/src/main.rs	page_under_the_tab_list_tests::the_tab_list_is_asked_before_any_page_is	include_str!	tab_list_target_at;web_page_at	P3	yes
 crates/bt-app/src/main.rs	platform_gate_tests::only_the_named_files_decide_what_platform_this_is	directory walk	(the file it reads)	P10	no
+crates/bt-app/src/main.rs	popover_trigger_tests::a_popup_is_up_only_while_its_own_layout_would_draw	include_str!	graph_filter_menu_layout;graph_filter_menu_stand;popups_up;preview_menu_layout;preview_menu_stand;root_menu_layout;root_menu_stand	P3	yes
+crates/bt-app/src/main.rs	popover_trigger_tests::every_dismissal_arm_asks_the_one_rule	include_str!	main.rs	P3	yes
+crates/bt-app/src/main.rs	popover_trigger_tests::the_register_names_every_popup	include_str!	popup_trigger	P3	yes
 crates/bt-app/src/main.rs	summon_key_wiring_tests::the_synthetic_bit_reaches_the_gate_and_the_gate_stands_first	include_str!	keyboard_input;window_event	P3	yes
 crates/bt-app/src/main.rs	system_preference_wiring_tests::the_system_preference_event_re_reads_the_desktops_canvas	include_str!	adopt_motion_preference;adopt_system_canvas	P14	no
 crates/bt-app/src/persist.rs	persist::tests::the_only_thread_that_fsyncs_session_json_is_the_writer	include_str!	flush_if_due;hand_over	P14	no
