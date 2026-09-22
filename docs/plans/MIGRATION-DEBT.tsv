@@ -266,8 +266,6 @@ crates/bt-app/src/webhost.rs	webhost::machine_tests::the_host_asks_its_own_gate_
 crates/bt-app/src/webhost.rs	webhost::refusal_card_tests::the_engine_is_only_ever_told_what_the_door_answered	include_str!	webhost.rs	P14	no
 crates/bt-app/src/webnav.rs	webnav::file_url_tests::no_file_url_is_compared_as_text	directory walk	(the file it reads)	P13	yes
 crates/bt-app/src/wsl.rs	wsl::tests::nothing_in_this_module_boots_a_distribution	runtime fs read	(the file it reads)	P14	no
-crates/bt-layout/tests/red_lines.rs	sources	dir walk	bt-layout/src, NON-recursive (plan 3.3, latent)	P8	no
-crates/bt-layout/tests/red_lines.rs	the_solver_uses_no_floating_point	dir walk	f32/f64 in the solver	P8	no
 crates/bt-platform/src/app_delegate.rs	tests::PROVIDER	include_str!	macos_services.rs	P14	no
 crates/bt-platform/src/hang.rs	tests::SOURCE	include_str!	hang.rs	P14	no
 crates/bt-platform/src/ime_observation.rs	tests::ime_observation_reads_only_the_supplied_window	include_str!	ime_observation.rs	P14	no
@@ -336,16 +334,6 @@ crates/bt-platform/src/msix.rs	tests::every_deployment_this_module_makes_announc
 crates/bt-platform/src/webview.rs	third_door_shape_tests::DOOR	include_str!	macos_webview.rs	P14	no
 crates/bt-pty/src/lib.rs	tests::SOURCE	include_str!	lib.rs	P14	no
 crates/bt-pty/src/lib.rs	tests::input_dump_off_write_path_has_only_the_option_gate	include_str!	lib.rs	P14	no
-crates/bt-render/src/lib.rs	tests::crate_sources	dir walk	bt-render/src, NON-recursive (plan 3.3, latent)	P8	no
-crates/bt-render/src/lib.rs	tests::every_chip_the_renderer_floats_over_a_body_is_struck_from_the_palette	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::every_headless_device_in_a_test_is_taken_through_the_lock	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::every_lane_prepares_into_the_one_shared_atlas	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::nothing_but_the_line_may_count_a_repack	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::source_without_prose	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::the_band_accessors_are_given_a_seat_and_never_take_one	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	tests::the_wash_is_struck_over_the_picture_and_under_the_blocks_own_chrome	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	web_holes::a_layers_own_hole_is_punched_after_the_face_that_layer_draws	include_str!	lib.rs	P8	no
-crates/bt-render/src/lib.rs	web_holes::the_hole_is_drawn_over_the_seat_and_under_everything_over_the_window	include_str!	lib.rs	P8	no
 crates/bt-term/tests/shell_integration_cmd.rs	shell_integration_source	runtime fs read	../../crates/bt-app/src/shell_integration.rs	P17	no
 crates/bt-term/tests/shell_integration_wsl.rs	shell_integration_source	runtime fs read	../../crates/bt-app/src/shell_integration.rs	P17	no
 scripts/check-adapter-boundary.ps1	the file list at the head of the script	script: named file list	crates/bt-term/src/adapter.rs;crates/bt-term/src/cell_capture.rs	P17	no

@@ -330,6 +330,9 @@ dependencies = [
 [[package]]
 name = "bt-layout"
 version = "0.4.3"
+dependencies = [
+ "bt-source",
+]
 
 [[package]]
 name = "bt-math"
@@ -408,6 +411,7 @@ dependencies = [
  "bt-doc",
  "bt-math",
  "bt-platform",
+ "bt-source",
  "bt-term",
  "bt-transcript",
  "bt-unicode",
