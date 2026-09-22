@@ -29403,7 +29403,9 @@ fn a_completion_that_changes_no_intrinsic_does_not_reflow_the_document() {
 ///
 /// MUTATION: leave `peek_pane` out of [`documents_held_in`] and the first
 /// assertion goes red; spell a `tab.preview_panes` walk into any of the three
-/// again and the second does.
+/// again and the second does; take the `documents_held` call out of one of them
+/// and the third does. A `tab.preview_panes` written in a *comment* inside one
+/// of the three is prose and leaves it green.
 #[test]
 fn the_glance_cards_document_is_in_the_awaited_set() {
     let file = PathBuf::from(r"D:\proj\shots/one.png");
@@ -29424,23 +29426,58 @@ fn the_glance_cards_document_is_in_the_awaited_set() {
         "and it stands on the file, so the watch follows it"
     );
 
-    // Built at run time so that this test's own text is not one of the sites
-    // it is counting.
-    let walk = format!("tab{}.preview_panes", ".");
+    // **The prohibition, asked of each door's own bytes.**
+    //
+    // It used to be `format!("tab{}.preview_panes", ".")`, assembled at run
+    // time so that this file's own text would not be one of the sites it
+    // counted — and the separator went on the wrong side, so the needle was
+    // `tab..preview_panes` and the half that was supposed to go red never
+    // could. `needle!` is what that assembly was reaching for: it excludes the
+    // one expression that built the needle (§2.6) and nothing else, so the
+    // spelling can be written the way the product would write it.
+    //
+    // `View::CodeKeepingLiterals`, because a sentence in a comment about the
+    // walk that used to be here is prose and not a walk.
     for door in [
         "markdown_pictures_awaited",
         "markdown_picture_files",
         "forget_the_picture_in",
     ] {
-        let text = method_body("Runtime", door);
-        assert!(
-            !text.contains(walk.as_str()),
-            "`{door}` walks the tabs' panes for itself, so the card is not \
-                 in it:\n{text}"
+        let walk = found_in(
+            needle!(Pattern::text("tab.preview_panes")),
+            View::CodeKeepingLiterals,
+            Scope::Item(ItemQuery::method("Runtime", door)),
         );
         assert!(
-            text.contains("documents_held"),
-            "`{door}` must be built from the one walk over every holder:\n{text}"
+            walk.is_empty(),
+            "`{door}` walks the tabs' panes for itself, so the card is not in \
+             it:\n{}",
+            walk.report(source())
+        );
+    }
+    // **And each door is built from the one walk, by the call it makes.**
+    // `contains("documents_held")` was the whole of this before, and it is a
+    // prefix of `documents_held_in` and of `documents_held_mut` — so it could
+    // not tell the walk that names the card from the two that do not.
+    for (door, call) in [
+        (
+            "markdown_pictures_awaited",
+            "pictures_awaited_by(self.documents_held())",
+        ),
+        (
+            "markdown_picture_files",
+            "picture_files_of(self.documents_held())",
+        ),
+        (
+            "forget_the_picture_in",
+            "forget_standing_answers(self.documents_held_mut(), path)",
+        ),
+    ] {
+        let text = method_body("Runtime", door);
+        assert!(
+            text.contains(call),
+            "`{door}` must be built from the one walk over every holder, as \
+             `{call}`:\n{text}"
         );
     }
     assert!(
