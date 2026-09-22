@@ -121627,6 +121627,41 @@ fn tab_surface_tip_boxes(
 
 #[cfg(test)]
 mod files_turn_wake_tests {
+    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
+    // commit after this one deletes the older of the two. `source`, `item_body`
+    // and `method_body` are `pty_drain_budget_tests`' helpers word for word.
+    use bt_source::{Index, ItemQuery};
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The statement the deadline asks its question in, cut out of a body.
+    fn question(body: &str) -> &str {
+        let turning = body
+            .find("let files_turning")
+            .expect("the deadline asks whether a triangle is turning");
+        let question = &body[turning..];
+        &question[..question.find(";\n").unwrap_or(question.len())]
+    }
+
     /// RED — **every tree that can turn a triangle is asked whether one is
     /// turning** (user report 2026-08-28, `docs/DESIGN.md` §7.37 ④).
     ///
@@ -121656,14 +121691,20 @@ mod files_turn_wake_tests {
         let at = SOURCE
             .find("fn strip_animation_work(")
             .expect("the window has an animation deadline");
-        let body = &SOURCE[at..];
-        let end = body.find("\n    fn ").unwrap_or(body.len());
-        let body = &body[..end];
-        let turning = body
-            .find("let files_turning")
-            .expect("the deadline asks whether a triangle is turning");
-        let question = &body[turning..];
-        let question = &question[..question.find(";\n").unwrap_or(question.len())];
+        let older = &SOURCE[at..];
+        let end = older.find("\n    fn ").unwrap_or(older.len());
+        let older = &older[..end];
+        let body = method_body("Runtime", "strip_animation_work");
+        assert!(
+            older.contains(body),
+            "the older reading does not carry the crate's body"
+        );
+        assert_eq!(
+            question(older),
+            question(body),
+            "the two readings disagree about the question the deadline asks"
+        );
+        let question = question(body);
         assert!(
             question.contains("file_trees"),
             "the docked columns' caches are still asked:\n{question}"
