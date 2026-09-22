@@ -109096,6 +109096,105 @@ mod recent_folder_door_tests {
             .count()
     }
 
+    // ── what this module asks the crate instead ───────────────────────────
+    //
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Nothing is deleted here: every reading is computed
+    // twice — once from `include_str!("main.rs")`, once from `bt-source` — and
+    // the two are asserted to agree. The deletion is the commit after this one.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
+    //
+    // The trimmed-line-start rule the file reading needed is what a view makes
+    // unnecessary: the mentions it was written to step over are this module's
+    // own `CALL` literal and the doc comments that explain the door, and
+    // `View::Identifiers` masks both. What it cannot mask is the door's own
+    // declaration, which is a call shape too — so that is named and exempted,
+    // which is §2.5's rule rather than a rule of this module's.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// The door, looked for as a call and not as a spelling, with its own
+    /// declaration taken out.
+    fn doors(scope: bt_source::Scope) -> usize {
+        source()
+            .search(
+                &bt_source::Search::new(
+                    bt_source::Needle::new(bt_source::Pattern::call("note_folder_opened")),
+                    bt_source::View::Identifiers,
+                )
+                .in_scope(scope)
+                .exempting_declarations_of(bt_source::ItemQuery::method(
+                    "Runtime",
+                    "note_folder_opened",
+                )),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .len()
+    }
+
+    /// The doors inside one method of `Runtime`.
+    fn doors_in(name: &str) -> usize {
+        doors(bt_source::Scope::Item(bt_source::ItemQuery::method(
+            "Runtime", name,
+        )))
+    }
+
+    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
+    ///
+    /// `body` hands back everything after the signature prefix it was given and
+    /// stops before the next `\n    fn `; `body_of` hands back the braces and
+    /// what is between them. So the crate's answer has to stand in this file's
+    /// slice at the head of the body, with nothing but the rest of the
+    /// declaration in front of it.
+    fn agreed(old: &'static str, name: &str) -> &'static str {
+        let new = method_body("Runtime", name);
+        let at = match old.find(new) {
+            Some(at) => at,
+            None => {
+                assert!(
+                    old.starts_with(&new[1..]),
+                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
+                     bytes"
+                );
+                0
+            }
+        };
+        assert!(
+            !old[..at].contains('{'),
+            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
+             the head of it"
+        );
+        assert_eq!(
+            doors_in(name),
+            calls(old),
+            "`Runtime::{name}`: this file's count of the doors and the crate's disagree"
+        );
+        old
+    }
+
     /// RED (user ruling 2026-09-05) — **the two doors a hand goes through record,
     /// and there are two of them.**
     ///
@@ -109107,16 +109206,32 @@ mod recent_folder_door_tests {
     #[test]
     fn the_doors_that_remember_a_folder_are_the_two_a_hand_goes_through() {
         assert_eq!(
-            calls(body("    fn reroot_files_column(")),
+            calls(agreed(
+                body("    fn reroot_files_column("),
+                "reroot_files_column"
+            )),
             1,
             "pointing a column somewhere else is the door the menu, `Browse…`, a \
              drop and a walk into a folder all come through"
         );
         assert_eq!(
-            calls(body("    fn show_folder_in_files_column(")),
+            calls(agreed(
+                body("    fn show_folder_in_files_column("),
+                "show_folder_in_files_column"
+            )),
             1,
             "and a tab with no column at all gets one, which is the same gesture \
              with nothing to re-root"
+        );
+        // **The same count, asked of the crate.** This file's reading sees
+        // `main.rs`; the crate's sees every file the package declares, which is
+        // the scope the ruling wants — a third door written in another file is
+        // exactly the "third is a ruling and not an edit" this counts, and the
+        // file reading could not see one.
+        assert_eq!(
+            doors(bt_source::Scope::Everything),
+            calls(SOURCE),
+            "this file's count of the doors and the package's disagree"
         );
         assert_eq!(
             calls(SOURCE),
@@ -109139,13 +109254,13 @@ mod recent_folder_door_tests {
     /// every `cd` the reader happens to open a column after.
     #[test]
     fn a_column_opened_onto_a_shells_own_folder_remembers_nothing() {
-        for signature in [
-            "    fn toggle_files_pane(",
-            "    fn seat_a_files_column(",
-            "    fn files_root_for_new_pane(",
+        for (signature, name) in [
+            ("    fn toggle_files_pane(", "toggle_files_pane"),
+            ("    fn seat_a_files_column(", "seat_a_files_column"),
+            ("    fn files_root_for_new_pane(", "files_root_for_new_pane"),
         ] {
             assert_eq!(
-                calls(body(signature)),
+                calls(agreed(body(signature), name)),
                 0,
                 "{signature} takes its folder from a shell and not from a hand"
             );
