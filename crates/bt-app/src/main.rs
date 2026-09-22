@@ -108884,23 +108884,71 @@ mod git_header_selection_tests {
 /// a seventh `return` added beside the six, without a line beside it, puts the
 /// silence back one arm at a time and nothing fails while it happens.
 ///
-/// So the pins read this file as text, which is the only witness that can answer
-/// "is there a `return` here with nothing written next to it". They assert
-/// nothing about *what* is traced — the format is free to change — only that no
-/// exit of these functions is unaccompanied.
+/// So the pins read the source, which is the only witness that can answer "is
+/// there a `return` here with nothing written next to it". They assert nothing
+/// about *what* is traced — the format is free to change — only that no exit of
+/// these functions is unaccompanied. Since P3 they ask the crate for the body
+/// of each function by name rather than this file for a slice of its text, so
+/// the answer follows the function when it moves.
 #[cfg(test)]
 mod mouse_trace_station_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree — eight
+    // body pins compared as bytes, and the route sweep run both ways — and this
+    // is the one that deletes the older of the two, because two implementations
+    // of one judgement do not vouch for each other (`docs/CONVENTIONS.md` §十
+    // rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `found` are that module's helpers
+    // word for word, and its header is where the six points behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed and stopped before the next
+    // `\n    fn `, which is not the end of the method — 1,874 bytes around
+    // `preview_landing_surface`'s 1,264-byte body, 1,375 around
+    // `open_preview_image`'s 809 — and it could not say which `impl` it had
+    // landed in. All eight turned out to be `Runtime`'s; the equivalence commit
+    // is what established that rather than assumed it.
+    //
+    // **One reading widens** (§4.1). The route sweep took this file; it now
+    // takes every file the package declares, which is one site more — a fixture
+    // in `tests.rs` writing a declared word. The closed set of route words is a
+    // fact about the package and not about one file of it, and a reading
+    // watching one file could not say so.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// How far back a trace call may stand from the `return` it belongs to.
@@ -108925,19 +108973,19 @@ mod mouse_trace_station_tests {
             .collect()
     }
 
-    fn assert_every_return_is_traced(signature: &str, needle: &str, expected: usize) {
-        let found = returns_and_what_precedes(body(signature), needle);
+    fn assert_every_return_is_traced(name: &str, needle: &str, expected: usize) {
+        let found = returns_and_what_precedes(method_body("Runtime", name), needle);
         assert_eq!(
             found.len(),
             expected,
-            "{signature} has {} exits spelled `{needle}`, the pin was written for {expected} — \
-             count them again and trace the new one",
+            "`Runtime::{name}` has {} exits spelled `{needle}`, the pin was written for \
+             {expected} — count them again and trace the new one",
             found.len()
         );
         for (line, before) in found {
             assert!(
                 before.contains("self.mouse_trace("),
-                "{signature}: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
+                "`Runtime::{name}`: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
                 line.trim(),
             );
         }
@@ -108966,8 +109014,8 @@ mod mouse_trace_station_tests {
     /// a second helper rather than as a widening of the first, because the
     /// chrome's pin counts one shape on purpose and a looser needle there would
     /// stop it counting.
-    fn assert_every_exit_is_traced(signature: &str, expected: usize) {
-        let text = body(signature);
+    fn assert_every_exit_is_traced(name: &str, expected: usize) {
+        let text = method_body("Runtime", name);
         let lines: Vec<&str> = text.lines().collect();
         let exits: Vec<usize> = lines
             .iter()
@@ -108978,7 +109026,7 @@ mod mouse_trace_station_tests {
         assert_eq!(
             exits.len(),
             expected,
-            "{signature} has {} exits, the pin was written for {expected} — \
+            "`Runtime::{name}` has {} exits, the pin was written for {expected} — \
              count them again and trace the new one",
             exits.len()
         );
@@ -108986,7 +109034,7 @@ mod mouse_trace_station_tests {
             let before = lines[at.saturating_sub(LOOKBACK)..at].join("\n");
             assert!(
                 DOORS.iter().any(|door| before.contains(door)),
-                "{signature}: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
+                "`Runtime::{name}`: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
                 lines[at].trim(),
             );
         }
@@ -109002,9 +109050,9 @@ mod mouse_trace_station_tests {
     /// it puts the silence back one arm at a time and nothing else fails.
     #[test]
     fn every_exit_of_the_wheels_road_writes_a_line() {
-        assert_every_exit_is_traced("    fn mouse_wheel(", 22);
-        assert_every_exit_is_traced("    fn scroll_rail(", 3);
-        assert_every_exit_is_traced("    fn aim_focus_card_window(", 10);
+        assert_every_exit_is_traced("mouse_wheel", 22);
+        assert_every_exit_is_traced("scroll_rail", 3);
+        assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
 
     /// **The route words are the declared ones** (T-WHEEL-TRACE, §7.60).
@@ -109015,15 +109063,22 @@ mod mouse_trace_station_tests {
     /// about. `crate::mouse_trace::WHEEL_ROUTES` is the list, and the two words this
     /// file picks indirectly — the local route, and the terminal's own arms —
     /// are asserted to be on it as literals, since a placeholder is not a word.
+    ///
+    /// The sweep is the package's since P3, not this file's: the closed set of
+    /// words is a fact about everything the package writes, and a fixture
+    /// writing an eleventh word is the same defect as a surface doing it. No
+    /// match may cross a file boundary (§2.2), so each word is read inside the
+    /// file its occurrence stands in.
     #[test]
     fn the_wheel_route_words_are_the_declared_ones() {
         let needle = concat!("wheel_route ", "taken", "=");
+        let index = source();
         let mut seen = 0;
-        for at in SOURCE
-            .match_indices(needle)
-            .map(|(at, _)| at + needle.len())
-        {
-            let word: String = SOURCE[at..]
+        for occurrence in found(needle!(Pattern::text(needle)), View::Raw).occurrences() {
+            let file = index
+                .file_at(occurrence.span.start())
+                .expect("every occurrence stands in a file of the universe");
+            let word: String = index.union()[occurrence.span.end()..file.span().end()]
                 .chars()
                 .take_while(|char| char.is_ascii_alphanumeric() || *char == '-')
                 .collect();
@@ -109038,8 +109093,12 @@ mod mouse_trace_station_tests {
                 crate::mouse_trace::WHEEL_ROUTES
             );
         }
-        assert!(seen > 0, "the route line is written somewhere in this file");
-        let wheel = body("    fn mouse_wheel(");
+        assert!(
+            seen > 0,
+            "the route line is written somewhere in this package"
+        );
+
+        let wheel = method_body("Runtime", "mouse_wheel");
         for word in ["terminal-pane", "focused-leaf-fallback", "pty", "nobody"] {
             assert!(
                 crate::mouse_trace::WHEEL_ROUTES.contains(&word),
@@ -109066,15 +109125,15 @@ mod mouse_trace_station_tests {
         // verb on the platform that hands that press to the application — the
         // window's own, which is a drag on one click and the reader's chosen
         // action on two (`at=press-title-bar`).
-        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 29);
+        assert_every_return_is_traced("chrome_mouse_input", "return Ok(true);", 29);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
     /// `Ok(())` — and they are two different findings, so they carry two labels.
     #[test]
     fn both_landing_refusals_write_a_line() {
-        let text = body("    fn preview_landing_surface(");
-        assert_every_return_is_traced("    fn preview_landing_surface(", "return None;", 2);
+        let text = method_body("Runtime", "preview_landing_surface");
+        assert_every_return_is_traced("preview_landing_surface", "return None;", 2);
         assert!(
             text.contains("none=add_preview") && text.contains("none=settle_seat_set_change"),
             "the two landing refusals are told apart by label, not merely counted"
@@ -109085,15 +109144,15 @@ mod mouse_trace_station_tests {
     /// shape of "the click did nothing", so it is the one that must speak.
     #[test]
     fn both_preview_openers_write_a_line_when_nothing_opens() {
-        for signature in ["    fn open_preview_image(", "    fn open_preview_file("] {
-            let text = body(signature);
+        for name in ["open_preview_image", "open_preview_file"] {
+            let text = method_body("Runtime", name);
             assert!(
                 text.contains("leave=no-landing-surface"),
-                "{signature} returns `Ok(())` without saying so"
+                "`Runtime::{name}` returns `Ok(())` without saying so"
             );
             assert!(
                 text.contains("enter path="),
-                "{signature} does not record that it was reached at all"
+                "`Runtime::{name}` does not record that it was reached at all"
             );
         }
     }
@@ -109108,7 +109167,7 @@ mod mouse_trace_station_tests {
     /// above do.
     #[test]
     fn the_folder_door_says_which_of_its_outcomes_happened() {
-        let text = body("    fn show_folder_in_files_column(");
+        let text = method_body("Runtime", "show_folder_in_files_column");
         assert!(
             text.contains("enter path="),
             "the folder door does not record that it was reached at all"
@@ -112569,28 +112628,90 @@ mod focus_column_notch_tests {
 /// spends Control on the secondary click, so a build that read `control_key()`
 /// there answered one press with two verbs.
 ///
-/// These are read as text because the repair is *which question six doors ask*,
-/// and every one of those doors needs a live `WindowRuntime` — a compositor, a
-/// renderer and a shell — to be asked at run time. What a machine can hold
-/// without a screen is the call each door makes, and that no seventh door grows
-/// back the raw reading beside them.
+/// These are read off the source because the repair is *which question six
+/// doors ask*, and every one of those doors needs a live `WindowRuntime` — a
+/// compositor, a renderer and a shell — to be asked at run time. What a machine
+/// can hold without a screen is the call each door makes, and that no seventh
+/// door grows back the raw reading beside them. Since P3 the six are named by
+/// identity and the sweep is the package's, so neither is bound to the file the
+/// doors happen to be written in today.
 #[cfg(test)]
 mod pointer_chord_site_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate. The commit before this one ran
+    // both readings side by side and asserted they agree — thirteen body pins
+    // compared as bytes, three sweeps compared as answers — and this is the one
+    // that deletes the older of the two, because two implementations of one
+    // judgement do not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `found` and `owner_names` are that
+    // module's helpers word for word, and its header is where the six points
+    // behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed and stopped before the next
+    // `\n    fn `, which is not the end of the method — 1,437 bytes around
+    // `terminal_link_grasp`'s 630-byte body — and it could not say which `impl`
+    // it had landed in. All seven identities turned out to be `Runtime`'s,
+    // including the seventh the list below does not name.
+    //
+    // **Two sweeps changed view** (§4.2 rule 3), and the mutation table carries
+    // the evidence for it. They filtered out a line whose first characters are
+    // `//`, which is a hand-rolled comment stripper that sees neither a block
+    // comment nor a trailing one; `View::CodeKeepingLiterals` is §2.1's
+    // replacement for exactly that, and it keeps literals verbatim, which
+    // matters because the spelling these forbid is read out of code. Each names
+    // its survivor by the item it stands in (§4.1) rather than by the text of
+    // its line, because an item is what a move keeps.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// The text of one method or free function, from its signature to the next.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
     }
 
-    /// The six doors a pointer gesture's modifier is read at, by the signature
-    /// each one is declared with.
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The names of the items these occurrences stand in (§4.1) — the assertion
+    /// that survives a move, because relocating a reader changes no key.
+    fn owner_names(found: &Found) -> Vec<String> {
+        let index = source();
+        let mut names: Vec<String> = found
+            .owners(index)
+            .into_iter()
+            .map(|(identity, count)| format!("{}×{count}", identity.name))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The six doors a pointer gesture's modifier is read at, by the name each
+    /// one is declared with.
     ///
     /// **The list is the test.** A seventh gesture that reads the modifier and
     /// is not named here is exactly the defect this ticket repaired — a reading
@@ -112601,16 +112722,16 @@ mod pointer_chord_site_tests {
     const POINTER_DOORS: [&str; 6] = [
         // A press on a rendered page: the drag carries what the press meant, and
         // the link is answered when the press turns out not to have travelled.
-        "    fn press_preview_text(",
+        "press_preview_text",
         // A press on a commit row: the compare gesture (D6).
-        "    fn press_graph_row(",
+        "press_graph_row",
         // A press in a pane: an OSC 8 hyperlink and an inline picture, both.
-        "    fn begin_local_selection(",
+        "begin_local_selection",
         // The pointing finger, on each of the two surfaces a link is drawn on.
-        "    fn terminal_link_grasp(",
-        "    fn preview_link_grasp(",
+        "terminal_link_grasp",
+        "preview_link_grasp",
         // A notch over a hosted page: zoom (方案 §0's five extras).
-        "    fn scroll_web_page(",
+        "scroll_web_page",
     ];
 
     /// RED GATE — **each of the six asks the one function that knows which key
@@ -112625,16 +112746,16 @@ mod pointer_chord_site_tests {
         // Assembled at run time so that this pin cannot match its own text.
         let door = ["input", "::", "pointer_chord_held", "("].concat();
         let hand = ["window", ".", "modifiers_held"].concat();
-        for signature in POINTER_DOORS {
-            let text = body(signature);
+        for name in POINTER_DOORS {
+            let text = method_body("Runtime", name);
             assert!(
                 text.contains(door.as_str()),
-                "{signature} decides a pointer gesture and must ask \
+                "`Runtime::{name}` decides a pointer gesture and must ask \
                  `{door})` which key this platform spends on one"
             );
             assert!(
                 text.contains(hand.as_str()),
-                "{signature} must strike the ruling against what the hand is \
+                "`Runtime::{name}` must strike the ruling against what the hand is \
                  holding and not against what the keyboard means (§13.33 ①)"
             );
         }
@@ -112648,11 +112769,10 @@ mod pointer_chord_site_tests {
     #[test]
     fn no_pointer_door_still_reads_control_by_name() {
         let raw = ["modifiers", ".", "control_key", "()"].concat();
-        for signature in POINTER_DOORS {
-            let text = body(signature);
+        for name in POINTER_DOORS {
             assert!(
-                !text.contains(raw.as_str()),
-                "{signature} still reads `{raw}` for a gesture — on a Mac that is \
+                !method_body("Runtime", name).contains(raw.as_str()),
+                "`Runtime::{name}` still reads `{raw}` for a gesture — on a Mac that is \
                  the secondary click and not this window's modifier"
             );
         }
@@ -112660,28 +112780,29 @@ mod pointer_chord_site_tests {
 
     /// RED GATE — **a seventh gesture cannot grow back the raw reading.**
     ///
-    /// The whole file is swept for `window.modifiers.control_key()`, which is
+    /// The whole package is swept for `window.modifiers.control_key()`, which is
     /// the exact spelling a pointer path used before this ticket, and the
-    /// survivors are named one by one with the reason each is a keyboard's
-    /// question rather than a hand's. A new pointer door written the old way
-    /// lands in this list and fails.
+    /// survivors are named one by one — by the item each stands in — with the
+    /// reason each is a keyboard's question rather than a hand's. A new pointer
+    /// door written the old way lands in this list and fails.
     #[test]
     fn no_other_door_reads_the_raw_control_key_for_a_gesture() {
         let raw = ["self", ".window", ".modifiers", ".", "control_key", "()"].concat();
-        let readers: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with("//") && line.contains(raw.as_str()))
-            .collect();
         // The one survivor, spelled at run time for the reason the needle is:
         // a keyboard's question in `preview_browse_key`, asking whether the
         // player's five transport keys arrived bare.
         let keyboards = format!("&& !{raw}");
+        let survivors = found(needle!(Pattern::text(&raw)), View::CodeKeepingLiterals);
         assert_eq!(
-            readers,
-            vec![keyboards.as_str()],
+            owner_names(&survivors),
+            ["preview_browse_key×1"],
             "every other reading of `{raw}` is a keyboard's; a pointer's reads \
-             `input::pointer_chord_held(self.window.modifiers_held)`"
+             `input::pointer_chord_held(self.window.modifiers_held)`:\n{}",
+            survivors.report(source())
+        );
+        assert!(
+            method_body("Runtime", "preview_browse_key").contains(keyboards.as_str()),
+            "and it is the negated half of a keyboard's question, not a hand's"
         );
     }
 
@@ -112694,9 +112815,7 @@ mod pointer_chord_site_tests {
     /// to record what the platform said, not what this window made of it.
     #[test]
     fn the_secondary_click_is_settled_once_and_above_every_router() {
-        let text = body(
-            "    fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
-        );
+        let text = method_body("Runtime", "mouse_input");
         let needle = ["input", "::", "pressed_button_of_gesture", "("].concat();
         let settle = text
             .find(needle.as_str())
@@ -112714,9 +112833,9 @@ mod pointer_chord_site_tests {
             "the station records the platform's own reading, which a translation \
              made above it would erase"
         );
-        let calls = SOURCE.matches(needle.as_str()).count();
         assert_eq!(
-            calls, 1,
+            found(needle!(Pattern::text(&needle)), View::Raw).len(),
+            1,
             "one door decides what button a press is, as one door decides what \
              modifiers are held"
         );
@@ -112730,15 +112849,17 @@ mod pointer_chord_site_tests {
     #[test]
     fn one_field_remembers_which_press_is_under_the_hand() {
         let needle = ["window", ".", "secondary_press"].concat();
-        let uses: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with("//") && line.contains(needle.as_str()))
-            .collect();
+        let touches = found(needle!(Pattern::text(&needle)), View::CodeKeepingLiterals);
         assert_eq!(
-            uses,
-            vec![format!("&mut self.{needle},")],
-            "the latch is touched at the one door and nowhere else: {uses:?}"
+            owner_names(&touches),
+            ["mouse_input×1"],
+            "§4.1: the latch is touched at the one door and nowhere else, and it is named by \
+             the item it is touched in rather than by a line of a file:\n{}",
+            touches.report(source())
+        );
+        assert!(
+            method_body("Runtime", "mouse_input").contains(&format!("&mut self.{needle},")),
+            "and that item is the one door every button event comes through"
         );
     }
 }
@@ -113772,9 +113893,7 @@ mod quit_transaction_tests {
     use super::{SessionWindowV1, TabV1, quit, restore, seed, session_windows};
     use std::time::SystemTime;
 
-    /// This file, read as text — the witness for the claims below that are about
-    /// *where* something is and is not written.
-    const SOURCE: &str = include_str!("main.rs");
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
     fn window(cwd: &str) -> SessionWindowV1 {
         SessionWindowV1 {
@@ -113787,20 +113906,82 @@ mod quit_transaction_tests {
         }
     }
 
-    /// The body of one function of this file, as text.
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate. The commit before this one ran
+    // both readings side by side and asserted they agree — eight body pins
+    // compared as bytes, two counts as numbers — and this is the one that
+    // deletes the older of the two, because two implementations of one
+    // judgement do not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `found` and `in_product` are that
+    // module's helpers word for word, and its header is where the six points
+    // behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed — spelled in pieces, because
+    // this module stands earlier in the file than the code it read and a whole
+    // needle would have found this module's own prose first — and stopped
+    // before the next `\n    fn `, which is not the end of the method.
+    // `exiting`'s slice was 62,842 bytes around a body of 883, because the next
+    // `fn ` at that indentation is far below the trait implementation.
+    //
+    // It also could not say which `impl` it had landed in, and here that
+    // mattered: the pins name four owners. `retire_all_shells` is a method of
+    // [`super::TabState`], not of `Runtime`; `settle_quit` is [`super::FolioApp`]'s;
+    // `exiting` is the `ApplicationHandler` implementation's. The equivalence
+    // commit is what established that rather than assumed it.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
     ///
-    /// The signature is handed over **in pieces and joined here**, on
-    /// `only_one_line_in_this_file_hands_the_store_a_document`'s own rule: this
-    /// module stands earlier in the file than the code it reads, so a needle
-    /// written out whole would find *this test's own prose* first and every
-    /// assertion below would be about a string literal.
-    fn body(signature: &[&str]) -> &'static str {
-        let signature = signature.concat();
-        let start = SOURCE
-            .find(signature.as_str())
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of one item, braces included — the identity of §2.4 rather than
+    /// a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// How many of these occurrences stand in a file a product build compiles.
+    ///
+    /// File-grained, and deliberately so: §2.3 computes product reachability per
+    /// *declaration path to a file*, and an inline `#[cfg(test)] mod` inside a
+    /// product file is not a file. Every needle this module counts is assembled
+    /// at run time, so no assertion of its own is among the occurrences and the
+    /// file is the right grain here.
+    fn in_product(found: &Found) -> usize {
+        found
+            .occurrences()
+            .iter()
+            .filter(|occurrence| {
+                source()
+                    .file_at(occurrence.span.start())
+                    .is_some_and(bt_source::FileRecord::permits_product)
+            })
+            .count()
     }
 
     /// **RED (shape) — a window is in the vault before it is asked what it looks like** (§7.53).
@@ -113815,14 +113996,15 @@ mod quit_transaction_tests {
     /// `FolioApp::resumed` seeds its picture with the paragraph it opened from.
     ///
     /// Held against the source for this module's own reason: it is a claim about *when* something
-    /// is written, which no value in the program carries.
+    /// is written, which no value in the program carries. The source is asked for by identity —
+    /// `Runtime::open_window` — so the claim follows the door rather than this file.
     ///
     /// Red gate: delete the `record_window` call, or move it below `new_window_runtime`, and this
     /// goes red. Move the snapshot after `show_new_window` and the last assertion does — a
     /// maximized window photographed after `SW_MAXIMIZE` has no normal rectangle left to measure.
     #[test]
     fn a_window_is_in_the_vault_before_it_is_asked_what_it_looks_like() {
-        let door = body(&["fn open_", "window(\n        event_loop: &ActiveEventLoop,"]);
+        let door = method_body("Runtime", "open_window");
         let seeded = door
             .find("app.record_window(")
             .expect("the door puts this window's opening rectangle in the vault");
@@ -113930,7 +114112,7 @@ mod quit_transaction_tests {
     ///
     /// The structural half of `quit_writes_every_window_and_vaults_none`, checked
     /// where it can actually be broken: `vault_this_window` is called from
-    /// exactly one place in this file, that place is the branch `close_window`
+    /// exactly one place in this package, that place is the branch `close_window`
     /// takes when the shut is *not* the process ending, and the quit's own
     /// teardown names neither it nor the store.
     ///
@@ -113940,19 +114122,16 @@ mod quit_transaction_tests {
     fn the_only_door_into_the_vault_is_a_window_the_user_closed() {
         let door = ["vault_this_", "window("].concat();
         assert_eq!(
-            SOURCE.matches(door.as_str()).count(),
+            found(needle!(Pattern::text(&door)), View::Raw).len(),
             2,
             "one definition and one call site"
         );
-        let close = body(&[
-            "    fn close_",
-            "window(&mut self, ending: bool) -> Result<()> {",
-        ]);
+        let close = method_body("Runtime", "close_window");
         assert!(
             close.contains(&["} else {\n            self.", door.as_str()].concat()),
             "the vault is the branch a shut that is *not* the process ending takes"
         );
-        let retire = body(&["    fn retire_", "window(&mut self) -> Result<()> {"]);
+        let retire = method_body("Runtime", "retire_window");
         assert!(
             !retire.contains("vault") && !retire.contains("mark_session_dirty"),
             "a quit's teardown neither files a window away nor re-records one"
@@ -113969,35 +114148,43 @@ mod quit_transaction_tests {
     /// seconds"; taking every step off this thread is what makes the click
     /// answer at once. There is one road now and it is
     /// `bt_pty::retire_session`, so this checks that `PtySession::shutdown` is
-    /// not called from this file at all.
+    /// not called from anywhere the product compiles.
     ///
     /// Red gate: put a synchronous shutdown back into any of the three doors and
     /// the count names it.
     #[test]
     fn a_pane_that_closes_is_taken_apart_somewhere_else() {
         let on_this_thread = ["pty.shut", "down()"].concat();
+        // **The one place the two readings part company, and it is a widening**
+        // (§4.1). This file's count is over `main.rs`; the crate's is over every
+        // file the package declares, and `tests.rs` — wholly test code by its
+        // own `#[cfg(test)]` declaration — holds the one test that drives a
+        // shutdown by hand. So the crate's answer is filtered to the files a
+        // product build compiles, which is the question this pin was always
+        // asking and the one `include_str!("main.rs")` could only approximate.
         assert_eq!(
-            SOURCE.matches(on_this_thread.as_str()).count(),
-            // None at all, counted over the whole of `main.rs`. It was 1 until 2026-09-18,
-            // when `mod tests` moved to `tests.rs` and took with it the one test that drives
-            // a shutdown by hand; this file is now the product plus fifty-four smaller test
-            // modules, and not one of them takes a session apart on the window thread.
+            in_product(&found(needle!(Pattern::text(&on_this_thread)), View::Raw)),
+            // None at all, counted over every file a product build of this package
+            // compiles. The one written anywhere in the package is the fixture in
+            // `tests.rs`, which `mod tests` took with it on 2026-09-18 and which the
+            // declaration reaching that file gates behind `#[cfg(test)]` — so it is
+            // not counted, which is the fact this pin meant all along.
             0,
-            "a synchronous shutdown is written in this file again"
+            "a synchronous shutdown is written in the product again"
         );
-        for door in [
-            "    fn retire_all_shells(&mut self) {",
-            "    fn let_go_of_this_",
+        for (owner, name) in [
+            ("TabState", "retire_all_shells"),
+            ("Runtime", "let_go_of_this_window"),
         ] {
-            let text = body(&[door]);
+            let text = method_body(owner, name);
             assert!(
                 !text.contains(&on_this_thread),
-                "`{door}` hands the session over rather than taking it apart here"
+                "`{owner}::{name}` hands the session over rather than taking it apart here"
             );
         }
         let handed = ["bt_pty::retire_", "session("].concat();
         assert!(
-            body(&["    fn retire_all_shells(&mut self) {"]).contains(handed.as_str()),
+            method_body("TabState", "retire_all_shells").contains(handed.as_str()),
             "and the hand-over is what it does instead"
         );
     }
@@ -114014,10 +114201,7 @@ mod quit_transaction_tests {
     /// before the process starts hiding windows over a file it never wrote.
     #[test]
     fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
-        let settle = body(&[
-            "    fn settle_",
-            "quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {",
-        ]);
+        let settle = method_body("FolioApp", "settle_quit");
         assert!(
             settle.contains("app.session_store.flush_judged()"),
             "the quit's write is the judged one"
@@ -114050,19 +114234,14 @@ mod quit_transaction_tests {
     /// call.
     #[test]
     fn the_quit_and_the_loops_own_backstop_stay_two_machines() {
-        let settle = body(&[
-            "    fn settle_",
-            "quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {",
-        ]);
+        let settle = method_body("FolioApp", "settle_quit");
         let shut = ["close_", "window"].concat();
         assert!(
             !settle.contains(shut.as_str()),
             "a quit never spends the per-window shut"
         );
-        let exiting = body(&[
-            "    fn exit",
-            "ing(&mut self, _event_loop: &ActiveEventLoop) {",
-        ]);
+        let exiting =
+            item_body(&ItemQuery::method("FolioApp", "exiting").of_trait("ApplicationHandler"));
         assert!(
             exiting.contains(&[shut.as_str(), "(true)"].concat()),
             "and the backstop for a loop stopped by something else is untouched"
@@ -129193,35 +129372,110 @@ mod summon_key_wiring_tests {
 /// is a defect this window has already had once on this very surface (§7.39's
 /// float, §7.1.5f's ladder).
 ///
-/// So these read the file as text, for [`mouse_trace_station_tests`]' stated
-/// reason, and they assert only the wiring: not what a function computes, but
-/// that it is the one being asked.
+/// So these read the source, for [`mouse_trace_station_tests`]' stated reason,
+/// and they assert only the wiring: not what a function computes, but that it
+/// is the one being asked. Since P3 they ask the crate about an item rather
+/// than this file about a slice of its text, so the wiring follows the
+/// functions when they move.
 #[cfg(test)]
 mod live_markdown_edit_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree —
+    // twenty-two body pins compared as bytes, four counts as numbers — and this
+    // is the one that deletes the older of the two, because two implementations
+    // of one judgement do not vouch for each other (`docs/CONVENTIONS.md` §十
+    // rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `found` are that module's helpers
+    // word for word, and its header is where the six points behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed and stopped before the next
+    // `\n    fn `, which is not the end of the method — 1,599 bytes around
+    // `leave_preview_page`'s 235-byte body, 2,088 around `seat_preview_caret`'s
+    // 757 — and it could not say which `impl` it had landed in. All fifteen
+    // identities turned out to be `Runtime`'s; the equivalence commit is what
+    // established that rather than assumed it.
+    //
+    // The four counts took this file **cut at this module's own declaration**,
+    // because every needle they count is spelled a second time in the
+    // assertions below and a count over the whole file would count the
+    // questions as well as the answers. `needle!` excludes one construction
+    // expression rather than every mention, so the file grain the pilot's
+    // `in_product` uses is not enough here: `in_product_items` is
+    // `clipboard_path_tests`' helper word for word, and it filters the
+    // package's answer by the `cfg` predicates §2.4 writes onto each
+    // occurrence's own item. A cut is a fact about one file; a `#[cfg(test)]`
+    // module is a fact that survives the move.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
     }
 
-    /// **The window, without the pins that read it.**
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// How many of these occurrences stand in code a product build compiles —
+    /// **at item grain**, which is `clipboard_path_tests`' helper and this
+    /// module's own decision rather than the pilot's file-grained one.
     ///
-    /// Every count below is a count of how many places in this file do a thing,
-    /// and the assertions themselves spell that thing out in a string literal —
-    /// so a count over the whole file would count the questions as well as the
-    /// answers. This module stands last, which is what makes the cut one line.
-    fn window() -> &'static str {
-        let end = SOURCE
-            .find("mod live_markdown_edit_tests {")
-            .expect("this module is declared in this file");
-        &SOURCE[..end]
+    /// Every needle counted below is written a second time in this module's own
+    /// assertions, and `needle!` excludes one construction expression rather
+    /// than every mention. §2.4's identity carries the `cfg` predicates written
+    /// on an enclosing inline `mod`, so the exclusion `window` performed by
+    /// cutting the file is a filter over the owners here.
+    ///
+    /// An occurrence in no callable at all is not a question this grain can
+    /// answer, so it is refused rather than quietly dropped.
+    fn in_product_items(found: &Found) -> usize {
+        let index = source();
+        assert_eq!(
+            found.outside_items(index),
+            0,
+            "an occurrence stands in no callable, so nothing here says whether \
+             the product compiles it:\n{}",
+            found.report(index)
+        );
+        found
+            .owners(index)
+            .into_iter()
+            .filter(|(identity, _)| {
+                !identity
+                    .variant
+                    .predicates()
+                    .iter()
+                    .any(|predicate| predicate == "test")
+            })
+            .map(|(_, count)| count)
+            .sum()
     }
 
     /// **Entering is one door and it does all five things** (T5 ①).
@@ -129234,7 +129488,7 @@ mod live_markdown_edit_tests {
     /// block nothing can be typed into.
     #[test]
     fn entering_writes_all_five_things_in_one_place() {
-        let door = body("    fn seat_preview_caret(");
+        let door = method_body("Runtime", "seat_preview_caret");
         for promise in [
             "caret.place(&content, offset, extend)",
             "pane.md_select = None",
@@ -129248,7 +129502,10 @@ mod live_markdown_edit_tests {
             );
         }
         assert_eq!(
-            window().matches("pane.md_caret = true").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("pane.md_caret = true")),
+                View::Raw
+            )),
             1,
             "one entrance, counted here on purpose — a second is a ruling and \
              not an edit",
@@ -129282,38 +129539,41 @@ mod live_markdown_edit_tests {
     /// and a press on a link renders the page it is standing in.
     #[test]
     fn leaving_is_one_door_that_escape_the_ground_and_a_blur_all_reach() {
-        for (door, what) in [
-            ("    fn preview_key(", "`Esc`"),
+        for (name, what) in [
+            ("preview_key", "`Esc`"),
             (
-                "    fn spend_preview_press(",
+                "spend_preview_press",
                 "a press on the page's empty ground, spent at the release",
             ),
             (
-                "    fn chrome_mouse_input(",
+                "chrome_mouse_input",
                 "losing the keyboard to a press elsewhere",
             ),
         ] {
             assert!(
-                body(door).contains("leave_preview_page("),
+                method_body("Runtime", name).contains("leave_preview_page("),
                 "{what} no longer renders the page again",
             );
         }
         assert!(
-            body("    fn press_preview_text(").contains("live && caret_at.is_none()"),
+            method_body("Runtime", "press_preview_text").contains("live && caret_at.is_none()"),
             "empty ground is a press that named no byte of the file — asked of \
              `caret_at`, because a press on a link names one and is the link's",
         );
         assert!(
-            body("    fn leave_preview_buffer_in(").contains("pane.md_caret = false"),
+            method_body("Runtime", "leave_preview_buffer_in").contains("pane.md_caret = false"),
             "and handing this surface a different file still leaves the page",
         );
         assert_eq!(
-            window().matches("md_caret = false").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("md_caret = false")),
+                View::Raw
+            )),
             2,
             "one door and the file swap, counted here on purpose",
         );
         assert!(
-            !body("    fn leave_preview_page(").contains("pane.caret ="),
+            !method_body("Runtime", "leave_preview_page").contains("pane.caret ="),
             "and leaving keeps the caret: it is a byte offset, and the flip to \
              the source face finds it where this left it",
         );
@@ -129330,11 +129590,14 @@ mod live_markdown_edit_tests {
     #[test]
     fn a_floated_page_takes_the_caret_through_the_docked_press() {
         assert!(
-            body("    fn press_float(").contains("self.press_preview_text(position)"),
+            method_body("Runtime", "press_float").contains("self.press_preview_text(position)"),
             "the float's body branch no longer reaches the rendered page's press",
         );
         assert_eq!(
-            window().matches("self.place_preview_caret_on(").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("self.place_preview_caret_on(")),
+                View::Raw
+            )),
             3,
             "the two ends of one spent gesture — where the press named and where \
              the hand let go — and the drag's own step inside a seat that cannot \
@@ -129351,7 +129614,7 @@ mod live_markdown_edit_tests {
     #[test]
     fn the_glance_card_refuses_the_caret_by_name() {
         assert!(
-            body("    fn preview_caret_takes_the_press(")
+            method_body("Runtime", "preview_caret_takes_the_press")
                 .contains("matches!(surface, PreviewSurface::Peek)"),
             "the card is no longer refused where the press decides",
         );
@@ -129370,7 +129633,7 @@ mod live_markdown_edit_tests {
     /// height and lands the caret nowhere near the pointer.
     #[test]
     fn the_quick_edits_press_declines_a_rendered_page() {
-        let press = body("    fn press_preview_body(");
+        let press = method_body("Runtime", "press_preview_body");
         assert!(
             press.contains("if self.preview_shows_live_markdown(surface) {"),
             "the quick edit's press no longer stands aside for the rendered page",
@@ -129400,29 +129663,32 @@ mod live_markdown_edit_tests {
     /// and draw another.
     #[test]
     fn the_caret_answers_before_the_piece_selection_everywhere() {
-        for (signature, first, second) in [
+        for (name, first, second) in [
             (
-                "    fn preview_selected_text(",
+                "preview_selected_text",
                 "self.preview_live_caret(surface)",
                 "pane.md_select?",
             ),
             (
-                "    fn preview_caret_selection_places(",
+                "preview_caret_selection_places",
                 "self.preview_live_caret(surface)?",
                 "preview_provenance::place_of(",
             ),
         ] {
-            let text = body(signature);
+            let text = method_body("Runtime", name);
             let one = text
                 .find(first)
-                .unwrap_or_else(|| panic!("{signature} no longer asks `{first}`"));
+                .unwrap_or_else(|| panic!("`Runtime::{name}` no longer asks `{first}`"));
             let two = text
                 .find(second)
-                .unwrap_or_else(|| panic!("{signature} no longer reaches `{second}`"));
-            assert!(one < two, "{signature} asks the two in the wrong order");
+                .unwrap_or_else(|| panic!("`Runtime::{name}` no longer reaches `{second}`"));
+            assert!(
+                one < two,
+                "`Runtime::{name}` asks the two in the wrong order"
+            );
         }
         assert!(
-            body("    fn preview_selected_text(").contains("caret.selected(content)"),
+            method_body("Runtime", "preview_selected_text").contains("caret.selected(content)"),
             "and a caret selection copies the file's own bytes",
         );
     }
@@ -129452,7 +129718,7 @@ mod live_markdown_edit_tests {
     /// wrong.
     #[test]
     fn a_press_on_a_rendered_page_changes_no_blocks_face() {
-        let press = body("    fn press_preview_text(");
+        let press = method_body("Runtime", "press_preview_text");
         for wrote in [
             "self.place_preview_caret_on(",
             "self.seat_preview_caret(",
@@ -129503,7 +129769,7 @@ mod live_markdown_edit_tests {
     /// spent nothing.
     #[test]
     fn the_release_spends_the_record_and_the_drag_holds_its_seat() {
-        let release = body("    fn release_preview_text(");
+        let release = method_body("Runtime", "release_preview_text");
         for reaches in ["pressed.spend(!click, head)", "self.spend_preview_press("] {
             assert!(
                 release.contains(reaches),
@@ -129511,7 +129777,7 @@ mod live_markdown_edit_tests {
                  answered",
             );
         }
-        let drag = body("    fn drag_preview_text(");
+        let drag = method_body("Runtime", "drag_preview_text");
         assert_eq!(
             drag.matches("self.place_preview_caret_on(").count(),
             1,
@@ -129545,12 +129811,12 @@ mod live_markdown_edit_tests {
     /// [`Runtime::settle_preview_caret`].
     #[test]
     fn the_grain_and_the_owed_caret_both_ride_on_the_record() {
-        let press = body("    fn press_preview_text(");
+        let press = method_body("Runtime", "press_preview_text");
         assert!(
             press.contains("let grain = preview_text_grain(clicks);"),
             "the press no longer classifies the repeat count it is recording",
         );
-        let spend = body("    fn spend_preview_press(");
+        let spend = method_body("Runtime", "spend_preview_press");
         assert!(
             spend.contains("self.widen_preview_caret(surface, grain)"),
             "the release no longer grows the caret to the grain the press asked \
@@ -129562,12 +129828,15 @@ mod live_markdown_edit_tests {
              caret it asked for",
         );
         assert_eq!(
-            window().matches("md_caret_wanted = Some(").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("md_caret_wanted = Some(")),
+                View::Raw
+            )),
             1,
             "one place owes the caret, counted here on purpose",
         );
         assert!(
-            body("    fn settle_preview_caret(").contains("md_caret_wanted"),
+            method_body("Runtime", "settle_preview_caret").contains("md_caret_wanted"),
             "and nothing spends it when the body lands",
         );
     }
@@ -129583,7 +129852,7 @@ mod live_markdown_edit_tests {
     /// still opened by the same `preview_press_opens_its_link` gate it was.
     #[test]
     fn a_press_on_a_link_records_no_caret_and_the_release_still_follows_it() {
-        let press = body("    fn press_preview_text(");
+        let press = method_body("Runtime", "press_preview_text");
         assert!(
             press.contains("let placing = caret_at.filter(|_| link.is_none() || shift);"),
             "a plain press on a link no longer declines the caret",
@@ -129593,7 +129862,7 @@ mod live_markdown_edit_tests {
             "the record is built from something other than `placing`, so a link \
              press may now put a caret in the page",
         );
-        let release = body("    fn release_preview_text(");
+        let release = method_body("Runtime", "release_preview_text");
         let gate = release
             .find("preview_press_opens_its_link(&drag.latch)")
             .expect("the release still asks the latch which gesture this was");
