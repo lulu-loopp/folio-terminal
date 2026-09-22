@@ -108699,26 +108699,13 @@ mod key_hint_spend_tests {
 /// nothing either.
 #[cfg(test)]
 mod git_hover_heal_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
-
-    // ── what this module asks the crate instead ───────────────────────────
+    // ── what this module asks the crate ───────────────────────────────────
     //
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Nothing is deleted here: both pins are read twice
-    // — once from `include_str!("main.rs")`, once from `bt-source` — and
-    // `agreed` asserts the two are the same bytes. The deletion is the commit
-    // after this one.
+    // Both pins used to read `include_str!("main.rs")`; they now ask
+    // `bt-source` about an *item* of this crate, so neither is bound to the
+    // file the method happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
     // module's header is where the six points behind `source`, `item_body` and
@@ -108746,42 +108733,11 @@ mod git_hover_heal_tests {
         item_body(&bt_source::ItemQuery::method(owner, name))
     }
 
-    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
-    ///
-    /// `body` hands back everything after the signature prefix it was given and
-    /// stops before the next `\n    fn `; `body_of` hands back the braces and
-    /// what is between them. So the crate's answer has to stand in this file's
-    /// slice at the head of the body, with nothing but the rest of the
-    /// declaration in front of it.
-    fn agreed(old: &'static str, name: &str) -> &'static str {
-        let new = method_body("Runtime", name);
-        let at = match old.find(new) {
-            Some(at) => at,
-            None => {
-                assert!(
-                    old.starts_with(&new[1..]),
-                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
-                     bytes"
-                );
-                0
-            }
-        };
-        assert!(
-            !old[..at].contains('{'),
-            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
-             the head of it"
-        );
-        old
-    }
-
     /// The heal stands in `refresh_chrome`, **after** the pages it heals against
     /// have been published and before anything is drawn from them.
     #[test]
     fn the_git_pages_hover_is_healed_against_the_page_it_is_drawn_from() {
-        let text = agreed(
-            body("    fn refresh_chrome_with_overlay("),
-            "refresh_chrome_with_overlay",
-        );
+        let text = method_body("Runtime", "refresh_chrome_with_overlay");
         let published = text
             .find("self.window.git_pages_shown = git_pages.clone();")
             .expect("`refresh_chrome` publishes the pages the hit test reads");
@@ -108798,10 +108754,7 @@ mod git_hover_heal_tests {
     /// a reader holding still over a row that is still there must keep it.
     #[test]
     fn the_heal_re_derives_the_hover_and_does_not_clear_it() {
-        let text = agreed(
-            body("    fn heal_git_hover(&mut self, scale: f32) {"),
-            "heal_git_hover",
-        );
+        let text = method_body("Runtime", "heal_git_hover");
         assert!(
             text.contains("seats::hit_git_panel("),
             "the heal asks the same question the pointer's own handler asks:\n{text}"
