@@ -2026,11 +2026,13 @@ mod tests {
     ///    exit code.
     #[test]
     fn shell_integration_removal_speaks_to_a_window_only_through_the_report() {
-        // **P3's equivalence commit for this pin** (`docs/plans/bt-app-split-prep.md`
-        // §6.3, and §6.0 rule 3). Each of the two doors is cut twice — once out
-        // of `include_str!("main.rs")`, once out of the body of the item that
-        // owns it — and the two cuts are required to be the same bytes. The
-        // deletion is the commit after this one, and the pattern is
+        // **P3's deletion commit for this pin** (`docs/plans/bt-app-split-prep.md`
+        // §6.3, and §6.0 rule 3). The commit before this one cut each of the two
+        // doors twice — once out of `include_str!("main.rs")`, once out of the
+        // body of the item that owns it — and asserted the two cuts were the
+        // same bytes; this one removes the older of the two, because two
+        // implementations of one judgement do not vouch for each other
+        // (`docs/CONVENTIONS.md` §十 rule 4). The pattern is
         // `main.rs::pty_drain_budget_tests`', not re-derived here.
         //
         // The cuts themselves are unchanged; what changes is where they are
@@ -2038,64 +2040,33 @@ mod tests {
         // `user_event` and the program's `main` — so the item is named and the
         // arm is cut inside its body, which is the same door wherever either
         // one comes to be written.
-        let source = include_str!("main.rs");
         let index = bt_source::Index::of_package("bt-app");
         let item_body = |query: bt_source::ItemQuery| {
             index
                 .body_of(&query)
                 .unwrap_or_else(|failure| panic!("{failure}"))
         };
-        let agree = |what: &str, file: &str, crate_reading: &str| {
-            assert_eq!(
-                file, crate_reading,
-                "{what}: this module's cut of `main.rs` and the crate's cut of the item that owns \
-                 it are not the same bytes"
-            );
-        };
-        let probed = source
-            .split_once("AppEvent::PowerShellProfileProbed => {")
-            .unwrap()
-            .1
-            .split_once("AppEvent::UpdateChecked")
-            .unwrap()
-            .0;
-        agree(
-            "the window's door",
-            probed,
-            item_body(
-                bt_source::ItemQuery::method("FolioApp", "user_event")
-                    .of_trait("ApplicationHandler"),
-            )
-            .split_once("AppEvent::PowerShellProfileProbed => {")
-            .expect("the window's user-event road carries the probe's arm")
-            .1
-            .split_once("AppEvent::UpdateChecked")
-            .expect("and the arm after it")
-            .0,
-        );
+        let probed = item_body(
+            bt_source::ItemQuery::method("FolioApp", "user_event").of_trait("ApplicationHandler"),
+        )
+        .split_once("AppEvent::PowerShellProfileProbed => {")
+        .expect("the window's user-event road carries the probe's arm")
+        .1
+        .split_once("AppEvent::UpdateChecked")
+        .expect("and the arm after it")
+        .0;
         assert!(probed.contains("report.window_text()"));
         assert!(
             !probed.contains("ShellProfileNothing"),
             "the window is being told about a removal that removed nothing"
         );
-        let console = source
+        let console = item_body(bt_source::ItemQuery::function("main"))
             .split_once("if cli::remove_shell_integration(std::env::args_os().skip(1)) {")
-            .unwrap()
+            .expect("the program's own entry carries the removal door")
             .1
             .split_once("if cli::remove_explorer_menu(")
-            .unwrap()
+            .expect("and the door after it")
             .0;
-        agree(
-            "the console's door",
-            console,
-            item_body(bt_source::ItemQuery::function("main"))
-                .split_once("if cli::remove_shell_integration(std::env::args_os().skip(1)) {")
-                .expect("the program's own entry carries the removal door")
-                .1
-                .split_once("if cli::remove_explorer_menu(")
-                .expect("and the door after it")
-                .0,
-        );
         assert!(
             console.contains("ShellProfileNothing"),
             "a person who typed the command is owed an answer"

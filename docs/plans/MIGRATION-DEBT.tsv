@@ -297,7 +297,6 @@ crates/bt-app/src/settings.rs	settings::tests::the_mock_up_carries_the_rail_this
 crates/bt-app/src/settings.rs	settings::tests::the_theme_row_wears_the_mock_ups_own_order_and_its_own_line	include_str!	../../../docs/design/ui-mockup.html	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::an_installed_script_that_is_not_this_builds_is_rewritten	include_str!	operate	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told	include_str!	../../../scripts/shell-integration/folio.ps1	P14	no
-crates/bt-app/src/shell_integration.rs	shell_integration::tests::shell_integration_removal_speaks_to_a_window_only_through_the_report	include_str!	main.rs	P3	yes
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::shell_integration_startup_and_removal_doors_are_above_window_work	include_str!	begin_startup_migration;candidates;main	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_bash_script_ships_with_unix_line_endings	include_str!	../../../scripts/shell-integration/folio.bash	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_integration_script_knows_the_name_this_terminal_announces	include_str!	../../../scripts/shell-integration/folio.ps1	P14	no
