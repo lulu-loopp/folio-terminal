@@ -108130,25 +108130,53 @@ fn most_recently_active_window<K: Copy + Eq>(
 /// about both, plus a pin that every dismissal arm actually asks.
 #[cfg(test)]
 mod popover_trigger_tests {
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree; this is
+    // the one that deletes the older of the two, because two implementations of
+    // one judgement do not vouch for each other (`docs/CONVENTIONS.md` §十
+    // rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body` and `method_body` are that module's helpers word for
+    // word, and the pilot's header is where the six points behind them live.
+    //
+    // **One owner, established rather than assumed.** All seven pins are
+    // inherent methods of `Runtime`; the deleted finder took the first
+    // `    fn name(` in this file, which is a method of whatever `impl` happens
+    // to come first. With the signatures go two hazards of their own: the
+    // deleted `router` held the whole of `mouse_input`'s signature as a literal,
+    // which is a line of `main.rs` and therefore a candidate match for any
+    // reader of that method, and the slice it returned ran past the closing
+    // brace into the next method's prose.
+    use bt_source::{Index, ItemQuery};
+
     use super::*;
 
-    const SOURCE: &str = include_str!("main.rs");
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
 
-    /// The text of one method, from its signature to the next method's — the
-    /// same reader the rest of this file's source pins use.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
     }
 
     fn router() -> &'static str {
-        body(
-            "    fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
-        )
+        method_body("Runtime", "mouse_input")
     }
 
     fn docked(seat: u64) -> PreviewSurface {
@@ -108364,7 +108392,7 @@ mod popover_trigger_tests {
     /// thought about.
     #[test]
     fn the_register_names_every_popup() {
-        let register = body("    fn popup_trigger(");
+        let register = method_body("Runtime", "popup_trigger");
         for popup in Popup::ALL {
             let name = format!("Popup::{popup:?}");
             assert!(
@@ -108395,23 +108423,14 @@ mod popover_trigger_tests {
     /// `preview_menu_seat().is_some()` — the second does.
     #[test]
     fn a_popup_is_up_only_while_its_own_layout_would_draw() {
-        let up = body("    fn popups_up(&self) -> PopupsUp {");
+        let up = method_body("Runtime", "popups_up");
         for (layout, stand) in [
-            (
-                "    fn preview_menu_layout(&mut self) -> Option<profiles::PreviewMenuLayout> {",
-                "preview_menu_stand",
-            ),
-            (
-                "    fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {",
-                "root_menu_stand",
-            ),
-            (
-                "    fn graph_filter_menu_layout(&mut self) -> Option<profiles::GitFilterMenuLayout> {",
-                "graph_filter_menu_stand",
-            ),
+            ("preview_menu_layout", "preview_menu_stand"),
+            ("root_menu_layout", "root_menu_stand"),
+            ("graph_filter_menu_layout", "graph_filter_menu_stand"),
         ] {
             assert!(
-                body(layout).contains(stand),
+                method_body("Runtime", layout).contains(stand),
                 "{layout} decides for itself whether it draws; it has to ask {stand}"
             );
             assert!(
@@ -108426,12 +108445,12 @@ mod popover_trigger_tests {
         // root button to the caption it wraps, so the list stays reachable at
         // every width instead of the menu becoming invisible and deaf.
         assert!(
-            body("    fn preview_menu_stand(").contains("furniture.pill.unwrap_or(furniture.name)"),
+            method_body("Runtime", "preview_menu_stand")
+                .contains("furniture.pill.unwrap_or(furniture.name)"),
             "the switcher hangs from the name when the head wears no pill"
         );
         assert!(
-            body("    fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {")
-                .contains(".unwrap_or(head.title)"),
+            method_body("Runtime", "root_menu_layout").contains(".unwrap_or(head.title)"),
             "the root menu hangs from the caption when the head seats no button"
         );
     }
@@ -108764,36 +108783,56 @@ mod launch_landing_tests {
 /// `key_hint` at all.
 #[cfg(test)]
 mod key_hint_spend_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Both claims are about which line stands before which in a handler that
+    // needs a whole window to reach, so they are source pins. They used to read
+    // `include_str!("main.rs")`; they now ask `bt-source` about an *item* of
+    // this crate, so neither is bound to the file the handler happens to be
+    // written in today (`docs/plans/bt-app-split-prep.md` §6.3). The commit
+    // before this one ran both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
     }
 
     #[test]
     fn the_wheel_and_the_button_spend_a_raised_hold_the_way_a_key_does() {
-        for signature in [
-            "fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {",
-            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
-        ] {
-            let text = body(signature);
+        for name in ["mouse_wheel", "mouse_input"] {
+            let text = method_body("Runtime", name);
             let spend = text
                 .find("self.spend_key_hint()?;")
-                .unwrap_or_else(|| panic!("{signature} spends the hold"));
+                .unwrap_or_else(|| panic!("`Runtime::{name}` spends the hold"));
             // Every `return` in these two functions is a surface saying "this
             // gesture was mine"; a spend behind one of them is a card that
             // survives whichever surface answered first.
             let first_return = text.find("return ").unwrap_or(text.len());
             assert!(
                 spend < first_return,
-                "{signature} spends the hold before the first surface can take the gesture home"
+                "`Runtime::{name}` spends the hold before the first surface can take the \
+                 gesture home"
             );
         }
     }
@@ -108809,9 +108848,7 @@ mod key_hint_spend_tests {
     /// below, as this door did until 2026-09-10, and it goes red.
     #[test]
     fn the_button_router_is_reached_through_the_one_function_that_knows_the_rule() {
-        let text = body(
-            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
-        );
+        let text = method_body("Runtime", "mouse_input");
         assert!(
             text.contains("let router_position = button_router_position("),
             "the door asks `button_router_position` where to answer from:\n{text}"
@@ -108841,24 +108878,45 @@ mod key_hint_spend_tests {
 /// nothing either.
 #[cfg(test)]
 mod git_hover_heal_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Both pins used to read `include_str!("main.rs")`; they now ask
+    // `bt-source` about an *item* of this crate, so neither is bound to the
+    // file the method happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
     }
 
     /// The heal stands in `refresh_chrome`, **after** the pages it heals against
     /// have been published and before anything is drawn from them.
     #[test]
     fn the_git_pages_hover_is_healed_against_the_page_it_is_drawn_from() {
-        let text = body("    fn refresh_chrome_with_overlay(");
+        let text = method_body("Runtime", "refresh_chrome_with_overlay");
         let published = text
             .find("self.window.git_pages_shown = git_pages.clone();")
             .expect("`refresh_chrome` publishes the pages the hit test reads");
@@ -108875,7 +108933,7 @@ mod git_hover_heal_tests {
     /// a reader holding still over a row that is still there must keep it.
     #[test]
     fn the_heal_re_derives_the_hover_and_does_not_clear_it() {
-        let text = body("    fn heal_git_hover(&mut self, scale: f32) {");
+        let text = method_body("Runtime", "heal_git_hover");
         assert!(
             text.contains("seats::hit_git_panel("),
             "the heal asks the same question the pointer's own handler asks:\n{text}"
@@ -109001,23 +109059,71 @@ mod git_header_selection_tests {
 /// a seventh `return` added beside the six, without a line beside it, puts the
 /// silence back one arm at a time and nothing fails while it happens.
 ///
-/// So the pins read this file as text, which is the only witness that can answer
-/// "is there a `return` here with nothing written next to it". They assert
-/// nothing about *what* is traced — the format is free to change — only that no
-/// exit of these functions is unaccompanied.
+/// So the pins read the source, which is the only witness that can answer "is
+/// there a `return` here with nothing written next to it". They assert nothing
+/// about *what* is traced — the format is free to change — only that no exit of
+/// these functions is unaccompanied. Since P3 they ask the crate for the body
+/// of each function by name rather than this file for a slice of its text, so
+/// the answer follows the function when it moves.
 #[cfg(test)]
 mod mouse_trace_station_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree — eight
+    // body pins compared as bytes, and the route sweep run both ways — and this
+    // is the one that deletes the older of the two, because two implementations
+    // of one judgement do not vouch for each other (`docs/CONVENTIONS.md` §十
+    // rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `found` are that module's helpers
+    // word for word, and its header is where the six points behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed and stopped before the next
+    // `\n    fn `, which is not the end of the method — 1,874 bytes around
+    // `preview_landing_surface`'s 1,264-byte body, 1,375 around
+    // `open_preview_image`'s 809 — and it could not say which `impl` it had
+    // landed in. All eight turned out to be `Runtime`'s; the equivalence commit
+    // is what established that rather than assumed it.
+    //
+    // **One reading widens** (§4.1). The route sweep took this file; it now
+    // takes every file the package declares, which is one site more — a fixture
+    // in `tests.rs` writing a declared word. The closed set of route words is a
+    // fact about the package and not about one file of it, and a reading
+    // watching one file could not say so.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// How far back a trace call may stand from the `return` it belongs to.
@@ -109042,19 +109148,19 @@ mod mouse_trace_station_tests {
             .collect()
     }
 
-    fn assert_every_return_is_traced(signature: &str, needle: &str, expected: usize) {
-        let found = returns_and_what_precedes(body(signature), needle);
+    fn assert_every_return_is_traced(name: &str, needle: &str, expected: usize) {
+        let found = returns_and_what_precedes(method_body("Runtime", name), needle);
         assert_eq!(
             found.len(),
             expected,
-            "{signature} has {} exits spelled `{needle}`, the pin was written for {expected} — \
-             count them again and trace the new one",
+            "`Runtime::{name}` has {} exits spelled `{needle}`, the pin was written for \
+             {expected} — count them again and trace the new one",
             found.len()
         );
         for (line, before) in found {
             assert!(
                 before.contains("self.mouse_trace("),
-                "{signature}: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
+                "`Runtime::{name}`: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
                 line.trim(),
             );
         }
@@ -109083,8 +109189,8 @@ mod mouse_trace_station_tests {
     /// a second helper rather than as a widening of the first, because the
     /// chrome's pin counts one shape on purpose and a looser needle there would
     /// stop it counting.
-    fn assert_every_exit_is_traced(signature: &str, expected: usize) {
-        let text = body(signature);
+    fn assert_every_exit_is_traced(name: &str, expected: usize) {
+        let text = method_body("Runtime", name);
         let lines: Vec<&str> = text.lines().collect();
         let exits: Vec<usize> = lines
             .iter()
@@ -109095,7 +109201,7 @@ mod mouse_trace_station_tests {
         assert_eq!(
             exits.len(),
             expected,
-            "{signature} has {} exits, the pin was written for {expected} — \
+            "`Runtime::{name}` has {} exits, the pin was written for {expected} — \
              count them again and trace the new one",
             exits.len()
         );
@@ -109103,7 +109209,7 @@ mod mouse_trace_station_tests {
             let before = lines[at.saturating_sub(LOOKBACK)..at].join("\n");
             assert!(
                 DOORS.iter().any(|door| before.contains(door)),
-                "{signature}: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
+                "`Runtime::{name}`: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
                 lines[at].trim(),
             );
         }
@@ -109119,9 +109225,9 @@ mod mouse_trace_station_tests {
     /// it puts the silence back one arm at a time and nothing else fails.
     #[test]
     fn every_exit_of_the_wheels_road_writes_a_line() {
-        assert_every_exit_is_traced("    fn mouse_wheel(", 22);
-        assert_every_exit_is_traced("    fn scroll_rail(", 3);
-        assert_every_exit_is_traced("    fn aim_focus_card_window(", 10);
+        assert_every_exit_is_traced("mouse_wheel", 22);
+        assert_every_exit_is_traced("scroll_rail", 3);
+        assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
 
     /// **The route words are the declared ones** (T-WHEEL-TRACE, §7.60).
@@ -109132,15 +109238,22 @@ mod mouse_trace_station_tests {
     /// about. `crate::mouse_trace::WHEEL_ROUTES` is the list, and the two words this
     /// file picks indirectly — the local route, and the terminal's own arms —
     /// are asserted to be on it as literals, since a placeholder is not a word.
+    ///
+    /// The sweep is the package's since P3, not this file's: the closed set of
+    /// words is a fact about everything the package writes, and a fixture
+    /// writing an eleventh word is the same defect as a surface doing it. No
+    /// match may cross a file boundary (§2.2), so each word is read inside the
+    /// file its occurrence stands in.
     #[test]
     fn the_wheel_route_words_are_the_declared_ones() {
         let needle = concat!("wheel_route ", "taken", "=");
+        let index = source();
         let mut seen = 0;
-        for at in SOURCE
-            .match_indices(needle)
-            .map(|(at, _)| at + needle.len())
-        {
-            let word: String = SOURCE[at..]
+        for occurrence in found(needle!(Pattern::text(needle)), View::Raw).occurrences() {
+            let file = index
+                .file_at(occurrence.span.start())
+                .expect("every occurrence stands in a file of the universe");
+            let word: String = index.union()[occurrence.span.end()..file.span().end()]
                 .chars()
                 .take_while(|char| char.is_ascii_alphanumeric() || *char == '-')
                 .collect();
@@ -109155,8 +109268,12 @@ mod mouse_trace_station_tests {
                 crate::mouse_trace::WHEEL_ROUTES
             );
         }
-        assert!(seen > 0, "the route line is written somewhere in this file");
-        let wheel = body("    fn mouse_wheel(");
+        assert!(
+            seen > 0,
+            "the route line is written somewhere in this package"
+        );
+
+        let wheel = method_body("Runtime", "mouse_wheel");
         for word in ["terminal-pane", "focused-leaf-fallback", "pty", "nobody"] {
             assert!(
                 crate::mouse_trace::WHEEL_ROUTES.contains(&word),
@@ -109183,15 +109300,15 @@ mod mouse_trace_station_tests {
         // verb on the platform that hands that press to the application — the
         // window's own, which is a drag on one click and the reader's chosen
         // action on two (`at=press-title-bar`).
-        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 29);
+        assert_every_return_is_traced("chrome_mouse_input", "return Ok(true);", 29);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
     /// `Ok(())` — and they are two different findings, so they carry two labels.
     #[test]
     fn both_landing_refusals_write_a_line() {
-        let text = body("    fn preview_landing_surface(");
-        assert_every_return_is_traced("    fn preview_landing_surface(", "return None;", 2);
+        let text = method_body("Runtime", "preview_landing_surface");
+        assert_every_return_is_traced("preview_landing_surface", "return None;", 2);
         assert!(
             text.contains("none=add_preview") && text.contains("none=settle_seat_set_change"),
             "the two landing refusals are told apart by label, not merely counted"
@@ -109202,15 +109319,15 @@ mod mouse_trace_station_tests {
     /// shape of "the click did nothing", so it is the one that must speak.
     #[test]
     fn both_preview_openers_write_a_line_when_nothing_opens() {
-        for signature in ["    fn open_preview_image(", "    fn open_preview_file("] {
-            let text = body(signature);
+        for name in ["open_preview_image", "open_preview_file"] {
+            let text = method_body("Runtime", name);
             assert!(
                 text.contains("leave=no-landing-surface"),
-                "{signature} returns `Ok(())` without saying so"
+                "`Runtime::{name}` returns `Ok(())` without saying so"
             );
             assert!(
                 text.contains("enter path="),
-                "{signature} does not record that it was reached at all"
+                "`Runtime::{name}` does not record that it was reached at all"
             );
         }
     }
@@ -109225,7 +109342,7 @@ mod mouse_trace_station_tests {
     /// above do.
     #[test]
     fn the_folder_door_says_which_of_its_outcomes_happened() {
-        let text = body("    fn show_folder_in_files_column(");
+        let text = method_body("Runtime", "show_folder_in_files_column");
         assert!(
             text.contains("enter path="),
             "the folder door does not record that it was reached at all"
@@ -109256,29 +109373,59 @@ mod mouse_trace_station_tests {
 /// could read.
 #[cfg(test)]
 mod recent_folder_door_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // The two rulings below are about *where* one call is made, which has no
+    // value to read back — so they are counted. That count used to be taken off
+    // `include_str!("main.rs")` line by line; it is now asked of `bt-source`,
+    // of an *item* of this crate or of the package, so neither ruling is bound
+    // to the file the doors happen to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source` live.
+    //
+    // The trimmed-line-start rule the file reading needed is what a view makes
+    // unnecessary: the mentions it was written to step over were this module's
+    // own needle and the doc comments that explain the door, and
+    // `View::Identifiers` masks both. What it cannot mask is the door's own
+    // declaration, which is a call shape too — so that is named and exempted,
+    // which is §2.5's rule rather than a rule of this module's.
 
-    /// The text of one method, from its signature to the next method's —
-    /// [`super::mouse_trace_station_tests`]' own reader.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
     }
 
-    /// The call, as a line begins it. Matched against a **trimmed line's start**
-    /// rather than anywhere in the text, so the mentions inside this module — and
-    /// inside the doc comments that explain the door — are not counted as doors.
-    const CALL: &str = "self.note_folder_opened(";
+    /// The door, looked for as a call and not as a spelling, with its own
+    /// declaration taken out.
+    fn doors(scope: bt_source::Scope) -> usize {
+        source()
+            .search(
+                &bt_source::Search::new(
+                    bt_source::Needle::new(bt_source::Pattern::call("note_folder_opened")),
+                    bt_source::View::Identifiers,
+                )
+                .in_scope(scope)
+                .exempting_declarations_of(bt_source::ItemQuery::method(
+                    "Runtime",
+                    "note_folder_opened",
+                )),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .len()
+    }
 
-    fn calls(text: &str) -> usize {
-        text.lines()
-            .filter(|line| line.trim_start().starts_with(CALL))
-            .count()
+    /// The doors inside one method of `Runtime`.
+    fn doors_in(name: &str) -> usize {
+        doors(bt_source::Scope::Item(bt_source::ItemQuery::method(
+            "Runtime", name,
+        )))
     }
 
     /// RED (user ruling 2026-09-05) — **the two doors a hand goes through record,
@@ -109292,19 +109439,22 @@ mod recent_folder_door_tests {
     #[test]
     fn the_doors_that_remember_a_folder_are_the_two_a_hand_goes_through() {
         assert_eq!(
-            calls(body("    fn reroot_files_column(")),
+            doors_in("reroot_files_column"),
             1,
             "pointing a column somewhere else is the door the menu, `Browse…`, a \
              drop and a walk into a folder all come through"
         );
         assert_eq!(
-            calls(body("    fn show_folder_in_files_column(")),
+            doors_in("show_folder_in_files_column"),
             1,
             "and a tab with no column at all gets one, which is the same gesture \
              with nothing to re-root"
         );
+        // Counted over the package and not over one file: a third door could be
+        // written anywhere, and wherever it was written it would be the ruling
+        // this number exists to require.
         assert_eq!(
-            calls(SOURCE),
+            doors(bt_source::Scope::Everything),
             2,
             "two doors, counted here on purpose - a third is a ruling and not an edit"
         );
@@ -109324,15 +109474,15 @@ mod recent_folder_door_tests {
     /// every `cd` the reader happens to open a column after.
     #[test]
     fn a_column_opened_onto_a_shells_own_folder_remembers_nothing() {
-        for signature in [
-            "    fn toggle_files_pane(",
-            "    fn seat_a_files_column(",
-            "    fn files_root_for_new_pane(",
+        for name in [
+            "toggle_files_pane",
+            "seat_a_files_column",
+            "files_root_for_new_pane",
         ] {
             assert_eq!(
-                calls(body(signature)),
+                doors_in(name),
                 0,
-                "{signature} takes its folder from a shell and not from a hand"
+                "`Runtime::{name}` takes its folder from a shell and not from a hand"
             );
         }
     }
@@ -109361,19 +109511,27 @@ mod recent_folder_door_tests {
 /// that stamped and walked away is the defect this whole module is about.
 #[cfg(test)]
 mod hold_station_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's —
-    /// [`super::mouse_trace_station_tests`]' own reader.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree; this is
+    // the one that deletes the older of the two (`docs/CONVENTIONS.md` §十
+    // rule 4).
+    //
+    // `source`, `item_body`, `method_body` and `free_fn_body` are
+    // `pty_drain_budget_tests`' helpers word for word and `trait_method_body` is
+    // `resident_run_tests`'. **Three owners, and neither deleted finder could
+    // tell them apart**: six pins are `Runtime`'s inherent methods, the
+    // dispatcher is `<FolioApp as ApplicationHandler>::window_event`, and the
+    // station table is a free function.
+    //
+    // Two signatures used to be spelled in halves — `["    fn window",
+    // "_event("]` — because this module stands *above* the door it reads and the
+    // finder took the first match in the file; and this module's own literal
+    // `"    fn flush_dropped_files(…) {"` is one such match for anybody else's
+    // reader. An identity has neither hazard, so both go with the finder.
+    use bt_source::{Index, ItemQuery};
 
     /// Where `needle` first stands in `text`.
     ///
@@ -109386,15 +109544,34 @@ mod hold_station_tests {
             .unwrap_or_else(|| panic!("`{needle}` is not in this function any more"))
     }
 
-    /// The text of one free function, from its signature to the line its body
-    /// closes on — [`body`]'s reader, one indentation level out.
-    fn free_body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n}").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one method of `owner`'s implementation of `trait_name`.
+    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name).of_trait(trait_name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
     }
 
     /// The `WindowEvent` kinds a match answers, read off its arm heads.
@@ -109421,7 +109598,7 @@ mod hold_station_tests {
     /// that names the wrong lane — silently, which is the whole problem.
     #[test]
     fn a_turn_enters_its_stations_where_the_work_begins() {
-        let turning = body("    fn turn(&mut self, now: Instant, application_clocks: bool)");
+        let turning = method_body("Runtime", "turn");
         // (the station, the first call it claims) — in the order `turn` runs them.
         let run = [
             ("Station::DpiSettle", "self.settle_deferred_dpi()?;"),
@@ -109480,28 +109657,25 @@ mod hold_station_tests {
     /// `window_event`, and every keystroke paid for it.
     #[test]
     fn a_scoped_station_hands_the_callers_back() {
-        for signature in [
-            "    fn flush_wheel(&mut self) -> Result<()> {",
-            "    fn flush_dropped_files(&mut self) -> Result<()> {",
-            "    fn refresh_chrome_with_overlay(",
-            "    fn refresh_search(&mut self, forced: bool) -> Result<()> {",
+        for name in [
+            "flush_wheel",
+            "flush_dropped_files",
+            "refresh_chrome_with_overlay",
+            "refresh_search",
         ] {
-            let text = body(signature);
+            let text = method_body("Runtime", name);
             let entered = text.matches("hang_watch::enter(").count();
-            assert!(entered > 0, "{signature} no longer names its own work");
+            assert!(entered > 0, "{name} no longer names its own work");
             assert_eq!(
                 text.matches("hang_watch::at(").count(),
                 entered,
-                "{signature} enters a station it does not hand back:\n{text}"
+                "{name} enters a station it does not hand back:\n{text}"
             );
         }
         // And the one door that must *not* be scoped: `window_event`'s own
-        // station is the event, and the handler under it is what it names.
-        //
-        // Spelled in two pieces because this pin stands *above* the door it
-        // reads, and a whole signature written here would be the first match in
-        // the file — the reader takes the first, so it would read this line.
-        let event = body(&["    fn window", "_event("].concat());
+        // station is the event, and the handler under it is what it names. It is
+        // a trait method, so it is asked for as one.
+        let event = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
         assert!(
             event.contains("hang_watch::at(hang_watch::Station::Event);"),
             "the event's own name has left the door it is about"
@@ -109534,8 +109708,8 @@ mod hold_station_tests {
     /// everything. That is the decay this pin is here to catch.
     #[test]
     fn every_event_kind_the_dispatcher_answers_names_its_own_handler() {
-        let dispatch = body(&["    fn window", "_event("].concat());
-        let naming = free_body(&["fn window_event", "_station("].concat());
+        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let naming = free_fn_body("window_event_station");
         let mut kinds = arms(dispatch);
         assert!(
             kinds.len() > 10,
@@ -110542,22 +110716,40 @@ mod files_locate_door_tests {
 mod file_peek_fade_tests {
     use super::*;
 
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // The wiring pins used to read `include_str!("main.rs")`; they now ask
+    // `bt-source` about an *item* of this crate, so none of them is bound to
+    // the file the method happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree. The split signatures
+    // went with the file reading: a name handed to `ItemQuery` is not searched
+    // for in this file, so nothing here can find itself.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
 
-    /// The text of one method, from its signature to the next method's.
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
     ///
-    /// Signatures are handed in **split** (`["    fn file_peek", "_opacity("]`)
-    /// for the reason [`files_locate_door_tests`] splits its own: an unbroken
-    /// literal here is a second occurrence of the very string being searched
-    /// for, and `find` would answer with this test instead of with the method.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
     }
 
     /// The opacity the card would be painted at, read exactly as
@@ -110642,13 +110834,13 @@ mod file_peek_fade_tests {
         // The card's wake-ups while it is up are the fade's own rule and nothing
         // else.
         assert!(
-            body(&["    fn file_peek", "_deadline("].concat()).contains("hover_fade_owes_frames("),
+            method_body("Runtime", "file_peek_deadline").contains("hover_fade_owes_frames("),
             "the card's wake-ups while it is up are the fade's own rule"
         );
         // And the way out drops the card whole on the frame it is asked to —
         // there is no third state for a card on its way off the glass, and
         // therefore nothing to schedule.
-        let hidden = body(&["    fn hide_file", "_peek("].concat());
+        let hidden = method_body("Runtime", "hide_file_peek");
         assert!(
             hidden.contains("self.window.file_peek = None;"),
             "hiding takes the card down whole"
@@ -110739,7 +110931,7 @@ mod file_peek_fade_tests {
     /// 90ms a motionless hand started.
     #[test]
     fn the_cards_fade_is_the_tips_rule_read_once_and_reaches_every_layer() {
-        let reads = body(&["    fn file_peek", "_opacity("].concat());
+        let reads = method_body("Runtime", "file_peek_opacity");
         assert!(
             reads.contains("tooltip::hover_fade_opacity("),
             "the card asks the tip's rule"
@@ -110751,7 +110943,7 @@ mod file_peek_fade_tests {
             );
         }
 
-        let layer = body(&["    fn file_peek", "_layer("].concat());
+        let layer = method_body("Runtime", "file_peek_layer");
         assert!(
             layer.contains("for layer in &mut layers {"),
             "the fade is folded over every layer the card put down"
@@ -110762,8 +110954,7 @@ mod file_peek_fade_tests {
         );
 
         assert!(
-            body(&["    fn advance_file", "_peek("].concat())
-                .contains("self.file_peek_owes_frame(now)"),
+            method_body("Runtime", "advance_file_peek").contains("self.file_peek_owes_frame(now)"),
             "and the card's own turn is what wakes the loop while it climbs"
         );
     }
@@ -112714,28 +112905,90 @@ mod focus_column_notch_tests {
 /// spends Control on the secondary click, so a build that read `control_key()`
 /// there answered one press with two verbs.
 ///
-/// These are read as text because the repair is *which question six doors ask*,
-/// and every one of those doors needs a live `WindowRuntime` — a compositor, a
-/// renderer and a shell — to be asked at run time. What a machine can hold
-/// without a screen is the call each door makes, and that no seventh door grows
-/// back the raw reading beside them.
+/// These are read off the source because the repair is *which question six
+/// doors ask*, and every one of those doors needs a live `WindowRuntime` — a
+/// compositor, a renderer and a shell — to be asked at run time. What a machine
+/// can hold without a screen is the call each door makes, and that no seventh
+/// door grows back the raw reading beside them. Since P3 the six are named by
+/// identity and the sweep is the package's, so neither is bound to the file the
+/// doors happen to be written in today.
 #[cfg(test)]
 mod pointer_chord_site_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate. The commit before this one ran
+    // both readings side by side and asserted they agree — thirteen body pins
+    // compared as bytes, three sweeps compared as answers — and this is the one
+    // that deletes the older of the two, because two implementations of one
+    // judgement do not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `found` and `owner_names` are that
+    // module's helpers word for word, and its header is where the six points
+    // behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed and stopped before the next
+    // `\n    fn `, which is not the end of the method — 1,437 bytes around
+    // `terminal_link_grasp`'s 630-byte body — and it could not say which `impl`
+    // it had landed in. All seven identities turned out to be `Runtime`'s,
+    // including the seventh the list below does not name.
+    //
+    // **Two sweeps changed view** (§4.2 rule 3), and the mutation table carries
+    // the evidence for it. They filtered out a line whose first characters are
+    // `//`, which is a hand-rolled comment stripper that sees neither a block
+    // comment nor a trailing one; `View::CodeKeepingLiterals` is §2.1's
+    // replacement for exactly that, and it keeps literals verbatim, which
+    // matters because the spelling these forbid is read out of code. Each names
+    // its survivor by the item it stands in (§4.1) rather than by the text of
+    // its line, because an item is what a move keeps.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// The text of one method or free function, from its signature to the next.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
     }
 
-    /// The six doors a pointer gesture's modifier is read at, by the signature
-    /// each one is declared with.
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The names of the items these occurrences stand in (§4.1) — the assertion
+    /// that survives a move, because relocating a reader changes no key.
+    fn owner_names(found: &Found) -> Vec<String> {
+        let index = source();
+        let mut names: Vec<String> = found
+            .owners(index)
+            .into_iter()
+            .map(|(identity, count)| format!("{}×{count}", identity.name))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The six doors a pointer gesture's modifier is read at, by the name each
+    /// one is declared with.
     ///
     /// **The list is the test.** A seventh gesture that reads the modifier and
     /// is not named here is exactly the defect this ticket repaired — a reading
@@ -112746,16 +112999,16 @@ mod pointer_chord_site_tests {
     const POINTER_DOORS: [&str; 6] = [
         // A press on a rendered page: the drag carries what the press meant, and
         // the link is answered when the press turns out not to have travelled.
-        "    fn press_preview_text(",
+        "press_preview_text",
         // A press on a commit row: the compare gesture (D6).
-        "    fn press_graph_row(",
+        "press_graph_row",
         // A press in a pane: an OSC 8 hyperlink and an inline picture, both.
-        "    fn begin_local_selection(",
+        "begin_local_selection",
         // The pointing finger, on each of the two surfaces a link is drawn on.
-        "    fn terminal_link_grasp(",
-        "    fn preview_link_grasp(",
+        "terminal_link_grasp",
+        "preview_link_grasp",
         // A notch over a hosted page: zoom (方案 §0's five extras).
-        "    fn scroll_web_page(",
+        "scroll_web_page",
     ];
 
     /// RED GATE — **each of the six asks the one function that knows which key
@@ -112770,16 +113023,16 @@ mod pointer_chord_site_tests {
         // Assembled at run time so that this pin cannot match its own text.
         let door = ["input", "::", "pointer_chord_held", "("].concat();
         let hand = ["window", ".", "modifiers_held"].concat();
-        for signature in POINTER_DOORS {
-            let text = body(signature);
+        for name in POINTER_DOORS {
+            let text = method_body("Runtime", name);
             assert!(
                 text.contains(door.as_str()),
-                "{signature} decides a pointer gesture and must ask \
+                "`Runtime::{name}` decides a pointer gesture and must ask \
                  `{door})` which key this platform spends on one"
             );
             assert!(
                 text.contains(hand.as_str()),
-                "{signature} must strike the ruling against what the hand is \
+                "`Runtime::{name}` must strike the ruling against what the hand is \
                  holding and not against what the keyboard means (§13.33 ①)"
             );
         }
@@ -112793,11 +113046,10 @@ mod pointer_chord_site_tests {
     #[test]
     fn no_pointer_door_still_reads_control_by_name() {
         let raw = ["modifiers", ".", "control_key", "()"].concat();
-        for signature in POINTER_DOORS {
-            let text = body(signature);
+        for name in POINTER_DOORS {
             assert!(
-                !text.contains(raw.as_str()),
-                "{signature} still reads `{raw}` for a gesture — on a Mac that is \
+                !method_body("Runtime", name).contains(raw.as_str()),
+                "`Runtime::{name}` still reads `{raw}` for a gesture — on a Mac that is \
                  the secondary click and not this window's modifier"
             );
         }
@@ -112805,28 +113057,29 @@ mod pointer_chord_site_tests {
 
     /// RED GATE — **a seventh gesture cannot grow back the raw reading.**
     ///
-    /// The whole file is swept for `window.modifiers.control_key()`, which is
+    /// The whole package is swept for `window.modifiers.control_key()`, which is
     /// the exact spelling a pointer path used before this ticket, and the
-    /// survivors are named one by one with the reason each is a keyboard's
-    /// question rather than a hand's. A new pointer door written the old way
-    /// lands in this list and fails.
+    /// survivors are named one by one — by the item each stands in — with the
+    /// reason each is a keyboard's question rather than a hand's. A new pointer
+    /// door written the old way lands in this list and fails.
     #[test]
     fn no_other_door_reads_the_raw_control_key_for_a_gesture() {
         let raw = ["self", ".window", ".modifiers", ".", "control_key", "()"].concat();
-        let readers: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with("//") && line.contains(raw.as_str()))
-            .collect();
         // The one survivor, spelled at run time for the reason the needle is:
         // a keyboard's question in `preview_browse_key`, asking whether the
         // player's five transport keys arrived bare.
         let keyboards = format!("&& !{raw}");
+        let survivors = found(needle!(Pattern::text(&raw)), View::CodeKeepingLiterals);
         assert_eq!(
-            readers,
-            vec![keyboards.as_str()],
+            owner_names(&survivors),
+            ["preview_browse_key×1"],
             "every other reading of `{raw}` is a keyboard's; a pointer's reads \
-             `input::pointer_chord_held(self.window.modifiers_held)`"
+             `input::pointer_chord_held(self.window.modifiers_held)`:\n{}",
+            survivors.report(source())
+        );
+        assert!(
+            method_body("Runtime", "preview_browse_key").contains(keyboards.as_str()),
+            "and it is the negated half of a keyboard's question, not a hand's"
         );
     }
 
@@ -112839,9 +113092,7 @@ mod pointer_chord_site_tests {
     /// to record what the platform said, not what this window made of it.
     #[test]
     fn the_secondary_click_is_settled_once_and_above_every_router() {
-        let text = body(
-            "    fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
-        );
+        let text = method_body("Runtime", "mouse_input");
         let needle = ["input", "::", "pressed_button_of_gesture", "("].concat();
         let settle = text
             .find(needle.as_str())
@@ -112859,9 +113110,9 @@ mod pointer_chord_site_tests {
             "the station records the platform's own reading, which a translation \
              made above it would erase"
         );
-        let calls = SOURCE.matches(needle.as_str()).count();
         assert_eq!(
-            calls, 1,
+            found(needle!(Pattern::text(&needle)), View::Raw).len(),
+            1,
             "one door decides what button a press is, as one door decides what \
              modifiers are held"
         );
@@ -112875,15 +113126,17 @@ mod pointer_chord_site_tests {
     #[test]
     fn one_field_remembers_which_press_is_under_the_hand() {
         let needle = ["window", ".", "secondary_press"].concat();
-        let uses: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with("//") && line.contains(needle.as_str()))
-            .collect();
+        let touches = found(needle!(Pattern::text(&needle)), View::CodeKeepingLiterals);
         assert_eq!(
-            uses,
-            vec![format!("&mut self.{needle},")],
-            "the latch is touched at the one door and nowhere else: {uses:?}"
+            owner_names(&touches),
+            ["mouse_input×1"],
+            "§4.1: the latch is touched at the one door and nowhere else, and it is named by \
+             the item it is touched in rather than by a line of a file:\n{}",
+            touches.report(source())
+        );
+        assert!(
+            method_body("Runtime", "mouse_input").contains(&format!("&mut self.{needle},")),
+            "and that item is the one door every button event comes through"
         );
     }
 }
@@ -113239,31 +113492,48 @@ mod a_page_lands_where_it_was_aimed_tests {
 /// compile and still pass every rectangle test the drop owns.
 #[cfg(test)]
 mod page_under_a_laden_hand_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Both claims are about where one question is asked and about how wide a
+    // list is, and neither returns a value — so they are source pins. They used
+    // to read `include_str!("main.rs")`; they now ask `bt-source` about *items*
+    // of this crate, so neither is bound to the file a method or a struct
+    // happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live. The struct half is `layer_shape_tests`' ask,
+    // `ItemQuery::type_item`, which finds the type's own declaration wherever
+    // it is written and at whatever indentation, rather than a `struct` keyword
+    // in column zero.
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
     }
 
-    /// The field lines of a top-level `struct <name> { … }`.
-    fn struct_fields(name: &str) -> &'static str {
-        let head = ["\nstruct ", name, " {\n"].concat();
-        let start = SOURCE
-            .find(head.as_str())
-            .unwrap_or_else(|| panic!("`struct {name}` is declared at the top level"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n}\n")
-                .expect("the struct is closed by a `}` in column zero");
-        &SOURCE[start..end]
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// The braces one type's members are written in, and what is between them.
+    fn type_body(name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::type_item(name))
     }
 
     /// **The carry is asked, and asked before any rectangle is.**
@@ -113278,7 +113548,7 @@ mod page_under_a_laden_hand_tests {
     /// the scan, and this goes red by name.
     #[test]
     fn the_hand_is_asked_before_any_page_is() {
-        let web_page_at = body("    fn web_page_at(");
+        let web_page_at = method_body("Runtime", "web_page_at");
         let asked = web_page_at
             .find("self.a_gesture_holds_the_pointer()")
             .expect("the page's door subtracts a hand that is already carrying");
@@ -113303,10 +113573,10 @@ mod page_under_a_laden_hand_tests {
     /// MUTATION: drop any one `…_drag` arm from the predicate and this names it.
     #[test]
     fn every_carry_this_window_can_hold_is_named_by_the_one_predicate() {
-        let predicate = body("    fn a_gesture_holds_the_pointer(");
+        let predicate = method_body("Runtime", "a_gesture_holds_the_pointer");
         let mut found = 0;
         for owner in ["WindowRuntime", "TabState"] {
-            for line in struct_fields(owner).lines() {
+            for line in type_body(owner).lines() {
                 let field = line.trim_start();
                 let Some((name, _)) = field.split_once(": Option<") else {
                     continue;
@@ -113340,17 +113610,49 @@ mod page_under_a_laden_hand_tests {
 /// is precisely the defect this slice repairs.
 #[cfg(test)]
 mod page_under_the_tab_list_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text — three body pins and one
+    // whole-file count; every one of them now asks `bt-source` about an *item*
+    // of this crate or about the crate itself, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree; this is
+    // the one that deletes the older of the two (`docs/CONVENTIONS.md` §十
+    // rule 4).
+    //
+    // `source`, `item_body`, `method_body` and `found` are
+    // `pty_drain_budget_tests`' helpers word for word. All three pins are
+    // `Runtime`'s. The count of each axis' one caller was a count over this file
+    // and is now a count over the package, which is the wider and the right
+    // reading: a second caller written into another file of this crate was
+    // invisible to it and is not invisible to this.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// **The tab list is asked, and asked before the pages are.**
@@ -113362,7 +113664,7 @@ mod page_under_the_tab_list_tests {
     /// already given away.
     #[test]
     fn the_tab_list_is_asked_before_any_page_is() {
-        let web_page_at = body("    fn web_page_at(");
+        let web_page_at = method_body("Runtime", "web_page_at");
         let asked = web_page_at
             .find("tab_list_target_at")
             .expect("the page's door subtracts the tab list");
@@ -113382,10 +113684,10 @@ mod page_under_the_tab_list_tests {
     /// "the tab list is over this pixel" one answer rather than two.
     #[test]
     fn every_axis_of_the_tab_list_is_reached_from_one_place() {
-        let door = body("    fn tab_list_target_at(");
+        let door = method_body("Runtime", "tab_list_target_at");
         for hit in ["hit_rail_chrome", "hit_tab_chrome", "hit_focus_rail"] {
             let needle = ["seats", "::", hit, "("].concat();
-            let calls = SOURCE.matches(needle.as_str()).count();
+            let calls = found(needle!(Pattern::text(needle.as_str())), View::Raw).len();
             assert_eq!(calls, 1, "{hit} is called from {calls} places, not one");
             assert!(
                 door.contains(needle.as_str()),
@@ -113399,7 +113701,7 @@ mod page_under_the_tab_list_tests {
     /// every click on an open rail to whatever is underneath it (R1).
     #[test]
     fn the_chrome_ladder_still_begins_with_the_tab_list() {
-        let chrome_target_at = body("    fn docked_chrome_target_at(");
+        let chrome_target_at = method_body("Runtime", "docked_chrome_target_at");
         let list = chrome_target_at
             .find("tab_list_target_at")
             .expect("the chrome ladder asks the tab list");
@@ -113987,9 +114289,7 @@ mod quit_transaction_tests {
     use super::{SessionWindowV1, TabV1, quit, restore, seed, session_windows};
     use std::time::SystemTime;
 
-    /// This file, read as text — the witness for the claims below that are about
-    /// *where* something is and is not written.
-    const SOURCE: &str = include_str!("main.rs");
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
     fn window(cwd: &str) -> SessionWindowV1 {
         SessionWindowV1 {
@@ -114002,20 +114302,82 @@ mod quit_transaction_tests {
         }
     }
 
-    /// The body of one function of this file, as text.
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate. The commit before this one ran
+    // both readings side by side and asserted they agree — eight body pins
+    // compared as bytes, two counts as numbers — and this is the one that
+    // deletes the older of the two, because two implementations of one
+    // judgement do not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `found` and `in_product` are that
+    // module's helpers word for word, and its header is where the six points
+    // behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed — spelled in pieces, because
+    // this module stands earlier in the file than the code it read and a whole
+    // needle would have found this module's own prose first — and stopped
+    // before the next `\n    fn `, which is not the end of the method.
+    // `exiting`'s slice was 62,842 bytes around a body of 883, because the next
+    // `fn ` at that indentation is far below the trait implementation.
+    //
+    // It also could not say which `impl` it had landed in, and here that
+    // mattered: the pins name four owners. `retire_all_shells` is a method of
+    // [`super::TabState`], not of `Runtime`; `settle_quit` is [`super::FolioApp`]'s;
+    // `exiting` is the `ApplicationHandler` implementation's. The equivalence
+    // commit is what established that rather than assumed it.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
     ///
-    /// The signature is handed over **in pieces and joined here**, on
-    /// `only_one_line_in_this_file_hands_the_store_a_document`'s own rule: this
-    /// module stands earlier in the file than the code it reads, so a needle
-    /// written out whole would find *this test's own prose* first and every
-    /// assertion below would be about a string literal.
-    fn body(signature: &[&str]) -> &'static str {
-        let signature = signature.concat();
-        let start = SOURCE
-            .find(signature.as_str())
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of one item, braces included — the identity of §2.4 rather than
+    /// a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// How many of these occurrences stand in a file a product build compiles.
+    ///
+    /// File-grained, and deliberately so: §2.3 computes product reachability per
+    /// *declaration path to a file*, and an inline `#[cfg(test)] mod` inside a
+    /// product file is not a file. Every needle this module counts is assembled
+    /// at run time, so no assertion of its own is among the occurrences and the
+    /// file is the right grain here.
+    fn in_product(found: &Found) -> usize {
+        found
+            .occurrences()
+            .iter()
+            .filter(|occurrence| {
+                source()
+                    .file_at(occurrence.span.start())
+                    .is_some_and(bt_source::FileRecord::permits_product)
+            })
+            .count()
     }
 
     /// **RED (shape) — a window is in the vault before it is asked what it looks like** (§7.53).
@@ -114030,14 +114392,15 @@ mod quit_transaction_tests {
     /// `FolioApp::resumed` seeds its picture with the paragraph it opened from.
     ///
     /// Held against the source for this module's own reason: it is a claim about *when* something
-    /// is written, which no value in the program carries.
+    /// is written, which no value in the program carries. The source is asked for by identity —
+    /// `Runtime::open_window` — so the claim follows the door rather than this file.
     ///
     /// Red gate: delete the `record_window` call, or move it below `new_window_runtime`, and this
     /// goes red. Move the snapshot after `show_new_window` and the last assertion does — a
     /// maximized window photographed after `SW_MAXIMIZE` has no normal rectangle left to measure.
     #[test]
     fn a_window_is_in_the_vault_before_it_is_asked_what_it_looks_like() {
-        let door = body(&["fn open_", "window(\n        event_loop: &ActiveEventLoop,"]);
+        let door = method_body("Runtime", "open_window");
         let seeded = door
             .find("app.record_window(")
             .expect("the door puts this window's opening rectangle in the vault");
@@ -114145,7 +114508,7 @@ mod quit_transaction_tests {
     ///
     /// The structural half of `quit_writes_every_window_and_vaults_none`, checked
     /// where it can actually be broken: `vault_this_window` is called from
-    /// exactly one place in this file, that place is the branch `close_window`
+    /// exactly one place in this package, that place is the branch `close_window`
     /// takes when the shut is *not* the process ending, and the quit's own
     /// teardown names neither it nor the store.
     ///
@@ -114155,19 +114518,16 @@ mod quit_transaction_tests {
     fn the_only_door_into_the_vault_is_a_window_the_user_closed() {
         let door = ["vault_this_", "window("].concat();
         assert_eq!(
-            SOURCE.matches(door.as_str()).count(),
+            found(needle!(Pattern::text(&door)), View::Raw).len(),
             2,
             "one definition and one call site"
         );
-        let close = body(&[
-            "    fn close_",
-            "window(&mut self, ending: bool) -> Result<()> {",
-        ]);
+        let close = method_body("Runtime", "close_window");
         assert!(
             close.contains(&["} else {\n            self.", door.as_str()].concat()),
             "the vault is the branch a shut that is *not* the process ending takes"
         );
-        let retire = body(&["    fn retire_", "window(&mut self) -> Result<()> {"]);
+        let retire = method_body("Runtime", "retire_window");
         assert!(
             !retire.contains("vault") && !retire.contains("mark_session_dirty"),
             "a quit's teardown neither files a window away nor re-records one"
@@ -114184,35 +114544,43 @@ mod quit_transaction_tests {
     /// seconds"; taking every step off this thread is what makes the click
     /// answer at once. There is one road now and it is
     /// `bt_pty::retire_session`, so this checks that `PtySession::shutdown` is
-    /// not called from this file at all.
+    /// not called from anywhere the product compiles.
     ///
     /// Red gate: put a synchronous shutdown back into any of the three doors and
     /// the count names it.
     #[test]
     fn a_pane_that_closes_is_taken_apart_somewhere_else() {
         let on_this_thread = ["pty.shut", "down()"].concat();
+        // **The one place the two readings part company, and it is a widening**
+        // (§4.1). This file's count is over `main.rs`; the crate's is over every
+        // file the package declares, and `tests.rs` — wholly test code by its
+        // own `#[cfg(test)]` declaration — holds the one test that drives a
+        // shutdown by hand. So the crate's answer is filtered to the files a
+        // product build compiles, which is the question this pin was always
+        // asking and the one `include_str!("main.rs")` could only approximate.
         assert_eq!(
-            SOURCE.matches(on_this_thread.as_str()).count(),
-            // None at all, counted over the whole of `main.rs`. It was 1 until 2026-09-18,
-            // when `mod tests` moved to `tests.rs` and took with it the one test that drives
-            // a shutdown by hand; this file is now the product plus fifty-four smaller test
-            // modules, and not one of them takes a session apart on the window thread.
+            in_product(&found(needle!(Pattern::text(&on_this_thread)), View::Raw)),
+            // None at all, counted over every file a product build of this package
+            // compiles. The one written anywhere in the package is the fixture in
+            // `tests.rs`, which `mod tests` took with it on 2026-09-18 and which the
+            // declaration reaching that file gates behind `#[cfg(test)]` — so it is
+            // not counted, which is the fact this pin meant all along.
             0,
-            "a synchronous shutdown is written in this file again"
+            "a synchronous shutdown is written in the product again"
         );
-        for door in [
-            "    fn retire_all_shells(&mut self) {",
-            "    fn let_go_of_this_",
+        for (owner, name) in [
+            ("TabState", "retire_all_shells"),
+            ("Runtime", "let_go_of_this_window"),
         ] {
-            let text = body(&[door]);
+            let text = method_body(owner, name);
             assert!(
                 !text.contains(&on_this_thread),
-                "`{door}` hands the session over rather than taking it apart here"
+                "`{owner}::{name}` hands the session over rather than taking it apart here"
             );
         }
         let handed = ["bt_pty::retire_", "session("].concat();
         assert!(
-            body(&["    fn retire_all_shells(&mut self) {"]).contains(handed.as_str()),
+            method_body("TabState", "retire_all_shells").contains(handed.as_str()),
             "and the hand-over is what it does instead"
         );
     }
@@ -114229,10 +114597,7 @@ mod quit_transaction_tests {
     /// before the process starts hiding windows over a file it never wrote.
     #[test]
     fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
-        let settle = body(&[
-            "    fn settle_",
-            "quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {",
-        ]);
+        let settle = method_body("FolioApp", "settle_quit");
         assert!(
             settle.contains("app.session_store.flush_judged()"),
             "the quit's write is the judged one"
@@ -114265,19 +114630,14 @@ mod quit_transaction_tests {
     /// call.
     #[test]
     fn the_quit_and_the_loops_own_backstop_stay_two_machines() {
-        let settle = body(&[
-            "    fn settle_",
-            "quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {",
-        ]);
+        let settle = method_body("FolioApp", "settle_quit");
         let shut = ["close_", "window"].concat();
         assert!(
             !settle.contains(shut.as_str()),
             "a quit never spends the per-window shut"
         );
-        let exiting = body(&[
-            "    fn exit",
-            "ing(&mut self, _event_loop: &ActiveEventLoop) {",
-        ]);
+        let exiting =
+            item_body(&ItemQuery::method("FolioApp", "exiting").of_trait("ApplicationHandler"));
         assert!(
             exiting.contains(&[shut.as_str(), "(true)"].concat()),
             "and the backstop for a loop stopped by something else is untouched"
@@ -115686,22 +116046,45 @@ mod textless_present_tests {
         assert_eq!(swapchain, 0, "no image is not a textless image");
     }
 
-    /// This file as text, for [`application_change_tests::SOURCE`]'s reason:
-    /// what is under test is which *arm* a variant lands in, and a
-    /// `WindowRuntime` is a surface, a compositor and four Win32 bridges.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what is under test here is which *arm* a variant lands in ─────────
+    //
+    // A `WindowRuntime` is a surface, a compositor and four Win32 bridges, so
+    // the two present sites cannot be stood up and what can be held about them
+    // is the shape of their `match`. That used to be read out of
+    // `include_str!("main.rs")`; it is now asked of `bt-source` about an *item*
+    // of this crate, so no claim here is bound to the file the method happens to
+    // be written in (`docs/plans/bt-app-split-prep.md` §6.3). The commit before
+    // this one ran both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
 
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!("\n    fn {name}(");
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n    }\n")
-                .expect("a method is closed by a `}` at its `impl`'s indentation");
-        &SOURCE[start..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// The body of one method written in a `impl <trait> for <owner>` block.
+    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name).of_trait(trait_name))
     }
 
     /// PIN — **a picture that lost its characters is re-filed and asked for
@@ -115726,7 +116109,7 @@ mod textless_present_tests {
     #[test]
     fn a_textless_present_is_a_frame_the_window_still_owes() {
         for method in ["redraw", "present_retained_picture"] {
-            let body = fn_body(method);
+            let body = method_body("Runtime", method);
             let owed = body
                 .find("PresentOutcome::PresentedWithoutText(_)")
                 .unwrap_or_else(|| panic!("`{method}` must name the textless outcome"));
@@ -115793,7 +116176,7 @@ mod textless_present_tests {
 
         // ② Both present sites still owe the picture.
         for method in ["redraw", "present_retained_picture"] {
-            let body = fn_body(method);
+            let body = method_body("Runtime", method);
             let owed = body
                 .find("PresentOutcome::SkippedNotVisible")
                 .unwrap_or_else(|| {
@@ -115812,16 +116195,20 @@ mod textless_present_tests {
         // ③ And the turn that pays the debt exists, on the event winit raises
         // from the very same `Visible` bit the acquire tested.
         //
-        // The needle is spelled in two pieces so that this test cannot find
-        // itself: the event-loop arm it is looking for stands *later* in this
-        // file than the test does.
-        let woken = SOURCE
+        // The dispatch is asked for by name —
+        // `<FolioApp as ApplicationHandler<AppEvent>>::window_event` — and the
+        // default arm the slice stops at is what makes that matter: it is
+        // spelled seven times in `main.rs` and once in `hang_watch.rs`, so
+        // "the next one" only means this dispatch's while the reading is the
+        // item's. The needle stays in two pieces for P18 to join.
+        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let woken = dispatch
             .find(concat!(
                 "WindowEvent::Occluded(false) => runtime.",
                 "publish_frame(FrameTrigger {"
             ))
             .expect("the event loop answers the window that came back on screen");
-        let arm = &SOURCE[woken..];
+        let arm = &dispatch[woken..];
         let end = arm.find("_ => Ok(())").expect("the dispatch default arm");
         assert_eq!(
             arm[..end].matches("publish_frame").count(),
@@ -115833,56 +116220,68 @@ mod textless_present_tests {
 
 #[cfg(test)]
 mod application_change_tests {
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Three readers here asked `main.rs` for its text — six method bodies and
+    // the record's own field list; every one of them now asks `bt-source` about
+    // an *item* of this crate, so no fact here is bound to the file it happens
+    // to be written in today. The commit before this one ran both readings side
+    // by side and asserted they agree; this is the one that deletes the older of
+    // the two (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // `source`, `item_body` and `method_body` are `pty_drain_budget_tests`'
+    // helpers word for word. **Two owners**: the five verbs are `Runtime`'s and
+    // the loop's door is `FolioApp`'s — the deleted `fn_body` took the first
+    // `\n    fn name(` in the file, which is a method of whatever `impl` comes
+    // first. The flag list stops being a top-level text cut and becomes the body
+    // of the struct identity, so a record that moved file is still read.
+    use bt_source::{Index, ItemQuery};
+
     use super::ApplicationChange;
     use winit::window::WindowId;
 
     const A: fn() -> WindowId = || WindowId::from(1_u64);
     const B: fn() -> WindowId = || WindowId::from(2_u64);
 
-    /// This file, read as text — the witness for the claims below that are
-    /// about *which function reaches which channel*. There is no value a unit
-    /// test could be handed for those: a `WindowRuntime` is a surface, a
-    /// compositor and four Win32 bridges, so "the other window redrew" is not a
-    /// sentence this process can say without a screen. What can be said without
-    /// one is that the verb hands its change to the application rather than
-    /// keeping it, and that the loop spends it before it sleeps.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The body of a method declared at an `impl`'s own indentation, which is
-    /// the shape of every function named below.
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!("\n    fn {name}(");
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n    }\n")
-                .expect("a method is closed by a `}` at its `impl`'s indentation");
-        &SOURCE[start..end]
-    }
-
-    /// The `bool` fields of [`ApplicationChange`], read off its declaration.
+    /// The `bool` fields of [`ApplicationChange`], read off its declaration —
+    /// **the record's own body, asked for by identity**.
+    ///
+    /// The witness for the claims below that are about *which function reaches
+    /// which channel*. There is no value a unit test could be handed for those:
+    /// a `WindowRuntime` is a surface, a compositor and four Win32 bridges, so
+    /// "the other window redrew" is not a sentence this process can say without
+    /// a screen. What can be said without one is that the verb hands its change
+    /// to the application rather than keeping it, and that the loop spends it
+    /// before it sleeps.
     ///
     /// Read rather than written out, because a list of flags kept beside the
     /// record is a list that stops matching it: the point of the pin below is
     /// that a *fourth* flag cannot be added without the sweep learning to spend
     /// it, and a hand-written list would go green on the day that happened.
     fn flags() -> Vec<&'static str> {
-        let head = "\nstruct ApplicationChange {\n";
-        let start = SOURCE
-            .find(head)
-            .expect("`struct ApplicationChange` is declared at the top level")
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n}\n")
-                .expect("a top-level struct is closed by a `}` in column zero");
-        SOURCE[start..end]
+        item_body(&ItemQuery::type_item("ApplicationChange"))
             .lines()
             .filter_map(|line| line.trim_start().strip_suffix(": bool,"))
             .collect()
+    }
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of the one item `query` names, braces included — the identity of
+    /// §2.4 rather than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
     }
 
     fn font(paid_by: WindowId) -> ApplicationChange {
@@ -116014,7 +116413,7 @@ mod application_change_tests {
     /// Red gate: delete the `change.caret` arm of `adopt_application_change`.
     #[test]
     fn the_sweep_spends_every_flag_the_record_can_carry() {
-        let sweep = fn_body("adopt_application_change");
+        let sweep = method_body("Runtime", "adopt_application_change");
         let flags = flags();
         assert!(
             flags.contains(&"caret"),
@@ -116045,7 +116444,7 @@ mod application_change_tests {
             "apply_cursor_style",
         ] {
             assert!(
-                fn_body(verb).contains("note_application_change"),
+                method_body("Runtime", verb).contains("note_application_change"),
                 "`{verb}` moves a process static, so it owes every other window \
                  a re-derivation"
             );
@@ -116069,7 +116468,7 @@ mod application_change_tests {
     fn no_window_is_left_holding_yesterday_when_the_loop_goes_to_sleep() {
         // `about_to_wait_inner` and not `about_to_wait`: the outer one is the
         // heartbeat's three lines, and the turn itself is the body inside it.
-        let door = fn_body("about_to_wait_inner");
+        let door = method_body("FolioApp", "about_to_wait_inner");
         let settled = door
             .find("settle_application_change")
             .expect("the loop settles what the application changed");
@@ -122722,22 +123121,25 @@ fn set_option_as_alt(window: &Window, option_sends_alt: bool) {
 /// window's ground is never laid under a clear that already carries it.
 #[cfg(test)]
 mod resize_skirt_order_tests {
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// One method's text, from its signature to the next method's.
+    /// One method's statements, asked of the crate by the name of the method
+    /// rather than of this file by a line of it.
     ///
     /// Comments go, and then whitespace goes. Both for the same reason: the
     /// claims below are about which *statement* stands first, and a paragraph
     /// explaining why it does is not a statement. Leaving comments in would
-    /// also make the pins fail the moment somebody rewords one.
-    fn body(signature: &str) -> String {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        rest[..end]
-            .lines()
+    /// also make the pins fail the moment somebody rewords one. The braces go
+    /// with them: they delimit the body, they are not a statement in it, and
+    /// the first claim below counts characters from the first statement.
+    fn body(name: &str) -> String {
+        let whole = normalised(method_body("Runtime", name));
+        whole[1..whole.len() - 1].to_owned()
+    }
+
+    /// The statements of a run of source, with everything that is not one
+    /// taken out — the reading both `body` and the crate's answer are put
+    /// through, so that the two are compared on the same terms.
+    fn normalised(text: &str) -> String {
+        text.lines()
             .map(|line| match line.find("//") {
                 Some(at) => &line[..at],
                 None => line,
@@ -122748,6 +123150,40 @@ mod resize_skirt_order_tests {
             .collect()
     }
 
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Both pins used to read `include_str!("main.rs")`; they now ask
+    // `bt-source` about an *item* of this crate, so neither is bound to the
+    // file the method happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
     /// Red gate: move the `set_window_size` call below the `renderer.resize`
     /// that follows it — or anywhere else in the handler — and this goes red.
     /// That is the shipped build of 2026-08-24, where the strip outside the old
@@ -122755,7 +123191,7 @@ mod resize_skirt_order_tests {
     /// through Folio's own frame.
     #[test]
     fn the_resize_handler_covers_the_new_strip_before_it_does_anything_else() {
-        let handler = body("fn resize(&mut self, physical: PhysicalSize<u32>) -> Result<()> {");
+        let handler = body("resize");
         // Plain needles: `body` hands back one method's text, so this test's own
         // source is not among the things being searched.
         let told = handler
@@ -122790,7 +123226,7 @@ mod resize_skirt_order_tests {
     /// swapchain that had caught up.
     #[test]
     fn the_present_funnel_shrinks_the_skirt_and_asks_for_the_frame_that_does_it() {
-        let funnel = body("fn present_seats_and_commit(");
+        let funnel = body("present_seats_and_commit");
         let shrunk = funnel
             .find(".set_covered_size(covered_width,covered_height)")
             .expect("the funnel tells the compositor what the swapchain now covers");
@@ -127162,6 +127598,58 @@ mod platform_gate_tests {
         opens && PLATFORM_WORDS.iter().any(|word| line.contains(word))
     }
 
+    // ── what the capability pin asks the crate ────────────────────────────
+    //
+    // `the_caption_run_is_decided_by_one_capability_read` used to read
+    // `main.rs` and `seats.rs` as two `include_str!` constants. It now asks
+    // `bt-source` about *items* and *modules* of this crate, so none of its
+    // claims is bound to the file a method happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // `sources()` above is **not** part of that: that walk is the P10 row of
+    // the debt list (§6.3), it is the twin of
+    // `scripts/check-portable-core.ps1`'s array reader — allowlist entry 1 —
+    // and P10's acceptance is the agreement test between the two walks, which
+    // is P10's ticket and not this batch's. It is left exactly as it is.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body` and
+    // `method_body` live.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// One search over a named scope — a Rust path, never a file.
+    fn found_in(
+        needle: bt_source::Needle,
+        view: bt_source::View,
+        scope: bt_source::Scope,
+    ) -> bt_source::Found {
+        source()
+            .search(&bt_source::Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
     /// RED — **no unlisted file, and no name on the list that has stopped
     /// asking.**
     ///
@@ -127269,13 +127757,19 @@ mod platform_gate_tests {
     /// past the accessor, and the last two do.
     #[test]
     fn the_caption_run_is_decided_by_one_capability_read() {
-        const MAIN: &str = include_str!("main.rs");
-        const SEATS: &str = include_str!("seats.rs");
         // Assembled rather than written whole, for `attention_hooks`' reason:
         // a pin that spelled its own needle would be an occurrence of the very
-        // thing it counts, and this count has to be exact.
+        // thing it counts, and this count has to be exact. Writing the halves
+        // back together is P18's ticket.
         const DOOR: &str = concat!("custom_window_frame", ".platform_chrome()");
-        let reads: Vec<usize> = MAIN.match_indices(DOOR).map(|(at, _)| at).collect();
+        // Counted over the package: a fourth reach for the frame could be
+        // written anywhere, and wherever it was written it would be the second
+        // opinion this number exists to refuse.
+        let reads = found_in(
+            bt_source::Needle::new(bt_source::Pattern::text(DOOR)),
+            bt_source::View::Raw,
+            bt_source::Scope::Everything,
+        );
         assert_eq!(
             reads.len(),
             3,
@@ -127284,22 +127778,28 @@ mod platform_gate_tests {
              everything else takes their answer",
             reads.len()
         );
+        let accessor = source()
+            .one(&bt_source::ItemQuery::method("Runtime", "platform_chrome"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(
-            MAIN.contains("fn platform_chrome(&self) -> bt_platform::PlatformChrome {"),
+            source()
+                .text(accessor.declaration())
+                .contains("fn platform_chrome(&self) -> bt_platform::PlatformChrome "),
             "and it is read there"
         );
-        // The accessor is the last of the three: the constructors stand above it
-        // in the file, and each binds what it reads to the local every argument
-        // below it is written off.
-        let accessor = MAIN
-            .find("fn platform_chrome(&self) -> bt_platform::PlatformChrome {")
-            .expect("the one accessor");
-        let (in_accessor, in_constructors): (Vec<usize>, Vec<usize>) =
-            reads.iter().partition(|at| **at > accessor);
-        assert_eq!(in_accessor.len(), 1, "the accessor reads it once");
-        for at in in_constructors {
+        // One of the three stands inside the accessor and the other two are the
+        // constructors binding the measurement they have just taken. Asked as
+        // containment, because which of them the file happens to hold first is
+        // no part of the claim.
+        let accessor_body = accessor.body().expect("the accessor has a body");
+        let (inside, outside): (Vec<bt_source::Span>, Vec<bt_source::Span>) = reads
+            .spans()
+            .into_iter()
+            .partition(|span| span.within(accessor_body));
+        assert_eq!(inside.len(), 1, "the accessor reads it once");
+        for span in outside {
             assert!(
-                MAIN[..at].ends_with("let platform_chrome = "),
+                source().union()[..span.start()].ends_with("let platform_chrome = "),
                 "a read outside the accessor is a window constructor binding the \
                  measurement it has just taken, and nothing else"
             );
@@ -127309,64 +127809,75 @@ mod platform_gate_tests {
         // the function whose whole job is the caption run, and the one branch in
         // the solver that decides the tabs' shape — and the module's own test
         // helper, which is how the other arm is written down at all.
-        let decisions: Vec<usize> = SEATS
-            .match_indices("buttons_are_the_platforms")
-            .map(|(at, _)| at)
-            .collect();
-        let body_of = |signature: &str| -> std::ops::Range<usize> {
-            let at = SEATS
-                .find(signature)
-                .unwrap_or_else(|| panic!("`{signature}` is not in `seats.rs`"));
-            let end = SEATS[at..]
-                .find("\n}\n")
-                .map(|to| at + to)
-                .expect("a function is closed at column zero");
-            at..end
-        };
+        //
+        // Read of the module `crate::seats` and not of the package: this very
+        // test spells the name three times in `main.rs`, and a package-wide
+        // reading would invert the claim.
+        let decisions = found_in(
+            bt_source::Needle::new(bt_source::Pattern::text("buttons_are_the_platforms")),
+            bt_source::View::Raw,
+            bt_source::Scope::Module("crate::seats".to_owned()),
+        );
         let readers = [
-            ("caption_targets", body_of("pub fn caption_targets(")),
-            ("tab_strip_geometry", body_of("pub fn tab_strip_geometry(")),
-            (
-                "window_caption_boxes",
-                body_of("pub fn window_caption_boxes("),
-            ),
+            "caption_targets",
+            "tab_strip_geometry",
+            "window_caption_boxes",
         ];
+        let bodies: Vec<bt_source::Span> = readers
+            .iter()
+            .map(|name| {
+                source()
+                    .one(&bt_source::ItemQuery::function(name).in_module("crate::seats"))
+                    .unwrap_or_else(|failure| panic!("{failure}"))
+                    .body()
+                    .unwrap_or_else(|| panic!("`{name}` has a body"))
+            })
+            .collect();
         assert_eq!(
             decisions.len(),
             readers.len() + 1,
-            "the capability is named {} times in `seats.rs`; it is read by \
+            "the capability is named {} times in `crate::seats`; it is read by \
              `caption_targets`, by `tab_strip_geometry` and by `window_caption_boxes`, \
              and constructed once by that module's own test helper — nothing else may \
              branch on it",
             decisions.len()
         );
         // Matched by *containment* rather than by position, because the order
-        // the two functions happen to stand in the file is not part of the
-        // claim: each named body holds exactly one read, and what is left over
-        // is the helper.
-        for (name, body) in &readers {
+        // the three functions happen to stand in is no part of the claim: each
+        // named body holds exactly one read, and what is left over is the
+        // helper.
+        for (name, body) in readers.iter().zip(&bodies) {
             assert_eq!(
-                decisions.iter().filter(|at| body.contains(*at)).count(),
+                decisions
+                    .spans()
+                    .iter()
+                    .filter(|span| span.within(*body))
+                    .count(),
                 1,
                 "`{name}` does not read the capability exactly once"
             );
         }
         let helper = decisions
-            .iter()
-            .find(|at| !readers.iter().any(|(_, body)| body.contains(*at)))
-            .expect("one occurrence outside the two readers");
+            .spans()
+            .into_iter()
+            .find(|span| !bodies.iter().any(|body| span.within(*body)))
+            .expect("one occurrence outside the three readers");
         assert!(
-            SEATS[*helper..].starts_with("buttons_are_the_platforms: true"),
-            "the occurrence outside the two readers is not the test helper that states \
+            source().union()[helper.start()..].starts_with("buttons_are_the_platforms: true"),
+            "the occurrence outside the three readers is not the test helper that states \
              the other arm"
         );
 
         // **The fourth site: the state change** (§13.48). One answer to the
         // wake, and it asks the accessor rather than the frame.
-        let answers: Vec<usize> = MAIN
-            .match_indices(concat!("AppEvent::WindowChromeChanged", " =>"))
-            .map(|(at, _)| at)
-            .collect();
+        let answers = found_in(
+            bt_source::Needle::new(bt_source::Pattern::text(concat!(
+                "AppEvent::WindowChromeChanged",
+                " =>"
+            ))),
+            bt_source::View::Raw,
+            bt_source::Scope::Everything,
+        );
         assert_eq!(
             answers.len(),
             1,
@@ -127374,30 +127885,35 @@ mod platform_gate_tests {
              window's own buttons away has one consequence and it is stated once",
             answers.len()
         );
-        let handler = "fn adopt_platform_chrome(&mut self) -> Result<()> {";
+        let handler = "`FolioApp::adopt_platform_chrome`";
         assert!(
-            MAIN[answers[0]..].starts_with(concat!(
+            source().union()[answers.spans()[0].start()..].starts_with(concat!(
                 "AppEvent::WindowChromeChanged",
                 " => self.adopt_platform_chrome(),"
             )),
-            "and what it is answered with is `{handler}`"
+            "and what it is answered with is {handler}"
         );
-        let at = MAIN.find(handler).expect("the fourth site");
-        let body = &MAIN[at..at + MAIN[at..].find("\n    }\n").expect("its end")];
         assert!(
-            !body.contains(DOOR),
+            !method_body("FolioApp", "adopt_platform_chrome").contains(DOOR),
             "the fourth read goes through `Runtime::platform_chrome` like every other \
              reader; reaching the frame here would be a second opinion about a window \
              that now has more than one answer"
         );
 
         // And the module that draws and hit-tests the bar knows nothing about
-        // which machine it is on.
+        // which machine it is on. Of `crate::seats` and of nothing wider: all
+        // three spellings stand in the files the list above admits on purpose,
+        // so a package-wide negative would be about nothing at all.
         for gate in ["target_os", "cfg!(windows)", "#[cfg(windows)]"] {
             assert!(
-                !SEATS.contains(gate),
-                "`seats.rs` names `{gate}`; the chrome is a capability and this file decides \
-                 by the value it is handed"
+                found_in(
+                    bt_source::Needle::new(bt_source::Pattern::text(gate)),
+                    bt_source::View::Raw,
+                    bt_source::Scope::Module("crate::seats".to_owned()),
+                )
+                .is_empty(),
+                "`crate::seats` names `{gate}`; the chrome is a capability and that module \
+                 decides by the value it is handed"
             );
         }
     }
@@ -129167,22 +129683,43 @@ mod palette_wiring_tests {
 /// same order, and that each arm ends in the door a keystroke already uses.
 #[cfg(test)]
 mod edit_menu_clipboard_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree; this is
+    // the one that deletes the older of the two (`docs/CONVENTIONS.md` §十
+    // rule 4).
+    //
+    // `source`, `item_body` and `method_body` are `pty_drain_budget_tests`'
+    // helpers word for word. **Two owners, and the deleted finder could not have
+    // told them apart**: four pins are `Runtime`'s and the menu landing is
+    // `FolioApp`'s.
+    use bt_source::{Index, ItemQuery};
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
     }
 
     /// The keyboard's own ladder.
     fn ladder() -> &'static str {
-        body("fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {")
+        method_body("Runtime", "keyboard_input")
     }
 
     /// PIN — **every surface the menu defers to has a rung above the clipboard
@@ -129204,8 +129741,9 @@ mod edit_menu_clipboard_tests {
     #[test]
     fn every_surface_the_menu_defers_to_stands_above_the_clipboard_rung() {
         let ladder = ladder();
-        let defers = body(
-            "    fn a_surface_above_the_clipboard_rung_holds_the_keyboard(&mut self) -> bool {",
+        let defers = method_body(
+            "Runtime",
+            "a_surface_above_the_clipboard_rung_holds_the_keyboard",
         );
         let rung = ladder
             .find("self.copy_selection()?;")
@@ -129251,8 +129789,8 @@ mod edit_menu_clipboard_tests {
     /// write the bytes itself — the last two assertions go red.
     #[test]
     fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
-        let verb = body("    fn run_an_application_menu_verb(");
-        let editor = body("    fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {");
+        let verb = method_body("Runtime", "run_an_application_menu_verb");
+        let editor = method_body("Runtime", "preview_key");
         let ladder = ladder();
         for (door, other, whose) in [
             (
@@ -129297,12 +129835,12 @@ mod edit_menu_clipboard_tests {
     /// the landing and the arm named here disappears.
     #[test]
     fn a_declined_clipboard_row_lands_where_every_other_menu_row_lands() {
-        let landing = body("    fn answer_a_menu_row(");
+        let landing = method_body("FolioApp", "answer_a_menu_row");
         assert!(
             landing.contains("runtime.run_an_application_menu_verb(action)?;"),
             "the landing answers a menu verb somewhere other than the window's own runtime"
         );
-        let verbs = body("    fn run_an_application_menu_verb(");
+        let verbs = method_body("Runtime", "run_an_application_menu_verb");
         for verb in [
             "AppMenuAction::Help",
             "AppMenuAction::CopySelection",
@@ -129328,17 +129866,50 @@ mod edit_menu_clipboard_tests {
 /// and a `#[test]` can make neither.
 #[cfg(test)]
 mod quit_with_no_window_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Both rulings are about the order of two lines and about which doors write
+    // one flag, neither of which returns a value — so they are source pins.
+    // They used to read `include_str!("main.rs")`; they now ask `bt-source`
+    // about an *item* of this crate, so no claim here is bound to the file the
+    // door happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body`,
+    // `method_body` and `found` live. The owner is an argument here because the
+    // four doors are not one type's: three are `FolioApp`'s and the chord's is
+    // `Runtime`'s, which is a distinction a text finder could not make.
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// RED — **the application's own verbs are answered before a window is
@@ -129356,7 +129927,7 @@ mod quit_with_no_window_tests {
     /// goes red — which is the bug, exactly.
     #[test]
     fn a_menu_quit_is_dispatched_before_the_landing_asks_for_a_window() {
-        let landing = body("    fn answer_a_menu_row(");
+        let landing = method_body("FolioApp", "answer_a_menu_row");
         // The needles are the code's own spelling and not the prose around it:
         // a comment that stayed put while the call moved would otherwise keep
         // this green.
@@ -129394,21 +129965,31 @@ mod quit_with_no_window_tests {
     #[test]
     fn every_door_onto_the_quit_records_the_same_debt() {
         assert!(
-            body("    fn run_a_verb_of_the_applications(").contains("app.ask_to_quit();"),
+            method_body("FolioApp", "run_a_verb_of_the_applications")
+                .contains("app.ask_to_quit();"),
             "the menu bar's Quit does not reach the quit transaction"
         );
         assert!(
-            body("    fn run_shortcut(").contains("self.app.ask_to_quit();"),
+            method_body("Runtime", "run_shortcut").contains("self.app.ask_to_quit();"),
             "the chord no longer records the debt through the one door"
         );
         assert!(
-            body("    fn begin_the_systems_quit(").contains("app.ask_to_quit();"),
+            method_body("FolioApp", "begin_the_systems_quit").contains("app.ask_to_quit();"),
             "AppKit's own quit request no longer records it through the one door"
         );
-        // And nothing writes the flag behind that door's back. The needle is
-        // spelled in two halves so that this line is not itself an occurrence.
+        // And nothing writes the flag behind that door's back. Counted over the
+        // package and not over one file, because "somewhere other than
+        // `App::ask_to_quit`" includes somewhere else entirely. The needle
+        // stays in two halves for P18 to join.
         assert_eq!(
-            SOURCE.matches(concat!("quit_requested", " = true")).count(),
+            found(
+                bt_source::Needle::new(bt_source::Pattern::text(concat!(
+                    "quit_requested",
+                    " = true"
+                ))),
+                bt_source::View::Raw,
+            )
+            .len(),
             1,
             "the quit debt is recorded somewhere other than `App::ask_to_quit`"
         );
@@ -129533,35 +130114,110 @@ mod summon_key_wiring_tests {
 /// is a defect this window has already had once on this very surface (§7.39's
 /// float, §7.1.5f's ladder).
 ///
-/// So these read the file as text, for [`mouse_trace_station_tests`]' stated
-/// reason, and they assert only the wiring: not what a function computes, but
-/// that it is the one being asked.
+/// So these read the source, for [`mouse_trace_station_tests`]' stated reason,
+/// and they assert only the wiring: not what a function computes, but that it
+/// is the one being asked. Since P3 they ask the crate about an item rather
+/// than this file about a slice of its text, so the wiring follows the
+/// functions when they move.
 #[cfg(test)]
 mod live_markdown_edit_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree —
+    // twenty-two body pins compared as bytes, four counts as numbers — and this
+    // is the one that deletes the older of the two, because two implementations
+    // of one judgement do not vouch for each other (`docs/CONVENTIONS.md` §十
+    // rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `found` are that module's helpers
+    // word for word, and its header is where the six points behind them live.
+    //
+    // What the deleted finder did, recorded before it went: it took everything
+    // after the signature prefix it was handed and stopped before the next
+    // `\n    fn `, which is not the end of the method — 1,599 bytes around
+    // `leave_preview_page`'s 235-byte body, 2,088 around `seat_preview_caret`'s
+    // 757 — and it could not say which `impl` it had landed in. All fifteen
+    // identities turned out to be `Runtime`'s; the equivalence commit is what
+    // established that rather than assumed it.
+    //
+    // The four counts took this file **cut at this module's own declaration**,
+    // because every needle they count is spelled a second time in the
+    // assertions below and a count over the whole file would count the
+    // questions as well as the answers. `needle!` excludes one construction
+    // expression rather than every mention, so the file grain the pilot's
+    // `in_product` uses is not enough here: `in_product_items` is
+    // `clipboard_path_tests`' helper word for word, and it filters the
+    // package's answer by the `cfg` predicates §2.4 writes onto each
+    // occurrence's own item. A cut is a fact about one file; a `#[cfg(test)]`
+    // module is a fact that survives the move.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
     }
 
-    /// **The window, without the pins that read it.**
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// How many of these occurrences stand in code a product build compiles —
+    /// **at item grain**, which is `clipboard_path_tests`' helper and this
+    /// module's own decision rather than the pilot's file-grained one.
     ///
-    /// Every count below is a count of how many places in this file do a thing,
-    /// and the assertions themselves spell that thing out in a string literal —
-    /// so a count over the whole file would count the questions as well as the
-    /// answers. This module stands last, which is what makes the cut one line.
-    fn window() -> &'static str {
-        let end = SOURCE
-            .find("mod live_markdown_edit_tests {")
-            .expect("this module is declared in this file");
-        &SOURCE[..end]
+    /// Every needle counted below is written a second time in this module's own
+    /// assertions, and `needle!` excludes one construction expression rather
+    /// than every mention. §2.4's identity carries the `cfg` predicates written
+    /// on an enclosing inline `mod`, so the exclusion `window` performed by
+    /// cutting the file is a filter over the owners here.
+    ///
+    /// An occurrence in no callable at all is not a question this grain can
+    /// answer, so it is refused rather than quietly dropped.
+    fn in_product_items(found: &Found) -> usize {
+        let index = source();
+        assert_eq!(
+            found.outside_items(index),
+            0,
+            "an occurrence stands in no callable, so nothing here says whether \
+             the product compiles it:\n{}",
+            found.report(index)
+        );
+        found
+            .owners(index)
+            .into_iter()
+            .filter(|(identity, _)| {
+                !identity
+                    .variant
+                    .predicates()
+                    .iter()
+                    .any(|predicate| predicate == "test")
+            })
+            .map(|(_, count)| count)
+            .sum()
     }
 
     /// **Entering is one door and it does all five things** (T5 ①).
@@ -129574,7 +130230,7 @@ mod live_markdown_edit_tests {
     /// block nothing can be typed into.
     #[test]
     fn entering_writes_all_five_things_in_one_place() {
-        let door = body("    fn seat_preview_caret(");
+        let door = method_body("Runtime", "seat_preview_caret");
         for promise in [
             "caret.place(&content, offset, extend)",
             "pane.md_select = None",
@@ -129588,7 +130244,10 @@ mod live_markdown_edit_tests {
             );
         }
         assert_eq!(
-            window().matches("pane.md_caret = true").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("pane.md_caret = true")),
+                View::Raw
+            )),
             1,
             "one entrance, counted here on purpose — a second is a ruling and \
              not an edit",
@@ -129622,38 +130281,41 @@ mod live_markdown_edit_tests {
     /// and a press on a link renders the page it is standing in.
     #[test]
     fn leaving_is_one_door_that_escape_the_ground_and_a_blur_all_reach() {
-        for (door, what) in [
-            ("    fn preview_key(", "`Esc`"),
+        for (name, what) in [
+            ("preview_key", "`Esc`"),
             (
-                "    fn spend_preview_press(",
+                "spend_preview_press",
                 "a press on the page's empty ground, spent at the release",
             ),
             (
-                "    fn chrome_mouse_input(",
+                "chrome_mouse_input",
                 "losing the keyboard to a press elsewhere",
             ),
         ] {
             assert!(
-                body(door).contains("leave_preview_page("),
+                method_body("Runtime", name).contains("leave_preview_page("),
                 "{what} no longer renders the page again",
             );
         }
         assert!(
-            body("    fn press_preview_text(").contains("live && caret_at.is_none()"),
+            method_body("Runtime", "press_preview_text").contains("live && caret_at.is_none()"),
             "empty ground is a press that named no byte of the file — asked of \
              `caret_at`, because a press on a link names one and is the link's",
         );
         assert!(
-            body("    fn leave_preview_buffer_in(").contains("pane.md_caret = false"),
+            method_body("Runtime", "leave_preview_buffer_in").contains("pane.md_caret = false"),
             "and handing this surface a different file still leaves the page",
         );
         assert_eq!(
-            window().matches("md_caret = false").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("md_caret = false")),
+                View::Raw
+            )),
             2,
             "one door and the file swap, counted here on purpose",
         );
         assert!(
-            !body("    fn leave_preview_page(").contains("pane.caret ="),
+            !method_body("Runtime", "leave_preview_page").contains("pane.caret ="),
             "and leaving keeps the caret: it is a byte offset, and the flip to \
              the source face finds it where this left it",
         );
@@ -129670,11 +130332,14 @@ mod live_markdown_edit_tests {
     #[test]
     fn a_floated_page_takes_the_caret_through_the_docked_press() {
         assert!(
-            body("    fn press_float(").contains("self.press_preview_text(position)"),
+            method_body("Runtime", "press_float").contains("self.press_preview_text(position)"),
             "the float's body branch no longer reaches the rendered page's press",
         );
         assert_eq!(
-            window().matches("self.place_preview_caret_on(").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("self.place_preview_caret_on(")),
+                View::Raw
+            )),
             3,
             "the two ends of one spent gesture — where the press named and where \
              the hand let go — and the drag's own step inside a seat that cannot \
@@ -129691,7 +130356,7 @@ mod live_markdown_edit_tests {
     #[test]
     fn the_glance_card_refuses_the_caret_by_name() {
         assert!(
-            body("    fn preview_caret_takes_the_press(")
+            method_body("Runtime", "preview_caret_takes_the_press")
                 .contains("matches!(surface, PreviewSurface::Peek)"),
             "the card is no longer refused where the press decides",
         );
@@ -129710,7 +130375,7 @@ mod live_markdown_edit_tests {
     /// height and lands the caret nowhere near the pointer.
     #[test]
     fn the_quick_edits_press_declines_a_rendered_page() {
-        let press = body("    fn press_preview_body(");
+        let press = method_body("Runtime", "press_preview_body");
         assert!(
             press.contains("if self.preview_shows_live_markdown(surface) {"),
             "the quick edit's press no longer stands aside for the rendered page",
@@ -129740,29 +130405,32 @@ mod live_markdown_edit_tests {
     /// and draw another.
     #[test]
     fn the_caret_answers_before_the_piece_selection_everywhere() {
-        for (signature, first, second) in [
+        for (name, first, second) in [
             (
-                "    fn preview_selected_text(",
+                "preview_selected_text",
                 "self.preview_live_caret(surface)",
                 "pane.md_select?",
             ),
             (
-                "    fn preview_caret_selection_places(",
+                "preview_caret_selection_places",
                 "self.preview_live_caret(surface)?",
                 "preview_provenance::place_of(",
             ),
         ] {
-            let text = body(signature);
+            let text = method_body("Runtime", name);
             let one = text
                 .find(first)
-                .unwrap_or_else(|| panic!("{signature} no longer asks `{first}`"));
+                .unwrap_or_else(|| panic!("`Runtime::{name}` no longer asks `{first}`"));
             let two = text
                 .find(second)
-                .unwrap_or_else(|| panic!("{signature} no longer reaches `{second}`"));
-            assert!(one < two, "{signature} asks the two in the wrong order");
+                .unwrap_or_else(|| panic!("`Runtime::{name}` no longer reaches `{second}`"));
+            assert!(
+                one < two,
+                "`Runtime::{name}` asks the two in the wrong order"
+            );
         }
         assert!(
-            body("    fn preview_selected_text(").contains("caret.selected(content)"),
+            method_body("Runtime", "preview_selected_text").contains("caret.selected(content)"),
             "and a caret selection copies the file's own bytes",
         );
     }
@@ -129792,7 +130460,7 @@ mod live_markdown_edit_tests {
     /// wrong.
     #[test]
     fn a_press_on_a_rendered_page_changes_no_blocks_face() {
-        let press = body("    fn press_preview_text(");
+        let press = method_body("Runtime", "press_preview_text");
         for wrote in [
             "self.place_preview_caret_on(",
             "self.seat_preview_caret(",
@@ -129843,7 +130511,7 @@ mod live_markdown_edit_tests {
     /// spent nothing.
     #[test]
     fn the_release_spends_the_record_and_the_drag_holds_its_seat() {
-        let release = body("    fn release_preview_text(");
+        let release = method_body("Runtime", "release_preview_text");
         for reaches in ["pressed.spend(!click, head)", "self.spend_preview_press("] {
             assert!(
                 release.contains(reaches),
@@ -129851,7 +130519,7 @@ mod live_markdown_edit_tests {
                  answered",
             );
         }
-        let drag = body("    fn drag_preview_text(");
+        let drag = method_body("Runtime", "drag_preview_text");
         assert_eq!(
             drag.matches("self.place_preview_caret_on(").count(),
             1,
@@ -129885,12 +130553,12 @@ mod live_markdown_edit_tests {
     /// [`Runtime::settle_preview_caret`].
     #[test]
     fn the_grain_and_the_owed_caret_both_ride_on_the_record() {
-        let press = body("    fn press_preview_text(");
+        let press = method_body("Runtime", "press_preview_text");
         assert!(
             press.contains("let grain = preview_text_grain(clicks);"),
             "the press no longer classifies the repeat count it is recording",
         );
-        let spend = body("    fn spend_preview_press(");
+        let spend = method_body("Runtime", "spend_preview_press");
         assert!(
             spend.contains("self.widen_preview_caret(surface, grain)"),
             "the release no longer grows the caret to the grain the press asked \
@@ -129902,12 +130570,15 @@ mod live_markdown_edit_tests {
              caret it asked for",
         );
         assert_eq!(
-            window().matches("md_caret_wanted = Some(").count(),
+            in_product_items(&found(
+                needle!(Pattern::text("md_caret_wanted = Some(")),
+                View::Raw
+            )),
             1,
             "one place owes the caret, counted here on purpose",
         );
         assert!(
-            body("    fn settle_preview_caret(").contains("md_caret_wanted"),
+            method_body("Runtime", "settle_preview_caret").contains("md_caret_wanted"),
             "and nothing spends it when the body lands",
         );
     }
@@ -129923,7 +130594,7 @@ mod live_markdown_edit_tests {
     /// still opened by the same `preview_press_opens_its_link` gate it was.
     #[test]
     fn a_press_on_a_link_records_no_caret_and_the_release_still_follows_it() {
-        let press = body("    fn press_preview_text(");
+        let press = method_body("Runtime", "press_preview_text");
         assert!(
             press.contains("let placing = caret_at.filter(|_| link.is_none() || shift);"),
             "a plain press on a link no longer declines the caret",
@@ -129933,7 +130604,7 @@ mod live_markdown_edit_tests {
             "the record is built from something other than `placing`, so a link \
              press may now put a caret in the page",
         );
-        let release = body("    fn release_preview_text(");
+        let release = method_body("Runtime", "release_preview_text");
         let gate = release
             .find("preview_press_opens_its_link(&drag.latch)")
             .expect("the release still asks the latch which gesture this was");
@@ -129968,16 +130639,47 @@ mod live_markdown_edit_tests {
 mod refused_preview_card_tests {
     use super::{PictureRefusal, i18n, refused_preview_card, seats};
 
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // ── what this module asks the crate ───────────────────────────────────
+    //
+    // Eleven of the joints below are wiring, and wiring has no value to assert
+    // without a window — so they are held as source pins. They used to read
+    // `include_str!("main.rs")`; they now ask `bt-source` about an *item* of
+    // this crate, so no claim here is bound to the file the method happens to
+    // be written in today (`docs/plans/bt-app-split-prep.md` §6.3). The commit
+    // before this one ran both readings side by side and asserted they agree.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
+    // module's header is where the six points behind `source`, `item_body`,
+    // `method_body` and `found` live.
 
-    /// The body of a method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &bt_source::ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&bt_source::ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// Every refusal the picture lane can put on a pane with nothing on it.
@@ -130081,16 +130783,24 @@ mod refused_preview_card_tests {
     /// nothing at all.
     #[test]
     fn the_refused_and_unknown_pages_share_one_card() {
+        // Counted over the package and not over one file: a second builder is
+        // the defect, and it could be written anywhere. The needle stays in two
+        // pieces for P18 to join.
         assert_eq!(
-            SOURCE
-                .matches(concat!("fn ", "refused_preview_card("))
-                .count(),
+            found(
+                bt_source::Needle::new(bt_source::Pattern::text(concat!(
+                    "fn ",
+                    "refused_preview_card("
+                ))),
+                bt_source::View::Raw,
+            )
+            .len(),
             1,
             "the card is built in more than one place, or nowhere"
         );
         // ① the pane's dressing pass builds both of its cards there — the
         //    picture it would not draw, and the document nothing here reads.
-        let dressing = body(concat!("    fn ", "refresh_chrome_with_overlay("));
+        let dressing = method_body("Runtime", "refresh_chrome_with_overlay");
         assert_eq!(
             dressing
                 .matches(concat!("refused_preview_card", "("))
@@ -130103,7 +130813,7 @@ mod refused_preview_card_tests {
             "the pane's card builder never asks the picture lane, so a refused picture is a bare sentence again"
         );
         // ② and a window's two, through the same function.
-        let window = body(concat!("    fn ", "float_refusal_words("));
+        let window = method_body("Runtime", "float_refusal_words");
         assert_eq!(
             window.matches(concat!("refused_preview_card", "(")).count(),
             2,
@@ -130111,20 +130821,20 @@ mod refused_preview_card_tests {
         );
         // ③ both hosts paint through the painter they already shared.
         assert!(
-            body(concat!("    fn ", "push_float_refusal_card("))
+            method_body("Runtime", "push_float_refusal_card")
                 .contains(concat!("seats::", "push_preview_card(")),
             "a window draws the card with something other than the pane's painter"
         );
         // ④ the pane's paint and its hit test read one geometry — the pane's
         //    card button is sized by the words this frame dressed.
         assert!(
-            body(concat!("    fn ", "docked_chrome_target_at("))
+            method_body("Runtime", "docked_chrome_target_at")
                 .contains(concat!("preview_card", "_verbs")),
             "the pane's card button is hit from something other than the words it was drawn with"
         );
         // ⑤ and the window's hit test asks the same question its paint asked.
         assert!(
-            body(concat!("    fn ", "float_hit_at(")).contains(concat!("float_refusal_words", "(")),
+            method_body("Runtime", "float_hit_at").contains(concat!("float_refusal_words", "(")),
             "the window's card button is hit from a second reading of what is refused"
         );
     }
@@ -130143,30 +130853,30 @@ mod refused_preview_card_tests {
     fn pressing_the_button_on_a_refused_page_runs_the_same_verb_as_the_unknown_page() {
         // The pane's button and the window's reach the same verb.
         assert!(
-            body(concat!("    fn ", "chrome_mouse_input("))
+            method_body("Runtime", "chrome_mouse_input")
                 .contains(concat!("ChromeTarget::", "PreviewOpenButton(_) => {")),
             "the pane's card button no longer takes a press"
         );
         assert!(
-            body(concat!("    fn ", "open_preview_externally("))
+            method_body("Runtime", "open_preview_externally")
                 .contains(concat!("open_preview_externally_on", "(")),
             "the pane's button has grown a second verb of its own"
         );
         assert!(
-            body(concat!("    fn ", "press_float(")).contains(concat!(
+            method_body("Runtime", "press_float").contains(concat!(
                 "open_preview_externally_on(",
                 "PreviewSurface::Float(id))"
             )),
             "the window's card button no longer reaches the pane's verb"
         );
         // And that one verb names the file through both lanes.
-        let verb = body(concat!("    fn ", "open_preview_externally_on("));
+        let verb = method_body("Runtime", "open_preview_externally_on");
         assert!(
             verb.contains(concat!("preview_file_on(", "surface)"))
                 && verb.contains(concat!("open_path_in_default_app", "(")),
             "the verb no longer asks this surface for its file, or no longer hands it over"
         );
-        let file = body(concat!("    fn ", "preview_file_on("));
+        let file = method_body("Runtime", "preview_file_on");
         assert!(
             file.contains(concat!("preview_buffer_on(", "surface)"))
                 && file.contains(concat!("preview_picture(", "surface)")),
@@ -130174,7 +130884,7 @@ mod refused_preview_card_tests {
         );
         // One launcher, and it is the door it has always been.
         assert!(
-            body(concat!("    fn ", "open_path_in_default_app("))
+            method_body("Runtime", "open_path_in_default_app")
                 .contains(concat!("self.", "open_local_path(path)")),
             "the card's button no longer goes through this window's one door"
         );
@@ -130201,17 +130911,70 @@ mod refused_preview_card_tests {
 /// value in their own modules as well.
 #[cfg(test)]
 mod field_command_tests {
-    const SOURCE: &str = include_str!("main.rs");
-    const PREVIEW_EDIT: &str = include_str!("preview_edit.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked a *file* for its text — `main.rs` for seven bodies
+    // and two whole-file counts, `preview_edit.rs` for two. Every one of them
+    // now asks `bt-source` about an *item*, a *module* or the package, so no
+    // fact here is bound to the file it happens to be written in today. The
+    // commit before this one ran both readings side by side and asserted they
+    // agree; this is the one that deletes the older of the two
+    // (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // `source`, `item_body`, `method_body`, `free_fn_body` and `found` are
+    // `pty_drain_budget_tests`' helpers word for word, `found_in` is
+    // `formula_tool_seat_tests`' and `trait_method_body` is
+    // `resident_run_tests`'. **Three owners**: five field handlers are
+    // `Runtime`'s, `rename_key` is a free function, and the modifier door is
+    // `<FolioApp as ApplicationHandler>::window_event` — the deleted finder took
+    // the first `fn name(` in the file and could not have said which.
+    //
+    // `preview_edit.rs` becomes the Rust path `crate::preview_edit`, so the day
+    // that module is a directory the scope is unchanged.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
 
-    /// One method's text, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one method of `owner`'s implementation of `trait_name`.
+    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name).of_trait(trait_name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// One search over a named scope — a Rust path, never a file.
+    fn found_in(needle: Needle, view: View, scope: Scope) -> Found {
+        source()
+            .search(&Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// RED (M1-7, X-3 §4 ③) — **a Command chord never types its letter into a
@@ -130224,21 +130987,21 @@ mod field_command_tests {
     #[test]
     fn a_command_chord_never_types_its_letter_into_a_field() {
         // The five that live here, each named by its handler.
-        for signature in [
-            concat!("    fn ", "palette_key("),
-            concat!("    fn ", "search_field_key("),
-            concat!("    fn ", "settings_field_key("),
-            concat!("    fn ", "git_menu_key("),
-            concat!("    fn ", "graph_search_key("),
+        for name in [
+            "palette_key",
+            "search_field_key",
+            "settings_field_key",
+            "git_menu_key",
+            "graph_search_key",
         ] {
-            let handler = body(signature);
+            let handler = method_body("Runtime", name);
             assert!(
                 handler.contains(concat!("input::", "types_a_character")),
-                "{signature} inserts a character without asking whether this press is typing"
+                "{name} inserts a character without asking whether this press is typing"
             );
             assert!(
                 handler.contains(concat!("input::", "is_command_chord")),
-                "{signature} decides what this application's modifier is for itself"
+                "{name} decides what this application's modifier is for itself"
             );
         }
         // The sixth is the Markdown page, whose one key handler is a pure
@@ -130246,17 +131009,29 @@ mod field_command_tests {
         // and that is written down at the arm: this surface exempts AltGr, so
         // `types_a_character`'s "no Control" half would take `€` off a German
         // keyboard.
+        //
+        // The module is named by its Rust path and not by its file, so the day
+        // `preview_edit.rs` becomes `preview_edit/mod.rs` the scope is the same
+        // one.
+        let page = |spelling: &str| {
+            !found_in(
+                needle!(Pattern::text(spelling)),
+                View::Raw,
+                Scope::Module("crate::preview_edit".to_owned()),
+            )
+            .is_empty()
+        };
         assert!(
-            PREVIEW_EDIT.contains(concat!("!crate::input::", "is_terminal_chord(modifiers)")),
+            page(concat!("!crate::input::", "is_terminal_chord(modifiers)")),
             "the page being edited takes a chord's letter as text"
         );
         assert!(
-            PREVIEW_EDIT.contains(concat!("crate::input::", "is_command_chord(modifiers)")),
+            page(concat!("crate::input::", "is_command_chord(modifiers)")),
             "the page being edited decides what this application's modifier is for itself"
         );
         // And the name box, which had the `super` half already and now asks the
         // platform which modifier that is.
-        let rename = body(concat!("fn ", "rename_key("));
+        let rename = free_fn_body("rename_key");
         assert!(
             rename.contains(concat!("input::", "is_terminal_chord(modifiers)"))
                 && rename.contains(concat!("input::", "is_command_chord_alone(modifiers)")),
@@ -130278,20 +131053,19 @@ mod field_command_tests {
     /// composing characters the reader asked it not to.
     #[test]
     fn the_option_policy_is_applied_at_one_door() {
-        let dispatch = body("fn window_event(");
+        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
         assert!(
             dispatch.contains(concat!("input::", "effective_modifiers(")),
             "the modifier door takes winit's answer without applying the Option ruling"
         );
+        let told = concat!("set_option_as_alt(&", "window, ");
         assert_eq!(
-            SOURCE
-                .matches(concat!("set_option_as_alt(&", "window, "))
-                .count(),
+            found(needle!(Pattern::text(told)), View::Raw).len(),
             2,
             "both window constructors have to tell the window what Option is"
         );
         assert!(
-            body(concat!("    fn ", "adopt_option_as_alt("))
+            method_body("Runtime", "adopt_option_as_alt")
                 .contains(concat!("set_option_as_alt(&self.", "window.window")),
             "a window that did not press the row is never told the answer changed"
         );
@@ -130309,8 +131083,9 @@ mod field_command_tests {
     /// to ending the process where it stands.
     #[test]
     fn the_default_menu_does_not_own_command_q() {
+        let told_not_to = concat!("builder.", "with_default_menu(false)");
         assert!(
-            SOURCE.contains(concat!("builder.", "with_default_menu(false)")),
+            !found(needle!(Pattern::text(told_not_to)), View::Raw).is_empty(),
             "winit's own menu still answers Cmd+Q, past Folio's quit verb"
         );
         // The other half of X-4's rule — that nothing ever sends the selector
