@@ -109,7 +109,8 @@ fn the_lowering_leaves_nothing_of_the_universe_behind() {
     let index = bt_app_index(&workspace);
     let universe =
         universes::crate_sources(bt_app(&workspace), Vendor::Excluded).expect("bt-app's own src");
-    let enumeration = bt_source::enumerate(&universe).expect("bt-app enumerates");
+    let (enumeration, unreached) = bt_source::enumerate(&universe).expect("bt-app enumerates");
+    unreached.expect_none("bt-app/src holds no file its own declarations do not reach");
 
     let declared: Vec<&PathBuf> = enumeration.files().keys().collect();
     let lowered: Vec<&Path> = index
@@ -205,9 +206,10 @@ fn the_lowering_leaves_nothing_of_the_universe_behind() {
         index.literals().len(),
         index.comments().len()
     );
-    assert!(
-        index.unsupported_macro_shapes().is_none(),
-        "P1b makes no macro traversal, and an empty report would read as one that found nothing"
+    println!(
+        "{} macro invocations and definitions, {} unsupported shapes",
+        index.macros().len(),
+        index.unsupported_macro_shapes().len()
     );
 }
 

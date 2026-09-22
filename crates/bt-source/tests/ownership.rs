@@ -20,8 +20,8 @@
 use std::path::{Path, PathBuf};
 
 use bt_source::{
-    Compilation, DiskScope, Enumeration, TargetId, TargetKind, TargetRoot, Universe, Vendor,
-    enumerate,
+    Compilation, DiskScope, Enumeration, TargetId, TargetKind, TargetRoot, Universe, Unreached,
+    Vendor, enumerate,
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -36,7 +36,7 @@ fn fixture_root() -> PathBuf {
 }
 
 /// The fixture directory `name`, walked from its `lib.rs`.
-fn enumerated_from(name: &str) -> Enumeration {
+fn enumerated_from(name: &str) -> (Enumeration, Unreached) {
     let directory = fixture(name);
     let universe = Universe::declare(
         format!("the {name} fixture"),
@@ -55,7 +55,7 @@ fn enumerated_from(name: &str) -> Enumeration {
     enumerate(&universe).expect("the fixture resolves completely")
 }
 
-fn enumerated() -> Enumeration {
+fn enumerated() -> (Enumeration, Unreached) {
     enumerated_from("ownership")
 }
 
@@ -92,7 +92,7 @@ fn named(paths: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
 /// MUTATION: move `outer/leaf.rs` beside `lib.rs` and the walk refuses it.
 #[test]
 fn a_nested_declaration_looks_inside_the_inline_module() {
-    let enumeration = enumerated();
+    let (enumeration, _) = enumerated();
     let leaf = enumeration
         .file(&fixture_root().join("outer").join("leaf.rs"))
         .expect("the inline module's child is reached");
@@ -124,7 +124,7 @@ fn a_nested_declaration_looks_inside_the_inline_module() {
 #[test]
 fn a_path_reached_file_is_a_mod_rs_to_its_children() {
     let root = fixture("path_reached");
-    let enumeration = enumerated_from("path_reached");
+    let (enumeration, unreached) = enumerated_from("path_reached");
     assert_eq!(
         named_under(enumeration.files().keys().cloned(), &root),
         ["child.rs", "lib.rs", "reached.rs"],
@@ -135,7 +135,7 @@ fn a_path_reached_file_is_a_mod_rs_to_its_children() {
         .expect("child.rs is the file rustc compiles");
     assert_eq!(child.owners()[0].module_path, "crate::p::child");
     assert_eq!(
-        named_under(enumeration.unreached().iter().cloned(), &root),
+        named_under(unreached.carried_forward(), &root),
         ["reached/child.rs"],
         "the decoy is on the disk and no declaration reaches it"
     );
@@ -153,7 +153,7 @@ fn a_path_reached_file_is_a_mod_rs_to_its_children() {
 /// remaining path is gated and the file becomes wholly test.
 #[test]
 fn a_file_reached_both_ways_is_still_product_code() {
-    let enumeration = enumerated();
+    let (enumeration, _) = enumerated();
     let shared = enumeration
         .file(&fixture_root().join("shared.rs"))
         .expect("shared.rs is reached");
@@ -176,7 +176,7 @@ fn a_file_reached_both_ways_is_still_product_code() {
 /// because there is no build in which `gate.rs` is absent and it is there.
 #[test]
 fn the_gate_belongs_to_the_declaration_and_carries_down() {
-    let enumeration = enumerated();
+    let (enumeration, _) = enumerated();
     assert_eq!(
         named(enumeration.wholly_test_files()),
         ["gate.rs", "gate/helper.rs", "inline_tests/nested.rs"],
@@ -209,11 +209,8 @@ fn the_gate_belongs_to_the_declaration_and_carries_down() {
 /// repair or a file nobody compiles — belongs to whoever reads the diff.
 #[test]
 fn a_file_no_declaration_reaches_is_reported() {
-    let enumeration = enumerated();
-    assert_eq!(
-        named(enumeration.unreached().iter().cloned()),
-        ["orphan.rs"]
-    );
+    let (enumeration, unreached) = enumerated();
+    assert_eq!(named(unreached.carried_forward()), ["orphan.rs"]);
     let diff = enumeration.cross_check();
     assert!(
         diff.only_declared.is_empty(),

@@ -207,3 +207,32 @@ fn a_package_the_workspace_does_not_have_is_a_refusal() {
         Err(Rejection::NoSuchPackage { .. })
     ));
 }
+
+/// RED — **a `#[cfg_attr(…, path = …)]` on a `mod` declaration is a refusal.**
+///
+/// It is the one attribute shape that decides *which file* a module is, by a
+/// predicate this walk refuses to evaluate: §2.4's second rule is that the host
+/// platform never selects, so a reading that took the `cfg_attr`'s arm would
+/// enumerate a different crate on each runner, and one that dropped it — which
+/// is what this crate did until 2026-09-21 — would silently resolve
+/// `mod platform;` to `platform.rs` and never say that it had ignored the
+/// spelling in front of it. Supporting it would mean answering a question with
+/// two answers; there are none of these in the workspace today, and the refusal
+/// is what keeps the first one from arriving quietly.
+///
+/// A `cfg_attr` carrying anything else can move neither answer and is followed.
+///
+/// MUTATION: take the `path` out of the fixture's `cfg_attr` and the
+/// declaration resolves like any other.
+#[test]
+fn a_conditional_path_attribute_on_a_declaration_is_a_refusal() {
+    let found = refusals("conditional_attribute");
+    let Some(Rejection::ConditionalDeclarationAttribute {
+        module, spelling, ..
+    }) = found.first()
+    else {
+        panic!("expected a refused declaration, got {found:#?}");
+    };
+    assert_eq!(module, "platform");
+    assert_eq!(spelling, "windows, path = \"on_windows.rs\"");
+}

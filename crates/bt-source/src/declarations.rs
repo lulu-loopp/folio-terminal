@@ -206,6 +206,12 @@ struct Declaration {
     predicates: Vec<String>,
     compilation: Compilation,
     path_attribute: Option<String>,
+    /// The spelling of a `#[cfg_attr(…)]` standing on this declaration that
+    /// carries a `path` or a `cfg`. See
+    /// [`Rejection::ConditionalDeclarationAttribute`]: it is refused rather
+    /// than read, because it decides the file or the gate by a predicate this
+    /// walk is blind to on purpose.
+    conditional_attribute: Option<String>,
 }
 
 /// The walk over one target.
@@ -325,6 +331,17 @@ impl<'ast> Visit<'ast> for Walk {
         let source = Rc::clone(&self.frame().source);
         let declaration = read_declaration(item, &source);
         let declared_in = self.frame().file.clone();
+
+        if let Some(spelling) = declaration.conditional_attribute {
+            self.rejections
+                .push(Rejection::ConditionalDeclarationAttribute {
+                    declared_in,
+                    at: declaration.at,
+                    module: declaration.module,
+                    spelling,
+                });
+            return;
+        }
 
         if let Some((_, items)) = &item.content {
             let step = DeclarationStep {
@@ -461,6 +478,7 @@ fn read_declaration(item: &syn::ItemMod, source: &str) -> Declaration {
     let span = item.mod_token.span.start();
     let (predicates, compilation) = cfg_predicates(&item.attrs, source);
     let mut path_attribute = None;
+    let mut conditional_attribute = None;
     for attribute in &item.attrs {
         if attribute.path().is_ident("path")
             && let syn::Meta::NameValue(value) = &attribute.meta
@@ -468,6 +486,12 @@ fn read_declaration(item: &syn::ItemMod, source: &str) -> Declaration {
             && let syn::Lit::Str(named) = &literal.lit
         {
             path_attribute = Some(named.value());
+        }
+        if attribute.path().is_ident("cfg_attr")
+            && let syn::Meta::List(list) = &attribute.meta
+            && decides_a_file_or_a_gate(list.tokens.clone())
+        {
+            conditional_attribute = Some(spelling(&list.delimiter, source));
         }
     }
     Declaration {
@@ -479,7 +503,22 @@ fn read_declaration(item: &syn::ItemMod, source: &str) -> Declaration {
         predicates,
         compilation,
         path_attribute,
+        conditional_attribute,
     }
+}
+
+/// Whether a `cfg_attr`'s body names `path` or `cfg` anywhere inside it.
+///
+/// Those two are the only attributes that change what this walk answers — which
+/// file a declaration names, and whether that file is test code — so they are
+/// the two a `cfg_attr` may not smuggle. Anything else it carries is followed
+/// without a word, because it cannot move either answer.
+fn decides_a_file_or_a_gate(tokens: proc_macro2::TokenStream) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Ident(name) => name == "path" || name == "cfg",
+        proc_macro2::TokenTree::Group(group) => decides_a_file_or_a_gate(group.stream()),
+        _ => false,
+    })
 }
 
 /// The text between a delimiter pair, exactly as it is written.

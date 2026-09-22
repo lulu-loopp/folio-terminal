@@ -165,6 +165,23 @@ impl FileRecord {
         let column = union.get(line_start..offset)?.chars().count() + 1;
         Some((line + 1, column))
     }
+
+    /// The union offset of a one-based line and column inside this file — the
+    /// inverse of [`FileRecord::locate`], for reading a `line!()`/`column!()`
+    /// pair back into a position (§2.6).
+    ///
+    /// The column counts characters, because that is what both this file's
+    /// `locate` and the compiler's own `column!()` count.
+    pub(crate) fn offset_at(&self, union: &str, line: usize, column: usize) -> Option<usize> {
+        let line_start = self.span.start() + *self.line_starts.get(line.checked_sub(1)?)? as usize;
+        let rest = union.get(line_start..self.span.end())?;
+        let mut characters = rest.char_indices();
+        let offset = match column.checked_sub(1)? {
+            0 => 0,
+            skip => characters.nth(skip).map(|(at, _)| at)?,
+        };
+        Some(line_start + offset)
+    }
 }
 
 /// Where a byte is, said the way a compiler says it.
@@ -333,6 +350,22 @@ impl ItemRecord {
         self.body
     }
 
+    /// **The declaration itself: everything before the body.**
+    ///
+    /// This is what §2.5's declaration exemption excludes — the attributes, the
+    /// visibility, the signature and the name in it — and not the body, because
+    /// a name written *inside* the item that declares it is an occurrence like
+    /// any other (a recursive call is the plain case). The guard this rule comes
+    /// from refuses "a match whose preceding text ends with the declaration
+    /// keywords", which is this span and nothing wider.
+    #[must_use]
+    pub const fn declaration(&self) -> Span {
+        match self.body {
+            Some(body) => Span::new(self.whole.start, body.start),
+            None => self.whole,
+        }
+    }
+
     /// Every identity these bytes answer to — one per owning module path.
     pub fn identities(&self) -> impl Iterator<Item = ItemIdentity> + '_ {
         self.module_paths.iter().map(|module_path| ItemIdentity {
@@ -471,6 +504,116 @@ impl CommentRecord {
     }
 }
 
+/// One module, and the bytes it is written in — the named scopes of §2.4/§3.
+///
+/// A scope is a **Rust path**, never a file, so it has to be resolvable to bytes
+/// without anybody naming one: a module whose body is a file is that file's
+/// bytes, and an inline `mod x { … }` is its braces and what is between them.
+/// The day the file splits, the path is unchanged and so is the scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleRecord {
+    pub(crate) file: usize,
+    /// One per owning declaration path of the file (§2.3).
+    pub(crate) module_paths: Vec<String>,
+    pub(crate) span: Span,
+    pub(crate) body: ModuleShape,
+}
+
+/// Where a module's bytes are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ModuleShape {
+    /// `mod x;` — the span is the whole file.
+    WholeFile,
+    /// `mod x { … }` — the span is the braces and what is between them.
+    Inline,
+}
+
+impl ModuleRecord {
+    #[must_use]
+    pub fn module_paths(&self) -> &[String] {
+        &self.module_paths
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        self.span
+    }
+
+    #[must_use]
+    pub const fn body(&self) -> ModuleShape {
+        self.body
+    }
+}
+
+/// Whether the parser could say what a stretch of bytes is, or only the lexer
+/// (§2.7).
+///
+/// **Not a confidence.** `Resolved` says the bytes are in a position the parser
+/// structured; `Candidate` says they are inside a macro's token tree, where the
+/// same tokens may be pasted into an item, dropped, or turned into something
+/// else entirely. Name *resolution* is not claimed by either: no query in this
+/// crate resolves a path to a definition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Certainty {
+    Resolved,
+    Candidate,
+}
+
+/// One macro invocation, or one `macro_rules!` definition, found lexically.
+///
+/// `syn`'s visitor does not descend into a macro's token tree — the
+/// token-stream visit has an empty default body — so a reader built on the
+/// parse alone cannot see a name inside `println!`. The lexer does see it, and
+/// these records are what say afterwards *which* names were found there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroRecord {
+    pub(crate) span: Span,
+    /// The token tree between the delimiters — the bytes whose classification
+    /// is [`Certainty::Candidate`].
+    pub(crate) tokens: Span,
+    /// `println`, `bt_source::needle`, `macro_rules`.
+    pub(crate) path: String,
+    pub(crate) kind: MacroKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MacroKind {
+    /// `name!(…)`, `name![…]`, `name!{…}`.
+    Invocation,
+    /// `macro_rules! name { … }`.
+    Definition,
+}
+
+impl MacroRecord {
+    /// The whole of it: the path, the `!`, the delimiters and what is inside.
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        self.span
+    }
+
+    /// What is between the delimiters.
+    #[must_use]
+    pub const fn tokens(&self) -> Span {
+        self.tokens
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> MacroKind {
+        self.kind
+    }
+
+    /// The last segment of the path — `println` for `std::println`.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.path.rsplit("::").next().unwrap_or(&self.path)
+    }
+}
+
 /// An executable macro shape §2.7 refuses to examine silently.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnsupportedMacroShape {
@@ -482,14 +625,34 @@ pub struct UnsupportedMacroShape {
 
 /// The shapes of §2.7 — an attribute or derive macro that replaces an item
 /// body, an arm that constructs an item, a source inclusion.
+///
+/// Each is a way the bytes this index holds are **not** the program the compiler
+/// sees. None is a failure; all are reported, because a gap nobody wrote down is
+/// the one that gets trusted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MacroShape {
+    /// An attribute whose path is not one the language defines — it may be an
+    /// attribute macro, and an attribute macro may rewrite the item under it.
+    /// Telling one from an inert helper attribute (`#[serde(…)]` is the case in
+    /// this tree) needs name resolution, which this reading does not do, so both
+    /// are reported.
     AttributeReplacingABody,
+    /// A `derive` naming something other than the language's own derives: it
+    /// generates items no byte of this index holds.
     DeriveReplacingABody,
+    /// A `macro_rules!` arm whose expansion opens an item — `fn`, `impl`,
+    /// `struct`, `mod` and the rest. The item it makes is not in the index, so
+    /// a query for that item would answer "not declared".
     ItemConstructingArm,
+    /// `include!` — Rust source pulled in from elsewhere. (`include_str!` and
+    /// `include_bytes!` carry data, not declarations, and are not this.)
     SourceInclusion,
+    /// `module_path!` — a module path this walk computed differently.
     ModulePath,
+    /// `compile_error!`.
     CompileError,
+    /// `line!`, `column!`, `file!` — the source's own coordinates, read at
+    /// compile time.
     LineNumber,
 }
 
@@ -500,11 +663,13 @@ pub struct Index {
     pub(crate) files: Vec<FileRecord>,
     pub(crate) by_path: BTreeMap<PathBuf, usize>,
     pub(crate) items: Vec<ItemRecord>,
+    pub(crate) modules: Vec<ModuleRecord>,
     pub(crate) tokens: Vec<TokenRecord>,
     pub(crate) literals: Vec<LiteralRecord>,
     pub(crate) comments: Vec<CommentRecord>,
+    pub(crate) macros: Vec<MacroRecord>,
     pub(crate) cross_check: FileSetDiff,
-    pub(crate) macro_shapes: Option<Vec<UnsupportedMacroShape>>,
+    pub(crate) macro_shapes: Vec<UnsupportedMacroShape>,
 }
 
 /// Counts and never contents: a derived `Debug` would print 23 MB of source
@@ -520,6 +685,8 @@ impl fmt::Debug for Index {
             .field("tokens", &self.tokens.len())
             .field("literals", &self.literals.len())
             .field("comments", &self.comments.len())
+            .field("macros", &self.macros.len())
+            .field("unsupported_macro_shapes", &self.macro_shapes.len())
             .finish()
     }
 }
@@ -619,18 +786,63 @@ impl Index {
         &self.cross_check
     }
 
-    /// The report of §2.7, or `None` when **no macro traversal has been made**.
-    ///
-    /// P1b lowers tokens inside macro invocations like any other tokens, but it
-    /// does not classify invocation shapes, and an empty report would read as
-    /// "nothing unsupported was found". P1c makes this `Some`.
+    /// Every module reached, with the bytes it is written in — what a named
+    /// scope resolves against.
     #[must_use]
-    pub fn unsupported_macro_shapes(&self) -> Option<&[UnsupportedMacroShape]> {
-        self.macro_shapes.as_deref()
+    pub fn modules(&self) -> &[ModuleRecord] {
+        &self.modules
+    }
+
+    /// Every macro invocation and `macro_rules!` definition, in union order.
+    #[must_use]
+    pub fn macros(&self) -> &[MacroRecord] {
+        &self.macros
+    }
+
+    /// The report of §2.7. **Empty means the traversal found nothing it cannot
+    /// classify**, which is a different statement from P1b's, where the
+    /// traversal had not been made at all.
+    #[must_use]
+    pub fn unsupported_macro_shapes(&self) -> &[UnsupportedMacroShape] {
+        &self.macro_shapes
+    }
+
+    /// Whether `span` lies inside a macro's token tree (§2.7).
+    ///
+    /// The scan runs backwards over every macro that begins at or before the
+    /// span, because macro token trees nest and an inner one ending early says
+    /// nothing about the outer one still being open.
+    #[must_use]
+    pub fn certainty(&self, span: Span) -> Certainty {
+        let after = self
+            .macros
+            .partition_point(|record| record.tokens.start() <= span.start());
+        if self.macros[..after]
+            .iter()
+            .rev()
+            .any(|record| span.within(record.tokens))
+        {
+            Certainty::Candidate
+        } else {
+            Certainty::Resolved
+        }
     }
 
     /// Whether any masked region overlaps `span` (§2.2 rule 2: masked bytes are
     /// opaque, so a match may neither sit inside one nor cross it).
+    /// The removed region overlapping `span`, if there is one.
+    pub(crate) fn mask_at(&self, span: Span) -> Option<Span> {
+        let after = self
+            .comments
+            .partition_point(|comment| comment.span.start() < span.end());
+        self.comments[..after]
+            .iter()
+            .rev()
+            .take_while(|comment| comment.span.end() > span.start())
+            .find(|comment| comment.span.overlaps(span))
+            .map(|comment| comment.span)
+    }
+
     pub(crate) fn is_masked(&self, span: Span) -> bool {
         // The masks are disjoint and sorted by start, so the one to look at is
         // the last that begins before this span ends; the loop walks back only
@@ -694,6 +906,21 @@ impl Index {
                 .map(String::capacity)
                 .sum::<usize>();
         }
+        total += self.modules.capacity() * size_of::<ModuleRecord>();
+        for module in &self.modules {
+            total += module.module_paths.capacity() * size_of::<String>();
+            total += module
+                .module_paths
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>();
+        }
+        total += self.macros.capacity() * size_of::<MacroRecord>();
+        total += self
+            .macros
+            .iter()
+            .map(|it| it.path.capacity())
+            .sum::<usize>();
         total += self.tokens.capacity() * size_of::<TokenRecord>();
         total += self.comments.capacity() * size_of::<CommentRecord>();
         total += self.literals.capacity() * size_of::<LiteralRecord>();

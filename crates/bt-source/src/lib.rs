@@ -46,8 +46,23 @@
 //!   [`Index::count_identifier`], [`Index::contains`] and [`Index::owners_of`],
 //!   each refusing loudly rather than answering a smaller question.
 //!
-//! What it deliberately does **not** build: the four views' full contract, needle
-//! provenance, named scopes and the lexical macro traversal of §2 (P1c).
+//! What P1c adds (§2, the reading contract in full):
+//!
+//! * [`View`] — the four views as an explicit argument with no default, byte
+//!   offsets into the original text in every answer, and the three no-crossing
+//!   rules: a removed region, a file boundary, and a literal's spelling against
+//!   its decoded value.
+//! * [`Pattern`] — a name, a path or a call shape, boundary-checked, so that
+//!   `stand_in` is not found inside `strip_stand_in`; [`Search`] carries the
+//!   declaration exemption of §2.5 as a named argument and reports every span it
+//!   removed.
+//! * [`needle!`] — a needle that records where the caller wrote it, so a reader
+//!   spelling its own subject excludes its construction and nothing else (§2.6),
+//!   and a caller outside the queried universe is a recorded answer.
+//! * [`Scope`] — a Rust path, never a file.
+//! * [`Index::macros`] and [`Index::unsupported_macro_shapes`] — the lexical
+//!   traversal of §2.7, with [`Certainty`] telling a name the parser placed from
+//!   one found inside a macro's token tree.
 //!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
@@ -70,15 +85,18 @@ mod universe;
 pub mod universes;
 
 pub use declarations::{Compilation, DeclarationStep, ModuleBody, ReachedModule};
-pub use enumerate::{Enumeration, FileFacts, FileOwner, FileSetDiff, enumerate};
+pub use enumerate::{Enumeration, FileFacts, FileOwner, FileSetDiff, Unreached, enumerate};
 pub use index::{
-    CommentKind, CommentRecord, ConditionalVariant, FileRecord, Index, ItemIdentity, ItemKind,
-    ItemRecord, LiteralRecord, LiteralValue, Location, MacroShape, Span, TokenKind, TokenRecord,
-    UnsupportedMacroShape,
+    Certainty, CommentKind, CommentRecord, ConditionalVariant, FileRecord, Index, ItemIdentity,
+    ItemKind, ItemRecord, LiteralRecord, LiteralValue, Location, MacroKind, MacroRecord,
+    MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord, UnsupportedMacroShape,
 };
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};
-pub use query::{Candidate, ItemQuery, QueryFailure, View};
+pub use query::{
+    Candidate, Excluded, Found, ItemQuery, Multiplicity, Needle, Occurrence, Pattern, Provenance,
+    QueryFailure, Scope, Search, Site, View, Why,
+};
 pub use reject::{Position, Rejection, report};
 pub use scope::{FileScoped, Scope};
 pub use universe::{DiskScope, Universe, Vendor, is_vendored, targets_of};

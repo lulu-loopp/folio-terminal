@@ -69,7 +69,7 @@ fn universe_for(package: &Package) -> Universe {
 fn every_member_crate_enumerates_without_a_refusal() {
     let workspace = workspace();
     let started = std::time::Instant::now();
-    let mut unreached: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut never_reached: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut only_declared: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut refused: Vec<String> = Vec::new();
     let mut files = 0usize;
@@ -77,11 +77,11 @@ fn every_member_crate_enumerates_without_a_refusal() {
     for package in workspace.packages() {
         let universe = universe_for(package);
         match enumerate(&universe) {
-            Ok(enumeration) => {
+            Ok((enumeration, unreached)) => {
                 files += enumeration.files().len();
-                let rows = named(enumeration.unreached().iter().cloned(), workspace.root());
+                let rows = named(unreached.carried_forward(), workspace.root());
                 if !rows.is_empty() {
-                    unreached.insert(package.name().to_owned(), rows);
+                    never_reached.insert(package.name().to_owned(), rows);
                 }
                 let outside = named(
                     enumeration.cross_check().only_declared.iter().cloned(),
@@ -102,7 +102,7 @@ fn every_member_crate_enumerates_without_a_refusal() {
         workspace.packages().len(),
         started.elapsed()
     );
-    println!("UNREACHED, per package:\n{unreached:#?}");
+    println!("UNREACHED, per package:\n{never_reached:#?}");
     println!("declared and outside every scope, per package:\n{only_declared:#?}");
     assert!(
         refused.is_empty(),
@@ -110,7 +110,7 @@ fn every_member_crate_enumerates_without_a_refusal() {
         refused.join("\n")
     );
     assert_eq!(
-        unreached,
+        never_reached,
         expected_unreached(),
         "the set of files no declaration reaches changed; each row is a finding with a reason, \
          never a number to adjust"
@@ -160,7 +160,9 @@ fn the_wholly_test_files_of_bt_app_are_the_twelve() {
     let workspace = workspace();
     let package = workspace.package("bt-app").expect("bt-app");
     let universe = universes::crate_sources(package, Vendor::Excluded).expect("bt-app's own src");
-    let enumeration = enumerate(&universe).expect("bt-app's declarations resolve completely");
+    let (enumeration, unreached) =
+        enumerate(&universe).expect("bt-app's declarations resolve completely");
+    unreached.expect_none("every .rs file under bt-app/src is reached by a declaration");
 
     let root = package.directory().join("src");
     let wholly = named(enumeration.wholly_test_files(), &root);
