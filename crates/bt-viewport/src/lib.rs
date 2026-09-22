@@ -8110,6 +8110,78 @@ mod tests {
         }
     }
 
+    /// The owner's 2026-09-22 report, off `BT_PTY_DUMP`: an agent printed
+    /// `  - docs/a.png：六个臂各一格` on the primary screen, the pane's folder was known, the file
+    /// was on the disk — and the reference was not underlined.
+    ///
+    /// The shape is the report's, cell for cell, because every part of it is load-bearing. The
+    /// separator is the **full-width** `：` a Chinese keyboard writes; there is **no space** behind
+    /// it, so the token runs on into the prose; and the prose is CJK, every character of which is
+    /// `is_alphanumeric` and therefore a path character, so nothing in the token's tail can be
+    /// released. One reading, carrying a mark no name is spelled with — and before
+    /// `is_seam_separator` read the class off `is_path_tail_char`, no shorter reading was offered
+    /// and the reference went dark.
+    ///
+    /// A CJK tail also means the row is a run of **wide** glyphs, each a lead cell plus the spacer
+    /// the grid puts beside it, and the trailing blank column keeps §7.1.5k ①'s gate out of it.
+    #[test]
+    fn a_relative_reference_behind_a_full_width_colon_is_a_link_on_the_primary_screen() {
+        const REL: &str = "docs/a.png";
+        let ledger = verified(&["D:\\src\\docs\\a.png"]);
+        let mut cells: Vec<CapturedCell> = format!("  - {REL}")
+            .chars()
+            .map(CapturedCell::plain)
+            .collect();
+        for wide in "：六个臂各一格".chars() {
+            cells.push(CapturedCell::plain(wide));
+            cells.push(CapturedCell {
+                wide_spacer: true,
+                ..CapturedCell::default()
+            });
+        }
+        cells.push(CapturedCell::plain(" "));
+        let columns = cells.len() as u32;
+        let mut projection = ViewportProjection::new(
+            key(columns),
+            DetectionRevision(1),
+            nz32(1),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.set_printed_path_links(&ledger);
+        let frame = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                vec![CapturedRow {
+                    captured_columns: columns,
+                    cells,
+                    continues: false,
+                    shell_mark: None,
+                }],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        let visual = frame
+            .row_map
+            .iter()
+            .position(|row| row.live_grid_row == Some(0))
+            .expect("the live row is on screen") as u32;
+        assert_eq!(
+            frame
+                .hyperlink_at(visual, 4)
+                .expect("the reference is a link")
+                .uri,
+            native_uri("file:///D:/src/docs/a.png")
+        );
+    }
+
     /// §7.38: a scheme-less bare domain becomes a link whose target is `https://` + its printed
     /// text, so downstream it is the same object a schemed URL is. It needs no working directory.
     /// And it is the lowest-priority claim: where a verified path covers the same text, the path —
