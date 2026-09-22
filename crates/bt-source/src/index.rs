@@ -204,14 +204,47 @@ impl fmt::Display for Location<'_> {
     }
 }
 
-/// What a callable is declared as. Identity distinguishes them (§2.4) and a
-/// query may not: `Runtime::present` and a free `present` are different things.
+/// What an item is declared as. Identity distinguishes them (§2.4) and a query
+/// may not: `Runtime::present` and a free `present` are different things, and so
+/// are `App::tab_ids` the field and `App::tab_ids` the method.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ItemKind {
     /// `fn f(…)` written at module level.
     Function,
     /// `fn f(…)` written inside an `impl` block or a trait definition.
     AssociatedFunction,
+    /// `struct S …`.
+    Struct,
+    /// `enum E { … }`.
+    Enum,
+    /// `union U { … }`.
+    Union,
+    /// One field of a `struct` or a `union`. A tuple field has no written name
+    /// and is named by its position, which is the name the language gives it:
+    /// `self.0`.
+    Field,
+    /// One variant of an `enum`.
+    Variant,
+}
+
+impl ItemKind {
+    /// Whether this is something with a body that runs.
+    #[must_use]
+    pub const fn is_callable(self) -> bool {
+        matches!(self, Self::Function | Self::AssociatedFunction)
+    }
+
+    /// Whether this is a data type — the thing a field or a variant belongs to.
+    #[must_use]
+    pub const fn is_type(self) -> bool {
+        matches!(self, Self::Struct | Self::Enum | Self::Union)
+    }
+
+    /// Whether this is written **inside** a data type and belongs to it.
+    #[must_use]
+    pub const fn is_member(self) -> bool {
+        matches!(self, Self::Field | Self::Variant)
+    }
 }
 
 /// The conditional arm a declaration stands on, **as it is spelled**.
@@ -262,8 +295,10 @@ pub struct ItemIdentity {
     pub module_path: String,
     /// The type an `impl` block is for, printed as the **last segment** of its
     /// path without lifetimes or generic arguments, so `Runtime<'_>`,
-    /// `Runtime<'a>` and `crate::Runtime<'_>` are one type. `None` for a free
-    /// function.
+    /// `Runtime<'a>` and `crate::Runtime<'_>` are one type — and, for a field or
+    /// a variant, the type it is written inside, which is that type's own name.
+    /// `None` for a free function and for a `struct`, `enum` or `union` item,
+    /// whose own name is [`ItemIdentity::name`].
     ///
     /// The qualification is dropped because a move is what writes it, and
     /// because [`ItemIdentity::module_path`] beside it already says where the
@@ -294,7 +329,7 @@ impl fmt::Display for ItemIdentity {
     }
 }
 
-/// One callable, lowered: who it is, and where its bytes are.
+/// One item, lowered: who it is, and where its bytes are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemRecord {
     pub(crate) file: usize,
@@ -307,10 +342,15 @@ pub struct ItemRecord {
     pub(crate) name: String,
     pub(crate) kind: ItemKind,
     pub(crate) variant: ConditionalVariant,
-    /// Everything from the first attribute to the closing brace or semicolon.
+    /// Everything from the first attribute to the closing brace or semicolon —
+    /// and, for a field or a variant, **up to and excluding the comma after it**,
+    /// which belongs to the list and not to the member.
     pub(crate) whole: Span,
-    /// The braces and what is between them. `None` for a trait method that
-    /// declares a signature and no default body.
+    /// The braces and what is between them — for a data type, the braces or the
+    /// parentheses its members are written in; for a variant, its own fields or
+    /// its discriminant. `None` for a trait method that declares a signature and
+    /// no default body, for a unit `struct`, for a fieldless variant carrying no
+    /// discriminant, and for every field.
     pub(crate) body: Option<Span>,
 }
 
@@ -363,6 +403,9 @@ impl ItemRecord {
     /// any other (a recursive call is the plain case). The guard this rule comes
     /// from refuses "a match whose preceding text ends with the declaration
     /// keywords", which is this span and nothing wider.
+    ///
+    /// A field has no body, so its declaration is the whole of it: the
+    /// attributes, the visibility, the name and the type, and not the comma.
     #[must_use]
     pub const fn declaration(&self) -> Span {
         match self.body {

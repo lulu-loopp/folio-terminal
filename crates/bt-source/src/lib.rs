@@ -73,6 +73,20 @@
 //!   that entry, [`ItemQuery`] and [`Search`], and the entry's own doc comment
 //!   says so.
 //!
+//! What P3's batches asked for next, having had to widen a guard to keep it
+//! green — **§2.4's identity rule reaches the data a program keeps, not only
+//! the code that runs**:
+//!
+//! * `struct`, `enum` and `union` items are identities ([`ItemQuery::type_item`]),
+//!   with the same span discipline and the same conditional-variant machinery
+//!   the callables have, so [`Scope::Item`] can name one type's bytes.
+//! * Their members are addressable: [`ItemQuery::field`] and
+//!   [`ItemQuery::variant`] answer the member's **declaration**
+//!   ([`Index::declaration_of`]), and a member the owning type does not carry in
+//!   every declaration of itself is [`QueryFailure::Member`] rather than a
+//!   smaller answer — the refusal that keeps "the counter lives on `App`" from
+//!   degrading to "this spelling is somewhere in this package".
+//!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
 //! only under `cfg(windows)` is enumerated on macOS too, because a guard that
@@ -103,8 +117,8 @@ pub use index::{
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};
 pub use query::{
-    Candidate, Excluded, Found, ItemQuery, Multiplicity, Needle, Occurrence, Pattern, Provenance,
-    QueryFailure, Scope, Search, Site, View, Why,
+    Candidate, Excluded, Found, ItemQuery, MemberSite, Multiplicity, Needle, Occurrence, Pattern,
+    Provenance, QueryFailure, Scope, Search, Site, View, Why,
 };
 pub use reject::{Position, Rejection, report};
 pub use scope::FileScoped;
