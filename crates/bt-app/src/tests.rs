@@ -5,6 +5,136 @@
 //! which the table reads as "not a link". These three are the whole vocabulary the tables below
 //! need, spelled once so that a test that cares about an arm does not have to spell a struct.
 
+// ── `bt-source`, and the one set of helpers every reader in this module asks
+//    it through (`docs/plans/bt-app-split-prep.md` §6.3, tickets P3 and P14)
+//
+// **This file is one flat `mod tests`, and it holds eighty-two readers that
+// used to ask `main.rs` for its text.** Each one is being moved to ask
+// `bt-source` about an *item* of this crate instead, so that no fact written
+// here is bound to the file the item happens to live in today. The pattern is
+// `main.rs`'s `pty_drain_budget_tests`, copied once rather than eighty times:
+//
+// 1. **One index per process** — [`source`], which is
+//    `bt_source::Index::of_package("bt-app")`: this package's own `src/`,
+//    reached through its declarations. The package is named there and nowhere
+//    else in this module.
+// 2. **A body pin names an identity, not a file.** [`method_body`] takes the
+//    type that owns the method, because the tuple of §2.4 is what stays the
+//    same when the method moves to another file. The owner is an argument and
+//    not a guess: what the deleted finders did was take the first
+//    `\n    fn name(` in `main.rs`, which is a method of *whatever `impl`
+//    happens to come first*.
+// 3. **A whole-source count or negative becomes a `Search`**, with its view
+//    said out loud and the scope that matches the claim.
+// 4. **A refusal is never an answer.** Every helper here panics on a
+//    `bt_source::QueryFailure`. An item that is not there, or is not unique,
+//    is the failure this preparation exists to make loud.
+//
+// **`Index::body_of` answers with the braces**, while every finder being
+// replaced began after the `{` the signature ends with — so a reader that
+// reasons about the first statement of a body strips the brace and says so,
+// and the equivalence commit compared the two readings on the body's interior,
+// the text they really share.
+
+use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+
+/// **This crate, indexed once per process** — the workspace read, this
+/// package's own `src/` declared as the universe and lowered, on the first ask
+/// of the process, behind one call.
+fn source() -> &'static Index {
+    Index::of_package("bt-app")
+}
+
+/// The body of one item, braces included — the identity of §2.4 rather than a
+/// line of a file.
+fn item_body(query: &ItemQuery) -> &'static str {
+    source()
+        .body_of(query)
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// The body of one inherent method of `owner`.
+fn method_body(owner: &str, name: &str) -> &'static str {
+    item_body(&ItemQuery::method(owner, name))
+}
+
+/// The body of one free function of this crate.
+fn free_fn_body(name: &str) -> &'static str {
+    item_body(&ItemQuery::function(name))
+}
+
+/// One item's text with its comments and its whitespace taken out.
+///
+/// The reading [`method_text`] makes, lifted off the file it used to cut so
+/// that it can be made of an item's body instead: the claims it serves are
+/// about which *statement* is there, and a paragraph explaining why it is
+/// there is not a statement.
+fn squeezed(text: &str) -> String {
+    text.lines()
+        .map(|line| match line.find("//") {
+            Some(at) => &line[..at],
+            None => line,
+        })
+        .collect::<String>()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+/// One inherent method's body, squeezed.
+fn squeezed_body(owner: &str, name: &str) -> String {
+    squeezed(method_body(owner, name))
+}
+
+/// The declaration of one item — its attributes, its visibility and its
+/// signature, stopping in front of the body.
+///
+/// The reader that pins the answer `create_files_row` gives back is asking
+/// about a signature, and a body reading cannot see one.
+fn item_declaration(query: &ItemQuery) -> &'static str {
+    source()
+        .declaration_of(query)
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// One search over the whole crate, refusing loudly rather than answering a
+/// smaller question.
+fn found(needle: Needle, view: View) -> Found {
+    source()
+        .search(&Search::new(needle, view))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// Every call of `owner::name`, with the line that declares it left out
+/// (§2.5) — the question "how many places reach this door" as a question
+/// about names rather than about a spelling.
+fn calls_of(owner: &str, name: &str) -> Found {
+    source()
+        .search(
+            &Search::new(needle!(Pattern::call(name)), View::Identifiers)
+                .exempting_declarations_of(ItemQuery::method(owner, name)),
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// How many of these occurrences stand in a file a product build compiles.
+///
+/// File-grained, and deliberately so: §2.3 computes product reachability per
+/// *declaration path to a file*, and an inline `#[cfg(test)] mod` inside a
+/// product file is not a file. It is what replaces a count taken over
+/// `main.rs`, which stopped being this crate's product text on 2026-09-18.
+fn in_product(found: &Found) -> usize {
+    found
+        .occurrences()
+        .iter()
+        .filter(|occurrence| {
+            source()
+                .file_at(occurrence.span.start())
+                .is_some_and(bt_source::FileRecord::permits_product)
+        })
+        .count()
+}
+
 /// A file on a volume this machine holds.
 fn a_local_file() -> bt_term::PathVerdict {
     bt_term::PathVerdict {
@@ -2566,14 +2696,7 @@ fn a_case_different_duplicate_is_refused_in_the_box_on_this_volume() {
 /// goes on showing a valid-looking field over a name Enter will not take.
 #[test]
 fn a_refusal_the_commit_raised_is_shown_in_the_box() {
-    const SOURCE: &str = include_str!("main.rs");
-    let body = |signature: &str| -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    };
+    let body = |name: &str| method_body("Runtime", name);
 
     let mut editor = TabRename::open_files_new(LEAF_ONE, "", false, true);
     editor.insert("notes.md");
@@ -2603,14 +2726,15 @@ fn a_refusal_the_commit_raised_is_shown_in_the_box() {
     // filesystem, and this module's standing rule is that what calls what is
     // read rather than driven.
     assert!(
-        body("    fn create_files_row(").contains("-> Result<Option<files::NewNameRefusal>>"),
+        item_declaration(&ItemQuery::method("Runtime", "create_files_row"))
+            .contains("-> Result<Option<files::NewNameRefusal>>"),
         "the commit answers which refusal stopped it, not a bare bool"
     );
     assert!(
-        body("    fn finish_rename(").contains("editor.refuse(refusal)"),
+        body("finish_rename").contains("editor.refuse(refusal)"),
         "and the editor is told before it goes back"
     );
-    let dress = body("    fn dress_files_tree_editor(");
+    let dress = body("dress_files_tree_editor");
     assert!(
         dress.contains("editor.refusal().is_some()"),
         "the box draws the refusal the commit raised"
@@ -2627,7 +2751,7 @@ fn a_refusal_the_commit_raised_is_shown_in_the_box() {
              not coloured"
     );
     assert!(
-        body("    fn open_files_row_new(").contains("bt_platform::directory_folds_case("),
+        body("open_files_row_new").contains("bt_platform::directory_folds_case("),
         "the folder is asked once, when the box opens — never on a frame"
     );
     assert!(
@@ -9231,11 +9355,14 @@ fn a_window_that_had_to_shrink_is_seated_on_the_monitor_that_shrank_it() {
 /// launch types onto the reader's prompt.
 #[test]
 fn a_remembered_line_comes_only_from_a_mark_the_reader_was_at() {
-    let source = include_str!("main.rs");
-    let at = source
+    // The deleted reading took eight hundred bytes from the anchor, which ran
+    // two hundred past the end of the method it meant; the item stops where
+    // the item stops.
+    let leaf = method_body("TabState", "term_leaf");
+    let at = leaf
         .find("last_command: if remember_the_command {")
         .expect("the one place a remembered line is written");
-    let clause = &source[at..at + 800];
+    let clause = &leaf[at..];
     assert!(
         clause.contains("!mark.command_text.is_empty() && mark.typed_by_user"),
         "the line written into session.json comes from a mark whose command              the reader's own keyboard was present for: {clause}"
@@ -12522,13 +12649,7 @@ fn a_redraw_asked_for_by_a_tab_with_no_shell_is_always_a_present() {
     // files no debt and a slot that is empty is the whole of the defect, and
     // it is invisible from any value this function could be handed. The
     // needle is split so that this assertion cannot find itself.
-    const SOURCE: &str = include_str!("main.rs");
-    let signature = concat!("    fn ", "redraw(&mut self) -> Result<()> {");
-    let start = SOURCE
-        .find(signature)
-        .expect("`redraw` is declared in this file");
-    let rest = &SOURCE[start + signature.len()..];
-    let redraw = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+    let redraw = method_body("Runtime", "redraw");
     assert!(
         redraw.contains("a_bare_redraw_still_owes_a_present("),
         "`redraw` drops a bare request again, so a preview alone in a tab \
@@ -12582,18 +12703,18 @@ fn method_text(signature: &str) -> String {
 /// not that gap.
 #[test]
 fn a_present_is_recorded_whichever_door_it_came_through() {
-    let retained = method_text("    fn present_retained_picture(&mut self) -> Result<()> {");
+    let retained = squeezed_body("Runtime", "present_retained_picture");
     assert!(
         retained.contains("self.trace_present(trigger.source,receipt,true)"),
         "the retained door is the only door a tab with no shell has, and an \
              instrument that cannot see it says such a tab never draws:\n{retained}"
     );
-    let composed = method_text(concat!("    fn ", "redraw(&mut self) -> Result<()> {"));
+    let composed = squeezed_body("Runtime", "redraw");
     assert!(
         composed.contains("self.trace_present(trigger.source,receipt,false)"),
         "and the composed door goes on printing what it always printed:\n{composed}"
     );
-    let instrument = method_text("    fn trace_present(");
+    let instrument = squeezed_body("Runtime", "trace_present");
     let written = instrument
         .find("self.window.last_present_at=Some(presented_at);")
         .expect("the instrument records when this window last put a picture up");
@@ -12766,26 +12887,24 @@ fn an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present(
     );
 
     // The chain: the only path from that present to a page on the glass.
-    let publisher = method_text(
-        "    fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {",
-    );
+    let publisher = squeezed_body("Runtime", "publish_frame_inner");
     assert!(
             publisher.contains("ifself.focused().is_none(){self.window.chrome_present_pending=true;hang_watch::during(hang_watch::Station::WindowRedraw,||{self.window.window.request_redraw()});returnOk(false);}"),
             "a tab with no shell composes no terminal picture, and what it owes \
              instead is a present:\n{publisher}"
         );
-    let retained = method_text("    fn present_retained_picture(&mut self) -> Result<()> {");
+    let retained = squeezed_body("Runtime", "present_retained_picture");
     assert!(
         retained.contains("letbodies=hang_watch::during(hang_watch::Station::RedrawLayout,||self.pane_draws(now));"),
         "the retained present is where such a tab's panes are placed:\n{retained}"
     );
-    let draws = method_text("    fn pane_draws(&mut self, now: Instant) -> Vec<PaneDraw> {");
+    let draws = squeezed_body("Runtime", "pane_draws");
     assert!(
         draws.contains("self.sync_web_page(now);"),
         "and placing the panes is what tells the engine its rectangle and \
              cuts the hole it is seen through:\n{draws}"
     );
-    let funnel = method_text("    fn present_seats_and_commit(");
+    let funnel = squeezed_body("Runtime", "present_seats_and_commit");
     assert!(
         funnel.contains(".commit()"),
         "and nothing else in this window publishes the composition tree the \
@@ -12847,7 +12966,7 @@ fn a_page_a_modal_covers_is_drawn_as_a_kept_frame() {
     }
 
     // ② The walk that names them, and the pass that keeps them.
-    let sync = method_text(concat!("    fn ", "sync_web_page("));
+    let sync = squeezed_body("Runtime", "sync_web_page");
     assert!(
         sync.contains("keepsakes.push(PageKeepsake{"),
         "the one walk that knows all five reasons is where the page a modal \
@@ -12857,7 +12976,7 @@ fn a_page_a_modal_covers_is_drawn_as_a_kept_frame() {
         sync.contains("self.keep_what_the_modal_covers(keepsakes,now);"),
         "and it hands them on:\n{sync}"
     );
-    let keeping = method_text(concat!("    fn ", "keep_what_the_modal_covers("));
+    let keeping = squeezed_body("Runtime", "keep_what_the_modal_covers");
     assert!(
         keeping.contains("self.photograph_pages(demands,now);"),
         "every page on the glass is photographed on the clock — a hidden \
@@ -12874,13 +12993,13 @@ fn a_page_a_modal_covers_is_drawn_as_a_kept_frame() {
     );
 
     // ③ The two places a kept frame reaches the glass.
-    let chrome = method_text(concat!("    fn ", "refresh_chrome_with_overlay("));
+    let chrome = squeezed_body("Runtime", "refresh_chrome_with_overlay");
     assert!(
         chrome.contains("icons.extend(self.page_keepsake_icons());"),
         "a docked pane draws its page's last frame in the chrome pass, \
              under every overlay and therefore under the scrim:\n{chrome}"
     );
-    let float = method_text(concat!("    fn ", "preview_float_layer("));
+    let float = squeezed_body("Runtime", "preview_float_layer");
     assert!(
         float.contains("self.float_page_keepsake_icon(id)"),
         "and a page a float is carrying draws it on that window's own \
@@ -12924,7 +13043,7 @@ fn a_retirement_asks_for_one_frame_and_not_one_per_turn() {
         "a second page going while the first is still leaving owes its own frame"
     );
 
-    let clock = method_text("    fn advance_web_page(&mut self, now: Instant) -> Result<()> {");
+    let clock = squeezed_body("Runtime", "advance_web_page");
     assert!(
         clock.contains("ifretiring{self.present_chrome_change()?;}"),
         "the frame is owed by the retirement and not by the wait:\n{clock}"
@@ -12996,18 +13115,15 @@ fn a_page_follows_the_pane_it_is_drawn_in() {
 
     // The three window-level doors, because a page is the window's and the
     // two tab-level carriers cannot reach it.
-    for (door, signature) in [
+    for (door, name) in [
         (
             "a pane torn out into a tab of its own",
-            "    fn extract_pane_into_new_tab(&mut self, leaf: LeafId, slot: usize) -> Result<Option<TabId>> {",
+            "extract_pane_into_new_tab",
         ),
-        (
-            "a pane dropped on another tab",
-            "    fn move_pane_across_tabs(",
-        ),
-        ("a tab merged into another's layout", "    fn absorb_tab("),
+        ("a pane dropped on another tab", "move_pane_across_tabs"),
+        ("a tab merged into another's layout", "absorb_tab"),
     ] {
-        let text = method_text(signature);
+        let text = squeezed_body("Runtime", name);
         assert!(
             text.contains("self.carry_the_pages_of_moved_panes("),
             "{door} leaves its page behind, and a page left behind is closed \
@@ -13017,9 +13133,7 @@ fn a_page_follows_the_pane_it_is_drawn_in() {
 
     // And the transaction: every page out of the table before any of them
     // goes back in.
-    let carrier = method_text(
-        "    fn carry_the_pages_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) -> Result<()> {",
-    );
+    let carrier = squeezed_body("Runtime", "carry_the_pages_of_moved_panes");
     let removed = carrier
         .find("self.window.web.remove(was)?")
         .expect("the pages are taken out of the window's table");
@@ -13106,12 +13220,7 @@ fn a_card_reads_the_picture_this_window_has_and_asks_for_nothing() {
 
     // The three refusals left the cache exactly as they found it: this
     // function reads and never asks.
-    const SOURCE: &str = include_str!("main.rs");
-    let at = SOURCE
-        .find("\nfn card_picture_in<'a>(")
-        .expect("the card's picture lookup is a free function in this file");
-    let rest = &SOURCE[at..];
-    let reader = &rest[..rest.find("\n}\n").expect("and it ends") + 3];
+    let reader = free_fn_body("card_picture_in");
     assert!(
         !reader.contains("request_peek_pixels") && !reader.contains(".insert("),
         "the card's picture lookup asks the worker or writes the cache, \
@@ -13353,10 +13462,7 @@ fn a_second_playback_on_one_surface_is_a_second_name_for_the_renderer() {
     // renderer's own map rather than spelled in here — see `bt_render`'s
     // `VideoTextureKey`. What has to be true on this side is that the layer
     // list is named through this one function.
-    let layers = method_text(concat!(
-        "    fn ",
-        "video_layers(&self, animations: &[DrawnAnimation]) -> Vec<bt_render::VideoLayer> {"
-    ));
+    let layers = squeezed_body("Runtime", "video_layers");
     assert!(
         layers.contains("key:animation_layer_key(drawn.surface,drawn.serial),"),
         "the animation layer is named by the one rule:\n{layers}"
@@ -13491,10 +13597,7 @@ fn an_opened_animation_starts_over_and_a_revealed_one_resumes() {
 
     // And the window lets go of the playback an open replaces, which is what
     // sends the worker to open the file again at frame zero.
-    let asking = method_text(concat!(
-        "    fn ",
-        "request_animations(&mut self, drawn: &[DrawnAnimation]) {"
-    ));
+    let asking = squeezed_body("Runtime", "request_animations");
     assert!(
         asking.contains("forkeyinanimations_opened(&mutself.window.animation_presence,&named){"),
         "the open is decided by the one rule:\n{asking}"
@@ -13851,18 +13954,15 @@ fn a_recording_follows_the_pane_it_is_drawn_in() {
     );
 
     // ② the three doors.
-    for (door, signature) in [
+    for (door, name) in [
         (
             "a pane torn out into a tab of its own",
-            "    fn extract_pane_into_new_tab(&mut self, leaf: LeafId, slot: usize) -> Result<Option<TabId>> {",
+            "extract_pane_into_new_tab",
         ),
-        (
-            "a pane dropped on another tab",
-            "    fn move_pane_across_tabs(",
-        ),
-        ("a tab merged into another's layout", "    fn absorb_tab("),
+        ("a pane dropped on another tab", "move_pane_across_tabs"),
+        ("a tab merged into another's layout", "absorb_tab"),
     ] {
-        let text = method_text(signature);
+        let text = squeezed_body("Runtime", name);
         assert!(
             text.contains("self.carry_the_recordings_of_moved_panes("),
             "{door} leaves its recording behind, and a recording left behind \
@@ -13871,9 +13971,7 @@ fn a_recording_follows_the_pane_it_is_drawn_in() {
     }
 
     // ③ the transaction.
-    let carrier = method_text(
-        "    fn carry_the_recordings_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) {",
-    );
+    let carrier = squeezed_body("Runtime", "carry_the_recordings_of_moved_panes");
     let removed = carrier
         .find("self.window.video.take(")
         .expect("the recordings are lifted off their surfaces");
@@ -18219,16 +18317,7 @@ fn only_the_two_menus_the_tab_list_raises_belong_to_a_tab_surface() {
 ///    already answered — the fourth.
 #[test]
 fn a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone() {
-    const SOURCE: &str = include_str!("main.rs");
-    let body = |signature: &str| -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    };
-
-    let router = body("    fn mouse_input(");
+    let router = method_body("Runtime", "mouse_input");
     let opener = router
         .find("self.open_tab_menu_at(tab, position)?;")
         .expect("a right press on a tab raises the tab's own menu");
@@ -18254,7 +18343,7 @@ fn a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone() {
         );
     }
     // ③ the router that owns activation never sees the right button at all.
-    let chrome = body("    fn chrome_mouse_input(");
+    let chrome = method_body("Runtime", "chrome_mouse_input");
     assert!(
         chrome
             .contains("if button != MouseButton::Left {\n            return Ok(false);\n        }"),
@@ -18314,12 +18403,7 @@ fn a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone() {
 ///    answer — the second, which pins that `hit` is asked first.
 #[test]
 fn a_press_outside_an_open_dropdown_closes_it_and_still_lands() {
-    const SOURCE: &str = include_str!("main.rs");
-    let start = SOURCE
-        .find("    fn settings_mouse_input(")
-        .expect("the settings dialog has a router of its own");
-    let rest = &SOURCE[start + "    fn settings_mouse_input(".len()..];
-    let router = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+    let router = method_body("Runtime", "settings_mouse_input");
 
     // ① the gate exists, and it asks the one door both popups leave by.
     let gate = router
@@ -20965,11 +21049,7 @@ fn a_divider_drag_that_loses_its_pointer_stops_holding_the_resize() {
     );
 
     // The recovery is read before the held-hand question it exists to keep honest.
-    const SOURCE: &str = include_str!("main.rs");
-    let flush = SOURCE
-        .split_once("    fn flush_pending_pty_resize(&mut self, now: Instant)")
-        .expect("this file declares the release flush")
-        .1;
+    let flush = method_body("Runtime", "flush_pending_pty_resize");
     let recovery = flush
         .find("end_a_divider_drag_that_lost_its_pointer")
         .expect("the flush ends a gesture nobody is holding any more");
@@ -30064,13 +30144,7 @@ fn an_image_that_will_not_decode_says_so_in_place() {
 /// `adopt_new_palette` and this goes red.
 #[test]
 fn a_theme_flip_asks_every_markdown_page_to_lay_out_again() {
-    const SOURCE: &str = include_str!("main.rs");
-    let start = SOURCE
-        .find("fn adopt_new_palette(&mut self) -> Result<()> {")
-        .expect("the one door every theme change goes through");
-    let body = &SOURCE[start..];
-    let end = body.find("\n    }\n").expect("its closing brace");
-    let body = &body[..end];
+    let body = method_body("Runtime", "adopt_new_palette");
     assert!(
         body.contains("self.refresh_preview_for_layout();"),
         "a page whose pictures and formulas are inked by the theme has to be \
@@ -33256,13 +33330,7 @@ fn a_composition_is_never_written_into_the_buffer() {
 
     // And the door the letters actually arrive at puts them in the window's
     // own `preedit` and never through the buffer's edit door.
-    const SOURCE: &str = include_str!("main.rs");
-    const END: &str = "\n    }\n";
-    let door = SOURCE
-        .find("fn preview_ime(&mut self, event: Ime) -> Result<()> {")
-        .map(|at| &SOURCE[at..])
-        .and_then(|rest| rest.find(END).map(|end| &rest[..end]))
-        .expect("the one door a composition reaches a page through");
+    let door = method_body("Runtime", "preview_ime");
     let preedit_arm = door
         .split("Ime::Commit")
         .next()
@@ -34696,16 +34764,7 @@ fn a_composition_goes_where_the_keyboard_is_and_only_the_shell_has_a_pty() {
 /// goes red.
 #[test]
 fn a_commit_with_no_composition_in_front_of_it_still_reaches_the_child() {
-    const SOURCE: &str = include_str!("main.rs");
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    }
-
-    let door = body("fn ime_input(&mut self, event: Ime) -> Result<()> {");
+    let door = method_body("Runtime", "ime_input");
     let commit = door
         .find("Ime::Commit(text) => {")
         .expect("the composition door has a commit arm");
@@ -34733,8 +34792,7 @@ fn a_commit_with_no_composition_in_front_of_it_still_reaches_the_child() {
     // The other shape's road, and the assertion that the two stay apart: the
     // key that carries text is rewritten in the *key* ladder, so no sentence
     // can arrive through both doors.
-    let ladder =
-        body("fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {");
+    let ladder = method_body("Runtime", "keyboard_input");
     assert!(
         ladder.contains("input::injected_logical_key("),
         "a press that carries text and names no key has no rung again"
@@ -37066,20 +37124,13 @@ fn a_file_row_and_a_folder_row_each_raise_a_menu_and_the_dead_ends_raise_none() 
 /// and the last one does.
 #[test]
 fn a_right_press_on_the_columns_ground_raises_the_roots_menu() {
-    const SOURCE: &str = include_str!("main.rs");
-    let body = |signature: &str| -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    };
     assert!(
-        body("    fn file_row_under(").contains("return self.files_ground_under(position);"),
+        method_body("Runtime", "file_row_under")
+            .contains("return self.files_ground_under(position);"),
         "a press that is on no row falls through to the column's ground \
              rather than to silence"
     );
-    let ground = body("    fn files_ground_under(");
+    let ground = method_body("Runtime", "files_ground_under");
     assert!(
         ground.contains("seats::files_ground_at("),
         "and the ground is resolved against the geometry the rows were \
@@ -37103,9 +37154,8 @@ fn a_right_press_on_the_columns_ground_raises_the_roots_menu() {
     // in full here is itself a line of `main.rs`, so `SOURCE.contains` would
     // be asking whether this test exists. Split across a `concat`, the
     // phrase appears in the file exactly where the code is.
-    let opener = ["self.file_row_under", "(position)"].concat();
     assert_eq!(
-        SOURCE.matches(opener.as_str()).count(),
+        in_product(&calls_of("Runtime", "file_row_under")),
         1,
         "the ground and the rows go through one right-press opener"
     );
@@ -37115,7 +37165,7 @@ fn a_right_press_on_the_columns_ground_raises_the_roots_menu() {
     ]
     .concat();
     assert!(
-        SOURCE.contains(anchored.as_str()),
+        !found(needle!(Pattern::text(anchored.as_str())), View::Raw).is_empty(),
         "hung at the pointer, which is where a menu raised by a press belongs"
     );
 }
@@ -37188,7 +37238,7 @@ fn ladder_call() -> String {
 /// the last one does.
 #[test]
 fn a_press_inside_a_float_never_names_a_docked_row() {
-    let router = runtime_fn_body(router_signature().as_str());
+    let router = method_body("Runtime", "pointer_target_at");
     let claim = router
         .find(["self.float_hit_at", "(position)"].concat().as_str())
         .expect("the float is asked first, because a float is drawn over the columns");
@@ -37205,7 +37255,7 @@ fn a_press_inside_a_float_never_names_a_docked_row() {
              answer that named only some parts would let every other part of an \
              opaque window fall through to the chrome behind it"
     );
-    let body = runtime_fn_body("    fn file_row_under(");
+    let body = method_body("Runtime", "file_row_under");
     assert!(
         !body.contains(["self.float_hit_at", "("].concat().as_str()),
         "the menu's door asks the one router and never the windows directly: \
@@ -37233,7 +37283,7 @@ fn a_press_inside_a_float_never_names_a_docked_row() {
 /// arm's `return None`, and the ordering assertion fails.
 #[test]
 fn a_press_on_a_floats_body_over_a_column_raises_no_root_menu() {
-    let body = runtime_fn_body("    fn file_row_under(");
+    let body = method_body("Runtime", "file_row_under");
     let claim = body
         .find("Some(PointerTarget::Float(")
         .expect("the float's claim is read first");
@@ -37249,7 +37299,7 @@ fn a_press_on_a_floats_body_over_a_column_raises_no_root_menu() {
         "the float's claim is answered before the ground is asked, so a \
              point inside a window never reaches the folder behind it"
     );
-    let ground_body = runtime_fn_body("    fn files_ground_under(");
+    let ground_body = method_body("Runtime", "files_ground_under");
     assert!(
         !ground_body.contains("float"),
         "and the ground path itself knows nothing about floats — the rule \
@@ -37302,7 +37352,7 @@ fn a_float_that_declines_a_point_still_consumes_it() {
     // The one part that is not a tree row and not silence either: whatever
     // the named rectangles leave over is the head, which is what makes a
     // press anywhere inside this window a drag of it.
-    let body = runtime_fn_body("    fn file_row_under(");
+    let body = method_body("Runtime", "file_row_under");
     assert!(
         body.contains("Some(PointerTarget::Float(id, float::FloatPart::Row(index)))"),
         "so the door that raises a file menu names the one part it can \
@@ -37330,7 +37380,7 @@ fn a_float_that_declines_a_point_still_consumes_it() {
 /// first two assertions fail by name.
 #[test]
 fn a_hover_inside_a_floats_body_lights_no_docked_row() {
-    let door = runtime_fn_body("    fn chrome_target_at(");
+    let door = method_body("Runtime", "chrome_target_at");
     assert!(
         door.contains("self.pointer_target_at(position)?"),
         "the chrome's door is the router's answer read through, and not a \
@@ -37341,7 +37391,7 @@ fn a_hover_inside_a_floats_body_lights_no_docked_row() {
         "and a point a window has claimed is no chrome at all — never the \
              chrome that window is covering"
     );
-    let hover = runtime_fn_body("    fn update_chrome_hover(");
+    let hover = method_body("Runtime", "update_chrome_hover");
     assert!(
         hover.contains("Some(PointerTarget::Float(..)) | None => None,"),
         "so the hover this window paints is read through the same claim"
@@ -37361,7 +37411,7 @@ fn a_hover_inside_a_floats_body_lights_no_docked_row() {
 /// name; move it below the docked rows and the first one does.
 #[test]
 fn a_hover_inside_a_float_arms_no_peek_for_the_row_beneath() {
-    let rows = runtime_fn_body("    fn row_under(");
+    let rows = method_body("Runtime", "row_under");
     let own = rows
         .find("Some(PointerTarget::Float(id, float::FloatPart::Row(index)))")
         .expect("a window's own tree row is that window's row");
@@ -37383,7 +37433,7 @@ fn a_hover_inside_a_float_arms_no_peek_for_the_row_beneath() {
         declined < cell,
         "a reference printed under a window is not under the pointer either"
     );
-    let glancing = runtime_fn_body("    fn glancing_row_at(");
+    let glancing = method_body("Runtime", "glancing_row_at");
     assert!(
         glancing.contains("self.row_under(position)?"),
         "and the glance's clock is armed from this one answer, so `None` \
@@ -37402,18 +37452,18 @@ fn a_hover_inside_a_float_arms_no_peek_for_the_row_beneath() {
 /// the part, and the first two assertions fail by name.
 #[test]
 fn a_hover_over_a_floating_trees_row_is_that_rows_hover() {
-    let router = runtime_fn_body(router_signature().as_str());
+    let router = method_body("Runtime", "pointer_target_at");
     assert!(
         router.contains("Some(PointerTarget::Float(id, part))"),
         "the router carries the part the window answered with, rather than \
              the bare fact that something is in the way"
     );
-    let rows = runtime_fn_body("    fn row_under(");
+    let rows = method_body("Runtime", "row_under");
     assert!(
         rows.contains("Some((RowHost::Float(id), index))"),
         "so a row of a floating tree is still that float's row"
     );
-    let peek = runtime_fn_body("    fn peek_row(");
+    let peek = method_body("Runtime", "peek_row");
     assert!(
         peek.contains("RowHost::Column(_) | RowHost::Float(_) =>"),
         "and the glance card resolves it on either host, exactly as it did"
@@ -38159,7 +38209,6 @@ fn a_files_foot_prints_the_root_its_breadcrumbs_would_print() {
 ///    the source pin names the function that got around it.
 #[test]
 fn a_pane_heads_folder_is_written_the_way_this_reader_writes_one() {
-    const SOURCE: &str = include_str!("main.rs");
     let write = CWD_AS_WHOLE_PATH.write;
     let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
         .expect("the reader running this test has a home directory");
@@ -38185,13 +38234,7 @@ fn a_pane_heads_folder_is_written_the_way_this_reader_writes_one() {
         "~/pages",
         "and a Mac's head says what a Mac's breadcrumbs say"
     );
-    let body = SOURCE
-        .split_once("fn cwd_whole(directory: &Path) -> Option<String> {")
-        .expect("`cwd_whole` is still spelled this way")
-        .1
-        .split_once("\n}\n")
-        .expect("it still has an end")
-        .0;
+    let body = free_fn_body("cwd_whole");
     assert!(
         body.contains("home_shortened_path"),
         "the head asks the breadcrumbs' own question rather than keeping a \
@@ -38237,14 +38280,7 @@ fn a_pane_heads_folder_is_written_the_way_this_reader_writes_one() {
 ///    frame that goes out is one behind the picture.
 #[test]
 fn a_formula_that_lands_rebuilds_the_page_that_was_standing_on_its_source() {
-    const SOURCE: &str = include_str!("main.rs");
-    let body = SOURCE
-        .split_once("fn apply_math_results(")
-        .expect("`apply_math_results` is still spelled this way")
-        .1
-        .split_once("\n    }\n")
-        .expect("it still has an end")
-        .0;
+    let body = method_body("Runtime", "apply_math_results");
     let rebuild = body
         .find("self.refresh_preview_body();")
         .expect("a landed picture asks the page to be laid out again");
@@ -42566,16 +42602,13 @@ fn two_pictures_in_one_tab_are_both_drawn() {
 /// goes red — and the lane joins the other two, needing a carrier of its own.
 #[test]
 fn an_animation_crosses_a_tab_boundary_because_it_is_keyed_by_its_file() {
-    let running =
-        method_text("    fn animation_running_on(&self, surface: PreviewSurface) -> bool {");
+    let running = squeezed_body("Runtime", "animation_running_on");
     assert!(
         running.contains("normalized_local_image_path_key"),
         "the animation lane is read by file, which is why a move has \
              nothing to re-key:\n{running}"
     );
-    let names = method_text(
-        "    fn animation_path_of(&self, surface: PreviewSurface) -> Option<PathBuf> {",
-    );
+    let names = squeezed_body("Runtime", "animation_path_of");
     assert!(
         names.contains("self.preview_picture(surface)?.path"),
         "and the file it is read by is the one on the pane, which travels \
@@ -43045,25 +43078,18 @@ fn both_chevrons_are_driven_by_one_policy_and_one_pair_of_constants() {
 /// for that door fails.
 #[test]
 fn both_pointer_doors_tell_the_chevron_clocks_where_the_hand_is() {
-    const SOURCE: &str = include_str!("main.rs");
-    let body = |signature: &str| -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    };
+    let body = |name: &str| method_body("Runtime", name);
     assert!(
-        body("    fn pointer_moved(").contains("self.observe_chevrons(Some(position)"),
+        body("pointer_moved").contains("self.observe_chevrons(Some(position)"),
         "the move door hands the gates the position it was handed"
     );
     assert!(
-        body("    fn pointer_left(").contains("self.observe_chevrons(None,"),
+        body("pointer_left").contains("self.observe_chevrons(None,"),
         "the leave door hands them the absence — without it a menu opened \
              from the strip's `⌄` never closes over the title bar's drag band"
     );
     assert!(
-        body("    fn turn(").contains("self.window.chevrons.deadline(),"),
+        body("turn").contains("self.window.chevrons.deadline(),"),
         "and the loop is woken for the grace: a clock nobody calls `due` on \
              is a menu that closes on the next thing to twitch"
     );
@@ -43284,16 +43310,9 @@ fn the_rails_open_and_the_chevrons_share_one_hover_open_path() {
 /// `the_rule_fades_in_with_the_group_it_introduces`, driven there directly.
 #[test]
 fn a_pointer_that_has_left_the_window_is_standing_in_no_pane() {
-    const SOURCE: &str = include_str!("main.rs");
-    let body = |signature: &str| -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    };
     assert!(
-        body("    fn pointer_left(").contains("self.window.seat_pointer.left_the_window()"),
+        method_body("Runtime", "pointer_left")
+            .contains("self.window.seat_pointer.left_the_window()"),
         "the leave door drops the control the pointer was on AND the pane it \
              was standing in, through the one function that owns both — without \
              the second, every head's hover run stays lit over a window the hand \
@@ -43440,16 +43459,8 @@ fn the_third_exit_is_the_drags_own_errand_and_the_ring_is_the_targets_own_mark()
 /// that is missing.
 #[test]
 fn a_tab_switch_leaves_no_menu_standing() {
-    const SOURCE: &str = include_str!("main.rs");
-    let body = |signature: &str| -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    };
     assert!(
-        body("    fn activate_tab(").contains("self.close_every_popup();"),
+        method_body("Runtime", "activate_tab").contains("self.close_every_popup();"),
         "the tab that arrives finds no popup left over from the one that left"
     );
     // And the closer is the one that answers for the whole list, not a hand
@@ -43457,7 +43468,7 @@ fn a_tab_switch_leaves_no_menu_standing() {
     // `close_popup` arm `close_popups_except` walks, so a ninth popup is
     // closed here the day it compiles.
     assert!(
-        body("    fn close_every_popup(").contains("for popup in Popup::ALL"),
+        method_body("Runtime", "close_every_popup").contains("for popup in Popup::ALL"),
         "the switch closes the list, not a copy of it"
     );
 }
@@ -45534,7 +45545,7 @@ fn a_row_makes_a_tab_on_the_padding_and_opens_in_the_entry_it_rests_on() {
 /// run (N158).
 #[test]
 fn a_rows_strip_arm_asks_the_run_and_never_the_window() {
-    let survey = row_strip_method("survey_strip");
+    let survey = method_body("Runtime", "survey_strip");
     let (asked, arms) = survey
         .split_once("match source {")
         .expect("survey_strip chooses on what is in the hand");
@@ -45589,7 +45600,7 @@ fn a_rows_two_landings_are_spent_by_its_own_two_commits() {
         release_verdict(Some(DropLanding::StripAdopt { tab: TabId(4) })),
         DragRelease::Adopt { tab: TabId(4) }
     );
-    let extract = row_strip_method("commit_strip_extract");
+    let extract = method_body("Runtime", "commit_strip_extract");
     assert!(
         extract.contains("self.commit_row_into_new_tab(&payload, slot)"),
         "a row over the padding makes a tab out of a path:\n{extract}"
@@ -45598,7 +45609,7 @@ fn a_rows_two_landings_are_spent_by_its_own_two_commits() {
         extract.contains("self.commit_pane_extract(drag, slot)"),
         "and a pane still tears out the way N157 says:\n{extract}"
     );
-    let adopt = row_strip_method("commit_strip_adopt");
+    let adopt = method_body("Runtime", "commit_strip_adopt");
     assert!(
         adopt.contains("self.commit_row_into_tab(&payload, target)"),
         "a row on an entry is opened in that tab:\n{adopt}"
@@ -45676,7 +45687,7 @@ fn the_tab_a_file_row_makes_is_activated_and_owns_the_buffer_it_opens() {
 /// for.
 #[test]
 fn a_folder_row_makes_a_files_tab_rooted_where_it_was_dragged_from() {
-    let text = row_strip_method("commit_row_into_new_tab");
+    let text = method_body("Runtime", "commit_row_into_new_tab");
     assert!(
         text.contains("bt_layout::SeatKind::Files"),
         "a folder's tab is one files column:\n{text}"
@@ -45714,7 +45725,7 @@ fn a_folder_row_makes_a_files_tab_rooted_where_it_was_dragged_from() {
 /// looking at, which from the outside is the drop having done nothing.
 #[test]
 fn a_row_on_an_entry_opens_through_that_tabs_own_doors() {
-    let text = row_strip_method("commit_row_into_tab");
+    let text = method_body("Runtime", "commit_row_into_tab");
     assert!(
         text.contains("self.activate_tab(index, false)?"),
         "the tab you aimed at is the tab you are looking at:\n{text}"
@@ -46874,25 +46885,18 @@ fn a_video_has_a_face_of_its_own() {
 /// then freezes.
 #[test]
 fn a_playing_video_is_spelled_as_the_file_it_is() {
-    const SOURCE: &str = include_str!("main.rs");
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    }
     let playing = concat!("surface_is_playing", "_a_video(surface)");
+    let body = |name: &str| method_body("Runtime", name);
     assert!(
-        body("fn preview_rail_kind(").contains(playing),
+        body("preview_rail_kind").contains(playing),
         "a playing pane must wear its file's breadcrumb and not an address bar"
     );
     assert!(
-        body("fn refit_preview_picture(").contains(playing),
+        body("refit_preview_picture").contains(playing),
         "and the decoded still must come off the glass while the engine is drawing"
     );
     assert!(
-        body("fn preview_head_tools(").contains(playing),
+        body("preview_head_tools").contains(playing),
         "and the head's per-type slot must hold the stop rather than a flip"
     );
     // **And the one place a surface's recording is known** — one map, keyed
@@ -46900,7 +46904,7 @@ fn a_playing_video_is_spelled_as_the_file_it_is() {
     // is no browser and no mint, so there is nowhere for a second answer to
     // come from.
     assert!(
-        body("fn video_playing_on(").contains("self.window.video.get(surface)"),
+        body("video_playing_on").contains("self.window.video.get(surface)"),
         "the window asks its own map and nothing else"
     );
 }
@@ -47074,15 +47078,7 @@ fn a_video_frame_alone_is_enough_to_present() {
     );
 
     // ② the call site asks it.
-    const SOURCE: &str = include_str!("main.rs");
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    }
-    let tick = body("fn advance_strip_animation(");
+    let tick = method_body("Runtime", "advance_strip_animation");
     assert!(
         tick.contains("tick_owes_a_present(self.refresh_chrome(), panes_owe, pictures_owe)"),
         "the chrome gate asks the whole question, with the picture's debt in it"
@@ -47096,7 +47092,7 @@ fn a_video_frame_alone_is_enough_to_present() {
         tick.contains("std::mem::take(&mut self.window.pictures_owe_a_frame)"),
         "and the picture's debt is a name that survives as far as that gate"
     );
-    let service = body("fn service_pictures(");
+    let service = method_body("Runtime", "service_pictures");
     assert!(
         service.contains("if frames_arrived || boxes_moved {")
             && service.contains("self.window.pictures_owe_a_frame = true;"),
@@ -47453,12 +47449,7 @@ fn a_seat_that_changes_content_drops_its_video() {
     );
 
     // And the sweep asks that question rather than the picture lane's.
-    const SOURCE: &str = include_str!("main.rs");
-    let start = SOURCE
-        .find("    fn sweep_video_seats(")
-        .expect("the sweep is declared in this file");
-    let rest = &SOURCE[start + "    fn sweep_video_seats(".len()..];
-    let sweep = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+    let sweep = method_body("Runtime", "sweep_video_seats");
     assert!(
         sweep.contains("self.preview_subject(*surface)"),
         "the sweep no longer asks what the surface is showing across every \
@@ -48410,16 +48401,7 @@ fn the_windows_address_door_mints_a_page_and_can_be_taken_back() {
 ///    that has just taken every key away from it.
 #[test]
 fn a_refused_address_is_a_field_that_can_still_be_left() {
-    const SOURCE: &str = include_str!("main.rs");
-    let body = |signature: &str| {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
-    };
-
-    let finish = body("    fn finish_rename(");
+    let finish = method_body("Runtime", "finish_rename");
     assert!(
         finish.contains("exit.may_stay_open()")
             && finish.contains("self.window.rename = Some(editor);"),
@@ -48427,7 +48409,7 @@ fn a_refused_address_is_a_field_that_can_still_be_left() {
              Enter, so blur cannot leave a `file:` page's address:\n{finish}"
     );
 
-    let press = body("    fn press_web_page(");
+    let press = method_body("Runtime", "press_web_page");
     let blur = press
         .find("self.finish_rename(RenameExit::Blur)?")
         .unwrap_or(usize::MAX);
