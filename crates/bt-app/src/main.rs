@@ -127697,6 +127697,29 @@ mod cross_window_drag_tests {
 /// rather than reimplementing them.
 #[cfg(test)]
 mod palette_wiring_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Every reader in this module asked `main.rs` for its
+    // text. Nothing is deleted here: each body pin now computes its answer twice
+    // — once from `include_str!("main.rs")`, once from `bt-source` — and asserts
+    // the two are the same bytes, and each reading that is not a body pin asserts
+    // the two answer the same thing. The deletion is the commit after this one, so
+    // that a reviewer sees the agreement and a bisect can land between them.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `found_in` are that module's and
+    // `formula_tool_seat_tests`' helpers word for word, and the pilot's header is
+    // where the six points behind them live. Two things this module needs that
+    // neither had a consumer for:
+    //
+    // * a body pin on an item that is **not** one of `Runtime`'s inherent
+    //   methods — `<FolioApp as ApplicationHandler>::window_event`, which is what
+    //   the one whole-file region reading in here turns out to be about. The
+    //   query says the trait, so `item_body` takes the `ItemQuery` and
+    //   `method_body` stays the one-liner it is.
+    // * `agreed` / `agreed_bodies` — the equivalence itself, deleted with the
+    //   old reading in the next commit.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
+
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -127708,6 +127731,81 @@ mod palette_wiring_tests {
         let rest = &SOURCE[start + signature.len()..];
         let end = rest.find("\n    fn ").unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    // ── what this module asks the crate instead ───────────────────────────
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of one item, braces included — the identity of §2.4 rather than
+    /// a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over a named scope — a Rust path, never a file.
+    fn found_in(needle: Needle, view: View, scope: Scope) -> Found {
+        source()
+            .search(&Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    // ── the two readings of one body, asserted to agree ───────────────────
+
+    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
+    ///
+    /// `body` hands back everything after the signature prefix it was given and
+    /// stops before the next `\n    fn `: the rest of the declaration, then the
+    /// body, then whatever stands between the closing brace and the next
+    /// method's `fn` — which in this file is that method's doc comment.
+    /// `body_of` hands back the braces and what is between them. So the crate's
+    /// answer has to stand in this file's slice at the head of the body, with
+    /// nothing but the rest of the declaration in front of it; most of this
+    /// module's prefixes end with the opening brace, in which case the slice
+    /// begins one byte inside the crate's answer.
+    ///
+    /// What comes back is the file's slice, so this commit changes no assertion.
+    fn agreed_bodies(old: &'static str, new: &'static str, identity: &str) -> &'static str {
+        let at = match old.find(new) {
+            Some(at) => at,
+            None => {
+                assert!(
+                    old.starts_with(&new[1..]),
+                    "`{identity}`: this file's slice and the crate's body are not the same bytes"
+                );
+                0
+            }
+        };
+        assert!(
+            !old[..at].contains('{'),
+            "`{identity}`: the crate's body stands inside this file's slice rather than at the \
+             head of it"
+        );
+        old
+    }
+
+    /// The same comparison for one of `Runtime`'s inherent methods, which is
+    /// what all but one of this module's pins turn out to be about.
+    fn agreed(old: &'static str, name: &str) -> &'static str {
+        agreed_bodies(
+            old,
+            method_body("Runtime", name),
+            &format!("Runtime::{name}"),
+        )
     }
 
     /// PIN — **every row of the palette runs a verb this window already had.**
@@ -127759,7 +127857,10 @@ mod palette_wiring_tests {
     /// `HostScreen::Cleared` unconditionally, and the pair named here is no longer in the body.
     #[test]
     fn the_clear_screen_row_asks_the_host_first_and_spends_its_answer() {
-        let run = body("    fn clear_pane_screen(&mut self, seat: SeatId) -> Result<()> {");
+        let run = agreed(
+            body("    fn clear_pane_screen(&mut self, seat: SeatId) -> Result<()> {"),
+            "clear_pane_screen",
+        );
         let asked = run
             .find("host_screen_after(pty.clear_host_buffer(true))")
             .expect("the row asks the pseudoconsole through the one mapping there is");
@@ -127774,7 +127875,10 @@ mod palette_wiring_tests {
 
     #[test]
     fn every_palette_verb_reaches_a_door_this_window_already_had() {
-        let run = body("fn run_palette_row(&mut self) -> Result<()> {");
+        let run = agreed(
+            body("fn run_palette_row(&mut self) -> Result<()> {"),
+            "run_palette_row",
+        );
         for door in [
             // Actions: the shortcut table's own dispatch.
             "self.run_shortcut(action)",
@@ -127797,8 +127901,10 @@ mod palette_wiring_tests {
             );
         }
 
-        let locate =
-            body("fn locate_path_in_files_columns(&mut self, path: &Path) -> Result<()> {");
+        let locate = agreed(
+            body("fn locate_path_in_files_columns(&mut self, path: &Path) -> Result<()> {"),
+            "locate_path_in_files_columns",
+        );
         assert!(
             locate.contains("self.open_files_path_to(seat, &key)?"),
             "and a file is revealed through the column's own reveal"
@@ -127819,8 +127925,10 @@ mod palette_wiring_tests {
     /// (2) scroll before choosing the page — the second goes red.
     #[test]
     fn opening_settings_on_a_row_opens_then_chooses_then_scrolls() {
-        let text =
-            body("fn open_settings_on_row(&mut self, row: settings::SettingsRow) -> Result<()> {");
+        let text = agreed(
+            body("fn open_settings_on_row(&mut self, row: settings::SettingsRow) -> Result<()> {"),
+            "open_settings_on_row",
+        );
         let open = text
             .find("self.toggle_settings_panel()?")
             .expect("it opens the dialog through the dialog's own door");
@@ -127845,7 +127953,10 @@ mod palette_wiring_tests {
     /// settings dialog opens underneath the palette.
     #[test]
     fn the_palette_closes_before_it_runs_the_row() {
-        let text = body("fn run_palette_row(&mut self) -> Result<()> {");
+        let text = agreed(
+            body("fn run_palette_row(&mut self) -> Result<()> {"),
+            "run_palette_row",
+        );
         let close = text
             .find("self.close_command_palette()?;")
             .expect("it closes itself");
@@ -127872,8 +127983,11 @@ mod palette_wiring_tests {
     ///     its own chord means.
     #[test]
     fn the_palette_takes_its_keys_above_the_swallow_and_above_the_table() {
-        let text = body(
-            "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
+        let text = agreed(
+            body(
+                "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
+            ),
+            "keyboard_input",
         );
         let rung = text
             .find("self.palette_key(event)?;")
@@ -127911,7 +128025,10 @@ mod palette_wiring_tests {
     ///     the list stops narrowing mid-composition.
     #[test]
     fn the_palette_ime_filters_on_the_preedit_without_committing_it() {
-        let text = body("fn palette_ime(&mut self, event: &Ime) -> Result<()> {");
+        let text = agreed(
+            body("fn palette_ime(&mut self, event: &Ime) -> Result<()> {"),
+            "palette_ime",
+        );
         assert!(
             text.contains("Ime::Preedit(text, _) => state.field_mut().set_preedit(text)"),
             "a pre-edit is set, never inserted"
@@ -127956,7 +128073,10 @@ mod palette_wiring_tests {
     /// re-query fired on a pre-edit returns the list unchanged.
     #[test]
     fn the_palette_asks_its_list_about_the_composed_reading() {
-        let text = body("fn arrange_palette(&mut self, requeried: bool) -> Result<()> {");
+        let text = agreed(
+            body("fn arrange_palette(&mut self, requeried: bool) -> Result<()> {"),
+            "arrange_palette",
+        );
         assert!(
             text.contains("state.query()"),
             "the query is the composed reading"
@@ -127981,13 +128101,20 @@ mod palette_wiring_tests {
     /// (2) drop the `ctrl` guard from the `Backspace` arm — the third goes red.
     #[test]
     fn the_palette_field_pastes_and_deletes_a_word() {
-        let keys = body("fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {");
+        let keys = agreed(
+            body("fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {"),
+            "palette_key",
+        );
         assert!(
             keys.contains("input::is_paste_shortcut(&event.logical_key, self.window.modifiers)"),
             "the paste chord is the window's own predicate, not a second spelling"
         );
         assert!(
-            body("fn clipboard_line(&self) -> String {").contains("text_field::one_line"),
+            agreed(
+                body("fn clipboard_line(&self) -> String {"),
+                "clipboard_line"
+            )
+            .contains("text_field::one_line"),
             "and what it hands the field is one line of printable text"
         );
         assert!(
@@ -128019,8 +128146,11 @@ mod palette_wiring_tests {
     /// pastes into the shell behind it.
     #[test]
     fn nothing_leaks_past_the_palette_to_the_shell() {
-        let text = body(
-            "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
+        let text = agreed(
+            body(
+                "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
+            ),
+            "keyboard_input",
         );
         let rung = text
             .find("self.palette_key(event)?;")
@@ -128043,7 +128173,10 @@ mod palette_wiring_tests {
         // And the composition ladder, which is a second function and the same
         // rule: the palette's arm returns, so no pre-edit and no commit reaches
         // the `write_pty_input` at the bottom of `ime_input`.
-        let ime = body("fn ime_input(&mut self, event: Ime) -> Result<()> {");
+        let ime = agreed(
+            body("fn ime_input(&mut self, event: Ime) -> Result<()> {"),
+            "ime_input",
+        );
         let palette = ime
             .find("ImeOwner::Palette => {")
             .expect("a composition has a palette arm");
@@ -128077,7 +128210,10 @@ mod palette_wiring_tests {
     /// reached for.
     #[test]
     fn the_palette_has_three_ways_out() {
-        let keys = body("fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {");
+        let keys = agreed(
+            body("fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {"),
+            "palette_key",
+        );
         let escape = keys
             .find("Key::Named(NamedKey::Escape) => {")
             .expect("Esc is answered");
@@ -128092,12 +128228,15 @@ mod palette_wiring_tests {
             "the close belongs to the Esc arm"
         );
 
-        let press = body("fn chrome_mouse_input(");
+        let press = agreed(body("fn chrome_mouse_input("), "chrome_mouse_input");
         let router = if press.contains("palette::hit(&layout, position.x, position.y)") {
             press
         } else {
-            body(
-                "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+            agreed(
+                body(
+                    "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+                ),
+                "mouse_input",
             )
         };
         assert!(
@@ -128116,6 +128255,29 @@ mod palette_wiring_tests {
             SOURCE[blur..blur + end].contains("runtime.close_command_palette()"),
             "and a window the reader has left is not one they are aiming in"
         );
+
+        // **The one reading in this module that was not a body pin**, and the
+        // one whose subject the file reading never named: the two focus arms
+        // live in `<FolioApp as ApplicationHandler>::window_event`, and the
+        // crate can say so. The old reading takes the first occurrence in the
+        // whole file — which is this module's own string literal above as soon
+        // as the product arm goes, the failure the pilot found in
+        // `a_scale_change`. Both regions are compared as bytes here.
+        let dispatch = item_body(
+            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
+        );
+        let asked = dispatch
+            .find("WindowEvent::Focused(false) => {")
+            .expect("the window answers losing focus");
+        let until = dispatch[asked..]
+            .find("WindowEvent::Focused(true) => {")
+            .expect("and getting it back");
+        assert_eq!(
+            &SOURCE[blur..blur + end],
+            &dispatch[asked..asked + until],
+            "the file's region between the two focus arms and the dispatcher's are not the \
+             same bytes"
+        );
     }
 
     /// PIN — **a row names its tab by an address that cannot be reused.**
@@ -128133,7 +128295,10 @@ mod palette_wiring_tests {
     /// `tab_index_of` calls go and this goes red.
     #[test]
     fn a_palette_row_names_its_tab_by_an_address_that_cannot_be_reused() {
-        let run = body("fn run_palette_row(&mut self) -> Result<()> {");
+        let run = agreed(
+            body("fn run_palette_row(&mut self) -> Result<()> {"),
+            "run_palette_row",
+        );
         assert_eq!(
             run.matches("self.tab_index_of(tab)").count(),
             2,
@@ -128155,15 +128320,21 @@ mod palette_wiring_tests {
     /// call to `point_at` goes, and this goes red.
     #[test]
     fn the_pointer_moves_the_selection_itself() {
-        let hover = body(
-            "fn drive_palette_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {",
+        let hover = agreed(
+            body(
+                "fn drive_palette_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {",
+            ),
+            "drive_palette_hover",
         );
         assert!(
             hover.contains("state.point_at(index)"),
             "hovering a row selects it"
         );
-        let press = body(
-            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+        let press = agreed(
+            body(
+                "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+            ),
+            "mouse_input",
         );
         assert!(
             press.contains("palette.point_at(index);"),
@@ -128191,7 +128362,10 @@ mod palette_wiring_tests {
     ///     red, and the box becomes transparent to the wheel over its input.
     #[test]
     fn the_palette_takes_the_notches_over_its_own_box() {
-        let wheel = body("fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {");
+        let wheel = agreed(
+            body("fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {"),
+            "mouse_wheel",
+        );
         let arm = wheel
             .find("palette::wheel_part(&layout, position.x, position.y)")
             .expect("the wheel asks the box the same question the press asks it");
@@ -128212,8 +128386,11 @@ mod palette_wiring_tests {
         );
 
         // One scroll for the wheel and the keyboard, in the house's own unit.
-        let scroll = body(
-            "fn scroll_palette_list(\n        &mut self,\n        layout: &palette::PaletteLayout,",
+        let scroll = agreed(
+            body(
+                "fn scroll_palette_list(\n        &mut self,\n        layout: &palette::PaletteLayout,",
+            ),
+            "scroll_palette_list",
         );
         assert!(
             scroll.contains("self.vertical_wheel_travel(delta, layout.list_height())"),
@@ -128224,7 +128401,11 @@ mod palette_wiring_tests {
             "and it writes the very field the arrows' `settle_palette_scroll` writes"
         );
         assert!(
-            body("fn settle_palette_scroll(&mut self) {").contains("state.set_scroll(scrolled)"),
+            agreed(
+                body("fn settle_palette_scroll(&mut self) {"),
+                "settle_palette_scroll"
+            )
+            .contains("state.set_scroll(scrolled)"),
             "which is that field"
         );
     }
@@ -128252,7 +128433,10 @@ mod palette_wiring_tests {
         assert_eq!(recall_flash(false, true), RecallFlash::Pane);
         assert_eq!(recall_flash(true, true), RecallFlash::Pane);
 
-        let run = body("fn run_palette_row(&mut self) -> Result<()> {");
+        let run = agreed(
+            body("fn run_palette_row(&mut self) -> Result<()> {"),
+            "run_palette_row",
+        );
         assert!(
             run.contains("RecallFlash::Row => self.jump_to_command_mark(seat, mark)")
                 && run.contains("RecallFlash::Pane => self.flash_pane(seat)"),
@@ -128265,7 +128449,10 @@ mod palette_wiring_tests {
             "and the screen is the one the pane is showing now"
         );
 
-        let flash = body("fn flash_pane(&mut self, seat: SeatId) -> Result<()> {");
+        let flash = agreed(
+            body("fn flash_pane(&mut self, seat: SeatId) -> Result<()> {"),
+            "flash_pane",
+        );
         assert!(
             !flash.contains("set_scroll_anchor") && !flash.contains("jump_to_command_mark"),
             "nothing is scrolled: the reader asked to be shown a pane, not moved inside it"
@@ -128290,6 +128477,20 @@ mod palette_wiring_tests {
     fn the_palette_is_never_written_to_the_session_file() {
         const PERSIST: &str = include_str!("persist.rs");
         for name in ["palette", "PaletteState"] {
+            // The concern is that module and not the crate (§4.1): half this
+            // window holds a `PaletteState`, and what this pins is that the
+            // half which writes the session file does not. So the scope is the
+            // Rust path `crate::persist` rather than a widening.
+            let written = found_in(
+                needle!(Pattern::text(name)),
+                View::Raw,
+                Scope::Module("crate::persist".to_owned()),
+            );
+            assert_eq!(
+                PERSIST.contains(name),
+                !written.is_empty(),
+                "`{name}`: the file's reading and the module's do not agree"
+            );
             assert!(
                 !PERSIST.contains(name),
                 "`{name}` has no business in what outlives the process"
