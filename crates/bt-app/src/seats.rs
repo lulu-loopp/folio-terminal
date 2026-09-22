@@ -36465,7 +36465,7 @@ mod tests {",
         // more, as this reading's own needle. The file grain alone would be
         // answered by that literal, which is the shape a migrated guard exists
         // to stop being satisfied by.
-        let handed = index
+        let handed = !index
             .search(&bt_source::Search::new(
                 bt_source::needle!(bt_source::Pattern::text(
                     "head_raised: self.head_that_raised_a_layer(),"
@@ -36473,25 +36473,8 @@ mod tests {",
                 bt_source::View::Raw,
             ))
             .unwrap_or_else(|failure| panic!("{failure}"))
-            .occurrences()
-            .iter()
-            .any(|occurrence| {
-                index
-                    .file_at(occurrence.span.start())
-                    .is_some_and(bt_source::FileRecord::permits_product)
-                    && index
-                        .items()
-                        .iter()
-                        .filter(|record| occurrence.span.within(record.whole()))
-                        .min_by_key(|record| record.whole().len())
-                        .is_none_or(|record| {
-                            !record
-                                .variant()
-                                .predicates()
-                                .iter()
-                                .any(|predicate| predicate == "test")
-                        })
-            });
+            .in_the_product(index)
+            .is_empty();
         assert!(handed, "the paint is no longer handed the derivation");
     }
 

@@ -15514,49 +15514,17 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// **How many of these occurrences a product build compiles.**
+    /// **How many of these occurrences a product build compiles** —
+    /// `bt_source::Found::in_the_product`, which owns that rule and both of the
+    /// grains it takes: §2.3's file and §2.4's item.
     ///
-    /// Two grains, because this tree says "test" two ways and a reader that
-    /// took only one of them would count its own assertions. A file reached
-    /// through a `#[cfg(test)] mod x;` declaration is not compiled into the
-    /// product at all, which is `FileRecord::permits_product` over
-    /// `Index::file_at` (§2.3, the pilot's `in_product`). An inline
-    /// `#[cfg(test)] mod` inside a file the product *does* compile is not a
-    /// file, so §2.4's identity carries its predicate instead, which is
-    /// `clipboard_path_tests`' `in_product_items`. This module needs both: the
-    /// spellings counted here are written again in its own assertions — in
-    /// this commit, by the older of the two readings standing beside the newer
-    /// one — and again in whole test files elsewhere in the package.
-    ///
-    /// The owner is the smallest callable holding the match, which is
-    /// `Found::owners`' own rule taken one occurrence at a time so that the
-    /// file grain can stand beside it. An occurrence in no callable — an
-    /// `impl` header, a `const` — is left in, because nothing about a `cfg`
-    /// says otherwise and dropping it quietly is the failure this preparation
-    /// is about.
+    /// This module needs both, which is why it is asked here rather than left
+    /// to the file grain: the spellings counted below are written again in this
+    /// module's own assertions, and again in whole test files elsewhere in the
+    /// package. The rule used to be written out here, in one of twelve copies
+    /// of it this crate carried.
     fn in_the_product(found: &bt_source::Found) -> usize {
-        let index = source_index();
-        found
-            .occurrences()
-            .iter()
-            .filter(|occurrence| {
-                index
-                    .file_at(occurrence.span.start())
-                    .is_some_and(bt_source::FileRecord::permits_product)
-                    && index
-                        .items()
-                        .iter()
-                        .filter(|record| occurrence.span.within(record.whole()))
-                        .min_by_key(|record| record.whole().len())
-                        .is_none_or(|record| {
-                            !record
-                                .variant()
-                                .predicates()
-                                .iter()
-                                .any(|predicate| predicate == "test")
-                        })
-            })
-            .count()
+        found.in_the_product(source_index()).len()
     }
 
     /// The same count of one raw needle — the view `include_str!` handed this

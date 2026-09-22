@@ -209,21 +209,14 @@ fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
         .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
-/// How many of these occurrences stand in a file a product build compiles.
+/// **How many of these occurrences a product build contains** —
+/// `bt_source::Found::in_the_product`, which owns that rule.
 ///
-/// File-grained, and deliberately so: §2.3 computes product reachability
-/// per *declaration path to a file*, and an inline `#[cfg(test)] mod`
-/// inside a product file is not a file.
+/// It reads at two grains, §2.3's file and §2.4's item, where this module used
+/// to read only the first. Both answer the same number here, measured needle by
+/// needle before the readings were joined.
 fn in_product(found: &bt_source::Found) -> usize {
-    found
-        .occurrences()
-        .iter()
-        .filter(|occurrence| {
-            source_index()
-                .file_at(occurrence.span.start())
-                .is_some_and(bt_source::FileRecord::permits_product)
-        })
-        .count()
+    found.in_the_product(source_index()).len()
 }
 
 /// The package's product count of one raw needle — the view `include_str!`

@@ -1107,13 +1107,13 @@ fn a_wait_is_not_a_journey() {
 //   retirement in a doc comment, and raw bytes over the package would have read
 //   that sentence as a second copy of the thing and inverted the guard.
 // * The two prohibitions on a renewable query-time deadline stay inside one
-//   module each — `crate` for `PaneMotion`, `crate::termscroll` for the thumb —
-//   because both spellings are ones other hosts legitimately carry: three types
-//   in this package declare that exact `deadline` signature and nine spell
-//   `frame: Duration`. A package-wide zero would have inverted both.
-//   `PaneMotion` is not a method of either block Step 2a moves, so `crate` is
-//   still the module it is declared in afterwards; a scope over *all impls of a
-//   type* is the helper that would say this exactly, and `bt-source` has none.
+//   named scope each, because both spellings are ones other hosts legitimately
+//   carry: three types in this package declare that exact `deadline` signature
+//   and nine spell `frame: Duration`. A package-wide zero would have inverted
+//   both. `PaneMotion`'s is `Scope::Impls("PaneMotion")` — every `impl` block
+//   of that type, in every file and on every arm, which is what the claim is
+//   about and what it used to have to approximate with the module the blocks
+//   are written in today. The thumb's is `crate::termscroll`.
 
 /// **This crate, indexed once per process** — the workspace read, this
 /// package's own `src/` declared as the universe and lowered, on the first ask
@@ -1140,21 +1140,14 @@ fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
         .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
-/// How many of these occurrences stand in a file a product build compiles.
+/// **How many of these occurrences a product build contains** —
+/// `bt_source::Found::in_the_product`, which owns that rule.
 ///
-/// File-grained, and deliberately so: §2.3 computes product reachability
-/// per *declaration path to a file*, and an inline `#[cfg(test)] mod`
-/// inside a product file is not a file.
+/// It reads at two grains, §2.3's file and §2.4's item, where this module used
+/// to read only the first. Both answer the same number here, measured needle by
+/// needle before the readings were joined.
 fn in_product(found: &bt_source::Found) -> usize {
-    found
-        .occurrences()
-        .iter()
-        .filter(|occurrence| {
-            source_index()
-                .file_at(occurrence.span.start())
-                .is_some_and(bt_source::FileRecord::permits_product)
-        })
-        .count()
+    found.in_the_product(source_index()).len()
 }
 
 /// The package's product count of one raw needle — the view `include_str!`
@@ -1586,17 +1579,17 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
             && work.contains("(bar_moving || pane_moving).then_some(next_tick).flatten()"),
         "a pane in flight is assigned the strip's absolute window-clock tick:\n{work}"
     );
-    let in_the_root = |text: &str| {
+    let in_the_type = |text: &str| {
         found_in(
             bt_source::Needle::new(bt_source::Pattern::text(text)),
             bt_source::View::Raw,
-            bt_source::Scope::Module("crate".to_owned()),
+            bt_source::Scope::Impls("PaneMotion".to_owned()),
         )
         .is_empty()
     };
     assert!(
-        in_the_root("fn deadline(&self, now: Instant, motion: Motion, frame: Duration)")
-            && in_the_root("self.is_animating(now, motion).then(|| now + frame)"),
+        in_the_type("fn deadline(&self, now: Instant, motion: Motion, frame: Duration)")
+            && in_the_type("self.is_animating(now, motion).then(|| now + frame)"),
         "PaneMotion must not own a renewable query-time deadline"
     );
 

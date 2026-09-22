@@ -242,7 +242,7 @@ fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
         assert!(body.contains(&format!("Outcome::{outcome}")), "{outcome}");
     }
     assert!(
-        source_index()
+        !source_index()
             .search(&bt_source::Search::new(
                 bt_source::needle!(bt_source::Pattern::text(
                     "let owed = owed || self.picture_is_owed();"
@@ -250,13 +250,8 @@ fn every_present_caller_closes_its_record_outside_all_outcome_arms() {
                 bt_source::View::Raw,
             ))
             .unwrap_or_else(|failure| panic!("{failure}"))
-            .occurrences()
-            .iter()
-            .any(|occurrence| {
-                source_index()
-                    .file_at(occurrence.span.start())
-                    .is_some_and(bt_source::FileRecord::permits_product)
-            }),
+            .in_the_product(source_index())
+            .is_empty(),
         "an empty redraw must not restart standing debt"
     );
     for forbidden in [

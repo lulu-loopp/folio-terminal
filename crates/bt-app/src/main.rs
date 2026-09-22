@@ -114361,23 +114361,16 @@ mod quit_transaction_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// How many of these occurrences stand in a file a product build compiles.
+    /// **How many of these occurrences a product build contains** —
+    /// `bt_source::Found::in_the_product`, which owns that rule.
     ///
-    /// File-grained, and deliberately so: §2.3 computes product reachability per
-    /// *declaration path to a file*, and an inline `#[cfg(test)] mod` inside a
-    /// product file is not a file. Every needle this module counts is assembled
-    /// at run time, so no assertion of its own is among the occurrences and the
-    /// file is the right grain here.
+    /// It reads at two grains, the file of §2.3 and the item of §2.4, where
+    /// this module used to read only the first. The two answer the same number
+    /// here, measured needle by needle before the readings were joined: every
+    /// needle this module counts is assembled at run time, so none of its own
+    /// assertions is among the occurrences.
     fn in_product(found: &Found) -> usize {
-        found
-            .occurrences()
-            .iter()
-            .filter(|occurrence| {
-                source()
-                    .file_at(occurrence.span.start())
-                    .is_some_and(bt_source::FileRecord::permits_product)
-            })
-            .count()
+        found.in_the_product(source()).len()
     }
 
     /// **RED (shape) — a window is in the vault before it is asked what it looks like** (§7.53).
@@ -114885,21 +114878,15 @@ mod pty_drain_budget_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// How many of these occurrences stand in a file a product build compiles.
+    /// **How many of these occurrences a product build contains** —
+    /// `bt_source::Found::in_the_product`, which owns that rule.
     ///
-    /// File-grained, and deliberately so: §2.3 computes product reachability per
-    /// *declaration path to a file*, and an inline `#[cfg(test)] mod` inside a
-    /// product file is not a file. See this module's header.
+    /// It reads at two grains, the file of §2.3 and the item of §2.4, where
+    /// this module used to read only the first. The two answer the same number
+    /// here, measured needle by needle before the readings were joined. See
+    /// this module's header.
     fn in_product(found: &Found) -> usize {
-        found
-            .occurrences()
-            .iter()
-            .filter(|occurrence| {
-                source()
-                    .file_at(occurrence.span.start())
-                    .is_some_and(bt_source::FileRecord::permits_product)
-            })
-            .count()
+        found.in_the_product(source()).len()
     }
 
     /// The names of the items these occurrences stand in (§4.1) — the assertion
@@ -130282,18 +130269,20 @@ mod live_markdown_edit_tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
-    /// How many of these occurrences stand in code a product build compiles —
-    /// **at item grain**, which is `clipboard_path_tests`' helper and this
-    /// module's own decision rather than the pilot's file-grained one.
+    /// **How many of these occurrences a product build compiles** —
+    /// `bt_source::Found::in_the_product`, which owns that rule at both of the
+    /// grains it takes.
     ///
-    /// Every needle counted below is written a second time in this module's own
-    /// assertions, and `needle!` excludes one construction expression rather
-    /// than every mention. §2.4's identity carries the `cfg` predicates written
-    /// on an enclosing inline `mod`, so the exclusion `window` performed by
-    /// cutting the file is a filter over the owners here.
+    /// This module needs the item grain: every needle counted below is written
+    /// a second time in its own assertions, and `needle!` excludes one
+    /// construction expression rather than every mention. §2.4's identity
+    /// carries the `cfg` predicates written on an enclosing inline `mod`, so
+    /// the exclusion `window` performed by cutting the file is a filter over
+    /// the owners here.
     ///
-    /// An occurrence in no callable at all is not a question this grain can
-    /// answer, so it is refused rather than quietly dropped.
+    /// An occurrence in no callable at all is not a question that grain can
+    /// answer, so it is refused here rather than quietly dropped — the one
+    /// thing this helper still decides for itself.
     fn in_product_items(found: &Found) -> usize {
         let index = source();
         assert_eq!(
@@ -130303,18 +130292,7 @@ mod live_markdown_edit_tests {
              the product compiles it:\n{}",
             found.report(index)
         );
-        found
-            .owners(index)
-            .into_iter()
-            .filter(|(identity, _)| {
-                !identity
-                    .variant
-                    .predicates()
-                    .iter()
-                    .any(|predicate| predicate == "test")
-            })
-            .map(|(_, count)| count)
-            .sum()
+        found.in_the_product(index).len()
     }
 
     /// **Entering is one door and it does all five things** (T5 ①).
@@ -131276,10 +131254,12 @@ mod clipboard_path_tests {
     /// construction expression rather than every mention. §2.4's identity
     /// carries the `cfg` predicates written on an enclosing inline `mod`, so the
     /// exclusion the old text prefix performed by accident is a filter over the
-    /// owners here.
+    /// owners here. The rule itself is
+    /// `bt_source::Found::in_the_product`'s, at both grains.
     ///
-    /// An occurrence in no callable at all is not a question this grain can
-    /// answer, so it is refused rather than quietly dropped.
+    /// An occurrence in no callable at all is not a question that grain can
+    /// answer, so it is refused here rather than quietly dropped — the one
+    /// thing this helper still decides for itself.
     fn in_product_items(found: &Found) -> usize {
         let index = source();
         assert_eq!(
@@ -131289,18 +131269,7 @@ mod clipboard_path_tests {
              the product compiles it:\n{}",
             found.report(index)
         );
-        found
-            .owners(index)
-            .into_iter()
-            .filter(|(identity, _)| {
-                !identity
-                    .variant
-                    .predicates()
-                    .iter()
-                    .any(|predicate| predicate == "test")
-            })
-            .map(|(_, count)| count)
-            .sum()
+        found.in_the_product(index).len()
     }
 
     struct MemoryClipboard {
