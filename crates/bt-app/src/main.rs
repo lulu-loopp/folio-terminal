@@ -113151,47 +113151,22 @@ mod a_page_lands_where_it_was_aimed_tests {
 /// compile and still pass every rectangle test the drop owns.
 #[cfg(test)]
 mod page_under_a_laden_hand_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
-
-    /// The field lines of a top-level `struct <name> { … }`.
-    fn struct_fields(name: &str) -> &'static str {
-        let head = ["\nstruct ", name, " {\n"].concat();
-        let start = SOURCE
-            .find(head.as_str())
-            .unwrap_or_else(|| panic!("`struct {name}` is declared at the top level"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find("\n}\n")
-                .expect("the struct is closed by a `}` in column zero");
-        &SOURCE[start..end]
-    }
-
-    // ── what this module asks the crate instead ───────────────────────────
+    // ── what this module asks the crate ───────────────────────────────────
     //
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Nothing is deleted here: the two body pins and
-    // the two struct readings are computed twice — once from
-    // `include_str!("main.rs")`, once from `bt-source` — and the two are
-    // asserted to agree. The deletion is the commit after this one.
+    // Both claims are about where one question is asked and about how wide a
+    // list is, and neither returns a value — so they are source pins. They used
+    // to read `include_str!("main.rs")`; they now ask `bt-source` about *items*
+    // of this crate, so neither is bound to the file a method or a struct
+    // happens to be written in today
+    // (`docs/plans/bt-app-split-prep.md` §6.3). The commit before this one ran
+    // both readings side by side and asserted they agree.
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived**; that
     // module's header is where the six points behind `source`, `item_body` and
-    // `method_body` live. The struct half is `layer_shape_tests`' —
-    // `declaration_of` over `ItemQuery::type_item`, which is the type's own
-    // declaration wherever it is written and whatever indentation it is written
-    // at, rather than a `struct` keyword in column zero.
+    // `method_body` live. The struct half is `layer_shape_tests`' ask,
+    // `ItemQuery::type_item`, which finds the type's own declaration wherever
+    // it is written and at whatever indentation, rather than a `struct` keyword
+    // in column zero.
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -113220,48 +113195,6 @@ mod page_under_a_laden_hand_tests {
         item_body(&bt_source::ItemQuery::type_item(name))
     }
 
-    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
-    ///
-    /// `body` hands back everything after the signature prefix it was given and
-    /// stops before the next `\n    fn `; `body_of` hands back the braces and
-    /// what is between them. So the crate's answer has to stand in this file's
-    /// slice at the head of the body, with nothing but the rest of the
-    /// declaration in front of it.
-    fn agreed(old: &'static str, name: &str) -> &'static str {
-        let new = method_body("Runtime", name);
-        let at = match old.find(new) {
-            Some(at) => at,
-            None => {
-                assert!(
-                    old.starts_with(&new[1..]),
-                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
-                     bytes"
-                );
-                0
-            }
-        };
-        assert!(
-            !old[..at].contains('{'),
-            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
-             the head of it"
-        );
-        old
-    }
-
-    /// **`struct_fields`' answer and the crate's, compared as bytes.**
-    ///
-    /// `struct_fields` hands back what stands between the opening brace's line
-    /// and the closing brace in column zero; the crate hands back the braces
-    /// and what is between them, which is the same bytes with those braces and
-    /// their two line breaks around them.
-    fn agreed_fields(old: &'static str, name: &str) -> &'static str {
-        assert!(
-            type_body(name).contains(old),
-            "`struct {name}`: this file's field lines do not stand inside the crate's body"
-        );
-        old
-    }
-
     /// **The carry is asked, and asked before any rectangle is.**
     ///
     /// Red gate: this is the defect. Before the repair `web_page_at` subtracted
@@ -113274,7 +113207,7 @@ mod page_under_a_laden_hand_tests {
     /// the scan, and this goes red by name.
     #[test]
     fn the_hand_is_asked_before_any_page_is() {
-        let web_page_at = agreed(body("    fn web_page_at("), "web_page_at");
+        let web_page_at = method_body("Runtime", "web_page_at");
         let asked = web_page_at
             .find("self.a_gesture_holds_the_pointer()")
             .expect("the page's door subtracts a hand that is already carrying");
@@ -113299,13 +113232,10 @@ mod page_under_a_laden_hand_tests {
     /// MUTATION: drop any one `…_drag` arm from the predicate and this names it.
     #[test]
     fn every_carry_this_window_can_hold_is_named_by_the_one_predicate() {
-        let predicate = agreed(
-            body("    fn a_gesture_holds_the_pointer("),
-            "a_gesture_holds_the_pointer",
-        );
+        let predicate = method_body("Runtime", "a_gesture_holds_the_pointer");
         let mut found = 0;
         for owner in ["WindowRuntime", "TabState"] {
-            for line in agreed_fields(struct_fields(owner), owner).lines() {
+            for line in type_body(owner).lines() {
                 let field = line.trim_start();
                 let Some((name, _)) = field.split_once(": Option<") else {
                     continue;
