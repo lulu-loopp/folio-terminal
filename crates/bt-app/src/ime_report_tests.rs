@@ -145,13 +145,14 @@ fn ime_self_report_format_has_facts_but_never_typed_text() {
     assert!(!printable_latin(None));
 }
 
-// ── what this module asks the crate instead ───────────────────────────────
+// ── what this module asks the crate ────────────────────────
 //
-// **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-// §6.3, and §6.0 rule 3). Nothing is deleted here: every reading below is taken
-// twice — once from `include_str!("main.rs")`, once from `bt-source` — and
-// `agree` is where the two are required to be the same answer. The deletion is
-// the commit after this one.
+// **P3's deletion commit for this batch** (`docs/plans/bt-app-split-prep.md`
+// §6.3, and §6.0 rule 3). The commit before this one took every reading
+// twice — once from the window's file, included as text, once from `bt-source`
+// — and asserted the two answered the same; this one removes the older of the
+// two, because two implementations of one judgement do not vouch for each
+// other (`docs/CONVENTIONS.md` §十 rule 4).
 //
 // **The pattern is `main.rs::pty_drain_budget_tests`' and is not re-derived**;
 // that module's header carries the six points behind `source_index`,
@@ -231,133 +232,67 @@ fn in_product_raw(needle: bt_source::Needle) -> usize {
     in_product(&found(needle, bt_source::View::Raw))
 }
 
-/// **The file's answer and the crate's, compared.** Every reading in the pin
-/// below goes through this, and the value handed back is the file's, so the
-/// assertions after it are the ones that were always there.
-fn agree<T: std::fmt::Debug + PartialEq>(what: &str, file: T, crate_reading: T) -> T {
-    assert_eq!(
-        file, crate_reading,
-        "{what}: this file's reading of `main.rs` and the crate's disagree"
-    );
-    file
-}
-
 #[test]
 fn ime_self_report_startup_and_focus_source_pin() {
-    let source = include_str!("main.rs");
     assert_eq!(
-        agree(
-            "the created stamp",
-            source
-                .matches("ime_report.created(ime_report::now_ms());")
-                .count(),
-            in_product_raw(bt_source::needle!(bt_source::Pattern::text(
-                "ime_report.created(ime_report::now_ms());"
-            ))),
-        ),
+        in_product_raw(bt_source::needle!(bt_source::Pattern::text(
+            "ime_report.created(ime_report::now_ms());"
+        ))),
         2
     );
     assert_eq!(
-        agree(
-            "the allowed stamp",
-            source
-                .matches("ime_report.allowed(true, ime_report::now_ms());")
-                .count(),
-            in_product_raw(bt_source::needle!(bt_source::Pattern::text(
-                "ime_report.allowed(true, ime_report::now_ms());"
-            ))),
-        ),
+        in_product_raw(bt_source::needle!(bt_source::Pattern::text(
+            "ime_report.allowed(true, ime_report::now_ms());"
+        ))),
         2
     );
-    assert!(agree(
-        "the shown stamp",
-        source.contains("self.window.ime_report.shown(ime_report::now_ms());"),
+    assert!(
         in_product_raw(bt_source::needle!(bt_source::Pattern::text(
             "self.window.ime_report.shown(ime_report::now_ms());"
-        ))) > 0,
-    ));
-    let focus = source
-        .split("WindowEvent::Focused(true) => {")
-        .nth(1)
-        .unwrap();
+        ))) > 0
+    );
     let focus_arm = trait_method_body("FolioApp", "ApplicationHandler", "window_event")
         .split("WindowEvent::Focused(true) => {")
         .nth(1)
         .expect("the window's event road carries the focus arm");
-    assert!(agree(
-        "the focus arm",
-        focus
-            .split("runtime.set_cursor_focus(true")
-            .next()
-            .unwrap()
-            .contains("runtime.observe_ime_focus(true)"),
+    assert!(
         focus_arm
             .split("runtime.set_cursor_focus(true")
             .next()
             .unwrap()
-            .contains("runtime.observe_ime_focus(true)"),
-    ));
-    assert!(agree(
-        "the key observation",
-        source.contains("runtime.observe_ime_key(&event, is_synthetic);"),
+            .contains("runtime.observe_ime_focus(true)")
+    );
+    assert!(
         in_product_raw(bt_source::needle!(bt_source::Pattern::text(
             "runtime.observe_ime_key(&event, is_synthetic);"
-        ))) > 0,
-    ));
-    let ime = source
-        .split("fn ime_input(&mut self, event: Ime)")
-        .nth(1)
-        .unwrap();
-    assert!(agree(
-        "the composing prologue",
-        ime.split("let composing =")
-            .next()
-            .unwrap()
-            .contains("self.window.ime_report.ime("),
+        ))) > 0
+    );
+    assert!(
         method_body("Runtime", "ime_input")
             .split("let composing =")
             .next()
             .unwrap()
-            .contains("self.window.ime_report.ime("),
-    ));
-    assert!(agree(
-        "the report's service",
-        source.contains("runtime.service_ime_report(now)"),
+            .contains("self.window.ime_report.ime(")
+    );
+    assert!(
         in_product_raw(bt_source::needle!(bt_source::Pattern::text(
             "runtime.service_ime_report(now)"
-        ))) > 0,
-    ));
-    assert!(agree(
-        "the joined deadline",
-        source.contains("earliest_deadline([wake_deadline, ime_deadline])"),
+        ))) > 0
+    );
+    assert!(
         in_product_raw(bt_source::needle!(bt_source::Pattern::text(
             "earliest_deadline([wake_deadline, ime_deadline])"
-        ))) > 0,
-    ));
-    let order = |constructor: &str| {
+        ))) > 0
+    );
+    for owner in ["create", "open_window"] {
+        let constructor = method_body("Runtime", owner)
+            .split(".create_window(attributes)")
+            .nth(1)
+            .unwrap_or_else(|| panic!("`Runtime::{owner}` constructs a window"));
         let created = constructor.find("ime_report.created(").unwrap();
         let allowed_call = constructor.find("window.set_ime_allowed(true)").unwrap();
         let allowed_record = constructor.find("ime_report.allowed(true,").unwrap();
-        created < allowed_call && allowed_call < allowed_record
-    };
-    let walked: Vec<bool> = source
-        .split(".create_window(attributes)")
-        .skip(1)
-        .map(order)
-        .collect();
-    let named: Vec<bool> = ["create", "open_window"]
-        .into_iter()
-        .map(|owner| {
-            order(
-                method_body("Runtime", owner)
-                    .split(".create_window(attributes)")
-                    .nth(1)
-                    .unwrap_or_else(|| panic!("`Runtime::{owner}` constructs a window")),
-            )
-        })
-        .collect();
-    for stamped in agree("the constructors' stamp order", walked, named) {
-        assert!(stamped);
+        assert!(created < allowed_call && allowed_call < allowed_record);
     }
 }
 
