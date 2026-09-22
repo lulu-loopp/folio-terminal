@@ -5,14 +5,26 @@
   agent is waiting for you. Beside the name, a terminal pane has run a command that
   printed a file, and the display formula in that file — the Gaussian integral of
   e to the minus x squared, equal to the square root of pi — has been typeset in
-  place, in the output, above the next prompt.</desc>
+  place, in the output, above the next prompt. The Folio mark, a sheet folded
+  once, stands beside the name.</desc>
 
   <rect width="1200" height="316" rx="14" fill="#F1F0EE"/>
+
+  <g id="mark">
+    <g transform="translate(64 96.64) scale(60)">
+      <rect x="0.02" y="0.02" width="0.96" height="0.96" rx="0.22" fill="#202027"/>
+      <rect x="0.185" y="0.245" width="0.63" height="0.51" rx="0.035" fill="#F4F1EA"/>
+      <rect x="0.5" y="0.245" width="0.315" height="0.51" rx="0.035" fill="#DDD7C9"/>
+      <rect x="0.5" y="0.245" width="0.035" height="0.51" fill="#DDD7C9"/>
+      <rect x="0.494" y="0.245" width="0.012" height="0.51" fill="#B6AD9B"/>
+      <circle cx="0.706" cy="0.678" r="0.023" fill="#9A9180"/>
+    </g>
+  </g>
 
   <g id="title-block" font-family="-apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, Roboto, Arial, sans-serif">
     <text x="64" y="70" font-size="20" font-weight="600" letter-spacing="3.4"
           fill="#8B8985">WINDOWS &#183; macOS &#183; TERMINAL</text>
-    <text x="64" y="154" font-size="76" font-weight="600" letter-spacing="-1.6"
+    <text x="140" y="154" font-size="76" font-weight="600" letter-spacing="-1.6"
           fill="#37352F">Folio</text>
     <text x="64" y="202" font-size="26" fill="#37352F">The terminal that renders math.</text>
     <text x="64" y="236" font-size="26" fill="#37352F">And says which agent is waiting for you.</text>
