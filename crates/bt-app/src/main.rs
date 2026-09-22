@@ -107994,41 +107994,30 @@ fn most_recently_active_window<K: Copy + Eq>(
 /// about both, plus a pin that every dismissal arm actually asks.
 #[cfg(test)]
 mod popover_trigger_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Every reader in this module asked this *file* for
-    // its text. Nothing is deleted here: each computes its answer twice, once
-    // from the file and once from `bt-source`, and asserts the two agree. The
-    // deletion is the commit after this one.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree; this is
+    // the one that deletes the older of the two, because two implementations of
+    // one judgement do not vouch for each other (`docs/CONVENTIONS.md` §十
+    // rule 4).
     //
     // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
     // `source`, `item_body` and `method_body` are that module's helpers word for
     // word, and the pilot's header is where the six points behind them live.
-    // Every pin here is an inherent method of `Runtime` — the deleted finder
-    // took the first `    fn name(` in this file, which is a method of whatever
-    // `impl` happens to come first, and this commit is what establishes the
-    // owner rather than assuming it.
     //
-    // `agreed` is this batch's own shape. [`body`] runs **past** the closing
-    // brace to the next `\n    fn `, and half of this module's signatures carry
-    // the opening brace themselves, so the comparison is written for both: the
-    // crate's body minus that brace has to stand at the head of the file's
-    // slice, once, with nothing but the rest of the declaration in front of it.
+    // **One owner, established rather than assumed.** All seven pins are
+    // inherent methods of `Runtime`; the deleted finder took the first
+    // `    fn name(` in this file, which is a method of whatever `impl` happens
+    // to come first. With the signatures go two hazards of their own: the
+    // deleted `router` held the whole of `mouse_input`'s signature as a literal,
+    // which is a line of `main.rs` and therefore a candidate match for any
+    // reader of that method, and the slice it returned ran past the closing
+    // brace into the next method's prose.
     use bt_source::{Index, ItemQuery};
 
     use super::*;
-
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's — the
-    /// same reader the rest of this file's source pins use.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -108050,53 +108039,8 @@ mod popover_trigger_tests {
         item_body(&ItemQuery::method(owner, name))
     }
 
-    /// **This file's slice and the crate's body, compared as bytes.**
-    ///
-    /// [`body`] hands back everything after the signature it matched up to the
-    /// next `\n    fn `, so its slice holds the rest of the declaration, the
-    /// whole body, and then whatever stands between this method and the next.
-    /// [`Index::body_of`] hands back the braces and everything between them, so
-    /// the crate's body **minus its opening brace** has to stand in this file's
-    /// slice, once, with nothing in front of it but the rest of the declaration
-    /// — which is empty when the matched signature carried the brace itself.
-    ///
-    /// What comes back is this file's slice, so this commit changes no
-    /// assertion; every assertion below was checked against the *narrowed* body
-    /// before this was written, because narrowing a slice can only take a
-    /// positive away.
-    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
-        let inner = new
-            .strip_prefix('{')
-            .expect("a body the crate hands back opens on its brace");
-        let at = old.find(inner).unwrap_or_else(|| {
-            panic!("`{what}`: this file's slice does not hold the body the crate returned")
-        });
-        assert_eq!(
-            old.rfind(inner),
-            Some(at),
-            "`{what}`: the crate's body stands twice inside this file's slice"
-        );
-        let head = &old[..at];
-        assert!(
-            head.is_empty()
-                || (head.ends_with('{') && !head[..head.len() - 1].contains(['{', '}'])),
-            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
-             of its body"
-        );
-        old
-    }
-
-    /// One method pin's two readings, asserted to agree, the file's returned.
-    fn agreed_method(signature: &str, owner: &str, name: &str) -> &'static str {
-        agreed(body(signature), method_body(owner, name), name)
-    }
-
     fn router() -> &'static str {
-        agreed_method(
-            "    fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
-            "Runtime",
-            "mouse_input",
-        )
+        method_body("Runtime", "mouse_input")
     }
 
     fn docked(seat: u64) -> PreviewSurface {
@@ -108312,7 +108256,7 @@ mod popover_trigger_tests {
     /// thought about.
     #[test]
     fn the_register_names_every_popup() {
-        let register = agreed_method("    fn popup_trigger(", "Runtime", "popup_trigger");
+        let register = method_body("Runtime", "popup_trigger");
         for popup in Popup::ALL {
             let name = format!("Popup::{popup:?}");
             assert!(
@@ -108343,30 +108287,14 @@ mod popover_trigger_tests {
     /// `preview_menu_seat().is_some()` — the second does.
     #[test]
     fn a_popup_is_up_only_while_its_own_layout_would_draw() {
-        let up = agreed_method(
-            "    fn popups_up(&self) -> PopupsUp {",
-            "Runtime",
-            "popups_up",
-        );
-        for (signature, layout, stand) in [
-            (
-                "    fn preview_menu_layout(&mut self) -> Option<profiles::PreviewMenuLayout> {",
-                "preview_menu_layout",
-                "preview_menu_stand",
-            ),
-            (
-                "    fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {",
-                "root_menu_layout",
-                "root_menu_stand",
-            ),
-            (
-                "    fn graph_filter_menu_layout(&mut self) -> Option<profiles::GitFilterMenuLayout> {",
-                "graph_filter_menu_layout",
-                "graph_filter_menu_stand",
-            ),
+        let up = method_body("Runtime", "popups_up");
+        for (layout, stand) in [
+            ("preview_menu_layout", "preview_menu_stand"),
+            ("root_menu_layout", "root_menu_stand"),
+            ("graph_filter_menu_layout", "graph_filter_menu_stand"),
         ] {
             assert!(
-                agreed_method(signature, "Runtime", layout).contains(stand),
+                method_body("Runtime", layout).contains(stand),
                 "{layout} decides for itself whether it draws; it has to ask {stand}"
             );
             assert!(
@@ -108381,21 +108309,12 @@ mod popover_trigger_tests {
         // root button to the caption it wraps, so the list stays reachable at
         // every width instead of the menu becoming invisible and deaf.
         assert!(
-            agreed_method(
-                "    fn preview_menu_stand(",
-                "Runtime",
-                "preview_menu_stand"
-            )
-            .contains("furniture.pill.unwrap_or(furniture.name)"),
+            method_body("Runtime", "preview_menu_stand")
+                .contains("furniture.pill.unwrap_or(furniture.name)"),
             "the switcher hangs from the name when the head wears no pill"
         );
         assert!(
-            agreed_method(
-                "    fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {",
-                "Runtime",
-                "root_menu_layout",
-            )
-            .contains(".unwrap_or(head.title)"),
+            method_body("Runtime", "root_menu_layout").contains(".unwrap_or(head.title)"),
             "the root menu hangs from the caption when the head seats no button"
         );
     }
