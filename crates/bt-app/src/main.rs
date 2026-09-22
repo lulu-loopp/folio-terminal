@@ -113504,10 +113504,16 @@ mod window_registry_tests {
 
 #[cfg(test)]
 mod multiwindow_session_tests {
+    // **P4's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, §6.0 rule 3). Both readings of the one count stand here and are
+    // asserted to agree; the commit after this one deletes the older of the two.
+    // `source` and `found` are `pty_drain_budget_tests`' helpers word for word.
     use super::{
         LayoutNodeV1, LeafNodeV1, NewWindowPlan, QuakeRestoreV1, SessionWindowV1, TabV1,
         TermLeafV1, plan_windows, restore_row_seed, seed, seeded_tab,
     };
+
+    use bt_source::{Found, Index, Needle, Search, View, needle};
 
     /// The rung a fresh `settings.json` carries, which is what every test here that is not *about*
     /// the rung is asking for. Named once rather than spelled at each call, so the day the shipped
@@ -113517,6 +113523,21 @@ mod multiwindow_session_tests {
     /// This file, read as text — the witness for the one claim below that is
     /// about *where* something is not written.
     const SOURCE: &str = include_str!("main.rs");
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
 
     fn term(cwd: &str, pinned: bool) -> TabV1 {
         TabV1 {
@@ -113927,9 +113948,14 @@ mod multiwindow_session_tests {
     #[test]
     fn only_one_line_in_this_file_hands_the_store_a_document() {
         let needle = ["session_store", ".record("].concat();
+        let counted = found(needle!(needle.as_str()), View::Raw).len();
         assert_eq!(
             SOURCE.matches(needle.as_str()).count(),
-            1,
+            counted,
+            "the two readings of the single writer disagree"
+        );
+        assert_eq!(
+            counted, 1,
             "every window's change goes through `App::record_session`, which is \
              what makes two windows one write"
         );
