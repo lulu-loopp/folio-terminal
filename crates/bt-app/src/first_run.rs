@@ -3889,16 +3889,77 @@ mod clock_edge_tests {
         assert_eq!(reads, 2);
     }
 
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source_index() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4
+    /// rather than a line of a file.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        source_index()
+            .body_of(&bt_source::ItemQuery::method(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **A file's slice and the crate's body, compared as bytes**, for the two
+    /// shapes the readings below take.
+    ///
+    /// `Head` is a slice that runs from after a signature prefix to the next
+    /// `\n    fn `, so the crate's body stands at the head of it with nothing
+    /// but the rest of the declaration in front. `Tail` is a slice cut at the
+    /// closing `\n    }`, so it is the crate's body without its last line.
+    fn agreed(old: &'static str, owner: &str, name: &str, cut: Cut) -> &'static str {
+        let whole = method_body(owner, name);
+        let new = match cut {
+            Cut::Head => whole,
+            Cut::Tail => &whole[..whole.rfind('\n').expect("a body spans lines")],
+        };
+        let at = old.find(new).unwrap_or_else(|| {
+            panic!(
+                "`{owner}::{name}`: this file's slice and the crate's body are not the same bytes"
+            )
+        });
+        assert!(
+            !old[..at].contains('{'),
+            "`{owner}::{name}`: the crate's body stands inside the file's slice rather than at the \
+             head of it"
+        );
+        old
+    }
+
+    /// Which end of the crate's body a file reading cut off.
+    #[derive(Clone, Copy)]
+    enum Cut {
+        Head,
+        Tail,
+    }
+
     #[test]
     fn first_run_clock_run_disk_questions_follow_the_ready_edge() {
+        // **P3's equivalence commit for this pin** (`docs/plans/bt-app-split-prep.md`
+        // §6.3, and §6.0 rule 3). Every body here is read twice — once as a
+        // slice of a named file, once as the body of an item of this crate —
+        // and `agreed` requires the two to be the same bytes. The deletion is
+        // the commit after this one, and the pattern is
+        // `main.rs::pty_drain_budget_tests`', not re-derived here.
         let source = include_str!("main.rs");
-        let body = source
-            .split("    fn raise_first_run_if_due(")
-            .nth(1)
-            .unwrap()
-            .split("\n    fn ")
-            .next()
-            .unwrap();
+        let body = agreed(
+            source
+                .split("    fn raise_first_run_if_due(")
+                .nth(1)
+                .unwrap()
+                .split("\n    fn ")
+                .next()
+                .unwrap(),
+            "Runtime",
+            "raise_first_run_if_due",
+            Cut::Head,
+        );
         let edge = body
             .find("first_run::take_ready_edge(")
             .expect("one attempt after the probe settles");
@@ -3919,32 +3980,50 @@ mod clock_edge_tests {
             );
         }
         // Agent availability already has one owner; never add a second PATH cache.
-        let lookup = source
-            .split("    fn agent_is_on_this_machine(")
-            .nth(1)
-            .unwrap()
-            .split("\n    fn ")
-            .next()
-            .unwrap();
+        let lookup = agreed(
+            source
+                .split("    fn agent_is_on_this_machine(")
+                .nth(1)
+                .unwrap()
+                .split("\n    fn ")
+                .next()
+                .unwrap(),
+            "Runtime",
+            "agent_is_on_this_machine",
+            Cut::Head,
+        );
         assert!(lookup.contains("self.app.profile_programs.is_available(id)"));
         assert!(!lookup.contains("search_path("));
         let profiles = include_str!("profiles.rs");
-        let available = profiles
-            .split("pub fn is_available(&self, id: &str)")
-            .nth(1)
-            .unwrap()
-            .split("\n    }")
-            .next()
-            .unwrap();
-        assert!(available.contains("self.program(id).is_some()"));
-        for signature in ["    fn adopt_profile_table(", "    fn answer_first_run("] {
-            let rearm = source
-                .split_once(signature)
+        let available = agreed(
+            profiles
+                .split("pub fn is_available(&self, id: &str)")
+                .nth(1)
                 .unwrap()
-                .1
-                .split("\n    fn ")
+                .split("\n    }")
                 .next()
-                .unwrap();
+                .unwrap(),
+            "ProfilePrograms",
+            "is_available",
+            Cut::Tail,
+        );
+        assert!(available.contains("self.program(id).is_some()"));
+        for (signature, name) in [
+            ("    fn adopt_profile_table(", "adopt_profile_table"),
+            ("    fn answer_first_run(", "answer_first_run"),
+        ] {
+            let rearm = agreed(
+                source
+                    .split_once(signature)
+                    .unwrap()
+                    .1
+                    .split("\n    fn ")
+                    .next()
+                    .unwrap(),
+                "Runtime",
+                name,
+                Cut::Head,
+            );
             assert!(rearm.contains("self.app.first_run_attempted = false;"));
         }
     }
