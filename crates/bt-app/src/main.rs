@@ -128758,30 +128758,19 @@ mod palette_wiring_tests {
 /// same order, and that each arm ends in the door a keystroke already uses.
 #[cfg(test)]
 mod edit_menu_clipboard_tests {
-    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Every reader here asked this *file* for its text.
-    // Nothing is deleted here — each computes its answer twice, once from the
-    // file and once from `bt-source`, and asserts the two agree. The deletion is
-    // the commit after this one.
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked `main.rs` for its text; every one of them now asks
+    // `bt-source` about an *item* of this crate, so no fact in this module is
+    // bound to the file it happens to be written in today. The commit before
+    // this one ran both readings side by side and asserted they agree; this is
+    // the one that deletes the older of the two (`docs/CONVENTIONS.md` §十
+    // rule 4).
     //
     // `source`, `item_body` and `method_body` are `pty_drain_budget_tests`'
-    // helpers word for word. **Two owners, and the finder could not have told
-    // them apart**: four pins are `Runtime`'s and the menu landing is
+    // helpers word for word. **Two owners, and the deleted finder could not have
+    // told them apart**: four pins are `Runtime`'s and the menu landing is
     // `FolioApp`'s.
     use bt_source::{Index, ItemQuery};
-
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the next method's.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
-    }
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -128803,54 +128792,9 @@ mod edit_menu_clipboard_tests {
         item_body(&ItemQuery::method(owner, name))
     }
 
-    /// **This file's slice and the crate's body, compared as bytes.**
-    ///
-    /// [`body`] hands back everything after the signature it matched up to the
-    /// next `\n    fn `, so its slice holds the rest of the declaration, the
-    /// whole body, and then whatever stands between this method and the next.
-    /// [`Index::body_of`] hands back the braces and everything between them, so
-    /// the crate's body **minus its opening brace** has to stand in this file's
-    /// slice, once, with nothing in front of it but the rest of the declaration
-    /// — which is empty when the matched signature carried the brace itself.
-    ///
-    /// What comes back is this file's slice, so this commit changes no
-    /// assertion; every assertion below was checked against the *narrowed* body
-    /// before this was written, because narrowing a slice can only take a
-    /// positive away.
-    fn agreed(old: &'static str, new: &'static str, what: &str) -> &'static str {
-        let inner = new
-            .strip_prefix('{')
-            .expect("a body the crate hands back opens on its brace");
-        let at = old.find(inner).unwrap_or_else(|| {
-            panic!("`{what}`: this file's slice does not hold the body the crate returned")
-        });
-        assert_eq!(
-            old.rfind(inner),
-            Some(at),
-            "`{what}`: the crate's body stands twice inside this file's slice"
-        );
-        let head = &old[..at];
-        assert!(
-            head.is_empty()
-                || (head.ends_with('{') && !head[..head.len() - 1].contains(['{', '}'])),
-            "`{what}`: the crate's body stands inside this file's slice rather than at the head \
-             of its body"
-        );
-        old
-    }
-
-    /// One method pin's two readings, asserted to agree, the file's returned.
-    fn agreed_method(signature: &str, owner: &str, name: &str) -> &'static str {
-        agreed(body(signature), method_body(owner, name), name)
-    }
-
     /// The keyboard's own ladder.
     fn ladder() -> &'static str {
-        agreed_method(
-            "fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {",
-            "Runtime",
-            "keyboard_input",
-        )
+        method_body("Runtime", "keyboard_input")
     }
 
     /// PIN — **every surface the menu defers to has a rung above the clipboard
@@ -128872,8 +128816,7 @@ mod edit_menu_clipboard_tests {
     #[test]
     fn every_surface_the_menu_defers_to_stands_above_the_clipboard_rung() {
         let ladder = ladder();
-        let defers = agreed_method(
-            "    fn a_surface_above_the_clipboard_rung_holds_the_keyboard(&mut self) -> bool {",
+        let defers = method_body(
             "Runtime",
             "a_surface_above_the_clipboard_rung_holds_the_keyboard",
         );
@@ -128921,16 +128864,8 @@ mod edit_menu_clipboard_tests {
     /// write the bytes itself — the last two assertions go red.
     #[test]
     fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
-        let verb = agreed_method(
-            "    fn run_an_application_menu_verb(",
-            "Runtime",
-            "run_an_application_menu_verb",
-        );
-        let editor = agreed_method(
-            "    fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {",
-            "Runtime",
-            "preview_key",
-        );
+        let verb = method_body("Runtime", "run_an_application_menu_verb");
+        let editor = method_body("Runtime", "preview_key");
         let ladder = ladder();
         for (door, other, whose) in [
             (
@@ -128975,16 +128910,12 @@ mod edit_menu_clipboard_tests {
     /// the landing and the arm named here disappears.
     #[test]
     fn a_declined_clipboard_row_lands_where_every_other_menu_row_lands() {
-        let landing = agreed_method("    fn answer_a_menu_row(", "FolioApp", "answer_a_menu_row");
+        let landing = method_body("FolioApp", "answer_a_menu_row");
         assert!(
             landing.contains("runtime.run_an_application_menu_verb(action)?;"),
             "the landing answers a menu verb somewhere other than the window's own runtime"
         );
-        let verbs = agreed_method(
-            "    fn run_an_application_menu_verb(",
-            "Runtime",
-            "run_an_application_menu_verb",
-        );
+        let verbs = method_body("Runtime", "run_an_application_menu_verb");
         for verb in [
             "AppMenuAction::Help",
             "AppMenuAction::CopySelection",
