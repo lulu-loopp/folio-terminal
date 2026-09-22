@@ -4339,38 +4339,26 @@ fn surfaces_reading(
 /// `docs/DESIGN.md` §7.45 ②).
 #[cfg(test)]
 mod card_answer_route_tests {
-    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, §6.0 rule 3). Both readings stand here and are asserted to agree; the
-    // commit after this one deletes the older of the two. `source`, `item_body`
-    // and `method_body` are `pty_drain_budget_tests`' helpers word for word.
-    use bt_source::{Index, ItemQuery};
-
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // The one reader here asked `main.rs` for its text; it now asks `bt-source`
+    // about an *item* of this crate, so no fact in this module is bound to the
+    // file it happens to be written in today. The commit before this one ran both
+    // readings side by side and asserted they agree; this is the one that deletes
+    // the older of the two, because two implementations of one judgement do not
+    // vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body` and `method_body` are that module's helpers word for
+    // word, and its header is where the six points behind them live.
+    //
+    // **One owner, established rather than assumed:** both doors are methods of
+    // `Runtime`. The deleted finder took the first `\n    fn name(` in this file,
+    // which is a method of whatever `impl` happens to come first, and it stopped
+    // at the first `}` in column four **without** it — the body minus its closing
+    // line. The equivalence commit compared the two byte for byte.
     use super::*;
 
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// `layer_shape_tests::fn_body`'s reader, kept beside the pins that use it
-    /// for the reason that module keeps its own. (That finder is gone — P3
-    /// migrated its consumers — so this names it rather than linking to it.)
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!(
-            "
-    fn {name}("
-        );
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find(
-                    "
-    }
-",
-                )
-                .expect("a method is closed by a `}` at the `impl`'s indentation");
-        &SOURCE[start..end]
-    }
+    use bt_source::{Index, ItemQuery};
 
     /// **This crate, indexed once per process** — the workspace read, this
     /// package's own `src/` declared as the universe and lowered, on the first
@@ -4499,22 +4487,7 @@ mod card_answer_route_tests {
     /// says so.
     #[test]
     fn a_landed_head_read_leaves_by_one_door() {
-        let older_lane = fn_body("apply_preview_results");
         let lane = method_body("Runtime", "apply_preview_results");
-        assert!(
-            [older_lane, "\n    }"].concat().ends_with(lane),
-            "the two readings of `apply_preview_results` disagree"
-        );
-        for probe in [
-            "self.settle_landed_head(index, &response.source, content, carded)",
-            "is_reading(",
-        ] {
-            assert_eq!(
-                older_lane.contains(probe),
-                lane.contains(probe),
-                "the two readings of `apply_preview_results` disagree about `{probe}`"
-            );
-        }
         assert!(
             lane.contains("self.settle_landed_head(index, &response.source, content, carded)"),
             "the head arm files the answer and leaves; who was reading it is not \
@@ -4525,19 +4498,7 @@ mod card_answer_route_tests {
             "and it does not walk the readers itself: a second walk is a second \
              answer, and the second answer is the one that forgot the card"
         );
-        let older_door = fn_body("settle_landed_head");
         let door = method_body("Runtime", "settle_landed_head");
-        assert!(
-            [older_door, "\n    }"].concat().ends_with(door),
-            "the two readings of `settle_landed_head` disagree"
-        );
-        for probe in ["surfaces_reading(", "peek_pane"] {
-            assert_eq!(
-                older_door.contains(probe),
-                door.contains(probe),
-                "the two readings of `settle_landed_head` disagree about `{probe}`"
-            );
-        }
         assert!(
             door.contains("surfaces_reading("),
             "the door asks the one walk"
