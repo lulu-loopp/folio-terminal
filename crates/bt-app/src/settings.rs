@@ -15437,47 +15437,37 @@ mod tests {
         assert!(panel.take_agents_open_edge(true), "Escape rearms it too");
 
         // And the edge is joined to the three reads: the window asks on it and nowhere else.
-        let window = include_str!("main.rs");
-        assert!(agree(
-            "the edge the window takes",
-            window.contains("take_agents_open_edge(content.shows_agents("),
+        assert!(
             in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
                 "take_agents_open_edge(content.shows_agents("
-            ))) > 0,
-        ));
+            ))) > 0
+        );
         assert_eq!(
-            agree(
-                "the refresh",
-                window.matches("self.refresh_agent_rows();").count(),
-                in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
-                    "self.refresh_agent_rows();"
-                ))),
-            ),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "self.refresh_agent_rows();"
+            ))),
             1
         );
         assert_eq!(
-            agree(
-                "the refresh's declaration",
-                window.matches("fn refresh_agent_rows(&mut self)").count(),
-                source_index()
-                    .find(&bt_source::ItemQuery::method(
-                        "Runtime",
-                        "refresh_agent_rows"
-                    ))
-                    .map_or(0, |declarations| declarations.len()),
-            ),
+            source_index()
+                .find(&bt_source::ItemQuery::method(
+                    "Runtime",
+                    "refresh_agent_rows"
+                ))
+                .map_or(0, |declarations| declarations.len()),
             1
         );
     }
 
-    // ── what these two pins ask the crate instead ─────────────────────────
+    // ── what these two pins ask the crate ─────────────────
     //
-    // **P3's equivalence commit for this module** (`docs/plans/bt-app-split-prep.md`
-    // §6.3, and §6.0 rule 3). Every reading above and below is taken twice —
-    // once from `include_str!("main.rs")`, once from `bt-source` — and
-    // `agree`/`agreed` are where the two are required to answer the same. The
-    // deletion is the commit after this one, and the pattern is
-    // `main.rs::pty_drain_budget_tests`', not re-derived here.
+    // **P3's deletion commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). The commit before this one took every reading
+    // above and below twice — once from `include_str!("main.rs")`, once from
+    // `bt-source` — and asserted the two answered the same; this one removes
+    // the older of the two, because two implementations of one judgement do
+    // not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4). The
+    // pattern is `main.rs::pty_drain_budget_tests`', not re-derived here.
     //
     // The counts widen from one file to the package, which is the scope each
     // claim wants: a second refresh written in another file is exactly the
@@ -15573,35 +15563,6 @@ mod tests {
     /// module.
     fn in_the_product_raw(needle: bt_source::Needle) -> usize {
         in_the_product(&found(needle, bt_source::View::Raw))
-    }
-
-    /// **The file's answer and the crate's, compared**, handing the file's back
-    /// so the assertion after it is the one that was always there.
-    fn agree<T: std::fmt::Debug + PartialEq>(what: &str, file: T, crate_reading: T) -> T {
-        assert_eq!(
-            file, crate_reading,
-            "{what}: this module's reading of `main.rs` and the crate's disagree"
-        );
-        file
-    }
-
-    /// **A slice of `main.rs` and the crate's body, compared as bytes.** The
-    /// slice runs from after a signature prefix to the next `\n    fn `, so the
-    /// crate's body stands at the head of it with nothing but the rest of the
-    /// declaration in front.
-    fn agreed(old: &'static str, name: &str) -> &'static str {
-        let new = method_body("Runtime", name);
-        let at = old.find(new).unwrap_or_else(|| {
-            panic!(
-                "`Runtime::{name}`: this file's slice and the crate's body are not the same bytes"
-            )
-        });
-        assert!(
-            !old[..at].contains('{'),
-            "`Runtime::{name}`: the crate's body stands inside the file's slice rather than at the \
-             head of it"
-        );
-        old
     }
 
     struct SettingsPointerHarness {
@@ -15730,32 +15691,22 @@ mod tests {
 
     #[test]
     fn settings_pointer_production_wiring_uses_the_counted_handler_and_owner() {
-        let source = include_str!("main.rs");
-        let body = |signature: &str, name: &str| {
-            let tail = source.split_once(signature).unwrap().1;
-            agreed(tail.split("\n    fn ").next().unwrap(), name)
-        };
-        let pointer = body("    fn pointer_moved(&mut self, position:", "pointer_moved");
+        let body = |name: &str| method_body("Runtime", name);
+        let pointer = body("pointer_moved");
         assert!(
             pointer.contains("settings::geometry::pointer_moved(self, position.x, position.y)?")
         );
-        let layout = body("    fn settings_layout(&mut self)", "settings_layout");
+        let layout = body("settings_layout");
         assert!(layout.contains("self.window.settings_geometry.read(inputs,"));
         assert!(layout.contains("self.window.settings_geometry.clear();"));
         assert_eq!(
-            agree(
-                "the one measured layout",
-                source.matches("inputs.layout(&mut measure)").count(),
-                in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
-                    "inputs.layout(&mut measure)"
-                ))),
-            ),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "inputs.layout(&mut measure)"
+            ))),
             1
         );
         // The test host substitutes only window/GPU effects, not the handler.
-        assert!(agree(
-            "the production handler",
-            source.contains("impl settings::geometry::PointerHost for Runtime<'_>"),
+        assert!(
             !found_in(
                 bt_source::needle!(bt_source::Pattern::text(
                     "impl settings::geometry::PointerHost for Runtime<'_>"
@@ -15763,9 +15714,9 @@ mod tests {
                 bt_source::View::Raw,
                 bt_source::Scope::Module("crate".to_owned()),
             )
-            .is_empty(),
-        ));
-        let content = body("    fn settings_dialog<'a>(", "settings_dialog");
+            .is_empty()
+        );
+        let content = body("settings_dialog");
         assert!(content.contains(".advanced_reveal_sample"));
         assert!(!content.contains("tween.sample(Instant::now()"));
     }
