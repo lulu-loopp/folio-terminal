@@ -4343,8 +4343,9 @@ mod card_answer_route_tests {
 
     const SOURCE: &str = include_str!("main.rs");
 
-    /// [`layer_shape_tests::fn_body`]'s reader, kept beside the pins that use it
-    /// for the reason that module keeps its own.
+    /// `layer_shape_tests::fn_body`'s reader, kept beside the pins that use it
+    /// for the reason that module keeps its own. (That finder is gone — P3
+    /// migrated its consumers — so this names it rather than linking to it.)
     fn fn_body(name: &str) -> &'static str {
         let head = format!(
             "
@@ -14513,48 +14514,95 @@ const _: fn(Runtime<'_>) = |Runtime { app: _, window: _ }| ();
 
 #[cfg(test)]
 mod layer_shape_tests {
-    /// This file, read as text — the only witness that can answer "what is *not*
-    /// in that struct".
-    const SOURCE: &str = include_str!("main.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // The four readers that pinned a method body or counted a spelling over this
+    // file now ask `bt-source` about an *item* of this crate, so no fact among
+    // them is bound to the file it happens to be written in today. The commit
+    // before this one ran both readings side by side and asserted they agree;
+    // this is the one that deletes the older of the two, because two
+    // implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4). `source`, `item_body`, `method_body`
+    // and `found` are `pty_drain_budget_tests`' helpers word for word, and that
+    // module's header is where the six points behind them live.
+    //
+    // **The four struct pins are type-scoped**, which is what the batch that
+    // left them behind did not have. A negative about what a struct holds is a
+    // `Search` whose scope is `Scope::Item(ItemQuery::type_item(…))` — the
+    // struct's own declaration and nothing beyond it (§4.1: where the concern
+    // is genuinely one item, the scope says so and the reading does not widen).
+    // A package-wide negative would not have widened those guards, it would
+    // have inverted them: every name `WindowRuntime` may not hold is a name
+    // `App` holds a few lines away. A positive is
+    // `Index::declaration_of(ItemQuery::field(owner, name))`, the field's
+    // attributes, visibility, name and type, stopping before the comma. The
+    // view is `View::Identifiers`, and [`inside`] is where that choice is
+    // argued — under raw bytes one of the four is red on a correct tree.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
 
-    /// **The declarations of a top-level struct, with its prose taken out.**
-    ///
-    /// Prose, because these pins read the body as text and a doc comment is text
-    /// too: `App`'s own doc names `WindowRenderer` in the sentence explaining why
-    /// a device is shared and a surface is not, and a pin that searched the whole
-    /// body would read that as a surface on the application (multiwindow slice
-    /// C — it did, the first time this ran). What the pins are about is what the
-    /// struct *holds*, so what they are given is its field lines and nothing
-    /// else.
-    fn struct_fields(name: &str) -> String {
-        struct_body(name)
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
     }
 
-    /// The body of a top-level `struct <name> { … }`, which is delimited by the
-    /// one `}` in column zero that follows it.
-    fn struct_body(name: &str) -> &'static str {
-        let head = format!(
-            "
-struct {name} {{
-"
-        );
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`struct {name}` is declared at the top level"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find(
-                    "
-}
-",
-                )
-                .expect("a top-level struct is closed by a `}` in column zero");
-        &SOURCE[start..end]
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **One search inside one type's own bytes** — the scope of §4.1, which is
+    /// the struct's whole declaration and nothing beside it, so `App`'s fields a
+    /// few lines below `WindowRuntime`'s are outside the reading rather than
+    /// inverting it.
+    ///
+    /// **`View::Identifiers`, and not `View::Raw`.** A scope over an item starts
+    /// at the item's first attribute, so raw bytes would read the prose written
+    /// inside the struct as well — and `App` documents its device field with the
+    /// sentence naming `WindowRenderer::apply_font_change`, which is exactly the
+    /// occurrence the deleted text finder cut comment lines out to avoid — under
+    /// raw bytes this file's last pin is red on a correct tree. The
+    /// identifier view never sees it: a `///` comment is masked whole and its
+    /// synthesized tokens are not lowered, so the reading is the names this
+    /// struct is *written from* rather than the words written about it. It also
+    /// buys the boundary check the text reading never had — `GpuContext` is not
+    /// `GpuContextHandle`.
+    fn inside(type_name: &str, pattern: &Pattern) -> Found {
+        source()
+            .search(
+                &Search::new(needle!(pattern.clone()), View::Identifiers)
+                    .in_scope(Scope::Item(ItemQuery::type_item(type_name))),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **The declaration of one field of `owner`** — its attributes, its
+    /// visibility, its name and its type, stopping before the comma.
+    ///
+    /// A field the type does not carry, and a field only one `#[cfg]` arm of a
+    /// type declared twice carries, are both `QueryFailure::Member` and both
+    /// panic here: neither `App` nor `WindowRuntime` is declared twice, and the
+    /// day one of them is, this says so instead of answering about one arm.
+    fn field_declaration(owner: &str, name: &str) -> &'static str {
+        source()
+            .declaration_of(&ItemQuery::field(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// PIN (multiwindow slice B) — **the window layer holds nothing the
@@ -14569,38 +14617,40 @@ struct {name} {{
     /// Red gate: move any one of these fields back and the test names it.
     #[test]
     fn the_window_layer_owns_nothing_the_application_owns() {
-        let body = struct_fields("WindowRuntime");
         for owned_by_the_app in [
             // The device layer, which slice C moved up: one `wgpu::Device`, one
             // atlas and — the saving that is not on the GPU at all — one
             // `FontSystem` for every window in the process (§2.2).
-            "GpuContext",
+            Pattern::identifier("GpuContext"),
             // And with it, who decides what losing that device costs
             // (§7.1.3m ⑤′). There is one device, so there is one episode of
             // losing it however many windows notice; a pilot per window would
             // number the same rebuild twice and would let two windows each fetch
             // a device, the second thrown away with every surface the first had
             // just built.
-            "DeviceLossPilot",
-            "persist::SessionStore",
-            "persist::SettingsStore",
-            "persist::KeybindingsStore",
-            "persist::ProfilesStore",
-            "pins::PinsStore",
-            "seed::SeedVault",
-            "shortcuts::Shortcuts",
-            "profiles::ProfilePrograms",
-            "MathWorker",
-            "files::FilesWorker",
-            "preview::PreviewWorker",
-            "git::GitWorker",
-            "git_watch::GitWatch",
-            "scheme_watch::SchemeWatch",
-            "storage_watch::StorageWatch",
+            Pattern::identifier("DeviceLossPilot"),
+            Pattern::path("persist::SessionStore"),
+            Pattern::path("persist::SettingsStore"),
+            Pattern::path("persist::KeybindingsStore"),
+            Pattern::path("persist::ProfilesStore"),
+            Pattern::path("pins::PinsStore"),
+            Pattern::path("seed::SeedVault"),
+            Pattern::path("shortcuts::Shortcuts"),
+            Pattern::path("profiles::ProfilePrograms"),
+            Pattern::identifier("MathWorker"),
+            Pattern::path("files::FilesWorker"),
+            Pattern::path("preview::PreviewWorker"),
+            Pattern::path("git::GitWorker"),
+            Pattern::path("git_watch::GitWatch"),
+            Pattern::path("scheme_watch::SchemeWatch"),
+            Pattern::path("storage_watch::StorageWatch"),
         ] {
+            let held = inside("WindowRuntime", &owned_by_the_app);
             assert!(
-                !body.contains(owned_by_the_app),
-                "`{owned_by_the_app}` is a fact about this program, not about one window"
+                held.is_empty(),
+                "{owned_by_the_app} is a fact about this program, not about one \
+                 window:\n{}",
+                held.report(source())
             );
         }
     }
@@ -14621,15 +14671,16 @@ struct {name} {{
     #[test]
     fn the_device_is_the_applications_and_the_surface_is_the_windows() {
         assert!(
-            struct_fields("App").contains("gpu: GpuContext,"),
+            field_declaration("App", "gpu").ends_with("gpu: GpuContext"),
             "one device, one atlas, one font database, for the whole process"
         );
         assert!(
-            struct_fields("WindowRuntime").contains("renderer: WindowRenderer,"),
+            field_declaration("WindowRuntime", "renderer").ends_with("renderer: WindowRenderer"),
             "a surface and the caches keyed by its pixel sizes are one window's"
         );
         assert!(
-            struct_fields("App").contains("device_loss_pilot: DeviceLossPilot,"),
+            field_declaration("App", "device_loss_pilot")
+                .ends_with("device_loss_pilot: DeviceLossPilot"),
             "and one device is one episode of losing it, however many windows notice \
              (§7.1.3m ⑤′)"
         );
@@ -14651,23 +14702,28 @@ struct {name} {{
     /// through the door slice D opened.
     #[test]
     fn the_session_file_is_written_by_the_application_and_never_by_a_window() {
-        let app = struct_fields("App");
         assert!(
-            app.contains("session_store: persist::SessionStore,"),
+            field_declaration("App", "session_store")
+                .ends_with("session_store: persist::SessionStore"),
             "one store, on the layer there is one of"
         );
         assert!(
-            app.contains("window_pictures: Vec<(WindowId, SessionWindowV1)>,"),
+            field_declaration("App", "window_pictures")
+                .ends_with("window_pictures: Vec<(WindowId, SessionWindowV1)>"),
             "the document is assembled from every window's own paragraph"
         );
-        let window = struct_fields("WindowRuntime");
+        let store = inside("WindowRuntime", &Pattern::identifier("session_store"));
         assert!(
-            !window.contains("session_store"),
-            "a window with a store of its own is a window that can race the others"
+            store.is_empty(),
+            "a window with a store of its own is a window that can race the \
+             others:\n{}",
+            store.report(source())
         );
+        let pictures = inside("WindowRuntime", &Pattern::identifier("window_pictures"));
         assert!(
-            !window.contains("window_pictures"),
-            "the list of windows is not a fact any one window holds"
+            pictures.is_empty(),
+            "the list of windows is not a fact any one window holds:\n{}",
+            pictures.report(source())
         );
     }
 
@@ -14679,48 +14735,36 @@ struct {name} {{
     /// the moment a second window opened.
     #[test]
     fn the_application_layer_owns_nothing_one_window_owns() {
-        let body = struct_fields("App");
         for owned_by_a_window in [
             // The window layer of the renderer, and pointedly not the device
             // layer beside it: `GpuContext` on `App` is the whole of slice C's
             // renderer move, and a `WindowRenderer` there would be the first
             // window's surface owning every later window's.
-            "WindowRenderer",
-            "Arc<Window>",
-            "bt_platform::Compositor",
-            "bt_platform::CustomWindowFrame",
-            "bt_platform::ImeSystemCaret",
-            "bt_platform::FolderPicker",
-            "bt_platform::MathContextMenu",
-            "Vec<TabState>",
+            Pattern::identifier("WindowRenderer"),
+            // **Two of these are asked wider than they used to be written**
+            // (§4.2 rule 3: a changed selector carries its own mutation). They
+            // were `Arc<Window>` and `Vec<TabState>`, spellings of a type
+            // *application*; the identifier view reads names, so what it can be
+            // asked is the name inside — which forbids `Rc<Window>` and
+            // `BTreeMap<TabId, TabState>` too. That is the sentence this pin was
+            // always making, said without the container: a window handle or a
+            // tree of tabs on `App` is a field a second window would have to
+            // un-share again.
+            Pattern::identifier("Window"),
+            Pattern::path("bt_platform::Compositor"),
+            Pattern::path("bt_platform::CustomWindowFrame"),
+            Pattern::path("bt_platform::ImeSystemCaret"),
+            Pattern::path("bt_platform::FolderPicker"),
+            Pattern::path("bt_platform::MathContextMenu"),
+            Pattern::identifier("TabState"),
         ] {
+            let held = inside("App", &owned_by_a_window);
             assert!(
-                !body.contains(owned_by_a_window),
-                "`{owned_by_a_window}` is a fact about one window"
+                held.is_empty(),
+                "{owned_by_a_window} is a fact about one window:\n{}",
+                held.report(source())
             );
         }
-    }
-
-    /// The body of a top-level-in-`impl` `fn <name>(`, delimited by the one `}`
-    /// at that `fn`'s own indentation which follows it.
-    fn fn_body(name: &str) -> &'static str {
-        let head = format!(
-            "
-    fn {name}("
-        );
-        let start = SOURCE
-            .find(&head)
-            .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
-            + head.len();
-        let end = start
-            + SOURCE[start..]
-                .find(
-                    "
-    }
-",
-                )
-                .expect("a method is closed by a `}` at the `impl`'s indentation");
-        &SOURCE[start..end]
     }
 
     /// PIN (user report, 2026-08-19) — **every spelling of a checkout is issued
@@ -14756,10 +14800,10 @@ struct {name} {{
         let tracking = concat!("GitWriteVerb::", "CheckoutTracking { name: ");
         let column = concat!("self.checkout_", "from_column(");
         let graph = concat!("self.checkout_", "in_graph(");
-        let performs = fn_body("checkout_at");
+        let performs = method_body("Runtime", "checkout_at");
         for spelling in [tracking, column, graph] {
             assert_eq!(
-                SOURCE.matches(spelling).count(),
+                found(needle!(spelling), View::Raw).len(),
                 1,
                 "`{spelling}` is written in more than one place, so one of them is \
                  a door that has not answered the tiers"
@@ -14772,10 +14816,10 @@ struct {name} {{
 
         // And `checkout_at` is reached from exactly two places: the question, and
         // the gate's confirmed answer — which *is* that question, answered.
-        let asks = fn_body("ask_to_checkout");
+        let asks = method_body("Runtime", "ask_to_checkout");
         let performing = concat!("self.checkout", "_at(");
         assert_eq!(
-            SOURCE.matches(performing).count(),
+            found(needle!(performing), View::Raw).len(),
             2,
             "a third caller of `checkout_at` is a third chance to skip the gate"
         );
@@ -14812,7 +14856,7 @@ struct {name} {{
     /// and this test is what says so.
     #[test]
     fn a_re_read_does_not_throw_the_picture_away_before_its_answer_exists() {
-        let rereads = fn_body("reread_git_origin");
+        let rereads = method_body("Runtime", "reread_git_origin");
         assert!(
             !rereads.contains(concat!("invalid", "ate(")),
             "a re-read does not know yet whether the history moved, so it may not \
@@ -14859,7 +14903,7 @@ struct {name} {{
             "apply_git_results",
             "apply_math_results",
         ] {
-            let body = fn_body(lane);
+            let body = method_body("Runtime", lane);
             assert!(
                 !body.contains("try_recv"),
                 "`{lane}` is one window's, and a receiver it drains is every \
@@ -14889,7 +14933,7 @@ struct {name} {{
             "apply_git_results",
             "apply_math_results",
         ] {
-            let body = fn_body(lane);
+            let body = method_body("Runtime", lane);
             assert!(
                 body.contains("self.owns("),
                 "`{lane}` takes its own out of the batch by asking whether this \
@@ -15401,14 +15445,18 @@ mod tab_identity_tests {
     // what is between them; the equivalence commit established that every
     // assertion here falls inside it, all twenty-five and not a sample.
     //
-    // **Two scopes widen, decided here rather than inherited (§4.1).** The
+    // **One scope widens, decided here rather than inherited (§4.1).** The
     // retired transfer probe's three names were forbidden in this file and are
     // forbidden in every file this package compiles, because a probe standing in
-    // any of them is the same second door onto the transaction. The per-window
-    // tab counter was read out of the text of three structs and is now asked for
-    // as an **identifier** over the whole package: `bt-source` indexes callable
-    // items, so a struct's fields are not an identity it can be asked for, and
-    // this is the one reading in this module that could not stay type-scoped.
+    // any of them is the same second door onto the transaction. The other
+    // widening has since been given back: the per-window tab counter is two
+    // halves, and only one of them is about the package. The half that says the
+    // application keeps the counter names a **field of `App`** — §2.4's identity
+    // rule reaches a type's members now, so that half is type-scoped, and it is
+    // narrower than the three structs of text it was read out of before. The
+    // half that says no *window* keeps one is a claim about a name nobody
+    // declares, which no type can be asked, so it stays an **identifier** search
+    // over the whole package.
     use super::*;
 
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
@@ -15440,6 +15488,14 @@ mod tab_identity_tests {
     /// The body of one free function of this crate.
     fn free_fn_body(name: &str) -> &'static str {
         item_body(&ItemQuery::function(name))
+    }
+
+    /// The declaration of one field of `owner`, attributes included — the
+    /// identity of §2.4 rather than a line of this file.
+    fn field_declaration(owner: &str, name: &str) -> &'static str {
+        source()
+            .declaration_of(&ItemQuery::field(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// One search over the whole crate, refusing loudly rather than answering a
@@ -15764,13 +15820,13 @@ mod tab_identity_tests {
     /// opened.
     #[test]
     fn no_window_keeps_a_tab_counter_of_its_own() {
-        // The one reading in this module the crate cannot keep type-scoped:
-        // `bt-source` indexes callable items, so a struct's fields are not an
-        // identity it can be asked for, and both halves widen from the text of
-        // three structs in this file to every file this package compiles
-        // (§4.1). The name is asked for as an **identifier**, which is what a
-        // field is: the spelling standing in the two doc comments that tell this
-        // story is not a counter, and nothing written in prose can answer this.
+        // The negative half, and the one reading in this module that stays
+        // package-wide: a counter no window keeps is a claim about a name
+        // nobody declares, so there is no type to ask it of and the universe is
+        // every file this package compiles (§4.1). The name is asked for as an
+        // **identifier**, which is what a counter is: the spelling standing in
+        // the two doc comments that tell this story is not a counter, and
+        // nothing written in prose can answer this.
         let counter = found(
             needle!(Pattern::identifier("next_tab_id")),
             View::Identifiers,
@@ -15781,13 +15837,16 @@ mod tab_identity_tests {
              window — nor the parts one is assembled from — mints one again\n{}",
             counter.report(source())
         );
+        // The positive half is type-scoped (§2.4): the counter that replaced it
+        // is a *field of `App`* and is asked for as one, so the query refuses —
+        // loudly, rather than answering a smaller question — if `App` is not
+        // declared, if it carries no `tab_ids`, or if it carries one in only
+        // some of its `#[cfg]` arms. Moving the field to another struct is the
+        // second of those.
+        let application = field_declaration("App", "tab_ids");
         assert!(
-            !found(
-                needle!(Pattern::text("tab_ids: TabIds")),
-                View::CodeKeepingLiterals
-            )
-            .is_empty(),
-            "and the one that replaced it is the application's"
+            application.ends_with("tab_ids: TabIds"),
+            "and the one that replaced it is the application's:\n{application}"
         );
     }
 
@@ -111871,18 +111930,102 @@ mod formula_copy_clock_tests {
 /// the only witness that can say "there are two".
 #[cfg(test)]
 mod focus_mode_door_tests {
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked a *file* for its text — `main.rs` through
+    // `include_str!`, and `cardhint.rs` beside it. Every one of them now asks
+    // `bt-source` about an *item*, a *module* or the package, so no fact in this
+    // module is bound to the file it happens to be written in today. The commit
+    // before this one ran both readings side by side and asserted they agree;
+    // this is the one that deletes the older of the two, because two
+    // implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4). `source`, `item_body`, `method_body`,
+    // `found` and `found_in` are `pty_drain_budget_tests`' and
+    // `formula_tool_seat_tests`' helpers word for word, and the pilot's header is
+    // where the six points behind them live.
+    //
+    // One shape those examples had no consumer for: `lines_holding`. Three pins
+    // here name a door by the *text of the line* it stands on, so the reading
+    // stays a line reading, over every file this package compiles rather than
+    // over this one.
+    //
+    // **Two owners, not one.** Seven pins are methods of `Runtime`;
+    // `mini_source` is `TabState`'s. The deleted finder took the first
+    // `    fn mini_source` in this file, which is a method of whatever `impl`
+    // happens to come first, and the equivalence commit is what established the
+    // owner rather than assumed it.
+    use bt_source::{Found, Index, ItemQuery, Needle, Scope, Search, View, needle};
 
-    /// The text of one method, from its signature to the next method's —
-    /// [`mouse_trace_station_tests`]' own reader.
-    fn body(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// One search over a named scope — a Rust path, never a file.
+    fn found_in(needle: Needle, view: View, scope: Scope) -> Found {
+        source()
+            .search(&Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **The trimmed lines of this package that hold `needle`, in file order.**
+    ///
+    /// The reading three pins here used to take of one file — that file's text
+    /// split into lines, trimmed, and kept when it held the needle — asked of
+    /// every file the crate compiles instead. A line is genuinely what those
+    /// assertions are about: they name the two doors by the text each stands on,
+    /// so the answer stays a list of lines rather than becoming a count.
+    ///
+    /// Each occurrence is cut back to its own file's boundaries before the line
+    /// is taken, so a match at the head of a file cannot reach into the one
+    /// concatenated in front of it; two occurrences on one line answer once, as
+    /// the line reading did.
+    fn lines_holding(needle: &str) -> Vec<&'static str> {
+        let index = source();
+        let union = index.union();
+        let mut lines: Vec<&'static str> = Vec::new();
+        let mut last = None;
+        for occurrence in found(needle!(needle), View::Raw).occurrences() {
+            let at = occurrence.span.start();
+            let file = index
+                .file_at(at)
+                .expect("every occurrence of a search stands in a file of its universe");
+            let floor = file.span().start();
+            let start = union[floor..at]
+                .rfind('\n')
+                .map_or(floor, |break_at| floor + break_at + 1);
+            if last == Some(start) {
+                continue;
+            }
+            last = Some(start);
+            let end = union[start..]
+                .find('\n')
+                .map_or(union.len(), |break_at| start + break_at);
+            lines.push(union[start..end].trim());
+        }
+        lines
     }
 
     /// **Every write of the bit, and there are two.**
@@ -111894,11 +112037,7 @@ mod focus_mode_door_tests {
     #[test]
     fn only_the_chord_and_the_settings_row_write_the_bit() {
         let needle = ["self", ".", "set_focus_mode", "("].concat();
-        let doors: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
+        let doors = lines_holding(needle.as_str());
         let expected = [
             // `Appearance ▸ Focus mode: On/Off`, through `focus_mode_requested`.
             format!("{needle}on)?;"),
@@ -111920,7 +112059,7 @@ mod focus_mode_door_tests {
     #[test]
     fn the_key_ladder_has_no_rung_for_the_mode() {
         assert!(
-            !body("    fn keyboard_input(").contains("focus_mode"),
+            !method_body("Runtime", "keyboard_input").contains("focus_mode"),
             "the escape ladder mentions focus mode, so some key still leaves it"
         );
     }
@@ -111948,7 +112087,7 @@ mod focus_mode_door_tests {
     /// exists.
     #[test]
     fn the_card_arms_its_reads_only_behind_the_mode_gate() {
-        let arming = body("    fn arm_card_reads(");
+        let arming = method_body("Runtime", "arm_card_reads");
         for lane in ["claim_head_read", "DirRequest"] {
             assert!(
                 arming.contains(lane),
@@ -111959,17 +112098,13 @@ mod focus_mode_door_tests {
         // And that one place is reached from one call site, which stands below
         // the gate that answers "is there a card column at all".
         let needle = ["self", ".", "arm_card_reads", "("].concat();
-        let callers: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
+        let callers = lines_holding(needle.as_str());
         assert_eq!(
             callers.len(),
             1,
             "a second caller is a second answer to when a background tab loads"
         );
-        let pass = body("    fn refresh_focus_thumbnails(");
+        let pass = method_body("Runtime", "refresh_focus_thumbnails");
         let gate = pass
             .find("focus_rail_geometry_now")
             .expect("the projection pass opens by asking whether there is a column at all");
@@ -112011,11 +112146,7 @@ mod focus_mode_door_tests {
     #[test]
     fn the_guests_the_column_holds_room_for_are_counted_at_one_door() {
         let needle = ["self", ".", "strip_guests", "("].concat();
-        let readers: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
+        let readers = lines_holding(needle.as_str());
         assert_eq!(
             readers.len(),
             2,
@@ -112025,7 +112156,7 @@ mod focus_mode_door_tests {
         // And that door is the dressing's own answer rather than a second
         // reading of the drag — which is what makes the room reserved and the
         // card drawn the same card.
-        let counter = body("    fn strip_guests(");
+        let counter = method_body("Runtime", "strip_guests");
         assert!(
             counter.contains("strip_stand_in"),
             "the count is `is there a stand-in`, asked of the function that \
@@ -112050,7 +112181,7 @@ mod focus_mode_door_tests {
     /// tree.
     #[test]
     fn the_stand_ins_thumbnail_slot_carries_the_pane_rather_than_a_hole() {
-        let pass = body("    fn refresh_chrome_with_overlay(");
+        let pass = method_body("Runtime", "refresh_chrome_with_overlay");
         let insert = ["focus_thumbnails", ".insert("].concat();
         let at = pass
             .find(insert.as_str())
@@ -112077,7 +112208,7 @@ mod focus_mode_door_tests {
         );
         // And the picture is the projection the column already holds rather
         // than a second one minted for the card in the air.
-        let dressing = body("    fn stand_in_pane(");
+        let dressing = method_body("Runtime", "stand_in_pane");
         assert!(
             dressing.contains("StripExtract") && dressing.contains("DragSource::Pane"),
             "the pane whose picture the stand-in wears is the one the tear-out \
@@ -112099,7 +112230,7 @@ mod focus_mode_door_tests {
         // last frame in, so the needle stops at the name: a pin that matched the
         // parenthesis would fall through to this very literal further down the
         // file and read a body that is not the one it means to.
-        let source = body("    fn mini_source");
+        let source = item_body(&ItemQuery::method("TabState", "mini_source"));
         assert!(
             source.contains("buffer.content.is_some()"),
             "the red line is 'is there text here already, without asking a disk'"
@@ -112142,11 +112273,7 @@ mod focus_mode_door_tests {
     fn the_cards_offer_is_spent_in_one_place_and_given_back_in_one() {
         let field = ["cards", "_gesture_hint_offer"].concat();
         let needle = ["settings", ".", field.as_str(), " ="].concat();
-        let writes: Vec<&str> = SOURCE
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains(needle.as_str()))
-            .collect();
+        let writes = lines_holding(needle.as_str());
         assert_eq!(
             writes,
             [
@@ -112160,7 +112287,7 @@ mod focus_mode_door_tests {
 
         // The restore is on the Appearance page and no other: a reset of the
         // Terminal page's ground has nothing to say about a column of cards.
-        let reset = body("    fn reset_advanced_group(");
+        let reset = method_body("Runtime", "reset_advanced_group");
         assert!(
             reset.contains(needle.as_str()),
             "the restoring half lives in the reset verb",
@@ -112203,12 +112330,9 @@ mod focus_mode_door_tests {
     fn the_cards_bubble_is_drawn_and_never_pressed() {
         // The code and not the prose: this module's own paragraphs are allowed
         // to *say* the word "press", and a needle that could not tell the two
-        // apart would be a pin that fails on its own argument.
-        let module: String = include_str!("cardhint.rs")
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // apart would be a pin that fails on its own argument. That is
+        // `View::CodeKeepingLiterals` exactly — and it sees the block comments and
+        // the trailing ones the old line filter walked past.
         for reachable in [
             "ChromeTarget",
             "rect_holds",
@@ -112217,14 +112341,19 @@ mod focus_mode_door_tests {
             "pointer",
         ] {
             assert!(
-                !module.contains(reachable),
+                found_in(
+                    needle!(reachable),
+                    View::CodeKeepingLiterals,
+                    Scope::Module("crate::cardhint".to_owned()),
+                )
+                .is_empty(),
                 "the bubble's own module names {reachable}, which is it becoming pressable",
             );
         }
         // And the window's one reading of what is under a pointer has never
         // heard of it.
         assert!(
-            !body("    fn docked_chrome_target_at(").contains("card_hint"),
+            !method_body("Runtime", "docked_chrome_target_at").contains("card_hint"),
             "the hit test knows the bubble exists, so a press can land on it",
         );
     }
@@ -131544,39 +131673,82 @@ mod clipboard_path_tests {
 /// value in the program can witness the *absence* of a call.
 #[cfg(test)]
 mod printed_path_provenance_tests {
+    // **P3's batch for this module** (`docs/plans/bt-app-split-prep.md` §6.3).
+    // Every reader here asked a *file* for its text — `main.rs` through
+    // `include_str!`, and two crates of this workspace through a relative path
+    // out of this directory. Every one of them now asks `bt-source` about an
+    // *item* or a *module*, so no fact in this module is bound to the file it
+    // happens to be written in today. The commit before this one ran both
+    // readings side by side and asserted they agree; this is the one that deletes
+    // the older of the two, because two implementations of one judgement do not
+    // vouch for each other (`docs/CONVENTIONS.md` §十 rule 4).
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body`, `free_fn_body` and `found` are that
+    // module's helpers word for word, and its header is where the six points
+    // behind them live. One shape this batch needed and no example had:
+    //
+    // * `found_in_package` — the readings that leave this package.
+    //   `Index::of_package` takes a package's name, so a cross-crate reader asks
+    //   about a module of *that* crate — `crate::handoff` in `bt-platform`,
+    //   `crate::session` in `bt-term` — rather than about a path from this file
+    //   to its source.
+    //
+    // **Two owners, not one.** Every body pin here is a method of `Runtime`
+    // except `status_text_in`, which belongs to `HyperlinkHover`; the deleted
+    // finder took the first `    fn status_text_in(` in this file, which is a
+    // method of whatever `impl` happens to come first, and could not have told
+    // the difference. The equivalence commit is what established that rather than
+    // assumed it.
     use super::{
         ClickIntent, HyperlinkActivation, Runtime, TerminalReference, answered_once,
         hyperlink_activation, verified_target_of,
     };
     use bt_layout::SeatId;
+    use bt_source::{Found, Index, ItemQuery, Needle, Scope, Search, View, needle};
     use std::{cell::RefCell, path::Path};
 
-    /// This file, read as text.
-    const SOURCE: &str = include_str!("main.rs");
-
-    /// The text of one method, from its signature to the brace that closes it at the `impl`'s own
-    /// indentation.
-    fn method(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest
-            .find("\n    }\n")
-            .expect("a method is closed by a `}` at the `impl`'s indentation");
-        &rest[..end]
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
     }
 
-    /// The text of one free function of this file.
-    fn free_function(signature: &str) -> &'static str {
-        let start = SOURCE
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
-        let rest = &SOURCE[start + signature.len()..];
-        let end = rest
-            .find("\n}\n")
-            .expect("a free function is closed by a `}` in the first column");
-        &rest[..end]
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        item_body(&ItemQuery::function(name))
+    }
+
+    /// One search over a named scope of another package of this workspace — the
+    /// reading that used to be a relative path from this file to that crate's
+    /// source. The scope is a Rust path in *that* crate, so `crate::handoff` is
+    /// `bt-platform`'s module however its file is spelled.
+    fn found_in_package(package: &str, needle: Needle, view: View, scope: Scope) -> Found {
+        Index::of_package(package)
+            .search(&Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     fn local_file() -> bt_term::PathVerdict {
@@ -131871,34 +132043,40 @@ mod printed_path_provenance_tests {
         // verdict's de-duplication skipped (closure re-review B-1').
         let press_door = ["self.re_ask_the_worker_about_a_link_", "target("].concat();
         let pointer_door = ["ask_about_the_link_under_the_", "pointer("].concat();
-        for (signature, needle) in [
-            ("    fn pointer_moved(", door.as_str()),
-            ("    fn begin_local_selection(", press_door.as_str()),
-            ("    fn publish_frame_inner(", pointer_door.as_str()),
+        for (name, needle) in [
+            ("pointer_moved", door.as_str()),
+            ("begin_local_selection", press_door.as_str()),
+            ("publish_frame_inner", pointer_door.as_str()),
         ] {
             assert!(
-                method(signature).contains(needle),
-                "{signature} can put a link under the pointer and must ask `{needle})` about it"
+                method_body("Runtime", name).contains(needle),
+                "`{name}` can put a link under the pointer and must ask `{needle})` about it"
             );
         }
-        // The modifier's door is in the event loop rather than in a method of the window.
-        let modifiers = SOURCE
+        // The modifier's door is in the event loop rather than in a method of the window, so the
+        // arm is cut out of `window_event`'s own body — which is an identity of this crate and
+        // not a prefix of a file that used to run to its end.
+        let loop_body = item_body(
+            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
+        );
+        let at = loop_body
             .find("WindowEvent::ModifiersChanged(modifiers) => {")
             .expect("the one door every modifier state comes through");
-        let arm = &SOURCE[modifiers..];
+        let arm = &loop_body[at..];
         let arm = &arm[..arm.find("WindowEvent::CursorMoved").unwrap_or(arm.len())];
         assert!(
             arm.contains(pointer_door.as_str()),
             "the hand-over modifier going down is a gesture that meets a reference"
         );
-        // And the two functions are still the only places the question is put.
+        // And the two functions are still the only places the question is put — in this package,
+        // now, rather than in this file: a door written into `runtime/` would be a third one.
         assert_eq!(
-            SOURCE.matches(door.as_str()).count(),
+            found(needle!(door.as_str()), View::Raw).len(),
             2,
             "the pointer move and the pointer-wide door — and nobody else"
         );
         assert_eq!(
-            SOURCE.matches(press_door.as_str()).count(),
+            found(needle!(press_door.as_str()), View::Raw).len(),
             1,
             "the press, and only the press, skips a held verdict"
         );
@@ -132019,13 +132197,18 @@ mod printed_path_provenance_tests {
     /// more and no less.
     #[test]
     fn the_user_chosen_door_asks_no_machine_about_the_file() {
-        let handoff = include_str!("../../bt-platform/src/handoff.rs");
         for call in [
             ["Assoc", "IsDangerous", "("].concat(),
             ["SHGetFileInfo", "W", "("].concat(),
         ] {
             assert!(
-                !handoff.contains(call.as_str()),
+                found_in_package(
+                    "bt-platform",
+                    needle!(call.as_str()),
+                    View::Raw,
+                    Scope::Module("crate::handoff".to_owned()),
+                )
+                .is_empty(),
                 "`{call})` is back under the door the user reaches by naming a file"
             );
         }
@@ -132174,7 +132357,7 @@ mod printed_path_provenance_tests {
     /// does not make.
     #[test]
     fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
-        let press = method("    fn activate_hyperlink(");
+        let press = method_body("Runtime", "activate_hyperlink");
         let open = press
             .find("self.open_local_path_verified(&path, facts);")
             .expect("the open door is handed the path as printed");
@@ -132183,10 +132366,15 @@ mod printed_path_provenance_tests {
             .expect("and so is the reveal, which takes the resolved name off the target");
         assert!(open < reveal, "the file arm stands before the folder arm");
         // And the resolved name is the doors' own transform, not a second reading of it.
-        let ledger = include_str!("../../bt-term/src/session.rs");
         let door = ["resolved_for_a_", "door("].concat();
         assert!(
-            ledger.contains(door.as_str()),
+            !found_in_package(
+                "bt-term",
+                needle!(door.as_str()),
+                View::Raw,
+                Scope::Module("crate::session".to_owned()),
+            )
+            .is_empty(),
             "the worker produces the door's input with the door's own function"
         );
     }
@@ -132224,20 +132412,20 @@ mod printed_path_provenance_tests {
         );
     }
 
-    /// The window-thread bodies that answer a pointer over a reference, by the signature each is
-    /// declared with.
+    /// The window-thread bodies that answer a pointer over a reference, by name — every one of
+    /// them an inherent method of [`Runtime`].
     ///
     /// **The list is the test.** An eighth door that asks a filesystem about a printed path is the
     /// defect this ticket repaired, and the sweep below is what catches one added without a line
     /// added here.
     const HOVER_DOORS: [&str; 7] = [
-        "    fn peek_target(",
-        "    fn terminal_reference_at(",
-        "    fn pointer_reference_at(",
-        "    fn terminal_link_grasp(",
-        "    fn activate_hyperlink_hover_if_due(",
-        "    fn activate_hyperlink(",
-        "    fn file_peek_card_layers(",
+        "peek_target",
+        "terminal_reference_at",
+        "pointer_reference_at",
+        "terminal_link_grasp",
+        "activate_hyperlink_hover_if_due",
+        "activate_hyperlink",
+        "file_peek_card_layers",
     ];
 
     /// The filesystem calls none of them may make. Assembled at run time so this pin cannot match
@@ -132291,14 +132479,14 @@ mod printed_path_provenance_tests {
     fn no_hover_door_makes_a_filesystem_call_of_its_own() {
         // And the two that are allowed to reach a disk are still the two, still where they were
         // argued for.
-        let card = method("    fn file_peek_card_layers(");
+        let card = method_body("Runtime", "file_peek_card_layers");
         assert!(
             card.contains(DISK_REACHING_CALLEES[0].0),
             "the glance card asks {} — {}",
             DISK_REACHING_CALLEES[0].0,
             DISK_REACHING_CALLEES[0].1
         );
-        let press = method("    fn activate_hyperlink(");
+        let press = method_body("Runtime", "activate_hyperlink");
         assert!(
             press.contains(DISK_REACHING_CALLEES[1].0),
             "a printed reference is revealed through {} — {}",
@@ -132309,12 +132497,12 @@ mod printed_path_provenance_tests {
             !press.contains("self.reveal_in_explorer("),
             "a printed reference must not take the door that canonicalises on this thread"
         );
-        for signature in HOVER_DOORS {
-            let text = method(signature);
+        for name in HOVER_DOORS {
+            let text = method_body("Runtime", name);
             for call in filesystem_calls() {
                 assert!(
                     !text.contains(call.as_str()),
-                    "{signature} reaches `{call}` on the thread that paints — a path a program \
+                    "`{name}` reaches `{call}` on the thread that paints — a path a program \
                      printed may name a mapped drive whose server is gone, and the answer costs \
                      the redirector's own timeout"
                 );
@@ -132328,16 +132516,16 @@ mod printed_path_provenance_tests {
     /// reader that reached for a disk would put the syscall back one level down.
     #[test]
     fn the_routing_table_asks_a_filesystem_nothing() {
-        for signature in [
-            "fn hyperlink_activation(",
-            "fn reference_card(",
-            "fn terminal_link_answers_a_press(",
+        for name in [
+            "hyperlink_activation",
+            "reference_card",
+            "terminal_link_answers_a_press",
         ] {
-            let text = free_function(signature);
+            let text = free_fn_body(name);
             for call in filesystem_calls() {
                 assert!(
                     !text.contains(call.as_str()),
-                    "{signature} reaches `{call}`, and every caller of it is on the window thread"
+                    "`{name}` reaches `{call}`, and every caller of it is on the window thread"
                 );
             }
         }
@@ -132353,7 +132541,7 @@ mod printed_path_provenance_tests {
     /// `bt_platform::names_a_program`'s — on the door, not on the caller.
     #[test]
     fn a_printed_reference_reaches_the_handler_only_under_the_modifier_and_a_local_verdict() {
-        let table = free_function("fn hyperlink_activation(");
+        let table = free_fn_body("hyperlink_activation");
         let arm = [
             "ClickIntent",
             "::",
@@ -132386,17 +132574,22 @@ mod printed_path_provenance_tests {
         }
         // The door is reached through the verified twin, so the three facts travel rather than
         // being fetched on this thread.
-        let press = method("    fn activate_hyperlink(");
+        let press = method_body("Runtime", "activate_hyperlink");
         assert!(press.contains("open_local_path_verified("));
         assert!(
             !press.contains("self.open_local_path("),
             "the asking door belongs to the surfaces where the user picked the file"
         );
         // And the refusal is the platform door's own, with the list it has always had.
-        let handoff = include_str!("../../bt-platform/src/handoff.rs");
         let refusal = ["names_a_", "program(&path,"].concat();
         assert!(
-            handoff.contains(refusal.as_str()),
+            !found_in_package(
+                "bt-platform",
+                needle!(refusal.as_str()),
+                View::Raw,
+                Scope::Module("crate::handoff".to_owned()),
+            )
+            .is_empty(),
             "the door refuses a program by its own list"
         );
     }
@@ -132409,7 +132602,7 @@ mod printed_path_provenance_tests {
     /// be about the thing the press would reach.
     #[test]
     fn the_hover_line_is_built_from_the_target_and_not_from_the_cells() {
-        let line = method("    fn status_text_in(");
+        let line = method_body("HyperlinkHover", "status_text_in");
         assert!(
             line.contains("printable_address(&self.active.as_ref()?.uri)"),
             "the status line must read the link's own target"
@@ -132429,7 +132622,7 @@ mod printed_path_provenance_tests {
     /// answer a frame with a reference from where the pointer used to be.
     #[test]
     fn the_pointer_memo_is_emptied_at_the_top_of_every_pointer_move() {
-        let moved = method("    fn pointer_moved(");
+        let moved = method_body("Runtime", "pointer_moved");
         let cleared = moved
             .find("self.window.pointer_reference.get_mut().take();")
             .expect("a pointer move empties the memo");
