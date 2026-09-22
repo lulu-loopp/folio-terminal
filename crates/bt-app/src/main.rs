@@ -108763,6 +108763,22 @@ mod git_header_selection_tests {
 /// exit of these functions is unaccompanied.
 #[cfg(test)]
 mod mouse_trace_station_tests {
+    // **P3's equivalence commit for this batch** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). Every reader in this module asked `main.rs` for its
+    // text. Nothing is deleted here: each body pin now computes its answer twice
+    // — once from `include_str!("main.rs")`, once from `bt-source` — and asserts
+    // the two are the same bytes, and the one whole-source scan asserts the two
+    // answer the same thing. The deletion is the commit after this one, so that a
+    // reviewer sees the agreement and a bisect can land between them.
+    //
+    // **The pattern is `pty_drain_budget_tests`' and is not re-derived.**
+    // `source`, `item_body`, `method_body` and `found` are that module's helpers
+    // word for word, and its header is where the six points behind them live.
+    // Two shapes are added here and deleted with the old reading: `agreed`, the
+    // equivalence itself, and the product filter the widening below is compared
+    // through.
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
+
     /// This file, read as text.
     const SOURCE: &str = include_str!("main.rs");
 
@@ -108774,6 +108790,72 @@ mod mouse_trace_station_tests {
         let rest = &SOURCE[start + signature.len()..];
         let end = rest.find("\n    fn ").unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    // ── what this module asks the crate instead ───────────────────────────
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4 rather
+    /// than a line of this file.
+    fn item_body(query: &ItemQuery) -> &'static str {
+        source()
+            .body_of(query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one inherent method of `owner`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        item_body(&ItemQuery::method(owner, name))
+    }
+
+    /// One search over the whole crate, refusing loudly rather than answering a
+    /// smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    // ── the two readings of one body, asserted to agree ───────────────────
+
+    /// **`body`'s answer and the crate's, compared as bytes**, on every call.
+    ///
+    /// `body` hands back everything after the signature prefix it was given and
+    /// stops before the next `\n    fn `: the rest of the declaration, then the
+    /// body, then whatever stands between the closing brace and the next
+    /// method's `fn `, which in this file is that method's doc comment.
+    /// `body_of` hands back the braces and what is between them. So the crate's
+    /// answer has to stand in this file's slice at the head of the body, with
+    /// nothing but the rest of the declaration in front of it.
+    ///
+    /// What comes back is the file's slice, so this commit changes no assertion.
+    fn agreed(old: &'static str, name: &str) -> &'static str {
+        let new = method_body("Runtime", name);
+        let at = match old.find(new) {
+            Some(at) => at,
+            None => {
+                assert!(
+                    old.starts_with(&new[1..]),
+                    "`Runtime::{name}`: this file's slice and the crate's body are not the same \
+                     bytes"
+                );
+                0
+            }
+        };
+        assert!(
+            !old[..at].contains('{'),
+            "`Runtime::{name}`: the crate's body stands inside this file's slice rather than at \
+             the head of it"
+        );
+        old
     }
 
     /// How far back a trace call may stand from the `return` it belongs to.
@@ -108798,8 +108880,8 @@ mod mouse_trace_station_tests {
             .collect()
     }
 
-    fn assert_every_return_is_traced(signature: &str, needle: &str, expected: usize) {
-        let found = returns_and_what_precedes(body(signature), needle);
+    fn assert_every_return_is_traced(signature: &str, name: &str, needle: &str, expected: usize) {
+        let found = returns_and_what_precedes(agreed(body(signature), name), needle);
         assert_eq!(
             found.len(),
             expected,
@@ -108839,8 +108921,8 @@ mod mouse_trace_station_tests {
     /// a second helper rather than as a widening of the first, because the
     /// chrome's pin counts one shape on purpose and a looser needle there would
     /// stop it counting.
-    fn assert_every_exit_is_traced(signature: &str, expected: usize) {
-        let text = body(signature);
+    fn assert_every_exit_is_traced(signature: &str, name: &str, expected: usize) {
+        let text = agreed(body(signature), name);
         let lines: Vec<&str> = text.lines().collect();
         let exits: Vec<usize> = lines
             .iter()
@@ -108875,9 +108957,9 @@ mod mouse_trace_station_tests {
     /// it puts the silence back one arm at a time and nothing else fails.
     #[test]
     fn every_exit_of_the_wheels_road_writes_a_line() {
-        assert_every_exit_is_traced("    fn mouse_wheel(", 22);
-        assert_every_exit_is_traced("    fn scroll_rail(", 3);
-        assert_every_exit_is_traced("    fn aim_focus_card_window(", 10);
+        assert_every_exit_is_traced("    fn mouse_wheel(", "mouse_wheel", 22);
+        assert_every_exit_is_traced("    fn scroll_rail(", "scroll_rail", 3);
+        assert_every_exit_is_traced("    fn aim_focus_card_window(", "aim_focus_card_window", 10);
     }
 
     /// **The route words are the declared ones** (T-WHEEL-TRACE, §7.60).
@@ -108892,6 +108974,7 @@ mod mouse_trace_station_tests {
     fn the_wheel_route_words_are_the_declared_ones() {
         let needle = concat!("wheel_route ", "taken", "=");
         let mut seen = 0;
+        let mut from_file: Vec<String> = Vec::new();
         for at in SOURCE
             .match_indices(needle)
             .map(|(at, _)| at + needle.len())
@@ -108910,9 +108993,48 @@ mod mouse_trace_station_tests {
                 "`{word}` is not one of the declared wheel routes: {:?}",
                 crate::mouse_trace::WHEEL_ROUTES
             );
+            from_file.push(word);
         }
         assert!(seen > 0, "the route line is written somewhere in this file");
-        let wheel = body("    fn mouse_wheel(");
+
+        // **The same scan, asked of the package, and the one widening in it.**
+        // This file's reading sees `main.rs`; the crate's sees every file the
+        // package declares, which is this file's sites plus whatever a
+        // `#[cfg(test)]` file writes. So the two are compared over the
+        // occurrences standing in a file a product build compiles — which is
+        // exactly what `include_str!("main.rs")` could reach — and the wider
+        // answer is asserted to hold every word the narrower one found. No
+        // match may cross a file boundary, so the word is read inside the file
+        // its occurrence stands in (§2.2).
+        let index = source();
+        let mut from_product: Vec<String> = Vec::new();
+        let mut from_package: Vec<String> = Vec::new();
+        for occurrence in found(needle!(Pattern::text(needle)), View::Raw).occurrences() {
+            let file = index
+                .file_at(occurrence.span.start())
+                .expect("every occurrence stands in a file of the universe");
+            let word: String = index.union()[occurrence.span.end()..file.span().end()]
+                .chars()
+                .take_while(|char| char.is_ascii_alphanumeric() || *char == '-')
+                .collect();
+            if word.is_empty() {
+                continue;
+            }
+            if file.permits_product() {
+                from_product.push(word.clone());
+            }
+            from_package.push(word);
+        }
+        assert_eq!(
+            from_product, from_file,
+            "this file's scan and the crate's, over the files a product build compiles"
+        );
+        assert!(
+            from_file.iter().all(|word| from_package.contains(word)),
+            "the package's answer holds every route word this file's did"
+        );
+
+        let wheel = agreed(body("    fn mouse_wheel("), "mouse_wheel");
         for word in ["terminal-pane", "focused-leaf-fallback", "pty", "nobody"] {
             assert!(
                 crate::mouse_trace::WHEEL_ROUTES.contains(&word),
@@ -108939,15 +109061,28 @@ mod mouse_trace_station_tests {
         // verb on the platform that hands that press to the application — the
         // window's own, which is a drag on one click and the reader's chosen
         // action on two (`at=press-title-bar`).
-        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 29);
+        assert_every_return_is_traced(
+            "    fn chrome_mouse_input(",
+            "chrome_mouse_input",
+            "return Ok(true);",
+            29,
+        );
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
     /// `Ok(())` — and they are two different findings, so they carry two labels.
     #[test]
     fn both_landing_refusals_write_a_line() {
-        let text = body("    fn preview_landing_surface(");
-        assert_every_return_is_traced("    fn preview_landing_surface(", "return None;", 2);
+        let text = agreed(
+            body("    fn preview_landing_surface("),
+            "preview_landing_surface",
+        );
+        assert_every_return_is_traced(
+            "    fn preview_landing_surface(",
+            "preview_landing_surface",
+            "return None;",
+            2,
+        );
         assert!(
             text.contains("none=add_preview") && text.contains("none=settle_seat_set_change"),
             "the two landing refusals are told apart by label, not merely counted"
@@ -108958,8 +109093,11 @@ mod mouse_trace_station_tests {
     /// shape of "the click did nothing", so it is the one that must speak.
     #[test]
     fn both_preview_openers_write_a_line_when_nothing_opens() {
-        for signature in ["    fn open_preview_image(", "    fn open_preview_file("] {
-            let text = body(signature);
+        for (signature, name) in [
+            ("    fn open_preview_image(", "open_preview_image"),
+            ("    fn open_preview_file(", "open_preview_file"),
+        ] {
+            let text = agreed(body(signature), name);
             assert!(
                 text.contains("leave=no-landing-surface"),
                 "{signature} returns `Ok(())` without saying so"
@@ -108981,7 +109119,10 @@ mod mouse_trace_station_tests {
     /// above do.
     #[test]
     fn the_folder_door_says_which_of_its_outcomes_happened() {
-        let text = body("    fn show_folder_in_files_column(");
+        let text = agreed(
+            body("    fn show_folder_in_files_column("),
+            "show_folder_in_files_column",
+        );
         assert!(
             text.contains("enter path="),
             "the folder door does not record that it was reached at all"
