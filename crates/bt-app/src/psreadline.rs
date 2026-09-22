@@ -1782,15 +1782,16 @@ mod tests {
         std::fs::remove_dir_all(documents).unwrap();
     }
 
-    // ── what these two pins ask the crate instead ─────────────────────────
+    // ── what these two pins ask the crate ─────────────────
     //
-    // **P3's equivalence commit for this module**
-    // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). Every body is
-    // read twice — once as a slice of a named file, once as the body of an item
-    // of this crate — and `agreed` requires the two to be the same bytes;
-    // `agree` does the same for the counts. The deletion is the commit after
-    // this one. The pattern is `main.rs::pty_drain_budget_tests`' and is not
-    // re-derived here.
+    // **P3's deletion commit for this module**
+    // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). The commit
+    // before this one read every body twice — once as a slice of a named
+    // file, once as the body of an item of this crate — and asserted the two
+    // were the same bytes, and did the same for the counts; this one removes
+    // the older of the two, because two implementations of one judgement do
+    // not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4). The
+    // pattern is `main.rs::pty_drain_budget_tests`', not re-derived here.
     //
     // Two readings change shape.
     //
@@ -1819,42 +1820,6 @@ mod tests {
         source_index()
             .body_of(&bt_source::ItemQuery::function(name))
             .unwrap_or_else(|failure| panic!("{failure}"))
-    }
-
-    /// **A file's slice and a crate body, compared as bytes.** `Head` is a
-    /// slice that runs from after a signature prefix to the next declaration,
-    /// so the crate's body stands at its head; `Tail` is a slice cut at the
-    /// closing brace's own line, so it is the body without that last line.
-    fn agreed(old: &'static str, what: &str, whole: &'static str, cut: Cut) -> &'static str {
-        let new = match cut {
-            Cut::Head => whole,
-            Cut::Tail => &whole[..whole.rfind('\n').expect("a body spans lines")],
-        };
-        let at = old.find(new).unwrap_or_else(|| {
-            panic!("`{what}`: the file's slice and the crate's body are not the same bytes")
-        });
-        assert!(
-            !old[..at].contains('{'),
-            "`{what}`: the crate's body stands inside the file's slice rather than at the head of it"
-        );
-        old
-    }
-
-    /// Which end of the crate's body a file reading cut off.
-    #[derive(Clone, Copy)]
-    enum Cut {
-        Head,
-        Tail,
-    }
-
-    /// **The file's answer and the crate's, compared**, handing the file's back
-    /// so the assertion after it is the one that was always there.
-    fn agree<T: std::fmt::Debug + PartialEq>(what: &str, file: T, crate_reading: T) -> T {
-        assert_eq!(
-            file, crate_reading,
-            "{what}: this module's reading of the file and the crate's disagree"
-        );
-        file
     }
 
     /// One search over the whole package, refusing loudly rather than
@@ -1918,36 +1883,13 @@ mod tests {
 
     #[test]
     fn psreadline_clock_run_source_has_an_unread_edge() {
-        let main = include_str!("main.rs");
-        let body = agreed(
-            main.split("    fn raise_psreadline_invite_if_due(")
-                .nth(1)
-                .unwrap()
-                .split("\n    fn ")
-                .next()
-                .unwrap(),
-            "Runtime::raise_psreadline_invite_if_due",
-            method_body("Runtime", "raise_psreadline_invite_if_due"),
-            Cut::Head,
-        );
+        let body = method_body("Runtime", "raise_psreadline_invite_if_due");
         assert!(
             !body.contains("self.refresh_psreadline_installed()"),
             "the turn must enter the shared unread gate, never refresh directly"
         );
         assert!(body.contains("psreadline::installed_on_probe("));
-        let source = include_str!("psreadline.rs");
-        let gate = agreed(
-            source
-                .split("pub fn installed_on_probe(")
-                .nth(1)
-                .unwrap()
-                .split("\n}")
-                .next()
-                .unwrap(),
-            "installed_on_probe",
-            free_fn_body("installed_on_probe"),
-            Cut::Tail,
-        );
+        let gate = free_fn_body("installed_on_probe");
         assert!(gate.contains("if cache.is_none() && probe.is_some() {\n        refresh_installed(cache, documents);\n    }"));
         assert_eq!(gate.matches("refresh_installed(").count(), 1);
         assert!(!body.contains("installed_copy("));
@@ -1956,30 +1898,13 @@ mod tests {
 
     #[test]
     fn psreadline_readers_and_refresh_edges_are_wired_to_the_app_fact() {
-        let source = include_str!("main.rs");
-        let body = |name: &str| {
-            let slice = source
-                .split_once(&format!("    fn {name}("))
-                .unwrap()
-                .1
-                .split("\n    fn ")
-                .next()
-                .unwrap();
-            agreed(
-                slice,
-                &format!("Runtime::{name}"),
-                method_body("Runtime", name),
-                Cut::Head,
-            )
-        };
-        assert!(agree(
-            "the app's own fact",
-            source.contains("psreadline_installed: Option<psreadline::InstalledCopy>"),
+        let body = |name: &str| method_body("Runtime", name);
+        assert!(
             source_index()
                 .declaration_of(&bt_source::ItemQuery::field("App", "psreadline_installed"))
                 .unwrap_or_else(|failure| panic!("{failure}"))
-                .contains("psreadline_installed: Option<psreadline::InstalledCopy>"),
-        ));
+                .contains("psreadline_installed: Option<psreadline::InstalledCopy>")
+        );
         let row = body("psreadline_row_state");
         assert!(row.contains("self.app.psreadline_installed.unwrap_or_default()"));
         assert!(!row.contains("installed_copy("));
@@ -2024,15 +1949,9 @@ mod tests {
             .unwrap();
         assert!(edge.contains("self.refresh_psreadline_installed();"));
         assert_eq!(
-            agree(
-                "the refresh edges",
-                source
-                    .matches("self.refresh_psreadline_installed();")
-                    .count(),
-                in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
-                    "self.refresh_psreadline_installed();"
-                ))),
-            ),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "self.refresh_psreadline_installed();"
+            ))),
             3,
             "only install, remove, and Terminal-page open refresh the disk fact"
         );
