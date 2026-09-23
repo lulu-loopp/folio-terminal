@@ -44177,6 +44177,88 @@ fn the_open_pill_peeks_and_pins_like_a_chevron() {
     }
 }
 
+/// RED (35, owner follow-up 2026-09-23) — **a right click on a pane head
+/// opens its menu pinned; leaving keeps it; Esc, a click elsewhere or a second
+/// right click on the head close it.**
+///
+/// A right click is a click. The menu it raises used to close 150ms after the
+/// hand left, because the pane gate governs the pane menu whoever raised it;
+/// now the right-press arm pins what it opened, and a second right press on
+/// the same head (its body, `×`, folder or `⌄`) is that menu's own button
+/// press: it pins a peek and closes a pinned menu. A right press on another
+/// head is a click elsewhere, and moves the menu.
+///
+/// MUTATION: delete `self.pin_the_chevron_menu_a_press_opened(Popup::Pane)`
+/// after the right-press `open_pane_menu` in `mouse_input` and the source half
+/// goes red; make `a_right_press_is_on_the_pane_menus_head` ignore the seat and
+/// the other-head assertion does.
+#[test]
+fn a_right_click_opens_the_pane_menu_pinned_and_a_second_one_closes_it() {
+    let router = method_body("Runtime", "mouse_input");
+    assert!(
+        router.contains("self.pin_the_chevron_menu_a_press_opened(Popup::Pane);"),
+        "the right press that raises the pane menu pins it"
+    );
+    assert!(router.contains("a_right_press_is_on_the_pane_menus_head("));
+
+    // Opened pinned; the hand leaving owes nothing, for as long as it is away.
+    let start = Instant::now();
+    let mut gates = ChevronGates::default();
+    gates.gate(Popup::Pane).expect("governed").pin();
+    for step in 1..=10u32 {
+        let now = start + profiles::CHEVRON_LEAVE_GRACE * step;
+        hand_leaves(&mut gates, Popup::Pane, now);
+        assert_eq!(
+            gates.deadline(),
+            None,
+            "a right-clicked menu never closes on leave"
+        );
+    }
+
+    // A second right press on the same head, on any part of it: closed.
+    let menu = Some(SeatId(4));
+    for part in [
+        seats::ChromeTarget::PaneHeader(SeatId(4)),
+        seats::ChromeTarget::PaneClose(SeatId(4)),
+        seats::ChromeTarget::PaneFiles(SeatId(4)),
+        seats::ChromeTarget::PaneMenu(SeatId(4)),
+    ] {
+        assert!(a_right_press_is_on_the_pane_menus_head(menu, Some(part)));
+    }
+    assert_eq!(
+        press_pins_a_peek(OwnPress::Spent, gates.gate(Popup::Pane)),
+        OwnPress::Spent,
+        "a second right press on the head closes the pinned menu"
+    );
+    gates.menu_gone(Popup::Pane);
+    assert_eq!(gates, ChevronGates::default());
+
+    // On a peek the same press pins it, as the `⌄` does.
+    let mut peek = peek_open(Popup::Pane, start);
+    assert_eq!(
+        press_pins_a_peek(OwnPress::Spent, peek.gate(Popup::Pane)),
+        OwnPress::Pinned
+    );
+
+    // Another head, the terminal, or no menu at all: a click elsewhere.
+    assert!(!a_right_press_is_on_the_pane_menus_head(
+        menu,
+        Some(seats::ChromeTarget::PaneHeader(SeatId(5)))
+    ));
+    assert!(!a_right_press_is_on_the_pane_menus_head(menu, None));
+    assert!(!a_right_press_is_on_the_pane_menus_head(
+        None,
+        Some(seats::ChromeTarget::PaneHeader(SeatId(4)))
+    ));
+
+    // Esc and a click elsewhere go through the closers that drop the pin
+    // (`esc_closes_a_pinned_menu`, `a_click_elsewhere_closes_a_pinned_menu`).
+    assert!(
+        method_body("Runtime", "close_pane_menu")
+            .contains("self.window.chevrons.menu_gone(Popup::Pane)")
+    );
+}
+
 /// RED (35) — **only a press pins, and every door that takes a `⌄` menu away
 /// drops its pin.**
 ///

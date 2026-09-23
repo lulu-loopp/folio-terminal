@@ -8,9 +8,9 @@ use crate::{
     PressAfterBlur, PressedCellTarget, PreviewSurface, RenameExit, RenameSubject, RowActivation,
     RowHost, RowPayload, RowPayloadKind, RowPress, Runtime, SpringGate, TabClick,
     TerminalReference, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst, WheelRoute,
-    answered_once, button_router_position, crumb_segments, drain_whole_units, files,
-    files_row_activation, first_run, float, float_grasp, float_sizing_of, formula_tools,
-    glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
+    a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position, crumb_segments,
+    drain_whole_units, files, files_row_activation, first_run, float, float_grasp, float_sizing_of,
+    formula_tools, glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
     live_viewport_mouse_hit, marks, mouse_trace, native_window, over_home_ground, palette,
     pan_on_the_wheel_road, platform_pointer_of, pointer_cursor, press_after_blur, press_files_node,
     press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
@@ -4281,7 +4281,20 @@ impl Runtime<'_> {
                 }
                 None => {
                     if state == ElementState::Pressed {
-                        let own = self.press_on_its_own_trigger(Popup::Pane, position);
+                        // **A right press on the menu's own head is a click on
+                        // its button too** (owner follow-up 2026-09-23): the
+                        // head's whole bar raises this menu on a right press,
+                        // so a second right press there pins a peek and
+                        // closes a pinned menu, exactly as the `⌄` does.
+                        let own = if button == MouseButton::Right
+                            && a_right_press_is_on_the_pane_menus_head(
+                                self.window.pane_menu.as_ref().map(|menu| menu.seat),
+                                self.chrome_target_at(position),
+                            ) {
+                            press_pins_a_peek(OwnPress::Spent, self.chevron_menu_up(Popup::Pane))
+                        } else {
+                            self.press_on_its_own_trigger(Popup::Pane, position)
+                        };
                         if own.dismisses() {
                             self.window.chevrons.clear();
                             self.close_pane_menu()?;
@@ -4487,6 +4500,9 @@ impl Runtime<'_> {
             ) = self.chrome_target_at(position)
         {
             self.open_pane_menu(seat, [position.x as f32, position.y as f32])?;
+            // **A right click is a click** (owner follow-up 2026-09-23): the
+            // menu it raises is pinned, and never closes on leave.
+            self.pin_the_chevron_menu_a_press_opened(Popup::Pane);
             return Ok(());
         }
         // The right press that raises a repository row's own menu (v2 ④). Below

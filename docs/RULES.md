@@ -504,12 +504,14 @@ Entry added 2026-09-23 (owner ruling 2026-09-23; 0.4.4 ticket 35): §7.1.6e
 *全屋 `⌄` 语法* (2026-08-16) with its amendments of 2026-08-21, 2026-09-10 and
 2026-09-23 — **every `⌄` menu (pane head, tab strip, the rail's `Open ⌄`) opens
 as a peek on a 250 ms rest and closes 150 ms after the hand leaves the button and
-the menu; a click on the button pins it, from a peek or from closed; a pinned
-menu closes only on Esc, a click elsewhere or a second click on its button.** One
+the menu; a click, left or right, pins it, from a peek or from closed (a right
+click on a pane head raises the pane menu pinned); a pinned menu closes only on
+Esc, a click elsewhere or a second click on its button (for the pane menu, a
+second right click on the same head too).** One
 `pinned` bit on `profiles::ChevronGate` (written by `pin`, read by `observe`,
 cleared by `menu_gone`; `clear` stops only the clocks); no record of how the menu
-opened and no new timer. Entry: DESIGN 2026-09-23 *Every `⌄` menu opens as a
-peek*. The row stays `not yet folded` for the reason above.
+opened and no new timer. Entries: DESIGN 2026-09-23 *Every `⌄` menu opens as a
+peek* and *A right click is a click*. The row stays `not yet folded` for the reason above.
 
 ### 29. Attention — `folded`
 **Rule.** An **episode** is one unanswered request from one pane.

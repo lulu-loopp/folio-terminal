@@ -34972,6 +34972,31 @@ fn press_spends_itself_closing(
 /// menu's button is spent closing it, as before; and every other verdict —
 /// a press elsewhere, a trigger that keeps its press, a popover no `⌄` governs
 /// — passes through untouched.
+/// **Whether a right press lands on the head that raised the pane menu that is
+/// up** (owner follow-up 2026-09-23: a right click is a click).
+///
+/// The head's whole bar — its body, its `×`, its folder, its `⌄` — raises the
+/// pane menu on a right press, so each of them is that menu's button for a
+/// right press: the second one pins a peek or closes a pinned menu. A right
+/// press on *another* head is a click elsewhere and moves the menu there.
+fn a_right_press_is_on_the_pane_menus_head(
+    menu: Option<SeatId>,
+    target: Option<seats::ChromeTarget>,
+) -> bool {
+    let Some(menu) = menu else {
+        return false;
+    };
+    matches!(
+        target,
+        Some(
+            seats::ChromeTarget::PaneHeader(seat)
+                | seats::ChromeTarget::PaneClose(seat)
+                | seats::ChromeTarget::PaneFiles(seat)
+                | seats::ChromeTarget::PaneMenu(seat),
+        ) if seat == menu
+    )
+}
+
 fn press_pins_a_peek(verdict: OwnPress, gate: Option<&mut profiles::ChevronGate>) -> OwnPress {
     match gate {
         Some(gate) if verdict == OwnPress::Spent && !gate.is_pinned() => {
