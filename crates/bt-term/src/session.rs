@@ -36669,8 +36669,13 @@ mod tests {
     /// The other half of the criterion, and the half that keeps it a rule rather
     /// than a sweep: the modes the shell *does* use are not touched.
     ///
-    /// `2004` is PSReadLine's own — it turns bracketed paste on for itself and
-    /// would be broken by a prompt that cleared it. `1049` belongs to whoever put
+    /// `2004` is the line editor's own where it has one — GNU readline 8.1 and
+    /// later, zsh's ZLE and fish turn bracketed paste on at their own prompt,
+    /// and a prompt that cleared it would break their paste. (PSReadLine is not
+    /// one of them: no version Folio has measured — 2.0.0, 2.4.5, 2.4.6 — sets
+    /// it or parses its markers, which is why a PowerShell paste takes its own
+    /// road; 0.4.4 ticket 03, correcting the reason this doc gave until then.)
+    /// `1049` belongs to whoever put
     /// the alternate screen up, and a prompt is not evidence that they left.
     /// `1007` only means anything on the alternate screen and is inert on a
     /// prompt. `DECCKM` is a keyboard mode a line editor may well have set.

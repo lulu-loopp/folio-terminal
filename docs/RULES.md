@@ -241,9 +241,17 @@ paste by `stage_paste` from `Runtime::deliver_paste`, where all four paste doors
 converge: the card is raised when the `multiline_paste_ask` setting is on, the
 payload was the clipboard's own text, the pane has not set `?2004`, and
 `input::pasted_line_count` is more than one (a single trailing separator does not
-count). A pane whose paste grammar is PowerShell at a prompt the shell opened in
-order takes PowerShell's own road instead (0.4.4 ticket 03) and is never shown
-the card; until that road lands it gets today's bytes. The card, centred on the
+count). **PowerShell asks nothing** (ruling 2026-09-22; `DESIGN.md` trailing
+entry 2026-09-23 *A multi-line paste into PowerShell lands whole on the input
+line and runs on one Enter*, 0.4.4 ticket 03): a pane whose paste grammar is
+PowerShell at a prompt the shell opened in order, on Windows, is never shown the
+card, whatever the setting; the block lands on PSReadLine's input line and runs
+on one Enter. One write: the byte `0x16` (`bt_pty::PSREADLINE_PASTE_INPUT`, and
+PSReadLine pastes the clipboard itself) when `input::psreadline_pastes_it_unchanged`,
+otherwise Folio's cleaned bytes with each break a Shift+Enter record
+(`input::input_line_bytes`). Only the clipboard's own text takes it; a paste the
+clipboard is rewritten under within ~20 ms is an accepted limit. A PowerShell
+pane missing any fact (no marks, a program running, macOS) gets the card. The card, centred on the
 window, says `N lines → <shell>`; `Enter` = *Run line by line* (today's bytes),
 `Tab` = *Join into one line* (`input::join_lines`: one space per run of breaks,
 no `\r`, no invented separator), `Esc` or `×` = nothing sent, clipboard
@@ -548,7 +556,10 @@ question is a *synchronous gate the reader's own gesture opened* — not a
 notification — and its ruled surface is a small **modal card centred on the
 window**, in the first-run card's and the dialogs' family, not anchored to the
 pane it is about (the pane association is the focus border and the card's own
-`→ <shell>`).
+`→ <shell>`). And a second datum (2026-09-23, ticket 03): where the program can
+take the block without running it — PowerShell at an open prompt — the same
+gesture raises **no surface at all**; a question is put only where no road
+lands the block unexecuted.
 
 ### 31. Settings and migrations — `not yet folded`
 Entries: the M2 schema document §2; the `migrate.rs` module doc; §7.19 *the words

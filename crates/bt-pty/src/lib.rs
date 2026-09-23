@@ -90,6 +90,17 @@ pub const TERM_READ_SLICE: NonZeroUsize = NonZeroUsize::new(8 * 1024).unwrap();
 /// On PSReadLine 2.4.x the handler repairs the cached input anchor and render geometry without
 /// repainting; older/unproven versions consume the chord as a no-op.
 pub const PSREADLINE_INVOKE_PROMPT_INPUT: &[u8] = b"\x1b[24;8~";
+/// **Ctrl+V, as the one byte ConPTY turns into that key** — the multi-line paste road for a
+/// PowerShell prompt (0.4.4 ticket 03).
+///
+/// Written *instead of* the pasted text: PSReadLine's default Ctrl+V binding is `Paste`, which
+/// reads the Windows clipboard itself and inserts the block into its multi-line edit buffer
+/// without accepting it, so nothing runs until the reader presses Enter once. Measured on a
+/// clean Windows 11 (2026-09-23 spike) with PowerShell 5.1 + PSReadLine 2.0.0 and 2.4.6 and pwsh
+/// 7.6.6 + 2.4.5, on Folio's ConPTY and on the inbox one. `cmd.exe` types it as `^V`, and a
+/// PSReadLine outside ConPTY may bind it to nothing, so the caller sends it only to a PowerShell
+/// prompt the shell opened in order, on Windows.
+pub const PSREADLINE_PASTE_INPUT: &[u8] = b"\x16";
 
 /// Windows PowerShell — the shell that is part of the operating system.
 ///
