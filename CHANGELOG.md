@@ -14,6 +14,9 @@ All notable changes to Folio are recorded here. The format follows
 - The glance card's shadow and the tooltip's padding and corners now match the
   rest of the float-tag family.
 
+- The Git page's row height, head and row type, and section labels now match
+  the rest of the window.
+
 ### Fixed
 
 - Touch input — a touch screen, or a remote-desktop tool that sends touch —
