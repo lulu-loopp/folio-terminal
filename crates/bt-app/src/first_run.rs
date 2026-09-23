@@ -3044,8 +3044,27 @@ mod tests {
             Target::Row(0),
             "the lit band answered a hover and not a press"
         );
+        // **The footer is pinned to the viewport, not to how many rows
+        // overflow it** (`cursor = viewport[3] + FOOT_GAP…` in [`layout`]), so
+        // shortening every row (`UI-SPEC.md` H4) moves the last row's switch
+        // up without moving the footer — and on this fixture the two used to
+        // clear each other by more room than they do now. The switch's own
+        // *centre* is no longer reliably past the footer, but the switch is
+        // still taller than the gap: probe low in the switch instead of at
+        // its middle, between the footer's own foot and the switch's, which
+        // stays correct regardless of exactly how much room is left.
         let last = placed.rows.len() - 1;
-        let (x, y) = middle(placed.rows[last].switch);
+        let switch = placed.rows[last].switch;
+        let below_the_foot = placed.done.1[3]
+            .max(placed.later.1[3])
+            .max(placed.body_clip[3]);
+        assert!(
+            switch[3] > below_the_foot,
+            "this fixture needs the last row's switch to still reach below \
+             the footer, or the probe below tests nothing"
+        );
+        let x = f64::from((switch[0] + switch[2]) / 2.0);
+        let y = f64::from((below_the_foot + switch[3]) / 2.0);
         assert_eq!(
             hit(&placed, x, y),
             Target::Panel,
