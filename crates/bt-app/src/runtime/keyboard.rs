@@ -1161,9 +1161,13 @@ impl Runtime<'_> {
         // Enter, the Join key and Esc"). `Enter` runs the lines as today — the reader has just
         // read the count, and the informed Enter is the point (2026-09-22) — `Tab` joins them and
         // `Esc` cancels. Every other key is swallowed and the card stays up.
-        if self.paste_card_seat().is_some() {
+        //
+        // `Enter` is the card's default, which is `Join` for a block wrapped with the shell's
+        // continuation mark (0.4.4 ticket 45).
+        if let Some(default) = self.paste_card_default() {
             if !event.repeat
-                && let Some(answer) = paste_card_key(&event.logical_key, self.window.modifiers)
+                && let Some(answer) =
+                    paste_card_key(&event.logical_key, self.window.modifiers, default)
             {
                 self.answer_paste_card(answer)?;
             }

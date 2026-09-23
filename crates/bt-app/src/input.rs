@@ -866,6 +866,86 @@ pub(crate) fn join_lines(text: &str) -> String {
     joined
 }
 
+/// **The lines of a pasted block, as [`pasted_line_count`] counts them** — `\r\n`, `\r` and
+/// `\n` each end one, and a single trailing separator ends the last rather than opening another.
+fn pasted_lines(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut lines = Vec::new();
+    let (mut start, mut at) = (0, 0);
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\r' => {
+                lines.push(&text[start..at]);
+                at += if bytes.get(at + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+                start = at;
+            }
+            b'\n' => {
+                lines.push(&text[start..at]);
+                at += 1;
+                start = at;
+            }
+            _ => at += 1,
+        }
+    }
+    if start < text.len() || lines.is_empty() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+/// **Does this line hand its command on to the next one with `mark`?** Trailing whitespace is
+/// not part of the question, and a doubled mark is the mark written literally (`^^` in cmd, two
+/// backticks in PowerShell, `\\` in a POSIX shell), so it is an odd run of marks that continues.
+fn continues_with(line: &str, mark: char) -> bool {
+    line.trim_end()
+        .chars()
+        .rev()
+        .take_while(|character| *character == mark)
+        .count()
+        % 2
+        == 1
+}
+
+/// **Is this block one command wrapped across lines?** (0.4.4 ticket 45) — every line but the
+/// last ends with `mark`, the shell's own continuation mark.
+///
+/// A block of one line is not wrapped, and a blank line in the middle ends no command with a
+/// mark, so a block with one is a block of commands.
+pub(crate) fn continued_by(text: &str, mark: char) -> bool {
+    let lines = pasted_lines(text);
+    lines.len() > 1
+        && lines[..lines.len() - 1]
+            .iter()
+            .all(|line| continues_with(line, mark))
+}
+
+/// **The card's `Join into one line` for a block [`continued_by`] `mark`** (0.4.4 ticket 45): the
+/// marks it recognised come off — a `^` at a line's end is not part of the command once the
+/// line has been joined — and the lines join with one space. A continuation line's indent is
+/// the wrap's, not the command's, so it goes with the break. No terminating `\r`, for
+/// [`join_lines`]'s reason.
+pub(crate) fn join_continued_lines(text: &str, mark: char) -> String {
+    let lines = pasted_lines(text);
+    let last = lines.len() - 1;
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let line = if index == 0 { line } else { line.trim_start() };
+            if index == last {
+                return line;
+            }
+            let line = line.trim_end();
+            line.strip_suffix(mark).unwrap_or(line).trim_end()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// **Shift+Enter, down and up, as two win32-input-mode key records** (`CSI Vk;Sc;Uc;Kd;Cs;Rc _`:
 /// `VK_RETURN` 13, scan code 28, character `\r`, key down then up, `SHIFT_PRESSED` 0x10, one
 /// repeat) — PSReadLine's `AddLine`, which puts a line break into the edit buffer and runs

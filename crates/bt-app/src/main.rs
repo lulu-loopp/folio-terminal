@@ -1003,8 +1003,38 @@ struct PendingPaste {
     text: String,
     /// [`input::pasted_line_count`] of it, which the card says.
     lines: usize,
+    /// **The shell's continuation mark, when the block is one command wrapped with it** — every
+    /// line but the last ends with it ([`input::continued_by`], 0.4.4 ticket 45). Then the card's
+    /// default is `Join`, and the join takes the marks off ([`paste_answer_text`]).
+    continued: Option<char>,
     /// The write's name in the error log, from the door that prepared it.
     context: &'static str,
+}
+
+impl PendingPaste {
+    /// **The answer `Enter` gives** (0.4.4 ticket 45): `Join` for a block that is one command
+    /// wrapped across lines — running it line by line would run each fragment on its own — and
+    /// `Run line by line` for everything else, as ticket 02 ruled.
+    fn default_answer(&self) -> PasteAnswer {
+        if self.continued.is_some() {
+            PasteAnswer::Join
+        } else {
+            PasteAnswer::RunLineByLine
+        }
+    }
+}
+
+/// **The mark a line of this shell ends with when its command goes on to the next line** (0.4.4
+/// ticket 45): cmd's `^`, PowerShell's backtick, a POSIX shell's and fish's backslash. Nushell
+/// has none (a command spans lines inside brackets, not after a mark), and an agent's prompt is
+/// not a shell.
+fn line_continuation_mark(grammar: shell_literal::ShellGrammar) -> Option<char> {
+    match grammar {
+        shell_literal::ShellGrammar::Cmd => Some('^'),
+        shell_literal::ShellGrammar::PowerShell => Some('`'),
+        shell_literal::ShellGrammar::Posix | shell_literal::ShellGrammar::Fish => Some('\\'),
+        shell_literal::ShellGrammar::Nushell | shell_literal::ShellGrammar::Agent => None,
+    }
 }
 
 /// What `Runtime::deliver_paste` does with a paste, once the question has been put.
@@ -1044,6 +1074,7 @@ fn stage_paste(
     let Some(leaf) = tab.sessions.get(&target.seat) else {
         return StagedPaste::Send(text);
     };
+    let mark = line_continuation_mark(leaf.paste_recipient.encoder.grammar);
     match paste_road(&text, PasteFacts::of(leaf, clipboard_text, ask, host)) {
         PasteRoad::AsTyped => StagedPaste::Send(text),
         PasteRoad::InputLine => StagedPaste::InputLine(powershell_input_line(&text)),
@@ -1052,10 +1083,12 @@ fn stage_paste(
                 leaf.pending_paste = None;
             }
             if let Some(leaf) = tab.sessions.get_mut(&target.seat) {
+                let continued = mark.filter(|mark| input::continued_by(&text, *mark));
                 leaf.pending_paste = Some(PendingPaste {
                     target,
                     text,
                     lines,
+                    continued,
                     context,
                 });
             }
@@ -1082,9 +1115,11 @@ fn take_pending_paste(tab: &mut TabState) -> Option<PendingPaste> {
 /// **The three answers the paste card takes** (owner's rulings 2026-09-22 and 2026-09-23).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PasteAnswer {
-    /// `Enter`, and the default: today's bytes, one command per line.
+    /// Today's bytes, one command per line — `Enter`'s answer unless the block is one command
+    /// wrapped across lines ([`PendingPaste::default_answer`]).
     RunLineByLine,
-    /// `Tab`, or a press on the word: the lines joined by spaces, and no Enter.
+    /// `Tab`, or a press on the word, or `Enter` for a wrapped block: the lines joined by spaces,
+    /// and no Enter.
     Join,
     /// `Esc` or `×`: nothing is sent and the clipboard is not touched.
     Cancel,
@@ -1094,7 +1129,10 @@ enum PasteAnswer {
 fn paste_answer_text(pending: &PendingPaste, answer: PasteAnswer) -> Option<String> {
     match answer {
         PasteAnswer::RunLineByLine => Some(pending.text.clone()),
-        PasteAnswer::Join => Some(input::join_lines(&pending.text)),
+        PasteAnswer::Join => Some(match pending.continued {
+            Some(mark) => input::join_continued_lines(&pending.text, mark),
+            None => input::join_lines(&pending.text),
+        }),
         PasteAnswer::Cancel => None,
     }
 }
@@ -1102,12 +1140,19 @@ fn paste_answer_text(pending: &PendingPaste, answer: PasteAnswer) -> Option<Stri
 /// **The only keys the card answers** (owner's ruling 2026-09-23: "the card is modal and answers
 /// only Enter, the Join key and Esc"). Everything else — a letter, a chord, `Ctrl+V` again, a
 /// modified `Enter` — is `None`, reaches nothing, and leaves the card up.
-fn paste_card_key(key: &Key, modifiers: ModifiersState) -> Option<PasteAnswer> {
+///
+/// `Enter` gives the card's `default` ([`PendingPaste::default_answer`]); `Tab` is the Join key
+/// whichever word is the default.
+fn paste_card_key(
+    key: &Key,
+    modifiers: ModifiersState,
+    default: PasteAnswer,
+) -> Option<PasteAnswer> {
     if !modifiers.is_empty() {
         return None;
     }
     match key {
-        Key::Named(NamedKey::Enter) => Some(PasteAnswer::RunLineByLine),
+        Key::Named(NamedKey::Enter) => Some(default),
         Key::Named(NamedKey::Tab) => Some(PasteAnswer::Join),
         Key::Named(NamedKey::Escape) => Some(PasteAnswer::Cancel),
         _ => None,

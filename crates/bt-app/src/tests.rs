@@ -50900,6 +50900,7 @@ fn enter_runs_it_line_by_line_with_todays_bytes() {
     let answer = paste_card_key(
         &Key::Named(NamedKey::Enter),
         winit::keyboard::ModifiersState::empty(),
+        PasteAnswer::RunLineByLine,
     );
     assert_eq!(answer, Some(PasteAnswer::RunLineByLine));
     let pending = take_pending_paste(&mut tab).expect("the answer takes it");
@@ -50923,6 +50924,7 @@ fn join_sends_one_line_and_no_enter() {
     let answer = paste_card_key(
         &Key::Named(NamedKey::Tab),
         winit::keyboard::ModifiersState::empty(),
+        PasteAnswer::RunLineByLine,
     );
     assert_eq!(answer, Some(PasteAnswer::Join));
     let pending = take_pending_paste(&mut tab).expect("the answer takes it");
@@ -50930,6 +50932,109 @@ fn join_sends_one_line_and_no_enter() {
     let sent = paste_bytes_sent(&mut tab, target.seat, &text);
     assert_eq!(sent, b"dir echo one ver");
     assert!(!sent.contains(&b'\r'), "no Enter: nothing runs");
+}
+
+/// RED (45) — **a block wrapped with the shell's continuation mark joins on `Enter`, and the join
+/// takes the marks off.**
+///
+/// Owner, 2026-09-23: a block copied as one command wrapped across lines — every line but the last
+/// ending with cmd's `^` — run line by line runs each fragment as its own command. The card
+/// now defaults to `Join` for such a block, and the joined line has no `^` in it: once the line
+/// is one line the mark is no longer part of the command. Through the real road: the clipboard's
+/// text staged into a cmd pane, the key's answer, and the bytes the writer would send.
+///
+/// MUTATION: ignore the marks (`let continued = None;` in `stage_paste`) — the default stays
+/// `Run line by line` and the first assertion goes red.
+#[test]
+fn a_block_wrapped_with_carets_joins_on_enter_and_loses_its_carets() {
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    let wrapped = "dir ^\r\n  /b ^  \r\n  /s\r\n";
+    assert_eq!(
+        paste_text_into(&mut tab, target, wrapped, true),
+        StagedPaste::Held
+    );
+    let (_, pending) = pending_paste_in(&tab).expect("the card is up");
+    assert_eq!(pending.default_answer(), PasteAnswer::Join);
+    let answer = paste_card_key(
+        &Key::Named(NamedKey::Enter),
+        winit::keyboard::ModifiersState::empty(),
+        pending.default_answer(),
+    );
+    assert_eq!(answer, Some(PasteAnswer::Join), "Enter joins it");
+    let pending = take_pending_paste(&mut tab).expect("the answer takes it");
+    let text = paste_answer_text(&pending, PasteAnswer::Join).expect("it sends");
+    assert_eq!(text, "dir /b /s");
+    let sent = paste_bytes_sent(&mut tab, target.seat, &text);
+    assert!(!sent.contains(&b'^'), "the marks came off: {sent:?}");
+    assert!(!sent.contains(&b'\r'), "no Enter: nothing runs");
+    // `Tab` is still the Join key.
+    assert_eq!(
+        paste_card_key(
+            &Key::Named(NamedKey::Tab),
+            winit::keyboard::ModifiersState::empty(),
+            PasteAnswer::Join,
+        ),
+        Some(PasteAnswer::Join)
+    );
+}
+
+/// RED (45) — **a block without the marks keeps `Run line by line` as its default**, and the other
+/// shells' marks are their own.
+///
+/// A block of commands is what ticket 02's card was for, and it still runs line by line on
+/// `Enter`. A mark is the target shell's: a backslash-wrapped block is wrapped for a POSIX shell
+/// and not for cmd, and `^^` at a line's end is cmd's literal caret, not a continuation.
+///
+/// MUTATION: treat every block as wrapped (`continued_by` answering `true`) — the first
+/// assertion goes red.
+#[test]
+fn a_block_without_marks_keeps_run_line_by_line_as_its_default() {
+    let default_for = |grammar, text: &str| {
+        let (mut tab, target) = paste_tab(paste_leaf(grammar, b""));
+        assert_eq!(
+            paste_text_into(&mut tab, target, text, true),
+            StagedPaste::Held
+        );
+        let (_, pending) = pending_paste_in(&tab).expect("the card is up");
+        (
+            pending.default_answer(),
+            paste_answer_text(pending, PasteAnswer::Join).expect("a join sends"),
+        )
+    };
+    let cmd = shell_literal::ShellGrammar::Cmd;
+    let posix = shell_literal::ShellGrammar::Posix;
+    assert_eq!(
+        default_for(cmd, THREE_LINES),
+        (PasteAnswer::RunLineByLine, "dir echo one ver".to_owned())
+    );
+    assert_eq!(
+        paste_card_key(
+            &Key::Named(NamedKey::Enter),
+            winit::keyboard::ModifiersState::empty(),
+            PasteAnswer::RunLineByLine,
+        ),
+        Some(PasteAnswer::RunLineByLine)
+    );
+    assert_eq!(
+        default_for(cmd, "echo ^^\r\nver").0,
+        PasteAnswer::RunLineByLine,
+        "`^^` is a literal caret"
+    );
+    assert_eq!(
+        default_for(cmd, "ls \\\n  -la").0,
+        PasteAnswer::RunLineByLine,
+        "a backslash is not cmd's mark"
+    );
+    assert_eq!(
+        default_for(cmd, "dir ^\n\nver").0,
+        PasteAnswer::RunLineByLine,
+        "a blank line ends no command with a mark"
+    );
+    assert_eq!(
+        default_for(posix, "ls \\\n  -la \\\n  /tmp"),
+        (PasteAnswer::Join, "ls -la /tmp".to_owned()),
+        "a POSIX shell's mark is the backslash"
+    );
 }
 
 /// RED (0.4.4 ticket 02) — **`Esc` sends no bytes and leaves the clipboard alone.**
@@ -50948,6 +51053,7 @@ fn cancel_sends_no_bytes_and_leaves_the_clipboard() {
     let answer = paste_card_key(
         &Key::Named(NamedKey::Escape),
         winit::keyboard::ModifiersState::empty(),
+        PasteAnswer::RunLineByLine,
     );
     assert_eq!(answer, Some(PasteAnswer::Cancel));
     let pending = take_pending_paste(&mut tab).expect("the answer takes it");
@@ -51088,7 +51194,11 @@ fn a_key_other_than_enter_tab_or_esc_reaches_nothing_and_leaves_the_card_up() {
         Key::Named(NamedKey::ArrowUp),
         Key::Named(NamedKey::F5),
     ] {
-        assert_eq!(paste_card_key(&key, none), None, "{key:?}");
+        assert_eq!(
+            paste_card_key(&key, none, PasteAnswer::RunLineByLine),
+            None,
+            "{key:?}"
+        );
     }
     for (key, modifiers) in [
         (Key::Character("v".into()), ModifiersState::CONTROL),
@@ -51099,7 +51209,7 @@ fn a_key_other_than_enter_tab_or_esc_reaches_nothing_and_leaves_the_card_up() {
         (Key::Named(NamedKey::Escape), ModifiersState::ALT),
     ] {
         assert_eq!(
-            paste_card_key(&key, modifiers),
+            paste_card_key(&key, modifiers, PasteAnswer::RunLineByLine),
             None,
             "{key:?} {modifiers:?}"
         );
@@ -51113,7 +51223,7 @@ fn a_key_other_than_enter_tab_or_esc_reaches_nothing_and_leaves_the_card_up() {
     assert!(pending_paste_in(&tab).is_some());
 
     let ladder = squeezed_body("Runtime", "keyboard_input");
-    let rung = "ifself.paste_card_seat().is_some(){if!event.repeat&&letSome(answer)=paste_card_key(&event.logical_key,self.window.modifiers){self.answer_paste_card(answer)?;}returnOk(());}";
+    let rung = "ifletSome(default)=self.paste_card_default(){if!event.repeat&&letSome(answer)=paste_card_key(&event.logical_key,self.window.modifiers,default){self.answer_paste_card(answer)?;}returnOk(());}";
     let at = ladder
         .find(rung)
         .unwrap_or_else(|| panic!("the card's rung is not whole"));

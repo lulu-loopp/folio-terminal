@@ -501,6 +501,14 @@ impl Runtime<'_> {
         pending_paste_in(tab).map(|(seat, _)| seat)
     }
 
+    /// **The answer `Enter` gives the card that is up**, or `None` while no paste waits (0.4.4
+    /// ticket 45) — read off the pending paste, like the card, so the key and the accented word
+    /// cannot disagree.
+    pub(crate) fn paste_card_default(&self) -> Option<PasteAnswer> {
+        let tab = self.window.tabs.get(self.window.active_tab)?;
+        pending_paste_in(tab).map(|(_, pending)| pending.default_answer())
+    }
+
     /// **Spend the card's answer** — `Enter`, `Tab`, `Esc`, or a press on it.
     ///
     /// The paste is taken off its leaf first, whatever the answer, so an answer can never be
@@ -548,11 +556,21 @@ impl Runtime<'_> {
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let lines = pending.lines;
+        let default = match pending.default_answer() {
+            PasteAnswer::Join => restore::PasteCardTarget::Join,
+            PasteAnswer::RunLineByLine | PasteAnswer::Cancel => restore::PasteCardTarget::Run,
+        };
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let content =
-            restore::paste_card_content(lines, &shell, width, scale, &mut |text, size, weight| {
+        let content = restore::paste_card_content(
+            lines,
+            &shell,
+            default,
+            width,
+            scale,
+            &mut |text, size, weight| {
                 renderer.measure_chrome_label(gpu, text, size, weight, 0.0, false)
-            });
+            },
+        );
         Some(restore::paste_card_layout(&content, width, height, scale))
     }
 }
