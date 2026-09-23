@@ -26,6 +26,9 @@ All notable changes to Folio are recorded here. The format follows
 - A folder an agent prints with a slash on the end (`whydrift/models/`) is a
   link, like the same folder printed without one. Clicking it shows the folder.
 
+- A printed path followed by a full-width stop and a number or a Latin word
+  (`notes.md。18 items`) is a link when the file is there.
+
 ## 0.4.3-preview — 2026-09-21
 
 ### Added

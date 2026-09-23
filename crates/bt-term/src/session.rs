@@ -26073,6 +26073,80 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// RED (owner report 2026-09-22) — **a full-width stop ends the name whatever follows it**,
+    /// walked from the printed row to the real disk.
+    ///
+    /// Claude Code printed `草稿在 <path>.md。18 条,每条三段:规则 /` with the path as an inline
+    /// code span, so the row carries the span's colour around the name and no space between
+    /// `.md` and `。18`. The file was on the disk and the row wore no mark: every reading the
+    /// lexer offered carried `。18`, because a seam required a non-ASCII character behind its
+    /// separator and the `1` is ASCII. `…md。十八条` was a link on the same commit.
+    ///
+    /// The lexer's half is pinned in `bt_transcript::paths` by
+    /// `a_non_ascii_separator_is_a_seam_whatever_follows_it`; this is the half that decides.
+    ///
+    /// MUTATION: drop `!character.is_ascii() ||` from `prose_seam_ends` and the row goes dark.
+    #[test]
+    fn a_printed_path_behind_a_full_width_stop_and_a_digit_is_a_link() {
+        /// The reference's text and its target, read off one frame row.
+        fn linked_on(frame: &ViewportFrame, row: u32) -> Option<(String, String)> {
+            let columns = frame.columns.get() as usize;
+            let start = row as usize * columns;
+            let mut text = String::new();
+            let mut uri = None;
+            for cell in &frame.cells[start..start + columns] {
+                if let Some(link) = &cell.hyperlink {
+                    uri.get_or_insert_with(|| link.uri.to_string());
+                    text.push_str(&cell.text);
+                }
+            }
+            uri.map(|uri| (text, uri))
+        }
+
+        let (directory, spare) = temporary_ordinary_file();
+        let draft = directory.join("engineering-playbook-draft-2026-09-21.md");
+        std::fs::write(&draft, b"# draft\n").unwrap();
+        let name = draft.to_string_lossy().into_owned();
+
+        let mut session = DualPlaneSession::new(nz(200), nz(8));
+        enable_path_detection(&mut session);
+        session
+            .feed(
+                format!(
+                    "\x1b]7;file:///{}\x07",
+                    directory.to_string_lossy().replace('\\', "/")
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        // Byte for byte as Claude Code emits it: the code span's truecolour around the name, the
+        // default foreground back, and the prose glued on behind.
+        let prose = "。18 条,每条三段:规则 /";
+        assert!(
+            bt_unicode::text_width(&format!("草稿在 {name}{prose}")) < 200,
+            "the row must not reach the last cell, or the truncation gate answers instead"
+        );
+        session
+            .feed(format!("草稿在 \x1b[38;2;177;185;249m{name}\x1b[39m{prose}\r\n").as_bytes())
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        assert!(session.path_is_verified(&draft));
+        assert_eq!(
+            linked_on(&frame, 0),
+            Some((
+                name.clone(),
+                bt_transcript::paths::local_path_to_file_uri(&draft)
+            )),
+            "the link is the name without the full-width stop, and it opens the file"
+        );
+
+        std::fs::remove_file(&draft).unwrap();
+        std::fs::remove_file(&spare).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
     /// PIN (user report 2026-08-21) — **a path the terminal wrapped is still one link**, asked of
     /// the real vendor grid rather than of a hand-built one.
     ///
