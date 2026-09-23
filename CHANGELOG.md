@@ -20,7 +20,7 @@ All notable changes to Folio are recorded here. The format follows
 - Every pane's head title is the same size as the float and glance heads', and
   the pane head's `⌄`, the preview switch, the float's dock and the files
   root button now stand in the same tool box every other head control uses.
-  The formula band's own buttons, which the same ruling already said reuse
+  The formula band's own buttons, which already reuse
   the pane head's, grow with it.
 
 - The command palette's field and rows are the same text size as the rest of
