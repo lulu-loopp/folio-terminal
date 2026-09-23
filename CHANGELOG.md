@@ -17,6 +17,10 @@ All notable changes to Folio are recorded here. The format follows
 - The Git page's row height, head and row type, and section labels now match
   the rest of the window.
 
+- Every pane's head title is the same size as the float and glance heads', and
+  the pane head's `⌄`, the preview switch, the float's dock and the files
+  root button now stand in the same tool box every other head control uses.
+
 ### Fixed
 
 - Touch input — a touch screen, or a remote-desktop tool that sends touch —

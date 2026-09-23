@@ -6810,14 +6810,16 @@ fn pixel_snapped(rect: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// The tool box in a head (`UI-SPEC.md` H3; [`PREVIEW_TOOL_BOX_LOGICAL_PX`]
+/// below), not the mock-up's own
 /// `.tab-files, .pane-files { width: 19px; height: 19px }` (mock-up 753-755),
-/// and `.files-head .pane-float` is given the same box at line 516-517.
+/// and `.files-head .pane-float` given the same box at line 516-517.
 ///
 /// One constant for all three because the mock-up writes one rule for the first
 /// two and repeats its numbers for the third: they are the same control in three
 /// places, and the note at line 752 says why — "同一个字形两处用,因为它是同一个
 /// 动作".
-pub const PANE_HEAD_TRIGGER_BOX_LOGICAL_PX: f32 = 19.0;
+pub const PANE_HEAD_TRIGGER_BOX_LOGICAL_PX: f32 = PREVIEW_TOOL_BOX_LOGICAL_PX;
 /// `border-radius: 5px` on the same three.
 pub const PANE_HEAD_TRIGGER_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.tab-files svg, .pane-files svg { width: 13px }`.
@@ -15238,8 +15240,9 @@ pub const FILES_ROW_FOCUS_RING_LOGICAL_PX: f32 = 1.5;
 /// `.files-root { padding: 2px 5px; margin: 0 -3px }` — the two together are the
 /// 2px the button's fill reaches past its own text (B15).
 pub const FILES_ROOT_BUTTON_INSET_LOGICAL_PX: f32 = 2.0;
-/// The button's box height: an 11px line in 2px of padding, top and bottom.
-pub const FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX: f32 = 19.0;
+/// The tool box in a head (`UI-SPEC.md` H3; [`PREVIEW_TOOL_BOX_LOGICAL_PX`]),
+/// not the mock-up's own 11px line in 2px of padding, top and bottom.
+pub const FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX: f32 = PREVIEW_TOOL_BOX_LOGICAL_PX;
 /// `.files-root { border-radius: 5px }`.
 pub const FILES_ROOT_BUTTON_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.files-root { gap: 4px }`, between the name and its chevron.
@@ -15454,10 +15457,10 @@ pub const PREVIEW_NAV_SPENT: f32 = 0.22;
 /// name's box grown five each way, and the negative margin is what keeps it from
 /// pushing the row wider (P18, the `.files-root` trick).
 pub const PREVIEW_SWITCH_INSET_X_LOGICAL_PX: f32 = 5.0;
-/// The pill's height: a 12.5px name's line box plus its `padding: 2px` top and
-/// bottom. The same nineteen the files head's root button lands on, and not a
-/// coincidence — both are "a name plus its padding" inside the same 30px head.
-pub const PREVIEW_SWITCH_HEIGHT_LOGICAL_PX: f32 = 19.0;
+/// The tool box in a head (`UI-SPEC.md` H3; [`PREVIEW_TOOL_BOX_LOGICAL_PX`]),
+/// not the mock-up's own 12.5px name's line box plus its `padding: 2px` top
+/// and bottom.
+pub const PREVIEW_SWITCH_HEIGHT_LOGICAL_PX: f32 = PREVIEW_TOOL_BOX_LOGICAL_PX;
 /// `.pv-name.switch { border-radius: 5px }`.
 pub const PREVIEW_SWITCH_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.pv-name.switch { gap: 4px }`, between the name, the chevron and the badge.
@@ -22237,6 +22240,32 @@ mod tests {
     use bt_persist::{
         SESSION_SCHEMA_VERSION, SessionV1, TabV1, read_session, write_session_atomic,
     };
+
+    /// RED (ticket 19) — **the pane head's `⌄`, the preview switch and the
+    /// files root button stand in the tool box every other head control uses,
+    /// not a smaller one of their own.**
+    ///
+    /// `UI-SPEC.md` H3: these three used to sit in a 19-pt box where
+    /// [`PREVIEW_TOOL_BOX_LOGICAL_PX`] (22) is the tool box in a head.
+    ///
+    /// MUTATION: revert any of `PANE_HEAD_TRIGGER_BOX_LOGICAL_PX`,
+    /// `PREVIEW_SWITCH_HEIGHT_LOGICAL_PX` or
+    /// `FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX` to a literal and this goes red.
+    #[test]
+    fn ui_spec_pane_head_class_a_values_follow_the_rule() {
+        assert_eq!(
+            PANE_HEAD_TRIGGER_BOX_LOGICAL_PX, PREVIEW_TOOL_BOX_LOGICAL_PX,
+            "UI-SPEC.md H3"
+        );
+        assert_eq!(
+            PREVIEW_SWITCH_HEIGHT_LOGICAL_PX, PREVIEW_TOOL_BOX_LOGICAL_PX,
+            "UI-SPEC.md H3"
+        );
+        assert_eq!(
+            FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX, PREVIEW_TOOL_BOX_LOGICAL_PX,
+            "UI-SPEC.md H3"
+        );
+    }
 
     fn viewport_of(width: u32, height: u32, dpi_milli: u32) -> LogicalRect {
         logical_viewport(
@@ -36512,7 +36541,7 @@ mod tests {",
         // The mock-up's own numbers first, never read back off the geometry that
         // reads them: an expectation derived from the value under test is a
         // tautology.
-        assert_eq!(PANE_HEAD_TRIGGER_BOX_LOGICAL_PX, 19.0);
+        assert_eq!(PANE_HEAD_TRIGGER_BOX_LOGICAL_PX, 22.0);
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = device_rect_of(&layout, terminal);
@@ -36525,7 +36554,7 @@ mod tests {",
             assert_eq!(
                 split[2] - split[0],
                 box_px,
-                "the divider stands in the folder's own 19px box at {scale}x"
+                "the divider stands in the folder's own 22px box at {scale}x"
             );
             assert_eq!(split[3] - split[1], box_px, "square, at {scale}x");
             assert_eq!(
