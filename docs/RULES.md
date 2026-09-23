@@ -233,6 +233,26 @@ store was decoded in full and then discarded. §7.1.5e and the `input.rs` header
 carry the paste rules.
 **Overrides.** none found.
 
+**A multi-line paste into a shell that would run it line by line asks first**
+(owner's rulings 2026-09-22 and 2026-09-23; `DESIGN.md` trailing entry
+2026-09-23 *A multi-line paste into a shell that would run it line by line waits
+on a card in the middle of the window*). One rule, `paste_road`, asked once per
+paste by `stage_paste` from `Runtime::deliver_paste`, where all four paste doors
+converge: the card is raised when the `multiline_paste_ask` setting is on, the
+payload was the clipboard's own text, the pane has not set `?2004`, and
+`input::pasted_line_count` is more than one (a single trailing separator does not
+count). A pane whose paste grammar is PowerShell at a prompt the shell opened in
+order takes PowerShell's own road instead (0.4.4 ticket 03) and is never shown
+the card; until that road lands it gets today's bytes. The card, centred on the
+window, says `N lines → <shell>`; `Enter` = *Run line by line* (today's bytes),
+`Tab` = *Join into one line* (`input::join_lines`: one space per run of breaks,
+no `\r`, no invented separator), `Esc` or `×` = nothing sent, clipboard
+untouched. **It is modal (2026-09-23)**: it answers only those three keys, every
+other key reaches nothing, and a drop under it is refused. The pending paste is
+`LeafSession::pending_paste` and dies with its shell; the answer is re-checked
+with `live_paste_target` before a byte is sent. Nothing is remembered but the
+setting.
+
 ### 10. Drag and drop — `not yet folded`
 Entries: §2.12 *a tab and a pane dragged out of this window: an application-level
 drag broker*; §7.1.1; §7.14d *a replay is neither a join nor a leave*.
@@ -428,6 +448,14 @@ and paste are never displaced by a recording. Still `not yet
 folded`: folding this row (the full rung order of `Runtime::keyboard_input`) is
 design-note T5, not this ticket.
 
+Entry added 2026-09-23 (0.4.4 ticket 02; owner's ruling 2026-09-23: "the card
+is modal and answers only Enter, the Join key and Esc"): **the multi-line paste
+card is a modal rung.** In `Runtime::keyboard_input` it stands directly under the
+PSReadLine invitation and above the settings dialog, and it returns for every
+key; `paste_card_key` is the whole of what it answers. In `KeyboardOwner` it is
+part of `menu_or_dialog`, so `is_modal` is true while it is up and a composition
+resolves to `ImeOwner::Modal`.
+
 ### 28. Mouse routing — `not yet folded`
 Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; §7.60
 *`T-WHEEL-TRACE`: the wheel has no road in a recording, so an aiming question
@@ -510,6 +538,17 @@ three-tier table's second row was retired in favour of the marks tier on
 2026-09-01.
 **Open.** The kind × urgency × modality → surface table is **to be ruled before
 0.5, by the project owner**. See `docs/ARCHITECTURE.md` §8.
+**Ruled and not yet built.** Owner, 2026-09-21 (recorded in the multi-line paste
+design note's "Owner rulings" 1 and 6): **pane strips become notifications.**
+The pane notice strip (`notice.rs`, `NoticeShape::Band`) is to stop being a
+surface for news; no ticket has moved a strip yet, so the strips in the tree
+today are still strips.
+**A datum for the table** (2026-09-22/23, 0.4.4 ticket 02): the multi-line paste
+question is a *synchronous gate the reader's own gesture opened* — not a
+notification — and its ruled surface is a small **modal card centred on the
+window**, in the first-run card's and the dialogs' family, not anchored to the
+pane it is about (the pane association is the focus border and the card's own
+`→ <shell>`).
 
 ### 31. Settings and migrations — `not yet folded`
 Entries: the M2 schema document §2; the `migrate.rs` module doc; §7.19 *the words
@@ -595,6 +634,13 @@ occupancy entry replaces row-level checks with `install_checked`.
 the window thread**, deliberately, because each already reads and writes those
 files synchronously there. Moving them onto workers is named as a 0.4.4 ticket
 and **no ticket id has been issued**. See `docs/ARCHITECTURE.md` §5.3 rows 2–4.
+**Ruled and not yet built.** Owner's verbal ruling of 2026-09-21, written down on
+2026-09-22 (multi-line paste design note, "Owner rulings" 6): **option A — Folio
+replaces its own older copy of the module on upgrade.** No ticket in the 0.4.4
+set implements it (`00-INDEX.md`, open decisions); today an older copy of
+Folio's own module is shown on the Settings row as installed with a newer
+one available (`i18n::psreadline_row_update_in`), and nothing replaces it
+without the reader's press.
 
 ### 39. Single instance and the launch pipe — `not yet folded`
 Entries: §7.59 *a second launch is no longer a second process: it hands its one

@@ -808,6 +808,64 @@ pub(crate) fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     bytes
 }
 
+/// **How many lines a paste is, as the reader would count them** (0.4.4 ticket 02).
+///
+/// The separators [`sanitize_paste`] turns into Enters — `\r`, `\n` and `\r\n`, each one line
+/// break — plus one, **not counting a single trailing separator**: `"a\nb"` is 2, `"a\n"` is 1,
+/// `"a\n\n"` is 2 and `"a"` is 1. A command copied off a web page usually carries its own
+/// newline, and that is still one command; the reader meant it to run. Only a second line is
+/// what the multi-line paste card is about.
+///
+/// One pass over the text and no allocation, because it is asked of every paste that reaches a
+/// shell without bracketed paste, single lines included.
+pub(crate) fn pasted_line_count(text: &str) -> usize {
+    let mut separators = 0usize;
+    let mut trailing = false;
+    let mut bytes = text.bytes().peekable();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'\r' => {
+                if bytes.peek() == Some(&b'\n') {
+                    bytes.next();
+                }
+                separators += 1;
+                trailing = true;
+            }
+            b'\n' => {
+                separators += 1;
+                trailing = true;
+            }
+            _ => trailing = false,
+        }
+    }
+    separators + 1 - usize::from(trailing)
+}
+
+/// **The card's `Join into one line`** (0.4.4 ticket 02): every run of line separators becomes
+/// one space, and nothing else changes.
+///
+/// No terminating `\r`, so nothing runs: the reader still presses Enter once, after reading the
+/// line. And no `;` or `&&` is invented — a separator swallowed by a trailing `#` comment would
+/// silently change what the script does, and writing shell syntax the reader did not write is
+/// the heuristic CONVENTIONS §一 forbids. A function of its own beside [`sanitize_paste`] rather
+/// than a flag on it: `Run line by line` must stay byte-identical to today's paste.
+pub(crate) fn join_lines(text: &str) -> String {
+    let mut joined = String::with_capacity(text.len());
+    let mut in_break = false;
+    for character in text.chars() {
+        if matches!(character, '\r' | '\n') {
+            if !in_break {
+                joined.push(' ');
+                in_break = true;
+            }
+        } else {
+            joined.push(character);
+            in_break = false;
+        }
+    }
+    joined
+}
+
 fn sanitize_paste(text: &str) -> Vec<u8> {
     // Remove the complete terminator before generic control filtering. Merely removing ESC would
     // leave a misleading printable "[201~" fragment and weakens later policy changes.
@@ -1163,6 +1221,142 @@ mod tests {
             paste_bytes("safe\x1b[201~tail\0\u{0007}", false),
             b"safetail"
         );
+    }
+
+    /// RED (0.4.4 ticket 02) — **a paste is as many lines as the reader sees, and the newline a
+    /// copied command carries does not make it two.**
+    ///
+    /// The card is raised on `> 1`, so this count is the whole of "is this a multi-line paste".
+    /// A count that included the trailing separator would ask about every command copied off a
+    /// web page; one that collapsed a blank line would under-count a block the reader can see.
+    ///
+    /// MUTATION: drop the `- usize::from(trailing)` term in `pasted_line_count` — `"a\n"` reads
+    /// as 2 and the second assertion goes red.
+    #[test]
+    fn pasted_line_count_ignores_one_trailing_separator() {
+        assert_eq!(pasted_line_count("a\nb"), 2);
+        assert_eq!(pasted_line_count("a\n"), 1);
+        assert_eq!(pasted_line_count("a\n\n"), 2);
+        assert_eq!(pasted_line_count("a"), 1);
+        // The three spellings of a break are one break each, as `sanitize_paste` has them.
+        assert_eq!(pasted_line_count("a\r\nb\rc\nd"), 4);
+        assert_eq!(pasted_line_count("a\r\n"), 1);
+        assert_eq!(pasted_line_count(""), 1);
+        // And the count agrees with the Enters today's road would send.
+        let text = "one\r\ntwo\nthree";
+        let enters = paste_bytes(text, false)
+            .iter()
+            .filter(|byte| **byte == b'\r')
+            .count();
+        assert_eq!(pasted_line_count(text), enters + 1);
+    }
+
+    /// RED (0.4.4 ticket 02) — **`Join into one line` sends no carriage return, so nothing runs
+    /// until the reader presses Enter.**
+    ///
+    /// The joined text is sent through the very door the paste always used (`paste_bytes`), so
+    /// the claim is made of those bytes and not of the string: a join that left a `\r` anywhere
+    /// would run the first half of the line as a command.
+    ///
+    /// MUTATION: make `join_lines` push `'\r'` instead of `' '` — every assertion goes red.
+    #[test]
+    fn joining_a_block_sends_no_carriage_return() {
+        for text in ["one\r\ntwo\nthree\r", "a\n\n\nb", "\r\nlead", "tail\n"] {
+            let bytes = paste_bytes(&join_lines(text), false);
+            assert!(
+                !bytes.contains(&b'\r') && !bytes.contains(&b'\n'),
+                "{text:?} joined still carries a line break: {bytes:?}"
+            );
+        }
+        assert_eq!(join_lines("one\r\ntwo\nthree"), "one two three");
+    }
+
+    /// RED (0.4.4 ticket 02) — **a join writes one space per break and never shell syntax.**
+    ///
+    /// `;` and `&&` are grammar, and which one is right depends on the shell and on whether the
+    /// line before ends in a comment. Folio cannot know either, so it writes neither: every run of
+    /// breaks is one space and every other character arrives as it was copied.
+    ///
+    /// MUTATION: join with `" && "` — the equality assertions go red.
+    #[test]
+    fn joining_never_invents_a_separator() {
+        assert_eq!(
+            join_lines("cd src\ncargo build # fast\n"),
+            "cd src cargo build # fast "
+        );
+        assert_eq!(
+            join_lines("a\r\n\r\nb"),
+            "a b",
+            "a run of breaks is one space"
+        );
+        let text = "echo 1\necho 2\r\necho 3";
+        let joined = join_lines(text);
+        assert!(!joined.contains(';') && !joined.contains('&'));
+        assert_eq!(
+            joined
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>(),
+            text.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>(),
+            "every other character arrives as it was copied"
+        );
+    }
+
+    /// RED (0.4.4 ticket 02) — **a dropped or copied file's path can never be a multi-line
+    /// paste**, so the drop road's exemption from the card is a proof and not a belief.
+    ///
+    /// Runs the real producer: real paths, two of them carrying a line break, through
+    /// `shell_literal::paths_text` for every grammar a pane can have. A path with a break in it is
+    /// refused by `shell_literal::representable`, so the text that reaches `deliver_paste` from
+    /// the `Files` arm is always one line.
+    ///
+    /// MUTATION: let `representable` accept a control character — the broken path is spelled and
+    /// the count reads 2.
+    #[test]
+    fn a_path_insertion_can_never_be_multi_line() {
+        use crate::shell_literal::{self, Encoder, Recipient, ShellGrammar};
+        let dir = std::env::temp_dir();
+        let paths = vec![
+            dir.join("plain.txt"),
+            dir.join("two\nlines.txt"),
+            dir.join("carriage\rreturn.txt"),
+            dir.join("with space.md"),
+        ];
+        for grammar in [
+            ShellGrammar::PowerShell,
+            ShellGrammar::Cmd,
+            ShellGrammar::Posix,
+            ShellGrammar::Fish,
+            ShellGrammar::Nushell,
+            ShellGrammar::Agent,
+        ] {
+            let recipient = Recipient {
+                encoder: Encoder {
+                    grammar,
+                    named_cmd: grammar == ShellGrammar::Cmd,
+                    delayed_expansion: false,
+                    powershell_doubled_quotes: &[],
+                },
+                namespace: bt_transcript::paths::PrintedPathNamespace::Windows,
+                spelling: None,
+                wsl_distribution: None,
+            };
+            for leading_space in [false, true] {
+                let insertion = shell_literal::paths_text(&paths, &recipient, leading_space);
+                assert_eq!(
+                    pasted_line_count(&insertion.text),
+                    1,
+                    "{grammar:?} spelled a path insertion over two lines: {:?}",
+                    insertion.text
+                );
+                assert!(
+                    !insertion.refused.is_empty(),
+                    "the broken paths are refused"
+                );
+            }
+        }
     }
 
     #[test]

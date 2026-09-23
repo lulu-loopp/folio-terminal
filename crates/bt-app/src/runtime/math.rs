@@ -281,6 +281,20 @@ impl Runtime<'_> {
                 ),
                 ModalBand::Fixed,
             )
+        } else if let Some(layout) = self.paste_card_layout() {
+            // **The multi-line paste card** (0.4.4 ticket 02), under the invitation and over the
+            // settings dialog. It is raised by the reader's own `Ctrl+V` into a shell, which no
+            // dialog above it lets through, so the order below it is a formality; what can rise
+            // over it is only a surface raised by something other than a key.
+            let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+            (
+                restore::paste_card_build(
+                    &layout,
+                    (width as f32, height as f32),
+                    self.window.paste_card_hover,
+                ),
+                ModalBand::Fixed,
+            )
         } else if let Some(layout) = self.settings_layout() {
             // The hover and the readings first, then the renderer: a combo whose
             // value outgrows its 118px button is ellipsised, and only the font

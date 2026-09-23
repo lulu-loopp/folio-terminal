@@ -2486,6 +2486,24 @@ pub enum Text {
     RowCopyOnSelect,
     /// Its sentence.
     DescCopyOnSelect,
+    /// **CHINESE PENDING (2026-09-23)** — `Terminal ▸ Ask before pasting several lines`, the
+    /// one row the owner ruled for the multi-line paste card (2026-09-22). English stands in both
+    /// columns until opus46 writes it.
+    RowMultilinePaste,
+    /// **CHINESE PENDING (2026-09-23)** — its sentence.
+    DescMultilinePaste,
+
+    // ── the multi-line paste card (0.4.4 ticket 02) ──
+    //
+    // Three strings and no sentence: the owner ruled the card's words (2026-09-22) and 界面字要少
+    // (2026-09-20) rules out an explanation. **CHINESE PENDING (2026-09-23)** on all three.
+    /// `N lines → <shell>` — the card's only line. `{lines}` and `{shell}` are filled by
+    /// [`paste_card_title`].
+    PasteCardTitle,
+    /// The default answer, and `Enter`'s: today's bytes.
+    PasteCardRun,
+    /// The other answer, and `Tab`'s: the lines joined, with no Enter.
+    PasteCardJoin,
 
     // ── a tab's own context menu (gesture audit 2026-08-26, 丙２) ──
     //
@@ -5024,6 +5042,17 @@ impl Text {
                 "Copies selected text to the clipboard when you release the mouse button.",
                 "松开鼠标后将选中的文字复制到剪贴板。",
             ),
+            Self::RowMultilinePaste => {
+                pick(lang, "Ask before pasting several lines", "多行粘贴前询问")
+            }
+            Self::DescMultilinePaste => pick(
+                lang,
+                "Asks before a paste runs as several commands. Off, it is sent as is.",
+                "粘贴内容会逐行执行时先询问。关闭时原样发送。",
+            ),
+            Self::PasteCardTitle => pick(lang, "{lines} lines → {shell}", "{lines} 行 → {shell}"),
+            Self::PasteCardRun => pick(lang, "Run line by line", "逐行运行"),
+            Self::PasteCardJoin => pick(lang, "Join into one line", "合为一行"),
             Self::ShortcutRecord => pick(lang, "Record", "录制"),
             // 「按键…」and not 「录制中…」: the ellipsis already says a clock is
             // running, and what the reader has to supply is the press.
@@ -5321,7 +5350,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 744] = [
+    pub const ALL: [Self; 749] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5981,6 +6010,11 @@ impl Text {
         Self::HyperlinkControlReveals,
         Self::RowCopyOnSelect,
         Self::DescCopyOnSelect,
+        Self::RowMultilinePaste,
+        Self::DescMultilinePaste,
+        Self::PasteCardTitle,
+        Self::PasteCardRun,
+        Self::PasteCardJoin,
         Self::TabMenuRename,
         Self::TabMenuUnpin,
         Self::TabMenuDuplicate,
@@ -6263,6 +6297,21 @@ pub fn web_fail_blocked_scheme(scheme: &str) -> String {
 /// The Chinese takes full-width brackets, which is the same decision the
 /// parentheses were: a half-width `(` after a Chinese character reads as a typo
 /// in a way it does not after a Latin one.
+/// The multi-line paste card's one line — `12 lines → Command Prompt` (owner's ruling
+/// 2026-09-22: "the card says `12 lines → cmd`").
+///
+/// The shell is the profile's own title, the name the reader already reads on the tab, and the
+/// count is [`crate::input::pasted_line_count`]'s. Filled from [`Text::PasteCardTitle`] rather
+/// than written as a `format!` here so that the missing Chinese is carried by the table's
+/// pending list like every other string this ticket adds.
+#[must_use]
+pub fn paste_card_title(lines: usize, shell: &str) -> String {
+    Text::PasteCardTitle
+        .text()
+        .replace("{lines}", &lines.to_string())
+        .replace("{shell}", shell)
+}
+
 #[must_use]
 pub fn new_tab_tip(profile_title: &str) -> String {
     match current() {

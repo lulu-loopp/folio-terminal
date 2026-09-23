@@ -6,10 +6,10 @@ use crate::{
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
     composition_ruling, diagnostics, file_menu_powers, git_graph, goto_tab_index, hang_watch,
     ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
-    input, keyboard_owner_is_a_shell, keyhint, marks, native_window, popup_takes_the_key,
-    preedit_caret_byte, profiles, quit, recoverable_clipboard_write, rename_key, rename_pastes,
-    restore, settings, settings_key_of, shortcuts, toast, window_ime_cursor_area, write_pty_input,
-    write_terminal_clipboard_text,
+    input, keyboard_owner_is_a_shell, keyhint, marks, native_window, paste_card_key,
+    popup_takes_the_key, preedit_caret_byte, profiles, quit, recoverable_clipboard_write,
+    rename_key, rename_pastes, restore, settings, settings_key_of, shortcuts, toast,
+    window_ime_cursor_area, write_pty_input, write_terminal_clipboard_text,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
@@ -653,6 +653,9 @@ impl Runtime<'_> {
                 || self.window.dirty_gate.is_open()
                 || self.window.first_run.is_open()
                 || self.window.psreadline_invite.is_open()
+                // The multi-line paste card (0.4.4 ticket 02): modal by the owner's ruling of
+                // 2026-09-23, so a drop is refused under it and a composition goes nowhere.
+                || self.paste_card_seat().is_some()
                 || self.window.settings.is_open()
                 || popup_takes_the_key(self.popups_up()).is_some(),
             files_tree: self.files_keyboard_seat().is_some(),
@@ -1150,6 +1153,19 @@ impl Runtime<'_> {
         if self.window.psreadline_invite.is_open() {
             if !event.repeat && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                 self.answer_psreadline_invite(restore::InviteTarget::Decline)?;
+            }
+            return Ok(());
+        }
+        // **The multi-line paste card owns the keyboard** (owner's ruling 2026-09-23: "While the
+        // paste card is up, keys do not reach the shell: the card is modal and answers only
+        // Enter, the Join key and Esc"). `Enter` runs the lines as today — the reader has just
+        // read the count, and the informed Enter is the point (2026-09-22) — `Tab` joins them and
+        // `Esc` cancels. Every other key is swallowed and the card stays up.
+        if self.paste_card_seat().is_some() {
+            if !event.repeat
+                && let Some(answer) = paste_card_key(&event.logical_key, self.window.modifiers)
+            {
+                self.answer_paste_card(answer)?;
             }
             return Ok(());
         }
@@ -1919,6 +1935,7 @@ impl Runtime<'_> {
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
             || self.window.psreadline_invite.is_open()
+            || self.paste_card_seat().is_some()
             || self.settings_layout().is_some()
             || self.window.rename.is_some()
             || self.window.git_menu.is_some()

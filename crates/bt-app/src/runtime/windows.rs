@@ -1842,6 +1842,7 @@ impl Runtime<'_> {
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
             || self.window.psreadline_invite.is_open()
+            || self.paste_card_seat().is_some()
             || self.window.settings.is_open()
             || self.window.restore_prompt.is_open()
     }

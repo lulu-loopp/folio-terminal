@@ -10,6 +10,9 @@ All notable changes to Folio are recorded here. The format follows
 
 - Sliding a finger over a pane now scrolls it, with the system's own flick.
   A one-finger slide no longer selects text.
+- Pasting several lines into a shell that would run them one by one now asks
+  first: run them line by line, join them into one line, or cancel. A setting
+  under Terminal turns the question off.
 
 ### Changed
 

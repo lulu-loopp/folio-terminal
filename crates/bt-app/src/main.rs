@@ -871,6 +871,205 @@ struct PasteTarget {
     incarnation: u64,
 }
 
+/// **Which road one prepared paste takes into one pane** (0.4.4 tickets 02 and 03).
+///
+/// The answer of [`paste_road`], which is the **one** place the window decides whether a paste
+/// asks: all four paste doors reach it through `Runtime::deliver_paste`, and nothing else in the
+/// tree asks the question (the design note's §1, "four doors, one road").
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PasteRoad {
+    /// Today's bytes, now: [`paste_text`], bracketed if the program asked for it.
+    AsTyped,
+    /// **A PowerShell prompt the shell opened in order** — the road ticket 03 builds, where the
+    /// block lands on PSReadLine's input line and nothing runs (the 2026-09-23 spike: C1 passes on
+    /// 5.1 with PSReadLine 2.0.0 and 2.4.6 and on pwsh 7).
+    ///
+    /// **Until 03 lands this is delivered exactly as [`Self::AsTyped`]**, which is today's
+    /// behaviour for that pane: the owner ruled that PowerShell is never shown the card
+    /// (2026-09-22, ruling 2), and a pane the road will serve is not a pane to put a question to
+    /// in the meantime. It is a road of its own already so that the two tickets share one
+    /// predicate rather than each writing half of one.
+    InputLine,
+    /// The card: nothing is sent until the reader answers. Carries the count the card shows, so
+    /// the text is scanned once.
+    Ask { lines: usize },
+}
+
+/// **The facts [`paste_road`] turns on**, read off one pane at the moment of the paste.
+///
+/// A value rather than a window, so the rule can be read and mutated without one — the wheel
+/// ruling's footing, which [`paste_target_is_live`] stands on too.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PasteFacts {
+    /// The payload was `ClipboardPayload::Text`. Every other arm — a copied file's paths, a
+    /// dropped file's, a saved picture's — is text Folio spelled itself and can never be two
+    /// lines (`input::tests::a_path_insertion_can_never_be_multi_line`).
+    clipboard_text: bool,
+    /// The program asked for bracketed paste (`?2004`): the block arrives as one lump and runs
+    /// nothing, so there is nothing to ask (`DualPlaneSession::bracketed_paste_mode`).
+    bracketed: bool,
+    /// **The pane is a PowerShell whose prompt the shell opened in order** — the paste recipient's
+    /// grammar, and `shell_prompt_opened_in_order`, the parser-owned marks. Never the profile's
+    /// name or the window title. `false` for a nested program, a closed region and a pane whose
+    /// integration never spoke, which is where ticket 03 hands the pane back to the card.
+    powershell_prompt_open: bool,
+    /// `settings.json`'s `multiline_paste_ask` — the one row the owner ruled (2026-09-22).
+    ask: bool,
+}
+
+impl PasteFacts {
+    /// The facts as the pane holds them now.
+    fn of(leaf: &LeafSession, clipboard_text: bool, ask: bool) -> Self {
+        Self {
+            clipboard_text,
+            bracketed: leaf.session.bracketed_paste_mode(),
+            powershell_prompt_open: leaf.paste_recipient.encoder.grammar
+                == shell_literal::ShellGrammar::PowerShell
+                && leaf.session.shell_prompt_opened_in_order(),
+            ask,
+        }
+    }
+}
+
+/// **The one rule for whether a paste asks** (owner's rulings 2026-09-22, 0.4.4 ticket 02).
+///
+/// `setting on ∧ payload was text ∧ !bracketed ∧ more than one line`, with ticket 03's PowerShell
+/// road standing in front of the question. The cheap facts are read first, so a bracketed paste
+/// or a path is never scanned, and a single line is scanned once and allocates nothing.
+fn paste_road(text: &str, facts: PasteFacts) -> PasteRoad {
+    if !facts.clipboard_text || facts.bracketed {
+        return PasteRoad::AsTyped;
+    }
+    let lines = input::pasted_line_count(text);
+    if lines <= 1 {
+        return PasteRoad::AsTyped;
+    }
+    if facts.powershell_prompt_open {
+        return PasteRoad::InputLine;
+    }
+    if facts.ask {
+        PasteRoad::Ask { lines }
+    } else {
+        PasteRoad::AsTyped
+    }
+}
+
+/// **A multi-line paste waiting for its answer** — the one fact the paste card is a projection of
+/// (0.4.4 ticket 02).
+///
+/// Held on the leaf it was aimed at ([`LeafSession::pending_paste`]), so it dies with that shell:
+/// a closed pane, a closed tab and a restarted shell all drop the struct that holds it, and no
+/// code had to be written to clear it on any of those roads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingPaste {
+    /// Where it was aimed, re-checked with `Runtime::live_paste_target` before it is spent — the
+    /// answer lands on a later turn, which is review X-1's rule for every delayed paste.
+    target: PasteTarget,
+    /// The text exactly as the clipboard gave it. `Run line by line` sends it as today; `Join into
+    /// one line` sends [`input::join_lines`] of it.
+    text: String,
+    /// [`input::pasted_line_count`] of it, which the card says.
+    lines: usize,
+    /// The write's name in the error log, from the door that prepared it.
+    context: &'static str,
+}
+
+/// What `Runtime::deliver_paste` does with a paste, once the question has been put.
+#[derive(Debug, Eq, PartialEq)]
+enum StagedPaste {
+    /// Write this now.
+    Send(String),
+    /// Held on the leaf; the card is up and nothing was sent.
+    Held,
+}
+
+/// **Decide, and hold the paste if the answer is "ask"** — `Runtime::deliver_paste`'s decision,
+/// with the window taken out so the rule and its effect can be run on a real tab.
+///
+/// **A second multi-line paste replaces the pending one** (design note §2): a question about text
+/// nobody answered is not a question anyone asked, so every other leaf's pending paste in this tab
+/// is dropped as the new one is held. The card is modal, so in practice there is never a first.
+fn stage_paste(
+    tab: &mut TabState,
+    target: PasteTarget,
+    text: String,
+    clipboard_text: bool,
+    ask: bool,
+    context: &'static str,
+) -> StagedPaste {
+    let Some(leaf) = tab.sessions.get(&target.seat) else {
+        return StagedPaste::Send(text);
+    };
+    match paste_road(&text, PasteFacts::of(leaf, clipboard_text, ask)) {
+        // Ticket 03 gives `InputLine` its own bytes. Until then that pane keeps today's road.
+        PasteRoad::AsTyped | PasteRoad::InputLine => StagedPaste::Send(text),
+        PasteRoad::Ask { lines } => {
+            for leaf in tab.sessions.values_mut() {
+                leaf.pending_paste = None;
+            }
+            if let Some(leaf) = tab.sessions.get_mut(&target.seat) {
+                leaf.pending_paste = Some(PendingPaste {
+                    target,
+                    text,
+                    lines,
+                    context,
+                });
+            }
+            StagedPaste::Held
+        }
+    }
+}
+
+/// The pane in this tab holding a paste that waits for an answer, and the paste.
+fn pending_paste_in(tab: &TabState) -> Option<(SeatId, &PendingPaste)> {
+    tab.sessions
+        .iter()
+        .find_map(|(seat, leaf)| leaf.pending_paste.as_ref().map(|pending| (*seat, pending)))
+}
+
+/// Take the waiting paste out of this tab, which is what every answer does first — `Cancel`
+/// included, and a spent answer cannot be spent twice.
+fn take_pending_paste(tab: &mut TabState) -> Option<PendingPaste> {
+    tab.sessions
+        .values_mut()
+        .find_map(|leaf| leaf.pending_paste.take())
+}
+
+/// **The three answers the paste card takes** (owner's rulings 2026-09-22 and 2026-09-23).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PasteAnswer {
+    /// `Enter`, and the default: today's bytes, one command per line.
+    RunLineByLine,
+    /// `Tab`, or a press on the word: the lines joined by spaces, and no Enter.
+    Join,
+    /// `Esc` or `×`: nothing is sent and the clipboard is not touched.
+    Cancel,
+}
+
+/// **What a spent answer writes**, or nothing for `Cancel`.
+fn paste_answer_text(pending: &PendingPaste, answer: PasteAnswer) -> Option<String> {
+    match answer {
+        PasteAnswer::RunLineByLine => Some(pending.text.clone()),
+        PasteAnswer::Join => Some(input::join_lines(&pending.text)),
+        PasteAnswer::Cancel => None,
+    }
+}
+
+/// **The only keys the card answers** (owner's ruling 2026-09-23: "the card is modal and answers
+/// only Enter, the Join key and Esc"). Everything else — a letter, a chord, `Ctrl+V` again, a
+/// modified `Enter` — is `None`, reaches nothing, and leaves the card up.
+fn paste_card_key(key: &Key, modifiers: ModifiersState) -> Option<PasteAnswer> {
+    if !modifiers.is_empty() {
+        return None;
+    }
+    match key {
+        Key::Named(NamedKey::Enter) => Some(PasteAnswer::RunLineByLine),
+        Key::Named(NamedKey::Tab) => Some(PasteAnswer::Join),
+        Key::Named(NamedKey::Escape) => Some(PasteAnswer::Cancel),
+        _ => None,
+    }
+}
+
 /// The clipboard picture worker's one-slot mailbox, on
 /// [`BackgroundDecodeMailbox`]'s shape and for its reasons.
 ///
@@ -11008,6 +11207,15 @@ struct LeafSession {
     /// a second PowerShell starting, or composing the path — and composing it is
     /// the bug this whole slice was opened by.
     integration_offer: Option<shell_integration::Offer>,
+    /// **A multi-line paste aimed at this shell, waiting for the card's answer** (0.4.4 ticket
+    /// 02) — `None` on every pane but the one the card is asking about.
+    ///
+    /// Here and not on the window for [`Self::integration_offer`]'s reason said about a paste:
+    /// it is text promised to *this process*, so it dies with it. A restarted shell is a new
+    /// `LeafSession`, a closed pane or tab drops this one, and either way the question is gone
+    /// with the shell it was about. Written by `stage_paste`; read by the card's layout, draw and
+    /// hit; taken by the card's answer.
+    pending_paste: Option<PendingPaste>,
 }
 
 struct TabState {
@@ -13991,6 +14199,10 @@ struct WindowRuntime {
     /// The PSReadLine invitation, when the probe has found a shell that would
     /// benefit (§7.1.6c-3b).
     psreadline_invite: psreadline::Invite,
+    /// **What the pointer is over on the multi-line paste card** (0.4.4 ticket 02) — the card's
+    /// only state of its own. Whether it is up at all is not stored here: it is
+    /// [`LeafSession::pending_paste`], read through `Runtime::paste_card_seat`.
+    paste_card_hover: Option<restore::PasteCardTarget>,
     /// The first-run card, on the first window of a machine that has never run
     /// Folio (§7.56).
     ///
@@ -36456,6 +36668,8 @@ fn create_leaf_session(
         frame_image_references: FrameImageReferences::default(),
         // Nobody has asked the machine where this shell's `$PROFILE` is yet.
         integration_offer: None,
+        // Nothing has been pasted into a shell that has just started.
+        pending_paste: None,
     })
 }
 
@@ -38822,6 +39036,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         root_menu: profiles::RootMenu::default(),
         dirty_gate: restore::DirtyGate::default(),
         psreadline_invite: psreadline::Invite::default(),
+        paste_card_hover: None,
         first_run: first_run::Card::default(),
         psreadline_size_changed: false,
         window_close_requested: false,
@@ -40884,6 +41099,7 @@ impl Runtime<'_> {
             scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
             line_wrapping: self.app.settings_store.loaded().line_wrapping,
             copy_on_select: self.app.settings_store.loaded().copy_on_select,
+            multiline_paste_ask: self.app.settings_store.loaded().multiline_paste_ask,
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
             turn_end_notification: self.app.settings_store.loaded().turn_end_notification,
             powershell_integration_offer: self
@@ -41536,6 +41752,9 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::copy_on_select_requested(target) {
             self.apply_copy_on_select(enabled);
         }
+        if let Some(enabled) = settings::multiline_paste_ask_requested(target) {
+            self.apply_multiline_paste_ask(enabled);
+        }
         if let Some(enabled) = settings::terminal_notifications_requested(target) {
             self.apply_terminal_notifications(enabled);
         }
@@ -41959,6 +42178,7 @@ impl Runtime<'_> {
             | Row::Scrollback
             | Row::LineWrapping
             | Row::CopyOnSelect
+            | Row::MultilinePaste
             | Row::Notifications
             | Row::TurnEndNotifications
             | Row::PowerShellOffer
@@ -61896,6 +62116,9 @@ fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
 #[derive(Default)]
 struct PreparedClipboardPaste {
     text: Option<String>,
+    /// **The text is the clipboard's own** (`ClipboardPayload::Text`), as against paths Folio
+    /// spelled. The one arm [`paste_road`] may ask about (0.4.4 ticket 02).
+    clipboard_text: bool,
     notice: Option<String>,
     /// **Every encoding a picture-and-nothing-else clipboard offered**, best
     /// first, or empty (§7.61).
@@ -61925,6 +62148,7 @@ fn prepare_clipboard_paste(
         }
         Ok(ClipboardPayload::Text(text)) => PreparedClipboardPaste {
             text: Some(text),
+            clipboard_text: true,
             ..PreparedClipboardPaste::default()
         },
         // **The third rung, and it is third because the clipboard says so**
@@ -70691,6 +70915,7 @@ mod edit_menu_clipboard_tests {
             "self.window.dirty_gate.is_open()",
             "self.window.first_run.is_open()",
             "self.window.psreadline_invite.is_open()",
+            "self.paste_card_seat().is_some()",
             "self.settings_layout().is_some()",
             "self.window.rename.is_some()",
             "self.window.git_menu.is_some()",
@@ -73194,13 +73419,19 @@ mod clipboard_path_tests {
             "a leaf with no ConPTY behind it never had anywhere to put the path"
         );
         // And the paste carries that answer out rather than reporting the
-        // swallowing wrapper's success.
+        // swallowing wrapper's success — from the one writer every paste ends in
+        // (`send_paste`, 0.4.4 ticket 02), which `deliver_paste` answers with.
+        let send = method_body("Runtime", "send_paste");
+        assert!(
+            send.contains("offer_pty_input(pty.as_ref(), bytes, context)")
+                && send.contains("Ok(landed.queued())"),
+            "the paste reports the wrapper's success rather than what the ring \
+             did with the bytes:\n{send}"
+        );
         let deliver = method_body("Runtime", "deliver_paste");
         assert!(
-            deliver.contains("offer_pty_input(pty.as_ref(), bytes, context)")
-                && deliver.contains("Ok(landed.queued())"),
-            "the paste reports the wrapper's success rather than what the ring \
-             did with the bytes:\n{deliver}"
+            deliver.contains("StagedPaste::Send(text) => self.send_paste(target, &text, context)"),
+            "the paste no longer answers with what its writer did:\n{deliver}"
         );
         // The three callers that must not change: a keystroke, the row menu and
         // the clipboard all go on through the swallowing door.
