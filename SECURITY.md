@@ -172,9 +172,9 @@ structure and call it security.
 `FrameNavigationStarting` and `WebResourceRequested` — the latter with a filter over
 every resource context — are registered in the same step as the surfaces above, and
 both ask what this seat was opened for. A page opened from the files column is
-answered as a browser answers a `file://` page: it may fetch from the network and
-load what its markup names on this machine, and a page script's `fetch` or
-`XMLHttpRequest` of a local file is refused; the host's own blank page fetches
+answered as a browser answers a `file://` page: it may fetch from the network, and
+its requests for files on this machine are left to the engine's own rule for a
+local page; the host's own blank page fetches
 nothing at all; a page you browsed to may fetch from the network and touches no
 `file:`. A share on another machine is refused on every seat. `data:`, `blob:`, the two empty documents a frame is made of and
 the parts the engine builds its own viewers out of pass on every seat. A refused
@@ -196,11 +196,12 @@ it.
 ### A local document
 
 A local `.html` runs its scripts here and reaches the network, as it would in a
-browser. What its markup names on this machine loads — on Windows any local file, as
-in Edge; on macOS the page's own folder and the folders under it, as in Safari — and
-a page script's `fetch` or `XMLHttpRequest` of a local file is refused, as in both.
-Folio refuses shares on other machines, new windows, downloads, permissions and
-external schemes. Treat an HTML file from a stranger as you would in a browser.
+browser. Which files on this machine it can read is the web engine's own rule for a
+local page, and Folio adds none: what its markup names loads — on Windows any local
+file, as in Edge; on macOS the page's own folder and the folders under it, as in
+Safari — and the engine refuses a page script's `fetch` or `XMLHttpRequest` of a
+local file, as both browsers do. Folio refuses shares on other machines, new windows,
+downloads, permissions and external schemes. Treat an HTML file from a stranger as you would in a browser.
 Markdown and text are drawn by Folio itself and run nothing.
 
 ## Diagnostics

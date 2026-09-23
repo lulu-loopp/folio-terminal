@@ -107,32 +107,6 @@ fn read_string(getter: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> 
     }
 }
 
-/// WebView2's resource context in this crate's words — one arm per value, and
-/// every value the engine may add later is [`WebRequestKind::Other`].
-#[cfg(windows)]
-fn web_request_kind(context: COREWEBVIEW2_WEB_RESOURCE_CONTEXT) -> WebRequestKind {
-    match context {
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT => WebRequestKind::Document,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_STYLESHEET => WebRequestKind::Stylesheet,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE => WebRequestKind::Image,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_MEDIA => WebRequestKind::Media,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FONT => WebRequestKind::Font,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT => WebRequestKind::Script,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_XML_HTTP_REQUEST => WebRequestKind::XmlHttpRequest,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FETCH => WebRequestKind::Fetch,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_TEXT_TRACK => WebRequestKind::TextTrack,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_EVENT_SOURCE => WebRequestKind::EventSource,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_WEBSOCKET => WebRequestKind::WebSocket,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_MANIFEST => WebRequestKind::Manifest,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SIGNED_EXCHANGE => WebRequestKind::SignedExchange,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_PING => WebRequestKind::Ping,
-        COREWEBVIEW2_WEB_RESOURCE_CONTEXT_CSP_VIOLATION_REPORT => {
-            WebRequestKind::CspViolationReport
-        }
-        _ => WebRequestKind::Other,
-    }
-}
-
 #[cfg(windows)]
 fn failure(step: &str, error: &windows::core::Error) -> String {
     format!(
@@ -382,62 +356,6 @@ pub enum WebRequestVerdict {
     Allow,
     /// Answer it here, with nothing.
     Refuse,
-}
-
-/// **The caller's policy about one thing a document asked for**: the address,
-/// and what the engine says it was for. Asked synchronously inside the
-/// engine's callback, so it can be answered only on the spot.
-pub type WebRequestGate = Box<dyn Fn(&str, WebRequestKind) -> WebRequestVerdict>;
-
-/// **What the engine says a request is for** — WebView2's resource context, one
-/// variant per value it reports (ticket 0.4.4-13).
-///
-/// Carried to the caller's `request_gate` beside the address, because the
-/// owner's ruling of 2026-09-23 decides a local page's reads of its own machine
-/// by the kind of request and not by a list of folders: what the document's
-/// markup loads, a browser loads; what a page script asks for with `fetch` or
-/// `XMLHttpRequest`, it does not. Named here in the engine's words and nothing
-/// else, because this crate decides nothing — which kinds count as which is
-/// `bt_app::webnav`'s.
-///
-/// A frame asked about at a frame-navigation callback is a [`Self::Document`]:
-/// that is what the engine calls the same request when it reaches
-/// `WebResourceRequested`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WebRequestKind {
-    /// A document: the page itself, or a frame's.
-    Document,
-    /// `<link rel=stylesheet>`, `@import`.
-    Stylesheet,
-    /// `<img>`, a CSS image, an icon.
-    Image,
-    /// `<video>`, `<audio>`.
-    Media,
-    /// `@font-face`.
-    Font,
-    /// `<script>`, a worker's script.
-    Script,
-    /// A page script's `XMLHttpRequest`.
-    XmlHttpRequest,
-    /// A page script's `fetch`.
-    Fetch,
-    /// `<track>`.
-    TextTrack,
-    /// `EventSource`.
-    EventSource,
-    /// A WebSocket handshake.
-    WebSocket,
-    /// `<link rel=manifest>`.
-    Manifest,
-    /// A signed exchange.
-    SignedExchange,
-    /// `<a ping>`, `sendBeacon`.
-    Ping,
-    /// A Content-Security-Policy violation report.
-    CspViolationReport,
-    /// Anything else, including a value this build's engine names and this
-    /// enum does not.
-    Other,
 }
 
 /// **Which of the seat's guarantees this controller actually carries** (R2-16).
@@ -1231,7 +1149,7 @@ struct Shared {
     /// subresource has nobody to restart it. Both run synchronously inside
     /// their callback for `gate`'s reason — neither `SetCancel` nor
     /// `SetResponse` can be decided later.
-    request_gate: WebRequestGate,
+    request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
     /// The target of the rewrite currently in flight, if any.
     ///
     /// A cancel-and-renavigate raises `NavigationStarting` again for the new
@@ -1319,7 +1237,7 @@ impl WebHost {
     /// mouse.
     pub fn new(
         gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
-        request_gate: WebRequestGate,
+        request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
         wake: Box<dyn Fn()>,
     ) -> Self {
         Self {
@@ -1988,10 +1906,7 @@ impl WebHost {
                     &NavigationStartingEventHandler::create(Box::new(move |_, args| {
                         let Some(args) = args else { return Ok(()) };
                         let uri = read_string(|out| args.Uri(out));
-                        if matches!(
-                            (shared.request_gate)(&uri, WebRequestKind::Document),
-                            WebRequestVerdict::Allow
-                        ) {
+                        if matches!((shared.request_gate)(&uri), WebRequestVerdict::Allow) {
                             return Ok(());
                         }
                         // `SetCancel` cannot be decided later, exactly as it
@@ -2027,14 +1942,7 @@ impl WebHost {
                             // empty string is refused by every arm of the rule.
                             Err(_) => String::new(),
                         };
-                        // A context that cannot be read is `Other`, which is
-                        // what the engine calls a request it has no word for.
-                        let mut context = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_OTHER;
-                        let kind = match args.ResourceContext(&mut context) {
-                            Ok(()) => web_request_kind(context),
-                            Err(_) => WebRequestKind::Other,
-                        };
-                        if matches!((shared.request_gate)(&uri, kind), WebRequestVerdict::Allow) {
+                        if matches!((shared.request_gate)(&uri), WebRequestVerdict::Allow) {
                             return Ok(());
                         }
                         // **Answered, not merely dropped.** A handler that
@@ -3586,7 +3494,7 @@ mod webview2_runtime_probe {
         let log = Rc::clone(&asked);
         let mut host = WebHost::new(
             Box::new(|_| WebNavigationVerdict::Proceed),
-            Box::new(move |candidate, _| {
+            Box::new(move |candidate| {
                 let allowed = allow(candidate);
                 log.borrow_mut().push((candidate.to_owned(), allowed));
                 if allowed {
@@ -3813,7 +3721,7 @@ mod install_and_close_contract_tests {
     fn a_host() -> WebHost {
         WebHost::new(
             Box::new(|_| WebNavigationVerdict::Proceed),
-            Box::new(|_, _| WebRequestVerdict::Allow),
+            Box::new(|_| WebRequestVerdict::Allow),
             Box::new(|| {}),
         )
     }

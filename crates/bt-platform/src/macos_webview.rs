@@ -116,8 +116,8 @@ use objc2_web_kit::{
 use super::{
     CloseStep, INSTALL_SEQUENCE, InstallStep, PageVisual, RehostCompensation, RehostOutcome,
     RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebDpiOwnership, WebEvent,
-    WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict, WebRequestGate,
-    WebRequestKind, WebRequestVerdict, WebSetting, install_rollback,
+    WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict, WebRequestVerdict,
+    WebSetting, install_rollback,
 };
 use crate::macos_impl::{window_for, window_thread};
 use crate::{Compositor, NativeWindow};
@@ -207,7 +207,7 @@ struct Shared {
     /// going — the door `FrameNavigationStarting` is on the other platform. The
     /// rest of what a document is built out of never reaches a callback here and
     /// is [`ThirdDoor`]'s.
-    request_gate: WebRequestGate,
+    request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
     /// The target of the rewrite currently in flight, if any — the Windows arm's
     /// belt against a normalisation that answered twice.
     rewriting_to: RefCell<Option<String>>,
@@ -1183,10 +1183,7 @@ impl Gate {
             // door's question and not the first's — the same split
             // `FrameNavigationStarting` makes on the other platform, arriving
             // here as one callback that has to tell them apart itself.
-            if matches!(
-                (shared.request_gate)(&uri, WebRequestKind::Document),
-                WebRequestVerdict::Allow
-            ) {
+            if matches!((shared.request_gate)(&uri), WebRequestVerdict::Allow) {
                 return WKNavigationActionPolicy::Allow;
             }
             shared.push(WebEvent::RequestRefused { uri });
@@ -1269,7 +1266,7 @@ impl WebHost {
     #[must_use]
     pub fn new(
         gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
-        request_gate: WebRequestGate,
+        request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
         wake: Box<dyn Fn()>,
     ) -> Self {
         let shared = Rc::new(Shared {
@@ -2108,7 +2105,7 @@ mod door_tests {
             events: RefCell::new(VecDeque::new()),
             chords: RefCell::new(Vec::new()),
             gate: Box::new(|_: &str| WebNavigationVerdict::Proceed),
-            request_gate: Box::new(|_: &str, _| WebRequestVerdict::Allow),
+            request_gate: Box::new(|_: &str| WebRequestVerdict::Allow),
             rewriting_to: RefCell::new(None),
             last_status: Cell::new(0),
             found: RefCell::new(String::new()),

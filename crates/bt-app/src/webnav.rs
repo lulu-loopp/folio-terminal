@@ -710,17 +710,16 @@ pub fn navigation_starting(candidate: &str, mint: &Mint) -> Decision {
 /// answers as a browser answers a `file://` page (owner's rulings of
 /// 2026-09-21 and 2026-09-23, ticket 0.4.4-13): it **reaches the network**,
 /// because a report that pulls its stylesheet, its chart library or its font
-/// from a server is a report that renders; what its markup names on this
-/// machine — a picture, a stylesheet, a script, a font, a frame — **loads**;
-/// and a page script's `fetch` or `XMLHttpRequest` of a `file:` address
-/// **does not**, which is the one line a browser draws and is why this door
-/// takes the request's [`RequestKind`]. No list of folders: how much of the
-/// disk markup may reach is the engine's own browser rule, which is every
-/// local file in Chromium and the page's folder in Safari (the Mac load's
-/// read access). A share is still refused — it is another machine, and the
-/// product's UNC refusal (DESIGN §7.1.3) reaches this door in the same words
-/// it reaches the others. A browsing seat may touch no `file:` at all, and the
-/// host's own blank page fetches nothing.
+/// from a server is a report that renders, and every `file:` request it
+/// makes on this machine is **handed to the engine**, which answers it with
+/// its own browser rule. That rule is the whole of the local reach, and Folio
+/// adds nothing to it: Chromium loads every local file the markup names and
+/// fails a page script's `fetch` or `XMLHttpRequest` of one; Safari does the
+/// same inside the page's folder (the Mac load's read access) — all measured.
+/// A share is still refused here — it is another machine, and the product's
+/// UNC refusal (DESIGN §7.1.3) reaches this door in the same words it reaches
+/// the others. A browsing seat may touch no `file:` at all, and the host's own
+/// blank page fetches nothing.
 ///
 /// # The three schemes that are neither
 ///
@@ -742,7 +741,7 @@ pub fn navigation_starting(candidate: &str, mint: &Mint) -> Decision {
 /// may be built out of, and the browser building its own viewer out of its own
 /// parts is not a document reaching anywhere.
 #[must_use]
-pub fn resource_request(candidate: &str, kind: RequestKind, mint: &Mint) -> Decision {
+pub fn resource_request(candidate: &str, mint: &Mint) -> Decision {
     let trimmed = candidate.trim();
     if trimmed.is_empty() {
         return Decision::Refuse(Refusal::Empty);
@@ -779,13 +778,14 @@ pub fn resource_request(candidate: &str, kind: RequestKind, mint: &Mint) -> Deci
         return Decision::Navigate(trimmed.to_owned());
     }
     if scheme == DISK {
-        return match (mint, kind) {
+        return match mint {
             // A `file:` URL that names a host is a share, and it is refused
             // under the name the rest of the product refuses shares by — on
-            // every seat, whatever asked for it.
+            // every seat.
             _ if names_a_file_host(trimmed) => Decision::Refuse(Refusal::NetworkPath),
-            (Mint::File(_), RequestKind::LoadedByMarkup) => Decision::Navigate(trimmed.to_owned()),
-            _ => Decision::Refuse(Refusal::FileScheme),
+            // The engine's own rule decides the rest (owner, 2026-09-23).
+            Mint::File(_) => Decision::Navigate(trimmed.to_owned()),
+            Mint::Nothing | Mint::Blank => Decision::Refuse(Refusal::FileScheme),
         };
     }
     if NETWORK.contains(&scheme) {
@@ -805,56 +805,6 @@ pub fn resource_request(candidate: &str, kind: RequestKind, mint: &Mint) -> Deci
         Ok(()) => Refusal::ExternalScheme,
     })
 }
-
-/// **What a request is for, in the one distinction the owner's ruling of
-/// 2026-09-23 draws** (ticket 0.4.4-13): "relative subresources (images,
-/// scripts, styles) load; page-side fetch/XHR of local files does not."
-///
-/// Both engines name it. WebView2 reports a resource context per request, read
-/// by [`RequestKind::of`]; WebKit's content rules take a `resource-type`, and
-/// [`READ_BY_SCRIPT_IN_WEBKIT`] is the word it files `fetch` and
-/// `XMLHttpRequest` under.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RequestKind {
-    /// Something the document's markup names: the document or a frame, a
-    /// stylesheet, a picture, a script, a font, media — everything that is not
-    /// a page script reading an address.
-    LoadedByMarkup,
-    /// A page script reading an address: `fetch` or `XMLHttpRequest`.
-    ReadByScript,
-}
-
-impl RequestKind {
-    /// WebView2's word for a request, in the ruling's.
-    #[must_use]
-    pub fn of(kind: bt_platform::WebRequestKind) -> Self {
-        use bt_platform::WebRequestKind as Engine;
-        match kind {
-            Engine::Fetch | Engine::XmlHttpRequest => Self::ReadByScript,
-            Engine::Document
-            | Engine::Stylesheet
-            | Engine::Image
-            | Engine::Media
-            | Engine::Font
-            | Engine::Script
-            | Engine::TextTrack
-            | Engine::EventSource
-            | Engine::WebSocket
-            | Engine::Manifest
-            | Engine::SignedExchange
-            | Engine::Ping
-            | Engine::CspViolationReport
-            | Engine::Other => Self::LoadedByMarkup,
-        }
-    }
-}
-
-/// **WebKit's word for [`RequestKind::ReadByScript`]** — the content-rule
-/// `resource-type` that covers both `fetch()` and `XMLHttpRequest` and no
-/// markup load (measured on macOS 26.6.2: a `^https://` rule of this type
-/// blocked both and not an `<img>`; the type is in WebKit's parser since
-/// 2021-03-04, before macOS 14).
-pub const READ_BY_SCRIPT_IN_WEBKIT: [&str; 1] = ["fetch"];
 
 // ── The same sentence, compiled in advance (M4-2) ──────────────────────────
 
@@ -903,9 +853,6 @@ pub struct ContentRule {
     /// The pattern, in the content-blocker dialect: anchored at `^`, an
     /// optional alternation of scheme names, then the separator.
     pub url_filter: String,
-    /// The content-blocker `resource-type`s the rule is limited to; empty is
-    /// every kind of request.
-    pub resource_types: &'static [&'static str],
 }
 
 /// **Every scheme `resource_request` refuses outright for this mint, as
@@ -925,11 +872,10 @@ pub struct ContentRule {
 ///
 /// # What the patterns can and cannot say, and who holds the rest
 ///
-/// A pattern speaks about an **address** and, with a `resource-type`, about
-/// what asked for it — so it can say *this seat reaches no server*, *this seat
-/// reaches no disk* and *no page script here reads the disk*. It cannot say
-/// *this file is inside that folder*, and nothing here tries: how much of the
-/// disk a local page's markup reaches is Safari's grant, carried by
+/// A pattern speaks about an **address**, so it can say *this seat reaches no
+/// server*, *this seat reaches no disk* and *this seat reaches no share*. It
+/// cannot say *this file is inside that folder*, and nothing here tries: how
+/// much of the disk a local page reaches is Safari's grant, carried by
 /// `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with the minted file's
 /// own folder, which X-2 measured enforcing it with no rule list at all. The
 /// test holds the patterns to [`resource_request`] and names the grant as the
@@ -948,11 +894,9 @@ pub fn content_rule_list(mint: &Mint) -> Vec<ContentRule> {
     // to remember to add.
     let network = NETWORK.iter().map(|scheme| ContentRule {
         url_filter: format!("^{scheme}://"),
-        resource_types: &[],
     });
     let disk = ContentRule {
         url_filter: format!("^{DISK}:"),
-        resource_types: &[],
     };
     match mint {
         // A browsing seat: the network is what it is for, and the disk is what
@@ -963,13 +907,13 @@ pub fn content_rule_list(mint: &Mint) -> Vec<ContentRule> {
         Mint::Nothing => vec![disk],
         // The host's own empty page fetches nothing at all.
         Mint::Blank => network.chain(std::iter::once(disk)).collect(),
-        // A local page reaches the network and loads what its markup names;
-        // a page script's read of a `file:` address is refused. How much of
-        // the disk markup reaches is the load's read access — Safari's grant.
-        // This one rule is also what keeps the list from being empty.
+        // A local page reaches the network, and the engine answers its `file:`
+        // requests by its own rule inside the load's read access — Safari's
+        // grant. What this seat refuses that no engine would is a share, which
+        // is [`names_a_file_host`] said as a pattern — and that one rule is
+        // also what keeps the list from being empty.
         Mint::File(_) => vec![ContentRule {
-            resource_types: &READ_BY_SCRIPT_IN_WEBKIT,
-            ..disk
+            url_filter: format!("^{DISK}:{A_FILE_HOST}"),
         }],
     }
 }
@@ -977,15 +921,16 @@ pub fn content_rule_list(mint: &Mint) -> Vec<ContentRule> {
 /// **The same list as Safari content-blocker JSON**, which is what
 /// `WKContentRuleListStore` compiles.
 ///
-/// One rule per line of the list above, `block` for every one of them, a
-/// `resource-type` only where the rule names one (the local seat's
-/// page-script read, ticket 0.4.4-13), and no `if-domain`, because a mint is
-/// not a domain.
+/// One rule per line of the list above, `block` for every one of them, and
+/// nothing else in it: no `resource-type`, because the sentence is about the
+/// address and not about what the document wanted the bytes for, and no
+/// `if-domain`, because a mint is not a domain.
 ///
 /// Never empty. A mint whose list were empty would be a JSON document
 /// `WKContentRuleListStore` refuses to compile, and a seat whose compilation
 /// failed is a seat with no third door at all — so the browsing seat carries
-/// its `file:` refusal rather than an empty list.
+/// its `file:` refusal and the local seat its share refusal rather than an
+/// empty list.
 #[must_use]
 pub fn content_rules(mint: &Mint) -> String {
     let mut json = String::from("[");
@@ -1003,20 +948,7 @@ pub fn content_rules(mint: &Mint) -> String {
                 other => json.push(other),
             }
         }
-        json.push('"');
-        if !rule.resource_types.is_empty() {
-            json.push_str(r#","resource-type":["#);
-            for (index, kind) in rule.resource_types.iter().enumerate() {
-                if index > 0 {
-                    json.push(',');
-                }
-                json.push('"');
-                json.push_str(kind);
-                json.push('"');
-            }
-            json.push(']');
-        }
-        json.push_str(r#"},"action":{"type":"block"}}"#);
+        json.push_str(r#""},"action":{"type":"block"}}"#);
     }
     json.push(']');
     json
@@ -1026,6 +958,12 @@ pub fn content_rules(mint: &Mint) -> String {
 fn is_an_empty_document(candidate: &str) -> bool {
     candidate.eq_ignore_ascii_case(BLANK_PAGE) || candidate.eq_ignore_ascii_case("about:srcdoc")
 }
+
+/// **[`names_a_file_host`] in the content-blocker dialect**: after `file:`,
+/// two slashes and then anything that is not the third. Measured on macOS
+/// 26.6.2: WebKit compiles `[^/]`, and a rule written with it blocks exactly
+/// the addresses whose next character is not a slash.
+pub const A_FILE_HOST: &str = "//[^/]";
 
 /// Whether a `file:` URL carries an authority — `file://server/share/x`.
 ///
@@ -1349,38 +1287,11 @@ pub fn site_key(url: &str) -> Option<String> {
 #[cfg(test)]
 mod resource_gate_tests {
     use super::*;
-    use bt_platform::WebRequestKind as Engine;
 
     /// The seat a reader opens out of the files column: one report, in one
     /// folder, with a second folder beside it that has nothing to do with it.
     fn a_report() -> Mint {
         Mint::file(Path::new(r"D:\tmp\page\report.html")).expect("a local path mints")
-    }
-
-    /// Every word WebView2 has for a request, as this crate's platform layer
-    /// reports it.
-    const EVERY_ENGINE_KIND: [Engine; 16] = [
-        Engine::Document,
-        Engine::Stylesheet,
-        Engine::Image,
-        Engine::Media,
-        Engine::Font,
-        Engine::Script,
-        Engine::XmlHttpRequest,
-        Engine::Fetch,
-        Engine::TextTrack,
-        Engine::EventSource,
-        Engine::WebSocket,
-        Engine::Manifest,
-        Engine::SignedExchange,
-        Engine::Ping,
-        Engine::CspViolationReport,
-        Engine::Other,
-    ];
-
-    /// The same request asked about by what the engine said it was for.
-    fn asked(candidate: &str, engine: Engine, mint: &Mint) -> Decision {
-        resource_request(candidate, RequestKind::of(engine), mint)
     }
 
     /// RED (0.4.4-13) — **a local page may fetch from the network.**
@@ -1390,8 +1301,8 @@ mod resource_gate_tests {
     /// the wrong font, and readers met that as a broken preview rather than as
     /// a protection (adversarial review 2026-09-21, the owner's rulings). A
     /// `file://` page in Edge, Chrome and Safari reaches every one of them —
-    /// measured for this ticket — so the local seat does too, by every kind of
-    /// request and over every scheme [`NETWORK`] names.
+    /// measured for this ticket — so the local seat does too, over every scheme
+    /// [`NETWORK`] names.
     ///
     /// MUTATION: answer `Refuse(NotMinted)` for `Mint::File(_)` in
     /// `resource_request`'s `NETWORK` arm, as it did before.
@@ -1404,25 +1315,23 @@ mod resource_gate_tests {
             "ws://localhost:5173/",
             "wss://example.com/live",
         ] {
-            for engine in EVERY_ENGINE_KIND {
-                assert_eq!(
-                    asked(outward, engine, &a_report()),
-                    Decision::Navigate(outward.to_owned()),
-                    "{outward} as {engine:?}"
-                );
-            }
+            assert_eq!(
+                resource_request(outward, &a_report()),
+                Decision::Navigate(outward.to_owned()),
+                "{outward}"
+            );
         }
     }
 
     /// RED (0.4.4-13) — **a local page still may not reach a share.**
     ///
     /// A share is another machine, and the product refuses one by the same name
-    /// at every door (DESIGN §7.1.3). The ruling opened the local seat to this
-    /// machine's files and to the network; it did not make a `file:` URL with a
-    /// host into either.
+    /// at every door (DESIGN §7.1.3). The rulings opened the local seat to the
+    /// network and handed its `file:` requests to the engine; they did not make
+    /// a `file:` URL with a host into either.
     ///
-    /// MUTATION: move the `names_a_file_host` arm below the
-    /// `(Mint::File(_), LoadedByMarkup)` arm in `resource_request`.
+    /// MUTATION: move the `names_a_file_host` arm below the `Mint::File(_)` arm
+    /// in `resource_request`.
     #[test]
     fn a_local_page_still_may_not_reach_a_share() {
         for share in [
@@ -1430,159 +1339,130 @@ mod resource_gate_tests {
             "file://server/share/x.png",
             "file://localhost/D:/tmp/page/report.html",
         ] {
-            for engine in EVERY_ENGINE_KIND {
-                assert_eq!(
-                    asked(share, engine, &a_report()),
-                    Decision::Refuse(Refusal::NetworkPath),
-                    "{share} as {engine:?}"
-                );
-            }
+            assert_eq!(
+                resource_request(share, &a_report()),
+                Decision::Refuse(Refusal::NetworkPath),
+                "{share}"
+            );
         }
     }
 
-    /// RED (0.4.4-13) — **what a local page's markup names on this machine
-    /// loads, wherever it lives.**
+    /// RED (0.4.4-13) — **what a local page's markup names on this machine is
+    /// handed to the engine, wherever it lives.**
     ///
     /// The owner's ruling of 2026-09-23: "relative subresources (images,
     /// scripts, styles) load … No Folio-specific list." Measured for this
     /// ticket on Edge 153 and Chrome 152, the engines WebView2 is: a relative
     /// `<img>`, a `../` `<script>`, a relative stylesheet, a picture in an
     /// unrelated folder named by an absolute `file:` URL, and a relative frame
-    /// all load. So every one of them passes this door by every engine word
-    /// that is not a page script's read — the engine resolved the relative
-    /// reference before it asked, which is why the candidates are absolute.
-    /// (Safari draws the line at the page's folder; on a Mac that is the load's
-    /// read access, and `the_two_spellings_of_the_resource_rule_agree` says
-    /// so.)
+    /// all load. The engine resolved each relative reference before it asked,
+    /// which is why the candidates are absolute. (Safari draws the line at the
+    /// page's folder; on a Mac that is the load's read access, and
+    /// `the_two_spellings_of_the_resource_rule_agree` says so.)
     ///
     /// MUTATION: restore the `is_inside_the_folder_of` guard on the
     /// `Mint::File` arm of `resource_request`'s `DISK` branch.
     #[test]
     fn a_local_page_loads_its_relative_image_script_and_style() {
-        for (resolved, engine) in [
-            ("file:///D:/tmp/page/rel.png", Engine::Image),
-            ("file:///D:/tmp/page/deep/down.png", Engine::Image),
-            ("file:///D:/tmp/up.js", Engine::Script),
-            ("file:///D:/tmp/page/rel.css", Engine::Stylesheet),
-            ("file:///D:/tmp/page/%E5%9B%BE.woff2", Engine::Font),
-            ("file:///D:/tmp/page/clip.mp4", Engine::Media),
-            ("file:///D:/tmp/page/frame.html", Engine::Document),
-            ("file:///C:/elsewhere/far.png", Engine::Image),
-            ("file:///D:/tmp/page/report.html#ch3", Engine::Document),
+        for resolved in [
+            "file:///D:/tmp/page/rel.png",
+            "file:///D:/tmp/page/deep/down.png",
+            "file:///D:/tmp/up.js",
+            "file:///D:/tmp/page/rel.css",
+            "file:///D:/tmp/page/%E5%9B%BE.woff2",
+            "file:///D:/tmp/page/frame.html",
+            "file:///C:/elsewhere/far.png",
+            "file:///D:/tmp/page/report.html#ch3",
         ] {
             assert_eq!(
-                asked(resolved, engine, &a_report()),
+                resource_request(resolved, &a_report()),
                 Decision::Navigate(resolved.to_owned()),
-                "{resolved} as {engine:?}"
+                "{resolved}"
             );
         }
     }
 
-    /// RED (0.4.4-13) — **a local page's script may not read a local file.**
+    /// RED (0.4.4-13) — **a local page's script read of a local file is passed
+    /// to the engine, which refuses it as a browser does.**
     ///
-    /// The other half of the same ruling: "page-side fetch/XHR of local files
-    /// does not." Edge, Chrome and Safari all fail `fetch('./data.json')` and
-    /// its `XMLHttpRequest` twin from a `file://` page (measured), so the door
-    /// says the same — for the file beside the page as for any other — and says
-    /// it by what the engine reported the request was for.
+    /// The owner's ruling of 2026-09-23: the refusal of a page script's `fetch`
+    /// or `XMLHttpRequest` of a local file is the engine's, not this door's.
+    /// Measured: Edge, Chrome, Safari and WKWebView all fail
+    /// `fetch('./data.json')` from a `file://` page on their own, and an empty
+    /// 403 minted here turned WebView2's network error into a response the page
+    /// could read the status of. So nothing here tells a script's read from a
+    /// picture's: the door answers the address, and the address is a local
+    /// file on a local seat.
     ///
-    /// MUTATION: answer `Navigate` for `(Mint::File(_), _)` in the `DISK` arm,
-    /// or map `Engine::Fetch` to `LoadedByMarkup` in `RequestKind::of`.
+    /// MUTATION: answer `Refuse(FileScheme)` for `Mint::File(_)` whenever the
+    /// candidate is outside the minted file's folder.
     #[test]
-    fn a_local_page_may_not_fetch_a_local_file() {
+    fn a_local_pages_script_read_of_a_local_file_is_passed_to_the_engine() {
         for read in [
             "file:///D:/tmp/page/data.json",
-            "file:///D:/tmp/page/report.html",
+            "file:///D:/tmp/other/notes.json",
             "file:///C:/elsewhere/notes.txt",
         ] {
-            for engine in [Engine::Fetch, Engine::XmlHttpRequest] {
-                assert_eq!(
-                    asked(read, engine, &a_report()),
-                    Decision::Refuse(Refusal::FileScheme),
-                    "{read} as {engine:?}"
-                );
-            }
+            assert_eq!(
+                resource_request(read, &a_report()),
+                Decision::Navigate(read.to_owned()),
+                "{read}"
+            );
         }
-    }
-
-    /// RED (0.4.4-13) — **each engine's word for a request means what the
-    /// ruling says**, with nothing left unsorted.
-    ///
-    /// WebView2's `fetch` and `XMLHttpRequest` contexts are the page script's
-    /// reads and every other context is the markup's; WebKit files both script
-    /// reads under one content-rule type, measured on macOS 26.6.2 (a rule of
-    /// that type blocked `fetch` and XHR and not an `<img>`).
-    ///
-    /// MUTATION: map `Engine::XmlHttpRequest` to `LoadedByMarkup`, or change
-    /// [`READ_BY_SCRIPT_IN_WEBKIT`] to `["raw"]`.
-    #[test]
-    fn every_engine_word_for_a_request_has_the_rulings_meaning() {
-        for engine in EVERY_ENGINE_KIND {
-            let expected = if matches!(engine, Engine::Fetch | Engine::XmlHttpRequest) {
-                RequestKind::ReadByScript
-            } else {
-                RequestKind::LoadedByMarkup
-            };
-            assert_eq!(RequestKind::of(engine), expected, "{engine:?}");
-        }
-        assert_eq!(READ_BY_SCRIPT_IN_WEBKIT, ["fetch"]);
     }
 
     /// PIN (0.4.4-13) — **the host's own blank page still fetches nothing.**
     ///
     /// Out of the ticket's scope and pinned against drift: the seat between two
-    /// documents reaches no server and no disk, by any kind of request.
+    /// documents reaches no server and no disk.
     ///
     /// MUTATION: answer `Navigate` for `Mint::Blank` in the `NETWORK` arm.
     #[test]
     fn the_blank_seat_still_fetches_nothing() {
-        for engine in EVERY_ENGINE_KIND {
-            for outward in [
-                "https://cdn.example.com/style.css",
-                "http://127.0.0.1:9/beacon.gif",
-                "ws://localhost:5173/",
-                "wss://example.com/live",
-            ] {
-                assert_eq!(
-                    asked(outward, engine, &Mint::Blank),
-                    Decision::Refuse(Refusal::NotMinted),
-                    "{outward} as {engine:?}"
-                );
-            }
+        for outward in [
+            "https://cdn.example.com/style.css",
+            "http://127.0.0.1:9/beacon.gif",
+            "ws://localhost:5173/",
+            "wss://example.com/live",
+        ] {
             assert_eq!(
-                asked("file:///D:/tmp/page/rel.png", engine, &Mint::Blank),
-                Decision::Refuse(Refusal::FileScheme),
-            );
-            assert_eq!(
-                asked("file://server/share/x.png", engine, &Mint::Blank),
-                Decision::Refuse(Refusal::NetworkPath),
+                resource_request(outward, &Mint::Blank),
+                Decision::Refuse(Refusal::NotMinted),
+                "{outward}"
             );
         }
+        assert_eq!(
+            resource_request("file:///D:/tmp/page/rel.png", &Mint::Blank),
+            Decision::Refuse(Refusal::FileScheme),
+        );
+        assert_eq!(
+            resource_request("file://server/share/x.png", &Mint::Blank),
+            Decision::Refuse(Refusal::NetworkPath),
+        );
     }
 
     /// PIN (0.4.4-13) — **a browsing seat still touches no file.**
     ///
-    /// The mirror image, unchanged by the ruling: a page from a server naming
-    /// `file:///C:/…` is refused whatever asked for it (A3), and its own
-    /// subresources are the whole of what it is for.
+    /// The mirror image, unchanged by the rulings: a page from a server naming
+    /// `file:///C:/…` is refused (A3), and its own subresources are the whole
+    /// of what it is for.
     ///
-    /// MUTATION: let the `(Mint::File(_), LoadedByMarkup)` arm match any mint.
+    /// MUTATION: let the `Mint::File(_)` arm of the `DISK` branch match any
+    /// mint.
     #[test]
     fn a_browsing_seat_still_touches_no_file() {
-        for engine in EVERY_ENGINE_KIND {
-            assert_eq!(
-                asked("file:///C:/Windows/win.ini", engine, &Mint::Nothing),
-                Decision::Refuse(Refusal::FileScheme),
-            );
-            assert_eq!(
-                asked("file://attacker/share/x.png", engine, &Mint::Nothing),
-                Decision::Refuse(Refusal::NetworkPath),
-            );
-            assert!(matches!(
-                asked("https://example.com/app.js", engine, &Mint::Nothing),
-                Decision::Navigate(_)
-            ));
-        }
+        assert_eq!(
+            resource_request("file:///C:/Windows/win.ini", &Mint::Nothing),
+            Decision::Refuse(Refusal::FileScheme),
+        );
+        assert_eq!(
+            resource_request("file://attacker/share/x.png", &Mint::Nothing),
+            Decision::Refuse(Refusal::NetworkPath),
+        );
+        assert!(matches!(
+            resource_request("https://example.com/app.js", &Mint::Nothing),
+            Decision::Navigate(_)
+        ));
     }
 
     /// The bytes a document is built out of rather than fetched from: inline
@@ -1599,15 +1479,10 @@ mod resource_gate_tests {
             "about:srcdoc",
             "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html",
         ] {
-            for kind in [RequestKind::LoadedByMarkup, RequestKind::ReadByScript] {
-                assert!(
-                    matches!(
-                        resource_request(held, kind, &a_report()),
-                        Decision::Navigate(_)
-                    ),
-                    "{held}"
-                );
-            }
+            assert!(
+                matches!(resource_request(held, &a_report()), Decision::Navigate(_)),
+                "{held}"
+            );
         }
     }
 
@@ -1627,7 +1502,7 @@ mod resource_gate_tests {
         ] {
             for mint in [Mint::Nothing, a_report()] {
                 assert_eq!(
-                    resource_request(candidate, RequestKind::LoadedByMarkup, &mint),
+                    resource_request(candidate, &mint),
                     Decision::Refuse(refusal),
                     "{candidate}"
                 );
@@ -1656,12 +1531,12 @@ mod content_rule_tests {
 
     /// **The emitted pattern, read rather than re-derived.**
     ///
-    /// The whole dialect this module writes: `^`, an optional parenthesised
-    /// alternation of scheme names, and then the separator the scheme is
-    /// followed by. Anything else is a pattern somebody added without teaching
-    /// this reader about it, and the panic says so rather than answering
-    /// `false` — a filter nobody can evaluate must not read as a filter that
-    /// blocks nothing.
+    /// The whole dialect this module writes: `^`, a scheme name, the separator
+    /// the scheme is followed by, and optionally [`A_FILE_HOST`]'s closing
+    /// class — one character that is not a slash. Anything else is a pattern
+    /// somebody added without teaching this reader about it, and the panic says
+    /// so rather than answering `false` — a filter nobody can evaluate must not
+    /// read as a filter that blocks nothing.
     fn blocks(filter: &str, candidate: &str) -> bool {
         let body = filter
             .strip_prefix('^')
@@ -1669,43 +1544,29 @@ mod content_rule_tests {
         let cut = body
             .find(':')
             .unwrap_or_else(|| panic!("`{filter}` names no scheme"));
-        let (scheme, separator) = body.split_at(cut);
+        let (scheme, rest) = body.split_at(cut);
+        let (separator, not_a_slash_next) = match rest.strip_suffix("[^/]") {
+            Some(separator) => (separator, true),
+            None => (rest, false),
+        };
         assert!(
             scheme
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && separator.chars().all(|c| c == ':' || c == '/'),
             "`{filter}` carries a pattern this reader does not understand"
         );
         // A content blocker's `url-filter` is case-insensitive unless the rule
         // says otherwise, and none of these does.
         let head = format!("{scheme}{separator}");
-        candidate.len() >= head.len() && candidate[..head.len()].eq_ignore_ascii_case(&head)
-    }
-
-    /// **WebKit's words for a request of this kind** — `fetch` for a page
-    /// script's read, and the markup's own types for everything else.
-    fn webkit_words(kind: RequestKind) -> &'static [&'static str] {
-        match kind {
-            RequestKind::ReadByScript => &READ_BY_SCRIPT_IN_WEBKIT,
-            RequestKind::LoadedByMarkup => &[
-                "document",
-                "image",
-                "style-sheet",
-                "script",
-                "font",
-                "media",
-            ],
-        }
-    }
-
-    /// Whether one compiled rule refuses this request: its pattern matches,
-    /// and it names no `resource-type` or names the request's.
-    fn rule_refuses(rule: &ContentRule, candidate: &str, kind: RequestKind) -> bool {
-        blocks(&rule.url_filter, candidate)
-            && (rule.resource_types.is_empty()
-                || webkit_words(kind)
-                    .iter()
-                    .any(|word| rule.resource_types.contains(word)))
+        let starts =
+            candidate.len() >= head.len() && candidate[..head.len()].eq_ignore_ascii_case(&head);
+        starts
+            && (!not_a_slash_next
+                || candidate[head.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c != '/'))
     }
 
     /// The Mac load's read access:
@@ -1736,166 +1597,83 @@ mod content_rule_tests {
     ///
     /// Each row is a line of X-2's table
     /// (`docs/plans/port/probe-x2-wkwebview-policy-2026-09-12.md`) or of ticket
-    /// 0.4.4-13's measurement, with the kind of request it is. Three sentences
-    /// are held over every row: no pattern refuses what [`resource_request`]
-    /// admits; the Mac pair (patterns plus the load's read access) refuses
-    /// everything [`resource_request`] refuses; and the Mac pair refuses
-    /// something [`resource_request`] admits only on the rows marked as
-    /// Safari's grant — a local page's markup naming a file outside its folder,
-    /// which Chromium loads and Safari does not (measured, Safari 26.6.2).
+    /// 0.4.4-13's measurement. Three sentences are held over every row: the
+    /// patterns refuse exactly what [`resource_request`] refuses; the Mac pair
+    /// (patterns plus the load's read access) refuses everything
+    /// [`resource_request`] refuses; and the pair refuses something
+    /// [`resource_request`] admits only on the rows marked as Safari's grant —
+    /// a local page naming a file outside its folder, which Chromium loads and
+    /// Safari does not (measured, Safari 26.6.2).
     ///
-    /// MUTATION: drop the `file:` rule from [`Mint::Nothing`]'s list, the
-    /// `resource-type` from the local seat's, or the network rule from
-    /// [`Mint::Blank`]'s, and the row that rule was written for names itself.
+    /// MUTATION: drop the `file:` rule from [`Mint::Nothing`]'s list, the share
+    /// rule from the local seat's, or the network rule from [`Mint::Blank`]'s,
+    /// and the row that rule was written for names itself.
     #[test]
     fn the_two_spellings_of_the_resource_rule_agree() {
-        use RequestKind::{LoadedByMarkup as Markup, ReadByScript as Script};
-        let fixtures: [(&str, RequestKind, Mint, bool); 33] = [
+        let fixtures: [(&str, Mint, bool); 30] = [
             // A browsing seat: its own origins are its business.
-            (
-                "http://127.0.0.1:9002/img.png",
-                Markup,
-                Mint::Nothing,
-                false,
-            ),
-            (
-                "http://127.0.0.1:9002/style.css",
-                Markup,
-                Mint::Nothing,
-                false,
-            ),
-            (
-                "http://127.0.0.1:9002/third.js",
-                Markup,
-                Mint::Nothing,
-                false,
-            ),
-            (
-                "http://127.0.0.1:9002/fetched.txt",
-                Script,
-                Mint::Nothing,
-                false,
-            ),
-            (
-                "http://127.0.0.1:9002/frame.html",
-                Markup,
-                Mint::Nothing,
-                false,
-            ),
-            ("https://example.com/a.png", Markup, Mint::Nothing, false),
+            ("http://127.0.0.1:9002/img.png", Mint::Nothing, false),
+            ("http://127.0.0.1:9002/style.css", Mint::Nothing, false),
+            ("http://127.0.0.1:9002/third.js", Mint::Nothing, false),
+            ("http://127.0.0.1:9002/fetched.txt", Mint::Nothing, false),
+            ("http://127.0.0.1:9002/frame.html", Mint::Nothing, false),
+            ("https://example.com/a.png", Mint::Nothing, false),
             // …including the socket its dev server reloads it over (audit 3
             // A-2). A browsing seat reaches a server, and `ws` is one of the
             // ways.
-            ("ws://localhost:5173/", Markup, Mint::Nothing, false),
-            ("wss://example.com/socket", Markup, Mint::Nothing, false),
+            ("ws://localhost:5173/", Mint::Nothing, false),
+            ("wss://example.com/socket", Mint::Nothing, false),
             // …and the disk is what it may not touch.
-            ("file:///etc/hosts", Markup, Mint::Nothing, false),
-            ("file:///etc/hosts", Script, Mint::Nothing, false),
-            (
-                "file:///D:/seat/open/inside.png",
-                Markup,
-                Mint::Nothing,
-                false,
-            ),
-            ("file://server/share/x.png", Markup, Mint::Nothing, false),
+            ("file:///etc/hosts", Mint::Nothing, false),
+            ("file:///D:/seat/open/inside.png", Mint::Nothing, false),
+            ("file://server/share/x.png", Mint::Nothing, false),
             // The document's own bytes, on every seat.
-            (
-                "data:text/html,%3Cb%3Ehi%3C/b%3E",
-                Markup,
-                Mint::Nothing,
-                false,
-            ),
-            (
-                "blob:http://127.0.0.1:9002/9d1",
-                Script,
-                Mint::Nothing,
-                false,
-            ),
-            ("about:blank", Markup, Mint::Nothing, false),
-            (
-                "data:text/html,%3Cb%3Ehi%3C/b%3E",
-                Markup,
-                a_report(),
-                false,
-            ),
-            // The local seat: what its markup names in its own folder and the
-            // folders under it.
-            ("file:///D:/seat/open/inside.png", Markup, a_report(), false),
-            (
-                "file:///D:/seat/open/images/plate.png",
-                Markup,
-                a_report(),
-                false,
-            ),
-            (
-                "file:///D:/seat/open/report.html#ch3",
-                Markup,
-                a_report(),
-                false,
-            ),
+            ("data:text/html,%3Cb%3Ehi%3C/b%3E", Mint::Nothing, false),
+            ("blob:http://127.0.0.1:9002/9d1", Mint::Nothing, false),
+            ("about:blank", Mint::Nothing, false),
+            ("data:text/html,%3Cb%3Ehi%3C/b%3E", a_report(), false),
+            // The local seat: its own folder and the folders under it, handed
+            // to the engine.
+            ("file:///D:/seat/open/inside.png", a_report(), false),
+            ("file:///D:/seat/open/images/plate.png", a_report(), false),
+            ("file:///D:/seat/open/report.html#ch3", a_report(), false),
+            ("file:///D:/seat/open/data.json", a_report(), false),
             // …outside it, which Chromium loads and Safari's grant refuses.
-            (
-                "file:///D:/seat/outside/secret.png",
-                Markup,
-                a_report(),
-                true,
-            ),
-            (
-                "file:///D:/seat/outside/secret.html",
-                Markup,
-                a_report(),
-                true,
-            ),
-            ("file:///D:/seat/up.js", Markup, a_report(), true),
-            // …a page script's read of any of it, refused everywhere.
-            ("file:///D:/seat/open/data.json", Script, a_report(), false),
-            (
-                "file:///D:/seat/outside/secret.png",
-                Script,
-                a_report(),
-                false,
-            ),
-            // …a share, refused everywhere.
-            ("file://server/share/x.png", Markup, a_report(), false),
+            ("file:///D:/seat/outside/secret.png", a_report(), true),
+            ("file:///D:/seat/outside/secret.html", a_report(), true),
+            ("file:///D:/seat/up.js", a_report(), true),
+            // …a share, refused by both spellings.
+            ("file://server/share/x.png", a_report(), false),
+            ("FILE://server/share/x.png", a_report(), false),
             // …and the network, by every way of reaching it (0.4.4-13).
-            ("http://127.0.0.1:9002/img.png", Markup, a_report(), false),
-            ("https://example.com/a.png", Markup, a_report(), false),
-            ("https://example.com/data.json", Script, a_report(), false),
-            ("ws://example.com/", Markup, a_report(), false),
-            ("wss://example.com/", Markup, a_report(), false),
+            ("http://127.0.0.1:9002/img.png", a_report(), false),
+            ("https://example.com/a.png", a_report(), false),
+            ("wss://example.com/", a_report(), false),
             // The host's own empty page fetches nothing.
-            ("http://127.0.0.1:9002/img.png", Markup, Mint::Blank, false),
-            ("wss://attacker.tld/", Markup, Mint::Blank, false),
-            (
-                "file:///D:/seat/open/inside.png",
-                Markup,
-                Mint::Blank,
-                false,
-            ),
+            ("http://127.0.0.1:9002/img.png", Mint::Blank, false),
+            ("wss://attacker.tld/", Mint::Blank, false),
+            ("file:///D:/seat/open/inside.png", Mint::Blank, false),
         ];
-        for (candidate, kind, mint, safari_reads_less) in fixtures {
+        for (candidate, mint, safari_reads_less) in fixtures {
             let by_pattern = content_rule_list(&mint)
                 .iter()
-                .any(|rule| rule_refuses(rule, candidate, kind));
+                .any(|rule| blocks(&rule.url_filter, candidate));
             let by_read_access = outside_the_read_access(&mint, candidate);
-            let spoken = matches!(
-                resource_request(candidate, kind, &mint),
-                Decision::Refuse(_)
-            );
+            let spoken = matches!(resource_request(candidate, &mint), Decision::Refuse(_));
             let on_the_mac = by_pattern || by_read_access;
-            assert!(
-                !by_pattern || spoken,
-                "{candidate} ({kind:?}) on {mint:?}: a pattern refuses what the rule admits"
+            assert_eq!(
+                by_pattern, spoken,
+                "{candidate} on {mint:?}: the patterns and the rule disagree"
             );
             assert!(
                 !spoken || on_the_mac,
-                "{candidate} ({kind:?}) on {mint:?}: the Mac load admits what the rule refuses"
+                "{candidate} on {mint:?}: the Mac load admits what the rule refuses"
             );
             assert_eq!(
                 on_the_mac && !spoken,
                 safari_reads_less,
-                "{candidate} ({kind:?}) on {mint:?}: the Mac load and the rule differ where \
-                 Safari's grant does not explain it"
+                "{candidate} on {mint:?}: the Mac load and the rule differ where Safari's \
+                 grant does not explain it"
             );
         }
     }
@@ -1912,10 +1690,18 @@ mod content_rule_tests {
             .iter()
             .map(|scheme| format!("^{scheme}://"))
             .chain(std::iter::once(format!("^{DISK}:")))
+            .chain(std::iter::once(format!("^{DISK}:{A_FILE_HOST}")))
             .collect();
         assert_eq!(
             out_of_a_table,
-            ["^http://", "^https://", "^ws://", "^wss://", "^file:"]
+            [
+                "^http://",
+                "^https://",
+                "^ws://",
+                "^wss://",
+                "^file:",
+                "^file://[^/]"
+            ]
         );
         for mint in [Mint::Nothing, Mint::Blank, a_report()] {
             for rule in content_rule_list(&mint) {
@@ -1924,13 +1710,6 @@ mod content_rule_tests {
                     "{:?} carries a pattern out of no table: {}",
                     mint,
                     rule.url_filter
-                );
-                // And a type out of no table is a type nobody measured.
-                assert!(
-                    rule.resource_types.is_empty()
-                        || rule.resource_types == READ_BY_SCRIPT_IN_WEBKIT,
-                    "{mint:?} carries a resource type out of no table: {:?}",
-                    rule.resource_types
                 );
             }
         }
@@ -1945,6 +1724,29 @@ mod content_rule_tests {
                     rule.url_filter
                 );
             }
+        }
+    }
+
+    /// RED — **the share pattern says what [`names_a_file_host`] says**, over
+    /// the spellings a share and a local path come in.
+    ///
+    /// MUTATION: write [`A_FILE_HOST`] as `//` and the local rows fail.
+    #[test]
+    fn the_share_pattern_is_the_share_rule() {
+        let pattern = format!("^{DISK}:{A_FILE_HOST}");
+        for candidate in [
+            "file://server/share/x.png",
+            "file://localhost/D:/x.png",
+            "FILE://Server/x",
+            "file:///D:/seat/open/inside.png",
+            "file:///Users/somebody/x.html",
+            "file:///",
+        ] {
+            assert_eq!(
+                blocks(&pattern, candidate),
+                names_a_file_host(candidate),
+                "{candidate}"
+            );
         }
     }
 
@@ -1966,12 +1768,8 @@ mod content_rule_tests {
         for mint in [Mint::Nothing, Mint::Blank, a_report()] {
             let rules = content_rule_list(&mint);
             let refuses = |candidate: &str| {
-                let kind = RequestKind::LoadedByMarkup;
-                let by_pattern = rules.iter().any(|rule| rule_refuses(rule, candidate, kind));
-                let spoken = matches!(
-                    resource_request(candidate, kind, &mint),
-                    Decision::Refuse(_)
-                );
+                let by_pattern = rules.iter().any(|rule| blocks(&rule.url_filter, candidate));
+                let spoken = matches!(resource_request(candidate, &mint), Decision::Refuse(_));
                 assert_eq!(
                     by_pattern, spoken,
                     "{candidate} on {mint:?}: the patterns and the rule disagree"
@@ -1991,17 +1789,16 @@ mod content_rule_tests {
         }
         // And the direction each mint actually takes, so that "they agree"
         // cannot be satisfied by refusing or allowing all four.
-        let markup = RequestKind::LoadedByMarkup;
         assert!(matches!(
-            resource_request("wss://example.com/live", markup, &Mint::Nothing),
+            resource_request("wss://example.com/live", &Mint::Nothing),
             Decision::Navigate(_)
         ));
         assert!(matches!(
-            resource_request("wss://example.com/live", markup, &a_report()),
+            resource_request("wss://example.com/live", &a_report()),
             Decision::Navigate(_)
         ));
         assert!(matches!(
-            resource_request("wss://example.com/live", markup, &Mint::Blank),
+            resource_request("wss://example.com/live", &Mint::Blank),
             Decision::Refuse(Refusal::NotMinted)
         ));
     }
@@ -2013,8 +1810,10 @@ mod content_rule_tests {
     /// compilation failed has no third door at all — so "the browsing seat has
     /// nothing to block" would be a browsing seat with no gate on its
     /// subresources whatsoever. Since 0.4.4-13 the local seat's one rule is the
-    /// page script's read of a `file:` address, and that rule is what keeps its
-    /// list from being empty (the ticket's blocking criterion B2).
+    /// share refusal the product already makes, and that rule is what keeps its
+    /// list from being empty (the ticket's blocking criterion B2). Measured on
+    /// macOS 26.6.2: the list compiles, and the local page loads as it does
+    /// with no list.
     ///
     /// MUTATION: answer `"[]"` for [`Mint::Nothing`], or an empty list for a
     /// `Mint::File`.
@@ -2026,7 +1825,7 @@ mod content_rule_tests {
         );
         assert_eq!(
             content_rules(&a_report()),
-            r#"[{"trigger":{"url-filter":"^file:","resource-type":["fetch"]},"action":{"type":"block"}}]"#
+            r#"[{"trigger":{"url-filter":"^file://[^/]"},"action":{"type":"block"}}]"#
         );
         assert_eq!(
             content_rules(&Mint::Blank),
@@ -2090,11 +1889,7 @@ mod content_rule_tests {
             Decision::Navigate(String::from("file:///Users/somebody/seat/open/report.html"))
         );
         assert!(matches!(
-            resource_request(
-                "file:///Users/somebody/seat/open/inside.png",
-                RequestKind::LoadedByMarkup,
-                &posix
-            ),
+            resource_request("file:///Users/somebody/seat/open/inside.png", &posix),
             Decision::Navigate(_)
         ));
     }
@@ -2177,10 +1972,7 @@ mod file_url_tests {
             );
             // And so does the door the document's pictures come through.
             assert!(
-                matches!(
-                    resource_request(&reported, RequestKind::LoadedByMarkup, &minted),
-                    Decision::Navigate(_)
-                ),
+                matches!(resource_request(&reported, &minted), Decision::Navigate(_)),
                 "the document could not read itself: {reported}"
             );
         }
@@ -2260,31 +2052,15 @@ mod file_url_tests {
                 Decision::Refuse(expected),
                 "the gate admitted {refused}"
             );
-            // The resource door no longer holds this table for the markup
-            // (ruling 2026-09-23, ticket 0.4.4-13: what a `file://` page's
-            // markup reaches is the engine's own rule); a page script's read
-            // of any of it is still refused.
-            assert!(
-                matches!(
-                    resource_request(refused, RequestKind::ReadByScript, &minted),
-                    Decision::Refuse(Refusal::FileScheme | Refusal::NetworkPath | Refusal::Empty)
-                ),
-                "the document's script read {refused}"
-            );
+            // The resource door no longer holds this table (owner, 2026-09-23,
+            // ticket 0.4.4-13): a local page's `file:` requests are the
+            // engine's to answer, and only a share is refused here.
         }
 
         // ⑨ **Double encoding is one decode, and one decode is what the disk
         // sees.** `%252e` is the two-character *name* `%2e` — the disk resolves
         // no traversal out of it and neither does this — so it names a child of
         // the folder it was written in and can never leave it.
-        assert!(matches!(
-            resource_request(
-                "file:///D:/tmp/%252e%252e/other/secret.png",
-                RequestKind::ReadByScript,
-                &minted
-            ),
-            Decision::Refuse(_)
-        ));
         assert_eq!(
             LocalFileUrl::parse("file:///D:/tmp/page/%252e%252e/x.png")
                 .expect("a name, not a traversal")
@@ -2340,10 +2116,7 @@ mod file_url_tests {
             "file:///D:/tmp/page/图.png",
         ] {
             assert!(
-                matches!(
-                    resource_request(inside, RequestKind::LoadedByMarkup, &minted),
-                    Decision::Navigate(_)
-                ),
+                matches!(resource_request(inside, &minted), Decision::Navigate(_)),
                 "the document could not read {inside}, which is beside it"
             );
         }

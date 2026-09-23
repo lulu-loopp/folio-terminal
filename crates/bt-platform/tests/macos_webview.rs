@@ -79,7 +79,7 @@ mod mac {
 
     use bt_platform::{
         Compositor, NativeWindow, PageVisual, WebEvent, WebHost, WebNavigationVerdict,
-        WebRequestKind, WebRequestVerdict,
+        WebRequestVerdict,
     };
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::{MainThreadMarker, MainThreadOnly};
@@ -158,11 +158,11 @@ mod mac {
     /// `bt_app::webnav::content_rule_tests`.
     ///
     /// Since ticket 0.4.4-13 a local seat reaches the network, and its one rule
-    /// is the page-script read of a `file:` address — `fetch` and
-    /// `XMLHttpRequest`, both of which WebKit files under `fetch`. Which of the
-    /// disk it may read by markup is the load's read access (the seat's folder,
-    /// Safari's own grant), and rows ② and ③ below are that grant at work.
-    const FILE_SEAT_RULES: &str = r#"[{"trigger":{"url-filter":"^file:","resource-type":["fetch"]},"action":{"type":"block"}}]"#;
+    /// is the share refusal: a `file:` URL with a host. Which of the disk it
+    /// may read is the load's read access (the seat's folder, Safari's own
+    /// grant), and rows ② and ③ below are that grant at work.
+    const FILE_SEAT_RULES: &str =
+        r#"[{"trigger":{"url-filter":"^file://[^/]"},"action":{"type":"block"}}]"#;
 
     // ── the window ─────────────────────────────────────────────────────────
 
@@ -969,12 +969,9 @@ function click(id) { document.getElementById(id).click(); }
                 }
             }),
             // `webnav::resource_request` on a `Mint::File` seat: a local file
-            // the markup names, and the network, pass; a page script's read of
-            // a `file:` address does not.
-            Box::new(|candidate: &str, kind: WebRequestKind| {
-                let read_by_script =
-                    matches!(kind, WebRequestKind::Fetch | WebRequestKind::XmlHttpRequest);
-                let local = candidate.starts_with("file:///") && !read_by_script;
+            // and the network pass to the engine; a share does not.
+            Box::new(|candidate: &str| {
+                let local = candidate.starts_with("file:///");
                 let network = ["http:", "https:", "ws:", "wss:"]
                     .iter()
                     .any(|scheme| candidate.starts_with(scheme));
@@ -1330,7 +1327,7 @@ function click(id) { document.getElementById(id).click(); }
                     WebNavigationVerdict::Cancel
                 }
             }),
-            Box::new(|candidate: &str, _: WebRequestKind| {
+            Box::new(|candidate: &str| {
                 if candidate.starts_with("file:") {
                     WebRequestVerdict::Refuse
                 } else {
