@@ -16,6 +16,7 @@ mod first_run;
 mod frame;
 mod i18n;
 mod keyboard;
+mod math;
 mod palette;
 mod profiles;
 mod quake;
