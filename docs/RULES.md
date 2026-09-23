@@ -351,13 +351,18 @@ the **view**. `PreviewBuffer::save` compares the recorded modified time against
 the file and, on disagreement, **writes nothing** and answers a conflict — the
 edits survive and the foot says so. A rename moves the buffer's identity onto the
 new path; the new suffix changes the view but cannot take back the content sniff.
-On a rendered page the caret's block is drawn as source, in the face its kind
-wears, and changes face only when a gesture ends. **The source block is banded
-from one range of file bytes** (`preview_live::source_band`): the caret's
-selection, or else the rendered selection mapped back to the file, stretched
-while a drag is in flight to the last byte the hand reached. **A table swept by a
-selection stays rendered; only the caret entering a table flips it to source**,
-until the 0.5 in-cell table editor replaces the flip.
+On a rendered page **every block the selection touches is drawn as source, as one
+unbroken run with the caret's own block** (`preview_live::source_span`), each in
+the face its kind wears; with nothing selected that is the caret's one block. The
+selection is the caret's, or else the rendered selection mapped back to the file.
+**A table swept by a selection stays rendered; only the caret entering a table
+flips it to source**, until the 0.5 in-cell table editor replaces the flip. Faces
+change only when a gesture ends: **the span a gesture starts on is held until the
+release** (`preview_press::held_span`), a press or a drag may move the caret
+anywhere the held span draws as source (`preview_press::keeps_the_span`), and a
+lost focus ends the drag. **The source blocks are banded from one range of file
+bytes** (`preview_live::source_band`), stretched while a drag is in flight to the
+last byte the hand reached.
 **From.** §7.1.3; §7.1.3q; §7.1.3s *undo lives on the buffer, and the dirty dot is
 a position in it*; §7.1.3v *a buffer knows which disk state it is holding, and a
 read is answered against the body it was issued for* (`T-EDIT-DISK`); §7.1.3w;
@@ -365,11 +370,16 @@ the 2026-09-21 entries *a block shows its source when the gesture ends, not
 while a selection is drawn* and *a press inside the source block is answered
 where it stands, and the seat holds until the gesture ends*; the 2026-09-23 entry
 *a selection crossing the source block bands it too, a table only a selection
-sweeps stays rendered, and a caret crossing into another block is measured*.
+sweeps stays rendered, and a caret crossing into another block is measured*; the
+2026-09-23 entry *every block a selection touches is drawn as source, a table it
+only sweeps stays rendered, and the span is held until the gesture ends*.
 **Overrides.** §7.1.3v overrides §7.1.3p: a read now carries the base it was
 issued for, and a late answer about a body the buffer has moved past is refused
 — it raises a disk-changed notice and keeps body, undo, caret and selection —
 instead of landing. §7.1.3v also deleted a second copy of the atomic write.
+The 2026-09-23 span entry overrides §7.1.3q's one source block and its "no block
+is exempt", and the 2026-09-21 sentences "the page's face is a function of the
+caret's seat alone" and "nothing is pinned in the painter".
 
 ### 20. The PDF glance — `not yet folded`
 Entries: §7.10 item ⑥; the dependency essay in `crates/bt-app/Cargo.toml` that

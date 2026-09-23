@@ -23,16 +23,23 @@
 //! hand over at the release, exactly where the page changes face.
 //!
 //! **One press is answered where it stands, and the rule says which** (closure
-//! review of this ruling, 2026-09-21). The page's face is a function of the
-//! caret's *seat* alone ([`caret_seat`]) — so a caret moving **inside the seat
-//! the page is already drawing** changes no face, and there is nothing to
-//! defer. [`keeps_the_seat`] is that question, and it is the whole of the
-//! exception: a press inside the block already drawn as source seats the caret
-//! at once and its drag goes on extending it, which is the ordinary editing
-//! gesture and must go on showing the selection as it is drawn. The moment the
-//! hand leaves the seat the caret stops following it — the seat may not change
-//! while a gesture is in flight — and the release places it where the hand let
-//! go.
+//! review of this ruling, 2026-09-21). A caret moving **inside the source the
+//! page is already drawing** changes no face, and there is nothing to defer.
+//! [`keeps_the_span`] is that question, and it is the whole of the exception: a
+//! press inside a block already drawn as source seats the caret at once and its
+//! drag goes on extending it, which is the ordinary editing gesture and must go
+//! on showing the selection as it is drawn. The moment the hand leaves the
+//! drawn source the caret stops following it, and the release places it where
+//! the hand let go.
+//!
+//! **The span a gesture starts on is held until it ends** (owner's ruling
+//! 2026-09-23). Since that ruling the page's face is a function of the caret's
+//! *selection* — every block it touches is source ([`crate::preview_live::source_span`])
+//! — and a press lets go of the selection at once, so the face is no longer
+//! something the caret's position alone can hold still. [`held_span`] holds it:
+//! while a gesture is in flight the page draws the span it was drawing when the
+//! button went down, and the release, which moves the caret, is where it
+//! changes, once.
 //!
 //! **Pure, in [`crate::preview_live`]'s style**: no window, no pane and no
 //! pointer. Which byte a point names is the window's question and is asked
@@ -41,34 +48,74 @@
 
 use std::ops::Range;
 
-use crate::preview_live::caret_seat;
+use crate::preview::MarkdownBlock;
+use crate::preview_live::{CaretSeat, SourceSpan, caret_seat};
 use crate::preview_select::Grain;
 
-/// **Whether a press may be answered where it stands**: the byte it named and
-/// the caret already standing in the page are in one seat, so putting the caret
-/// there changes no block's face.
+/// **Whether a press may be answered where it stands**: the byte it named is in
+/// the source the page is already drawing, so putting the caret there changes
+/// no block's face (2026-09-21, as the owner's ruling of 2026-09-23 widened the
+/// source from one block to a span).
 ///
 /// `caret` is the caret the page is *drawing from* — `None` for a page nobody
-/// has entered, which draws no source block at all and therefore has no seat to
+/// has entered, which draws no source block at all and therefore has nothing to
 /// keep. That is why a first press into a rendered page always waits for the
-/// release and a press inside the block already open never does.
+/// release. `drawn` is the span the page is drawing, which while a gesture is
+/// in flight is the one it started on ([`held_span`]).
+///
+/// **A byte in a block the span draws as source** keeps it: the caret stands in
+/// a block the page already draws from the file's own bytes, and the span is
+/// held until the gesture ends whatever the caret does inside it. A table the
+/// span sweeps but does not draw is rendered, so a byte in it does not. **A
+/// byte in a gap** keeps it only when the caret is already in that same gap —
+/// the empty line a gap is drawn as stands in one place whichever of its bytes
+/// the caret is on, and it is drawn only for the caret's own gap.
 ///
 /// Asked in seats rather than in ranges so that the two positions a range cannot
 /// tell apart — the end of an unterminated last block, and the blank line after
 /// a paragraph — are answered here exactly as the page answers them when it
-/// decides what to draw. A gap is a seat like any other: the empty line it is
-/// drawn as stands in the same place whichever of its bytes the caret is on.
+/// decides what to draw. With nothing selected, `drawn` is the caret's own
+/// block and this is the 2026-09-21 rule word for word: the byte and the caret
+/// are in one seat.
 #[must_use]
-pub fn keeps_the_seat(
+pub fn keeps_the_span(
     content: &str,
     ranges: &[Range<usize>],
+    blocks: &[MarkdownBlock],
+    drawn: Option<&SourceSpan>,
     caret: Option<usize>,
     offset: usize,
 ) -> bool {
     let Some(caret) = caret else {
         return false;
     };
-    caret_seat(content, ranges, caret) == caret_seat(content, ranges, offset)
+    match caret_seat(content, ranges, offset) {
+        CaretSeat::Block(index) => drawn.is_some_and(|span| span.draws(index, blocks)),
+        gap @ CaretSeat::Gap { .. } => gap == caret_seat(content, ranges, caret),
+    }
+}
+
+/// **The span a page draws while a gesture may be in flight** (owner's ruling
+/// 2026-09-23; the 2026-09-21 timing ruling, now pinned).
+///
+/// While a gesture is in flight the page draws `standing` — the span it was
+/// drawing when the button went down — and nothing the gesture does to the
+/// caret or to either selection model moves it: a press drops the band at once
+/// and not the span, and a drag across the page changes no block's face. With
+/// no gesture in flight it is `fresh()`, the span the caret and its selection
+/// draw now, which is how keyboard selection (Shift+arrows, Select All) moves
+/// it keystroke by keystroke and how the release moves it, once.
+#[must_use]
+pub fn held_span(
+    in_flight: bool,
+    standing: Option<&SourceSpan>,
+    fresh: impl FnOnce() -> Option<SourceSpan>,
+) -> Option<SourceSpan> {
+    if in_flight {
+        standing.cloned()
+    } else {
+        fresh()
+    }
 }
 
 /// **What a press on a rendered page named**, kept until the gesture it began
@@ -168,7 +215,7 @@ impl Pressed {
 mod tests {
     use super::*;
     use crate::preview_edit::EditCaret;
-    use crate::preview_live::{CaretSeat, caret_seat};
+    use crate::preview_live::source_span;
     use crate::preview_select::{word_end, word_start};
     use std::ops::Range;
 
@@ -182,17 +229,27 @@ mod tests {
         vec![0..8, 9..25, 26..43]
     }
 
+    /// Its blocks, through the real parser — whose ranges are the ones above.
+    fn blocks() -> Vec<MarkdownBlock> {
+        let (blocks, parsed) = crate::preview::parse_markdown_ranged(PAGE);
+        assert_eq!(parsed, ranges(), "the parser's ranges are the page's");
+        blocks
+    }
+
     /// **A live rendered page, as much of one as this rule can be held
-    /// against**: the caret standing in it, and whether one is standing at all.
+    /// against**: the caret standing in it, whether one is standing at all, and
+    /// the span it is drawing.
     ///
-    /// Those two are the whole of what decides which block is drawn as source
-    /// ([`caret_seat`], §7.1.3q), which is what the owner's report is about —
-    /// so a gesture that leaves them alone is a page that does not change shape,
-    /// whatever else the window is doing.
+    /// The first two decide which blocks are drawn as source
+    /// ([`source_span`], §7.1.3q as the owner's ruling of 2026-09-23 widened
+    /// it), and the third is what is on the glass: the key the window laid the
+    /// page out by, which a gesture in flight holds ([`held_span`]).
     struct Page {
         caret: EditCaret,
         /// `PreviewPane::md_caret`: whether anybody has entered this page.
         entered: bool,
+        /// `PreviewDocumentKey::source`: the span the page is drawing.
+        drawn: Option<SourceSpan>,
         /// The gesture in flight — what the press recorded, and the last byte
         /// the hand has reached.
         flight: Option<(Pressed, Option<usize>)>,
@@ -207,17 +264,44 @@ mod tests {
             Self {
                 caret: EditCaret::default(),
                 entered: false,
+                drawn: None,
                 flight: None,
                 seated: false,
             }
         }
 
-        /// **Which block this page draws as source**, and `None` when it draws
-        /// none — the one rule, asked of the caret and of nothing else.
-        fn source_block(&self) -> Option<usize> {
-            self.entered
-                .then(|| caret_seat(PAGE, &ranges(), self.caret.caret))
-                .and_then(CaretSeat::block)
+        /// **The blocks this page draws as source**, as the window lays them out
+        /// — the span it is drawing, which a gesture in flight holds.
+        fn source_blocks(&self) -> Vec<usize> {
+            let blocks = blocks();
+            self.drawn
+                .as_ref()
+                .map(|span| span.drawn(&blocks).collect())
+                .unwrap_or_default()
+        }
+
+        /// **A frame**: the page is laid out again, by the window's own rule —
+        /// the span the gesture started on while one is in flight, and the
+        /// caret's selection otherwise ([`held_span`]).
+        fn frame(&mut self) {
+            let (caret, entered) = (self.caret, self.entered);
+            self.drawn = held_span(self.flight.is_some(), self.drawn.as_ref(), || {
+                entered
+                    .then(|| source_span(PAGE, &ranges(), &blocks(), caret.range(), caret.caret))
+                    .flatten()
+            });
+        }
+
+        /// Whether a byte of the file is in the source this page is drawing.
+        fn keeps(&self, offset: usize) -> bool {
+            keeps_the_span(
+                PAGE,
+                &ranges(),
+                &blocks(),
+                self.drawn.as_ref(),
+                self.drawing_from(),
+                offset,
+            )
         }
 
         /// The caret the page is drawing from, which a page nobody has entered
@@ -227,18 +311,25 @@ mod tests {
         }
 
         /// The button going down on a byte of the file — and answered here and
-        /// now when it keeps the seat, exactly as the window's own press does.
+        /// now when it keeps the span, exactly as the window's own press does.
+        /// A plain press lets go of the selection at once
+        /// (`Runtime::drop_preview_selection`), and a frame follows.
         fn press(&mut self, pressed: Pressed) {
             self.flight = Some((pressed, None));
             self.seated = match pressed {
-                Pressed::Byte { offset, .. } => {
-                    keeps_the_seat(PAGE, &ranges(), self.drawing_from(), offset)
-                }
+                Pressed::Byte { offset, .. } => self.keeps(offset),
                 Pressed::Ground => false,
             };
+            if matches!(
+                pressed,
+                Pressed::Byte { extend: false, .. } | Pressed::Ground
+            ) {
+                self.caret.anchor = self.caret.caret;
+            }
             if self.seated {
                 self.spend(pressed.spend(false, None));
             }
+            self.frame();
         }
 
         /// The hand moving with the button down, over another byte.
@@ -251,9 +342,10 @@ mod tests {
                 return;
             };
             *reached = Some(offset);
-            if self.seated && keeps_the_seat(PAGE, &ranges(), self.drawing_from(), offset) {
+            if self.seated && self.keeps(offset) {
                 self.caret.place(PAGE, offset, true);
             }
+            self.frame();
         }
 
         /// The button coming up — the record spent whatever the press already
@@ -265,6 +357,7 @@ mod tests {
             };
             self.seated = false;
             self.spend(pressed.spend(travelled, reached));
+            self.frame();
         }
 
         /// The window's own [`Spend`], through the same functions it obeys it
@@ -312,14 +405,14 @@ mod tests {
     fn a_press_turns_no_block_into_source_while_the_button_is_down() {
         let mut page = Page::read();
         assert_eq!(
-            page.source_block(),
-            None,
+            page.source_blocks(),
+            Vec::<usize>::new(),
             "a page being read draws no source"
         );
         page.press(Pressed::byte(12, Grain::Character, false));
         assert_eq!(
-            page.source_block(),
-            None,
+            page.source_blocks(),
+            Vec::<usize>::new(),
             "the press moved the caret, so the block under the pointer re-flowed \
              under a hand that has not let go",
         );
@@ -341,8 +434,8 @@ mod tests {
         page.release(false);
         assert_eq!(page.caret.caret, 12, "the byte the press named");
         assert_eq!(
-            page.source_block(),
-            Some(1),
+            page.source_blocks(),
+            vec![1],
             "and only now is its block drawn as source",
         );
         assert!(page.selected().is_empty(), "a click takes no text");
@@ -360,14 +453,14 @@ mod tests {
         page.press(Pressed::byte(12, Grain::Character, false));
         page.drag_to(20);
         assert_eq!(
-            page.source_block(),
-            None,
+            page.source_blocks(),
+            Vec::<usize>::new(),
             "a block turned to source mid-drag"
         );
         page.drag_to(32);
         assert_eq!(
-            page.source_block(),
-            None,
+            page.source_blocks(),
+            Vec::<usize>::new(),
             "the block the drag reached turned to source under the pointer",
         );
         page.release(true);
@@ -377,9 +470,10 @@ mod tests {
             "the run drawn over"
         );
         assert_eq!(
-            page.source_block(),
-            Some(2),
-            "and the caret's own block is source once the gesture is over",
+            page.source_blocks(),
+            vec![1, 2],
+            "and both blocks it was drawn over are source once the gesture is \
+             over (owner's ruling 2026-09-23)",
         );
     }
 
@@ -393,10 +487,14 @@ mod tests {
     fn a_double_click_takes_its_word_when_the_button_comes_up() {
         let mut page = Page::read();
         page.press(Pressed::byte(12, Grain::Word, false));
-        assert_eq!(page.source_block(), None, "still nothing while it is down");
+        assert_eq!(
+            page.source_blocks(),
+            Vec::<usize>::new(),
+            "still nothing while it is down"
+        );
         page.release(false);
         assert_eq!(page.selected(), "first", "the word the press landed in");
-        assert_eq!(page.source_block(), Some(1));
+        assert_eq!(page.source_blocks(), vec![1]);
     }
 
     /// **A shift-press is an extension and has no grain of its own**, so the two
@@ -418,7 +516,7 @@ mod tests {
         );
         page.release(false);
         assert_eq!(page.selected(), "st paragraph\n\nsecond pa");
-        assert_eq!(page.source_block(), Some(2));
+        assert_eq!(page.source_blocks(), vec![1, 2]);
     }
 
     /// RED — **a press inside the seat the page is already drawing is answered
@@ -439,7 +537,7 @@ mod tests {
         let mut page = Page::read();
         page.press(Pressed::byte(12, Grain::Character, false));
         page.release(false);
-        assert_eq!(page.source_block(), Some(1), "the page has been entered");
+        assert_eq!(page.source_blocks(), vec![1], "the page has been entered");
         // And now the second gesture, inside the block that is already open.
         page.press(Pressed::byte(10, Grain::Character, false));
         assert_eq!(page.caret.caret, 10, "the caret did not follow the press");
@@ -450,13 +548,13 @@ mod tests {
             "no band is drawn while the hand is selecting the words it is editing",
         );
         assert_eq!(
-            page.source_block(),
-            Some(1),
+            page.source_blocks(),
+            vec![1],
             "and the face is the one it was: the caret never left the seat",
         );
         page.release(true);
         assert_eq!(page.selected(), "irst parag", "the end state is the drag's");
-        assert_eq!(page.source_block(), Some(1));
+        assert_eq!(page.source_blocks(), vec![1]);
     }
 
     /// RED — **a drag out of the seat freezes the caret until the release**
@@ -479,8 +577,8 @@ mod tests {
             "the caret followed the hand out of its own seat",
         );
         assert_eq!(
-            page.source_block(),
-            Some(1),
+            page.source_blocks(),
+            vec![1],
             "so the paragraph under the pointer re-flowed mid-gesture",
         );
         page.release(true);
@@ -489,7 +587,7 @@ mod tests {
             "irst paragraph\n\nsecond pa",
             "and the release reaches the byte the hand let go over",
         );
-        assert_eq!(page.source_block(), Some(2));
+        assert_eq!(page.source_blocks(), vec![1, 2]);
     }
 
     /// **A repeated press inside the standing seat takes its word at once**,
@@ -510,7 +608,7 @@ mod tests {
             "first",
             "the word is not taken until later"
         );
-        assert_eq!(page.source_block(), Some(1));
+        assert_eq!(page.source_blocks(), vec![1]);
         page.release(false);
         assert_eq!(page.selected(), "first", "and the release says the same");
     }
@@ -522,17 +620,17 @@ mod tests {
         let mut page = Page::read();
         page.press(Pressed::byte(12, Grain::Character, false));
         page.release(false);
-        assert_eq!(page.source_block(), Some(1));
+        assert_eq!(page.source_blocks(), vec![1]);
         page.press(Pressed::Ground);
         assert_eq!(
-            page.source_block(),
-            Some(1),
+            page.source_blocks(),
+            vec![1],
             "the page changed shape while the button was still down",
         );
         page.release(false);
         assert_eq!(
-            page.source_block(),
-            None,
+            page.source_blocks(),
+            Vec::<usize>::new(),
             "and it renders again at the release"
         );
     }
@@ -577,5 +675,155 @@ mod tests {
              where the press named it",
         );
         assert_eq!(Pressed::Ground.spend(true, Some(13)), Spend::Ground);
+    }
+
+    // ── The span is held for the length of a gesture (2026-09-23) ──────────
+
+    /// RED (owner's ruling 2026-09-23, B) — **a drag across three blocks
+    /// changes no block's face until the button comes up, and then draws all
+    /// three as source, once.**
+    ///
+    /// The span changes where the caret does, and the caret moves at the
+    /// release: a frame drawn at every report of the drag shows the page it
+    /// showed when the button went down.
+    ///
+    /// MUTATION: let [`held_span`] answer `fresh()` while a gesture is in
+    /// flight and the plain press in the middle of the drag collapses the span
+    /// it began on — the page changes shape under a hand that has not let go.
+    #[test]
+    fn a_drag_in_flight_changes_no_face_until_the_release() {
+        let mut page = Page::read();
+        page.press(Pressed::byte(12, Grain::Character, false));
+        page.drag_to(35);
+        page.release(true);
+        assert_eq!(page.source_blocks(), vec![1, 2], "a span of two blocks");
+        page.press(Pressed::byte(3, Grain::Character, false));
+        assert!(
+            page.selected().is_empty(),
+            "the press let go of the selection"
+        );
+        assert_eq!(
+            page.source_blocks(),
+            vec![1, 2],
+            "and of nothing else: the press into the heading changes no face",
+        );
+        for reach in [5, 14, 20, 30, 38] {
+            page.drag_to(reach);
+            assert_eq!(page.source_blocks(), vec![1, 2], "mid-drag at {reach}");
+        }
+        page.release(true);
+        assert_eq!(
+            page.source_blocks(),
+            vec![0, 1, 2],
+            "all three blocks the selection covers, at the release",
+        );
+        assert_eq!(page.selected(), "itle\n\nfirst paragraph\n\nsecond parag");
+    }
+
+    /// RED (owner's ruling 2026-09-23, B) — **a press inside a span of several
+    /// blocks keeps every one of them drawn until the release, and a click
+    /// there collapses the span to the one block it landed in.**
+    ///
+    /// The press lets go of the selection at once — the band goes — but not of
+    /// the span: the caret stands in a block the page already draws as source,
+    /// so it is answered where it stands, and the faces change once, when the
+    /// button comes up.
+    ///
+    /// MUTATION: answer [`keeps_the_span`] from the caret's own block (the
+    /// 2026-09-21 seat rule) and the press into the other block of the span is
+    /// deferred — the caret does not move under the press, and the drag that
+    /// follows draws no band.
+    #[test]
+    fn a_click_inside_a_span_keeps_it_until_the_release_and_then_leaves_one_block() {
+        let mut page = Page::read();
+        page.press(Pressed::byte(12, Grain::Character, false));
+        page.drag_to(35);
+        page.release(true);
+        assert_eq!(page.source_blocks(), vec![1, 2], "a span of two blocks");
+        // Into the first of the two, which is not the block the caret is in.
+        page.press(Pressed::byte(14, Grain::Character, false));
+        assert_eq!(page.caret.caret, 14, "answered where it stands");
+        assert!(
+            page.selected().is_empty(),
+            "and the selection is let go at once"
+        );
+        assert_eq!(
+            page.source_blocks(),
+            vec![1, 2],
+            "but not the span: the page does not change shape under the button",
+        );
+        page.release(false);
+        assert_eq!(
+            page.source_blocks(),
+            vec![1],
+            "the selection is gone, so the caret's one block is left",
+        );
+    }
+
+    /// RED (owner's ruling 2026-09-23, B) — **the caret may follow the hand
+    /// anywhere in the span it started on**, and no further.
+    #[test]
+    fn a_drag_inside_a_held_span_moves_the_caret_through_all_of_it() {
+        let mut page = Page::read();
+        page.press(Pressed::byte(3, Grain::Character, false));
+        page.drag_to(35);
+        page.release(true);
+        assert_eq!(page.source_blocks(), vec![0, 1, 2]);
+        page.press(Pressed::byte(4, Grain::Character, false));
+        page.drag_to(38);
+        assert_eq!(
+            page.caret.caret, 38,
+            "from the heading to the last paragraph, inside the span it began on",
+        );
+        assert_eq!(page.selected(), "tle\n\nfirst paragraph\n\nsecond parag");
+        assert_eq!(page.source_blocks(), vec![0, 1, 2]);
+        page.release(true);
+        assert_eq!(page.source_blocks(), vec![0, 1, 2]);
+    }
+
+    /// **With nothing selected, the span rule is the seat rule** — every pair
+    /// of positions on the page answers [`keeps_the_span`] exactly as the
+    /// 2026-09-21 rule answered "the byte and the caret are in one seat".
+    #[test]
+    fn a_collapsed_caret_keeps_exactly_its_own_seat() {
+        let (ranges, blocks) = (ranges(), blocks());
+        for caret in 0..=PAGE.len() {
+            let drawn = source_span(PAGE, &ranges, &blocks, caret..caret, caret);
+            for offset in 0..=PAGE.len() {
+                assert_eq!(
+                    keeps_the_span(PAGE, &ranges, &blocks, drawn.as_ref(), Some(caret), offset),
+                    caret_seat(PAGE, &ranges, caret) == caret_seat(PAGE, &ranges, offset),
+                    "caret {caret}, press {offset}",
+                );
+            }
+            assert!(
+                !keeps_the_span(PAGE, &ranges, &blocks, drawn.as_ref(), None, caret),
+                "a page nobody has entered keeps nothing",
+            );
+        }
+    }
+
+    /// RED (owner's ruling 2026-09-23) — **a table the span only sweeps is not
+    /// a place the caret may be taken mid-gesture**, because it is drawn
+    /// rendered: a caret there would stand in pipes nobody can see.
+    #[test]
+    fn a_table_the_span_sweeps_is_not_kept() {
+        let content = "one\n\n| a |\n|---|\n| 1 |\n\ntwo\n";
+        let (blocks, ranges) = crate::preview::parse_markdown_ranged(content);
+        assert!(
+            matches!(blocks[1], MarkdownBlock::Table { .. }),
+            "{blocks:?}"
+        );
+        let head = ranges[2].start + 1;
+        let drawn = source_span(content, &ranges, &blocks, 1..head, head);
+        let cell = ranges[1].start + 2;
+        assert!(
+            !keeps_the_span(content, &ranges, &blocks, drawn.as_ref(), Some(head), cell),
+            "the swept table is rendered",
+        );
+        assert!(
+            keeps_the_span(content, &ranges, &blocks, drawn.as_ref(), Some(head), 1),
+            "and the paragraph beyond it is source",
+        );
     }
 }
