@@ -3855,7 +3855,13 @@ impl Runtime<'_> {
             seats::PreviewRailPart::Reload => self.run_web_head_verb(surface, WebHeadVerb::Reload),
             seats::PreviewRailPart::Browser => self.open_preview_in_browser(surface),
             seats::PreviewRailPart::Flip => self.flip_preview_source_on(surface),
-            seats::PreviewRailPart::OpenWith => self.open_preview_rail_menu(surface),
+            // The pill is a `⌄` (§7.1.6e, 2026-09-10), so the menu a press on it
+            // opens is pinned (owner ruling 2026-09-23).
+            seats::PreviewRailPart::OpenWith => {
+                self.open_preview_rail_menu(surface)?;
+                self.pin_the_chevron_menu_a_press_opened(Popup::File);
+                Ok(())
+            }
             // One glyph, two verbs, and the row's kind is what tells them apart
             // — the same fork [`seats::preview_rail_target`] makes on the docked
             // host, made once more where the press turns into an action.

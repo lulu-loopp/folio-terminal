@@ -1165,14 +1165,27 @@ impl Runtime<'_> {
                 // P133's rule, owed by every closer and paid by only one of
                 // them until now: the arrow turns back when the list goes.
                 if self.window.profile_menu.close() {
+                    self.window.chevrons.menu_gone(popup);
                     self.start_chevron_turn();
                 }
             }
             Popup::Root => {
                 self.window.root_menu.close();
             }
-            Popup::File => self.window.file_menu = None,
-            Popup::Pane => self.window.pane_menu = None,
+            // **A menu a `⌄` governs takes its gate's pin with it** (owner
+            // ruling 2026-09-23) — only when it was actually up, so that a
+            // closer walking every popup does not stop a rest that is running
+            // on a button whose menu was never raised.
+            Popup::File => {
+                if self.window.file_menu.take().is_some() {
+                    self.window.chevrons.menu_gone(popup);
+                }
+            }
+            Popup::Pane => {
+                if self.window.pane_menu.take().is_some() {
+                    self.window.chevrons.menu_gone(popup);
+                }
+            }
             Popup::GraphFilter => self.window.graph_filter_menu = None,
             Popup::GitMenu => self.window.git_menu = None,
             Popup::TermMenu => self.window.term_menu = None,
@@ -1419,6 +1432,10 @@ impl Runtime<'_> {
         // E61: the opener closes the others. Not the float — that is a place, not
         // a popup, and this menu is very often *about a row inside it*.
         self.close_popups_except(Popup::File);
+        // **A file menu already up is replaced, which is its going away** (owner
+        // ruling 2026-09-23): the new one starts unpinned, and a press that
+        // raised it pins it on its own way out.
+        self.window.chevrons.menu_gone(Popup::File);
         self.window.file_menu = Some(FileMenuState {
             point,
             row: target.row,
@@ -1514,8 +1531,9 @@ impl Runtime<'_> {
         // The pill's gate goes with it, on [`Self::close_profile_menu`]'s note: a
         // grace still running against a menu that has already gone would fire a
         // second close on an empty state, and a rest maturing a frame later would
-        // raise a menu the thing that closed this one had just answered.
-        self.window.chevrons.rail.clear();
+        // raise a menu the thing that closed this one had just answered. And its
+        // pin goes with the menu (owner ruling 2026-09-23).
+        self.window.chevrons.menu_gone(Popup::File);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -2158,6 +2176,54 @@ impl Runtime<'_> {
         }
     }
 
+    /// **The gate of a `⌄` menu that is up**, or `None` when `popup` is not one
+    /// of the three a `⌄` governs or is not up (owner ruling 2026-09-23).
+    ///
+    /// The strip's picker and the pane head's menu are governed whenever they
+    /// are up; the file menu only while it is the one a preview rail's
+    /// `Open ⌄` raised — the same menu under a tree row's right press, or under
+    /// the breadcrumb's `…` chip, is not a chevron's and is never pinned.
+    pub(in crate::runtime) fn chevron_menu_up(
+        &mut self,
+        popup: Popup,
+    ) -> Option<&mut profiles::ChevronGate> {
+        let up = match popup {
+            Popup::Profile => self.window.profile_menu.is_open(),
+            Popup::Pane => self.window.pane_menu.is_some(),
+            Popup::File => self
+                .window
+                .file_menu
+                .as_ref()
+                .is_some_and(|menu| menu.rail().is_some()),
+            Popup::Root
+            | Popup::GraphFilter
+            | Popup::Preview
+            | Popup::GitMenu
+            | Popup::TermMenu
+            | Popup::Tab
+            | Popup::Palette => false,
+        };
+        if up {
+            self.window.chevrons.gate(popup)
+        } else {
+            None
+        }
+    }
+
+    /// **A press on a closed `⌄` pins the menu it opened** (owner ruling
+    /// 2026-09-23: 「直接点按钮=钉住」) — called by each button's press arm right
+    /// after its opener. The rest-open in [`Self::advance_chevrons`] goes
+    /// through the same openers and never through here, which is the whole
+    /// difference between a peek and a pinned menu.
+    ///
+    /// Nothing is pinned when the opener raised nothing (a pane with no shell,
+    /// a pill with no path): the pin belongs to a menu that is up.
+    pub(in crate::runtime) fn pin_the_chevron_menu_a_press_opened(&mut self, popup: Popup) {
+        if let Some(gate) = self.chevron_menu_up(popup) {
+            gate.pin();
+        }
+    }
+
     /// **The three hover-open clocks, matured** — the one place any of these
     /// menus is opened or closed by time rather than by a press.
     ///
@@ -2247,6 +2313,7 @@ impl Runtime<'_> {
         let Some(menu) = self.window.file_menu.take() else {
             return Ok(());
         };
+        self.window.chevrons.menu_gone(Popup::File);
         let (activation, tree_row, crumbs) = (menu.activation, menu.row, menu.crumbs);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -3290,7 +3357,9 @@ impl Runtime<'_> {
         // window rather than a menu, so it does not join the menus' mutually
         // exclusive chain — but a menu hanging off a control that is about to be
         // covered is a menu pointing at nothing.
-        self.window.profile_menu.close();
+        if self.window.profile_menu.close() {
+            self.window.chevrons.menu_gone(Popup::Profile);
+        }
         self.window.root_menu.close();
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();

@@ -9488,10 +9488,49 @@ impl ChevronGates {
     /// Every gate is cleared together by everything that is not a pointer move
     /// — Esc, a click, another popup opening. Whatever put a menu away has
     /// already answered the question the clocks were asking.
+    ///
+    /// **Clocks only.** A pin belongs to the menu that is up and goes when that
+    /// menu goes ([`profiles::ChevronGate::menu_gone`], through
+    /// [`Self::gate`]); a drag starting or another hover panel taking the glass
+    /// stops the clocks here and must not unpin a menu that is still up.
     fn clear(&mut self) {
         self.profile.clear();
         self.pane.clear();
         self.rail.clear();
+    }
+
+    /// **The gate that governs one popup**, or `None` for a popup no `⌄`
+    /// raises (owner ruling 2026-09-23).
+    ///
+    /// The one place the three menus are named against their gates, so that
+    /// pinning, reading the pin and dropping it with the menu are the same
+    /// sentence for all three: the strip's picker, the pane head's menu, and the
+    /// file menu — whose only chevron is a preview rail's `Open ⌄`. Whether the
+    /// file menu that is up is the pill's is the caller's question; the menu
+    /// going away drops the rail gate's pin whichever control raised it, since a
+    /// window holds one file menu.
+    fn gate(&mut self, popup: Popup) -> Option<&mut profiles::ChevronGate> {
+        match popup {
+            Popup::Profile => Some(&mut self.profile),
+            Popup::Pane => Some(&mut self.pane),
+            Popup::File => Some(&mut self.rail),
+            Popup::Root
+            | Popup::GraphFilter
+            | Popup::Preview
+            | Popup::GitMenu
+            | Popup::TermMenu
+            | Popup::Tab
+            | Popup::Palette => None,
+        }
+    }
+
+    /// **One popup went away** — its gate's clocks stop and its pin goes with
+    /// it. Every path that takes one of the three menus down, or replaces it
+    /// with another, comes through here.
+    fn menu_gone(&mut self, popup: Popup) {
+        if let Some(gate) = self.gate(popup) {
+            gate.menu_gone();
+        }
     }
 }
 
@@ -34873,12 +34912,22 @@ enum OwnPress {
     /// alone here — the control is about to be asked, and closing is part of
     /// what it will do.
     Handed,
+    /// **The press landed on the `⌄` of a menu that was only peeking, and pinned
+    /// it** (owner ruling 2026-09-23). Leave the popup up and stop: the menu
+    /// now stays until Esc, a press elsewhere or a second press on this button,
+    /// which is [`Self::Spent`] again.
+    Pinned,
 }
 
 impl OwnPress {
     /// Whether this arm is the one that puts the popup away.
     fn dismisses(self) -> bool {
-        self != Self::Handed
+        matches!(self, Self::Elsewhere | Self::Spent)
+    }
+
+    /// Whether the press is used up here and goes no further.
+    fn ends_the_press(self) -> bool {
+        matches!(self, Self::Spent | Self::Pinned)
     }
 }
 
@@ -34909,6 +34958,52 @@ fn press_spends_itself_closing(
         OwnPress::Handed
     } else {
         OwnPress::Spent
+    }
+}
+
+/// **A second press on a `⌄` pins a peek and closes only a pinned menu** (owner
+/// ruling 2026-09-23: 「窥视中点按钮=钉住」「"再点即收"只在钉住态成立」) — the
+/// rule, with no window around it.
+///
+/// `verdict` is [`press_spends_itself_closing`]'s answer and `gate` is the gate
+/// of the menu that is up when a `⌄` governs it
+/// ([`Runtime::chevron_menu_up`]). A press that would be spent closing its own
+/// popover pins it instead when that popover is a peek; a press on a pinned
+/// menu's button is spent closing it, as before; and every other verdict —
+/// a press elsewhere, a trigger that keeps its press, a popover no `⌄` governs
+/// — passes through untouched.
+/// **Whether a right press lands on the head that raised the pane menu that is
+/// up** (owner follow-up 2026-09-23: a right click is a click).
+///
+/// The head's whole bar — its body, its `×`, its folder, its `⌄` — raises the
+/// pane menu on a right press, so each of them is that menu's button for a
+/// right press: the second one pins a peek or closes a pinned menu. A right
+/// press on *another* head is a click elsewhere and moves the menu there.
+fn a_right_press_is_on_the_pane_menus_head(
+    menu: Option<SeatId>,
+    target: Option<seats::ChromeTarget>,
+) -> bool {
+    let Some(menu) = menu else {
+        return false;
+    };
+    matches!(
+        target,
+        Some(
+            seats::ChromeTarget::PaneHeader(seat)
+                | seats::ChromeTarget::PaneClose(seat)
+                | seats::ChromeTarget::PaneFiles(seat)
+                | seats::ChromeTarget::PaneMenu(seat),
+        ) if seat == menu
+    )
+}
+
+fn press_pins_a_peek(verdict: OwnPress, gate: Option<&mut profiles::ChevronGate>) -> OwnPress {
+    match gate {
+        Some(gate) if verdict == OwnPress::Spent && !gate.is_pinned() => {
+            gate.pin();
+            OwnPress::Pinned
+        }
+        _ => verdict,
     }
 }
 
@@ -49476,6 +49571,11 @@ mod popover_trigger_tests {
             "a handed press is not put away twice"
         );
         assert!(OwnPress::Spent.dismisses() && OwnPress::Elsewhere.dismisses());
+        // And a press that pinned a peek keeps the menu and goes no further
+        // (owner ruling 2026-09-23).
+        assert!(!OwnPress::Pinned.dismisses() && OwnPress::Pinned.ends_the_press());
+        assert!(OwnPress::Spent.ends_the_press());
+        assert!(!OwnPress::Elsewhere.ends_the_press() && !OwnPress::Handed.ends_the_press());
     }
 
     /// RED — **every dismissal arm asks the one rule, and none of them answers
@@ -49514,9 +49614,9 @@ mod popover_trigger_tests {
             "six popups have a trigger, and each one's arm dismisses on the verdict"
         );
         assert_eq!(
-            router.matches("if own == OwnPress::Spent {").count(),
+            router.matches("if own.ends_the_press() {").count(),
             6,
-            "and each one stops there when the press was its own close"
+            "and each one stops there when the press was its own close, or its pin"
         );
         // Assembled rather than written out: a literal spelled in full here is
         // itself a line of `main.rs`, and the scan would find its own needle.
