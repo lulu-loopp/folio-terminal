@@ -16613,6 +16613,93 @@ fn a_double_click_swings_between_fit_and_a_hundred_percent_and_lands_centred() {
     );
 }
 
+/// RED (42) — **a press on a float's body climbs the docked pane's ladder, picture
+/// included.**
+///
+/// A zoomed picture in a floating window could be neither panned nor
+/// double-clicked (owner, 2026-09-23: 「悬浮窗中的图片无法拖动」), while the same
+/// picture docked did both. `press_float` claims every press inside a window
+/// above the chrome router and restated the docked pane's body ladder for
+/// itself, and the restatement left out `press_preview_image` — the one rung
+/// that arms the pan and counts the double click. The move and release halves
+/// were never missing. The ladder is now one value, [`PreviewBodyRung::LADDER`],
+/// walked by one function that both hosts call, so the picture's rung is the
+/// float's because it is the pane's.
+///
+/// A `Runtime` needs a window and a GPU, so the routing is read off the
+/// bodies (through `bt_source`) and the order off the value itself.
+///
+/// MUTATION: remove the picture's rung from `PreviewBodyRung::LADDER` (the
+/// call a float's body press makes into `press_preview_image`) — the order
+/// assertion goes red; restate the list in `press_float` again and the reader
+/// assertions go red.
+#[test]
+fn a_press_on_a_floats_picture_climbs_the_docked_panes_ladder() {
+    assert_eq!(
+        PreviewBodyRung::LADDER.as_slice(),
+        [
+            PreviewBodyRung::BodyThumb,
+            PreviewBodyRung::BlockThumb,
+            PreviewBodyRung::Picture,
+            PreviewBodyRung::EditSurface,
+            PreviewBodyRung::RenderedText,
+        ]
+        .as_slice(),
+        "the furniture, then the picture, then the edit surface and the page"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "press_preview_body_ladder")),
+        ["chrome_mouse_input", "press_float"],
+        "the docked pane and the float walk one ladder"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "press_preview_image")),
+        ["press_preview_body_ladder"],
+        "the picture's rung is asked from one place"
+    );
+    // Neither host asks a rung for itself: that would be a second list. (The
+    // glance card asks the block bar for its own body, which no preview surface
+    // walk can see — `press_file_peek` is not one of the two hosts.)
+    for rung in [
+        "press_preview_body_thumb",
+        "press_preview_block_thumb",
+        "press_preview_body",
+        "press_preview_text",
+    ] {
+        let readers = reader_names(&calls_of("Runtime", rung));
+        assert!(
+            readers
+                .iter()
+                .any(|name| name == "press_preview_body_ladder")
+                && !readers
+                    .iter()
+                    .any(|name| name == "press_float" || name == "chrome_mouse_input"),
+            "`{rung}` is asked outside the ladder by a host: {readers:?}"
+        );
+    }
+}
+
+/// PIN (42) — **a double click on a float's picture is a double click, and it
+/// toggles the zoom.**
+///
+/// The half of `press_preview_image` a float's press now reaches: the float is a
+/// surface that takes zoom, two presses in one place on it are a pair, and the
+/// pair swings the picture between fit and a hundred percent. Green before the
+/// fix too — the gap was the routing above, not this arithmetic.
+#[test]
+fn a_double_click_on_a_floats_picture_toggles_its_zoom() {
+    let surface = PreviewSurface::Float(9);
+    assert!(surface_takes_image_zoom(surface));
+    let now = Instant::now();
+    let mut clicks = ImageClicks::default();
+    assert!(!clicks.register(surface, [400.0, 300.0], now));
+    assert!(clicks.register(surface, [402.0, 301.0], now + Duration::from_millis(90)));
+    assert_eq!(
+        image_zoom_toggled(ImageZoom::FIT).mode,
+        ImageZoomMode::Scale(1.0)
+    );
+}
+
 #[test]
 fn two_presses_in_one_place_are_a_double_click_and_a_third_starts_over() {
     let surface = seat_of(TAB_ONE, SeatId(2));

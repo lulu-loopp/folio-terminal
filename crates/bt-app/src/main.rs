@@ -24216,6 +24216,59 @@ enum ImageGrasp {
     Closed,
 }
 
+/// **One rung of the ladder a press on a preview's body climbs** — the pieces
+/// a docked preview pane and a preview float share, in the one order both ask
+/// them (0.4.4 ticket 42).
+///
+/// The furniture first and the content after it: the body's own bar rides over
+/// the whole document, a wide block's bar over that block, and a picture, the
+/// edit surface and a rendered page are three alternatives underneath — a body
+/// shows one of them, never two. The docked pane asked this list in
+/// `chrome_mouse_input` and a float restated it in `press_float`, because a press
+/// inside a window is claimed above the chrome router; the restatement drifted
+/// three times (the video, the rendered page's selection, and then the picture,
+/// which left a zoomed picture in a float unpannable and deaf to a double click —
+/// owner report 2026-09-23, 「悬浮窗中的图片无法拖动」). So the list is a value
+/// both callers walk ([`Self::LADDER`], `Runtime::press_preview_body_ladder`),
+/// and a rung added here is added to both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewBodyRung {
+    /// The body's own scroll bar (`Runtime::press_preview_body_thumb`).
+    BodyThumb,
+    /// A wide block's bar (`Runtime::press_preview_block_thumb`).
+    BlockThumb,
+    /// A picture that takes zoom: a double click toggles it, a press arms the
+    /// pan (`Runtime::press_preview_image`).
+    Picture,
+    /// The edit surface: the caret (`Runtime::press_preview_body`).
+    EditSurface,
+    /// A rendered page: a selection, or a link (`Runtime::press_preview_text`).
+    RenderedText,
+}
+
+impl PreviewBodyRung {
+    /// The order, top rung first.
+    const LADDER: [Self; 5] = [
+        Self::BodyThumb,
+        Self::BlockThumb,
+        Self::Picture,
+        Self::EditSurface,
+        Self::RenderedText,
+    ];
+
+    /// Its name in the mouse trace — the station names the docked ladder wrote
+    /// before it was one list, kept so an old trace and a new one read alike.
+    fn trace_name(self) -> &'static str {
+        match self {
+            Self::BodyThumb => "press-preview-body-thumb",
+            Self::BlockThumb => "press-preview-block-thumb",
+            Self::Picture => "press-preview-image",
+            Self::EditSurface => "press-preview-body",
+            Self::RenderedText => "press-preview-text",
+        }
+    }
+}
+
 /// A picture being carried: which surface, and where the hand was last seen.
 ///
 /// The delta is taken from the previous *move* rather than from the press, so a
@@ -50841,7 +50894,10 @@ mod mouse_trace_station_tests {
         // verb on the platform that hands that press to the application — the
         // window's own, which is a drag on one click and the reader's chosen
         // action on two (`at=press-title-bar`).
-        assert_every_return_is_traced("chrome_mouse_input", "return Ok(true);", 29);
+        // 29 → 25 on 2026-09-23 (0.4.4 ticket 42): the preview body's five rungs
+        // became one ladder a float walks too, and one exit, whose trace names the
+        // rung that took the press (`PreviewBodyRung::trace_name`).
+        assert_every_return_is_traced("chrome_mouse_input", "return Ok(true);", 25);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
@@ -51832,9 +51888,16 @@ mod files_locate_door_tests {
         // One selection path, reached from both hosts — the float's press and the
         // docked router's — so the window and the pane cannot come to select
         // differently.
+        //
+        // Both reach it through the one body ladder since 0.4.4 ticket 42.
+        assert!(
+            method_body("Runtime", "press_preview_body_ladder")
+                .contains("self.press_preview_text(position)"),
+            "the body ladder has lost the rendered page's rung"
+        );
         for name in ["press_float", "chrome_mouse_input"] {
             assert!(
-                method_body("Runtime", name).contains("self.press_preview_text(position)"),
+                method_body("Runtime", name).contains("self.press_preview_body_ladder(position)"),
                 "{name} does not reach the rendered-page selection path, so a document \
                  selects on one host and not the other"
             );
@@ -51887,8 +51950,10 @@ mod files_locate_door_tests {
         let player = press
             .find("self.press_video_at(position)")
             .expect("the float's press asks the player");
+        // The document is reached through the ladder the docked pane shares
+        // (0.4.4 ticket 42), whose last rung is the rendered page.
         let document = press
-            .find("self.press_preview_text(position)")
+            .find("self.press_preview_body_ladder(position)")
             .expect("the float's press reaches the document");
         assert!(
             player < document,
@@ -72073,8 +72138,12 @@ mod live_markdown_edit_tests {
     /// with an entrance of its own would be two answers to "where is the caret".
     #[test]
     fn a_floated_page_takes_the_caret_through_the_docked_press() {
+        // Through the one ladder the docked pane walks too (0.4.4 ticket 42).
         assert!(
-            method_body("Runtime", "press_float").contains("self.press_preview_text(position)"),
+            method_body("Runtime", "press_float")
+                .contains("self.press_preview_body_ladder(position)")
+                && method_body("Runtime", "press_preview_body_ladder")
+                    .contains("self.press_preview_text(position)"),
             "the float's body branch no longer reaches the rendered page's press",
         );
         assert_eq!(
