@@ -2308,17 +2308,20 @@ enum PreviewDocument {
         /// letter under the pointer is, and the highlight of a caret selection
         /// asks [`preview_provenance::place_of`] the same question backwards.
         maps: Vec<preview_provenance::BlockOrigins>,
-        /// **The block the caret is in, drawn as the file's own bytes**
-        /// (§7.1.3q). `None` when nothing on this surface holds a caret, and
-        /// when the caret stands in the tissue between two blocks
-        /// ([`preview_live::CaretSeat::Gap`]).
+        /// **The blocks drawn as the file's own bytes** (§7.1.3q, as the
+        /// owner's ruling of 2026-09-23 widened it from the caret's one block
+        /// to every block its selection touches). Empty when nothing on this
+        /// surface holds a caret, and when the caret stands in the tissue
+        /// between two blocks ([`preview_live::CaretSeat::Gap`]) with nothing
+        /// selected.
         ///
-        /// **Boxed**, which is the one place in this enum that pays for a
-        /// pointer: `None` is the answer on every rendered document nobody has
-        /// clicked into, and a variant carrying the block's bytes inline would
-        /// make every `PreviewDocument` — a diff, a table, an empty pane — as
-        /// large as the rarest thing any of them can hold.
-        source: Option<Box<MarkdownCaretBlock>>,
+        /// Held out of line in a `Vec`, which is the one place in this enum
+        /// that pays for a pointer: empty is the answer on every rendered
+        /// document nobody has clicked into and allocates nothing, and a variant
+        /// carrying the blocks' bytes inline would make every `PreviewDocument`
+        /// — a diff, a table, an empty pane — as large as the rarest thing any
+        /// of them can hold.
+        source: SourceBlocks,
         /// One entry per block, measured **once per content change** — see
         /// [`MarkdownBlockIntrinsic`].
         intrinsic: Vec<MarkdownBlockIntrinsic>,
@@ -2508,6 +2511,142 @@ impl MarkdownCaretBlock {
             Self::Prose(block) => Some(block),
             Self::Mono(_) => None,
         }
+    }
+}
+
+/// **Every block drawn as the file's own bytes, in block order** (owner's
+/// ruling 2026-09-23: every block the selection touches is drawn as source).
+///
+/// What used to be one optional block is a set of them: the caret's own block,
+/// and every block its selection reaches ([`preview_live::SourceSpan`]). Empty
+/// on every page nobody has entered and whenever the caret stands in a gap with
+/// nothing selected. A plain `Vec` because the empty set is the common answer
+/// and costs no allocation, and ordered by index so that asking for one block
+/// is a binary search and not a walk — the painter asks once per visible block.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SourceBlocks(Vec<MarkdownCaretBlock>);
+
+/// The empty set, for a caller with a page and no source block on it.
+static NO_SOURCE_BLOCKS: SourceBlocks = SourceBlocks(Vec::new());
+
+impl SourceBlocks {
+    /// The set, from blocks built in ascending index order.
+    fn new(blocks: Vec<MarkdownCaretBlock>) -> Self {
+        debug_assert!(
+            blocks
+                .windows(2)
+                .all(|pair| pair[0].index() < pair[1].index())
+        );
+        Self(blocks)
+    }
+
+    /// Block `index` as source, when it is drawn that way.
+    fn get(&self, index: usize) -> Option<&MarkdownCaretBlock> {
+        self.0
+            .binary_search_by_key(&index, MarkdownCaretBlock::index)
+            .ok()
+            .map(|at| &self.0[at])
+    }
+
+    /// Every source block, in document order.
+    fn iter(&self) -> std::slice::Iter<'_, MarkdownCaretBlock> {
+        self.0.iter()
+    }
+
+    /// How many blocks are drawn as source.
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether no block is drawn as source.
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl SourceBlocks {
+    /// **The set a span draws, cut out of the buffer** — every block
+    /// [`preview_live::SourceSpan::draws`], each in the face its kind wears
+    /// (`Runtime::markdown_source_blocks` is the window's call of it).
+    ///
+    /// `advance` is the monospace face's column at this scale, which the window
+    /// measured and a monospace block folds by.
+    fn build(
+        content: &str,
+        span: &preview_live::SourceSpan,
+        blocks: &[preview::MarkdownBlock],
+        ranges: &[std::ops::Range<usize>],
+        scale: f32,
+        advance: f32,
+    ) -> Self {
+        Self::new(
+            span.drawn(blocks)
+                .filter_map(|index| {
+                    markdown_source_block(
+                        content,
+                        index,
+                        ranges.get(index)?,
+                        blocks.get(index)?,
+                        scale,
+                        advance,
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+/// **One block, cut out of the buffer and dressed in the face its kind wears**
+/// — [`SourceBlocks::build`] for one index.
+fn markdown_source_block(
+    content: &str,
+    index: usize,
+    range: &std::ops::Range<usize>,
+    block: &preview::MarkdownBlock,
+    scale: f32,
+    advance: f32,
+) -> Option<MarkdownCaretBlock> {
+    let text = preview_live::block_source(content, range).to_owned();
+    let Some(heading) = markdown_prose_face(block) else {
+        let metrics = seats::preview_text_metrics(scale);
+        return Some(MarkdownCaretBlock::Mono(MarkdownSourceBlock {
+            index,
+            range: range.clone(),
+            lines: preview_edit::display_lines(&text),
+            text,
+            font_size: metrics.font_size,
+            line_height: metrics.line_height,
+            advance,
+        }));
+    };
+    let metrics = seats::preview_markdown_metrics(scale);
+    let (font_size, line_height) = match heading {
+        Some(level) => (
+            metrics.heading_font(level),
+            metrics.heading_line_height(level),
+        ),
+        None => (metrics.font_size, metrics.line_height),
+    };
+    Some(MarkdownCaretBlock::Prose(MarkdownProseBlock {
+        index,
+        range: range.clone(),
+        lines: prose_source_lines(&text),
+        text,
+        heading: heading.is_some(),
+        font_size,
+        line_height,
+    }))
+}
+
+impl From<Option<Box<MarkdownCaretBlock>>> for SourceBlocks {
+    fn from(block: Option<Box<MarkdownCaretBlock>>) -> Self {
+        Self(block.map(|block| vec![*block]).unwrap_or_default())
+    }
+}
+
+impl From<MarkdownCaretBlock> for SourceBlocks {
+    fn from(block: MarkdownCaretBlock) -> Self {
+        Self(vec![block])
     }
 }
 
@@ -4029,9 +4168,12 @@ struct PreviewDocumentKey {
     /// exactly what these are: nothing about the document changed, only how tall
     /// one of its blocks now is. So an arrival re-flows and does not re-parse.
     art: PageArtKey,
-    /// **Which block is drawn as source, and what its bytes are** (§7.1.3q):
-    /// the caret's block by index and by range, or `None` when no caret stands
-    /// on this surface or it stands in the tissue between two blocks.
+    /// **Which blocks are drawn as source, and what their bytes are** (§7.1.3q,
+    /// widened on 2026-09-23 from the caret's block to every block its
+    /// selection touches): the run by index and by range, and the one table
+    /// the caret has opened ([`preview_live::SourceSpan`]); `None` when no
+    /// caret stands on this surface, or it stands in the tissue between two
+    /// blocks with nothing selected.
     ///
     /// **On the width's side of the split, and that is the whole placement
     /// argument.** The caret moving from one block to the next changes not one
@@ -4054,8 +4196,8 @@ struct PreviewDocumentKey {
     /// then re-lay-out the whole document per keypress for a body that is
     /// identical; where the caret sits *inside* its block is a paint-time
     /// question ([`MarkdownCaretPaint`]) and the page is rebuilt every frame
-    /// anyway.
-    source: Option<(usize, std::ops::Range<usize>)>,
+    /// anyway. A selection re-keys only when it reaches into another block.
+    source: Option<preview_live::SourceSpan>,
 }
 
 /// The half of [`PreviewDocumentKey`] that has **nothing to do with the pane's
@@ -4395,6 +4537,15 @@ struct PreviewPane {
     /// the rows Up and Down walk. §7.1.3u is the account of what a second
     /// derivation of any one of those costs.
     md_prose: Option<preview_live::ProseRows>,
+    /// **Every prose source block on the glass, as the shaper laid it out**
+    /// (2026-09-23) — [`Self::md_prose`] for each block a selection has drawn as
+    /// source and not only the caret's, which is always one of them.
+    ///
+    /// Two readers: the band a selection draws over each of those blocks, and
+    /// the byte a press inside one of them names. The caret, the composition
+    /// and the arrow keys stand in exactly one block and go on reading
+    /// [`Self::md_prose`].
+    md_prose_blocks: Vec<preview_live::ProseRows>,
     /// Where the caret is in this surface's buffer, and what it has selected.
     caret: preview_edit::EditCaret,
     /// The sentence this surface's body owes about its last save, and when it
@@ -4945,7 +5096,7 @@ fn preview_document_key(
     body_width_px: f32,
     scale: f32,
     art: PageArtKey,
-    source: Option<(usize, std::ops::Range<usize>)>,
+    source: Option<preview_live::SourceSpan>,
 ) -> PreviewDocumentKey {
     PreviewDocumentKey {
         parse: PreviewParseKey {
@@ -6246,17 +6397,24 @@ struct BlockScrollPaint<'a> {
 /// draw one anyway.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MarkdownCaretSeat {
-    /// Inside the block the document is already carrying as its source block:
-    /// the line of that block's own source, and the column in it.
-    Source(usize, usize),
+    /// Inside a block the document is already carrying as a monospace source
+    /// block: which block, the line of that block's own source, and the column
+    /// in it. The block is named because a selection can draw several blocks
+    /// as source (2026-09-23) and the caret stands in exactly one of them.
+    Source {
+        block: usize,
+        line: usize,
+        column: usize,
+    },
     /// Inside the block the document is carrying as its **prose** block
     /// (§7.1.3w), at this byte of the file.
     ///
     /// A byte and not a row and a column, because the face it is drawn in has
     /// neither: where that byte stands is the shaper's answer
     /// ([`preview_live::ProseRows`]), and it is asked in the one pass that holds
-    /// a shaper rather than guessed at here.
-    Prose(usize),
+    /// a shaper rather than guessed at here. The block is named for
+    /// [`Self::Source`]'s reason.
+    Prose { block: usize, offset: usize },
     /// In the tissue between two blocks, where no block was parsed from and none
     /// ever will be. **One empty source line, standing immediately under the
     /// block in front of it** — see [`preview_live`]'s module note for why that
@@ -6266,6 +6424,21 @@ enum MarkdownCaretSeat {
         after: Option<usize>,
         line_height: f32,
     },
+}
+
+/// **The caret's own prose rows, out of every prose source block's**
+/// (2026-09-23) — the one [`preview_live::ProseRows`] the caret, the
+/// composition, the IME's candidate box and the arrow keys read.
+///
+/// `seat` is the block the caret stands in (`None` for a gap or no caret):
+/// the rows of that block when it is drawn as prose, or the gap's composition
+/// line — measured only while a composition stands in a gap — when it is
+/// `None`. Nothing for a caret in a monospace block, which has no rows here.
+fn preview_caret_prose(
+    blocks: &[preview_live::ProseRows],
+    seat: Option<usize>,
+) -> Option<preview_live::ProseRows> {
+    blocks.iter().find(|rows| rows.index == seat).cloned()
 }
 
 /// **The caret and what it has dragged over, on a rendered page** —
@@ -6360,10 +6533,21 @@ impl MarkdownPreedit {
 /// Empty on every surface that holds no caret, which — until the markdown
 /// block's T5 gives the rendered face one — is every surface in the window. That is why this ticket
 /// changes nothing a reader can see.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct MarkdownLive<'a> {
-    source: Option<&'a MarkdownCaretBlock>,
+    /// Every block drawn as source — the caret's, and every block its
+    /// selection touches (2026-09-23).
+    source: &'a SourceBlocks,
     caret: Option<&'a MarkdownCaretPaint>,
+}
+
+impl Default for MarkdownLive<'_> {
+    fn default() -> Self {
+        Self {
+            source: &NO_SOURCE_BLOCKS,
+            caret: None,
+        }
+    }
 }
 
 /// **One parsed page, in the four things the painter walks together**: the
@@ -6546,7 +6730,7 @@ fn build_preview_markdown_body(
         // paragraph under the caret are the same monospace lines, and the only
         // thing the block's kind still decides is whether the highlighting the
         // measuring pass computed for it applies.
-        match live.source.filter(|block| block.index() == block_index) {
+        match live.source.get(block_index) {
             Some(MarkdownCaretBlock::Mono(source)) => {
                 push_markdown_source_block(
                     (quads, paragraphs),
@@ -6579,7 +6763,7 @@ fn build_preview_markdown_body(
                     // rule under them and the input method's caret inside them
                     // are places on a proportional row, which only the shaper
                     // can say ([`Runtime::preview_prose_geometry`]).
-                    markdown_prose_composition(live.caret),
+                    markdown_prose_composition(live.caret, prose.index),
                     palette,
                 ) {
                     if line.paragraph.rect[3] > body[1] && line.paragraph.rect[1] < body[3] {
@@ -7315,11 +7499,17 @@ fn markdown_prose_runs(
 /// ([`markdown_gap_paragraph`]).
 fn markdown_prose_composition(
     caret: Option<&MarkdownCaretPaint>,
+    block: usize,
 ) -> Option<(usize, &MarkdownPreedit)> {
     let caret = caret.filter(|caret| caret.lit)?;
     match caret.seat {
-        MarkdownCaretSeat::Prose(offset) => Some((offset, caret.preedit.as_ref()?)),
-        MarkdownCaretSeat::Source(..) | MarkdownCaretSeat::Gap { .. } => None,
+        MarkdownCaretSeat::Prose {
+            block: seat,
+            offset,
+        } if seat == block => Some((offset, caret.preedit.as_ref()?)),
+        MarkdownCaretSeat::Prose { .. }
+        | MarkdownCaretSeat::Source { .. }
+        | MarkdownCaretSeat::Gap { .. } => None,
     }
 }
 
@@ -7503,11 +7693,17 @@ fn push_markdown_source_block(
         .filter(|caret| caret.lit)
         .and_then(|caret| Some((caret.preedit.as_ref()?, caret.seat)))
         .and_then(|(preedit, seat)| match seat {
-            MarkdownCaretSeat::Source(line, column) => {
+            MarkdownCaretSeat::Source {
+                block,
+                line,
+                column,
+            } if block == source.index => {
                 let (row, column) = preview_caret_row(&wrap, line, column);
                 Some((row, column, preedit))
             }
-            MarkdownCaretSeat::Prose(_) | MarkdownCaretSeat::Gap { .. } => None,
+            MarkdownCaretSeat::Source { .. }
+            | MarkdownCaretSeat::Prose { .. }
+            | MarkdownCaretSeat::Gap { .. } => None,
         });
     // **The fills first and the letters after**, which is not a preference:
     // [`bt_render::PreviewBody`] draws its quads and then its text, so a band is
@@ -7546,7 +7742,12 @@ fn push_markdown_source_block(
             });
         }
         if caret.lit
-            && let MarkdownCaretSeat::Source(line, column) = caret.seat
+            && let MarkdownCaretSeat::Source {
+                block,
+                line,
+                column,
+            } = caret.seat
+            && block == source.index
         {
             let (row, column) = preview_caret_row(&wrap, line, column);
             if rows.contains(&row) {
@@ -24099,11 +24300,11 @@ struct PreviewTextDrag {
     /// gesture is extending a caret that is already in the page (closure review
     /// of the 2026-09-21 ruling).
     ///
-    /// True only for a press inside the seat the page was already drawing from,
+    /// True only for a press inside the source the page was already drawing,
     /// which is the one press that changes no face — see
-    /// [`preview_press::keeps_the_seat`]. What it buys is the band under an
-    /// editing drag; what it does not buy is the right to leave that seat, which
-    /// [`Self::reached`] carries instead.
+    /// [`preview_press::keeps_the_span`]. What it buys is the band under an
+    /// editing drag; what it does not buy is the right to leave that source,
+    /// which [`Self::reached`] carries instead.
     seated: bool,
     /// **The last byte of the file this gesture reached**, in the page's own
     /// terms.
@@ -45082,23 +45283,38 @@ impl Runtime<'_> {
         }
     }
 
-    /// Which block of the parse **already on this surface** holds that caret.
+    /// Which blocks of the parse **already on this surface** that caret and its
+    /// selection draw as source ([`preview_live::selection_span`], owner's
+    /// ruling 2026-09-23).
     ///
     /// The ranges are the standing document's, so this is true for exactly as
     /// long as [`PreviewParseKey`] is — which is the only span of time the answer
     /// is asked for outside a parse. See [`PreviewDocumentKey::source`].
-    fn standing_source_block(
+    fn standing_source_span(
         &self,
         surface: PreviewSurface,
         caret: Option<preview_edit::EditCaret>,
-    ) -> Option<(usize, std::ops::Range<usize>)> {
+    ) -> Option<preview_live::SourceSpan> {
         let caret = caret?;
         let content = self.preview_buffer_on(surface)?.content.as_deref()?;
-        let PreviewDocument::Markdown { ranges, .. } = &self.preview_pane(surface)?.doc else {
+        let pane = self.preview_pane(surface)?;
+        let PreviewDocument::Markdown {
+            blocks,
+            ranges,
+            maps,
+            ..
+        } = &pane.doc
+        else {
             return None;
         };
-        let index = preview_live::caret_seat(content, ranges, caret.caret).block()?;
-        Some((index, ranges.get(index)?.clone()))
+        preview_live::selection_span(
+            content,
+            blocks,
+            ranges,
+            maps,
+            &caret,
+            pane.md_select.as_ref(),
+        )
     }
 }
 
@@ -45271,7 +45487,7 @@ fn measure_markdown_intrinsics(
 fn lay_markdown_out(
     blocks: &[preview::MarkdownBlock],
     intrinsic: &[MarkdownBlockIntrinsic],
-    source: Option<&MarkdownCaretBlock>,
+    source: &SourceBlocks,
     width: f32,
     metrics: seats::PreviewMarkdownMetrics,
     art: PageArt<'_>,
@@ -45292,7 +45508,7 @@ fn lay_markdown_out(
             let mut measured = measure_markdown_local(
                 block,
                 intrinsic,
-                source.filter(|source| source.index() == index),
+                source.get(index),
                 width,
                 metrics,
                 art,
@@ -61923,6 +62139,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     let cancelled = runtime
                         .cancel_drag()
                         .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
+                    // And a drag across a rendered page, which is holding the
+                    // span it began on until a release that will not come
+                    // (owner's ruling 2026-09-23).
+                    let cancelled = cancelled
+                        .and_then(|either| runtime.cancel_preview_text_drag().map(|()| either));
                     runtime.window.tab_press = None;
                     runtime.window.pane_press = None;
                     runtime.window.row_press = None;
@@ -71964,7 +72185,7 @@ mod live_markdown_edit_tests {
             "the drag moves the caret in more places than the one the seat guards",
         );
         let guard = drag
-            .find("seated && self.preview_press_keeps_the_caret_seat(surface, Some(offset))")
+            .find("seated && self.preview_press_keeps_the_span(surface, Some(offset))")
             .expect(
                 "the drag no longer asks whether the caret may move, so the page \
                  re-flows under a hand that has not let go",

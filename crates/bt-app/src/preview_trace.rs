@@ -30,11 +30,13 @@
 //!   markdown document cost to build, split three ways (ticket T4). This is the
 //!   station a keystroke is measured with: see [`DocumentBuild`].
 //! * `reflow bytes=<n> blocks=<n> why=<source+width+art+font|frame>
-//!   source=<index|none>-><index|none> face=<mono|prose|none> realized=<n>
-//!   math_us=<n> pictures_us=<n> reconcile_us=<n> realize_us=<n> total_us=<n>`
-//!   — the same document laid out again with no re-parse (2026-09-23): what
-//!   asked for it, which block stopped and which started being drawn as source,
-//!   how many blocks were measured, and where the time went. This is the station
+//!   source=<index|none>-><index|none> set=<n>-><n> face=<mono|prose|mixed|none>
+//!   realized=<n> math_us=<n> pictures_us=<n> reconcile_us=<n> realize_us=<n>
+//!   total_us=<n>` — the same document laid out again with no re-parse
+//!   (2026-09-23): what asked for it, the first block drawn as source before
+//!   and after, how many blocks were drawn as source before and after (a
+//!   selection draws every block it touches), the face they wear, how many
+//!   blocks were measured, and where the time went. This is the station
 //!   a caret moving into another block — a table flipping to its source — is
 //!   measured with; before it the arm wrote nothing. See [`ReflowBuild`].
 //! * `math formulas=<n> drawn=<n> asked=<n> worker=<0|1>` and
@@ -189,13 +191,25 @@ impl ReflowCause {
     }
 }
 
-/// The face the block now drawn as source wears, for a `reflow` line.
+/// The face the blocks now drawn as source wear, for a `reflow` line.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceFace {
     /// A fence, a table, a formula, a rule or a picture: the monospace fold.
     Mono,
     /// A heading, a paragraph, a list or a quote: the body face.
     Prose,
+    /// Some of each — a selection across a paragraph and a fence.
+    Mixed,
+}
+
+impl SourceFace {
+    /// The face a set of source blocks wears, from each block's own; `None`
+    /// for an empty set.
+    pub fn of(faces: impl IntoIterator<Item = Self>) -> Option<Self> {
+        faces
+            .into_iter()
+            .reduce(|one, two| if one == two { one } else { Self::Mixed })
+    }
 }
 
 /// **What one re-flow cost** — [`DocumentBuild`]'s opposite number, for the
@@ -215,8 +229,11 @@ pub struct ReflowBuild {
     pub bytes: usize,
     pub blocks: usize,
     pub cause: ReflowCause,
-    /// The block drawn as source before this re-flow, and the one after it.
+    /// The first block drawn as source before this re-flow, and after it.
     pub source: (Option<usize>, Option<usize>),
+    /// How many blocks were drawn as source before this re-flow, and after it
+    /// — one for a caret, every block a selection touches (2026-09-23).
+    pub set: (usize, usize),
     pub face: Option<SourceFace>,
     /// Blocks measured by this re-flow — two for a caret crossing from one
     /// visible block into another, the band for a resize.
@@ -227,24 +244,27 @@ pub struct ReflowBuild {
     pub realize: std::time::Duration,
 }
 
-/// `reflow bytes=<n> blocks=<n> why=<…> source=<a>-><b> face=<mono|prose|none>
-/// realized=<n> math_us=<n> pictures_us=<n> reconcile_us=<n> realize_us=<n>
-/// total_us=<n>`
+/// `reflow bytes=<n> blocks=<n> why=<…> source=<a>-><b> set=<n>-><n>
+/// face=<mono|prose|mixed|none> realized=<n> math_us=<n> pictures_us=<n>
+/// reconcile_us=<n> realize_us=<n> total_us=<n>`
 pub fn reflow(trace: Option<&Trace>, build: ReflowBuild) {
     emit(trace, || {
         let index = |at: Option<usize>| at.map_or_else(|| "none".to_owned(), |at| at.to_string());
         let total = build.math + build.pictures + build.reconcile + build.realize;
         format!(
-            "reflow bytes={} blocks={} why={} source={}->{} face={} realized={} \
+            "reflow bytes={} blocks={} why={} source={}->{} set={}->{} face={} realized={} \
              math_us={} pictures_us={} reconcile_us={} realize_us={} total_us={}",
             build.bytes,
             build.blocks,
             build.cause.names(),
             index(build.source.0),
             index(build.source.1),
+            build.set.0,
+            build.set.1,
             match build.face {
                 Some(SourceFace::Mono) => "mono",
                 Some(SourceFace::Prose) => "prose",
+                Some(SourceFace::Mixed) => "mixed",
                 None => "none",
             },
             build.realized,
@@ -347,6 +367,7 @@ mod tests {
                     ..ReflowCause::default()
                 },
                 source: (Some(96), Some(101)),
+                set: (1, 1),
                 face: Some(SourceFace::Mono),
                 realized: 2,
                 math: micros(1_200),
@@ -362,8 +383,31 @@ mod tests {
                 blocks: 1,
                 cause: ReflowCause::default(),
                 source: (None, None),
+                set: (0, 0),
                 face: None,
                 realized: 0,
+                math: micros(0),
+                pictures: micros(0),
+                reconcile: micros(0),
+                realize: micros(0),
+            },
+        );
+        // **A selection reaching from a paragraph into a fence** (owner's ruling
+        // 2026-09-23): the line says how many blocks are source before and
+        // after, and that they wear both faces.
+        reflow(
+            Some(&trace),
+            ReflowBuild {
+                bytes: 53_000,
+                blocks: 412,
+                cause: ReflowCause {
+                    source: true,
+                    ..ReflowCause::default()
+                },
+                source: (Some(96), Some(96)),
+                set: (1, 5),
+                face: SourceFace::of([SourceFace::Prose, SourceFace::Mono, SourceFace::Prose]),
+                realized: 4,
                 math: micros(0),
                 pictures: micros(0),
                 reconcile: micros(0),
@@ -374,12 +418,12 @@ mod tests {
         let lines: Vec<&str> = written.lines().collect();
         assert_eq!(
             lines.len(),
-            3,
+            4,
             "a header and one line per re-flow: {written:?}"
         );
         assert!(
             lines[1].ends_with(
-                "reflow bytes=53000 blocks=412 why=source source=96->101 face=mono realized=2 \
+                "reflow bytes=53000 blocks=412 why=source source=96->101 set=1->1 face=mono realized=2 \
                  math_us=1200 pictures_us=300 reconcile_us=2500 realize_us=4000 total_us=8000"
             ),
             "{:?}",
@@ -387,12 +431,22 @@ mod tests {
         );
         assert!(
             lines[2].ends_with(
-                "why=frame source=none->none face=none realized=0 \
+                "why=frame source=none->none set=0->0 face=none realized=0 \
                  math_us=0 pictures_us=0 reconcile_us=0 realize_us=0 total_us=0"
             ),
             "{:?}",
             lines[2],
         );
+        assert!(
+            lines[3].contains("source=96->96 set=1->5 face=mixed realized=4 "),
+            "{:?}",
+            lines[3],
+        );
+        assert_eq!(
+            SourceFace::of([SourceFace::Prose, SourceFace::Prose]),
+            Some(SourceFace::Prose)
+        );
+        assert_eq!(SourceFace::of([]), None);
         let _ = std::fs::remove_file(&path);
     }
 

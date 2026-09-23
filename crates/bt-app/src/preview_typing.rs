@@ -260,7 +260,7 @@ fn md_typing_path_eager_benchmark() {
                     (blocks, ranges, maps, None)
                 };
                 let content = buffer.content.as_deref().unwrap();
-                let source = source_at(content, &blocks, &ranges, caret.caret);
+                let source = SourceBlocks::from(source_at(content, &blocks, &ranges, caret.caret));
                 let math = DocumentMath::default();
                 let pictures = DocumentPictures::default();
                 let palette = bt_render::chrome_palette();
@@ -290,7 +290,7 @@ fn md_typing_path_eager_benchmark() {
                 let layout = preview_wrap::lay_markdown_out_cached(
                     &blocks,
                     &intrinsic,
-                    source.as_deref(),
+                    &source,
                     PageArt {
                         math: &math,
                         pictures: &pictures,
@@ -385,7 +385,7 @@ pub(super) fn assert_one_character_edit_reuses_work() {
         WORK.with_borrow_mut(BTreeMap::clear);
         let (blocks, ranges, maps) = preview::parse_markdown_mapped(content);
         let parsed_bytes = work("parsed bytes");
-        let source = source_at(content, &blocks, &ranges, caret.caret);
+        let source = SourceBlocks::from(source_at(content, &blocks, &ranges, caret.caret));
         let math = DocumentMath::default();
         let pictures = DocumentPictures::default();
         let palette = bt_render::chrome_palette();
@@ -413,7 +413,7 @@ pub(super) fn assert_one_character_edit_reuses_work() {
         let layout = preview_wrap::lay_markdown_out_cached(
             &blocks,
             &intrinsic,
-            source.as_deref(),
+            &source,
             PageArt {
                 math: &math,
                 pictures: &pictures,
