@@ -873,9 +873,10 @@ used to answer two ways:
   colour 2026-09-23). Where a site icon's luminance (measured once, when it is
   learned) and the ground it is drawn on are under 3:1 — WCAG 2.1 SC 1.4.11,
   `marks::SITE_ICON_CONTRAST_MINIMUM` — it is drawn on a circle of its own box, no
-  border, no shadow, in `--panel` (`ChromePalette::title_bar`): "the theme's
-  card-surface tone (the token one step off the head's), the same token in both
-  themes; never pure white". The ground is whatever the frame laid under that box.
+  border, no shadow, in the light theme's panel tone `#F7F7F5` in both themes
+  (`marks::SITE_ICON_PLATE`), never pure white (2026-09-23). A pale icon on the light
+  theme gains little from it (1.07:1), and that is accepted. The ground is whatever the
+  frame laid under that box.
 **From.** trailing entry 2026-09-22 *The current UI gets its written
 specification*; `docs/UI-UX.md` §二 (accent is attention, not position), §六 (the
 divider drag); §7.28 *the small tags floating over the text wear one outfit: one

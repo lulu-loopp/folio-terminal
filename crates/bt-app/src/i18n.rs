@@ -1876,13 +1876,12 @@ pub enum Text {
     /// the fact a reader has to know before they turn it on — that this is the
     /// one row in the dialog that overrides a colour a program asked for.
     DescMinimumContrast,
-    /// **CHINESE PENDING (2026-09-23)** — `Appearance ▸ Advanced ▸ Web pages`, which colour
-    /// scheme a web pane asks its page for (0.4.4 ticket 09). English stands in both columns until
-    /// opus46 writes it.
+    /// `Appearance ▸ Advanced ▸ Web pages`, which colour scheme a web pane asks its page for
+    /// (0.4.4 ticket 09).
     RowWebPages,
-    /// **CHINESE PENDING (2026-09-23)** — its sentence.
+    /// Its sentence.
     DescWebPages,
-    /// **CHINESE PENDING (2026-09-23)** — the row's first answer, the shipped one (`Theme`): the
+    /// The row's first answer, the shipped one (`Theme`): the
     /// page asks Folio's own light or dark. `Light` and `Dark` are the theme row's own two words.
     OptionFollowTheme,
 
@@ -4449,8 +4448,7 @@ impl Text {
                 "Lightens or darkens terminal text to this ratio. Above Off, program colours give way.",
                 "终端文字提亮或压暗到这个对比度。关以上会覆盖程序指定的颜色。",
             ),
-            // CHINESE PENDING (2026-09-23) — English stands in both columns until opus46 writes
-            // the row, its sentence and its first answer (0.4.4 ticket 09).
+            // The web pane's colour-scheme row (0.4.4 ticket 09); Chinese by opus46, 2026-09-23.
             Self::RowWebPages => pick(lang, "Web pages", "网页"),
             Self::DescWebPages => pick(
                 lang,

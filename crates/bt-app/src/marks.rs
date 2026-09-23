@@ -2072,8 +2072,7 @@ impl ChromeMarkRasters {
                     if let (Some(backdrop), Some(luminance)) = (backdrop, luminance)
                         && site_icon_wants_plate(luminance, backdrop.luminance_under(sprites, at))
                     {
-                        let mut plate =
-                            site_icon_plate(sprite.rect, width_px, height_px, backdrop.palette);
+                        let mut plate = site_icon_plate(sprite.rect, width_px, height_px);
                         plate.opacity = sprite.opacity;
                         plate.above_text = sprite.above_text;
                         self.push_mark(&plate, width_px, height_px, kept, &mut icons);
@@ -2161,29 +2160,27 @@ pub fn site_icon_wants_plate(icon_luminance: f64, ground_luminance: f64) -> bool
     (light + 0.05) / (dark + 0.05) < SITE_ICON_CONTRAST_MINIMUM
 }
 
-/// **The plate a site icon is drawn on when it needs one**: a circle the size of the icon's own
-/// box, no border and no shadow, in the palette's `--panel` —
-/// [`bt_render::ChromePalette::title_bar`] (owner's ruling 2026-09-23: "the theme's card-surface
-/// tone (the token one step off the head's), the same token in both themes; never pure white").
+/// **The plate's colour: the light theme's `--panel`, `#F7F7F5`, in both themes** (owner's ruling
+/// 2026-09-23, after comparing the two readings side by side).
 ///
-/// `--panel` is the surface `ChromePalette::derive` steps one notch off the canvas a head is
-/// drawn on (`pane_head` is `--termbg`), and it is never `#FFFFFF`: on a light canvas it is the
-/// canvas stepped *down*, so a white scheme's panel is `#F7F7F5`, and on a dark canvas it is a
-/// dark colour stepped up by ten. The surfaces that *are* white on the light canvas — `--menu`
-/// and `--win` — are the ones the ruling rules out.
+/// One colour and not the theme's own `--panel`, because the theme's own does nothing on the
+/// case the plate exists for: GitHub's dark mark (`#22272C`) on the dark theme's `--panel`
+/// (`#252525`) is 1.02:1, worse than on the bare head; on `#F7F7F5` it is 14:1. It is the stock
+/// light canvas's `--panel` ([`bt_render::LIGHT_CHROME`]'s `title_bar`), never `#FFFFFF`. A pale
+/// icon on the light theme's white head gains little from it (1.07:1) — accepted as is by the
+/// same ruling.
+pub const SITE_ICON_PLATE: [u8; 3] = bt_render::LIGHT_CHROME.title_bar;
+
+/// **The plate a site icon is drawn on when it needs one**: a circle the size of the icon's own
+/// box, no border and no shadow, in [`SITE_ICON_PLATE`].
 #[must_use]
-pub fn site_icon_plate(
-    rect: [f32; 4],
-    width_px: u32,
-    height_px: u32,
-    palette: &bt_render::ChromePalette,
-) -> ChromeSprite {
+pub fn site_icon_plate(rect: [f32; 4], width_px: u32, height_px: u32) -> ChromeSprite {
     ChromeSprite::new(
         ChromeMark::ControlPill {
             radius_px: (width_px.min(height_px) / 2).max(1),
         },
         rect,
-        palette.title_bar,
+        SITE_ICON_PLATE,
     )
 }
 
@@ -2197,7 +2194,7 @@ struct Floor {
 }
 
 /// **What is under a mark**: the flat colours painted before every mark, and the palette the
-/// window's own ground and the plate come from (0.4.4 ticket 09).
+/// window's own ground comes from (0.4.4 ticket 09).
 struct Backdrop<'a> {
     floors: Vec<Floor>,
     palette: &'a bt_render::ChromePalette,
@@ -6654,7 +6651,7 @@ mod tests {
     }
 
     /// RED (0.4.4 ticket 09) — **a site's icon that would vanish into the head it is drawn on
-    /// wears a plate, in the palette's `--panel`, and the plate is never white.**
+    /// wears a plate, in the light theme's `--panel` on both themes, and the plate is never white.**
     ///
     /// The case the ticket was opened for: GitHub serves a black mark to a page told "light", and
     /// on the dark head that mark is black on `#1B1B1B` — 1.1:1, a hole where an icon should be.
@@ -6663,8 +6660,11 @@ mod tests {
     /// icon, at WCAG 2.1 SC 1.4.11's 3:1.
     ///
     /// Both halves of the owner's ruling of 2026-09-23 are read off the pixels: the plate is the
-    /// theme's `--panel` (`ChromePalette::title_bar`), and it is not `#FFFFFF`. The pale icon on
-    /// the light head is the second case, with the same token.
+    /// light theme's `--panel`, `#F7F7F5`, on the dark head as on the light one, and it is not
+    /// `#FFFFFF`. The pale icon on the light head is the second case, with the same colour.
+    ///
+    /// MUTATION: draw the plate in the palette in force (`palette.title_bar`) and the dark case
+    /// reads `#252525` here.
     ///
     /// MUTATION: drop the plate push in `icons_for`, or compare against a fixed ground instead of
     /// `luminance_under`, and the first assertion goes red.
@@ -6688,9 +6688,11 @@ mod tests {
             let middle = plate.width_px / 2;
             assert_eq!(
                 rgb_at(plate, middle, middle),
-                palette.title_bar,
-                "the plate is `--panel`"
+                [0xf7, 0xf7, 0xf5],
+                "the plate is the light theme's `--panel` on {:?}",
+                palette.pane_head
             );
+            assert_eq!(SITE_ICON_PLATE, bt_render::LIGHT_CHROME.title_bar);
             assert_ne!(
                 rgb_at(plate, middle, middle),
                 [0xff, 0xff, 0xff],
