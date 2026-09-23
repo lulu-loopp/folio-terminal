@@ -38,9 +38,21 @@
 //! genuinely changes — Win32's grammar (drive letters, `PATHEXT`, the
 //! trailing-dot trim) versus POSIX's (bytes, a leading `/`, the execute bit) —
 //! so each arm states its own and neither borrows the other's.
+//!
+//! **And none of it runs on the window thread** (`docs/DESIGN.md`, 2026-09-22 —
+//! *a hand-off to the system runs on its own lane*). Every door here is still
+//! synchronous and still answers a real `Result`; what moved is who waits for
+//! it. `bt-app`'s OS hand-off lane is one below-normal thread that enters a
+//! [`ShellThread`] once and hands each [`Handoff`] to the door it names, in the
+//! order the reader pressed, and the window hears the answer later through its
+//! event loop. The doors themselves did not move and did not change what they
+//! decide: [`ShellThread::hand_over`] is a `match` onto the same functions the
+//! window thread used to call.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+use crate::NativeWindow;
 
 /// The refusal's own words, so the caller can tell "this window will not do
 /// that" apart from "Windows could not".
@@ -78,6 +90,111 @@ impl VerifiedTarget {
             is_directory: false,
             executable: false,
             resolved: None,
+        }
+    }
+}
+
+/// **One hand-off, as a value** — what the OS hand-off lane carries
+/// (`docs/ARCHITECTURE.md` §5.1).
+///
+/// One variant per door, holding exactly the arguments that door takes after
+/// the window, so a request is the call written down rather than a second
+/// description of it: whatever a door decides — the normalisation, the program
+/// refusal, the reveal's one token — it decides on the lane from the same
+/// arguments it was given on the window thread.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Handoff {
+    /// [`open_local_path`] — a file the user picked, to its registered handler.
+    Open(PathBuf),
+    /// [`open_local_path_verified`] — a printed reference the pane's ledger answered for.
+    OpenVerified(PathBuf, VerifiedTarget),
+    /// [`reveal_in_explorer`] — a path shown in the file manager.
+    Reveal(PathBuf),
+    /// [`reveal_verified`] — the same, for a path the ledger answered for.
+    RevealVerified(PathBuf, VerifiedTarget),
+    /// [`shell_execute`] — an address that has already passed the caller's scheme policy.
+    Address(String),
+    /// [`open_local_file`] — a decoded local picture, to the system viewer.
+    LocalImage(PathBuf),
+    /// [`open_system_fonts_page`] — the system's own fonts page.
+    FontsPage,
+}
+
+/// **The thread the hand-offs run on, prepared for them** — the proof a
+/// [`Handoff`] is only handed over from a thread that has been made ready.
+///
+/// On Windows that preparation is COM. `ShellExecuteW` can delegate to shell
+/// extensions that are activated through COM, and Microsoft's own instruction
+/// for any caller is `CoInitializeEx(COINIT_APARTMENTTHREADED |
+/// COINIT_DISABLE_OLE1DDE)` on the calling thread first. The window thread had
+/// that for free — winit initialises OLE there for drag and drop — and the lane
+/// is a fresh thread with nothing, so it enters its apartment here, once, and
+/// leaves it when the value is dropped. Not `Send`: an apartment belongs to the
+/// thread that entered it, and the type says so.
+///
+/// On macOS it is an autorelease pool per hand-off (`NSWorkspace` answers with
+/// autoreleased objects, and a thread of our own has no pool that drains
+/// between requests); on a third platform it is nothing, and every door there
+/// already refuses.
+pub struct ShellThread {
+    /// Whether this value entered an apartment and so owes the matching leave.
+    #[cfg(windows)]
+    entered: bool,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl ShellThread {
+    /// Prepare the calling thread for hand-offs. Call it on the lane thread,
+    /// before the first request.
+    #[must_use]
+    pub fn enter() -> Self {
+        Self {
+            #[cfg(windows)]
+            entered: windows_handoff::enter_apartment(),
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    /// **Hand one request to the door it names**, with `window` — the window
+    /// that asked — as that door's window argument.
+    ///
+    /// The answer is the door's own, byte for byte: `Ok` when the system took
+    /// it, the door's refusal otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the named door refuses with.
+    pub fn hand_over(&self, window: NativeWindow, request: &Handoff) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            objc2::rc::autoreleasepool(|_| Self::door(window, request))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::door(window, request)
+        }
+    }
+
+    fn door(window: NativeWindow, request: &Handoff) -> Result<(), String> {
+        match request {
+            Handoff::Open(path) => open_local_path(window, path),
+            Handoff::OpenVerified(path, target) => {
+                open_local_path_verified(window, path, target.clone())
+            }
+            Handoff::Reveal(path) => reveal_in_explorer(window, path),
+            Handoff::RevealVerified(path, target) => reveal_verified(window, path, target.clone()),
+            Handoff::Address(target) => shell_execute(window, target),
+            Handoff::LocalImage(path) => open_local_file(window, path),
+            Handoff::FontsPage => open_system_fonts_page(window),
+        }
+    }
+}
+
+impl Drop for ShellThread {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.entered {
+            windows_handoff::leave_apartment();
         }
     }
 }
@@ -627,21 +744,32 @@ pub use macos_handoff::{
 ///
 /// What these calls *are* is **synchronous and blocking**: `openURL:` waits on
 /// a LaunchServices round trip, which is why Apple added
-/// `openURL:configuration:completionHandler:` beside it. That is the same
-/// bargain the Windows arm takes — `ShellExecuteW` blocks the window thread
-/// too — and taking the asynchronous form would mean a completion block, a
-/// package (`block2`) and a second answer arriving after the caller has already
-/// been told `Ok`. A door whose `Result` is a real answer is worth the wait
-/// this one costs.
+/// `openURL:configuration:completionHandler:` beside it. The doors keep the
+/// synchronous form, because a door whose `Result` is a real answer is worth a
+/// wait — **but the wait is no longer the window's.** Until 2026-09-22 this
+/// paragraph said the window thread paid it, on both arms, and called that a
+/// fair price; the measured 1.4 s `Ctrl`+click stall on Windows reversed the
+/// bargain (`docs/DESIGN.md`, 2026-09-22 — *a hand-off to the system runs on its
+/// own lane*). Every door here is now called from `bt-app`'s OS hand-off lane
+/// through [`super::ShellThread`], and the window hears the `Result` through its
+/// event loop.
+///
+/// **No foreground code on this arm.** `openURL:` activates the application
+/// that receives the URL, `activateFileViewerSelectingURLs:` activates Finder
+/// (it is documented as doing so), and `open_folder_in_finder` activates Finder
+/// itself — so the receiver comes to the front without this process granting
+/// anything, and macOS has no foreground lock to grant against.
 ///
 /// # The window is spare, and stays in the signature
 ///
-/// Each of these takes a `NativeWindow` because `ShellExecuteW` takes an
-/// `HWND` — the window an error box is parented to. `NSWorkspace` has nothing
-/// to be given one. The parameter stays because a door in this crate has one
-/// signature on every platform (§4.4 ②, M1-9), and it is consumed with
-/// `let _ = window;` at the top of each body so that a reader meets the fact
-/// rather than deducing it.
+/// Each of these takes a `NativeWindow` because `ShellExecuteW` once took the
+/// asking window as its `HWND` — the window an error box is parented to. Neither
+/// arm parents anything to it now: `NSWorkspace` has nothing to be given one,
+/// and the Windows arm hands `ShellExecuteW` no owner since the call left the
+/// window thread (see `windows_handoff::hand_over`). The parameter stays because
+/// a door in this crate has one signature on every platform (§4.4 ②, M1-9) and
+/// it names the window that asked; it is consumed with `let _ = window;` at the
+/// top of each body so that a reader meets the fact rather than deducing it.
 ///
 /// # The path gate is this platform's, not Windows'
 ///
@@ -1530,14 +1658,20 @@ pub use windows_handoff::{
 
 #[cfg(windows)]
 mod windows_handoff {
+    #[cfg(not(test))]
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
 
     use crate::NativeWindow;
     use windows::Win32::Foundation::MAX_PATH;
     use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
+    #[cfg(not(test))]
     use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    #[cfg(not(test))]
+    use windows::Win32::UI::WindowsAndMessaging::{
+        ASFW_ANY, AllowSetForegroundWindow, SW_SHOWNORMAL,
+    };
+    #[cfg(not(test))]
     use windows::core::PCWSTR;
 
     use super::{
@@ -1559,6 +1693,34 @@ mod windows_handoff {
     // Word guards its own macros. A floor that refuses a document the reader named by hand is
     // worse than the list it was added to.
 
+    /// **Enter a single-threaded apartment with OLE1 DDE off** — Microsoft's
+    /// instruction for any thread that calls `ShellExecuteW` (see
+    /// [`super::ShellThread`]). Answers whether this call entered one and so owes
+    /// [`leave_apartment`]; a thread already in an apartment of another kind
+    /// answers `RPC_E_CHANGED_MODE`, owes nothing, and hands off as it is.
+    pub(super) fn enter_apartment() -> bool {
+        use windows::Win32::System::Com::{
+            COINIT, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
+        };
+        // SAFETY: no reserved pointer, a documented flag pair, on the thread that
+        // will make every hand-off; balanced by `leave_apartment` on the same
+        // thread when `ShellThread` drops.
+        let entered = unsafe {
+            CoInitializeEx(
+                None,
+                COINIT(COINIT_APARTMENTTHREADED.0 | COINIT_DISABLE_OLE1DDE.0),
+            )
+        };
+        entered.is_ok()
+    }
+
+    /// The matching leave, on the thread that entered.
+    pub(super) fn leave_apartment() {
+        // SAFETY: called only when `enter_apartment` answered `true`, on the
+        // same thread (`ShellThread` is not `Send`).
+        unsafe { windows::Win32::System::Com::CoUninitialize() };
+    }
+
     /// **The one `ShellExecuteW` in this workspace.**
     ///
     /// Every hand-off above it has already decided *what* it is handing over;
@@ -1574,24 +1736,54 @@ mod windows_handoff {
     /// and therefore the first place that program looks for the libraries it
     /// loads. Each caller names a directory it can defend: a file's own folder
     /// for a file, the system directory for an address that has no folder.
+    ///
+    /// **It runs on the OS hand-off lane, never on the window thread**
+    /// (`docs/DESIGN.md`, 2026-09-22 — *a hand-off to the system runs on its own
+    /// lane*). Two things follow from that, and both are written here because
+    /// this is the one place either could be undone:
+    ///
+    /// * **No owner window.** `ShellExecuteW`'s `hwnd` is the owner of whatever
+    ///   UI the call raises — an error box, the "how do you want to open this"
+    ///   picker, a shell extension's own dialog. A window owned across threads
+    ///   attaches the two threads' input queues, so the window thread would
+    ///   share its input with a lane that is, by design, allowed to sit inside a
+    ///   shell extension for a second and a half. `None` makes that UI a
+    ///   top-level window of this process, which is the foreground process at
+    ///   the moment of the press, so it still comes up in front. `window` is the
+    ///   window that asked; it stays in the signature because a door here has one
+    ///   signature on every platform.
+    /// * **The receiver may take the front** —
+    ///   [`let_the_receiver_take_the_front`], immediately before the call. See it
+    ///   for why the grant is not scoped to one process.
     fn hand_over(
         window: NativeWindow,
         program: &str,
         arguments: Option<&std::ffi::OsStr>,
         directory: &Path,
     ) -> Result<(), String> {
-        let hwnd = window.as_hwnd();
+        let _ = window;
+        let_the_receiver_take_the_front();
+        shell_execute_w(program, arguments, directory)
+    }
+
+    /// **The call itself** — `ShellExecuteW` with no owner, the `open` verb and
+    /// the directory the caller defended.
+    #[cfg(not(test))]
+    fn shell_execute_w(
+        program: &str,
+        arguments: Option<&std::ffi::OsStr>,
+        directory: &Path,
+    ) -> Result<(), String> {
         let mut operation = wide("open");
         let mut program = wide(program);
         let mut arguments = arguments.map(wide_os);
         let mut directory = wide_os(directory.as_os_str());
         // SAFETY: every buffer below is a live, NUL-terminated UTF-16 buffer
         // for the duration of this synchronous call, the caller's gate has
-        // refused any embedded NUL, and `hwnd` is winit's live top-level
-        // window.
+        // refused any embedded NUL, and no window is named.
         let result = unsafe {
             ShellExecuteW(
-                Some(hwnd),
+                None,
                 PCWSTR(operation.as_mut_ptr()),
                 PCWSTR(program.as_mut_ptr()),
                 arguments
@@ -1609,12 +1801,76 @@ mod windows_handoff {
         }
     }
 
+    /// **The same call in this crate's own tests: written down, never made.**
+    ///
+    /// The seam `the_reveal_grants_the_foreground_before_it_hands_over` reads.
+    /// What it can hold is the *order* of the two calls and the exact program
+    /// and argument handed over — the real producer's output — and what it
+    /// cannot hold is what Explorer then does with them, which is the owner's
+    /// machine's question and not a unit test's.
+    #[cfg(test)]
+    fn shell_execute_w(
+        program: &str,
+        arguments: Option<&std::ffi::OsStr>,
+        directory: &Path,
+    ) -> Result<(), String> {
+        recorded::note(format!(
+            "ShellExecuteW {program} {} in {}",
+            arguments.map_or_else(String::new, |arguments| arguments
+                .to_string_lossy()
+                .into_owned()),
+            directory.display()
+        ));
+        Ok(())
+    }
+
+    /// **Let whichever process receives this hand-off come to the front**
+    /// (owner, 2026-09-22: 「接手的窗口必须在最前」).
+    ///
+    /// Windows gives the foreground only to a process the foreground process
+    /// has said may take it. The process `ShellExecuteW` starts is covered by
+    /// that rule on its own — it was started by the foreground process — but
+    /// **the process that ends up showing the window is often not the one that
+    /// was started**: `explorer.exe /select,…` forwards the request to the
+    /// Explorer that is already running and exits, and a single-instance editor
+    /// forwards the file to its running copy the same way. The window then
+    /// opens, or an existing one is reused, behind Folio — the owner's report
+    /// of 2026-09-22. A grant scoped to one process id would name the process
+    /// that was started and exits, which is the wrong one, and the process that
+    /// will receive the forward is not knowable from here.
+    ///
+    /// So the grant is `ASFW_ANY`, made **by this process, in answer to the
+    /// press the reader just made, immediately before the hand-off that press
+    /// asked for.** Review C-7 refused `ASFW_ANY` at the launch pipe for a
+    /// reason that does not apply here: there the process id came off a wire, so
+    /// a peer that had taken the pipe's name could spend this process's
+    /// foreground on whatever it liked, at a moment of its choosing. Nothing
+    /// reaches this call from outside — it takes no argument at all — and the
+    /// grant lapses at the reader's next input or the moment any process takes
+    /// the foreground, which the receiver does straight away.
+    /// `hotkey::allow_foreground_for` keeps its refusal of `u32::MAX`, because
+    /// that door is still the one a process id from outside reaches.
+    ///
+    /// Failure is not reported: it answers `false` when this process is no
+    /// longer the one allowed to grant (the reader clicked elsewhere first), and
+    /// the worst it costs is the window opening behind, which is today's
+    /// behaviour.
+    fn let_the_receiver_take_the_front() {
+        #[cfg(test)]
+        recorded::note("AllowSetForegroundWindow(ASFW_ANY)".to_owned());
+        // SAFETY: a call taking one integer and dereferencing nothing.
+        #[cfg(not(test))]
+        let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    }
+
+    #[cfg(not(test))]
     fn wide(text: &str) -> Vec<u16> {
         let mut units: Vec<u16> = text.encode_utf16().collect();
         units.push(0);
         units
     }
 
+    #[cfg(not(test))]
     fn wide_os(text: &std::ffi::OsStr) -> Vec<u16> {
         let mut units: Vec<u16> = text.encode_wide().collect();
         units.push(0);
@@ -1888,6 +2144,26 @@ mod windows_handoff {
             Some(arguments.as_os_str()),
             &windows_directory(),
         )
+    }
+
+    /// The written-down calls of this crate's own tests, one list per thread so
+    /// that two tests running at once do not read each other's.
+    #[cfg(test)]
+    pub(super) mod recorded {
+        use std::cell::RefCell;
+
+        thread_local! {
+            static CALLS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        }
+
+        pub(in super::super) fn note(call: String) {
+            CALLS.with(|calls| calls.borrow_mut().push(call));
+        }
+
+        /// Everything noted on this thread since the last take, oldest first.
+        pub(in super::super) fn take() -> Vec<String> {
+            CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+        }
     }
 }
 
@@ -2363,5 +2639,62 @@ mod tests {
             "the extension list is a Windows fact; the execute bit is M2-2's"
         );
         assert_eq!(program_on_path(Path::new("copilot")), None);
+    }
+
+    /// RED (ticket 10, owner 2026-09-22) — **the reveal grants the foreground before it hands
+    /// over, and so does an open.**
+    ///
+    /// Explorer opened *behind* Folio on a `Ctrl`+click of a printed folder: `explorer.exe
+    /// /select,…` forwards the request to the Explorer already running and exits, and that
+    /// Explorer has no right to the front unless the foreground process granted one before the
+    /// hand-off. The grant after the call is too late — the forward has already happened — so
+    /// the order is the claim. What this can hold is the order and the exact argument handed
+    /// over, through this crate's recorded seam (`windows_handoff::shell_execute_w` writes the
+    /// call down in tests instead of making it); what it cannot hold is Explorer's own
+    /// behaviour, which is the owner's machine's measurement.
+    ///
+    /// Run through [`ShellThread`], the lane's own entry, over a real file and a real folder, so
+    /// the argument is the real reveal's (`reveal_arguments` asked of the disk) and not a string
+    /// written here.
+    ///
+    /// MUTATION: delete the `let_the_receiver_take_the_front();` line from `hand_over`, or move
+    /// it after `shell_execute_w`, and the first entry is no longer the grant.
+    #[cfg(windows)]
+    #[test]
+    fn the_reveal_grants_the_foreground_before_it_hands_over() {
+        let scratch =
+            std::env::temp_dir().join(format!("folio-handoff-front-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("a scratch directory");
+        let file = scratch.join("notes.md");
+        std::fs::write(&file, b"x").expect("a scratch file");
+        let window = crate::NativeWindow::stand_in(0);
+        let shell = ShellThread::enter();
+        let _ = windows_handoff::recorded::take();
+
+        for request in [
+            Handoff::Reveal(file.clone()),
+            Handoff::Reveal(scratch.clone()),
+            Handoff::Open(file.clone()),
+        ] {
+            assert_eq!(shell.hand_over(window, &request), Ok(()), "{request:?}");
+            let calls = windows_handoff::recorded::take();
+            assert_eq!(calls.len(), 2, "one grant, one hand-off: {calls:?}");
+            assert_eq!(
+                calls[0], "AllowSetForegroundWindow(ASFW_ANY)",
+                "the grant comes first, or the receiver cannot take the front: {calls:?}"
+            );
+            assert!(calls[1].starts_with("ShellExecuteW "), "{calls:?}");
+        }
+        // The grant is not a second decision: a refused hand-off grants nothing, because the
+        // refusal is the door's and comes before the call.
+        let program = scratch.join("payload.exe");
+        assert_eq!(
+            shell.hand_over(window, &Handoff::Open(program)),
+            Err(PROGRAM_REFUSED.to_owned())
+        );
+        assert!(windows_handoff::recorded::take().is_empty());
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&scratch);
     }
 }

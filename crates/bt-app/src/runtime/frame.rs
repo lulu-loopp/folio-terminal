@@ -632,12 +632,22 @@ impl Runtime<'_> {
             // judgement the seat's half of this row already makes. A refusal is
             // said out loud here for the reason the page arm below says one: a
             // press asked for something.
-            HyperlinkActivation::Browser => {
-                if !self.hand_url_to_the_browser(&hyperlink.uri)? {
+            //
+            // Two refusals and one sentence: the address door's, answered here, and the
+            // system's, answered when the OS hand-off lane does (2026-09-22) — both under the
+            // cells the address is printed in, as they always were.
+            HyperlinkActivation::Browser => match self.hand_url_to_the_browser(&hyperlink.uri)? {
+                Some(handed) => {
+                    self.if_refused(
+                        handed,
+                        crate::handoff_lane::OnRefused::HyperlinkBlocked(hyperlink),
+                    );
+                }
+                None => {
                     self.window.hyperlink_hover.show_blocked(hyperlink);
                     self.publish_interaction_frame()?;
                 }
-            }
+            },
             // **The same address, kept in this window** (§7.1.5g ①). One door
             // and not a second: `webnav::address_bar` is what an address typed
             // into the head, restored from a session or read out of `pins.json`

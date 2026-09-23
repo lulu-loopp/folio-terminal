@@ -646,7 +646,9 @@ processes** are constructed only by `bt_platform::quiet_command` /
 `quiet_command_named`: silent, an absolute program path resolved beforehand, an
 explicit working directory. **Hand-offs to the operating system** — the four
 verbs that leave the window — live only in `bt_platform::handoff`, which holds
-the workspace's only `ShellExecuteW` and its only platform hand-off sites.
+the workspace's only `ShellExecuteW` and its only platform hand-off sites, and
+run on the OS hand-off lane (`bt-app::handoff_lane`), never the window thread;
+nothing else in `bt-app` names a door (`no_handoff_runs_on_the_window_thread`).
 **Named threads** come only from `bt_platform::spawn_at_priority`, which sets the
 band as the new thread's first statement and is the single `unsafe` boundary for
 it. **A new side effect gets a door.**
@@ -655,7 +657,9 @@ and the exclusions); trailing entry 2026-09-20 *clock-run disk reads — a clock
 is a deadline or an edge, never a poll*; §7.40 item ① *every child process that
 does not go through the pseudoconsole comes out of one silent door*; §13.18
 *M2-2/M2-4: the four verbs handed to the machine live in one module*; §1.4
-*resilience under CPU starvation* (three bands, one spawner).
+*resilience under CPU starvation* (three bands, one spawner); 2026-09-22 *a
+hand-off to the system runs on its own lane, and the window that receives it may
+take the front*.
 **Overrides.** none found.
 **The gap, recorded as a fact.** The self-report declares that directory
 enumeration and metadata are **excluded from the ledger's accounting**. That is a
@@ -668,7 +672,8 @@ no lane, no door and no guard, and nothing rules whether it should.
 **Rule.** **Three bands**, set as the new thread's first statement through
 `bt_platform::spawn_at_priority`: the event and render loop above normal, the PTY
 reader normal, **every** worker below normal — files, git and its two pipe
-threads, preview, math, image scaling, the machine probes and the hang watchdog.
+threads, preview, math, image scaling, the OS hand-off lane (`bt-os-handoff`),
+the machine probes and the hang watchdog.
 Multimedia scheduling is explicitly refused. **A drain turn takes one quantum,
 never "until the ring is empty"**: a fixed slice per pane, capped by the
 per-turn slice count or the turn's time budget, then back to the pump; and when

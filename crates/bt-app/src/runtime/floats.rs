@@ -2717,12 +2717,11 @@ impl Runtime<'_> {
         // spawning `explorer.exe` itself as this once did: one verb printed on
         // three strips is one verb, and a bridge that only one of the three
         // goes around is a bridge with a hole in it.
-        if self.reveal_in_explorer(Path::new(&root)) {
-            self.window.revealed_foot = Some((RevealedFoot::Float(id), Instant::now()));
-            if self.refresh_overlay() {
-                self.present_chrome_change()?;
-            }
-        }
+        let handed = self.reveal_in_explorer(Path::new(&root));
+        self.when_handed_over(
+            handed,
+            crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Float(id)),
+        );
         Ok(())
     }
 
@@ -2748,12 +2747,11 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        if self.reveal_in_explorer(&path) {
-            self.window.revealed_foot = Some((RevealedFoot::Float(id), Instant::now()));
-            if self.refresh_overlay() {
-                self.present_chrome_change()?;
-            }
-        }
+        let handed = self.reveal_in_explorer(&path);
+        self.when_handed_over(
+            handed,
+            crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Float(id)),
+        );
         Ok(())
     }
 
