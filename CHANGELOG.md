@@ -12,6 +12,8 @@ All notable changes to Folio are recorded here. The format follows
   longer reaches the shell.
 - Ctrl+click on a network-share path or on a mailto:, vscode: or other link now
   hands it to Windows or macOS. Links inside a previewed document do the same.
+- The glance card's bottom line shows the file's folder; click it to find the
+  file, Ctrl+click to show it in Explorer.
 
 - In the Markdown preview, a paragraph turns into its source when the gesture
   ends, not while a selection is being drawn across it.

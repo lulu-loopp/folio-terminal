@@ -9563,6 +9563,43 @@ fn files_key_within(root: &str, folder: &Path) -> Option<String> {
     }))
 }
 
+/// **Where a locate lands in the files column** (user ruling 2026-08-25; the
+/// file arm, 2026-09-20).
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FilesLocate {
+    /// The folder is inside the tree `seat` is rooted at: keep that root, open
+    /// the way down, and select `select` — the folder's own node, or the file's
+    /// row inside it.
+    Inside { seat: SeatId, select: String },
+    /// It is not — or there is no column: a column is rooted at the folder
+    /// (the existing one re-rooted, or one seated), and `select` is the file's
+    /// row in it when a file was named.
+    Root { select: Option<String> },
+}
+
+/// [`FilesLocate`] for standing a column on `folder` and selecting `file` in
+/// it, given the tab's column and the root it stands on (`None` for a tab with
+/// no column).
+///
+/// The one decision [`Runtime::locate_folder_in_files_column`] makes, out of
+/// the runtime so the three arms can be asked of it: inside the tree, outside
+/// it, and no tree at all. **The root is only ever replaced, never restored**:
+/// nothing here or in the verb remembers the root it replaced (owner,
+/// 2026-09-23 — the column does not switch back).
+fn files_locate(column: Option<(SeatId, &str)>, folder: &Path, file: Option<&str>) -> FilesLocate {
+    let inside =
+        column.and_then(|(seat, root)| files_key_within(root, folder).map(|key| (seat, key)));
+    match inside {
+        Some((seat, key)) => FilesLocate::Inside {
+            seat,
+            select: file.map_or_else(|| key.clone(), |name| files::child_key(&key, name)),
+        },
+        None => FilesLocate::Root {
+            select: file.map(|name| files::child_key("", name)),
+        },
+    }
+}
+
 /// Every folder that has to be open for one node id to be a drawn row — **the
 /// node itself included** — root first.
 ///
@@ -32397,6 +32434,14 @@ struct FilePeek {
     /// second derivation that note is about — a handle tested where it is not
     /// drawn.
     head: Option<[f32; 4]>,
+    /// **The foot's folder address, as a press target** — the strip left of the
+    /// standing fact, or `None` for a card with no folder to name (user ruling
+    /// 2026-09-20; [`file_peek::foot_address_box`]).
+    ///
+    /// Written beside [`Self::head`] and for its reason: the address is cut and
+    /// the notice measured by the frame that drew them, and a press tested
+    /// against a second derivation would land where the address is not.
+    foot: Option<[f32; 4]>,
     /// **How far this card's column of pages can be wound**, in physical pixels
     /// — `None` for every card whose body is not one (user ruling 2026-08-26).
     ///
@@ -32472,6 +32517,60 @@ struct FilePeekSubject {
     /// **What the card is placed against** — the row, or the card that row is
     /// inside (user ruling 2026-09-07; [`file_peek::PeekAnchor`]).
     anchor: file_peek::PeekAnchor,
+}
+
+impl FilePeekSubject {
+    /// **The card's foot: the folder that holds the file** (user ruling 2026-09-20).
+    ///
+    /// Asked of the path alone. Which host raised the card — a files row, a Git
+    /// row, a reference a program printed — is not an argument, because the
+    /// ruling is one line for every surface: 「文件列与终端引用两处同一行不分两种写法」.
+    fn foot_address_on(&self, platform: bt_platform::HostPlatform, home: Option<&Path>) -> String {
+        file_peek::peek_foot_address(self.path.as_deref(), platform, home)
+    }
+}
+
+/// **What a press on the glance card's folder address asks for** (user ruling
+/// 2026-09-20).
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PeekFootPress {
+    /// Stand the files column on `folder` and select `file` in it — the locate
+    /// verb every "show this in the files column" in this window already means.
+    Locate { folder: PathBuf, file: String },
+    /// Show the file selected in Explorer or Finder, through the door a files
+    /// row's own menu takes ([`Runtime::reveal_in_explorer`]).
+    Reveal(PathBuf),
+    /// The same for a name a program printed, through the door that reference's
+    /// own `Ctrl`+click takes ([`Runtime::reveal_verified`]) — carrying the
+    /// pane's ledger, never asking a disk.
+    RevealVerified(SeatId, PathBuf),
+}
+
+/// [`PeekFootPress`] for a press on the foot of a card about `file`, raised over
+/// `host`, with the hand-over modifier held or not.
+///
+/// **The plain click stays in the window and the modifier hands it over** — the
+/// standing gesture rule ([`ClickIntent`]), and the ruling's own two halves: 「点击
+/// = 在 Folio 文件列里定位…并选中文件，Ctrl+点击 = 在系统资源管理器/访达里打开并选中」.
+/// The reveal goes through the door the *surface* already uses for its own
+/// `Ctrl`+click, so a terminal reference is handed over off its ledger exactly
+/// as it is when the reference itself is clicked.
+///
+/// `None` for a path with no folder above it or no name, which no card over a
+/// file on a disk has.
+fn peek_foot_press(host: RowHost, file: &Path, hand_over: bool) -> Option<PeekFootPress> {
+    match ClickIntent::of(hand_over) {
+        ClickIntent::Here => Some(PeekFootPress::Locate {
+            folder: file.parent()?.to_path_buf(),
+            file: file.file_name()?.to_string_lossy().into_owned(),
+        }),
+        ClickIntent::System => Some(match host {
+            RowHost::Terminal(seat) => PeekFootPress::RevealVerified(seat, file.to_path_buf()),
+            RowHost::Column(_) | RowHost::Float(_) | RowHost::Git(_) => {
+                PeekFootPress::Reveal(file.to_path_buf())
+            }
+        }),
+    }
 }
 
 impl TabState {
@@ -34671,8 +34770,9 @@ enum Fading {
 /// inside a window that has been torn off. Keyed by the surface, because that is
 /// what a *box* is — what it says changes, where it is does not.
 ///
-/// The glance card is deliberately absent: its lead is a fixed sentence and it
-/// has no receipt to trade places with (`file_peek::peek_foot_text`).
+/// The glance card is deliberately absent: its lead is its file's folder
+/// (`file_peek::peek_foot_address`), and a press on it takes the card down, so
+/// there is no strip left standing to carry a receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FootSaying {
     /// A docked files column's `.files-foot`.
@@ -51315,21 +51415,29 @@ mod files_locate_door_tests {
         let hard = ["self.show_folder", "_in_files_column("].concat();
         let soft = ["locate_folder", "_in_files_column"].concat();
         let calls = found(needle!(Pattern::text(hard.as_str())), View::Raw);
+        // One call since 2026-09-23 (ticket 12): the soft verb's two outer arms —
+        // no column, and a folder outside the tree — became one arm of
+        // `files_locate`'s answer, `FilesLocate::Root`, and the call went with them.
         assert_eq!(
             calls.len(),
-            2,
-            "the hard verb is called from two places — the soft verb's two arms \
+            1,
+            "the hard verb is called from one place — the soft verb's `Root` arm \
              — and here it is called from {}:\n{}",
             calls.len(),
             calls.report(source())
         );
+        let body = method_body("Runtime", soft.as_str());
         assert_eq!(
-            method_body("Runtime", soft.as_str())
-                .matches(hard.as_str())
-                .count(),
-            2,
-            "and both of them are inside the verb that asks whether the folder \
-             is inside the tree first"
+            body.matches(hard.as_str()).count(),
+            1,
+            "and it is inside the verb that asks whether the folder is inside the tree first"
+        );
+        let asked = body
+            .find("files_locate(")
+            .expect("the soft verb asks the range question");
+        assert!(
+            asked < body.find(hard.as_str()).expect("the hard verb is called"),
+            "the range is asked before the column is re-rooted"
         );
     }
 }
@@ -74183,7 +74291,7 @@ mod printed_path_provenance_tests {
     /// **The list is the test.** An eighth door that asks a filesystem about a printed path is the
     /// defect this ticket repaired, and the sweep below is what catches one added without a line
     /// added here.
-    const HOVER_DOORS: [&str; 7] = [
+    const HOVER_DOORS: [&str; 9] = [
         "peek_target",
         "terminal_reference_at",
         "pointer_reference_at",
@@ -74191,6 +74299,10 @@ mod printed_path_provenance_tests {
         "activate_hyperlink_hover_if_due",
         "activate_hyperlink",
         "file_peek_card_layers",
+        // The glance card's foot (ticket 12): its address is the path's parent and its press
+        // hands a reference over off the ledger, so neither asks a disk (acceptance A3).
+        "file_peek_foot_grasp",
+        "press_file_peek_foot",
     ];
 
     /// The filesystem calls none of them may make. Assembled at run time so this pin cannot match

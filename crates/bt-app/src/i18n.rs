@@ -1747,9 +1747,7 @@ pub enum Text {
     RefNameShape,
 
     // ── the file peek card and the diff document ───────────────────────────
-    /// The card's foot. `Enter` is a key cap.
-    PeekFoot,
-    /// Its refusal — the preview pane's own sentence said in one line, and a
+    /// The card's refusal — the preview pane's own sentence said in one line, and a
     /// different sentence from [`Self::PreviewRefusalBinary`] because this one
     /// covers the unrecognised type as well.
     PeekUnknown,
@@ -4182,11 +4180,6 @@ impl Text {
             ),
 
             // ── the file peek card and the diff document ───────────────────
-            Self::PeekFoot => pick(
-                lang,
-                "Enter / double-click opens the preview pane",
-                "Enter / 双击打开预览窗格",
-            ),
             Self::PeekUnknown => pick(
                 lang,
                 "No preview: binary or unrecognised type.",
@@ -5328,7 +5321,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 745] = [
+    pub const ALL: [Self; 744] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5850,7 +5843,6 @@ impl Text {
         Self::RefNameDash,
         Self::RefNameLock,
         Self::RefNameShape,
-        Self::PeekFoot,
         Self::PeekUnknown,
         Self::PeekFileGone,
         Self::GitDocumentEmpty,

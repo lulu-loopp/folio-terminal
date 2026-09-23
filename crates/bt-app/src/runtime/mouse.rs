@@ -2354,7 +2354,9 @@ impl Runtime<'_> {
             self.window.drag.is_some(),
             grasp,
             divider_axis,
-            self.preview_link_grasp() || self.terminal_link_grasp(),
+            // The glance card's folder address is a link too (user ruling
+            // 2026-09-20): pressing it goes somewhere.
+            self.preview_link_grasp() || self.terminal_link_grasp() || self.file_peek_foot_grasp(),
             self.window.command_rail_hover.is_some(),
             self.image_grasp(),
         ));

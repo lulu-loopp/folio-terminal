@@ -268,8 +268,13 @@ Entries: §7.54 and its lettered continuations §7.54a–§7.54e, of which §7.5
 ### 17. The files column — `not yet folded`
 Entries: §7.5 *"go in" and "pin" in the files column*; §7.15 *a row in the tree
 has a two-faced menu*; §7.24 *the files column watches those folders itself*;
-the `files.rs` module doc. **Note the door gap**: this subsystem's directory
-enumeration has no read-ledger lane (see row 52).
+the `files.rs` module doc; the trailing entry of 2026-09-23 *the glance card's
+foot names the folder that holds the file* — rulings of 2026-09-20 (the glance
+card's foot locates its file in this column: the folder kept when it is inside
+the root, re-rooted when it is not, the file's row selected) and 2026-09-23 (the
+column does not switch back afterwards; it is navigation, not a peek). **Note
+the door gap**: this subsystem's directory enumeration has no read-ledger lane
+(see row 52).
 
 ### 18. The preview dispatcher — `folded`
 **Rule.** Exactly one ladder decides what a preview surface shows:

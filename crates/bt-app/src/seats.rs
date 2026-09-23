@@ -19836,7 +19836,7 @@ pub struct FootStrip<'a> {
     /// says "this is where the content lives, and pressing hands it to the
     /// system", and for a page that is a URL and the default browser rather than
     /// a path and Explorer. Which end the text is cut from is decided one level
-    /// up, in [`FootDress::cut_left`], because that is a property of the string
+    /// up, in [`FootDress::cut`], because that is a property of the string
     /// and not of the strip.
     pub web: bool,
     /// **The site's own icon**, where the session has one (the favicon slice, `docs/DESIGN.md` §7.13).
@@ -19909,6 +19909,20 @@ pub struct FootWords {
     pub dissolved: f32,
 }
 
+/// **Which part of a foot's lead is expendable** — a property of the string,
+/// decided by the surface that knows what kind of string it handed over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeadCut {
+    /// From the back: a URL, whose scheme and host are its identity.
+    Back,
+    /// From the front: a path to a file, whose name is its identity (P35).
+    Front,
+    /// From the middle: a folder's address on the glance card (user ruling
+    /// 2026-09-20, 「地址过长从中间省略」), whose root and whose last folder are
+    /// the two halves a reader needs.
+    Middle,
+}
+
 /// What to dress one foot with, before it is measured.
 #[derive(Clone, Copy, Debug)]
 pub struct FootDress<'a> {
@@ -19916,16 +19930,15 @@ pub struct FootDress<'a> {
     /// strip's trailing padding.
     pub run: [f32; 4],
     /// What stands on the left when nothing is being confirmed — a path in a
-    /// pane or a float, the glance card's fixed sentence.
+    /// pane or a float, the glance card's folder address.
     pub lead: &'a str,
     /// The word the strip is flashing **instead of** `lead`: "Revealed in File
     /// Explorer", "Saved".
     pub flash: Option<&'a str>,
     /// The standing fact this surface owes, or empty.
     pub notice: &'a str,
-    /// Cut the lead from the front (a path — P35 keeps the file name) rather
-    /// than from the back (a sentence, which reads forwards).
-    pub cut_left: bool,
+    /// Which end of the lead gives way when it does not fit — see [`LeadCut`].
+    pub cut: LeadCut,
     pub font_px: f32,
     pub gap_px: f32,
     /// How far the lead has dissolved, `0.0` at rest — see
@@ -19951,7 +19964,7 @@ pub fn dress_foot(dress: FootDress<'_>, measure: &mut impl FnMut(&str, f32) -> f
         lead,
         flash,
         notice,
-        cut_left,
+        cut,
         font_px,
         gap_px,
         dissolved,
@@ -19966,10 +19979,10 @@ pub fn dress_foot(dress: FootDress<'_>, measure: &mut impl FnMut(&str, f32) -> f
     let (lead_box, notice_box) = foot_notice_split(run, notice_width, gap_px);
     let lead = flash.unwrap_or(lead);
     let room = lead_box[2] - lead_box[0];
-    let lead = if cut_left {
-        crate::settings::ellipsized_left(lead, room, font_px, measure)
-    } else {
-        crate::settings::ellipsized(lead, room, font_px, measure)
+    let lead = match cut {
+        LeadCut::Front => crate::settings::ellipsized_left(lead, room, font_px, measure),
+        LeadCut::Back => crate::settings::ellipsized(lead, room, font_px, measure),
+        LeadCut::Middle => crate::settings::ellipsized_middle(lead, room, font_px, measure),
     };
     // Measured **after** the cut, because what a bubble has to hug is the text
     // that is going to be drawn and not the one that was asked for.

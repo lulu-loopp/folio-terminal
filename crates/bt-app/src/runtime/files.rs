@@ -3,10 +3,10 @@
 
 use crate::{
     ColumnKeyboard, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FileMenuTreeRow, FilesEditPlace,
-    FilesEditRow, FilesFocusArrival, FolderPick, FootSaying, LeafId, PointerTarget, ReferenceCard,
-    RenameSubject, RevealedFoot, RowActivation, RowHost, Runtime, SplitSeed, TabClick, TabRename,
-    answers_for, column_keyboard, columns_wanting_git, dropped_files_seat_at, files,
-    files_key_under, files_key_within, files_keyboard_seat_of, files_open_chain,
+    FilesEditRow, FilesFocusArrival, FilesLocate, FolderPick, FootSaying, LeafId, PointerTarget,
+    ReferenceCard, RenameSubject, RevealedFoot, RowActivation, RowHost, Runtime, SplitSeed,
+    TabClick, TabRename, answers_for, column_keyboard, columns_wanting_git, dropped_files_seat_at,
+    files, files_key_under, files_keyboard_seat_of, files_locate, files_open_chain,
     files_row_activation, files_row_counts_clicks, files_row_entry, files_row_menu_subject, float,
     float_dock_label, folder_pick_outcome, foot_revealed_label, git_panel, hang_watch,
     home_shortened_path, i18n, marks, name_is_writable, palette_index, press_files_node, preview,
@@ -550,33 +550,67 @@ impl Runtime<'_> {
     /// answers a keyboard walking into them: the expansions are recorded and the
     /// reads are asked for, and the row is revealed when the disk comes back —
     /// see [`WindowRuntime::files_locate`].
+    ///
+    /// **And a file inside that folder can be the row it selects** (user ruling
+    /// 2026-09-20 — the glance card's foot, 「在 Folio 文件列里定位到该文件夹并选中
+    /// 文件」). `file` is that file's name, and it changes which row is selected
+    /// and nothing about which root the column stands on: inside the tree the
+    /// way down is opened to the folder and the file's row is the one selected;
+    /// outside it — or with no column at all — the column is rooted at the
+    /// folder exactly as before, and then the file's row is selected in it.
+    /// **Nothing remembers the old root to go back to** (owner, 2026-09-23: "The
+    /// files column does not switch back after the glance-foot click; it is
+    /// navigation, not a peek.") — the range rule above is the whole of it.
     pub(in crate::runtime) fn locate_folder_in_files_column(
         &mut self,
         folder: &Path,
+        file: Option<&str>,
     ) -> Result<()> {
         let existing = self.seats.files_seat();
         self.mouse_trace(|| {
             format!(
-                "locate_folder_in_files_column enter path={} column={existing:?}",
+                "locate_folder_in_files_column enter path={} file={file:?} column={existing:?}",
                 folder.display()
             )
         });
-        let Some(seat) = existing else {
-            // No column at all: there is no tree to move gently, so the only
-            // thing "locate" can mean is the one `show_folder_in_files_column`
-            // already means — open one, rooted here.
-            self.mouse_trace(|| "locate_folder_in_files_column leave=no-column".to_owned());
-            return self.show_folder_in_files_column(folder);
-        };
-        let root = self.window.tabs[self.window.active_tab]
-            .files_state(seat)
-            .root;
-        let Some(key) = files_key_within(&root, folder) else {
-            self.mouse_trace(|| "locate_folder_in_files_column leave=outside-the-tree".to_owned());
-            return self.show_folder_in_files_column(folder);
-        };
-        self.mouse_trace(|| format!("locate_folder_in_files_column leave=inside key={key}"));
-        self.open_files_path_to(seat, &key)
+        let root = existing.map(|seat| {
+            self.window.tabs[self.window.active_tab]
+                .files_state(seat)
+                .root
+        });
+        let column = existing.zip(root.as_deref());
+        match files_locate(column, folder, file) {
+            FilesLocate::Inside { seat, select } => {
+                self.mouse_trace(|| {
+                    format!("locate_folder_in_files_column leave=inside key={select}")
+                });
+                self.open_files_path_to(seat, &select)
+            }
+            FilesLocate::Root { select } => {
+                self.mouse_trace(|| {
+                    format!(
+                        "locate_folder_in_files_column leave={}",
+                        if existing.is_some() {
+                            "outside-the-tree"
+                        } else {
+                            "no-column"
+                        }
+                    )
+                });
+                // No column at all, or a folder outside the tree it shows: there
+                // is no way down to open, so the only thing "locate" can mean is
+                // the one `show_folder_in_files_column` already means — a column
+                // rooted here.
+                self.show_folder_in_files_column(folder)?;
+                // A folder is then already what the column shows. A file is one
+                // row of it, selected through the door the inside arm takes. A
+                // window with no room for a column has none to select in.
+                let (Some(select), Some(seat)) = (select, self.seats.files_seat()) else {
+                    return Ok(());
+                };
+                self.open_files_path_to(seat, &select)
+            }
+        }
     }
 
     /// Open every folder between a column's root and one node of it, select that

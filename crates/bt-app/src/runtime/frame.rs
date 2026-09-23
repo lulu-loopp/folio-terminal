@@ -745,7 +745,9 @@ impl Runtime<'_> {
             // is — and re-rooting on it threw a whole repository away to show a
             // subtree of it. Outside the tree, `locate_folder_in_files_column`
             // is the old verb exactly.
-            HyperlinkActivation::FilesColumn(path) => self.locate_folder_in_files_column(&path)?,
+            HyperlinkActivation::FilesColumn(path) => {
+                self.locate_folder_in_files_column(&path, None)?
+            }
             HyperlinkActivation::Blocked => {
                 self.window.hyperlink_hover.show_blocked(hyperlink);
                 self.publish_interaction_frame()?;

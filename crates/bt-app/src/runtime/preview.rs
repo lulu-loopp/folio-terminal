@@ -3673,7 +3673,7 @@ impl Runtime<'_> {
                     // from a path, whose file name is its identity. Same band,
                     // same ellipsis, opposite ends, because the two kinds of
                     // address are read from opposite ends.
-                    cut_left: false,
+                    cut: seats::LeadCut::Back,
                     font_px: font,
                     gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
                 },
@@ -3736,7 +3736,7 @@ impl Runtime<'_> {
                 notice: &notice,
                 // **Left-truncated** (P35): the ellipsis goes at the head so the
                 // file name — the part you actually care about — survives.
-                cut_left: true,
+                cut: seats::LeadCut::Front,
                 font_px: font,
                 gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
             },
@@ -3813,7 +3813,7 @@ impl Runtime<'_> {
         let Some(folder) = folder else {
             return Ok(());
         };
-        self.locate_folder_in_files_column(&folder)
+        self.locate_folder_in_files_column(&folder, None)
     }
 
     /// **One control of a preview rail, pressed — the ladder both hosts run**
@@ -5190,7 +5190,9 @@ impl Runtime<'_> {
             HyperlinkActivation::Reveal(path) => {
                 self.reveal_in_explorer(&path);
             }
-            HyperlinkActivation::FilesColumn(path) => self.locate_folder_in_files_column(&path)?,
+            HyperlinkActivation::FilesColumn(path) => {
+                self.locate_folder_in_files_column(&path, None)?
+            }
             HyperlinkActivation::Blocked => self.say_address_refused(surface, target.trim())?,
             // A scheme-less target this window cannot place, or an anchor it
             // cannot yet honour. The press is still the link's: it landed on a
@@ -11267,7 +11269,7 @@ impl Runtime<'_> {
                         // Left-truncated, exactly as the docked foot is (P35):
                         // the ellipsis goes at the head so the file name
                         // survives.
-                        cut_left: true,
+                        cut: seats::LeadCut::Front,
                         font_px: foot_font,
                         gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
                     },

@@ -4,13 +4,13 @@
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
     LeafId, MathWorkerRequest, PeekBodyKind, PeekCacheEntry, PeekCandidate, PeekClock, PeekFacts,
-    PeekPageOutcome, PeekPageRaster, PeekPageSlot, PeekSubject, PeekThumbnail, PeekThumbnailTarget,
-    PreviewPane, PreviewSurface, ReferenceCard, RowHost, Runtime, ScaleWorkerRequest,
-    ScrollThumbState, ShellAddress, facts_of_a_file_the_user_chose, file_peek, file_peek_promotion,
-    files, float, git, git_document_question, git_panel, hang_watch, i18n, mark_opacity, marks,
-    peek_body_kind, peek_cache_key_for_decode, peek_page_texture_key, peek_scale_task, peek_strip,
-    preview, preview_body_bar, profiles, ring_arc, risen_frame, scroll_bar_layer, seats,
-    session_is_breathing, tooltip, wait_pulse,
+    PeekFootPress, PeekPageOutcome, PeekPageRaster, PeekPageSlot, PeekSubject, PeekThumbnail,
+    PeekThumbnailTarget, PreviewPane, PreviewSurface, ReferenceCard, RowHost, Runtime,
+    ScaleWorkerRequest, ScrollThumbState, ShellAddress, facts_of_a_file_the_user_chose, file_peek,
+    file_peek_promotion, files, float, git, git_document_question, git_panel, hang_watch, i18n,
+    input, mark_opacity, marks, peek_body_kind, peek_cache_key_for_decode, peek_foot_press,
+    peek_page_texture_key, peek_scale_task, peek_strip, preview, preview_body_bar, profiles,
+    ring_arc, risen_frame, scroll_bar_layer, seats, session_is_breathing, tooltip, wait_pulse,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -499,6 +499,7 @@ impl Runtime<'_> {
             frame: None,
             body: None,
             head: None,
+            foot: None,
             column: None,
             closing_at: None,
             thumb_grab: None,
@@ -1516,6 +1517,13 @@ impl Runtime<'_> {
         let Some(subject) = self.file_peek_subject() else {
             return Vec::new();
         };
+        // The foot's address, taken before the subject's fields are handed to the
+        // card's content below — the file's folder, a string operation (user
+        // ruling 2026-09-20; `file_peek::peek_foot_address`).
+        let address = subject.foot_address_on(
+            bt_platform::host_platform(),
+            profiles::home_directory(&bt_pty::SystemShellEnvironment).as_deref(),
+        );
         let scale = self.window.renderer.metrics().scale_factor as f32;
         // How tall the document really is, kept whole: the card's body is the
         // *capped* height, and the scroll bar's arithmetic needs the uncapped one
@@ -1769,8 +1777,10 @@ impl Runtime<'_> {
         };
         // The foot's two halves, measured here for the reason the name and the
         // chip were: only something holding a font can say how wide a line is.
-        // The card is never saved into and never reveals a folder, so it has no
-        // flash — its left hand is the fixed sentence, always.
+        // The card is never saved into, and a press on its foot takes it down,
+        // so it has no flash — its left hand is the file's folder, always (user
+        // ruling 2026-09-20): the path's parent, spelled as the files column's
+        // foot spells a folder, and never a question put to a disk.
         let notice = self
             .preview_standing_fact(PreviewSurface::Peek, Instant::now())
             .unwrap_or_default()
@@ -1782,12 +1792,12 @@ impl Runtime<'_> {
                 seats::FootDress {
                     dissolved: 0.0,
                     run: file_peek::foot_run(&layout, scale),
-                    lead: file_peek::peek_foot_text(),
+                    lead: &address,
                     flash: None,
                     notice: &notice,
-                    // A sentence reads forwards, so it is cut from the back —
-                    // the one foot in this window whose lead is not a path.
-                    cut_left: false,
+                    // An address is read from both ends — where it stands and
+                    // which folder it names — so it gives way in the middle.
+                    cut: seats::LeadCut::Middle,
                     font_px: file_peek::PEEK_FOOT_FONT_LOGICAL_PX * scale,
                     gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
                 },
@@ -1807,6 +1817,7 @@ impl Runtime<'_> {
             peek.frame = Some(layout.frame);
             peek.body = Some(layout.body);
             peek.head = Some(layout.head);
+            peek.foot = file_peek::foot_address_box(&layout, &foot);
             // And the column's reach, or the fact that this card has none — written
             // unconditionally, because a card that changed body without clearing it would
             // answer a wheel with the last document's number.
@@ -1888,18 +1899,19 @@ impl Runtime<'_> {
 
     /// **A press inside the card**, and what it means (user ruling, 2026-08-14).
     ///
-    /// Two answers and no third, which is what keeps "read-only" true of a card
-    /// the pointer can now reach:
+    /// None of its answers edits the document, which is what keeps "read-only"
+    /// true of a card the pointer can now reach:
     ///
     /// * on the **scroll thumb**, take hold of it — asked first for the reason
     ///   [`Self::press_preview_block_thumb`] is asked before the body it rides
     ///   over: a bar drawn inside a region is still a bar, and a press there
     ///   means the bar, exactly as it does in every text editor on the desk;
+    /// * on the **foot's folder address**, find the file where it lives — in the
+    ///   files column, or under the hand-over modifier in Explorer or Finder
+    ///   ([`Self::press_file_peek_foot`], user ruling 2026-09-20);
     /// * **anywhere else in the card, open the real preview pane** — the same
-    ///   door Enter and the double-click take, so the foot's promise ("Enter /
-    ///   double-click opens the preview pane") and the click agree about where
-    ///   they land — and take the card down, because what it was standing in for
-    ///   is now on screen.
+    ///   door Enter and the double-click take — and take the card down, because
+    ///   what it was standing in for is now on screen.
     ///
     /// There is deliberately no caret and no selection: a press in a document is
     /// a place to type in a *pane*, and the card has nothing to type into. That
@@ -1930,8 +1942,10 @@ impl Runtime<'_> {
             .as_ref()
             .and_then(|peek| peek.head)
             .unwrap_or_default();
-        match file_peek::press_at(frame, head, self.file_peek_bar().as_ref(), at) {
+        let foot = self.window.file_peek.as_ref().and_then(|peek| peek.foot);
+        match file_peek::press_at(frame, head, foot, self.file_peek_bar().as_ref(), at) {
             file_peek::Press::Elsewhere => Ok(false),
+            file_peek::Press::Foot => self.press_file_peek_foot(),
             // **The card's head is a handle, and this press is not yet anything**
             // (user ruling 2026-08-27, §7.29). Six pixels of travel make it a
             // carry ([`Self::promote_file_peek_press`]); a release without them
@@ -2002,6 +2016,73 @@ impl Runtime<'_> {
                 self.press_file_peek_door()
             }
         }
+    }
+
+    /// **A press on the card's foot: the file, found where it lives** (user
+    /// ruling 2026-09-20).
+    ///
+    /// The foot names the folder that holds the file, and a press on it answers
+    /// that address with one of the two verbs this window already has for a
+    /// place: a plain click **locates** — the files column stands on the folder,
+    /// keeping its root when the folder is inside it and re-rooting when it is
+    /// not, and selects the file's row
+    /// ([`Self::locate_folder_in_files_column`]) — and the hand-over modifier
+    /// **reveals** the file, selected, in Explorer or Finder, through the door
+    /// the card's own surface uses for its `Ctrl`+click ([`peek_foot_press`]).
+    ///
+    /// The card comes down first, as it does for the pane's door: the column is
+    /// about to move under it, and a card left standing would be placed against
+    /// a row that has just gone. **The column stays where the press took it** —
+    /// nothing here remembers the root it replaced, and taking the card down
+    /// restores nothing (owner, 2026-09-23: "it is navigation, not a peek").
+    ///
+    /// No disk is asked on the way: the folder is the path's parent, and a
+    /// printed reference is handed over off its pane's ledger.
+    fn press_file_peek_foot(&mut self) -> Result<bool> {
+        let Some((host, path)) = self.window.file_peek.as_ref().and_then(|peek| {
+            peek.source
+                .file_path()
+                .map(|path| (peek.host, path.to_path_buf()))
+        }) else {
+            return Ok(false);
+        };
+        let hand_over = input::pointer_chord_held(self.window.modifiers_held);
+        let Some(press) = peek_foot_press(host, &path, hand_over) else {
+            return Ok(false);
+        };
+        self.hide_file_peek();
+        match press {
+            PeekFootPress::Locate { folder, file } => {
+                self.locate_folder_in_files_column(&folder, Some(&file))?;
+            }
+            PeekFootPress::Reveal(path) => {
+                self.reveal_in_explorer(&path);
+            }
+            PeekFootPress::RevealVerified(seat, path) => {
+                let facts = self.verified_target(seat, &path);
+                self.reveal_verified(&path, facts);
+            }
+        }
+        self.apply_pointer_cursor();
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// **Whether the pointer is on the card's folder address** — the hand the
+    /// terminal's links wear, because the address is one: it goes somewhere
+    /// when pressed (user ruling 2026-09-20).
+    pub(in crate::runtime) fn file_peek_foot_grasp(&self) -> bool {
+        let Some(at) = self.window.pointer_position else {
+            return false;
+        };
+        self.window
+            .file_peek
+            .as_ref()
+            .filter(|peek| peek.clock.is_shown())
+            .and_then(|peek| peek.foot)
+            .is_some_and(|foot| file_peek::contains(foot, [at.x as f32, at.y as f32]))
     }
 
     /// **The card is the door to the pane** — the answer the whole face gave

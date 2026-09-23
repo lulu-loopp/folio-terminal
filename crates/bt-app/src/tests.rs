@@ -36036,7 +36036,7 @@ fn the_read_only_fact_hangs_on_the_path_foots_right_hand() {
             lead: r"C:\w\huge.txt",
             flash: None,
             notice: preview::preview_truncated_notice(),
-            cut_left: true,
+            cut: seats::LeadCut::Front,
             font_px: 10.0,
             gap_px: gap,
         },
@@ -36190,7 +36190,7 @@ fn a_long_path_is_cut_and_the_phrase_beside_it_is_not() {
             lead: long,
             flash: None,
             notice: preview::preview_truncated_notice(),
-            cut_left: true,
+            cut: seats::LeadCut::Front,
             font_px: 10.0,
             gap_px: gap,
         },
@@ -36220,7 +36220,7 @@ fn a_long_path_is_cut_and_the_phrase_beside_it_is_not() {
             lead: long,
             flash: None,
             notice: "",
-            cut_left: true,
+            cut: seats::LeadCut::Front,
             font_px: 10.0,
             gap_px: gap,
         },
@@ -36262,7 +36262,7 @@ fn a_flashing_foot_gives_the_whole_strip_to_the_word_it_is_flashing() {
                 lead: r"C:\w\huge.txt",
                 flash: Some(flash),
                 notice: preview::preview_truncated_notice(),
-                cut_left: true,
+                cut: seats::LeadCut::Front,
                 font_px: 10.0,
                 gap_px: 12.0,
             },
@@ -48975,6 +48975,242 @@ fn unchanged_main_menu_inputs_are_silent_before_appkit() {
         !stale_language.matches(&shortcuts, focus),
         "a language revision rebuilds the menu",
     );
+}
+
+/// A card's subject for `path`, raised over `host` — the two hosts differ in
+/// exactly the field that says where the path came from.
+fn glance_subject(path: &Path, host: RowHost) -> FilePeekSubject {
+    FilePeekSubject {
+        path: Some(path.to_path_buf()),
+        printed_in: match host {
+            RowHost::Terminal(seat) => Some(seat),
+            RowHost::Column(_) | RowHost::Float(_) | RowHost::Git(_) => None,
+        },
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        ftype: preview::PreviewFtype::Markdown,
+        refused: false,
+        dirty: false,
+        anchor: file_peek::PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
+    }
+}
+
+/// A real folder with a real file in it, for the glance-foot tests: the path
+/// the card holds is a path on this disk, not a spelling made up for the test.
+fn glance_fixture(name: &str) -> (PathBuf, PathBuf) {
+    let folder =
+        std::env::temp_dir().join(format!("folio-glance-foot-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(folder.join("notes")).expect("the fixture folder is made");
+    let file = folder.join("notes").join("plan.md");
+    std::fs::write(&file, "# plan\n").expect("the fixture file is written");
+    (folder, file)
+}
+
+/// RED (ticket 12, user ruling 2026-09-20) — **the glance card's foot is one
+/// writing for a files row and a terminal reference: the same file gives the
+/// same folder.**
+///
+/// The ruling says it in so many words: 「文件列与终端引用两处同一行不分两种写法」. The
+/// two hosts differ in where the path came from — a program printed one, the
+/// user's own tree listed the other — and that difference decides how the card
+/// reads its facts (audit 3 C-2). It must decide nothing about the foot: the
+/// foot is the path's parent, and a path has one parent.
+///
+/// MUTATION: have `FilePeekSubject::foot_address_on` print the file's own path
+/// when `printed_in` is set — the two feet part, and the equality goes red.
+#[test]
+fn the_foot_is_one_writing_for_rows_and_references() {
+    let (folder, file) = glance_fixture("one-writing");
+    let platform = bt_platform::host_platform();
+    let row = glance_subject(&file, RowHost::Column(SeatId(1))).foot_address_on(platform, None);
+    let reference =
+        glance_subject(&file, RowHost::Terminal(SeatId(2))).foot_address_on(platform, None);
+    assert_eq!(
+        row, reference,
+        "one file, one foot, whichever surface raised the card"
+    );
+    assert_eq!(
+        row,
+        folder.join("notes").display().to_string(),
+        "and the foot is the folder that holds the file"
+    );
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// RED (ticket 12, user ruling 2026-09-20) — **a plain click on the foot finds
+/// the file in the files column and selects it, by the locate verb's three
+/// arms.**
+///
+/// The press is decided by [`peek_foot_press`] and landed by [`files_locate`] —
+/// the decision [`Runtime::locate_folder_in_files_column`] makes, the verb every
+/// "show this in the files column" in this window already means (rule 9: the
+/// existing verb, not a second one). Its range rule is the 2026-08-25 ruling
+/// 「打开文件不许重根文件树」: a folder inside the column's tree keeps the root and
+/// selects the file's row under it; a folder outside it re-roots the column at
+/// the folder and selects the file's row there; a tab with no column gets one
+/// rooted at the folder, with the file's row selected.
+///
+/// MUTATION: route the plain click to the reveal door (answer
+/// `PeekFootPress::Reveal` for `ClickIntent::Here` in `peek_foot_press`) — the
+/// first assertion goes red.
+#[test]
+fn a_click_on_the_foot_selects_the_file_in_the_files_column() {
+    let (folder, file) = glance_fixture("locate");
+    for host in [RowHost::Column(SeatId(1)), RowHost::Terminal(SeatId(2))] {
+        let Some(PeekFootPress::Locate {
+            folder: at,
+            file: name,
+        }) = peek_foot_press(host, &file, false)
+        else {
+            panic!("a plain click on {host:?}'s foot must stay in the window and locate");
+        };
+        assert_eq!(at, folder.join("notes"));
+        assert_eq!(name, "plan.md");
+
+        // ① Inside the tree the column already shows: the root stays, and the
+        //    file's row under the way down is the one selected.
+        let root = folder.display().to_string();
+        assert_eq!(
+            files_locate(Some((SeatId(7), &root)), &at, Some(&name)),
+            FilesLocate::Inside {
+                seat: SeatId(7),
+                select: "/notes/plan.md".to_owned(),
+            }
+        );
+        // ② Outside it: the column is rooted at the folder, and the file's row
+        //    — a child of the new root — is selected.
+        let elsewhere = std::env::temp_dir()
+            .join("folio-glance-foot-elsewhere")
+            .display()
+            .to_string();
+        assert_eq!(
+            files_locate(Some((SeatId(7), &elsewhere)), &at, Some(&name)),
+            FilesLocate::Root {
+                select: Some("/plan.md".to_owned()),
+            }
+        );
+        // ③ No column at all: one is opened there, the same answer.
+        assert_eq!(
+            files_locate(None, &at, Some(&name)),
+            FilesLocate::Root {
+                select: Some("/plan.md".to_owned()),
+            }
+        );
+    }
+    // And the folder-only callers are the verb they always were.
+    let root = folder.display().to_string();
+    assert_eq!(
+        files_locate(Some((SeatId(7), &root)), &folder.join("notes"), None),
+        FilesLocate::Inside {
+            seat: SeatId(7),
+            select: "/notes".to_owned(),
+        }
+    );
+    assert_eq!(
+        files_locate(None, &folder, None),
+        FilesLocate::Root { select: None }
+    );
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// RED (ticket 12, owner ruling 2026-09-23) — **the files column stays where the
+/// foot took it when the card goes.**
+///
+/// The 2026-09-20 note said 「不在当前根下就让文件列临时切过去」, and "temporarily"
+/// could be read as "switch back when the card goes". The owner settled it: "The
+/// files column does not switch back after the glance-foot click; it is
+/// navigation, not a peek." So the press takes the card down and then locates,
+/// and nothing on the card's way down touches the column: the card holds no
+/// root to restore, and the door that ends its life names no files-column verb.
+///
+/// MUTATION: have `hide_file_peek` re-root the column at a remembered root (a
+/// `reroot_files_column` or `show_folder_in_files_column` call) — the second
+/// loop goes red.
+#[test]
+fn the_column_stays_where_the_foot_took_it_when_the_card_goes() {
+    let press = method_body("Runtime", "press_file_peek_foot");
+    let down = press
+        .find("self.hide_file_peek();")
+        .expect("the foot's press takes the card down");
+    let locate = press
+        .find("self.locate_folder_in_files_column(&folder, Some(&file))")
+        .expect("and locates through the existing verb");
+    assert!(
+        down < locate,
+        "the card goes before the column moves, so it is never placed against a row that moved"
+    );
+    for verb in [
+        "reroot_files_column",
+        "show_folder_in_files_column",
+        "seat_a_files_column",
+        ".root =",
+    ] {
+        assert!(
+            !press.contains(verb),
+            "the foot moves the column only through the locate verb — found `{verb}`"
+        );
+    }
+    for verb in [
+        "reroot_files_column",
+        "show_folder_in_files_column",
+        "locate_folder_in_files_column",
+        ".root =",
+    ] {
+        assert!(
+            !method_body("Runtime", "hide_file_peek").contains(verb),
+            "taking the card down moves the files column (`{verb}`): it would switch back"
+        );
+    }
+}
+
+/// RED (ticket 12, user ruling 2026-09-20) — **`Ctrl` (`⌘`) and a click on the
+/// foot reveals the file, selected, through the door the card's surface already
+/// uses for its own hand-over.**
+///
+/// A files row, a Git row and a folder card's row reveal through
+/// [`Runtime::reveal_in_explorer`], the door a row's own menu takes; a reference
+/// a program printed reveals through [`Runtime::reveal_verified`], with the
+/// pane's ledger — exactly as the reference itself does under `Ctrl`, so the
+/// card does not become a way round audit 3 C-2's rule. The file is revealed,
+/// not its folder: Explorer and Finder open the folder with the file selected.
+///
+/// MUTATION: answer `Reveal` for a terminal host (the files door) — the second
+/// assertion goes red; drop the reveal call from `press_file_peek_foot` — the
+/// body pin does.
+#[test]
+fn a_ctrl_click_on_the_foot_reveals_the_file() {
+    let (folder, file) = glance_fixture("reveal");
+    for host in [
+        RowHost::Column(SeatId(1)),
+        RowHost::Float(3),
+        RowHost::Git(SeatId(4)),
+    ] {
+        assert_eq!(
+            peek_foot_press(host, &file, true),
+            Some(PeekFootPress::Reveal(file.clone())),
+            "{host:?}"
+        );
+    }
+    assert_eq!(
+        peek_foot_press(RowHost::Terminal(SeatId(2)), &file, true),
+        Some(PeekFootPress::RevealVerified(SeatId(2), file.clone())),
+        "a printed reference is handed over off its ledger"
+    );
+    let press = method_body("Runtime", "press_file_peek_foot");
+    for door in [
+        "self.reveal_in_explorer(&path);",
+        "let facts = self.verified_target(seat, &path);",
+        "self.reveal_verified(&path, facts);",
+        "input::pointer_chord_held(self.window.modifiers_held)",
+    ] {
+        assert!(
+            press.contains(door),
+            "the foot's press reaches `{door}` rather than a door of its own"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&folder);
 }
 
 /// RED (ticket 20) — **the command palette's field and rows are primary
