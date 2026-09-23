@@ -25,6 +25,7 @@ mod peek;
 mod profiles;
 mod quake;
 mod search;
+mod tabs;
 mod terminal;
 mod tooltips;
 mod web;
