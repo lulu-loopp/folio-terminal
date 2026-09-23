@@ -40796,6 +40796,8 @@ fn leaf_saying(text: &str) -> LeafSession {
         // Nothing was started, so there is no `$PROFILE` this fixture could
         // be owed an answer about.
         integration_offer: Some(shell_integration::Offer::Silent),
+        // Nothing has been pasted into a fixture.
+        pending_paste: None,
         // A fixture is not a restore, so nothing is owed to its prompt.
         pending_typing: None,
     }
@@ -48577,5 +48579,533 @@ fn unchanged_main_menu_inputs_are_silent_before_appkit() {
     assert!(
         !stale_language.matches(&shortcuts, focus),
         "a language revision rebuilds the menu",
+    );
+}
+
+// ── the multi-line paste card (0.4.4 ticket 02) ─────────────────────────────
+//
+// `Runtime` cannot be built without a window, so the decision `Runtime::deliver_paste` makes is a
+// free function over a real tab (`stage_paste`), and these tests run it on real leaves: a real
+// `DualPlaneSession` whose modes are set by the bytes a program would print, a paste prepared by
+// the real `prepare_clipboard_paste` / `prepare_dropped_paste`, and the answer's bytes produced by
+// the real `paste_text`. Where the claim is about the window's own wiring — which rung the keys
+// reach, which door the answer leaves by — it is pinned on the method bodies through `bt_source`.
+
+/// A shell-less leaf whose paste grammar is `grammar`, after the program printed `printed`.
+fn paste_leaf(grammar: shell_literal::ShellGrammar, printed: &[u8]) -> LeafSession {
+    let mut leaf = leaf_saying("");
+    leaf.paste_recipient.encoder.grammar = grammar;
+    leaf.session
+        .feed(printed)
+        .expect("feed the program's own bytes");
+    leaf
+}
+
+/// One tab holding `leaf`, and the address a paste into it is aimed at.
+fn paste_tab(leaf: LeafSession) -> (TabState, PasteTarget) {
+    let tab = tab_holding(leaf);
+    let (seat, leaf) = tab.sessions.iter().next().expect("a lone terminal");
+    let target = PasteTarget {
+        tab: tab.id,
+        seat: *seat,
+        incarnation: leaf.incarnation,
+    };
+    (tab, target)
+}
+
+/// The clipboard holding `text`, pasted into `target` the way `paste_from_clipboard_into` does.
+fn paste_text_into(tab: &mut TabState, target: PasteTarget, text: &str, ask: bool) -> StagedPaste {
+    let recipient = tab.sessions[&target.seat].paste_recipient.clone();
+    let prepared = prepare_clipboard_paste(
+        Ok(bt_platform::ClipboardPayload::Text(text.to_owned())),
+        &recipient,
+        false,
+    );
+    stage_paste(
+        tab,
+        target,
+        prepared.text.expect("text arrives as text"),
+        prepared.clipboard_text,
+        ask,
+        "test paste",
+    )
+}
+
+/// The bytes the one writer puts on the child's input for `text`.
+fn paste_bytes_sent(tab: &mut TabState, seat: SeatId, text: &str) -> Vec<u8> {
+    let leaf = tab.sessions.get_mut(&seat).expect("the seat has a shell");
+    let mut sent = Vec::new();
+    paste_text(&mut leaf.session, &mut leaf.projection, text, |bytes| {
+        sent.extend_from_slice(bytes);
+        Ok(())
+    })
+    .expect("a capture cannot fail");
+    sent
+}
+
+const THREE_LINES: &str = "dir\r\necho one\r\nver";
+
+/// RED (0.4.4 ticket 02) — **a program that asked for bracketed paste is never asked about a
+/// paste.**
+///
+/// `?2004` means the block arrives as one lump and nothing runs, so there is nothing to ask: the
+/// paste is sent at once, wrapped, exactly as before this ticket.
+///
+/// MUTATION: drop `|| facts.bracketed` from `paste_road` — the bracketed pane is held.
+#[test]
+fn a_bracketed_pane_is_never_asked() {
+    let (mut tab, target) = paste_tab(paste_leaf(
+        shell_literal::ShellGrammar::Posix,
+        b"\x1b[?2004h",
+    ));
+    let staged = paste_text_into(&mut tab, target, THREE_LINES, true);
+    assert_eq!(staged, StagedPaste::Send(THREE_LINES.to_owned()));
+    assert!(pending_paste_in(&tab).is_none(), "no card");
+    assert_eq!(
+        paste_bytes_sent(&mut tab, target.seat, THREE_LINES),
+        b"\x1b[200~dir\recho one\rver\x1b[201~",
+        "today's bracketed bytes"
+    );
+}
+
+/// RED (0.4.4 ticket 02) — **a single line is never asked about, including one that carries its
+/// own trailing newline.**
+///
+/// MUTATION: raise the card on `lines >= 1` in `paste_road` — every paste into cmd is held.
+#[test]
+fn a_single_line_paste_is_never_asked() {
+    for text in ["ver", "ver\r\n", "ver\n"] {
+        let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+        assert_eq!(
+            paste_text_into(&mut tab, target, text, true),
+            StagedPaste::Send(text.to_owned()),
+            "{text:?}"
+        );
+        assert!(pending_paste_in(&tab).is_none());
+    }
+}
+
+/// RED (0.4.4 ticket 02) — **a dropped path is never asked about.**
+///
+/// Runs the real drop producer on a real file: `prepare_dropped_paste` spells the path and marks
+/// the payload as Folio's own, and a payload that is not the clipboard's text never reaches the
+/// question — even if it could somehow have two lines, which
+/// `input::tests::a_path_insertion_can_never_be_multi_line` says it cannot.
+///
+/// MUTATION: drop `!facts.clipboard_text ||` from `paste_road` — the second assertion goes red.
+#[test]
+fn a_dropped_path_is_never_asked() {
+    let dir = std::env::temp_dir().join(format!("bt-t02-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notes.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    let recipient = tab.sessions[&target.seat].paste_recipient.clone();
+    let prepared = prepare_dropped_paste(vec![file.clone(), file], &recipient, false);
+    assert!(!prepared.clipboard_text, "a drop is Folio's own spelling");
+    let text = prepared.text.expect("the path is spelled");
+    assert_eq!(
+        stage_paste(
+            &mut tab,
+            target,
+            text.clone(),
+            prepared.clipboard_text,
+            true,
+            "drop"
+        ),
+        StagedPaste::Send(text)
+    );
+    // And the arm, not the count, is what exempts it.
+    assert_eq!(
+        stage_paste(
+            &mut tab,
+            target,
+            THREE_LINES.to_owned(),
+            false,
+            true,
+            "drop"
+        ),
+        StagedPaste::Send(THREE_LINES.to_owned())
+    );
+    assert!(pending_paste_in(&tab).is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// RED (0.4.4 ticket 02) — **a multi-line paste into cmd sends nothing until it is answered, and
+/// the card says how many lines and into what.**
+///
+/// cmd reads raw input, so every `\r` is a command (the design note's fact 1, and 01's control
+/// arm: two commands ran before any Enter). The paste is held on the leaf; nothing is returned
+/// for the writer, which is the whole of "no byte before an answer".
+///
+/// MUTATION: return `StagedPaste::Send(text)` from the `Ask` arm of `stage_paste` — the first
+/// assertion goes red.
+#[test]
+fn a_multi_line_paste_into_cmd_sends_nothing_until_answered() {
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    assert_eq!(
+        paste_text_into(&mut tab, target, THREE_LINES, true),
+        StagedPaste::Held
+    );
+    let (seat, pending) = pending_paste_in(&tab).expect("the card is up");
+    assert_eq!(seat, target.seat);
+    assert_eq!(pending.lines, 3);
+    assert_eq!(pending.target, target);
+    assert_eq!(
+        pending.text, THREE_LINES,
+        "held exactly as the clipboard gave it"
+    );
+    // The card's line, from the profile the pane shows.
+    let shell = profile_banner_name(&tab.sessions[&seat].profile);
+    let title = i18n::paste_card_title(pending.lines, &shell);
+    assert!(
+        title.starts_with("3 ") && title.ends_with(&format!("→ {shell}")),
+        "{title}"
+    );
+}
+
+/// RED (0.4.4 ticket 02) — **`Enter` runs the paste line by line, with exactly today's bytes.**
+///
+/// "Run line by line" is not a new road: it is the paste the reader would have had without the
+/// card, byte for byte, through the same writer.
+///
+/// MUTATION: send `input::join_lines` of the text for `RunLineByLine` in `paste_answer_text`.
+#[test]
+fn enter_runs_it_line_by_line_with_todays_bytes() {
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    // Today's bytes: the same paste with the question turned off.
+    let StagedPaste::Send(today) = paste_text_into(&mut tab, target, THREE_LINES, false) else {
+        panic!("the setting off sends at once");
+    };
+    let today = paste_bytes_sent(&mut tab, target.seat, &today);
+    assert_eq!(
+        paste_text_into(&mut tab, target, THREE_LINES, true),
+        StagedPaste::Held
+    );
+    let answer = paste_card_key(
+        &Key::Named(NamedKey::Enter),
+        winit::keyboard::ModifiersState::empty(),
+    );
+    assert_eq!(answer, Some(PasteAnswer::RunLineByLine));
+    let pending = take_pending_paste(&mut tab).expect("the answer takes it");
+    let text = paste_answer_text(&pending, PasteAnswer::RunLineByLine).expect("it sends");
+    assert_eq!(paste_bytes_sent(&mut tab, target.seat, &text), today);
+    assert_eq!(today, b"dir\recho one\rver");
+    assert!(pending_paste_in(&tab).is_none(), "the card is gone");
+}
+
+/// RED (0.4.4 ticket 02) — **`Join into one line` sends one line and no Enter.**
+///
+/// MUTATION: make `PasteAnswer::Join` send `pending.text` in `paste_answer_text` — the bytes carry
+/// two `\r` and two commands run.
+#[test]
+fn join_sends_one_line_and_no_enter() {
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    assert_eq!(
+        paste_text_into(&mut tab, target, THREE_LINES, true),
+        StagedPaste::Held
+    );
+    let answer = paste_card_key(
+        &Key::Named(NamedKey::Tab),
+        winit::keyboard::ModifiersState::empty(),
+    );
+    assert_eq!(answer, Some(PasteAnswer::Join));
+    let pending = take_pending_paste(&mut tab).expect("the answer takes it");
+    let text = paste_answer_text(&pending, PasteAnswer::Join).expect("it sends");
+    let sent = paste_bytes_sent(&mut tab, target.seat, &text);
+    assert_eq!(sent, b"dir echo one ver");
+    assert!(!sent.contains(&b'\r'), "no Enter: nothing runs");
+}
+
+/// RED (0.4.4 ticket 02) — **`Esc` sends no bytes and leaves the clipboard alone.**
+///
+/// The answer takes the paste off its leaf and hands the writer nothing; and the method that
+/// spends it never names the clipboard, so there is no road by which a cancel could write it.
+///
+/// MUTATION: return `Some(pending.text.clone())` for `Cancel` in `paste_answer_text`.
+#[test]
+fn cancel_sends_no_bytes_and_leaves_the_clipboard() {
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    assert_eq!(
+        paste_text_into(&mut tab, target, THREE_LINES, true),
+        StagedPaste::Held
+    );
+    let answer = paste_card_key(
+        &Key::Named(NamedKey::Escape),
+        winit::keyboard::ModifiersState::empty(),
+    );
+    assert_eq!(answer, Some(PasteAnswer::Cancel));
+    let pending = take_pending_paste(&mut tab).expect("the answer takes it");
+    assert_eq!(paste_answer_text(&pending, PasteAnswer::Cancel), None);
+    assert!(pending_paste_in(&tab).is_none(), "the card is gone");
+    let spend = method_body("Runtime", "answer_paste_card");
+    assert!(
+        !spend.contains("clipboard"),
+        "the answer reaches the clipboard:\n{spend}"
+    );
+    assert!(spend.contains("take_pending_paste(&mut self.window.tabs[active])"));
+}
+
+/// RED (0.4.4 ticket 02) — **a second multi-line paste replaces the pending one**, wherever in
+/// the tab it was aimed.
+///
+/// MUTATION: drop the loop that clears every leaf's `pending_paste` in `stage_paste` — two panes
+/// hold a paste and the first is still found.
+#[test]
+fn a_second_multi_line_paste_replaces_the_pending_one() {
+    let mut tab = cross_tab(1, &["a", "b"]);
+    let seats: Vec<SeatId> = tab.sessions.keys().copied().collect();
+    for seat in &seats {
+        tab.sessions
+            .get_mut(seat)
+            .unwrap()
+            .paste_recipient
+            .encoder
+            .grammar = shell_literal::ShellGrammar::Cmd;
+    }
+    let aim = |tab: &TabState, seat: SeatId| PasteTarget {
+        tab: tab.id,
+        seat,
+        incarnation: tab.sessions[&seat].incarnation,
+    };
+    let first = aim(&tab, seats[0]);
+    let second = aim(&tab, seats[1]);
+    assert_eq!(
+        paste_text_into(&mut tab, first, "a\nb", true),
+        StagedPaste::Held
+    );
+    assert_eq!(
+        paste_text_into(&mut tab, second, "c\nd\ne", true),
+        StagedPaste::Held
+    );
+    let held: Vec<SeatId> = tab
+        .sessions
+        .iter()
+        .filter(|(_, leaf)| leaf.pending_paste.is_some())
+        .map(|(seat, _)| *seat)
+        .collect();
+    assert_eq!(held, vec![seats[1]], "one question, the newest");
+    let (_, pending) = pending_paste_in(&tab).unwrap();
+    assert_eq!((pending.text.as_str(), pending.lines), ("c\nd\ne", 3));
+}
+
+/// RED (0.4.4 ticket 02) — **a restarted shell takes its pending paste with it.**
+///
+/// `Runtime::restart_shell` puts a new `LeafSession` in the seat; the pending paste lived on the
+/// old one, so the card has nothing left to project and the old address names nothing.
+///
+/// MUTATION: keep the pending paste on the window instead of the leaf — it outlives the shell.
+#[test]
+fn a_restarted_shell_cancels_the_pending_paste() {
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    assert_eq!(
+        paste_text_into(&mut tab, target, THREE_LINES, true),
+        StagedPaste::Held
+    );
+    // What `restart_shell` does to the seat.
+    tab.sessions.insert(
+        target.seat,
+        paste_leaf(shell_literal::ShellGrammar::Cmd, b""),
+    );
+    assert!(
+        pending_paste_in(&tab).is_none(),
+        "the card is gone with the shell"
+    );
+    let standing = tab.sessions.get(&target.seat).map(|leaf| leaf.incarnation);
+    assert!(!paste_target_is_live(tab.id, standing, target));
+}
+
+/// RED (0.4.4 ticket 02) — **an answer spent after the tab stopped being on top sends nothing.**
+///
+/// The answer lands on a later turn, so the writer re-asks `live_paste_target` before a byte
+/// leaves (review X-1). The rule is `paste_target_is_live`; the wiring — the answer leaves only
+/// through `send_paste`, and `send_paste` asks first — is pinned on the bodies.
+///
+/// MUTATION: remove the `live_paste_target` guard at the top of `Runtime::send_paste`.
+#[test]
+fn an_answer_spent_after_the_tab_moved_sends_nothing() {
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    assert_eq!(
+        paste_text_into(&mut tab, target, THREE_LINES, true),
+        StagedPaste::Held
+    );
+    let pending = take_pending_paste(&mut tab).unwrap();
+    let standing = tab
+        .sessions
+        .get(&pending.target.seat)
+        .map(|leaf| leaf.incarnation);
+    assert!(
+        paste_target_is_live(tab.id, standing, pending.target),
+        "control"
+    );
+    assert!(
+        !paste_target_is_live(TabId(tab.id.0 + 1), standing, pending.target),
+        "another tab is on top: nothing may be written"
+    );
+    let spend = squeezed_body("Runtime", "answer_paste_card");
+    assert!(spend.contains("self.send_paste(pending.target,&text,pending.context)?"));
+    let send = squeezed_body("Runtime", "send_paste");
+    let guard = send
+        .find("letSome(active)=self.live_paste_target(target)else{returnOk(false);};")
+        .expect("the writer re-asks the address");
+    assert!(guard < send.find("paste_text(").expect("and then writes"));
+}
+
+/// RED (0.4.4 ticket 02) — **while the card is up, a key other than Enter, Tab or Esc reaches
+/// nothing and the card stays** (owner's ruling 2026-09-23).
+///
+/// The key's meaning is `paste_card_key`; that it reaches nothing is the rung: it stands above
+/// every road to a shell in `keyboard_input` and returns whatever the key was.
+///
+/// MUTATION: map `Key::Character` to `Cancel` in `paste_card_key`, or take the `return Ok(())`
+/// out of the card's rung.
+#[test]
+fn a_key_other_than_enter_tab_or_esc_reaches_nothing_and_leaves_the_card_up() {
+    use winit::keyboard::ModifiersState;
+    let none = ModifiersState::empty();
+    for key in [
+        Key::Character("a".into()),
+        Key::Character("v".into()),
+        Key::Named(NamedKey::Space),
+        Key::Named(NamedKey::Backspace),
+        Key::Named(NamedKey::ArrowUp),
+        Key::Named(NamedKey::F5),
+    ] {
+        assert_eq!(paste_card_key(&key, none), None, "{key:?}");
+    }
+    for (key, modifiers) in [
+        (Key::Character("v".into()), ModifiersState::CONTROL),
+        (Key::Named(NamedKey::Enter), ModifiersState::SHIFT),
+        (Key::Named(NamedKey::Enter), ModifiersState::CONTROL),
+        (Key::Named(NamedKey::Tab), ModifiersState::CONTROL),
+        (Key::Named(NamedKey::Tab), ModifiersState::SHIFT),
+        (Key::Named(NamedKey::Escape), ModifiersState::ALT),
+    ] {
+        assert_eq!(
+            paste_card_key(&key, modifiers),
+            None,
+            "{key:?} {modifiers:?}"
+        );
+    }
+    // The card is still up after them: nothing took the paste.
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    assert_eq!(
+        paste_text_into(&mut tab, target, THREE_LINES, true),
+        StagedPaste::Held
+    );
+    assert!(pending_paste_in(&tab).is_some());
+
+    let ladder = squeezed_body("Runtime", "keyboard_input");
+    let rung = "ifself.paste_card_seat().is_some(){if!event.repeat&&letSome(answer)=paste_card_key(&event.logical_key,self.window.modifiers){self.answer_paste_card(answer)?;}returnOk(());}";
+    let at = ladder
+        .find(rung)
+        .unwrap_or_else(|| panic!("the card's rung is not whole"));
+    for road in [
+        "self.paste_from_clipboard()?;",
+        "self.copy_selection()?;",
+        "send_user_input(",
+    ] {
+        if let Some(later) = ladder.find(road) {
+            assert!(at < later, "`{road}` is reached before the card's rung");
+        }
+    }
+}
+
+/// RED (0.4.4 ticket 02) — **a file dropped while the card is up is refused**, because the card is
+/// a modal rung of `KeyboardOwner` (owner's ruling 2026-09-23 made it modal; the design note's
+/// `a_pending_paste_question_does_not_refuse_a_drop` was written for the withdrawn strip and is
+/// withdrawn with it).
+///
+/// MUTATION: take `self.paste_card_seat().is_some()` out of `keyboard_owner`'s `menu_or_dialog`.
+#[test]
+fn a_drop_while_the_card_is_up_is_refused() {
+    let owner = squeezed_body("Runtime", "keyboard_owner");
+    assert!(
+        owner.contains("||self.paste_card_seat().is_some()"),
+        "the card is not a rung of the keyboard owner:\n{owner}"
+    );
+    let modal = KeyboardOwner {
+        menu_or_dialog: true,
+        ..KeyboardOwner::default()
+    };
+    assert!(modal.is_modal());
+    assert_eq!(
+        ime_owner(modal),
+        ImeOwner::Modal,
+        "a composition goes nowhere"
+    );
+    let (_tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    let promised = Some(PasteOffer {
+        landing: DropLanding::SeatCentre {
+            target: target.seat,
+        },
+        target,
+    });
+    assert_eq!(
+        paste_offer_is_kept(GlassHere::Ours, promised, promised, true, modal.is_modal()),
+        None,
+        "a path was written under the card"
+    );
+}
+
+/// RED (0.4.4 ticket 02) — **with the setting off, a multi-line paste is sent exactly as today.**
+///
+/// MUTATION: ignore `facts.ask` in `paste_road` — the paste is held with the row off.
+#[test]
+fn turning_the_setting_off_sends_as_today() {
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    let StagedPaste::Send(text) = paste_text_into(&mut tab, target, THREE_LINES, false) else {
+        panic!("the row is off: nothing is held");
+    };
+    assert!(pending_paste_in(&tab).is_none());
+    assert_eq!(
+        paste_bytes_sent(&mut tab, target.seat, &text),
+        input::paste_bytes(THREE_LINES, false),
+        "today's bytes"
+    );
+    // And the persisted default is on, as the owner ruled.
+    assert!(bt_persist::SettingsV1::default().multiline_paste_ask);
+    assert!(settings::SettingsValues::sample().multiline_paste_ask);
+}
+
+/// RED (0.4.4 tickets 02 and 03) — **the question has one address**: `deliver_paste` asks it
+/// through `stage_paste`, and `paste_road` is the one rule, read by nothing else.
+///
+/// A PowerShell prompt the shell opened in order takes ticket 03's road and is never shown the
+/// card (owner's ruling 2026-09-22, ruling 2); until 03 lands that road is today's bytes. A
+/// PowerShell pane whose integration never spoke has no such prompt, and is asked.
+///
+/// MUTATION: raise the card for `InputLine` in `stage_paste`, or drop `stage_paste(` from
+/// `deliver_paste`.
+#[test]
+fn the_paste_question_has_one_address_and_powershell_keeps_its_road() {
+    let deliver = squeezed_body("Runtime", "deliver_paste");
+    assert!(deliver.contains("matchstage_paste(&mutself.window.tabs[active],"));
+    assert!(squeezed(free_fn_body("stage_paste")).contains("paste_road(&text,PasteFacts::of("));
+    for (name, count) in [("stage_paste(", 2), ("paste_road(", 2)] {
+        let items = found(needle!(Pattern::text(name)), View::CodeKeepingLiterals)
+            .in_the_product(source())
+            .len();
+        assert_eq!(items, count, "`{name}` is asked from a second place");
+    }
+
+    let open_prompt = b"\x1b]133;A\x07PS C:\\> \x1b]133;B\x07";
+    let (mut tab, target) = paste_tab(paste_leaf(
+        shell_literal::ShellGrammar::PowerShell,
+        open_prompt,
+    ));
+    let facts = PasteFacts::of(&tab.sessions[&target.seat], true, true);
+    assert!(facts.powershell_prompt_open);
+    assert_eq!(paste_road(THREE_LINES, facts), PasteRoad::InputLine);
+    assert_eq!(
+        paste_text_into(&mut tab, target, THREE_LINES, true),
+        StagedPaste::Send(THREE_LINES.to_owned()),
+        "PowerShell keeps today's road until ticket 03 lands"
+    );
+    // No OSC 133 — the integration never spoke — is a program without bracketed paste.
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::PowerShell, b""));
+    assert_eq!(
+        paste_text_into(&mut tab, target, THREE_LINES, true),
+        StagedPaste::Held
     );
 }

@@ -305,7 +305,16 @@ use serde::{Deserialize, Serialize};
 /// ask for anything else, so a reader upgrading has been watching it work for as long as they have
 /// had typeset matrices — and a migration that wrote `false` would take a working screen away from
 /// them without being asked.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 36;
+///
+/// **v37 carries `multiline_paste_ask`**, the Terminal page's switch over the card a paste of
+/// several lines raises in a shell that would run them one by one (owner's ruling 2026-09-22:
+/// "one row, 'ask before pasting several lines', on by default").
+///
+/// **It lands on**, and unlike v36 that is the ruling rather than a behaviour carried forward:
+/// every build before this one sent the lines straight in, and the owner ruled that a paste into
+/// such a shell asks first. The row is what keeps the question a choice — a reader who wants the
+/// old road has one press that gives it back.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 37;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -558,6 +567,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "turn_end_notification": true | false,
 ///   "cards_gesture_hint_offer": true | false,
 ///   "copy_on_select": true | false,
+///   "multiline_paste_ask": true | false,
 ///   "update_check": true | false,
 ///   "quake_height": 20..=100,
 ///   "quake_width": 30..=100,
@@ -1091,6 +1101,14 @@ pub struct SettingsV1 {
     /// closes it.
     #[serde(default = "default_copy_on_select")]
     pub copy_on_select: bool,
+    /// **Whether a paste of several lines into a shell that would run them one by one asks
+    /// first** (v37, owner's ruling 2026-09-22).
+    ///
+    /// Only a shell that has not asked for bracketed paste is ever asked about: a program that
+    /// set `?2004` receives the block as one lump and runs nothing, so there is nothing to ask.
+    /// Off, every paste takes the road it took before this key existed.
+    #[serde(default = "default_multiline_paste_ask")]
+    pub multiline_paste_ask: bool,
     /// **Whether this build asks the releases page whether a newer one exists** (v26,
     /// `docs/DESIGN.md` §7.51).
     ///
@@ -1403,6 +1421,12 @@ fn default_repair_row_breaks() -> bool {
     true
 }
 
+/// The same door for a v37 key missing from a file this build is reading: `false` here is a
+/// reader who turned the question off, which is an answer nobody gives by leaving a line out.
+fn default_multiline_paste_ask() -> bool {
+    true
+}
+
 impl Default for SettingsV1 {
     fn default() -> Self {
         Self {
@@ -1459,6 +1483,8 @@ impl Default for SettingsV1 {
             // A drag that lets go of a selection has always written it to the clipboard; the row
             // gives that habit a name rather than choosing it.
             copy_on_select: true,
+            // The owner's ruling of 2026-09-22: on by default.
+            multiline_paste_ask: true,
             // A preview has no other way to say that it has been superseded.
             update_check: true,
             // Tall enough to read a command's output, short enough that the window it came down

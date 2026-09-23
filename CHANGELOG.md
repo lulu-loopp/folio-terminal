@@ -6,6 +6,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- Pasting several lines into a shell that would run them one by one now asks
+  first: run them line by line, join them into one line, or cancel. A setting
+  under Terminal turns the question off.
+
 ### Changed
 
 - In the Markdown preview, a paragraph turns into its source when the gesture

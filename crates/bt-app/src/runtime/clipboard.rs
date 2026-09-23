@@ -2,11 +2,13 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    Drag, DropLanding, LeafSession, PasteOffer, PasteTarget, PreparedClipboardPaste, Runtime,
-    UserInputKind, copy_selection, hang_watch, input_line_needs_a_space_first, offer_pty_input,
-    paste_offer_is_kept, paste_target_is_live, paste_text, prepare_clipboard_paste,
-    prepare_dropped_paste, recoverable_clipboard_write, seats, text_field, toast,
-    write_selection_text, write_terminal_clipboard_text,
+    Drag, DropLanding, LeafSession, PasteAnswer, PasteOffer, PasteTarget, PreparedClipboardPaste,
+    Runtime, StagedPaste, UserInputKind, copy_selection, hang_watch, i18n,
+    input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_offer_is_kept,
+    paste_target_is_live, paste_text, pending_paste_in, prepare_clipboard_paste,
+    prepare_dropped_paste, profile_banner_name, recoverable_clipboard_write, restore, seats,
+    stage_paste, take_pending_paste, text_field, toast, write_selection_text,
+    write_terminal_clipboard_text,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -75,6 +77,16 @@ impl Runtime<'_> {
     pub(crate) fn apply_copy_on_select(&mut self, enabled: bool) {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.copy_on_select = enabled;
+        self.app.settings_store.store(settings);
+    }
+
+    /// Store the reader's answer about the multi-line paste card (0.4.4 ticket 02).
+    ///
+    /// [`Self::apply_copy_on_select`]'s shape: [`Self::deliver_paste`] reads the loaded settings
+    /// at the moment of each paste, so the next one already answers the new way.
+    pub(crate) fn apply_multiline_paste_ask(&mut self, enabled: bool) {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.multiline_paste_ask = enabled;
         self.app.settings_store.store(settings);
     }
 
@@ -364,6 +376,12 @@ impl Runtime<'_> {
     /// the day a second road arrived at it. `context` is the one thing the two
     /// roads do not share: it names the write for a reader of the error, and a
     /// drop that could not reach a shell is not a clipboard that could not.
+    ///
+    /// **And the one place a paste may be asked about** (0.4.4 ticket 02). All four doors arrive
+    /// here, so [`stage_paste`] — and through it [`crate::paste_road`] — is asked exactly once per
+    /// paste, after the address is known to be live and before a byte is written. A paste it holds
+    /// raises the card and sends nothing; the card's answer spends it through
+    /// [`Self::answer_paste_card`].
     fn deliver_paste(
         &mut self,
         target: PasteTarget,
@@ -377,7 +395,6 @@ impl Runtime<'_> {
         let Some(active) = self.live_paste_target(target) else {
             return Ok(false);
         };
-        let seat = target.seat;
         if let Some(notice) = prepared.notice {
             self.toast(
                 toast::ToastKind::Error,
@@ -389,6 +406,43 @@ impl Runtime<'_> {
         let Some(text) = prepared.text else {
             return Ok(false);
         };
+        let ask = self.app.settings_store.loaded().multiline_paste_ask;
+        match stage_paste(
+            &mut self.window.tabs[active],
+            target,
+            text,
+            prepared.clipboard_text,
+            ask,
+            context,
+        ) {
+            StagedPaste::Send(text) => self.send_paste(target, &text, context),
+            StagedPaste::Held => {
+                self.window.paste_card_hover = None;
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    /// **The one writer every paste ends in** — today's tail of [`Self::deliver_paste`], and the
+    /// road the paste card's answer takes too (0.4.4 ticket 02).
+    ///
+    /// **The address is asked again here**, because the card's answer lands on a later turn:
+    /// a tab no longer on top, a seat gone or a shell restarted since the paste was held all send
+    /// nothing (review X-1's rule for every delayed paste). On the synchronous road it is the
+    /// same question asked twice in one turn, which costs nothing.
+    fn send_paste(
+        &mut self,
+        target: PasteTarget,
+        text: &str,
+        context: &'static str,
+    ) -> Result<bool> {
+        let Some(active) = self.live_paste_target(target) else {
+            return Ok(false);
+        };
+        let seat = target.seat;
         let Some(LeafSession {
             pty,
             session,
@@ -404,7 +458,7 @@ impl Runtime<'_> {
         // the strength of it. Everything below this line is unchanged — the
         // bookkeeping a paste owes is owed for the gesture rather than for the
         // ring's mood — and only what this function *answers* now depends on it.
-        let landed = paste_text(session, projection, &text, |bytes| {
+        let landed = paste_text(session, projection, text, |bytes| {
             offer_pty_input(pty.as_ref(), bytes, context)
         })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
@@ -430,5 +484,88 @@ impl Runtime<'_> {
             source: FrameSource::Keyboard,
         })?;
         Ok(landed.queued())
+    }
+
+    /// **The pane the paste card is asking about**, or `None` while no paste waits — which is
+    /// the whole of "is the card up" (0.4.4 ticket 02).
+    ///
+    /// Read off the leaves of the tab on top rather than off a flag of its own, so the card and
+    /// the fact it projects cannot disagree: when the shell goes, the question goes with it.
+    pub(crate) fn paste_card_seat(&self) -> Option<SeatId> {
+        let tab = self.window.tabs.get(self.window.active_tab)?;
+        pending_paste_in(tab).map(|(seat, _)| seat)
+    }
+
+    /// **Spend the card's answer** — `Enter`, `Tab`, `Esc`, or a press on it.
+    ///
+    /// The paste is taken off its leaf first, whatever the answer, so an answer can never be
+    /// spent twice and the card is gone before anything is written. `Cancel` sends nothing and
+    /// touches nothing, the clipboard included. The other two go through [`Self::send_paste`],
+    /// which re-checks the address before a byte leaves.
+    pub(in crate::runtime) fn answer_paste_card(&mut self, answer: PasteAnswer) -> Result<()> {
+        let active = self.window.active_tab;
+        let Some(pending) = take_pending_paste(&mut self.window.tabs[active]) else {
+            return Ok(());
+        };
+        self.window.paste_card_hover = None;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        if let Some(text) = paste_answer_text(&pending, answer) {
+            self.send_paste(pending.target, &text, pending.context)?;
+        }
+        Ok(())
+    }
+
+    /// A press on the card, answered by what it landed on. The face and the scrim answer nothing.
+    pub(in crate::runtime) fn press_paste_card(
+        &mut self,
+        target: restore::PasteCardTarget,
+    ) -> Result<()> {
+        let answer = match target {
+            restore::PasteCardTarget::Panel => return Ok(()),
+            restore::PasteCardTarget::Close => PasteAnswer::Cancel,
+            restore::PasteCardTarget::Join => PasteAnswer::Join,
+            restore::PasteCardTarget::Run => PasteAnswer::RunLineByLine,
+        };
+        self.answer_paste_card(answer)
+    }
+
+    /// The paste card, measured against a real font, or nothing while no paste waits.
+    ///
+    /// `<shell>` is the profile's own title — the name the tab already reads — through
+    /// [`profile_banner_name`], the one door that names a pane's profile to the reader.
+    pub(in crate::runtime) fn paste_card_layout(&mut self) -> Option<restore::PasteCardLayout> {
+        let tab = self.window.tabs.get(self.window.active_tab)?;
+        let (seat, pending) = pending_paste_in(tab)?;
+        let shell = profile_banner_name(&tab.sessions.get(&seat)?.profile);
+        let title = i18n::paste_card_title(pending.lines, &shell);
+        let run_text = i18n::Text::PasteCardRun.text();
+        let join_text = i18n::Text::PasteCardJoin.text();
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = (width as f32, height as f32);
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let content = restore::PasteCardContent {
+            title_width: renderer.measure_chrome_text(
+                gpu,
+                &title,
+                restore::TITLE_FONT_LOGICAL_PX * scale,
+            ),
+            title,
+            run_text,
+            join_text,
+            run_text_width: renderer.measure_chrome_text(
+                gpu,
+                run_text,
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+            join_text_width: renderer.measure_chrome_text(
+                gpu,
+                join_text,
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+        };
+        Some(restore::paste_card_layout(&content, width, height, scale))
     }
 }
