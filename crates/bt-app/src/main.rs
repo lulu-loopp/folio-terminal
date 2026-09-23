@@ -1003,8 +1003,50 @@ struct PendingPaste {
     text: String,
     /// [`input::pasted_line_count`] of it, which the card says.
     lines: usize,
+    /// **The shell's continuation mark, when the block is one command wrapped with it** — every
+    /// line but the last ends with it ([`input::continued_by`], 0.4.4 ticket 45). Then the card's
+    /// default is `Join`, and the join takes the marks off ([`paste_answer_text`]).
+    continued: Option<char>,
+    /// **Where the keyboard moved the card's focus**, or `None` while it stands where the card
+    /// opened it — on the default (owner's ruling 2026-09-23: the card is a standard two-button
+    /// dialog). Held here rather than on the window so a new paste opens on its own default with
+    /// no code written to reset it. `Some` is also `:focus-visible`: the ring is drawn once a
+    /// key has moved the focus.
+    moved_focus: Option<PasteAnswer>,
     /// The write's name in the error log, from the door that prepared it.
     context: &'static str,
+}
+
+impl PendingPaste {
+    /// **The answer `Enter` gives** (0.4.4 ticket 45): `Join` for a block that is one command
+    /// wrapped across lines — running it line by line would run each fragment on its own — and
+    /// `Run line by line` for everything else, as ticket 02 ruled.
+    fn default_answer(&self) -> PasteAnswer {
+        if self.continued.is_some() {
+            PasteAnswer::Join
+        } else {
+            PasteAnswer::RunLineByLine
+        }
+    }
+
+    /// **The word `Enter` activates** — where the keyboard moved the focus, else the default the
+    /// card opened on (owner's ruling 2026-09-23).
+    fn focus(&self) -> PasteAnswer {
+        self.moved_focus.unwrap_or_else(|| self.default_answer())
+    }
+}
+
+/// **The mark a line of this shell ends with when its command goes on to the next line** (0.4.4
+/// ticket 45): cmd's `^`, PowerShell's backtick, a POSIX shell's and fish's backslash. Nushell
+/// has none (a command spans lines inside brackets, not after a mark), and an agent's prompt is
+/// not a shell.
+fn line_continuation_mark(grammar: shell_literal::ShellGrammar) -> Option<char> {
+    match grammar {
+        shell_literal::ShellGrammar::Cmd => Some('^'),
+        shell_literal::ShellGrammar::PowerShell => Some('`'),
+        shell_literal::ShellGrammar::Posix | shell_literal::ShellGrammar::Fish => Some('\\'),
+        shell_literal::ShellGrammar::Nushell | shell_literal::ShellGrammar::Agent => None,
+    }
 }
 
 /// What `Runtime::deliver_paste` does with a paste, once the question has been put.
@@ -1044,6 +1086,7 @@ fn stage_paste(
     let Some(leaf) = tab.sessions.get(&target.seat) else {
         return StagedPaste::Send(text);
     };
+    let mark = line_continuation_mark(leaf.paste_recipient.encoder.grammar);
     match paste_road(&text, PasteFacts::of(leaf, clipboard_text, ask, host)) {
         PasteRoad::AsTyped => StagedPaste::Send(text),
         PasteRoad::InputLine => StagedPaste::InputLine(powershell_input_line(&text)),
@@ -1052,10 +1095,13 @@ fn stage_paste(
                 leaf.pending_paste = None;
             }
             if let Some(leaf) = tab.sessions.get_mut(&target.seat) {
+                let continued = mark.filter(|mark| input::continued_by(&text, *mark));
                 leaf.pending_paste = Some(PendingPaste {
                     target,
                     text,
                     lines,
+                    continued,
+                    moved_focus: None,
                     context,
                 });
             }
@@ -1082,9 +1128,9 @@ fn take_pending_paste(tab: &mut TabState) -> Option<PendingPaste> {
 /// **The three answers the paste card takes** (owner's rulings 2026-09-22 and 2026-09-23).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PasteAnswer {
-    /// `Enter`, and the default: today's bytes, one command per line.
+    /// Today's bytes, one command per line.
     RunLineByLine,
-    /// `Tab`, or a press on the word: the lines joined by spaces, and no Enter.
+    /// The lines joined by spaces, and no Enter.
     Join,
     /// `Esc` or `×`: nothing is sent and the clipboard is not touched.
     Cancel,
@@ -1094,23 +1140,58 @@ enum PasteAnswer {
 fn paste_answer_text(pending: &PendingPaste, answer: PasteAnswer) -> Option<String> {
     match answer {
         PasteAnswer::RunLineByLine => Some(pending.text.clone()),
-        PasteAnswer::Join => Some(input::join_lines(&pending.text)),
+        PasteAnswer::Join => Some(match pending.continued {
+            Some(mark) => input::join_continued_lines(&pending.text, mark),
+            None => input::join_lines(&pending.text),
+        }),
         PasteAnswer::Cancel => None,
     }
 }
 
-/// **The only keys the card answers** (owner's ruling 2026-09-23: "the card is modal and answers
-/// only Enter, the Join key and Esc"). Everything else — a letter, a chord, `Ctrl+V` again, a
-/// modified `Enter` — is `None`, reaches nothing, and leaves the card up.
-fn paste_card_key(key: &Key, modifiers: ModifiersState) -> Option<PasteAnswer> {
-    if !modifiers.is_empty() {
-        return None;
-    }
+/// **What a key does on the paste card** — answer it, or move its focus.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PasteCardKey {
+    /// Spend this answer.
+    Answer(PasteAnswer),
+    /// Put the focus on this word.
+    Focus(PasteAnswer),
+}
+
+/// **The only keys the card answers** — a standard two-button dialog (owner's ruling
+/// 2026-09-23, superseding the 2026-09-22 "`Tab` = Join"): `Tab` and `Shift+Tab` move the focus
+/// between the two words (with two words, both directions wrap to the other one), `Enter`
+/// activates the word that has the focus, and `Esc` cancels. Everything else — a letter, a chord,
+/// `Ctrl+V` again, a modified `Enter` — is `None`, reaches nothing, and leaves the card up.
+fn paste_card_key(
+    key: &Key,
+    modifiers: ModifiersState,
+    focus: PasteAnswer,
+) -> Option<PasteCardKey> {
+    let other = match focus {
+        PasteAnswer::RunLineByLine => PasteAnswer::Join,
+        PasteAnswer::Join | PasteAnswer::Cancel => PasteAnswer::RunLineByLine,
+    };
     match key {
-        Key::Named(NamedKey::Enter) => Some(PasteAnswer::RunLineByLine),
-        Key::Named(NamedKey::Tab) => Some(PasteAnswer::Join),
-        Key::Named(NamedKey::Escape) => Some(PasteAnswer::Cancel),
+        Key::Named(NamedKey::Tab) if modifiers.is_empty() || modifiers == ModifiersState::SHIFT => {
+            Some(PasteCardKey::Focus(other))
+        }
+        _ if !modifiers.is_empty() => None,
+        Key::Named(NamedKey::Enter) => Some(PasteCardKey::Answer(focus)),
+        Key::Named(NamedKey::Escape) => Some(PasteCardKey::Answer(PasteAnswer::Cancel)),
         _ => None,
+    }
+}
+
+/// **One key on the card, spent on the pending paste** — the focus moves on the paste itself, and
+/// an answer comes back for the caller to spend. The whole of the card's keyboard, so a test runs
+/// the very step the window runs.
+fn paste_card_step(pending: &mut PendingPaste, key: PasteCardKey) -> Option<PasteAnswer> {
+    match key {
+        PasteCardKey::Answer(answer) => Some(answer),
+        PasteCardKey::Focus(to) => {
+            pending.moved_focus = Some(to);
+            None
+        }
     }
 }
 
@@ -24216,6 +24297,59 @@ enum ImageGrasp {
     Closed,
 }
 
+/// **One rung of the ladder a press on a preview's body climbs** — the pieces
+/// a docked preview pane and a preview float share, in the one order both ask
+/// them (0.4.4 ticket 42).
+///
+/// The furniture first and the content after it: the body's own bar rides over
+/// the whole document, a wide block's bar over that block, and a picture, the
+/// edit surface and a rendered page are three alternatives underneath — a body
+/// shows one of them, never two. The docked pane asked this list in
+/// `chrome_mouse_input` and a float restated it in `press_float`, because a press
+/// inside a window is claimed above the chrome router; the restatement drifted
+/// three times (the video, the rendered page's selection, and then the picture,
+/// which left a zoomed picture in a float unpannable and deaf to a double click —
+/// owner report 2026-09-23, 「悬浮窗中的图片无法拖动」). So the list is a value
+/// both callers walk ([`Self::LADDER`], `Runtime::press_preview_body_ladder`),
+/// and a rung added here is added to both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewBodyRung {
+    /// The body's own scroll bar (`Runtime::press_preview_body_thumb`).
+    BodyThumb,
+    /// A wide block's bar (`Runtime::press_preview_block_thumb`).
+    BlockThumb,
+    /// A picture that takes zoom: a double click toggles it, a press arms the
+    /// pan (`Runtime::press_preview_image`).
+    Picture,
+    /// The edit surface: the caret (`Runtime::press_preview_body`).
+    EditSurface,
+    /// A rendered page: a selection, or a link (`Runtime::press_preview_text`).
+    RenderedText,
+}
+
+impl PreviewBodyRung {
+    /// The order, top rung first.
+    const LADDER: [Self; 5] = [
+        Self::BodyThumb,
+        Self::BlockThumb,
+        Self::Picture,
+        Self::EditSurface,
+        Self::RenderedText,
+    ];
+
+    /// Its name in the mouse trace — the station names the docked ladder wrote
+    /// before it was one list, kept so an old trace and a new one read alike.
+    fn trace_name(self) -> &'static str {
+        match self {
+            Self::BodyThumb => "press-preview-body-thumb",
+            Self::BlockThumb => "press-preview-block-thumb",
+            Self::Picture => "press-preview-image",
+            Self::EditSurface => "press-preview-body",
+            Self::RenderedText => "press-preview-text",
+        }
+    }
+}
+
 /// A picture being carried: which surface, and where the hand was last seen.
 ///
 /// The delta is taken from the previous *move* rather than from the press, so a
@@ -33085,6 +33219,11 @@ struct FilePeek {
     /// the notice measured by the frame that drew them, and a press tested
     /// against a second derivation would land where the address is not.
     foot: Option<[f32; 4]>,
+    /// **Whether the frame last drawn lit that address under the pointer** —
+    /// the painter's receipt ([`file_peek::over_foot`]), written beside
+    /// [`Self::foot`] and read by a pointer move to know whether the hand
+    /// crossed the address's edge and a frame is owed.
+    foot_lit: bool,
     /// **How far this card's column of pages can be wound**, in physical pixels
     /// — `None` for every card whose body is not one (user ruling 2026-08-26).
     ///
@@ -50836,7 +50975,10 @@ mod mouse_trace_station_tests {
         // verb on the platform that hands that press to the application — the
         // window's own, which is a drag on one click and the reader's chosen
         // action on two (`at=press-title-bar`).
-        assert_every_return_is_traced("chrome_mouse_input", "return Ok(true);", 29);
+        // 29 → 25 on 2026-09-23 (0.4.4 ticket 42): the preview body's five rungs
+        // became one ladder a float walks too, and one exit, whose trace names the
+        // rung that took the press (`PreviewBodyRung::trace_name`).
+        assert_every_return_is_traced("chrome_mouse_input", "return Ok(true);", 25);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
@@ -51827,9 +51969,16 @@ mod files_locate_door_tests {
         // One selection path, reached from both hosts — the float's press and the
         // docked router's — so the window and the pane cannot come to select
         // differently.
+        //
+        // Both reach it through the one body ladder since 0.4.4 ticket 42.
+        assert!(
+            method_body("Runtime", "press_preview_body_ladder")
+                .contains("self.press_preview_text(position)"),
+            "the body ladder has lost the rendered page's rung"
+        );
         for name in ["press_float", "chrome_mouse_input"] {
             assert!(
-                method_body("Runtime", name).contains("self.press_preview_text(position)"),
+                method_body("Runtime", name).contains("self.press_preview_body_ladder(position)"),
                 "{name} does not reach the rendered-page selection path, so a document \
                  selects on one host and not the other"
             );
@@ -51882,8 +52031,10 @@ mod files_locate_door_tests {
         let player = press
             .find("self.press_video_at(position)")
             .expect("the float's press asks the player");
+        // The document is reached through the ladder the docked pane shares
+        // (0.4.4 ticket 42), whose last rung is the rendered page.
         let document = press
-            .find("self.press_preview_text(position)")
+            .find("self.press_preview_body_ladder(position)")
             .expect("the float's press reaches the document");
         assert!(
             player < document,
@@ -72068,8 +72219,12 @@ mod live_markdown_edit_tests {
     /// with an entrance of its own would be two answers to "where is the caret".
     #[test]
     fn a_floated_page_takes_the_caret_through_the_docked_press() {
+        // Through the one ladder the docked pane walks too (0.4.4 ticket 42).
         assert!(
-            method_body("Runtime", "press_float").contains("self.press_preview_text(position)"),
+            method_body("Runtime", "press_float")
+                .contains("self.press_preview_body_ladder(position)")
+                && method_body("Runtime", "press_preview_body_ladder")
+                    .contains("self.press_preview_text(position)"),
             "the float's body branch no longer reaches the rendered page's press",
         );
         assert_eq!(

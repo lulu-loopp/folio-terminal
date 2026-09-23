@@ -2530,9 +2530,9 @@ pub enum Text {
     /// `N lines → <shell>` — the card's only line. `{lines}` and `{shell}` are filled by
     /// [`paste_card_title`].
     PasteCardTitle,
-    /// The default answer, and `Enter`'s: today's bytes.
+    /// Today's bytes, one command per line.
     PasteCardRun,
-    /// The other answer, and `Tab`'s: the lines joined, with no Enter.
+    /// The lines joined, with no Enter.
     PasteCardJoin,
 
     // ── a tab's own context menu (gesture audit 2026-08-26, 丙２) ──

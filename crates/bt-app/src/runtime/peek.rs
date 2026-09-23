@@ -474,6 +474,22 @@ impl Runtime<'_> {
         taken
     }
 
+    /// **The hand crossed the foot's address**, in either direction: a frame
+    /// is owed so the strip lights or goes dark under it (owner report
+    /// 2026-09-23). Read against the painter's own receipt, so a move that
+    /// stays on one side of the edge owes nothing — the card is otherwise drawn
+    /// identically wherever the hand rests in it.
+    ///
+    /// Asked by both pointer callers right after [`Self::observe_file_peek`],
+    /// on whatever card that left standing.
+    pub(in crate::runtime) fn relight_file_peek_foot(&self) -> bool {
+        let lit = self.file_peek_foot_grasp();
+        self.window
+            .file_peek
+            .as_ref()
+            .is_some_and(|peek| peek.foot_lit != lit)
+    }
+
     /// **The card this row would put up**, armed and not yet matured.
     ///
     /// One construction site for the two ways a glance begins: the pointer
@@ -500,6 +516,7 @@ impl Runtime<'_> {
             body: None,
             head: None,
             foot: None,
+            foot_lit: false,
             column: None,
             closing_at: None,
             thumb_grab: None,
@@ -1805,8 +1822,13 @@ impl Runtime<'_> {
             )
         };
         let palette = bt_render::chrome_palette();
-        let mut layer =
-            file_peek::build(&layout, &content, &foot, picture, &pages, &palette, scale);
+        let pointer = self
+            .window
+            .pointer_position
+            .map(|at| [at.x as f32, at.y as f32]);
+        let mut layer = file_peek::build(
+            &layout, &content, &foot, pointer, picture, &pages, &palette, scale,
+        );
         // **Where the card came to rest, filed before anything is drawn into
         // it** — every pointer question about the card reads these two, so a
         // frame that painted a card without recording it would be a card on
@@ -1818,6 +1840,10 @@ impl Runtime<'_> {
             peek.body = Some(layout.body);
             peek.head = Some(layout.head);
             peek.foot = file_peek::foot_address_box(&layout, &foot);
+            // And whether this frame lit it — the receipt a pointer move reads
+            // to know that the hand crossed the address's edge and a frame is
+            // owed ([`Self::relight_file_peek_foot`]).
+            peek.foot_lit = file_peek::over_foot(peek.foot, pointer);
             // And the column's reach, or the fact that this card has none — written
             // unconditionally, because a card that changed body without clearing it would
             // answer a wheel with the last document's number.
@@ -2081,8 +2107,7 @@ impl Runtime<'_> {
             .file_peek
             .as_ref()
             .filter(|peek| peek.clock.is_shown())
-            .and_then(|peek| peek.foot)
-            .is_some_and(|foot| file_peek::contains(foot, [at.x as f32, at.y as f32]))
+            .is_some_and(|peek| file_peek::over_foot(peek.foot, Some([at.x as f32, at.y as f32])))
     }
 
     /// **The card is the door to the pane** — the answer the whole face gave

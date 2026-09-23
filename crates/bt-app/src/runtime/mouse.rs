@@ -5,8 +5,8 @@ use crate::{
     ApplicationChange, DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragRelease,
     DragSource, DropBatch, DropLanding, Fading, FloatDrag, FloatDragKind, FloatHeadPress,
     HoverFloat, LeafId, MathHoverExit, MouseRoute, OwnPress, PanePress, PointerTarget, Popup,
-    PressAfterBlur, PressedCellTarget, PreviewSurface, RenameExit, RenameSubject, RowActivation,
-    RowHost, RowPayload, RowPayloadKind, RowPress, Runtime, SpringGate, TabClick,
+    PressAfterBlur, PressedCellTarget, PreviewBodyRung, PreviewSurface, RenameExit, RenameSubject,
+    RowActivation, RowHost, RowPayload, RowPayloadKind, RowPress, Runtime, SpringGate, TabClick,
     TerminalReference, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst, WheelRoute,
     a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position, crumb_segments,
     drain_whole_units, files, files_row_activation, first_run, float, float_grasp, float_sizing_of,
@@ -348,7 +348,9 @@ impl Runtime<'_> {
             .flatten();
         self.window.float.observe(trigger, now);
         let row = self.glancing_row_at(position);
-        if self.observe_file_peek(row, now) && self.refresh_overlay() {
+        // And the foot's hover on whatever card is left (0.4.4 ticket 41).
+        let owed = self.observe_file_peek(row, now) | self.relight_file_peek_foot();
+        if owed && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         let tab = self
@@ -1058,12 +1060,12 @@ impl Runtime<'_> {
                 // in a float selects exactly as it does in a pane and shares one
                 // `preview_select` model. A source buffer's `press_preview_body`
                 // answers first and a rendered one falls through to it.
-                if !(self.press_preview_body_thumb(position)?
-                    || self.press_preview_block_thumb(position)?
-                    || self.press_preview_body(position)?)
-                {
-                    self.press_preview_text(position)?;
-                }
+                //
+                // **Through the docked pane's own ladder, not a restatement of
+                // it** (0.4.4 ticket 42): the restatement had left the picture
+                // out, so a zoomed picture in a window could be neither panned
+                // nor double-clicked. [`PreviewBodyRung`] is the one list.
+                self.press_preview_body_ladder(position)?;
             }
             // **The row under the head, on the window that grew one** (§7.7 ⑩
             // 欠账). Through the docked row's own ladder and the docked row's own
@@ -1082,6 +1084,33 @@ impl Runtime<'_> {
         // shape the pointer is wearing was decided by what just changed.
         self.apply_pointer_cursor();
         Ok(true)
+    }
+
+    /// **A press on a preview's body, up [`PreviewBodyRung::LADDER`]** — the
+    /// rung that took it, or `None` when no rung did (0.4.4 ticket 42).
+    ///
+    /// The one statement of the order a docked pane's body and a float's body
+    /// share; `chrome_mouse_input` and [`Self::press_float`] both walk it, so
+    /// the two cannot differ again. Every rung finds its surface through
+    /// `preview_surface_at` (or the bar walks beside it), which asks floats
+    /// before docked seats, so the same list serves both hosts.
+    fn press_preview_body_ladder(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<Option<PreviewBodyRung>> {
+        for rung in PreviewBodyRung::LADDER {
+            let taken = match rung {
+                PreviewBodyRung::BodyThumb => self.press_preview_body_thumb(position)?,
+                PreviewBodyRung::BlockThumb => self.press_preview_block_thumb(position)?,
+                PreviewBodyRung::Picture => self.press_preview_image(position)?,
+                PreviewBodyRung::EditSurface => self.press_preview_body(position)?,
+                PreviewBodyRung::RenderedText => self.press_preview_text(position)?,
+            };
+            if taken {
+                return Ok(Some(rung));
+            }
+        }
+        Ok(None)
     }
 
     /// A press on one row of the float's tree.
@@ -2057,7 +2086,11 @@ impl Runtime<'_> {
         // repaint would stay on the glass until some unrelated event redrew it —
         // which under a hand that has come to rest is never (real-machine
         // capture, 2026-08-13: the glance survived the move onto a folder row).
-        if self.observe_file_peek(row, Instant::now()) && self.refresh_overlay() {
+        // And the foot's hover on whatever card is left, on the same frame
+        // (0.4.4 ticket 41): the address lights or goes dark as the hand
+        // crosses its edge.
+        let owed = self.observe_file_peek(row, Instant::now()) | self.relight_file_peek_foot();
+        if owed && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         // Below every gesture that owns the pointer and beside the hover it
@@ -3328,14 +3361,6 @@ impl Runtime<'_> {
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-title-bar state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
-            // The body's own bar answers first of all: it is the outermost piece
-            // of furniture the pane has, drawn over the document, over every
-            // block in it and over every link in those — and a press on it was
-            // never a press on what it is standing over.
-            if self.press_preview_body_thumb(position)? {
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-body-thumb state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
             // **And a terminal pane's, on exactly those terms** (P2-9 slice 1).
             // The lane is the outermost band a terminal pane has; a press in it
             // was never a press on the cells it stands beside, and answering it
@@ -3361,40 +3386,16 @@ impl Runtime<'_> {
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-terminal-column-thumb state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
-            // The bar under a wide block is a scrollbar and answers first: it
-            // stands over the block it scrolls, so a press on it was never a
-            // press in the content beneath.
-            if self.press_preview_block_thumb(position)? {
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-block-thumb state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            // A picture answers before the edit surface does, and answers
-            // instead of it: the two are alternatives on one body, and a body
-            // showing a picture has nothing to put a caret in.
-            if self.press_preview_image(position)? {
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-image state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            // A press inside the edit surface puts the caret where the pointer
-            // is and takes the keyboard, which is what a `<textarea>` does and
-            // the only way into `InputOwner::PreviewEdit` that does not need a
-            // chord.
-            if self.press_preview_body(position)? {
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-body state={state:?} button={button:?} target={traced_target:?}"));
-                return Ok(true);
-            }
-            // **And a press inside a rendered page draws a selection across it**
-            // (user report 2026-08-28). Below the edit surface because the two
-            // are alternatives on one body — a buffer shows its source or its
-            // render, never both — and below the picture and the bars for their
-            // own reason: everything above this is furniture standing over the
-            // document, and a press on furniture was never a press on the words.
-            //
-            // A markdown **link** is answered from here now rather than from a
-            // press of its own three arms up, because a link and the prose it
-            // stands in share one button: see [`Self::open_preview_link`].
-            if self.press_preview_text(position)? {
-                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-text state={state:?} button={button:?} target={traced_target:?}"));
+            // **Then the preview body's ladder** ([`PreviewBodyRung`], 0.4.4
+            // ticket 42): the body's own bar, a wide block's bar, a picture, the
+            // edit surface and a rendered page, in that order and through the one
+            // function a float's body press walks too. Below the terminal's two
+            // bars rather than between them and the body's: a seat is a terminal
+            // or a preview and never both, so no point is claimed by one of each
+            // and the order between the two kinds decides nothing.
+            if let Some(rung) = self.press_preview_body_ladder(position)? {
+                let station = rung.trace_name();
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at={station} state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             return Ok(press_reaches_no_grid(

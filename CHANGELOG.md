@@ -22,6 +22,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- When a pasted block is one command wrapped across lines (each line but the
+  last ends with `^` in cmd, a backtick in PowerShell or `\` in a Unix
+  shell), the paste card's Enter joins it into one line and drops those marks.
+- The multi-line paste card works like any two-button dialog: Tab and
+  Shift+Tab move between Join and Run line by line, Enter presses the
+  highlighted one, Esc cancels.
 - In a Markdown preview you are editing, every block a selection touches shows
   its Markdown, as in Obsidian; a table the selection only passes through stays
   rendered. The blocks change when you let go of the mouse, not while you drag.
@@ -69,6 +75,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- The multi-line paste card's title no longer runs under its × button; a very
+  long profile name is shortened with an ellipsis.
+- A zoomed picture in a floating window can be dragged to pan it, and a
+  double-click zooms it in or out, as in a pane.
+- The folder at the bottom of the glance card now lights up under the
+  pointer, like every other line you can click.
 - The open-in-browser arrow on a web pane showing an `http` or `https` page
   now opens that page in your browser; it used to do nothing.
 - While a divider is dragged, the pane under the pointer keeps the rounded

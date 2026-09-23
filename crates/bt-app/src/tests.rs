@@ -16613,6 +16613,93 @@ fn a_double_click_swings_between_fit_and_a_hundred_percent_and_lands_centred() {
     );
 }
 
+/// RED (42) — **a press on a float's body climbs the docked pane's ladder, picture
+/// included.**
+///
+/// A zoomed picture in a floating window could be neither panned nor
+/// double-clicked (owner, 2026-09-23: 「悬浮窗中的图片无法拖动」), while the same
+/// picture docked did both. `press_float` claims every press inside a window
+/// above the chrome router and restated the docked pane's body ladder for
+/// itself, and the restatement left out `press_preview_image` — the one rung
+/// that arms the pan and counts the double click. The move and release halves
+/// were never missing. The ladder is now one value, [`PreviewBodyRung::LADDER`],
+/// walked by one function that both hosts call, so the picture's rung is the
+/// float's because it is the pane's.
+///
+/// A `Runtime` needs a window and a GPU, so the routing is read off the
+/// bodies (through `bt_source`) and the order off the value itself.
+///
+/// MUTATION: remove the picture's rung from `PreviewBodyRung::LADDER` (the
+/// call a float's body press makes into `press_preview_image`) — the order
+/// assertion goes red; restate the list in `press_float` again and the reader
+/// assertions go red.
+#[test]
+fn a_press_on_a_floats_picture_climbs_the_docked_panes_ladder() {
+    assert_eq!(
+        PreviewBodyRung::LADDER.as_slice(),
+        [
+            PreviewBodyRung::BodyThumb,
+            PreviewBodyRung::BlockThumb,
+            PreviewBodyRung::Picture,
+            PreviewBodyRung::EditSurface,
+            PreviewBodyRung::RenderedText,
+        ]
+        .as_slice(),
+        "the furniture, then the picture, then the edit surface and the page"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "press_preview_body_ladder")),
+        ["chrome_mouse_input", "press_float"],
+        "the docked pane and the float walk one ladder"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "press_preview_image")),
+        ["press_preview_body_ladder"],
+        "the picture's rung is asked from one place"
+    );
+    // Neither host asks a rung for itself: that would be a second list. (The
+    // glance card asks the block bar for its own body, which no preview surface
+    // walk can see — `press_file_peek` is not one of the two hosts.)
+    for rung in [
+        "press_preview_body_thumb",
+        "press_preview_block_thumb",
+        "press_preview_body",
+        "press_preview_text",
+    ] {
+        let readers = reader_names(&calls_of("Runtime", rung));
+        assert!(
+            readers
+                .iter()
+                .any(|name| name == "press_preview_body_ladder")
+                && !readers
+                    .iter()
+                    .any(|name| name == "press_float" || name == "chrome_mouse_input"),
+            "`{rung}` is asked outside the ladder by a host: {readers:?}"
+        );
+    }
+}
+
+/// PIN (42) — **a double click on a float's picture is a double click, and it
+/// toggles the zoom.**
+///
+/// The half of `press_preview_image` a float's press now reaches: the float is a
+/// surface that takes zoom, two presses in one place on it are a pair, and the
+/// pair swings the picture between fit and a hundred percent. Green before the
+/// fix too — the gap was the routing above, not this arithmetic.
+#[test]
+fn a_double_click_on_a_floats_picture_toggles_its_zoom() {
+    let surface = PreviewSurface::Float(9);
+    assert!(surface_takes_image_zoom(surface));
+    let now = Instant::now();
+    let mut clicks = ImageClicks::default();
+    assert!(!clicks.register(surface, [400.0, 300.0], now));
+    assert!(clicks.register(surface, [402.0, 301.0], now + Duration::from_millis(90)));
+    assert_eq!(
+        image_zoom_toggled(ImageZoom::FIT).mode,
+        ImageZoomMode::Scale(1.0)
+    );
+}
+
 #[test]
 fn two_presses_in_one_place_are_a_double_click_and_a_third_starts_over() {
     let surface = seat_of(TAB_ONE, SeatId(2));
@@ -50810,11 +50897,16 @@ fn enter_runs_it_line_by_line_with_todays_bytes() {
         paste_text_into(&mut tab, target, THREE_LINES, true),
         StagedPaste::Held
     );
+    let focus = pending_paste_in(&tab).expect("the card is up").1.focus();
     let answer = paste_card_key(
         &Key::Named(NamedKey::Enter),
         winit::keyboard::ModifiersState::empty(),
+        focus,
     );
-    assert_eq!(answer, Some(PasteAnswer::RunLineByLine));
+    assert_eq!(
+        answer,
+        Some(PasteCardKey::Answer(PasteAnswer::RunLineByLine))
+    );
     let pending = take_pending_paste(&mut tab).expect("the answer takes it");
     let text = paste_answer_text(&pending, PasteAnswer::RunLineByLine).expect("it sends");
     assert_eq!(paste_bytes_sent(&mut tab, target.seat, &text), today);
@@ -50823,6 +50915,9 @@ fn enter_runs_it_line_by_line_with_todays_bytes() {
 }
 
 /// RED (0.4.4 ticket 02) — **`Join into one line` sends one line and no Enter.**
+///
+/// The word is reached as the owner's ruling of 2026-09-23 has it: `Tab` moves the focus to it
+/// and `Enter` activates it.
 ///
 /// MUTATION: make `PasteAnswer::Join` send `pending.text` in `paste_answer_text` — the bytes carry
 /// two `\r` and two commands run.
@@ -50833,9 +50928,11 @@ fn join_sends_one_line_and_no_enter() {
         paste_text_into(&mut tab, target, THREE_LINES, true),
         StagedPaste::Held
     );
-    let answer = paste_card_key(
-        &Key::Named(NamedKey::Tab),
-        winit::keyboard::ModifiersState::empty(),
+    let none = winit::keyboard::ModifiersState::empty();
+    let answer = paste_card_keys(
+        &mut tab,
+        &[Key::Named(NamedKey::Tab), Key::Named(NamedKey::Enter)],
+        none,
     );
     assert_eq!(answer, Some(PasteAnswer::Join));
     let pending = take_pending_paste(&mut tab).expect("the answer takes it");
@@ -50843,6 +50940,203 @@ fn join_sends_one_line_and_no_enter() {
     let sent = paste_bytes_sent(&mut tab, target.seat, &text);
     assert_eq!(sent, b"dir echo one ver");
     assert!(!sent.contains(&b'\r'), "no Enter: nothing runs");
+}
+
+/// RED (45) — **a block wrapped with the shell's continuation mark joins on `Enter`, and the join
+/// takes the marks off.**
+///
+/// Owner, 2026-09-23: a block copied as one command wrapped across lines — every line but the last
+/// ending with cmd's `^` — run line by line runs each fragment as its own command. The card
+/// now defaults to `Join` for such a block, and the joined line has no `^` in it: once the line
+/// is one line the mark is no longer part of the command. Through the real road: the clipboard's
+/// text staged into a cmd pane, the key's answer, and the bytes the writer would send.
+///
+/// MUTATION: ignore the marks (`let continued = None;` in `stage_paste`) — the default stays
+/// `Run line by line` and the first assertion goes red.
+#[test]
+fn a_block_wrapped_with_carets_joins_on_enter_and_loses_its_carets() {
+    let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    let wrapped = "dir ^\r\n  /b ^  \r\n  /s\r\n";
+    assert_eq!(
+        paste_text_into(&mut tab, target, wrapped, true),
+        StagedPaste::Held
+    );
+    let (_, pending) = pending_paste_in(&tab).expect("the card is up");
+    assert_eq!(pending.default_answer(), PasteAnswer::Join);
+    assert_eq!(
+        pending.focus(),
+        PasteAnswer::Join,
+        "the focus opens on the default"
+    );
+    let answer = paste_card_keys(
+        &mut tab,
+        &[Key::Named(NamedKey::Enter)],
+        winit::keyboard::ModifiersState::empty(),
+    );
+    assert_eq!(answer, Some(PasteAnswer::Join), "Enter joins it");
+    let pending = take_pending_paste(&mut tab).expect("the answer takes it");
+    let text = paste_answer_text(&pending, PasteAnswer::Join).expect("it sends");
+    assert_eq!(text, "dir /b /s");
+    let sent = paste_bytes_sent(&mut tab, target.seat, &text);
+    assert!(!sent.contains(&b'^'), "the marks came off: {sent:?}");
+    assert!(!sent.contains(&b'\r'), "no Enter: nothing runs");
+}
+
+/// RED (45) — **a block without the marks keeps `Run line by line` as its default**, and the other
+/// shells' marks are their own.
+///
+/// A block of commands is what ticket 02's card was for, and it still runs line by line on
+/// `Enter`. A mark is the target shell's: a backslash-wrapped block is wrapped for a POSIX shell
+/// and not for cmd, and `^^` at a line's end is cmd's literal caret, not a continuation.
+///
+/// MUTATION: treat every block as wrapped (`continued_by` answering `true`) — the first
+/// assertion goes red.
+#[test]
+fn a_block_without_marks_keeps_run_line_by_line_as_its_default() {
+    let default_for = |grammar, text: &str| {
+        let (mut tab, target) = paste_tab(paste_leaf(grammar, b""));
+        assert_eq!(
+            paste_text_into(&mut tab, target, text, true),
+            StagedPaste::Held
+        );
+        let (_, pending) = pending_paste_in(&tab).expect("the card is up");
+        (
+            pending.default_answer(),
+            paste_answer_text(pending, PasteAnswer::Join).expect("a join sends"),
+        )
+    };
+    let cmd = shell_literal::ShellGrammar::Cmd;
+    let posix = shell_literal::ShellGrammar::Posix;
+    assert_eq!(
+        default_for(cmd, THREE_LINES),
+        (PasteAnswer::RunLineByLine, "dir echo one ver".to_owned())
+    );
+    assert_eq!(
+        default_for(cmd, "echo ^^\r\nver").0,
+        PasteAnswer::RunLineByLine,
+        "`^^` is a literal caret"
+    );
+    assert_eq!(
+        default_for(cmd, "ls \\\n  -la").0,
+        PasteAnswer::RunLineByLine,
+        "a backslash is not cmd's mark"
+    );
+    assert_eq!(
+        default_for(cmd, "dir ^\n\nver").0,
+        PasteAnswer::RunLineByLine,
+        "a blank line ends no command with a mark"
+    );
+    assert_eq!(
+        default_for(posix, "ls \\\n  -la \\\n  /tmp"),
+        (PasteAnswer::Join, "ls -la /tmp".to_owned()),
+        "a POSIX shell's mark is the backslash"
+    );
+}
+
+/// **Keys pressed on the card in order**, through the window's own step ([`paste_card_key`] then
+/// [`paste_card_step`] on the pending paste), and the answer the last of them gave, if any.
+fn paste_card_keys(
+    tab: &mut TabState,
+    keys: &[Key],
+    modifiers: winit::keyboard::ModifiersState,
+) -> Option<PasteAnswer> {
+    let mut answer = None;
+    for key in keys {
+        let pending = tab
+            .sessions
+            .values_mut()
+            .find_map(|leaf| leaf.pending_paste.as_mut())
+            .expect("the card is up");
+        answer = paste_card_key(key, modifiers, pending.focus())
+            .and_then(|key| paste_card_step(pending, key));
+    }
+    answer
+}
+
+/// RED (45b) — **the paste card is a standard two-button dialog: `Tab` moves the focus, `Enter`
+/// activates the focused word, `Esc` cancels.**
+///
+/// Owner's ruling 2026-09-23, superseding the 2026-09-22 "`Tab` = Join": `Tab` and `Shift+Tab`
+/// move the focus between the two words, wrapping, and the focus opens on the default the
+/// continuation-mark rule chose. So on a block of commands, `Tab` then `Enter` joins; `Tab` twice
+/// is back on the default and `Enter` runs it line by line; and `Esc` cancels wherever the focus
+/// is.
+///
+/// MUTATION: make `Tab` answer `Join` again in `paste_card_key` (the superseded ruling) — `Tab`
+/// then `Enter` is spent on the `Tab`, and the first assertion goes red.
+#[test]
+fn tab_moves_the_paste_cards_focus_and_enter_activates_it() {
+    let none = winit::keyboard::ModifiersState::empty();
+    let tab_key = Key::Named(NamedKey::Tab);
+    let enter = Key::Named(NamedKey::Enter);
+    let held = || {
+        let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+        assert_eq!(
+            paste_text_into(&mut tab, target, THREE_LINES, true),
+            StagedPaste::Held
+        );
+        tab
+    };
+
+    let mut once = held();
+    assert_eq!(
+        paste_card_keys(&mut once, &[tab_key.clone(), enter.clone()], none),
+        Some(PasteAnswer::Join),
+        "Tab then Enter on a line-by-line default joins"
+    );
+
+    let mut twice = held();
+    assert_eq!(
+        paste_card_keys(&mut twice, &[tab_key.clone(), tab_key.clone()], none),
+        None,
+        "moving the focus answers nothing and the card stays"
+    );
+    assert_eq!(
+        pending_paste_in(&twice).expect("still up").1.focus(),
+        PasteAnswer::RunLineByLine,
+        "Tab twice is back on the default"
+    );
+    assert_eq!(
+        paste_card_keys(&mut twice, std::slice::from_ref(&enter), none),
+        Some(PasteAnswer::RunLineByLine)
+    );
+
+    let mut back = held();
+    assert_eq!(
+        paste_card_keys(
+            &mut back,
+            std::slice::from_ref(&tab_key),
+            winit::keyboard::ModifiersState::SHIFT
+        ),
+        None
+    );
+    assert_eq!(
+        pending_paste_in(&back).expect("still up").1.focus(),
+        PasteAnswer::Join,
+        "Shift+Tab moves the other way, which with two words is the other word"
+    );
+
+    let mut moved = held();
+    assert_eq!(
+        paste_card_keys(
+            &mut moved,
+            &[tab_key.clone(), Key::Named(NamedKey::Escape)],
+            none
+        ),
+        Some(PasteAnswer::Cancel),
+        "Esc cancels wherever the focus is"
+    );
+
+    // A wrapped block opens with the focus on Join, and one Tab reaches Run line by line.
+    let (mut wrapped, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
+    assert_eq!(
+        paste_text_into(&mut wrapped, target, "dir ^\r\n/b", true),
+        StagedPaste::Held
+    );
+    assert_eq!(
+        paste_card_keys(&mut wrapped, &[tab_key, enter], none),
+        Some(PasteAnswer::RunLineByLine)
+    );
 }
 
 /// RED (0.4.4 ticket 02) — **`Esc` sends no bytes and leaves the clipboard alone.**
@@ -50861,8 +51155,9 @@ fn cancel_sends_no_bytes_and_leaves_the_clipboard() {
     let answer = paste_card_key(
         &Key::Named(NamedKey::Escape),
         winit::keyboard::ModifiersState::empty(),
+        PasteAnswer::RunLineByLine,
     );
-    assert_eq!(answer, Some(PasteAnswer::Cancel));
+    assert_eq!(answer, Some(PasteCardKey::Answer(PasteAnswer::Cancel)));
     let pending = take_pending_paste(&mut tab).expect("the answer takes it");
     assert_eq!(paste_answer_text(&pending, PasteAnswer::Cancel), None);
     assert!(pending_paste_in(&tab).is_none(), "the card is gone");
@@ -50981,8 +51276,9 @@ fn an_answer_spent_after_the_tab_moved_sends_nothing() {
     assert!(guard < send.find("paste_body(").expect("and then writes"));
 }
 
-/// RED (0.4.4 ticket 02) — **while the card is up, a key other than Enter, Tab or Esc reaches
-/// nothing and the card stays** (owner's ruling 2026-09-23).
+/// RED (0.4.4 ticket 02) — **while the card is up, a key other than Enter, Tab, Shift+Tab or Esc
+/// reaches nothing and the card stays** (owner's rulings 2026-09-23; `Shift+Tab` joined the keys
+/// with the two-button-dialog ruling of the same day).
 ///
 /// The key's meaning is `paste_card_key`; that it reaches nothing is the rung: it stands above
 /// every road to a shell in `keyboard_input` and returns whatever the key was.
@@ -51001,18 +51297,22 @@ fn a_key_other_than_enter_tab_or_esc_reaches_nothing_and_leaves_the_card_up() {
         Key::Named(NamedKey::ArrowUp),
         Key::Named(NamedKey::F5),
     ] {
-        assert_eq!(paste_card_key(&key, none), None, "{key:?}");
+        assert_eq!(
+            paste_card_key(&key, none, PasteAnswer::RunLineByLine),
+            None,
+            "{key:?}"
+        );
     }
     for (key, modifiers) in [
         (Key::Character("v".into()), ModifiersState::CONTROL),
         (Key::Named(NamedKey::Enter), ModifiersState::SHIFT),
         (Key::Named(NamedKey::Enter), ModifiersState::CONTROL),
         (Key::Named(NamedKey::Tab), ModifiersState::CONTROL),
-        (Key::Named(NamedKey::Tab), ModifiersState::SHIFT),
+        (Key::Named(NamedKey::Tab), ModifiersState::ALT),
         (Key::Named(NamedKey::Escape), ModifiersState::ALT),
     ] {
         assert_eq!(
-            paste_card_key(&key, modifiers),
+            paste_card_key(&key, modifiers, PasteAnswer::RunLineByLine),
             None,
             "{key:?} {modifiers:?}"
         );
@@ -51026,7 +51326,7 @@ fn a_key_other_than_enter_tab_or_esc_reaches_nothing_and_leaves_the_card_up() {
     assert!(pending_paste_in(&tab).is_some());
 
     let ladder = squeezed_body("Runtime", "keyboard_input");
-    let rung = "ifself.paste_card_seat().is_some(){if!event.repeat&&letSome(answer)=paste_card_key(&event.logical_key,self.window.modifiers){self.answer_paste_card(answer)?;}returnOk(());}";
+    let rung = "ifself.paste_card_seat().is_some(){if!event.repeat&&letSome(focus)=self.paste_card_focus()&&letSome(key)=paste_card_key(&event.logical_key,self.window.modifiers,focus){self.press_paste_card_key(key)?;}returnOk(());}";
     let at = ladder
         .find(rung)
         .unwrap_or_else(|| panic!("the card's rung is not whole"));

@@ -1893,6 +1893,12 @@ fn focus_ring(
     )
 }
 
+/// [`focus_ring`] at a button's own offset — the one outline a focused dialog button wears, lent
+/// to the other cards of this craft (the paste card, 0.4.4 ticket 45).
+pub(crate) fn button_focus_ring(rect: [f32; 4], scale: f32, accent: [u8; 3]) -> Vec<OverlayQuad> {
+    focus_ring(rect, scale, FOCUS_RING_BUTTON_OFFSET_LOGICAL_PX, accent)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_button(
     quads: &mut Vec<OverlayQuad>,

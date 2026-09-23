@@ -263,6 +263,21 @@ pub fn foot_address_box(layout: &PeekLayout, words: &crate::seats::FootWords) ->
     Some([layout.foot[0], layout.foot[1], right, layout.foot[3]])
 }
 
+/// **Whether the pointer is on the foot's address** — the hover half of the
+/// press [`foot_address_box`] already answers (owner report 2026-09-23:
+/// 「我鼠标现在是hover在路径上的，他没有变色」).
+///
+/// One rectangle, two readers: the painter lights the strip with this, and the
+/// window asks it of the box the painter filed for the press, so the address
+/// lights exactly where a press on it would find the file and nowhere else. No
+/// address (a composed document, a flash) means nothing to light.
+#[must_use]
+pub fn over_foot(address: Option<[f32; 4]>, at: Option<[f32; 2]>) -> bool {
+    address
+        .zip(at)
+        .is_some_and(|(address, at)| contains(address, at))
+}
+
 /// The foot's own text run: the strip inside its horizontal padding.
 ///
 /// Handed out so the caller can measure the card's words beside the renderer,
@@ -1328,11 +1343,17 @@ pub fn layout(
 
 /// Paint the card — one layer, above the pinned float (P143: "z-index above the
 /// pinned flyout (60) — flyout rows peek too").
+///
+/// `pointer` is where the hand is, if it is in this window: the foot's address
+/// answers it the way every clickable strip in this window answers a hover
+/// ([`over_foot`]).
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     layout: &PeekLayout,
     content: &PeekContent,
     foot: &crate::seats::FootWords,
+    pointer: Option<[f32; 2]>,
     picture: Option<PeekPicture<'_>>,
     pages: &[PeekPage<'_>],
     palette: &ChromePalette,
@@ -1612,6 +1633,45 @@ pub fn build(
         ));
     }
 
+    // **The address lights under the hand** (owner report 2026-09-23), as the
+    // files column's foot and a float's foot do: `--hover` behind the whole
+    // press target and the words one ink up, because the whole strip left of
+    // the notice is the button (`foot_address_box`). Laid under the rule, and
+    // stopped at the face's own bottom corners for the float foot's reason — a
+    // square fill painted over a rounded window's curve. An edge the address
+    // shares with the card's interior (its top, and its right when a notice
+    // keeps the other end) is squared back off by a plain band.
+    let address = foot_address_box(layout, foot);
+    let foot_lit = over_foot(address, pointer);
+    if let Some(lit) = address.filter(|_| foot_lit) {
+        let radius =
+            (px(PEEK_RADIUS_LOGICAL_PX) - px(PEEK_BORDER_LOGICAL_PX).max(1.0).round()).max(0.0);
+        let band = |rect: [f32; 4]| OverlayQuad {
+            rect,
+            color: palette.menu_item_hover,
+            alpha: 1.0,
+        };
+        quads.extend(bt_render::rounded_overlay_fill(
+            lit,
+            radius,
+            palette.menu_item_hover,
+            1.0,
+        ));
+        quads.push(band([
+            lit[0],
+            lit[1],
+            lit[2],
+            (lit[1] + radius).min(lit[3]),
+        ]));
+        if lit[2] < layout.foot[2] {
+            quads.push(band([
+                (lit[2] - radius).max(lit[0]),
+                lit[1],
+                lit[2],
+                lit[3],
+            ]));
+        }
+    }
     // `border-top: 1px solid var(--border-soft)` over the foot.
     quads.push(OverlayQuad {
         rect: [
@@ -1631,7 +1691,11 @@ pub fn build(
         &foot.lead,
         foot.lead_box,
         px(PEEK_FOOT_FONT_LOGICAL_PX),
-        palette.body_hint_text,
+        if foot_lit {
+            palette.menu_item_text
+        } else {
+            palette.body_hint_text
+        },
     ));
     if !foot.notice.is_empty() {
         labels.push(ChromeLabel {
@@ -1845,7 +1909,16 @@ mod tests {
             SCALE,
         );
         let gone_foot = foot(&gone_layout, "");
-        let layer = build(&gone_layout, &card, &gone_foot, None, &[], &palette, SCALE);
+        let layer = build(
+            &gone_layout,
+            &card,
+            &gone_foot,
+            None,
+            None,
+            &[],
+            &palette,
+            SCALE,
+        );
 
         let said = |words: &str| layer.labels.iter().find(|label| label.text == words);
         assert!(
@@ -1887,6 +1960,7 @@ mod tests {
             &typed_layout,
             &typed,
             &typed_foot,
+            None,
             None,
             &[],
             &palette,
@@ -1946,7 +2020,16 @@ mod tests {
             SCALE,
         );
         let card_foot = foot(&card_layout, "");
-        let card_layer = build(&card_layout, &card, &card_foot, None, &[], &palette, SCALE);
+        let card_layer = build(
+            &card_layout,
+            &card,
+            &card_foot,
+            None,
+            None,
+            &[],
+            &palette,
+            SCALE,
+        );
         let card_name = &card_layer.labels[0];
         assert_eq!(card_name.text, NAME, "the card's first label is the name");
 
@@ -2057,6 +2140,7 @@ mod tests {
                 &layout,
                 &card,
                 &dressed,
+                None,
                 None,
                 &[],
                 &bt_render::chrome_palette(),
@@ -2574,6 +2658,7 @@ mod tests {
             &card,
             &foot(&layout, ""),
             None,
+            None,
             &[],
             &bt_render::chrome_palette(),
             SCALE,
@@ -2713,6 +2798,7 @@ mod tests {
             &laid,
             &card,
             &foot(&laid, ""),
+            None,
             Some(PeekPicture {
                 key: "video-frame:clip",
                 rgba: &picture,
@@ -2799,6 +2885,7 @@ mod tests {
             &empty,
             &foot(&pending, ""),
             None,
+            None,
             &[],
             &bt_render::chrome_palette(),
             SCALE,
@@ -2873,6 +2960,7 @@ mod tests {
             &card,
             &foot(&laid, ""),
             None,
+            None,
             &[],
             &bt_render::chrome_palette(),
             SCALE,
@@ -2932,6 +3020,7 @@ mod tests {
             &pending,
             &empty,
             &foot(&pending, ""),
+            None,
             None,
             &[],
             &bt_render::chrome_palette(),
@@ -3017,6 +3106,7 @@ mod tests {
             &laid,
             &card,
             &foot(&laid, ""),
+            None,
             Some(PeekPicture {
                 key: "peek:shot",
                 rgba: &pixels,
@@ -3157,6 +3247,7 @@ mod tests {
                 laid,
                 card,
                 &foot(laid, ""),
+                None,
                 None,
                 pages,
                 &bt_render::chrome_palette(),
@@ -3501,6 +3592,7 @@ mod tests {
             &layout,
             &card,
             &foot(&layout, ""),
+            None,
             Some(PeekPicture {
                 key: "peek:wide.png@280x70",
                 rgba: &rgba,
@@ -4116,5 +4208,101 @@ mod tests {
             &mut ruler,
         );
         assert_eq!(foot_address_box(&card, &bare), None);
+    }
+
+    /// RED (41) — **the foot's address lights under the hand, and only there.**
+    ///
+    /// Ticket 12 made the foot the file's folder and a press on it finds the
+    /// file; on the owner's machine (2026-09-23, next89) pointing at it changed
+    /// nothing, so a control read as a caption. The files column's foot and a
+    /// float's foot both answer a hover with `--hover` behind the strip and the
+    /// words one ink up; this is the card's strip doing the same, over the card's
+    /// own `--menu` ground, through the one box the press is tested against.
+    /// Built through [`build`] with a pointer, in both themes.
+    ///
+    /// MUTATION: ignore the hover flag in the paint (`let foot_lit = false;` in
+    /// `build`) — the address keeps its resting ink under the hand and the first
+    /// assertion goes red.
+    #[test]
+    fn the_foots_address_lights_under_the_pointer_and_nowhere_else() {
+        let card = tall_card([40.0, 300.0, 240.0, 320.0]);
+        let notice = crate::preview::preview_truncated_notice();
+        let dressed = foot(&card, notice);
+        let address = foot_address_box(&card, &dressed).expect("a file's card has an address");
+        let middle = (card.foot[1] + card.foot[3]) / 2.0;
+        let on_address = [card.foot[0] + 12.0, middle];
+        let on_notice = [dressed.notice_box[0] + 2.0, middle];
+        let in_document = [card.foot[0] + 12.0, card.foot[1] - 12.0];
+        for palette in [bt_render::DARK_CHROME, bt_render::LIGHT_CHROME] {
+            assert_ne!(palette.menu_item_text, palette.body_hint_text);
+            let drawn = |pointer: Option<[f32; 2]>| {
+                build(
+                    &card,
+                    &content(lines(40)),
+                    &dressed,
+                    pointer,
+                    None,
+                    &[],
+                    &palette,
+                    SCALE,
+                )
+            };
+            let ink = |layer: &OverlayLayer| {
+                layer
+                    .labels
+                    .iter()
+                    .find(|label| label.text == FOLDER)
+                    .expect("the address is drawn")
+                    .color
+            };
+            let lit = |layer: &OverlayLayer| {
+                layer.quads.iter().any(|quad| {
+                    quad.color == palette.menu_item_hover
+                        && quad.rect[0] >= address[0]
+                        && quad.rect[2] <= address[2]
+                        && quad.rect[1] >= address[1]
+                        && quad.rect[3] <= address[3]
+                })
+            };
+
+            let hovered = drawn(Some(on_address));
+            assert_eq!(
+                ink(&hovered),
+                palette.menu_item_text,
+                "the address steps up from the resting ink under the hand"
+            );
+            assert!(
+                lit(&hovered),
+                "and `--hover` fills the strip it answers for"
+            );
+            assert!(
+                hovered
+                    .quads
+                    .iter()
+                    .filter(|quad| quad.color == palette.menu_item_hover)
+                    .all(|quad| quad.rect[2] <= address[2] && quad.rect[3] <= card.foot[3]),
+                "the fill stops at the address and inside the card's face"
+            );
+            let notice_ink = hovered
+                .labels
+                .iter()
+                .find(|label| label.text == notice)
+                .expect("the notice is drawn")
+                .color;
+            assert_eq!(
+                notice_ink, palette.body_hint_text,
+                "the notice is not the address"
+            );
+
+            for (away, why) in [
+                (None, "no pointer in the window"),
+                (Some(on_notice), "on the notice beside it"),
+                (Some(in_document), "in the document above it"),
+            ] {
+                let rest = drawn(away);
+                assert_eq!(ink(&rest), palette.body_hint_text, "{why}");
+                assert!(!lit(&rest), "{why}");
+            }
+        }
     }
 }
