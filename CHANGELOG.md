@@ -11,6 +11,9 @@ All notable changes to Folio are recorded here. The format follows
 - In the Markdown preview, a paragraph turns into its source when the gesture
   ends, not while a selection is being drawn across it.
 
+- The glance card's shadow and the tooltip's padding and corners now match the
+  rest of the float-tag family.
+
 ### Fixed
 
 - Touch input — a touch screen, or a remote-desktop tool that sends touch —
