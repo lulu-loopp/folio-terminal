@@ -4451,15 +4451,15 @@ impl Text {
             ),
             // CHINESE PENDING (2026-09-23) — English stands in both columns until opus46 writes
             // the row, its sentence and its first answer (0.4.4 ticket 09).
-            Self::RowWebPages => pick(lang, "Web pages", "Web pages"),
+            Self::RowWebPages => pick(lang, "Web pages", "网页"),
             Self::DescWebPages => pick(
                 lang,
                 "Asks web pages for light or dark. A site with no dark style stays as it is.",
-                "Asks web pages for light or dark. A site with no dark style stays as it is.",
+                "向网页请求浅色或深色。没有深色样式的网站保持原样。",
             ),
             // `Theme` and not the ticket's `Follow theme`: the picker's button is 118px and
             // the longer label is drawn `Follow th…` on every machine, in the shipped state.
-            Self::OptionFollowTheme => pick(lang, "Theme", "Theme"),
+            Self::OptionFollowTheme => pick(lang, "Theme", "主题"),
             // 「通知」and not 「桌面通知」: Windows itself calls the surface
             // 「通知」in its own Settings, and the row's sentence says where it
             // lands. English keeps the plural for the same reason — the row is
@@ -6274,15 +6274,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 6] = [
-        // 0.4.4 ticket 09 (2026-09-23): the web pane's colour-scheme row.
-        (Self::RowWebPages, HostPlatform::Windows),
-        (Self::RowWebPages, HostPlatform::MacOs),
-        (Self::DescWebPages, HostPlatform::Windows),
-        (Self::DescWebPages, HostPlatform::MacOs),
-        (Self::OptionFollowTheme, HostPlatform::Windows),
-        (Self::OptionFollowTheme, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
