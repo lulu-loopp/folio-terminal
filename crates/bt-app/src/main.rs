@@ -40635,6 +40635,13 @@ impl Runtime<'_> {
             tables: self.app.settings_store.loaded().tables,
             block_max_height: self.app.settings_store.loaded().block_max_height,
             focus_card_height: self.app.settings_store.loaded().focus_card_height,
+            // The one effective table — the object the Shortcuts page records
+            // into — so the `Cards` row names the chord that answers, in this
+            // platform's spelling and after any rebind (0.4.4 ticket 06).
+            focus_mode_chord: self
+                .app
+                .shortcuts
+                .accelerator(shortcuts::Action::ToggleFocusMode),
             scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
             line_wrapping: self.app.settings_store.loaded().line_wrapping,
             copy_on_select: self.app.settings_store.loaded().copy_on_select,

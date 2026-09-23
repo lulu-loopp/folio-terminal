@@ -1907,13 +1907,18 @@ impl Shortcuts {
     /// annotation is small text on this platform and in every editor on it, and
     /// caps in the row would be a second control-shaped thing beside a control
     /// column that is already there.
+    ///
+    /// **Spelled in this table's own dialect**, not the host's (0.4.4 ticket
+    /// 06): the two are the same for every table the product builds, and the
+    /// difference is what lets a test on one machine read what the other
+    /// machine's `Cards` row will say.
     #[must_use]
     pub(crate) fn accelerator(&self, action: Action) -> Option<String> {
         self.rows
             .iter()
             .find(|row| row.action == action)
             .and_then(|row| row.chord.as_ref())
-            .map(|chord| chord_caps(chord).join("+"))
+            .map(|chord| chord_caps_on(chord, self.dialect).join("+"))
     }
 
     /// The table as this build ships it, in this machine's dialect.

@@ -1852,11 +1852,13 @@ pub enum Text {
     // withdrawn surface is how a withdrawn surface comes back by accident.
     /// `Appearance ▸ Focus mode` — the row, and the name of the thing itself.
     RowFocusMode,
-    /// Its sentence. Says what the column *is* and names the chord, because this
-    /// row and that chord are the only two ways in — and, since 2026-08-20, the
-    /// only two ways out as well (the 08-19 ruling withdrew the pane-header
-    /// double-click and the pane menu's row; the 08-20 one withdrew the `Exit`
-    /// button, its heading row and the `Esc` rung).
+    /// Its sentence, **without the chord**. Says what the column *is*; the
+    /// chord that is the other way in — and, since 2026-08-20, the only other
+    /// way out (the 08-19 ruling withdrew the pane-header double-click and the
+    /// pane menu's row; the 08-20 one withdrew the `Exit` button, its heading
+    /// row and the `Esc` rung) — is added by [`focus_mode_row_in`] out of the
+    /// shortcut table, because a chord spelled here by hand is wrong on macOS
+    /// and wrong after a rebind (0.4.4 ticket 06, owner ruling 2026-09-22).
     DescFocusMode,
     // `FocusExit` — the word on a button at the head of the card column — left
     // this table with the button on 2026-08-20, for the same reason the pane
@@ -4396,17 +4398,18 @@ impl Text {
             // `solve_focused` and the `focus-mode` binding id are identifiers,
             // and an identifier is not something a reader meets.
             Self::RowFocusMode => pick(lang, "Cards", "卡片"),
-            // Three clauses, in the order a reader meets them: what replaces the
-            // tab strip, what happens to the tab you pick, and the other door.
-            // It states facts and names the chord — no persuasion, and no "we".
-            // The two pane-level doors it used to name were withdrawn on
-            // 2026-08-19, and the sentence lost them the same day: a row that
-            // advertises a gesture the build does not have is worse than a row
-            // that says less.
+            // What replaces the tab strip, in the order a reader meets it. The
+            // other door — the chord — is not spelled here: the row's sentence
+            // is composed by `focus_mode_row_in` out of the shortcut table, so it
+            // names the chord this platform and this reader's rebinds actually
+            // hold (0.4.4 ticket 06). The two pane-level doors it used to name
+            // were withdrawn on 2026-08-19, and the sentence lost them the same
+            // day: a row that advertises a gesture the build does not have is
+            // worse than a row that says less.
             Self::DescFocusMode => pick(
                 lang,
-                "The tab strip becomes a column of cards, one per tab. Ctrl+Shift+Z does the same.",
-                "标签条变成一列卡片，每个标签一张。Ctrl+Shift+Z 同样可切换。",
+                "The tab strip becomes a column of cards, one per tab.",
+                "标签条变成一列卡片，每个标签一张。",
             ),
             // 「最小对比度」is the term of art both WCAG's Chinese translations
             // and VS Code's own Chinese locale use for this quantity, so the row
@@ -6434,6 +6437,55 @@ pub fn update_row_available_in(lang: Lang, version: &str) -> String {
         }
         Lang::Chinese => format!("{version} 已发布。点击「打开发布页」可在浏览器中查看。"),
     }
+}
+
+/// **The `Cards` row's sentence**, with the chord the shortcut table holds for
+/// `focus-mode` — in the table's own caps spelling, which is the dialect of the
+/// machine the table was built for (0.4.4 ticket 06).
+///
+/// The chord is handed in rather than looked up, so this is a function of its
+/// arguments: the caller reads it from the one effective table
+/// ([`crate::shortcuts::Shortcuts::accelerator`]) on every draw, and a row the
+/// reader rebound shows the new chord the next time the dialog is painted. A
+/// row the reader has unbound has no chord, and the sentence then stops after
+/// its first clause — naming an absent key would be a door that is not there.
+#[must_use]
+pub fn focus_mode_row_in(lang: Lang, chord: Option<&str>) -> String {
+    let lead = Text::DescFocusMode.in_lang(lang);
+    match (chord, lang) {
+        (None, _) => lead.to_owned(),
+        (Some(chord), Lang::English) => format!("{lead} {chord} does the same."),
+        (Some(chord), Lang::Chinese) => format!("{lead}{chord} 同样可切换。"),
+    }
+}
+
+/// **A composed sentence that has to outlive the frame that composed it.**
+///
+/// `SettingsRow::description` answers `&'static str` — every row in the dialog
+/// hands its answer straight to a `ChromeLabel`, and the whole table costs zero
+/// allocations because of it. `psreadline::row_description` meets the same
+/// signature with a `OnceLock` per language, which is sound there because its
+/// probe is a one-shot; it is **not** sound for a sentence whose value can change
+/// while the process runs — the version `update::row_description` names, or the
+/// chord `focus_mode_row_in` names after a rebind — because a `OnceLock` would
+/// go on drawing the first one.
+///
+/// So the sentences are interned instead, and the pool is bounded by the things
+/// that generate them: one entry per language per distinct value this process is
+/// told about — at most two versions, and one chord per recording the reader
+/// makes on the `focus-mode` row. It does not grow with frames, with dialog
+/// opens, or with time.
+pub(crate) fn intern(text: String) -> &'static str {
+    static POOL: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut pool = POOL
+        .lock()
+        .expect("the sentence pool is not held across a panic");
+    if let Some(held) = pool.iter().find(|held| **held == text) {
+        return held;
+    }
+    let held: &'static str = Box::leak(text.into_boxed_str());
+    pool.push(held);
+    held
 }
 
 /// The row's line when the machine already had a new enough module of its own.
@@ -8752,8 +8804,9 @@ mod tests {
         }
     }
 
-    /// PIN (§7.1.6b′, user rulings 2026-08-19 and 2026-08-20) — **the focus-mode
-    /// row advertises the doors that exist, and no others.**
+    /// RED (0.4.4 ticket 06; §7.1.6b′, user rulings 2026-08-19, 2026-08-20 and
+    /// 2026-09-22) — **the `Cards` row names the chord the shortcut table holds,
+    /// on this platform and after any rebind, and no door this build withdrew.**
     ///
     /// The mode shipped with five doors and is down to two. Withdrawn on 08-19:
     /// a double-click on a pane header (it reads as "make this pane bigger",
@@ -8767,33 +8820,314 @@ mod tests {
     /// withdrawn door can go on being promised after the code that answered it
     /// is gone.
     ///
-    /// Red gate: put any withdrawn door's name back into the sentence without
-    /// building the door, and this goes red in whichever language it was added
-    /// to.
+    /// The old pin asserted `contains("Ctrl+Shift+Z")`, which pinned the defect
+    /// in place: the macOS table holds `Shift+Cmd+E` for `focus-mode`, and a
+    /// reader who records another chord owns a table that holds neither. The
+    /// chord is therefore read from the real table — `Shortcuts::defaults_for`
+    /// in each dialect, then `Shortcuts::set` with a chord its own verdict calls
+    /// free — through the real `accelerator`, into the real composer.
+    ///
+    /// MUTATION: spell `Ctrl+Shift+Z` into `DescFocusMode`, or make
+    /// `focus_mode_row_in` ignore its chord — the macOS dialect and the rebind
+    /// both go red.
     #[test]
-    fn the_focus_mode_row_names_the_chord_and_no_gesture_this_build_withdrew() {
-        for lang in [Lang::English, Lang::Chinese] {
-            let sentence = Text::DescFocusMode.in_lang(lang);
+    fn the_focus_mode_row_names_the_tables_chord_and_no_gesture_this_build_withdrew() {
+        use crate::shortcuts::{Action, ChordVerdict, Shortcuts, parse_chord};
+        for (platform, rebind) in [
+            (HostPlatform::Windows, "Ctrl+Shift+F9"),
+            (HostPlatform::MacOs, "Cmd+Shift+F9"),
+        ] {
+            let mut table = Shortcuts::defaults_for(platform);
+            let shipped = table
+                .accelerator(Action::ToggleFocusMode)
+                .expect("focus-mode ships bound in every dialect");
+            let chord = parse_chord(rebind).expect("the rebind is a chord");
             assert!(
-                sentence.contains("Ctrl+Shift+Z"),
-                "{lang:?}: the row names the one chord that turns it"
+                matches!(table.verdict_for("focus-mode", &chord), ChordVerdict::Free),
+                "{platform:?}: the rebind is one the recorder would accept"
             );
-            for withdrawn in [
-                "double-click",
-                "双击",
-                "⌄",
-                "pane's header",
-                "窗格标题栏",
-                "Exit",
-                "退出钮",
-                "Esc",
-            ] {
+            table.set("focus-mode", Some(chord));
+            let rebound = table
+                .accelerator(Action::ToggleFocusMode)
+                .expect("the rebind holds a chord");
+            assert_ne!(shipped, rebound);
+            for lang in Lang::ALL {
+                let sentence = focus_mode_row_in(lang, Some(&shipped));
                 assert!(
-                    !sentence.contains(withdrawn),
-                    "{lang:?}: the sentence still promises `{withdrawn}`, a door this \
-                     build does not have"
+                    sentence.contains(&shipped),
+                    "{platform:?} {lang:?}: the row names the table's chord {shipped:?}: \
+                     {sentence:?}"
+                );
+                assert_eq!(
+                    chords_spelled_in(&sentence),
+                    std::slice::from_ref(&shipped),
+                    "{platform:?} {lang:?}: the table's chord is the only one the row names"
+                );
+                let after = focus_mode_row_in(lang, Some(&rebound));
+                assert!(
+                    after.contains(&rebound) && !after.contains(&shipped),
+                    "{platform:?} {lang:?}: after a rebind the row names {rebound:?} and \
+                     not {shipped:?}: {after:?}"
+                );
+                for sentence in [sentence, after] {
+                    for withdrawn in [
+                        "double-click",
+                        "双击",
+                        "⌄",
+                        "pane's header",
+                        "窗格标题栏",
+                        "Exit",
+                        "退出钮",
+                        "Esc",
+                    ] {
+                        assert!(
+                            !sentence.contains(withdrawn),
+                            "{lang:?}: the sentence still promises `{withdrawn}`, a door \
+                             this build does not have"
+                        );
+                    }
+                }
+            }
+        }
+        // The Mac row, in the table's own caps spelling (acceptance A1).
+        assert!(
+            focus_mode_row_in(
+                Lang::English,
+                Shortcuts::defaults_for(HostPlatform::MacOs)
+                    .accelerator(Action::ToggleFocusMode)
+                    .as_deref(),
+            )
+            .contains("Shift+Cmd+E")
+        );
+    }
+
+    /// RED (0.4.4 ticket 06) — **a row whose chord the reader gave back to the
+    /// shell names no chord at all.**
+    ///
+    /// The composer's third answer. Naming a key the table no longer holds is
+    /// the defect the ticket fixes in a different costume, and naming "no key"
+    /// would be the row reporting an absence nobody asked about — so the
+    /// sentence stops after what the column is.
+    ///
+    /// MUTATION: make the `None` arm of `focus_mode_row_in` append a chord.
+    #[test]
+    fn an_unbound_focus_mode_row_names_no_chord() {
+        use crate::shortcuts::{Action, Shortcuts};
+        let mut table = Shortcuts::defaults_for(HostPlatform::Windows);
+        table.set("focus-mode", None);
+        let chord = table.accelerator(Action::ToggleFocusMode);
+        assert_eq!(chord, None);
+        for lang in Lang::ALL {
+            assert_eq!(
+                focus_mode_row_in(lang, chord.as_deref()),
+                Text::DescFocusMode.in_lang(lang)
+            );
+        }
+    }
+
+    /// Every chord-shaped run in `text`: one or more modifier words, each
+    /// followed by `+`, then something a shortcut row could hold as its key — a
+    /// single character, an arrow, or a named key. `Ctrl+click`, `Shift+wheel`,
+    /// `Alt+arrow`, `Ctrl+letter` and `Ctrl+Alt is …` are gestures and classes,
+    /// not chords, and are not returned.
+    ///
+    /// Both dialects' modifier words, and Apple's symbols, so a sentence cannot
+    /// get past the gate by spelling a Mac chord the Mac way.
+    fn chords_spelled_in(text: &str) -> Vec<String> {
+        const MODIFIERS: [&str; 13] = [
+            "Ctrl", "Control", "Alt", "Option", "Shift", "Cmd", "Command", "Win", "Super", "⌘",
+            "⌃", "⌥", "⇧",
+        ];
+        const NAMED: [&str; 26] = [
+            "Esc",
+            "Escape",
+            "Enter",
+            "Return",
+            "Tab",
+            "Space",
+            "Backspace",
+            "Delete",
+            "Del",
+            "Insert",
+            "Home",
+            "End",
+            "PageUp",
+            "PageDown",
+            "F1",
+            "F2",
+            "F3",
+            "F4",
+            "F5",
+            "F6",
+            "F7",
+            "F8",
+            "F9",
+            "F10",
+            "F11",
+            "F12",
+        ];
+        let mut found = Vec::new();
+        let mut from = 0;
+        while from < text.len() {
+            let rest = &text[from..];
+            let at_a_word_start = text[..from]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric());
+            let mut cursor = 0;
+            if at_a_word_start {
+                'modifiers: loop {
+                    for word in MODIFIERS {
+                        let tail = &rest[cursor..];
+                        if tail.starts_with(word) && tail[word.len()..].starts_with('+') {
+                            cursor += word.len() + 1;
+                            continue 'modifiers;
+                        }
+                    }
+                    break;
+                }
+            }
+            if cursor == 0 {
+                from += rest.chars().next().map_or(1, char::len_utf8);
+                continue;
+            }
+            let tail = &rest[cursor..];
+            let run: String = tail
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect();
+            let key = if run.is_empty() {
+                tail.chars()
+                    .next()
+                    .filter(|c| c.is_ascii_punctuation() || ['←', '↑', '→', '↓'].contains(c))
+                    .map(String::from)
+            } else if run.len() == 1 || NAMED.contains(&run.as_str()) {
+                Some(run)
+            } else {
+                None
+            };
+            match key {
+                Some(key) => {
+                    found.push(format!("{}{key}", &rest[..cursor]));
+                    from += cursor + key.len();
+                }
+                None => from += cursor,
+            }
+        }
+        found
+    }
+
+    /// **The chords no table row produces, spelled on purpose** — each by the
+    /// entry that spells it, with the reason on the line. The gate below
+    /// refuses an entry here that *is* a table chord (the ticket's blocking
+    /// criterion B2).
+    ///
+    /// The first-run card's `Esc` / `Ctrl+W` / `Alt+F4` are not here because no
+    /// `Text` spells them: they are named in that module's comments only.
+    const HAND_SPELLED_KEYS: &[(Text, &str)] = &[
+        // The search capsule's tip: `Shift+Enter` is the field's own key while
+        // it holds the focus, answered by the field and not by a row of the
+        // shortcut table — there is no row to read it from.
+        (Text::SearchTipPrevious, "Shift+Enter"),
+    ];
+
+    /// RED (0.4.4 ticket 06; owner ruling 2026-09-22 §4, "the T2 gate") — **no
+    /// shipped string spells a chord the shortcut table does not produce.**
+    ///
+    /// `DescFocusMode` spelled `Ctrl+Shift+Z` in both languages with no platform
+    /// column, which was true on Windows until somebody rebound the row and was
+    /// never true on a Mac. That class of defect is a sentence and a table
+    /// disagreeing, and the only way to keep them from disagreeing is for the
+    /// sentence not to hold the chord at all. So every `Text` × `Lang` ×
+    /// `HostPlatform` is scanned for chord-shaped runs, and each one must be
+    /// the caps spelling of a **surfaced** row of that platform's shipped table
+    /// — or be on [`HAND_SPELLED_KEYS`], which may not hold a table chord.
+    ///
+    /// A chord a string needs to name is composed from the table at the draw
+    /// (`focus_mode_row_in`), not spelled into this table.
+    ///
+    /// MUTATION: put `Ctrl+Shift+Z` back into `DescFocusMode` — this names
+    /// `(DescFocusMode, MacOs)`.
+    #[test]
+    fn no_shipped_string_spells_a_chord_the_table_does_not_produce() {
+        use crate::shortcuts::{Shortcuts, chord_caps_on};
+        let table_chords = |platform: HostPlatform| -> Vec<String> {
+            Shortcuts::defaults_for(platform)
+                .rows()
+                .iter()
+                .filter(|row| row.surfaced)
+                .filter_map(|row| row.chord.as_ref())
+                .map(|chord| chord_caps_on(chord, platform).join("+"))
+                .collect()
+        };
+        let platforms = [
+            HostPlatform::Windows,
+            HostPlatform::MacOs,
+            HostPlatform::OtherUnix,
+        ];
+        for (entry, chord) in HAND_SPELLED_KEYS {
+            for platform in platforms {
+                assert!(
+                    !table_chords(platform).iter().any(|held| held == chord),
+                    "{entry:?}: {chord:?} is a table chord on {platform:?} and must be read \
+                     from the table, not allowed by hand"
                 );
             }
+        }
+        let mut offenders: Vec<(Text, HostPlatform, Lang, String)> = Vec::new();
+        let mut scanned = 0_usize;
+        for platform in platforms {
+            let produced = table_chords(platform);
+            for entry in Text::ALL {
+                for lang in Lang::ALL {
+                    for chord in chords_spelled_in(entry.on(lang, platform)) {
+                        scanned += 1;
+                        let allowed = HAND_SPELLED_KEYS
+                            .iter()
+                            .any(|(held, spelled)| *held == entry && *spelled == chord);
+                        if !allowed && !produced.contains(&chord) {
+                            offenders.push((entry, platform, lang, chord));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these strings spell a chord no surfaced row of that platform's table \
+             produces — compose it from the table instead: {offenders:#?}"
+        );
+        assert!(
+            scanned > 0,
+            "the scan found the allowlisted chord, so it can see one"
+        );
+    }
+
+    /// The scanner the gate stands on, read against the shapes it has to tell
+    /// apart — so a gate that found nothing is not a scanner that could not.
+    #[test]
+    fn the_chord_scanner_finds_chords_and_passes_gestures() {
+        assert_eq!(
+            chords_spelled_in("Ctrl+Shift+Z does the same. Ctrl+Shift+Z 同样可切换。"),
+            ["Ctrl+Shift+Z", "Ctrl+Shift+Z"]
+        );
+        assert_eq!(chords_spelled_in("Previous (Shift+Enter)"), ["Shift+Enter"]);
+        assert_eq!(chords_spelled_in("Press Shift+Cmd+E."), ["Shift+Cmd+E"]);
+        assert_eq!(chords_spelled_in("Ctrl+, opens it"), ["Ctrl+,"]);
+        assert_eq!(chords_spelled_in("Ctrl+Shift+↑ jumps"), ["Ctrl+Shift+↑"]);
+        // A Chinese sentence need not leave a space after the key.
+        assert_eq!(chords_spelled_in("按 Ctrl+Shift+Z同样"), ["Ctrl+Shift+Z"]);
+        for gesture in [
+            "Ctrl+click opens",
+            "⌘+点击用默认程序打开",
+            "Shift+wheel",
+            "Alt+滚轮可滚动",
+            "Ctrl+Alt is reserved",
+            "Ctrl+letter belongs",
+            "Ctrl+字母属于 shell",
+            "readline 把 Alt+方向键读作",
+        ] {
+            assert!(chords_spelled_in(gesture).is_empty(), "{gesture:?}");
         }
     }
 
