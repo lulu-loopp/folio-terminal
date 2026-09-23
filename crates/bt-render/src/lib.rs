@@ -20247,13 +20247,17 @@ mod tests {
         // ① The substance is the fifteen columns the rows really take, and the
         //    region is ⑨ i's ground round it: one whole cell column on the left,
         //    which the pane edge takes straight back because a source row begins
-        //    at column zero, and on the right that column plus the four the two
-        //    marks need. The same rectangle the ground is drawn under and the
-        //    same one `math_band_face` answers with.
+        //    at column zero, and on the right that column plus the five the two
+        //    marks need (`UI-SPEC.md` H3, 2026-09-23: `MATH_TOOL_BUTTON_LOGICAL_PX`
+        //    grew from 19 to 22, and `math_tool_cluster_width_px`'s two marks
+        //    plus their gap now round up to five ten-pixel cells at this
+        //    fixture's own metrics rather than four). The same rectangle the
+        //    ground is drawn under and the same one `math_band_face` answers
+        //    with.
         let ink_right = metrics.padding_px + 15.0 * metrics.cell_width_px;
         assert_eq!(geometry.ink, [metrics.padding_px, 28.0, ink_right, 88.0]);
         assert_eq!(geometry.block[0], metrics.padding_px);
-        assert_eq!(geometry.block[2], ink_right + 5.0 * metrics.cell_width_px);
+        assert_eq!(geometry.block[2], ink_right + 6.0 * metrics.cell_width_px);
         assert_eq!([geometry.block[1], geometry.block[3]], [28.0, 88.0]);
         assert_eq!(boxes.block, geometry.block);
         assert!(
