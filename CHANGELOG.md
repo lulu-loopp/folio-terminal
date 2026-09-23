@@ -26,6 +26,9 @@ All notable changes to Folio are recorded here. The format follows
 
 - The first-run card's option rows are the same height as a Settings row.
 
+- The section labels inside the right-click and `⌄` menus are the same size
+  and spacing as Settings and the rail.
+
 ### Fixed
 
 - Touch input — a touch screen, or a remote-desktop tool that sends touch —
