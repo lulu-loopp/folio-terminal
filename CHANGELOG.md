@@ -16,6 +16,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- A local HTML page in the preview can load its stylesheets, scripts and fonts
+  from the web.
 - A shortcut can now use Ctrl with a letter; the row notes that the key no
   longer reaches the shell.
 - Ctrl+click on a network-share path or on a mailto:, vscode: or other link now

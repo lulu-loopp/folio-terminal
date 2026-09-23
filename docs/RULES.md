@@ -769,6 +769,13 @@ Entries: §7.7 through §7.16, the W-series (the web seat's shape, the host and 
 input, a page as a preview buffer, a local file as a page, the card, naming by
 pane, the site's own icon, the floor, the hole); §7.14 (both of them); §13.29
 *`WKWebView` host*. §7.35 carries the teardown rule and is folded in row 43.
+Trailing entries: 2026-09-20 *a page that may not fetch may not open a socket*;
+2026-09-21 *a previewed local document is not walled off from the network*;
+2026-09-23 *a previewed local page reaches the network, and reads this machine
+the way a browser lets a `file://` page read it* — the network rule (owner,
+2026-09-21) and the file-read ruling (owner, 2026-09-23: markup loads, a page
+script's `fetch`/XHR of a local file does not, no Folio list), which supersede
+R1-10's "reads its own folder and reaches no server".
 
 ### 50. The video engine — `not yet folded`
 Entries: §7.23 *video has a face: the first frame comes from the platform decoder,

@@ -17,7 +17,7 @@ use std::path::Path;
 use super::{
     NativeWindow, PageVisual, RehostCompensation, RehostOutcome, RehostSide, RehostStep, WebChord,
     WebDpiOwnership, WebEvent, WebInstallReport, WebMouseEvent, WebNavigationVerdict,
-    WebRequestVerdict,
+    WebRequestGate,
 };
 use crate::Compositor;
 
@@ -44,7 +44,7 @@ pub struct WebHost {
         dead_code,
         reason = "the macOS arm asks it about a subframe; the rest is a compiled rule list"
     )]
-    request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
+    request_gate: WebRequestGate,
     #[expect(
         dead_code,
         reason = "the macOS arm wakes the loop when a delegate answers"
@@ -58,7 +58,7 @@ impl WebHost {
     #[must_use]
     pub fn new(
         gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
-        request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
+        request_gate: WebRequestGate,
         wake: Box<dyn Fn()>,
     ) -> Self {
         Self {

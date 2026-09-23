@@ -3308,8 +3308,9 @@ pub use webview::{
     INSTALL_SEQUENCE, InstallRollback, InstallStep, REHOST_SEQUENCE, RehostCompensation,
     RehostOutcome, RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord,
     WebDpiOwnership, WebEvent, WebGuards, WebHost, WebInstallReport, WebKey, WebMouseEvent,
-    WebNavigationVerdict, WebRequestVerdict, WebSetting, WebSettingRule, forget_web_environment,
-    install_rollback, rehost_compensation, web_mouse_buttons, webview2_runtime_version,
+    WebNavigationVerdict, WebRequestGate, WebRequestKind, WebRequestVerdict, WebSetting,
+    WebSettingRule, forget_web_environment, install_rollback, rehost_compensation,
+    web_mouse_buttons, webview2_runtime_version,
 };
 
 #[cfg(windows)]

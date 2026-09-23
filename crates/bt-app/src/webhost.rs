@@ -449,7 +449,7 @@ fn is_blank(url: &str) -> bool {
 // did. What did move is why the development target is allowed — the stub
 // admitted it by name, and §3’s loopback rule admits it now (DESIGN §7.8 ⑦).
 use crate::webnav::{
-    BLANK_PAGE, Decision, Mint, Origin, Refusal, address_bar, check, content_rules,
+    BLANK_PAGE, Decision, Mint, Origin, Refusal, RequestKind, address_bar, check, content_rules,
     navigation_starting, resource_request,
 };
 
@@ -1928,13 +1928,17 @@ impl WebSeat {
             // by the time anybody could act on it, and a card per missing
             // picture would be this window shouting about a page's own
             // contents.
-            Box::new(move |candidate| {
-                let decision = resource_request(candidate, &request_gate.borrow());
+            Box::new(move |candidate, engine_kind| {
+                let decision = resource_request(
+                    candidate,
+                    RequestKind::of(engine_kind),
+                    &request_gate.borrow(),
+                );
                 let allowed = matches!(decision, Decision::Navigate(_));
                 if !allowed {
                     crate::web_trace::line(|| {
                         format!(
-                            "request_refused {} uri={candidate} mint={} verdict={}",
+                            "request_refused {} uri={candidate} kind={engine_kind:?} mint={} verdict={}",
                             crate::web_trace::seat(page),
                             crate::web_trace::mint(&request_gate.borrow()),
                             crate::web_trace::verdict(&decision),
@@ -4683,7 +4687,7 @@ mod rehost_address_tests {
             machine: WebMachine::new(),
             host: bt_platform::WebHost::new(
                 Box::new(|_| bt_platform::WebNavigationVerdict::Proceed),
-                Box::new(|_| bt_platform::WebRequestVerdict::Allow),
+                Box::new(|_, _| bt_platform::WebRequestVerdict::Allow),
                 Box::new(|| {}),
             ),
             mint: Rc::new(RefCell::new(Mint::Nothing)),

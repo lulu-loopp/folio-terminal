@@ -34,9 +34,11 @@
 //! through [`WebHost::set_request_rules`], which is a door on every arm and does
 //! nothing on the one whose engine asks per request.
 //!
-//! The local seat's other half — *this folder and no other* — is not a pattern
-//! at all. It is `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with the
-//! minted file's own folder, which X-2 measured enforcing it with no rule list
+//! Which of the disk a local page may read by markup is not a pattern at all.
+//! It is `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with the minted
+//! file's own folder — the grant Safari itself gives a `file://` page, measured
+//! on Safari 26.6.2 for ticket 0.4.4-13 (the page's folder and below load; `../`
+//! and another folder do not) — which X-2 measured enforcing with no rule list
 //! in the room and no callback fired for the refusal.
 //!
 //! # What this arm does not promise, stated rather than implied
@@ -114,8 +116,8 @@ use objc2_web_kit::{
 use super::{
     CloseStep, INSTALL_SEQUENCE, InstallStep, PageVisual, RehostCompensation, RehostOutcome,
     RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebDpiOwnership, WebEvent,
-    WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict, WebRequestVerdict,
-    WebSetting, install_rollback,
+    WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict, WebRequestKind,
+    WebRequestVerdict, WebSetting, install_rollback,
 };
 use crate::macos_impl::{window_for, window_thread};
 use crate::{Compositor, NativeWindow};
@@ -205,7 +207,7 @@ struct Shared {
     /// going — the door `FrameNavigationStarting` is on the other platform. The
     /// rest of what a document is built out of never reaches a callback here and
     /// is [`ThirdDoor`]'s.
-    request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
+    request_gate: WebRequestGate,
     /// The target of the rewrite currently in flight, if any — the Windows arm's
     /// belt against a normalisation that answered twice.
     rewriting_to: RefCell<Option<String>>,
@@ -275,9 +277,9 @@ impl Shared {
     }
 
     /// **Point the page at an address** — and, for a local file, at the one
-    /// folder it may read.
+    /// folder it may read, which is the folder Safari grants a `file://` page.
     ///
-    /// This is where the local seat's folder rule actually stands.
+    /// This is where the local seat's folder bound actually stands.
     /// `loadFileURL:allowingReadAccessToURL:` is the whole of it: X-2 measured a
     /// picture and a frame naming a sibling folder refused by this call with no
     /// rule list in the room, and no callback fired for either — which is why
@@ -1181,7 +1183,10 @@ impl Gate {
             // door's question and not the first's — the same split
             // `FrameNavigationStarting` makes on the other platform, arriving
             // here as one callback that has to tell them apart itself.
-            if matches!((shared.request_gate)(&uri), WebRequestVerdict::Allow) {
+            if matches!(
+                (shared.request_gate)(&uri, WebRequestKind::Document),
+                WebRequestVerdict::Allow
+            ) {
                 return WKNavigationActionPolicy::Allow;
             }
             shared.push(WebEvent::RequestRefused { uri });
@@ -1264,7 +1269,7 @@ impl WebHost {
     #[must_use]
     pub fn new(
         gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
-        request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
+        request_gate: WebRequestGate,
         wake: Box<dyn Fn()>,
     ) -> Self {
         let shared = Rc::new(Shared {
@@ -2103,7 +2108,7 @@ mod door_tests {
             events: RefCell::new(VecDeque::new()),
             chords: RefCell::new(Vec::new()),
             gate: Box::new(|_: &str| WebNavigationVerdict::Proceed),
-            request_gate: Box::new(|_: &str| WebRequestVerdict::Allow),
+            request_gate: Box::new(|_: &str, _| WebRequestVerdict::Allow),
             rewriting_to: RefCell::new(None),
             last_status: Cell::new(0),
             found: RefCell::new(String::new()),
