@@ -15,6 +15,7 @@ mod dpi;
 mod first_run;
 mod frame;
 mod i18n;
+mod keyboard;
 mod palette;
 mod profiles;
 mod quake;
