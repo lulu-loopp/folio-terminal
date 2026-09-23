@@ -162,7 +162,7 @@ mod websheet;
 mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
-use bt_doc::{Bias, LayoutKey};
+use bt_doc::LayoutKey;
 use bt_layout::{
     Axis, LayoutNode, LogicalRect, MIN_PANE_H, MIN_PANE_W, SeatId, SeatKind, SeatLayout,
     SeatMetrics, SizePolicy, SplitId, WorkAreaHint,
@@ -171,8 +171,15 @@ use bt_math::{MathEngine, MathMode, MathRaster, MathRenderError};
 use bt_persist::{
     LayoutNodeV1, LeafNodeV1, QuakeRestoreV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1,
     SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabV1,
-    TermLeafV1, ThemeModeV1, WindowBoundsV1, WindowStateV1,
+    TermLeafV1, ThemeModeV1, WindowBoundsV1,
 };
+// Step 2a moved these two names' last non-test users into `runtime/` (the
+// `peek` and `windows` topics), which import them themselves; the root keeps
+// them for `tests.rs`, which reads them through `use super::*`.
+#[cfg(test)]
+use bt_doc::Bias;
+#[cfg(test)]
+use bt_persist::WindowStateV1;
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtyError, PtySession, PtySize};
 use bt_render::{
     ChromePalette, CursorStyle, DEVICE_REBUILD_ATTEMPTS, DeviceLossPilot, Flight, FrameSource,
