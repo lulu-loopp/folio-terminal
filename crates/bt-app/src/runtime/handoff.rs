@@ -3,8 +3,9 @@
 //!
 //! The surfaces that hand something to the system — `open_local_path`,
 //! `reveal_in_explorer`, `open_local_path_verified`, `reveal_verified`, `open_preview_link`,
-//! `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings`, and since
-//! ticket 14 `open_unverified_reference` and `hand_uri_to_the_system` — each call
+//! `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings`, since
+//! ticket 14 `open_unverified_reference` and `hand_uri_to_the_system`, and since ticket 39
+//! `open_preview_in_browser` for a page it hands over by its address — each call
 //! [`Runtime::hand_off`] with the request and the words its refusal has always had. None of them
 //! calls a `bt_platform::handoff` door itself (`no_handoff_runs_on_the_window_thread`).
 
