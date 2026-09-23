@@ -34510,6 +34510,63 @@ fn every_block_in_the_source_set_is_drawn_as_source_and_only_one_holds_the_caret
     assert_eq!(carets[0][1], top_of(2), "standing in the third block");
 }
 
+/// RED (owner's ruling 2026-09-23, B) — **the window draws the span one
+/// function computes, holds it while a gesture is in flight, and lets it go
+/// when the window loses the pointer.**
+///
+/// The pure halves are held by their own tests — [`preview_live::source_span`]
+/// and [`preview_live::selection_span`] for which blocks, and
+/// [`preview_press::held_span`] / [`preview_press::keeps_the_span`] for when,
+/// through `preview_press`'s gesture model. What is left is the wiring those
+/// cannot see: both arms of `rebuild_preview_document` ask the same producer
+/// with the page's rendered selection; the no-parse arm asks it through the
+/// hold, keyed on a drag on *this* surface; the press and the drag ask the span
+/// on the glass (`doc_key.source`); and a blur ends the drag, which would
+/// otherwise hold the span for ever.
+///
+/// MUTATION: read the fresh span in `rebuild_preview_document` without
+/// `held_span` (the page changes shape mid-drag), or drop the blur's
+/// `cancel_preview_text_drag` (a lost release pins the span), and a clause
+/// below goes red.
+#[test]
+fn the_window_holds_the_span_a_gesture_starts_on_and_frees_it_on_a_blur() {
+    let rebuild = squeezed_body("Runtime", "rebuild_preview_document");
+    assert!(
+        rebuild.contains("preview_press::held_span(in_flight,")
+            && rebuild.contains(".is_some_and(|drag|drag.surface==surface)")
+            && rebuild.contains("||self.standing_source_span(surface,Some(caret))"),
+        "the span is held while a drag on this surface is in flight",
+    );
+    assert!(
+        rebuild.contains("parsed_source=live_caret.and_then(|caret|{preview_live::selection_span("),
+        "a new parse asks the same producer",
+    );
+    let standing = squeezed_body("Runtime", "standing_source_span");
+    assert!(
+        standing.contains("preview_live::selection_span(")
+            && standing.contains("pane.md_select.as_ref()"),
+        "with the page's rendered selection, mapped back to the file",
+    );
+    let keeps = squeezed_body("Runtime", "preview_press_keeps_the_span");
+    assert!(
+        keeps.contains("preview_press::keeps_the_span(")
+            && keeps.contains("pane.doc_key.as_ref().and_then(|key|key.source.as_ref())"),
+        "the press asks about the span on the glass",
+    );
+    let dispatch =
+        item_body(&ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"));
+    let blur = dispatch
+        .find("WindowEvent::Focused(false) => {")
+        .expect("the window answers losing focus");
+    let end = dispatch[blur..]
+        .find("WindowEvent::Focused(true) => {")
+        .expect("and getting it back");
+    assert!(
+        dispatch[blur..blur + end].contains("runtime.cancel_preview_text_drag()"),
+        "a blur ends the drag, and the span it was holding with it",
+    );
+}
+
 /// RED (preview report 2026-09-23, A) — **the source block's band is chosen by
 /// one function and drawn from it in both faces.**
 ///

@@ -5531,7 +5531,7 @@ impl Runtime<'_> {
             .filter(|_| shift);
         // Asked before anything moves, because it is a question about the page
         // as the hand found it.
-        let in_the_seat = self.preview_press_keeps_the_caret_seat(surface, caret_at);
+        let in_the_seat = self.preview_press_keeps_the_span(surface, caret_at);
         if pressed.is_some() && !shift {
             // **A plain press lets go of what was selected**, and that is the
             // one thing left that happens at once: dropping a highlight moves no
@@ -5619,15 +5619,19 @@ impl Runtime<'_> {
         pane.md_select = None;
     }
 
-    /// **Whether a byte of the file is in the seat this page is already drawing
-    /// from** ([`preview_press::keeps_the_seat`], asked of a surface).
+    /// **Whether a byte of the file is in the source this page is already
+    /// drawing** ([`preview_press::keeps_the_span`], asked of a surface).
     ///
     /// Two questions turn on it and they are one question. A press there may be
-    /// answered where it stands, because putting the caret inside the seat the
-    /// page is already drawing changes no block's face; and a gesture there has
-    /// no rendered pieces under it, because what the seat is drawn as is the
-    /// file's own bytes and it pushes no [`PreviewTextSite`]s.
-    pub(crate) fn preview_press_keeps_the_caret_seat(
+    /// answered where it stands, because putting the caret inside a block the
+    /// page already draws as source changes no block's face — the span is held
+    /// until the gesture ends; and a gesture there has no rendered pieces under
+    /// it, because what a source block is drawn as is the file's own bytes and
+    /// it pushes no [`PreviewTextSite`]s.
+    ///
+    /// The span asked about is the one on the glass, `doc_key.source`, which
+    /// while a gesture is in flight is the one it started on.
+    pub(crate) fn preview_press_keeps_the_span(
         &self,
         surface: PreviewSurface,
         offset: Option<usize>,
@@ -5641,17 +5645,37 @@ impl Runtime<'_> {
         else {
             return false;
         };
-        let Some(PreviewDocument::Markdown { ranges, .. }) =
-            self.preview_pane(surface).map(|pane| &pane.doc)
-        else {
+        let Some(pane) = self.preview_pane(surface) else {
             return false;
         };
-        preview_press::keeps_the_seat(
+        let PreviewDocument::Markdown { blocks, ranges, .. } = &pane.doc else {
+            return false;
+        };
+        preview_press::keeps_the_span(
             content,
             ranges,
+            blocks,
+            pane.doc_key.as_ref().and_then(|key| key.source.as_ref()),
             self.preview_live_caret(surface).map(|caret| caret.caret),
             offset,
         )
+    }
+
+    /// **A gesture on a rendered page that will get no release** — the window
+    /// lost the focus, and with it the pointer capture, mid-drag (K129's
+    /// `pointercancel`, one surface along).
+    ///
+    /// The record is dropped unspent, as every other press this window cancels
+    /// on a blur is: a gesture nobody finished chose nothing. What it frees is
+    /// the span the gesture was holding (owner's ruling 2026-09-23): a drag left
+    /// standing would keep the page drawing the span it began on however the
+    /// caret moved after, so the page is laid out again from where the caret and
+    /// the rendered selection stand now.
+    pub(crate) fn cancel_preview_text_drag(&mut self) -> Result<()> {
+        if self.preview_text_drag.take().is_some() {
+            self.repaint_preview()?;
+        }
+        Ok(())
     }
 
     /// **Whether a press on this surface may put a caret in the page** (T5 ①).
@@ -5892,7 +5916,7 @@ impl Runtime<'_> {
             // again on every report rather than remembered, because it is the
             // same question the press asked and the caret has not left it: a
             // page whose face cannot change is one this may write to.
-            if spends && seated && self.preview_press_keeps_the_caret_seat(surface, Some(offset)) {
+            if spends && seated && self.preview_press_keeps_the_span(surface, Some(offset)) {
                 if self.preview_pane(surface).map(|pane| pane.caret.caret) != Some(offset) {
                     self.place_preview_caret_on(surface, offset, true)?;
                 }
@@ -7836,14 +7860,33 @@ impl Runtime<'_> {
             picture_reach,
             theme,
         };
-        // **Which block the caret is in** (§7.1.3q). Read before the key,
-        // because it is part of it — and read off the document *already* on this
-        // surface, which is the only parse whose ranges describe the bytes the
-        // caret is an offset into. When the content has moved under it, the
+        // **Which blocks the caret and its selection draw as source** (§7.1.3q).
+        // Read before the key, because it is part of it — and read off the
+        // document *already* on this surface, which is the only parse whose
+        // ranges describe the bytes the caret is an offset into. When the content has moved under it, the
         // answer below is stale and the key differs on its revision anyway; the
         // parse that follows fills the true one in.
+        //
+        // **And held while a gesture is in flight** (owner's ruling 2026-09-23):
+        // the span a press finds on the glass is the span the page draws until
+        // the button comes up, whatever the press and the drag do to the caret
+        // and to either selection model in the meantime — so a hand drawing a
+        // selection across the page never sees it change shape, and the release,
+        // which moves the caret, changes it once.
         let live_caret = self.preview_live_caret(surface);
-        let standing_source = self.standing_source_span(surface, live_caret);
+        let in_flight = self
+            .preview_text_drag
+            .as_ref()
+            .is_some_and(|drag| drag.surface == surface);
+        let standing_source = live_caret.and_then(|caret| {
+            preview_press::held_span(
+                in_flight,
+                self.preview_pane(surface)
+                    .and_then(|pane| pane.doc_key.as_ref())
+                    .and_then(|key| key.source.as_ref()),
+                || self.standing_source_span(surface, Some(caret)),
+            )
+        });
         let mut key = self.preview_buffer_on(surface).map(|buffer| {
             preview_document_key(
                 buffer,

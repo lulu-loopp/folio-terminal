@@ -24261,11 +24261,11 @@ struct PreviewTextDrag {
     /// gesture is extending a caret that is already in the page (closure review
     /// of the 2026-09-21 ruling).
     ///
-    /// True only for a press inside the seat the page was already drawing from,
+    /// True only for a press inside the source the page was already drawing,
     /// which is the one press that changes no face — see
-    /// [`preview_press::keeps_the_seat`]. What it buys is the band under an
-    /// editing drag; what it does not buy is the right to leave that seat, which
-    /// [`Self::reached`] carries instead.
+    /// [`preview_press::keeps_the_span`]. What it buys is the band under an
+    /// editing drag; what it does not buy is the right to leave that source,
+    /// which [`Self::reached`] carries instead.
     seated: bool,
     /// **The last byte of the file this gesture reached**, in the page's own
     /// terms.
@@ -62039,6 +62039,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     let cancelled = runtime
                         .cancel_drag()
                         .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
+                    // And a drag across a rendered page, which is holding the
+                    // span it began on until a release that will not come
+                    // (owner's ruling 2026-09-23).
+                    let cancelled = cancelled
+                        .and_then(|either| runtime.cancel_preview_text_drag().map(|()| either));
                     runtime.window.tab_press = None;
                     runtime.window.pane_press = None;
                     runtime.window.row_press = None;
@@ -72080,7 +72085,7 @@ mod live_markdown_edit_tests {
             "the drag moves the caret in more places than the one the seat guards",
         );
         let guard = drag
-            .find("seated && self.preview_press_keeps_the_caret_seat(surface, Some(offset))")
+            .find("seated && self.preview_press_keeps_the_span(surface, Some(offset))")
             .expect(
                 "the drag no longer asks whether the caret may move, so the page \
                  re-flows under a hand that has not let go",
