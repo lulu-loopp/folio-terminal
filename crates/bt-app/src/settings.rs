@@ -23209,7 +23209,7 @@ mod tests {
         for mark in (0..profiles::count()).map(profiles::mark) {
             let [_, box_height] = option_mark_box_logical_px(mark);
             assert!(
-                box_height <= ITEM_HEIGHT_LOGICAL_PX && box_height <= COMBO_HEIGHT_LOGICAL_PX,
+                box_height <= ITEM_HEIGHT_LOGICAL_PX.min(COMBO_HEIGHT_LOGICAL_PX),
                 "{mark:?} at {box_height} does not fit the row it stands in"
             );
         }
