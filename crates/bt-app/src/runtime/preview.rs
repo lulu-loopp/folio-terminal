@@ -9,29 +9,28 @@ use crate::{
     FormulaSwitches, FrameTraces, HyperlinkActivation, ImageDrag, ImageGrasp, ImageZoom, ImeOwner,
     LeafId, LeafSeed, MARKDOWN_CHIP_RADIUS_LOGICAL_PX, MarkdownBlockLayout, MarkdownCaretBlock,
     MarkdownCaretPaint, MarkdownCaretSeat, MarkdownLive, MarkdownPage, MarkdownPicture,
-    MarkdownPreedit, MarkdownProseBlock, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest,
-    MarkdownSourceBlock, MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost,
-    PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PagePicture, PasteTarget, PeekCacheEntry,
-    PeekThumbnailTarget, PictureErrand, PictureOnGlass, PictureReach, PictureRefusal,
-    PopoverTrigger, Popup, PresentIntent, PreviewBlockDrag, PreviewBodyDrag, PreviewDocument,
-    PreviewEditPaint, PreviewHeadFrame, PreviewHexHover, PreviewImageState, PreviewLink,
-    PreviewMathSite, PreviewOpenLane, PreviewPane, PreviewPreedit, PreviewRailFrame,
-    PreviewSurface, PreviewTextDrag, PreviewTextSite, PreviewViewState, ProseParagraph,
-    RenameSubject, Reparse, RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest,
-    ScrollThumbState, SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick, TabId,
-    TabRename, TabState, TabTriggerHand, VideoGlance, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb,
-    WindowRuntime, advance_drawn_animations, animation, animation_layer_key,
-    animation_refusal_notice, animations_opened, answer_one_picture, answers_for, attention_trace,
-    build_preview_diff_body, build_preview_markdown_body, build_preview_table_body,
-    build_preview_text_body, clipboard_picture, create_leaf_session, crumb_segments,
-    deliver_clipboard_picture, diagnostics, documents_held_in, documents_held_mut_in,
-    documents_pictures, earliest_deadline, file_peek, files_a_tab_stands_on,
-    files_row_display_name, float, float_dock_label, folded_levels, foot_revealed_label,
-    forget_a_picture, forget_standing_answers, git_panel, graph_key_of, hang_watch, hex_peek,
-    highlight, i18n, image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence,
-    image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale, image_zoom_settles,
-    image_zoom_toggled, ime_owner, input, markdown_empty_page_offset, markdown_prose_composition,
-    markdown_prose_face, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
+    MarkdownPreedit, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest, MarkdownSourceBlock,
+    MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost, PREVIEW_REFUSAL_HOLD, PageArt,
+    PageArtKey, PagePicture, PasteTarget, PeekCacheEntry, PeekThumbnailTarget, PictureErrand,
+    PictureOnGlass, PictureReach, PictureRefusal, PopoverTrigger, Popup, PresentIntent,
+    PreviewBlockDrag, PreviewBodyDrag, PreviewDocument, PreviewEditPaint, PreviewHeadFrame,
+    PreviewHexHover, PreviewImageState, PreviewLink, PreviewMathSite, PreviewOpenLane, PreviewPane,
+    PreviewPreedit, PreviewRailFrame, PreviewSurface, PreviewTextDrag, PreviewTextSite,
+    PreviewViewState, ProseParagraph, RenameSubject, Reparse, RevealTween, RevealedFoot,
+    RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState, SourceBlocks, Step,
+    SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState, TabTriggerHand,
+    VideoGlance, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime,
+    advance_drawn_animations, animation, animation_layer_key, animation_refusal_notice,
+    animations_opened, answer_one_picture, answers_for, attention_trace, build_preview_diff_body,
+    build_preview_markdown_body, build_preview_table_body, build_preview_text_body,
+    clipboard_picture, create_leaf_session, crumb_segments, deliver_clipboard_picture, diagnostics,
+    documents_held_in, documents_held_mut_in, documents_pictures, earliest_deadline, file_peek,
+    files_a_tab_stands_on, files_row_display_name, float, float_dock_label, folded_levels,
+    foot_revealed_label, forget_a_picture, forget_standing_answers, git_panel, graph_key_of,
+    hang_watch, hex_peek, highlight, i18n, image_clamped_pan, image_destination, image_is_pannable,
+    image_meta_sentence, image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale,
+    image_zoom_settles, image_zoom_toggled, ime_owner, input, markdown_empty_page_offset,
+    markdown_prose_composition, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
     markdown_source_offset_at, marks, measure_preview_links, name_is_writable, native_window,
     notice, owe_sharpened_rasters, page_destination, page_foot_flash, page_foot_lead,
     page_source_file, peek_scale_task, picture_channel_owner, picture_errand, picture_files_of,
@@ -46,13 +45,13 @@ use crate::{
     preview_select, preview_selection_bands, preview_tab_index_among, preview_text,
     preview_text_box_at, preview_text_boxes, preview_text_grain, preview_trace, preview_viewport,
     preview_watch, preview_wide_blocks, preview_wrap, preview_wrap_columns, profiles,
-    prose_source_lines, recoverable_clipboard_write, resolve_document_pictures,
-    revealable_preview_file, same_path_ignoring_case, sample_window_place, scroll_bar_layer,
-    scrollback_quota, seats, settings, settle_attention, shown_address, source_opens_as_a_page,
-    step_preview_caret_by_row, strip_animation_tick_is_due, surface_pixels, surface_subject_of,
-    surface_takes_image_zoom, switcher_rows, tab_owes_frame, tab_trailing_targets, table_block,
-    text_field, tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key,
-    video_seat, video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
+    recoverable_clipboard_write, resolve_document_pictures, revealable_preview_file,
+    same_path_ignoring_case, sample_window_place, scroll_bar_layer, scrollback_quota, seats,
+    settings, settle_attention, shown_address, source_opens_as_a_page, step_preview_caret_by_row,
+    strip_animation_tick_is_due, surface_pixels, surface_subject_of, surface_takes_image_zoom,
+    switcher_rows, tab_owes_frame, tab_trailing_targets, table_block, text_field,
+    tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key, video_seat,
+    video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
     wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
 };
 use anyhow::Context;
@@ -7844,7 +7843,7 @@ impl Runtime<'_> {
         // answer below is stale and the key differs on its revision anyway; the
         // parse that follows fills the true one in.
         let live_caret = self.preview_live_caret(surface);
-        let standing_source = self.standing_source_block(surface, live_caret);
+        let standing_source = self.standing_source_span(surface, live_caret);
         let mut key = self.preview_buffer_on(surface).map(|buffer| {
             preview_document_key(
                 buffer,
@@ -7995,11 +7994,19 @@ impl Runtime<'_> {
             else {
                 unreachable!()
             };
-            let was_source = was_source.iter().next().map(MarkdownCaretBlock::index);
+            let was_source = (
+                was_source.iter().next().map(MarkdownCaretBlock::index),
+                was_source.len(),
+            );
             let metrics = seats::preview_markdown_metrics(scale);
             let (left, right) = preview::markdown_measure_box(body, metrics);
-            let source =
-                self.markdown_caret_block(surface, standing_source.as_ref(), blocks, scale);
+            let source = self.markdown_source_blocks(
+                surface,
+                standing_source.as_ref(),
+                blocks,
+                ranges,
+                scale,
+            );
             let clock = trace.map(|_| Instant::now());
             let math = self.resolve_document_math(
                 blocks,
@@ -8059,13 +8066,14 @@ impl Runtime<'_> {
                     blocks: blocks.len(),
                     cause,
                     source: (
-                        was_source,
+                        was_source.0,
                         source.iter().next().map(MarkdownCaretBlock::index),
                     ),
-                    face: source.iter().next().map(|block| match block {
+                    set: (was_source.1, source.len()),
+                    face: preview_trace::SourceFace::of(source.iter().map(|block| match block {
                         MarkdownCaretBlock::Mono(_) => preview_trace::SourceFace::Mono,
                         MarkdownCaretBlock::Prose(_) => preview_trace::SourceFace::Prose,
-                    }),
+                    })),
                     realized: cost.realized,
                     math: math_took.unwrap_or_default(),
                     pictures: pictures_took.unwrap_or_default(),
@@ -8107,7 +8115,7 @@ impl Runtime<'_> {
         // Filled in by the markdown arm alone, and written back into the key
         // under the match: every other view has no blocks and therefore no block
         // the caret could be in.
-        let mut parsed_source: Option<(usize, std::ops::Range<usize>)> = None;
+        let mut parsed_source: Option<preview_live::SourceSpan> = None;
         let doc = match view {
             // The editor's own line model, not [`str::lines`]: a body ending in
             // a break has an empty line after it, the caret can stand on that
@@ -8186,18 +8194,29 @@ impl Runtime<'_> {
                 let parsed = clock.map(|clock| clock.elapsed());
                 let (measure_left, measure_right) = preview::markdown_measure_box(body, metrics);
                 let width = (measure_right - measure_left).max(1.0);
-                // **The caret's own block, now that there is a parse to index**
-                // (§7.1.3q). Written back into the key below, because the key
-                // was built before this parse existed and a key that said `None`
-                // where the document says `Some` would re-lay-out the whole page
-                // on the very next frame.
-                parsed_source = live_caret
-                    .and_then(|caret| {
-                        preview_live::caret_seat(&content, &ranges, caret.caret).block()
-                    })
-                    .and_then(|index| Some((index, ranges.get(index)?.clone())));
-                let source =
-                    self.markdown_caret_block(surface, parsed_source.as_ref(), &blocks, scale);
+                // **The source span, now that there is a parse to index**
+                // (§7.1.3q; owner's ruling 2026-09-23). Written back into the
+                // key below, because the key was built before this parse existed
+                // and a key that said `None` where the document says `Some` would
+                // re-lay-out the whole page on the very next frame.
+                parsed_source = live_caret.and_then(|caret| {
+                    preview_live::selection_span(
+                        &content,
+                        &blocks,
+                        &ranges,
+                        &maps,
+                        &caret,
+                        self.preview_pane(surface)
+                            .and_then(|pane| pane.md_select.as_ref()),
+                    )
+                });
+                let source = self.markdown_source_blocks(
+                    surface,
+                    parsed_source.as_ref(),
+                    &blocks,
+                    &ranges,
+                    scale,
+                );
 
                 let math = self.resolve_document_math(
                     &blocks,
@@ -8248,7 +8267,7 @@ impl Runtime<'_> {
                         preview_trace::DocumentBuild {
                             bytes: content.len(),
                             blocks: blocks.len(),
-                            source: parsed_source.as_ref().map(|(index, _)| *index),
+                            source: source.iter().next().map(MarkdownCaretBlock::index),
                             hits: self.window.markdown_intrinsics.hits,
                             misses: self.window.markdown_intrinsics.misses,
                             parse: parsed,
@@ -8360,11 +8379,12 @@ impl Runtime<'_> {
         Some(self.preview_pane(surface)?.caret)
     }
 
-    /// **The caret's block, cut out of the buffer and dressed in the face its
-    /// kind wears** (§7.1.3q for the one, §7.1.3w for the other).
+    /// **The source blocks, cut out of the buffer and each dressed in the face
+    /// its kind wears** (§7.1.3q for the one, §7.1.3w for the other; the set is
+    /// the owner's ruling of 2026-09-23, [`preview_live::SourceSpan`]).
     ///
     /// Built from the buffer rather than from the parse, because the whole point
-    /// of the caret's block is that it is **the file's own bytes** and not a
+    /// of a source block is that it is **the file's own bytes** and not a
     /// rendering of them: the block beside it in `blocks` has already lost its
     /// hashes, its pipes and its indent.
     ///
@@ -8374,57 +8394,29 @@ impl Runtime<'_> {
     /// those the alignment is the content and monospace is the honest face for
     /// it. Nothing else about this depends on the kind — the bytes, the range
     /// and the line breaks are the same bytes, range and breaks either way.
-    fn markdown_caret_block(
+    ///
+    /// Every block the span draws is built, which is a copy of the bytes it
+    /// covers: one pass over the selection per change of span, the same order
+    /// as the whole-document passes a re-flow already makes.
+    fn markdown_source_blocks(
         &self,
         surface: PreviewSurface,
-        source: Option<&(usize, std::ops::Range<usize>)>,
+        span: Option<&preview_live::SourceSpan>,
         blocks: &[preview::MarkdownBlock],
+        ranges: &[std::ops::Range<usize>],
         scale: f32,
     ) -> SourceBlocks {
-        let Some((index, range)) = source else {
+        let (Some(span), Some(content)) = (
+            span,
+            self.preview_buffer_on(surface)
+                .and_then(|buffer| buffer.content.as_deref()),
+        ) else {
             return SourceBlocks::default();
         };
-        let Some(content) = self
-            .preview_buffer_on(surface)
-            .and_then(|buffer| buffer.content.as_deref())
-        else {
-            return SourceBlocks::default();
-        };
-        let text = preview_live::block_source(content, range).to_owned();
-        let Some(block) = blocks.get(*index) else {
-            return SourceBlocks::default();
-        };
-        let Some(heading) = markdown_prose_face(block) else {
-            let metrics = seats::preview_text_metrics(scale);
-            return SourceBlocks::new(vec![MarkdownCaretBlock::Mono(MarkdownSourceBlock {
-                index: *index,
-                range: range.clone(),
-                lines: preview_edit::display_lines(&text),
-                text,
-                font_size: metrics.font_size,
-                line_height: metrics.line_height,
-                advance: self
-                    .preview_pane(surface)
-                    .map_or(0.0, |pane| pane.mono_advance),
-            })]);
-        };
-        let metrics = seats::preview_markdown_metrics(scale);
-        let (font_size, line_height) = match heading {
-            Some(level) => (
-                metrics.heading_font(level),
-                metrics.heading_line_height(level),
-            ),
-            None => (metrics.font_size, metrics.line_height),
-        };
-        SourceBlocks::new(vec![MarkdownCaretBlock::Prose(MarkdownProseBlock {
-            index: *index,
-            range: range.clone(),
-            lines: prose_source_lines(&text),
-            text,
-            heading: heading.is_some(),
-            font_size,
-            line_height,
-        })])
+        let advance = self
+            .preview_pane(surface)
+            .map_or(0.0, |pane| pane.mono_advance);
+        SourceBlocks::build(content, span, blocks, ranges, scale, advance)
     }
 
     /// **Find every picture this page needs, and ask for the ones that are

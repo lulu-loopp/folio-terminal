@@ -34409,6 +34409,107 @@ fn a_source_block_bands_its_rows_from_the_band_it_is_handed() {
     }
 }
 
+/// RED (owner's ruling 2026-09-23, B) — **every block in the source set is
+/// drawn from its own bytes and banded, and only the caret's block carries the
+/// caret.**
+///
+/// The painter's half of the ruling. A selection from the first block into the
+/// third draws both as their source rows with the band across each, and a
+/// block between them that is not in the set — as a table the selection only
+/// swept is not — stays rendered. The caret stands in exactly one block: the
+/// third, where the selection's head is.
+///
+/// MUTATION: draw the caret from `MarkdownCaretSeat::Source` without matching
+/// its block (the one-block painter) and the first block draws a second caret
+/// at the same line and column.
+#[test]
+fn every_block_in_the_source_set_is_drawn_as_source_and_only_one_holds_the_caret() {
+    let metrics = seats::preview_markdown_metrics(1.0);
+    let palette = bt_render::chrome_palette();
+    let body = [0.0, 0.0, 400.0, 400.0];
+    let blocks = prose(&["first", "middle", "last"]);
+    let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+    let art = PageArt {
+        math: &DocumentMath::default(),
+        pictures: &DocumentPictures::default(),
+        theme: bt_render::Theme::Dark,
+    };
+    let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+        line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+    };
+    let set = SourceBlocks::new(vec![
+        mono_caret_block(0, 0, "| one |"),
+        mono_caret_block(2, 20, "| three |"),
+    ]);
+    let layout = lay_markdown_out(&blocks, &intrinsic, &set, 400.0, metrics, art, &mut shaper);
+    let caret = MarkdownCaretPaint {
+        seat: MarkdownCaretSeat::Source {
+            block: 2,
+            line: 0,
+            column: 3,
+        },
+        lit: true,
+        selection: 2..23,
+        band: 2..23,
+        caret_width: 2.0,
+        preedit: None,
+    };
+    let built = build_preview_markdown_body(
+        body,
+        metrics,
+        [0.0, 0.0],
+        rested_bars(&[]),
+        MarkdownPage {
+            blocks: &blocks,
+            intrinsic: &intrinsic,
+            layout: &layout,
+            live: MarkdownLive {
+                source: &set,
+                caret: Some(&caret),
+            },
+        },
+        &palette,
+        art,
+    );
+    let texts: Vec<String> = built
+        .body
+        .paragraphs
+        .iter()
+        .map(|paragraph| paragraph.runs.iter().map(|run| run.text.as_str()).collect())
+        .collect();
+    assert!(
+        texts.iter().any(|text| text == "| one |") && texts.iter().any(|text| text == "| three |"),
+        "both source blocks are drawn as their own bytes: {texts:?}",
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("middle")),
+        "and the block between them is drawn rendered: {texts:?}",
+    );
+    let top_of = |index: usize| metrics.padding_y + layout[index].top;
+    let bands: Vec<[f32; 4]> = built
+        .body
+        .quads
+        .iter()
+        .filter(|quad| quad.color == palette.preview_selection)
+        .map(|quad| quad.rect)
+        .collect();
+    for index in [0, 2] {
+        assert!(
+            bands.iter().any(|band| band[1] == top_of(index)),
+            "block {index} is banded on its own row: {bands:?}",
+        );
+    }
+    let carets: Vec<[f32; 4]> = built
+        .body
+        .quads
+        .iter()
+        .filter(|quad| quad.color == palette.preview_caret)
+        .map(|quad| quad.rect)
+        .collect();
+    assert_eq!(carets.len(), 1, "one caret on the page: {carets:?}");
+    assert_eq!(carets[0][1], top_of(2), "standing in the third block");
+}
+
 /// RED (preview report 2026-09-23, A) — **the source block's band is chosen by
 /// one function and drawn from it in both faces.**
 ///
@@ -34823,11 +34924,10 @@ fn the_caret_changing_block_is_a_layout_change_and_not_a_parse_change() {
         encoding: preview::HeadEncoding::Utf8,
         lossy: false,
     });
-    let (_, ranges) = preview::parse_markdown_ranged(source);
+    let (blocks, ranges) = preview::parse_markdown_ranged(source);
     let key = |caret: Option<usize>| {
         let seat = caret.and_then(|caret| {
-            let index = preview_live::caret_seat(source, &ranges, caret).block()?;
-            Some((index, ranges[index].clone()))
+            preview_live::source_span(source, &ranges, &blocks, caret..caret, caret)
         });
         preview_document_key(
             &buffer,
@@ -34869,6 +34969,74 @@ fn the_caret_changing_block_is_a_layout_change_and_not_a_parse_change() {
         heading,
         key(None),
         "a page with no caret has no source block"
+    );
+}
+
+/// RED (owner's ruling 2026-09-23) — **a selection that reaches into another
+/// block is a layout change, and one that stays inside its block is not.**
+///
+/// The key carries the source span, so the page is laid out again exactly when
+/// the set of blocks drawn as source moves — never per character a
+/// Shift+arrow adds inside a block, and never a re-parse.
+///
+/// MUTATION ①: key the source on the caret's block alone and the first
+/// assertion goes red — Shift+Down into the next paragraph leaves it rendered.
+/// MUTATION ②: key it on the selection's bytes rather than its blocks and the
+/// second goes red — every Shift+arrow re-lays-out the page.
+#[test]
+fn a_selection_reaching_another_block_is_a_layout_change_and_not_a_parse_change() {
+    let source = "# head\n\nfirst paragraph\n\nsecond paragraph\n";
+    let mut buffer = preview::PreviewBuffer::new(
+        preview::PreviewSource::file(r"C:\w\live.md"),
+        "live.md".to_owned(),
+    );
+    buffer.accept(preview::HeadOutcome::Read {
+        text: source.to_owned(),
+        truncated: false,
+        mtime: None,
+        content_says_text: true,
+        encoding: preview::HeadEncoding::Utf8,
+        lossy: false,
+    });
+    let (blocks, ranges, maps) = preview::parse_markdown_mapped(source);
+    let key = |anchor: usize, caret: usize| {
+        let caret = preview_edit::EditCaret {
+            anchor,
+            caret,
+            ..preview_edit::EditCaret::default()
+        };
+        preview_document_key(
+            &buffer,
+            false,
+            1200.0,
+            1.0,
+            PageArtKey {
+                math_generation: 0,
+                body_ink: [0, 0, 0],
+                picture_generation: 0,
+                picture_reach: PictureReach::from_the_top(),
+                theme: bt_render::Theme::Dark,
+            },
+            preview_live::selection_span(source, &blocks, &ranges, &maps, &caret, None),
+        )
+    };
+    let start = ranges[1].start + 2;
+    let within = key(start, start + 4);
+    let across = key(start, ranges[2].start + 3);
+    assert_ne!(
+        within, across,
+        "① the selection reached the second paragraph, so it is drawn as source"
+    );
+    assert_eq!(within.parse, across.parse, "and nothing is parsed again");
+    assert_eq!(
+        within,
+        key(start, start + 9),
+        "② a selection growing inside its own block is not a layout change",
+    );
+    assert_eq!(
+        within,
+        key(start, start),
+        "and neither is letting go of it: the caret's block is the same one",
     );
 }
 

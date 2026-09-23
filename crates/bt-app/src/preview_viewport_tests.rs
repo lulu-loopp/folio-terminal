@@ -36,6 +36,12 @@ pub(crate) struct Harness {
     pub offsets: Vec<f32>,
     /// What the last [`Self::rebuild`]'s realize pass said it measured.
     pub realized: usize,
+    /// **Where the caret's selection is anchored**, when it has one: the next
+    /// rebuild with a caret draws every block from here to the caret as source,
+    /// through the window's own producers ([`preview_live::source_span`],
+    /// [`SourceBlocks::build`]). `None` is a collapsed caret, which the
+    /// harness has always drawn as its one block.
+    pub select_from: Option<usize>,
     cache: preview_wrap::WindowCache,
     intrinsic: MarkdownIntrinsicCache,
     measure: Cpu,
@@ -56,6 +62,7 @@ impl Default for Harness {
             scale: 1.0,
             offsets: Vec::new(),
             realized: 0,
+            select_from: None,
             cache: preview_wrap::WindowCache::default(),
             intrinsic: MarkdownIntrinsicCache::default(),
             measure: Cpu::default(),
@@ -82,35 +89,57 @@ impl Harness {
         drop(timer);
         let timer = preview_typing::Timer::new("layout");
         let mut anchor = edits.and_then(|_| capture(&old, self.view, &mut self.measure));
-        let source = SourceBlocks::from(caret.and_then(|at| {
-            preview_typing::source_at(text, &blocks, &ranges, at).or_else(|| {
-                let index = preview_live::caret_seat(text, &ranges, at).block()?;
-                let raw = preview_live::block_source(text, &ranges[index]).to_owned();
-                let metrics = seats::preview_text_metrics(self.scale);
-                let advance = self.measure.width(
-                    &[bt_render::PreviewRun {
-                        text: "M".into(),
-                        color: [0; 3],
-                        mono: true,
-                        bold: false,
-                        italic: false,
-                        font_scale: 1.0,
-                        inline_box_px: None,
-                    }],
-                    metrics.font_size,
-                    metrics.line_height,
-                );
-                Some(Box::new(MarkdownCaretBlock::Mono(MarkdownSourceBlock {
-                    index,
-                    range: ranges[index].clone(),
-                    lines: preview_edit::display_lines(&raw),
-                    text: raw,
-                    font_size: metrics.font_size,
-                    line_height: metrics.line_height,
-                    advance,
-                })))
-            })
-        }));
+        let selected = caret.zip(self.select_from).map(|(at, from)| {
+            let metrics = seats::preview_text_metrics(self.scale);
+            let advance = self.measure.width(
+                &[bt_render::PreviewRun {
+                    text: "M".into(),
+                    color: [0; 3],
+                    mono: true,
+                    bold: false,
+                    italic: false,
+                    font_scale: 1.0,
+                    inline_box_px: None,
+                }],
+                metrics.font_size,
+                metrics.line_height,
+            );
+            preview_live::source_span(text, &ranges, &blocks, from.min(at)..from.max(at), at)
+                .map_or_else(SourceBlocks::default, |span| {
+                    SourceBlocks::build(text, &span, &blocks, &ranges, self.scale, advance)
+                })
+        });
+        let source = selected.unwrap_or_else(|| {
+            SourceBlocks::from(caret.and_then(|at| {
+                preview_typing::source_at(text, &blocks, &ranges, at).or_else(|| {
+                    let index = preview_live::caret_seat(text, &ranges, at).block()?;
+                    let raw = preview_live::block_source(text, &ranges[index]).to_owned();
+                    let metrics = seats::preview_text_metrics(self.scale);
+                    let advance = self.measure.width(
+                        &[bt_render::PreviewRun {
+                            text: "M".into(),
+                            color: [0; 3],
+                            mono: true,
+                            bold: false,
+                            italic: false,
+                            font_scale: 1.0,
+                            inline_box_px: None,
+                        }],
+                        metrics.font_size,
+                        metrics.line_height,
+                    );
+                    Some(Box::new(MarkdownCaretBlock::Mono(MarkdownSourceBlock {
+                        index,
+                        range: ranges[index].clone(),
+                        lines: preview_edit::display_lines(&raw),
+                        text: raw,
+                        font_size: metrics.font_size,
+                        line_height: metrics.line_height,
+                        advance,
+                    })))
+                })
+            }))
+        });
         let frame = preview_wrap::Frame::new(self.width, self.scale, 0);
         let mut pass = self.cache.prepare(&old, edits.is_some(), frame);
         let (mut state, mut layout, mut intrinsic) = State::reconcile(Reconcile {
@@ -315,11 +344,40 @@ fn a_realize_pass_reports_the_blocks_it_measured() {
     // The window's no-parse arm hands the geometry pass the edits since the
     // key being replaced, which for a caret move is none at all.
     reset();
-    h.rebuild(text, Some(&[]), Some(ranges[3].start));
+    h.rebuild(text.clone(), Some(&[]), Some(ranges[3].start));
     assert_eq!(h.realized, work("realized blocks"), "a flip");
     assert_eq!(
         h.realized, 2,
         "the block the caret left and the block it entered, and no other",
+    );
+    // **A selection reaching two more blocks measures those two** (owner's
+    // ruling 2026-09-23): blocks 3, 4 and 5 are source, and 3 already was.
+    h.select_from = Some(ranges[3].start + 1);
+    reset();
+    h.rebuild(text.clone(), Some(&[]), Some(ranges[5].start + 1));
+    assert_eq!(h.realized, work("realized blocks"), "a widened span");
+    assert_eq!(
+        h.realized, 2,
+        "the two blocks the selection reached into, and not the one it began in",
+    );
+    let PreviewDocument::Markdown { source, .. } = &h.doc else {
+        panic!()
+    };
+    assert_eq!(
+        source
+            .iter()
+            .map(MarkdownCaretBlock::index)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5],
+    );
+    // And letting go of it puts the two back.
+    h.select_from = None;
+    reset();
+    h.rebuild(text, Some(&[]), Some(ranges[5].start + 1));
+    assert_eq!(h.realized, work("realized blocks"), "a cleared selection");
+    assert_eq!(
+        h.realized, 2,
+        "blocks 3 and 4 go back to rendered; 5, the caret's, stays source",
     );
 }
 

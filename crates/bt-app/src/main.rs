@@ -2553,10 +2553,89 @@ impl SourceBlocks {
         self.0.iter()
     }
 
+    /// How many blocks are drawn as source.
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
     /// Whether no block is drawn as source.
     fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+impl SourceBlocks {
+    /// **The set a span draws, cut out of the buffer** — every block
+    /// [`preview_live::SourceSpan::draws`], each in the face its kind wears
+    /// (`Runtime::markdown_source_blocks` is the window's call of it).
+    ///
+    /// `advance` is the monospace face's column at this scale, which the window
+    /// measured and a monospace block folds by.
+    fn build(
+        content: &str,
+        span: &preview_live::SourceSpan,
+        blocks: &[preview::MarkdownBlock],
+        ranges: &[std::ops::Range<usize>],
+        scale: f32,
+        advance: f32,
+    ) -> Self {
+        Self::new(
+            span.drawn(blocks)
+                .filter_map(|index| {
+                    markdown_source_block(
+                        content,
+                        index,
+                        ranges.get(index)?,
+                        blocks.get(index)?,
+                        scale,
+                        advance,
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+/// **One block, cut out of the buffer and dressed in the face its kind wears**
+/// — [`SourceBlocks::build`] for one index.
+fn markdown_source_block(
+    content: &str,
+    index: usize,
+    range: &std::ops::Range<usize>,
+    block: &preview::MarkdownBlock,
+    scale: f32,
+    advance: f32,
+) -> Option<MarkdownCaretBlock> {
+    let text = preview_live::block_source(content, range).to_owned();
+    let Some(heading) = markdown_prose_face(block) else {
+        let metrics = seats::preview_text_metrics(scale);
+        return Some(MarkdownCaretBlock::Mono(MarkdownSourceBlock {
+            index,
+            range: range.clone(),
+            lines: preview_edit::display_lines(&text),
+            text,
+            font_size: metrics.font_size,
+            line_height: metrics.line_height,
+            advance,
+        }));
+    };
+    let metrics = seats::preview_markdown_metrics(scale);
+    let (font_size, line_height) = match heading {
+        Some(level) => (
+            metrics.heading_font(level),
+            metrics.heading_line_height(level),
+        ),
+        None => (metrics.font_size, metrics.line_height),
+    };
+    Some(MarkdownCaretBlock::Prose(MarkdownProseBlock {
+        index,
+        range: range.clone(),
+        lines: prose_source_lines(&text),
+        text,
+        heading: heading.is_some(),
+        font_size,
+        line_height,
+    }))
 }
 
 impl From<Option<Box<MarkdownCaretBlock>>> for SourceBlocks {
@@ -4089,9 +4168,12 @@ struct PreviewDocumentKey {
     /// exactly what these are: nothing about the document changed, only how tall
     /// one of its blocks now is. So an arrival re-flows and does not re-parse.
     art: PageArtKey,
-    /// **Which block is drawn as source, and what its bytes are** (§7.1.3q):
-    /// the caret's block by index and by range, or `None` when no caret stands
-    /// on this surface or it stands in the tissue between two blocks.
+    /// **Which blocks are drawn as source, and what their bytes are** (§7.1.3q,
+    /// widened on 2026-09-23 from the caret's block to every block its
+    /// selection touches): the run by index and by range, and the one table
+    /// the caret has opened ([`preview_live::SourceSpan`]); `None` when no
+    /// caret stands on this surface, or it stands in the tissue between two
+    /// blocks with nothing selected.
     ///
     /// **On the width's side of the split, and that is the whole placement
     /// argument.** The caret moving from one block to the next changes not one
@@ -4114,8 +4196,8 @@ struct PreviewDocumentKey {
     /// then re-lay-out the whole document per keypress for a body that is
     /// identical; where the caret sits *inside* its block is a paint-time
     /// question ([`MarkdownCaretPaint`]) and the page is rebuilt every frame
-    /// anyway.
-    source: Option<(usize, std::ops::Range<usize>)>,
+    /// anyway. A selection re-keys only when it reaches into another block.
+    source: Option<preview_live::SourceSpan>,
 }
 
 /// The half of [`PreviewDocumentKey`] that has **nothing to do with the pane's
@@ -5014,7 +5096,7 @@ fn preview_document_key(
     body_width_px: f32,
     scale: f32,
     art: PageArtKey,
-    source: Option<(usize, std::ops::Range<usize>)>,
+    source: Option<preview_live::SourceSpan>,
 ) -> PreviewDocumentKey {
     PreviewDocumentKey {
         parse: PreviewParseKey {
@@ -45106,23 +45188,38 @@ impl Runtime<'_> {
         }
     }
 
-    /// Which block of the parse **already on this surface** holds that caret.
+    /// Which blocks of the parse **already on this surface** that caret and its
+    /// selection draw as source ([`preview_live::selection_span`], owner's
+    /// ruling 2026-09-23).
     ///
     /// The ranges are the standing document's, so this is true for exactly as
     /// long as [`PreviewParseKey`] is — which is the only span of time the answer
     /// is asked for outside a parse. See [`PreviewDocumentKey::source`].
-    fn standing_source_block(
+    fn standing_source_span(
         &self,
         surface: PreviewSurface,
         caret: Option<preview_edit::EditCaret>,
-    ) -> Option<(usize, std::ops::Range<usize>)> {
+    ) -> Option<preview_live::SourceSpan> {
         let caret = caret?;
         let content = self.preview_buffer_on(surface)?.content.as_deref()?;
-        let PreviewDocument::Markdown { ranges, .. } = &self.preview_pane(surface)?.doc else {
+        let pane = self.preview_pane(surface)?;
+        let PreviewDocument::Markdown {
+            blocks,
+            ranges,
+            maps,
+            ..
+        } = &pane.doc
+        else {
             return None;
         };
-        let index = preview_live::caret_seat(content, ranges, caret.caret).block()?;
-        Some((index, ranges.get(index)?.clone()))
+        preview_live::selection_span(
+            content,
+            blocks,
+            ranges,
+            maps,
+            &caret,
+            pane.md_select.as_ref(),
+        )
     }
 }
 
