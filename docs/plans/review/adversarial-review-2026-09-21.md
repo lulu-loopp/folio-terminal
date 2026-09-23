@@ -263,6 +263,9 @@ of an ordinary small fix stop at two rounds.
 - **The graphics-dependency precondition from D2-1a** — the two swapchain arms must be given a
   consecutive-failure counter and a log line **before** the graphics library is upgraded, because
   the loop is unreachable only for as long as the pinned backends refuse to produce those states.
+- **The UI's deviations from its written spec** (added 2026-09-22, not from this audit) — 49
+  deviations over 100 constants, brought to the rule values of `docs/design/UI-SPEC.md`, one ticket
+  per group at the end of `docs/design/UI-DEVIATIONS.md`, split between 0.4.4 and 0.4.5.
 
 ## Unresolved
 

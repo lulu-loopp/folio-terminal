@@ -1,6 +1,6 @@
 # Where the design files came from
 
-43 tracked files in `docs/design/`, plus the five in `assets/app-icon/` that the
+45 tracked files in `docs/design/`, plus the five in `assets/app-icon/` that the
 build reads — the mark and the scripts that draw it left this directory when the
 tree was rearranged, and their provenance is the same question, so it is answered
 here rather than in a second document. Each file is one of three things — **own**
@@ -104,6 +104,13 @@ from the entries hand-drawn at 16, 20, 24, 32, 40, 48 and 64; and the source has
 no pixels above 256, so the three slots above it are left absent rather than
 filled with an upscale, and macOS scales the 256 for every reader instead. Both
 are the icon source's to fix, not the packaging's.
+
+## The written spec
+
+| File | | |
+|---|---|---|
+| `UI-SPEC.md` | **own** | The current UI's rules, read off the shipped code's constants (2026-09-22). Written here, from the code; it copies nothing. |
+| `UI-DEVIATIONS.md` | **own** | Its companion: every constant that does not follow those rules yet, ranked, with the ticket groups. |
 
 ## Nothing here is undetermined
 
