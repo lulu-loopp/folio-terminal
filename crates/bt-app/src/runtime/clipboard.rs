@@ -2,13 +2,13 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteOffer, PasteTarget,
+    Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey, PasteOffer, PasteTarget,
     PreparedClipboardPaste, Runtime, StagedPaste, UserInputKind, copy_selection, hang_watch,
     input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_body,
-    paste_offer_is_kept, paste_target_is_live, pending_paste_in, prepare_clipboard_paste,
-    prepare_dropped_paste, profile_banner_name, recoverable_clipboard_write, restore, seats,
-    stage_paste, take_pending_paste, text_field, toast, write_selection_text,
-    write_terminal_clipboard_text,
+    paste_card_step, paste_offer_is_kept, paste_target_is_live, pending_paste_in,
+    prepare_clipboard_paste, prepare_dropped_paste, profile_banner_name,
+    recoverable_clipboard_write, restore, seats, stage_paste, take_pending_paste, text_field,
+    toast, write_selection_text, write_terminal_clipboard_text,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -501,12 +501,33 @@ impl Runtime<'_> {
         pending_paste_in(tab).map(|(seat, _)| seat)
     }
 
-    /// **The answer `Enter` gives the card that is up**, or `None` while no paste waits (0.4.4
-    /// ticket 45) — read off the pending paste, like the card, so the key and the accented word
-    /// cannot disagree.
-    pub(crate) fn paste_card_default(&self) -> Option<PasteAnswer> {
+    /// **The word `Enter` activates on the card that is up**, or `None` while no paste waits —
+    /// read off the pending paste, like the card, so the key and the ring cannot disagree.
+    pub(crate) fn paste_card_focus(&self) -> Option<PasteAnswer> {
         let tab = self.window.tabs.get(self.window.active_tab)?;
-        pending_paste_in(tab).map(|(_, pending)| pending.default_answer())
+        pending_paste_in(tab).map(|(_, pending)| pending.focus())
+    }
+
+    /// **A key on the card** ([`paste_card_step`]): a focus move is spent on the pending paste
+    /// and repainted, and an answer is spent.
+    pub(in crate::runtime) fn press_paste_card_key(&mut self, key: PasteCardKey) -> Result<()> {
+        let active = self.window.active_tab;
+        let Some(pending) = self.window.tabs[active]
+            .sessions
+            .values_mut()
+            .find_map(|leaf| leaf.pending_paste.as_mut())
+        else {
+            return Ok(());
+        };
+        match paste_card_step(pending, key) {
+            Some(answer) => self.answer_paste_card(answer),
+            None => {
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// **Spend the card's answer** — `Enter`, `Tab`, `Esc`, or a press on it.
@@ -556,10 +577,13 @@ impl Runtime<'_> {
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let lines = pending.lines;
-        let default = match pending.default_answer() {
+        let word = |answer| match answer {
             PasteAnswer::Join => restore::PasteCardTarget::Join,
             PasteAnswer::RunLineByLine | PasteAnswer::Cancel => restore::PasteCardTarget::Run,
         };
+        let default = word(pending.default_answer());
+        // The ring stands where the keyboard moved the focus, and only once it has.
+        let ring = pending.moved_focus.map(word);
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let content = restore::paste_card_content(
             lines,
@@ -571,6 +595,6 @@ impl Runtime<'_> {
                 renderer.measure_chrome_label(gpu, text, size, weight, 0.0, false)
             },
         );
-        Some(restore::paste_card_layout(&content, width, height, scale))
+        Some(restore::paste_card_layout(&content, width, height, scale).with_ring(ring))
     }
 }

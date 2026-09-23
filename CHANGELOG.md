@@ -25,6 +25,9 @@ All notable changes to Folio are recorded here. The format follows
 - When a pasted block is one command wrapped across lines (each line but the
   last ends with `^` in cmd, a backtick in PowerShell or `\` in a Unix
   shell), the paste card's Enter joins it into one line and drops those marks.
+- The multi-line paste card works like any two-button dialog: Tab and
+  Shift+Tab move between Join and Run line by line, Enter presses the
+  highlighted one, Esc cancels.
 - In a Markdown preview you are editing, every block a selection touches shows
   its Markdown, as in Obsidian; a table the selection only passes through stays
   rendered. The blocks change when you let go of the mouse, not while you drag.

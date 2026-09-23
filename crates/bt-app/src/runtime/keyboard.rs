@@ -1162,15 +1162,16 @@ impl Runtime<'_> {
         // read the count, and the informed Enter is the point (2026-09-22) — `Tab` joins them and
         // `Esc` cancels. Every other key is swallowed and the card stays up.
         //
-        // `Enter` is the card's default, which is `Join` for a block wrapped with the shell's
-        // continuation mark (0.4.4 ticket 45).
+        // Since the owner's ruling of 2026-09-23 it is a standard two-button dialog: `Tab` and
+        // `Shift+Tab` move the focus, `Enter` activates the focused word, and the focus opens on
+        // the default — `Join` for a block wrapped with the shell's continuation mark (0.4.4
+        // ticket 45).
         if self.paste_card_seat().is_some() {
             if !event.repeat
-                && let Some(default) = self.paste_card_default()
-                && let Some(answer) =
-                    paste_card_key(&event.logical_key, self.window.modifiers, default)
+                && let Some(focus) = self.paste_card_focus()
+                && let Some(key) = paste_card_key(&event.logical_key, self.window.modifiers, focus)
             {
-                self.answer_paste_card(answer)?;
+                self.press_paste_card_key(key)?;
             }
             return Ok(());
         }

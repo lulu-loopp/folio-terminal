@@ -11827,3 +11827,10 @@ Owner's ruling 2026-09-23 on the report of three screenshots taken while editing
 **The join.** For a wrapped block the join takes each recognised mark off with the whitespace around it, drops a continuation line's indent, and joins the lines with one space (`input::join_continued_lines`): `dir ^` / `  /b ^` / `  /s` becomes `dir /b /s`. A block with no marks joins as before (`input::join_lines`). Neither sends an Enter.
 
 **One fact.** The mark is stored on `LeafSession::pending_paste` beside the text, so the key (`Runtime::paste_card_default`), the card's arrangement and the join all read one answer. No setting and no new words.
+
+### 2026-09-23 — The paste card is a standard two-button dialog: Tab moves the focus and Enter activates it
+Owner's ruling 2026-09-23, folded into 0.4.4 ticket 45. The multi-line paste lineage: §7.1.5i and the 2026-09-23 entries for tickets 02 and 45 above. **Supersedes** the 2026-09-22 ruling recorded in ticket 02's entry, *The answers* ("`Tab` joins it"), and the sentence of the entry just above that says "`Tab` stays the Join key either way".
+
+**The keys.** `Tab` and `Shift+Tab` move the focus between *Join into one line* and *Run line by line*. With two words, both directions go to the other word and wrap. `Enter` activates the word that has the focus, and `Esc` or `×` cancels wherever the focus is. Any other key, and `Tab` with Ctrl or Alt held, still reaches nothing (`paste_card_key`, which answers `PasteCardKey::Answer` or `PasteCardKey::Focus`).
+
+**Where the focus starts and lives.** The focus opens on the default the continuation-mark rule chose (`PendingPaste::default_answer`). Where a key moved it is `PendingPaste::moved_focus`, on the pending paste itself, so the next paste opens on its own default and no code resets it. The key rung (`Runtime::press_paste_card_key` → `paste_card_step`) and the card read the same field. The accent fill stays on the default word, as the recommended answer. Once a key has moved the focus, the focused word wears the first-run card's focus ring (`first_run::button_focus_ring`, `:focus-visible`).

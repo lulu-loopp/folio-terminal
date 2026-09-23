@@ -1007,6 +1007,12 @@ struct PendingPaste {
     /// line but the last ends with it ([`input::continued_by`], 0.4.4 ticket 45). Then the card's
     /// default is `Join`, and the join takes the marks off ([`paste_answer_text`]).
     continued: Option<char>,
+    /// **Where the keyboard moved the card's focus**, or `None` while it stands where the card
+    /// opened it — on the default (owner's ruling 2026-09-23: the card is a standard two-button
+    /// dialog). Held here rather than on the window so a new paste opens on its own default with
+    /// no code written to reset it. `Some` is also `:focus-visible`: the ring is drawn once a
+    /// key has moved the focus.
+    moved_focus: Option<PasteAnswer>,
     /// The write's name in the error log, from the door that prepared it.
     context: &'static str,
 }
@@ -1021,6 +1027,12 @@ impl PendingPaste {
         } else {
             PasteAnswer::RunLineByLine
         }
+    }
+
+    /// **The word `Enter` activates** — where the keyboard moved the focus, else the default the
+    /// card opened on (owner's ruling 2026-09-23).
+    fn focus(&self) -> PasteAnswer {
+        self.moved_focus.unwrap_or_else(|| self.default_answer())
     }
 }
 
@@ -1089,6 +1101,7 @@ fn stage_paste(
                     text,
                     lines,
                     continued,
+                    moved_focus: None,
                     context,
                 });
             }
@@ -1115,11 +1128,9 @@ fn take_pending_paste(tab: &mut TabState) -> Option<PendingPaste> {
 /// **The three answers the paste card takes** (owner's rulings 2026-09-22 and 2026-09-23).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PasteAnswer {
-    /// Today's bytes, one command per line — `Enter`'s answer unless the block is one command
-    /// wrapped across lines ([`PendingPaste::default_answer`]).
+    /// Today's bytes, one command per line.
     RunLineByLine,
-    /// `Tab`, or a press on the word, or `Enter` for a wrapped block: the lines joined by spaces,
-    /// and no Enter.
+    /// The lines joined by spaces, and no Enter.
     Join,
     /// `Esc` or `×`: nothing is sent and the clipboard is not touched.
     Cancel,
@@ -1137,25 +1148,50 @@ fn paste_answer_text(pending: &PendingPaste, answer: PasteAnswer) -> Option<Stri
     }
 }
 
-/// **The only keys the card answers** (owner's ruling 2026-09-23: "the card is modal and answers
-/// only Enter, the Join key and Esc"). Everything else — a letter, a chord, `Ctrl+V` again, a
-/// modified `Enter` — is `None`, reaches nothing, and leaves the card up.
-///
-/// `Enter` gives the card's `default` ([`PendingPaste::default_answer`]); `Tab` is the Join key
-/// whichever word is the default.
+/// **What a key does on the paste card** — answer it, or move its focus.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PasteCardKey {
+    /// Spend this answer.
+    Answer(PasteAnswer),
+    /// Put the focus on this word.
+    Focus(PasteAnswer),
+}
+
+/// **The only keys the card answers** — a standard two-button dialog (owner's ruling
+/// 2026-09-23, superseding the 2026-09-22 "`Tab` = Join"): `Tab` and `Shift+Tab` move the focus
+/// between the two words (with two words, both directions wrap to the other one), `Enter`
+/// activates the word that has the focus, and `Esc` cancels. Everything else — a letter, a chord,
+/// `Ctrl+V` again, a modified `Enter` — is `None`, reaches nothing, and leaves the card up.
 fn paste_card_key(
     key: &Key,
     modifiers: ModifiersState,
-    default: PasteAnswer,
-) -> Option<PasteAnswer> {
-    if !modifiers.is_empty() {
-        return None;
-    }
+    focus: PasteAnswer,
+) -> Option<PasteCardKey> {
+    let other = match focus {
+        PasteAnswer::RunLineByLine => PasteAnswer::Join,
+        PasteAnswer::Join | PasteAnswer::Cancel => PasteAnswer::RunLineByLine,
+    };
     match key {
-        Key::Named(NamedKey::Enter) => Some(default),
-        Key::Named(NamedKey::Tab) => Some(PasteAnswer::Join),
-        Key::Named(NamedKey::Escape) => Some(PasteAnswer::Cancel),
+        Key::Named(NamedKey::Tab) if modifiers.is_empty() || modifiers == ModifiersState::SHIFT => {
+            Some(PasteCardKey::Focus(other))
+        }
+        _ if !modifiers.is_empty() => None,
+        Key::Named(NamedKey::Enter) => Some(PasteCardKey::Answer(focus)),
+        Key::Named(NamedKey::Escape) => Some(PasteCardKey::Answer(PasteAnswer::Cancel)),
         _ => None,
+    }
+}
+
+/// **One key on the card, spent on the pending paste** — the focus moves on the paste itself, and
+/// an answer comes back for the caller to spend. The whole of the card's keyboard, so a test runs
+/// the very step the window runs.
+fn paste_card_step(pending: &mut PendingPaste, key: PasteCardKey) -> Option<PasteAnswer> {
+    match key {
+        PasteCardKey::Answer(answer) => Some(answer),
+        PasteCardKey::Focus(to) => {
+            pending.moved_focus = Some(to);
+            None
+        }
     }
 }
 

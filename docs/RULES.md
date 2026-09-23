@@ -264,11 +264,18 @@ otherwise Folio's cleaned bytes with each break a Shift+Enter record
 (`input::input_line_bytes`). Only the clipboard's own text takes it; a paste the
 clipboard is rewritten under within ~20 ms is an accepted limit. A PowerShell
 pane missing any fact (no marks, a program running, macOS) gets the card. The card, centred on the
-window, says `N lines → <shell>`; `Enter` = *Run line by line* (today's bytes),
-`Tab` = *Join into one line* (`input::join_lines`: one space per run of breaks,
-no `\r`, no invented separator), `Esc` or `×` = nothing sent, clipboard
-untouched. **It is modal (2026-09-23)**: it answers only those three keys, every
-other key reaches nothing, and a drop under it is refused. The pending paste is
+window, says `N lines → <shell>` and offers *Run line by line* (today's bytes)
+and *Join into one line* (`input::join_lines`: one space per run of breaks, no
+`\r`, no invented separator; for a block wrapped with the shell's continuation
+mark, `input::join_continued_lines` also drops the marks). **It is a standard
+two-button dialog (ruling 2026-09-23, superseding 2026-09-22's "`Tab` = Join";
+`DESIGN.md` trailing entry 2026-09-23 *The paste card is a standard two-button
+dialog*)**: the focus opens on the default — *Join* when every line but the last
+ends with the shell's continuation mark, else *Run line by line* — `Tab` and
+`Shift+Tab` move it between the two words, `Enter` activates the focused word,
+`Esc` or `×` = nothing sent, clipboard untouched. **It is modal (2026-09-23)**:
+it answers only those keys, every other key reaches nothing, and a drop under it
+is refused. The pending paste is
 `LeafSession::pending_paste` and dies with its shell; the answer is re-checked
 with `live_paste_target` before a byte is sent. Nothing is remembered but the
 setting.

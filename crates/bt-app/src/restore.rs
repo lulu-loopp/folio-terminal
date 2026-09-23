@@ -2533,6 +2533,17 @@ pub struct PasteCardLayout {
     join_text: &'static str,
     run_text: &'static str,
     default: PasteCardTarget,
+    /// The word the keyboard's focus ring stands on, once a key has moved it (`:focus-visible`,
+    /// owner's ruling 2026-09-23: the card is a standard two-button dialog).
+    ring: Option<PasteCardTarget>,
+}
+
+impl PasteCardLayout {
+    /// The same card with the focus ring on `ring`'s word, or on neither.
+    #[must_use]
+    pub fn with_ring(self, ring: Option<PasteCardTarget>) -> Self {
+        Self { ring, ..self }
+    }
 }
 
 /// The `×`'s square, and the gap that keeps the title off it — the toast's own close box, which
@@ -2700,6 +2711,7 @@ pub fn paste_card_layout(
         join_text: content.join_text,
         run_text: content.run_text,
         default: content.default,
+        ring: None,
     }
 }
 
@@ -2823,6 +2835,21 @@ pub fn paste_card_build(
         border,
         palette,
     );
+    // `:focus-visible` on the word the keyboard moved to — the first-run card's ring, the house's
+    // one outline for a focused button.
+    match layout.ring {
+        Some(PasteCardTarget::Join) => quads.extend(crate::first_run::button_focus_ring(
+            layout.join,
+            scale,
+            palette.accent,
+        )),
+        Some(PasteCardTarget::Run) => quads.extend(crate::first_run::button_focus_ring(
+            layout.run,
+            scale,
+            palette.accent,
+        )),
+        _ => {}
+    }
     vec![OverlayLayer {
         quads,
         labels,
@@ -4446,5 +4473,62 @@ in the folders you left them, as new shells."
                 );
             }
         }
+    }
+
+    /// RED (45b) — **the focus ring stands on the word the keyboard moved to, and on nothing until
+    /// a key has moved it** (`:focus-visible`, owner's ruling 2026-09-23).
+    ///
+    /// MUTATION: drop the ring's `match` from `paste_card_build` — "a ring is drawn" goes red.
+    #[test]
+    fn the_paste_cards_ring_stands_on_the_focused_word() {
+        let accent = chrome_palette().accent;
+        let content = PasteCardContent {
+            title: "3 lines → Command Prompt".to_owned(),
+            title_width: 170.0,
+            run_text: "Run line by line",
+            join_text: "Join into one line",
+            run_text_width: 100.0,
+            join_text_width: 112.0,
+            default: PasteCardTarget::Run,
+        };
+        let layout = paste_card_layout(&content, 1440.0, 756.0, 1.0);
+        let rest = paste_card_build(&layout, (1440.0, 756.0), None);
+        let ring_on = |target| {
+            let moved = paste_card_build(
+                &layout.clone().with_ring(Some(target)),
+                (1440.0, 756.0),
+                None,
+            );
+            // What the ring added, over the same card at rest.
+            moved[0].quads[rest[0].quads.len()..].to_vec()
+        };
+        for (target, rect, other) in [
+            (PasteCardTarget::Join, layout.join, layout.run),
+            (PasteCardTarget::Run, layout.run, layout.join),
+        ] {
+            let ring = ring_on(target);
+            assert!(!ring.is_empty(), "{target:?}: a ring is drawn");
+            assert!(ring.iter().all(|quad| quad.color == accent));
+            let reach = 6.0;
+            assert!(
+                ring.iter().all(|quad| quad.rect[0] >= rect[0] - reach
+                    && quad.rect[2] <= rect[2] + reach
+                    && quad.rect[1] >= rect[1] - reach
+                    && quad.rect[3] <= rect[3] + reach),
+                "{target:?}: the ring stands around its own word"
+            );
+            assert!(
+                ring.iter()
+                    .all(|quad| quad.rect[2] <= other[0] || quad.rect[0] >= other[2]),
+                "{target:?}: and not over the other"
+            );
+        }
+        assert_eq!(
+            paste_card_build(&layout.clone().with_ring(None), (1440.0, 756.0), None)[0]
+                .quads
+                .len(),
+            rest[0].quads.len(),
+            "no ring until a key has moved the focus"
+        );
     }
 }
