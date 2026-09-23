@@ -3024,48 +3024,30 @@ impl Text {
                 "The open-source components Folio is made of, and their licences.",
                 "Folio 使用的开源组件及其许可证。",
             ),
-            // zh: pending opus46
-            Self::RowExportSettings => pick(lang, "Export settings", "Export settings"),
-            // zh: pending opus46
+            Self::RowExportSettings => pick(lang, "Export settings", "导出设置"),
             Self::DescExportSettings => pick(
                 lang,
                 "Settings, profiles, shortcuts and colour schemes, in one file.",
-                "Settings, profiles, shortcuts and colour schemes, in one file.",
+                "设置、配置文件、快捷键和配色，合为一个文件。",
             ),
-            // zh: pending opus46
-            Self::ExportVerb => pick(lang, "Export…", "Export…"),
-            // zh: pending opus46
-            Self::RowImportSettings => pick(lang, "Import settings", "Import settings"),
-            // zh: pending opus46
+            Self::ExportVerb => pick(lang, "Export…", "导出…"),
+            Self::RowImportSettings => pick(lang, "Import settings", "导入设置"),
             Self::DescImportSettings => pick(
                 lang,
                 "Applies an exported file at once.",
-                "Applies an exported file at once.",
+                "一次性应用导出文件。",
             ),
-            // zh: pending opus46
-            Self::ImportVerb => pick(lang, "Import…", "Import…"),
-            // zh: pending opus46
-            Self::RowSettingsFolder => pick(lang, "Settings folder", "Settings folder"),
-            // zh: pending opus46
-            Self::DescSettingsFolder => pick(
-                lang,
-                "Where these files are kept.",
-                "Where these files are kept.",
-            ),
-            // zh: pending opus46
-            Self::SettingsExported => pick(lang, "Exported", "Exported"),
-            // zh: pending opus46
-            Self::SettingsExportFailed => pick(lang, "Not exported", "Not exported"),
-            // zh: pending opus46
-            Self::SettingsImported => pick(lang, "Imported", "Imported"),
-            // zh: pending opus46
-            Self::SettingsImportFailed => pick(lang, "Not imported", "Not imported"),
-            // zh: pending opus46
-            Self::SettingsSkipped => pick(lang, "Skipped", "Skipped"),
-            // zh: pending opus46
-            Self::SettingsNotOnThisMachine => {
-                pick(lang, "Not on this machine", "Not on this machine")
+            Self::ImportVerb => pick(lang, "Import…", "导入…"),
+            Self::RowSettingsFolder => pick(lang, "Settings folder", "设置文件夹"),
+            Self::DescSettingsFolder => {
+                pick(lang, "Where these files are kept.", "这些文件的存放位置。")
             }
+            Self::SettingsExported => pick(lang, "Exported", "已导出"),
+            Self::SettingsExportFailed => pick(lang, "Not exported", "未导出"),
+            Self::SettingsImported => pick(lang, "Imported", "已导入"),
+            Self::SettingsImportFailed => pick(lang, "Not imported", "未导入"),
+            Self::SettingsSkipped => pick(lang, "Skipped", "已跳过"),
+            Self::SettingsNotOnThisMachine => pick(lang, "Not on this machine", "本机不适用"),
 
             Self::RowTheme => pick(lang, "Theme", "主题"),
             Self::RowCursor => pick(lang, "Cursor", "光标"),
@@ -6329,38 +6311,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 28] = [
-        // The configuration doors and their cards (0.4.4 ticket 05), on both
-        // platforms: the rows and the cards are the same on each.
-        (Self::RowExportSettings, HostPlatform::Windows),
-        (Self::RowExportSettings, HostPlatform::MacOs),
-        (Self::DescExportSettings, HostPlatform::Windows),
-        (Self::DescExportSettings, HostPlatform::MacOs),
-        (Self::ExportVerb, HostPlatform::Windows),
-        (Self::ExportVerb, HostPlatform::MacOs),
-        (Self::RowImportSettings, HostPlatform::Windows),
-        (Self::RowImportSettings, HostPlatform::MacOs),
-        (Self::DescImportSettings, HostPlatform::Windows),
-        (Self::DescImportSettings, HostPlatform::MacOs),
-        (Self::ImportVerb, HostPlatform::Windows),
-        (Self::ImportVerb, HostPlatform::MacOs),
-        (Self::RowSettingsFolder, HostPlatform::Windows),
-        (Self::RowSettingsFolder, HostPlatform::MacOs),
-        (Self::DescSettingsFolder, HostPlatform::Windows),
-        (Self::DescSettingsFolder, HostPlatform::MacOs),
-        (Self::SettingsExported, HostPlatform::Windows),
-        (Self::SettingsExported, HostPlatform::MacOs),
-        (Self::SettingsExportFailed, HostPlatform::Windows),
-        (Self::SettingsExportFailed, HostPlatform::MacOs),
-        (Self::SettingsImported, HostPlatform::Windows),
-        (Self::SettingsImported, HostPlatform::MacOs),
-        (Self::SettingsImportFailed, HostPlatform::Windows),
-        (Self::SettingsImportFailed, HostPlatform::MacOs),
-        (Self::SettingsSkipped, HostPlatform::Windows),
-        (Self::SettingsSkipped, HostPlatform::MacOs),
-        (Self::SettingsNotOnThisMachine, HostPlatform::Windows),
-        (Self::SettingsNotOnThisMachine, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
