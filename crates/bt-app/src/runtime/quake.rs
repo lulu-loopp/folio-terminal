@@ -227,7 +227,7 @@ impl Runtime<'_> {
     /// `WM_EXITSIZEMOVE` is not a winit event, and a rectangle read once a frame
     /// while a window is being dragged is one `GetWindowRect` against a drag that
     /// is already repainting the screen.
-    pub(crate) fn remember_summoned_arrangement(&mut self) {
+    pub(in crate::runtime) fn remember_summoned_arrangement(&mut self) {
         if !self.is_quake_window() || !self.window.custom_window_frame.in_size_move() {
             return;
         }

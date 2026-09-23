@@ -35,7 +35,7 @@ impl Runtime<'_> {
     /// ([`DropLanding::shows_itself`]) — not built and then hidden, because an
     /// invisible layer still costs a text shaping pass and a raster lookup every
     /// frame the pointer moves, and "not drawn" is the same picture either way.
-    pub(crate) fn drag_ghost_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn drag_ghost_layer(&mut self) -> Vec<marks::OverlayLayer> {
         // **F2 — the visitor's ghost, laid out at *this* window's scale.**
         //
         // The four facts it says arrived on the broker ([`GhostFace`]); where
@@ -158,7 +158,7 @@ impl Runtime<'_> {
     /// takes it unchanged — `focusedLeaf(tabById(d.wsId))` in the mock-up is how
     /// a tab finds a name at all, and here the tab has been carrying its own
     /// since T1.
-    pub(crate) fn drag_label(
+    pub(in crate::runtime) fn drag_label(
         &self,
         source: &DragSource,
         palette: bt_render::ChromePalette,
@@ -246,7 +246,7 @@ impl Runtime<'_> {
     /// the flyout still inside its closing grace" are facts those hosts already
     /// own, and a second copy of them is a copy that goes stale on whichever
     /// path forgets to write it.
-    pub(crate) fn hover_float_up(&self) -> Option<HoverFloat> {
+    pub(in crate::runtime) fn hover_float_up(&self) -> Option<HoverFloat> {
         HoverFloat::holding(|who| self.hover_float_is_up(who))
     }
 
@@ -272,7 +272,7 @@ impl Runtime<'_> {
 
     /// Whether `who`'s clock may run right now: the glass is free, or it is
     /// already `who`'s.
-    pub(crate) fn hover_float_free(&self, who: HoverFloat) -> bool {
+    pub(in crate::runtime) fn hover_float_free(&self, who: HoverFloat) -> bool {
         who.free(|other| self.hover_float_is_up(other))
     }
 
@@ -282,7 +282,7 @@ impl Runtime<'_> {
     /// `settling` was still maturing would re-open itself 180ms later under a
     /// pointer that had not moved — G87's bug, and it is exactly as true when
     /// the dismissal comes from this list as when it comes from Esc.
-    pub(crate) fn close_hover_floats_except(&mut self, keep: HoverFloat) -> bool {
+    pub(in crate::runtime) fn close_hover_floats_except(&mut self, keep: HoverFloat) -> bool {
         let mut went = false;
         for who in keep.others() {
             match who {
@@ -336,7 +336,7 @@ impl Runtime<'_> {
     /// Called once, from the tail of the tick, and only on the pass where the
     /// glass actually came free — so a window with nothing hovering pays
     /// nothing.
-    pub(crate) fn rearm_hover_intents(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn rearm_hover_intents(&mut self, now: Instant) -> Result<()> {
         let Some(position) = self.window.pointer_position else {
             return Ok(());
         };
@@ -394,7 +394,7 @@ impl Runtime<'_> {
     /// drawn into the terminal picture: the shape is read at draw time out of
     /// the process static (`bt_render::cursor_pixel_bounds`), so the picture on
     /// the glass is the one thing that is now wrong.
-    pub(crate) fn adopt_new_cursor_style(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn adopt_new_cursor_style(&mut self) -> Result<()> {
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -482,7 +482,11 @@ impl Runtime<'_> {
     /// is the same as opening it there" true rather than nearly true — the pool
     /// lookup, the view memory and the expansion-set reset all come along
     /// without being remembered a second time.
-    pub(crate) fn retarget_row_drop(&mut self, payload: &RowPayload, target: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn retarget_row_drop(
+        &mut self,
+        payload: &RowPayload,
+        target: SeatId,
+    ) -> Result<()> {
         match payload.kind {
             RowPayloadKind::File => {
                 self.open_preview_onto(self.preview_here(target), payload.path.clone())
@@ -528,7 +532,7 @@ impl Runtime<'_> {
     /// floor this menu can have a *child*, so what the highlight does when the
     /// pointer leaves a row is no longer "the new row takes it" but "the new row
     /// takes it unless the hand is on its way to the child".
-    pub(crate) fn drive_term_menu_hover(
+    pub(in crate::runtime) fn drive_term_menu_hover(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
@@ -612,7 +616,7 @@ impl Runtime<'_> {
     /// why the tab it came from does not close even when that pane was its last
     /// one. What the switch buys is sight of where you are about to put the
     /// thing; the putting is the release.
-    pub(crate) fn advance_drag_spring(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_drag_spring(&mut self, now: Instant) -> Result<()> {
         let Some(drag) = self.window.drag.as_mut() else {
             return Ok(());
         };
@@ -630,7 +634,7 @@ impl Runtime<'_> {
     }
 
     /// The spring's next wake-up, for the loop's set.
-    pub(crate) fn drag_spring_deadline(&self) -> Option<Instant> {
+    pub(in crate::runtime) fn drag_spring_deadline(&self) -> Option<Instant> {
         self.window.drag.as_ref()?.spring.deadline()
     }
 
@@ -684,7 +688,7 @@ impl Runtime<'_> {
     /// wake is [`Self::drag_autoscroll_deadline`], which is clamped to the
     /// display frame — that is where the pacing belongs, and the name of this
     /// method says which side of the line it is on.
-    pub(crate) fn service_drag_autoscroll(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn service_drag_autoscroll(&mut self, now: Instant) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let motion = self.app.motion;
         let Some((run, scroll, pointer)) = self.drag_autoscroll_aim(now) else {
@@ -753,7 +757,7 @@ impl Runtime<'_> {
     /// at the foot of a fully-scrolled column from waking this window sixty times
     /// a second for as long as it stays there: [`seats::autoscroll_speed`]
     /// answers `0.0` there, and the clock and the deadline read the same answer.
-    pub(crate) fn drag_autoscroll_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(in crate::runtime) fn drag_autoscroll_deadline(&self, now: Instant) -> Option<Instant> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (run, scroll, pointer) = self.drag_autoscroll_aim(now)?;
         let speed =
@@ -1288,7 +1292,7 @@ impl Runtime<'_> {
     /// A float's own body answers for itself through `float_hit_at` and
     /// `web_page_at`, neither of which comes through here; this is only about the
     /// panes underneath.
-    pub(crate) fn pointer_over_a_float(&self, position: PhysicalPosition<f64>) -> bool {
+    pub(in crate::runtime) fn pointer_over_a_float(&self, position: PhysicalPosition<f64>) -> bool {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let now = Instant::now();
         let (x, y) = (position.x as f32, position.y as f32);
@@ -1366,7 +1370,10 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn activate_hyperlink_hover_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn activate_hyperlink_hover_if_due(
+        &mut self,
+        now: Instant,
+    ) -> Result<()> {
         // The **ledger** is read here, on the settle, and the settle happens once per link —
         // [`HyperlinkHover::activate_if_due`]'s own note. It is the same question
         // [`Self::activate_hyperlink`] asks on the press, so the sentence the reader is shown and
@@ -2384,7 +2391,7 @@ impl Runtime<'_> {
     /// every source alike: put away what was explaining the thing you just picked
     /// up, take the pointer, and record the gesture. Anything that varies by
     /// source has already happened in the caller.
-    pub(crate) fn begin_drag(
+    pub(in crate::runtime) fn begin_drag(
         &mut self,
         source: DragSource,
         carry: DragCarry,
@@ -2483,7 +2490,7 @@ impl Runtime<'_> {
     /// measure is a surveyor that cannot grow a branch without threading a second
     /// argument through every existing one. The price is one strip solve per
     /// pointer move, on a strip of at most a few dozen tabs.
-    pub(crate) fn survey_drop(
+    pub(in crate::runtime) fn survey_drop(
         &self,
         source: &DragSource,
         home: Option<[f32; 4]>,
@@ -5021,7 +5028,12 @@ impl Runtime<'_> {
     /// that changed length depending on the direction of the hand is a distance
     /// the hand has to relearn. `page` is the screenful along *this* axis, so the
     /// "one screen at a time" wheel setting means one screen either way.
-    pub(crate) fn wheel_travel(&self, delta: MouseScrollDelta, page: f32, sideways: bool) -> f32 {
+    pub(in crate::runtime) fn wheel_travel(
+        &self,
+        delta: MouseScrollDelta,
+        page: f32,
+        sideways: bool,
+    ) -> f32 {
         match delta {
             MouseScrollDelta::LineDelta(x, y) => {
                 let line = self.line_height_subpixels().get() as f32
@@ -5204,7 +5216,7 @@ impl Runtime<'_> {
     /// read: both say where the hand was *before* the drag, which is not where
     /// this drop landed, and a routing built on either would be a guess wearing
     /// a measurement's clothes.
-    pub(crate) fn platform_pointer_now(&self) -> Option<PhysicalPosition<f64>> {
+    pub(in crate::runtime) fn platform_pointer_now(&self) -> Option<PhysicalPosition<f64>> {
         platform_pointer_of(
             native_window(&self.window.window)
                 .ok()
@@ -5898,7 +5910,7 @@ impl Runtime<'_> {
     /// under it leaves it standing, which it already did before this line
     /// existed), and a predicate that could stick is a predicate that could
     /// switch every page in the window off for good.
-    pub(crate) fn a_gesture_holds_the_pointer(&self) -> bool {
+    pub(in crate::runtime) fn a_gesture_holds_the_pointer(&self) -> bool {
         self.window.drag.is_some()
             || self.window.divider_drag.is_some()
             || self.window.float_drag.is_some()

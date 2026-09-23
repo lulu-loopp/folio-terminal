@@ -25,7 +25,7 @@ impl Runtime<'_> {
     /// Per window, because `height: auto` is a property of a box and not of the
     /// host: two windows can be following their content at once, and a hand on
     /// one of them ends it for that one alone.
-    pub(crate) fn resize_floats_to_content(&mut self) -> bool {
+    pub(in crate::runtime) fn resize_floats_to_content(&mut self) -> bool {
         // A window with no float has nothing to grow (closure review 2,
         // 2026-09-18): this runs on every turn, and the read below is a walk and
         // a `Vec`.
@@ -85,7 +85,7 @@ impl Runtime<'_> {
     /// A diagnostic about a shell resizing. A tab with no shell has no
     /// transaction, no trace and nothing to log (§7.1.6h) — and a trace that
     /// printed a line about one would be a diagnostic inventing its subject.
-    pub(crate) fn flush_resize_trace(&mut self) {
+    pub(in crate::runtime) fn flush_resize_trace(&mut self) {
         if !self.app.trace_resize || self.focused().is_none() {
             return;
         }
@@ -168,7 +168,10 @@ impl Runtime<'_> {
     /// scheduled one: the queue this drains is a `LeafSession` field, and there is no leaf
     /// (§7.1.6h). Answering `None` is answering "nothing is owed and nothing has to be woken
     /// for", which is exactly true.
-    pub(crate) fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<Option<Instant>> {
+    pub(in crate::runtime) fn flush_pending_pty_resize(
+        &mut self,
+        now: Instant,
+    ) -> Result<Option<Instant>> {
         hang_watch::at(hang_watch::Station::PtyResize);
         // **A gesture nobody is holding any more is over** (Codex review 2026-09-17). Read before
         // the held-hand question below, because that question is the one a stale answer ruins: a
@@ -452,7 +455,7 @@ impl Runtime<'_> {
     /// which every message the DPI change produced has been delivered, so the
     /// rectangle in hand by then is the one the window is keeping — whether that
     /// is a new one or the one it already had.
-    pub(crate) fn settle_dpi_rectangle(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn settle_dpi_rectangle(&mut self) -> Result<()> {
         if !self.window.dpi_rectangle.due() {
             return Ok(());
         }
@@ -489,7 +492,7 @@ impl Runtime<'_> {
     /// because the end of the OS's modal move/size loop is not one — winit
     /// surfaces neither end of it, and the loop coming back round is the one
     /// thing that is guaranteed to happen after the hand lets go.
-    pub(crate) fn settle_deferred_dpi(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn settle_deferred_dpi(&mut self) -> Result<()> {
         if !self
             .window
             .dpi_settlement
@@ -508,7 +511,10 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    pub(crate) fn reconcile_authoritative_dpi(&mut self, stage: &'static str) -> Result<bool> {
+    pub(in crate::runtime) fn reconcile_authoritative_dpi(
+        &mut self,
+        stage: &'static str,
+    ) -> Result<bool> {
         let physical = self.window.window.inner_size();
         // **The second reader of the same rectangle**, held to the same rule
         // ([`resize_worth_solving`]): `inner_size()` on an iconic window is the icon's client

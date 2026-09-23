@@ -50,7 +50,7 @@ impl Runtime<'_> {
     ///
     /// The direction is still one-way (red line L10): what comes back out of the
     /// terminal never re-enters here.
-    pub(crate) fn resolve_seat_layout(&mut self, render_physical: PhysicalSize<u32>) {
+    pub(in crate::runtime) fn resolve_seat_layout(&mut self, render_physical: PhysicalSize<u32>) {
         // Provenance is decided here, at the one place a rectangle becomes a layout, and from the
         // very number the solver is handed (user ruling 2026-08-08).
         (self.window.size_policy, self.window.lawful_client_size) = size_authority_for_rectangle(
@@ -125,7 +125,7 @@ impl Runtime<'_> {
     ///
     /// A seat the solver did not place has no box and is simply absent, which is
     /// the same answer [`PaneMotion::begin`] gives a seat that left the layout.
-    pub(crate) fn pane_rects(&self) -> Vec<(SeatId, [f32; 4])> {
+    pub(in crate::runtime) fn pane_rects(&self) -> Vec<(SeatId, [f32; 4])> {
         self.seat_layout
             .rects
             .iter()
@@ -150,7 +150,7 @@ impl Runtime<'_> {
     /// [`Self::tab_trailers`] does for the strip: two seats of one chrome build
     /// disagreeing about what time it is would be two seats sampled from two
     /// different frames of the same animation.
-    pub(crate) fn pane_transforms(&self, now: Instant) -> Vec<(SeatId, PaneTransform)> {
+    pub(in crate::runtime) fn pane_transforms(&self, now: Instant) -> Vec<(SeatId, PaneTransform)> {
         self.seat_layout
             .rects
             .iter()
@@ -300,7 +300,7 @@ impl Runtime<'_> {
     /// back is a rail with a hand on it — `hot` recolours every tick and the crest
     /// travels — so [`cmdrail::RailCache::picture`] paints those afresh and caches
     /// only the resting one.
-    pub(crate) fn command_rail_layers(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn command_rail_layers(&mut self) -> Vec<marks::OverlayLayer> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let palette = bt_render::chrome_palette();
         let motion = self.app.motion;
@@ -370,7 +370,7 @@ impl Runtime<'_> {
     /// and a torn-out pane leaves one behind that would be handed back to whatever
     /// seat id the solver reuses next. The sweep runs where the overlay is built,
     /// so it is a function of the same solve everything else that frame is.
-    pub(crate) fn sweep_command_rails(&mut self) {
+    pub(in crate::runtime) fn sweep_command_rails(&mut self) {
         if self.window.command_rails.is_empty() {
             return;
         }
@@ -387,7 +387,7 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn drive_command_rail_hover(
+    pub(in crate::runtime) fn drive_command_rail_hover(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<bool> {
@@ -523,7 +523,7 @@ impl Runtime<'_> {
 
     /// While any rail still owes a frame to one of its four clocks, one frame at
     /// the animation's own rate; nothing at all otherwise.
-    pub(crate) fn command_rail_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(in crate::runtime) fn command_rail_deadline(&self, now: Instant) -> Option<Instant> {
         self.animating_deadline(self.command_rails_are_moving(now), now)
     }
 
@@ -537,7 +537,7 @@ impl Runtime<'_> {
 
     /// Pay the rails' frames. The clocks run themselves out — nothing here has to
     /// stop them, because `is_animating` and the paint read the same instants.
-    pub(crate) fn advance_command_rails(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_command_rails(&mut self, now: Instant) -> Result<()> {
         if !self.command_rails_are_moving(now) {
             return Ok(());
         }
@@ -561,7 +561,10 @@ impl Runtime<'_> {
     /// costs one `match` and not a second press path. Which of the two a tick
     /// means was decided when the tick was built — see [`cmdrail::Entry::target`]
     /// — so nothing here asks the search whether it is open.
-    pub(crate) fn press_command_rail(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn press_command_rail(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some((seat, index)) = self.command_rail_at(position) else {
             return Ok(false);
         };
@@ -630,7 +633,7 @@ impl Runtime<'_> {
     /// agrees with, so there is no later frame to wait for. The row band waits
     /// because its rectangle is read out of a frame that has not been composed
     /// yet.
-    pub(crate) fn flash_pane(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn flash_pane(&mut self, seat: SeatId) -> Result<()> {
         self.window.command_flash = Some(CommandFlash {
             seat,
             band: FlashBand::Pane,
@@ -656,7 +659,7 @@ impl Runtime<'_> {
     /// this is a second host and not a second implementation: the same capsule,
     /// in the same corner, opened with the same chord. What differs is who
     /// counts the matches — see [`Self::refresh_search`].
-    pub(crate) fn seat_can_search(&self, seat: SeatId) -> bool {
+    pub(in crate::runtime) fn seat_can_search(&self, seat: SeatId) -> bool {
         if self.seat_holds_a_page(seat) {
             return true;
         }
@@ -666,7 +669,7 @@ impl Runtime<'_> {
     }
 
     /// Whether the tab in front holds a page on that seat.
-    pub(crate) fn seat_holds_a_page(&self, seat: SeatId) -> bool {
+    pub(in crate::runtime) fn seat_holds_a_page(&self, seat: SeatId) -> bool {
         self.web_on(seat).is_some()
     }
 
@@ -840,7 +843,7 @@ impl Runtime<'_> {
     /// writes the setting and ends the asking for good. Before that ruling the
     /// difference was the next PowerShell pane, which is how a reader with four
     /// of them was asked four times.
-    pub(crate) fn close_pane_notice(&mut self, host: NoticeHost) -> Result<()> {
+    pub(in crate::runtime) fn close_pane_notice(&mut self, host: NoticeHost) -> Result<()> {
         if let NoticeHost::Seat(seat) = host
             && let Some(leaf) = self.sessions.get_mut(&seat)
         {
@@ -874,7 +877,7 @@ impl Runtime<'_> {
     /// Every string it draws has to be measured with the real font before the
     /// box that holds them can be sized, which is why the content is built here,
     /// where the renderer is, and handed to a module that knows only numbers.
-    pub(crate) fn restore_layout(&mut self) -> Option<restore::RestoreLayout> {
+    pub(in crate::runtime) fn restore_layout(&mut self) -> Option<restore::RestoreLayout> {
         if !self.window.restore_prompt.is_open() || self.app.restore_question.is_empty() {
             return None;
         }
@@ -932,7 +935,7 @@ impl Runtime<'_> {
     /// each sprite is also what keeps the fade from compounding with the label
     /// fade the rail already runs (Q183): they are two declarations on two
     /// elements, and CSS multiplies them exactly once each.
-    pub(crate) fn rail_overlay_layers(&self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn rail_overlay_layers(&self) -> Vec<marks::OverlayLayer> {
         // **The fold belongs to the ordinary rail, and to nothing else**
         // (§7.1.6b′: the `Sidebar` row's three rest states govern the *ordinary*
         // panel, and the card column is card-width whatever they say). A window
@@ -1036,7 +1039,7 @@ impl Runtime<'_> {
     /// build, and the rectangles are the live solve rather than anything the
     /// tween remembers: an arriving pane's box is whatever the solver says it is
     /// this frame, including after a window resize that happened mid-fade.
-    pub(crate) fn pane_fade_veils(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn pane_fade_veils(&self, now: Instant) -> Vec<marks::OverlayLayer> {
         pane_fade_veil_layers(
             &self.window.pane_motion,
             &self.pane_rects(),
@@ -1068,7 +1071,7 @@ impl Runtime<'_> {
     /// (`#dock-shift` 24 and `#dock-preview` 25 against `.combo-menu`'s 30 and
     /// `.tip`'s 60) — this is a drawing *on* the layout, not a surface floating
     /// over the window.
-    pub(crate) fn dock_overlay_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn dock_overlay_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
         let Some(shown) = self.window.drop_preview.as_ref() else {
             return Vec::new();
         };
@@ -1239,7 +1242,7 @@ impl Runtime<'_> {
     /// kills its shell outright; a preview pane's asks — and only when it is the
     /// *last* preview pane in the tab, because the pool outlives any one pane and
     /// only the last one's closing would strand it (P123).
-    pub(crate) fn close_pane(&mut self, seat: bt_layout::SeatId) -> Result<()> {
+    pub(in crate::runtime) fn close_pane(&mut self, seat: bt_layout::SeatId) -> Result<()> {
         let kind = self
             .seat_layout
             .get(seat)
@@ -1355,7 +1358,7 @@ impl Runtime<'_> {
     /// setting itself, because the ruling is that *every* direction-less split
     /// obeys one answer and a second reader is a second place that can stop
     /// obeying it.
-    pub(crate) fn duplicate_split_axis(&self) -> Axis {
+    pub(in crate::runtime) fn duplicate_split_axis(&self) -> Axis {
         self.settings_split_axis(self.focused_leaf)
     }
 
@@ -1406,7 +1409,7 @@ impl Runtime<'_> {
     /// every caller until the picker's `Left` and `Up` zones needed the other
     /// value. **No layout work was owed for them**: "put the new pane first" is
     /// a tree edit the solver has always been able to make.
-    pub(crate) fn split_seat(
+    pub(in crate::runtime) fn split_seat(
         &mut self,
         source: SeatId,
         dir: Axis,
@@ -1494,7 +1497,7 @@ impl Runtime<'_> {
     /// ([`float::FloatPreview::page`]), and `pop_out_preview` closed the seat
     /// that used to be able to answer for it. A glance card never holds a page —
     /// a hover is a question and a browser is not something a question starts.
-    pub(crate) fn rail_page(&self, surface: PreviewSurface) -> Option<LeafId> {
+    pub(in crate::runtime) fn rail_page(&self, surface: PreviewSurface) -> Option<LeafId> {
         match surface {
             PreviewSurface::Seat(leaf) => self.window.web.contains_key(&leaf).then_some(leaf),
             PreviewSurface::Float(id) => self.page_carried_by(id),
@@ -1515,7 +1518,11 @@ impl Runtime<'_> {
     /// different reasons and none of them is a failure: a document with nothing
     /// to point at, a pane on a tab that is not in front, and a window squeezed
     /// past its own floor.
-    pub(crate) fn rail_band(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
+    pub(in crate::runtime) fn rail_band(
+        &self,
+        surface: PreviewSurface,
+        scale: f32,
+    ) -> Option<[f32; 4]> {
         match surface {
             PreviewSurface::Seat(leaf) => {
                 if leaf.tab != self.id {
@@ -1552,7 +1559,7 @@ impl Runtime<'_> {
     /// each built their own would be three rows disagreeing about where a button
     /// is. [`Self::preview_rail_measure`]'s own sentence, with the derivation
     /// finished rather than left to each caller.
-    pub(crate) fn rail_geometry(
+    pub(in crate::runtime) fn rail_geometry(
         &self,
         surface: PreviewSurface,
         scale: f32,
@@ -1591,7 +1598,11 @@ impl Runtime<'_> {
     }
 
     /// Move one pane's window `columns` to the right, negative for left.
-    pub(crate) fn scroll_seat_by_columns(&mut self, seat: SeatId, columns: i32) -> Result<()> {
+    pub(in crate::runtime) fn scroll_seat_by_columns(
+        &mut self,
+        seat: SeatId,
+        columns: i32,
+    ) -> Result<()> {
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return Ok(());
@@ -1760,7 +1771,10 @@ impl Runtime<'_> {
     /// second derivation would be a rectangle that disagrees with the one under
     /// the pointer, which is the whole class of bug the hit test's own note is
     /// about.
-    pub(crate) fn row_geometry(&mut self, host: RowHost) -> Option<seats::FilesTreeGeometry> {
+    pub(in crate::runtime) fn row_geometry(
+        &mut self,
+        host: RowHost,
+    ) -> Option<seats::FilesTreeGeometry> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         match host {
             // A Git page is not a tree and has no tree geometry. Everything that
@@ -1838,7 +1852,7 @@ impl Runtime<'_> {
     }
 
     /// The gate's box this frame, or `None` when nothing is being asked.
-    pub(crate) fn dirty_gate_layout(&mut self) -> Option<restore::GateLayout> {
+    pub(in crate::runtime) fn dirty_gate_layout(&mut self) -> Option<restore::GateLayout> {
         let request = self.window.dirty_gate.request()?.clone();
         let names = self.gate_dirty_names(&request);
         if names.is_empty() {
@@ -1904,7 +1918,7 @@ impl Runtime<'_> {
     /// What the menu *does* fold for is the window changing size under it, which
     /// the caller handles by closing it — a menu is a moment, and a resize ends
     /// the moment.
-    pub(crate) fn file_menu_layout(&mut self) -> Option<profiles::FileMenuLayout> {
+    pub(in crate::runtime) fn file_menu_layout(&mut self) -> Option<profiles::FileMenuLayout> {
         let menu = self.window.file_menu.as_ref()?;
         let point = menu.point;
         let crumbs: Vec<String> = menu.crumbs.iter().map(|level| level.name.clone()).collect();
@@ -1929,7 +1943,7 @@ impl Runtime<'_> {
     /// a bundle of `Copy` scalars rather than borrows, so unlike the git menu it
     /// needs no owned draw struct — the measure closure can hold the renderer
     /// mutably while the look sits on the stack.
-    pub(crate) fn term_menu_layout(&mut self) -> Option<profiles::TermMenuLayout> {
+    pub(in crate::runtime) fn term_menu_layout(&mut self) -> Option<profiles::TermMenuLayout> {
         let menu = self.window.term_menu.as_ref()?;
         let (point, look) = (
             menu.point,
@@ -1973,7 +1987,7 @@ impl Runtime<'_> {
     /// walks the same three planes a copy is cut from, and they are installed
     /// through [`TabState::set_leaf_selection`] — the one door that also drops
     /// every other pane's selection, because this window holds one.
-    pub(crate) fn select_all_in_pane(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn select_all_in_pane(&mut self, seat: SeatId) -> Result<()> {
         let Some(selection) = self
             .sessions
             .get(&seat)
@@ -2019,7 +2033,7 @@ impl Runtime<'_> {
     /// The rows above it **scroll out into history the ordinary way**, so
     /// everything cleared is still there to be scrolled back to and still there
     /// to be searched. That is exactly what the row below it is not.
-    pub(crate) fn clear_pane_screen(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn clear_pane_screen(&mut self, seat: SeatId) -> Result<()> {
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return Ok(());
         };
@@ -2061,7 +2075,7 @@ impl Runtime<'_> {
     /// some of those by hand would be a second, shorter definition of what
     /// deleting history means — and the first thing to fall off it would be
     /// whichever structure the next slice adds.
-    pub(crate) fn clear_pane_scrollback(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn clear_pane_scrollback(&mut self, seat: SeatId) -> Result<()> {
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return Ok(());
         };
@@ -2077,7 +2091,7 @@ impl Runtime<'_> {
     /// Where the pane menu is, if one is up. [`Runtime::file_menu_layout`]'s
     /// twin, and anchored the same way: at the point the pointer was at, which
     /// no re-layout can move or destroy.
-    pub(crate) fn pane_menu_layout(&mut self) -> Option<profiles::PaneMenuLayout> {
+    pub(in crate::runtime) fn pane_menu_layout(&mut self) -> Option<profiles::PaneMenuLayout> {
         let menu = self.window.pane_menu.as_ref()?;
         let (point, submenu, zoomed) = (menu.point, menu.submenu, menu.zoomed);
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -2110,7 +2124,11 @@ impl Runtime<'_> {
     /// verbs a surface cannot perform is worse than no menu: the same refusal
     /// [`Runtime::open_file_menu`] makes for a directory row, made here for the
     /// same reason and in the same one place rather than at each caller.
-    pub(crate) fn open_pane_menu(&mut self, seat: SeatId, point: [f32; 2]) -> Result<()> {
+    pub(in crate::runtime) fn open_pane_menu(
+        &mut self,
+        seat: SeatId,
+        point: [f32; 2],
+    ) -> Result<()> {
         if !self.sessions.contains_key(&seat) {
             return Ok(());
         }
@@ -2146,7 +2164,7 @@ impl Runtime<'_> {
     /// strip's `⌄` does the same, and a right click on the head still drops this
     /// same menu at the pointer, because that gesture belongs to the surface
     /// rather than to a button on it.
-    pub(crate) fn toggle_pane_menu(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn toggle_pane_menu(&mut self, seat: SeatId) -> Result<()> {
         if self
             .window
             .pane_menu
@@ -2194,7 +2212,7 @@ impl Runtime<'_> {
 
     /// The pane menu's own level of the overlay stack, or nothing when none is
     /// up.
-    pub(crate) fn pane_menu_layer(&mut self) -> MenuPaint {
+    pub(in crate::runtime) fn pane_menu_layer(&mut self) -> MenuPaint {
         let Some(layout) = self.pane_menu_layout() else {
             return MenuPaint::none();
         };
@@ -2230,7 +2248,7 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn close_pane_menu(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn close_pane_menu(&mut self) -> Result<bool> {
         if self.window.pane_menu.take().is_none() {
             return Ok(false);
         }
@@ -2244,7 +2262,10 @@ impl Runtime<'_> {
     ///
     /// The hold is cleared on both edges: an opening submenu has nothing to
     /// survive yet, and a closing one has nothing left to survive for.
-    pub(crate) fn set_pane_submenu(&mut self, open: Option<profiles::PaneMenuRow>) -> Result<bool> {
+    pub(in crate::runtime) fn set_pane_submenu(
+        &mut self,
+        open: Option<profiles::PaneMenuRow>,
+    ) -> Result<bool> {
         let Some(menu) = self.window.pane_menu.as_mut() else {
             return Ok(false);
         };
@@ -2297,7 +2318,7 @@ impl Runtime<'_> {
     /// 4. **The apex is re-seated** on every move the triangle does *not* hold,
     ///    so a hand that changes direction is measured from where it changed
     ///    rather than from where it started three rows ago.
-    pub(crate) fn drive_pane_menu_hover(
+    pub(in crate::runtime) fn drive_pane_menu_hover(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
@@ -2411,7 +2432,7 @@ impl Runtime<'_> {
     /// open it is the safety triangle's 300ms cap. One field because there is one
     /// question — "what does this menu owe at some instant" — and a menu cannot
     /// be both waiting to open its child and holding it open against the rows.
-    pub(crate) fn advance_pane_menu(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_pane_menu(&mut self, now: Instant) -> Result<()> {
         let Some(menu) = self.window.pane_menu.as_ref() else {
             return Ok(());
         };
@@ -2461,7 +2482,7 @@ impl Runtime<'_> {
     }
 
     /// The pane menu's next wake-up, for the loop's set.
-    pub(crate) fn pane_menu_deadline(&self) -> Option<Instant> {
+    pub(in crate::runtime) fn pane_menu_deadline(&self) -> Option<Instant> {
         self.window.pane_menu.as_ref()?.submenu_hold_until
     }
 
@@ -2471,7 +2492,10 @@ impl Runtime<'_> {
     /// that one button has one name whichever host drew it; everything else in
     /// the chrome exists on one host only and wears its own target. See
     /// [`PopoverTrigger`] for why a second spelling would be a second button.
-    pub(crate) fn docked_popover_trigger(&self, target: seats::ChromeTarget) -> PopoverTrigger {
+    pub(in crate::runtime) fn docked_popover_trigger(
+        &self,
+        target: seats::ChromeTarget,
+    ) -> PopoverTrigger {
         if let Some((seat, part)) = seats::preview_rail_control(target) {
             return PopoverTrigger::Rail(self.preview_here(seat), part);
         }
@@ -2491,7 +2515,10 @@ impl Runtime<'_> {
     /// The seat comes out of the menu, never from the pointer. Between the press
     /// that raised this and the one that ran it, the pointer has travelled —
     /// down the menu, which is drawn over some *other* pane as often as not.
-    pub(crate) fn run_pane_menu_row(&mut self, hit: profiles::PaneMenuHit) -> Result<()> {
+    pub(in crate::runtime) fn run_pane_menu_row(
+        &mut self,
+        hit: profiles::PaneMenuHit,
+    ) -> Result<()> {
         // **The child's row is resolved while the child still exists** (B9). A
         // `Submenu` hit counts rows on the glass, and what those rows are about
         // is a fact about the layout — which is built out of the menu state the
@@ -2602,7 +2629,11 @@ impl Runtime<'_> {
     /// caller's, because the two doors carry it differently — one in its own
     /// menu state, one in the terminal menu's — and both took it from the press
     /// that raised them rather than from where the pointer has since travelled.
-    pub(crate) fn run_pane_verb(&mut self, seat: SeatId, hit: profiles::PaneMenuHit) -> Result<()> {
+    pub(in crate::runtime) fn run_pane_verb(
+        &mut self,
+        seat: SeatId,
+        hit: profiles::PaneMenuHit,
+    ) -> Result<()> {
         // The pane may have gone while the menu stood open — its shell exited,
         // or another gesture took it. Every verb below needs it to still be
         // there, so it is asked once.
@@ -2694,7 +2725,7 @@ impl Runtime<'_> {
     /// siblings in the collapsed-bar arm and in `set_focus`'s, because a caller
     /// that skips it because it happens to know the answer is a caller that will
     /// be wrong the day the answer changes.
-    pub(crate) fn toggle_pane_zoom(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn toggle_pane_zoom(&mut self, seat: SeatId) -> Result<()> {
         if !self.seats.toggle_zoom(seat) {
             return Ok(());
         }
@@ -2788,7 +2819,7 @@ impl Runtime<'_> {
     ///
     /// The rise is [`risen_frame`]'s, shared with the hit test so the window is
     /// asked about exactly where it is drawn.
-    pub(crate) fn float_geometry_of(
+    pub(in crate::runtime) fn float_geometry_of(
         &mut self,
         id: float::FloatId,
     ) -> Option<(float::FloatGeometry, float::FloatFade)> {
@@ -2816,7 +2847,7 @@ impl Runtime<'_> {
     /// button's box a couple of pixels too narrow for its own caption, and the
     /// label's rect *is* that box less its padding — so the `K` was clipped
     /// against the bounds the shortfall had drawn.
-    pub(crate) fn float_dock_label_width(&mut self, scale: f32) -> f32 {
+    pub(in crate::runtime) fn float_dock_label_width(&mut self, scale: f32) -> f32 {
         let font = float::FLOAT_DOCK_FONT_LOGICAL_PX * scale;
         self.window.renderer.measure_chrome_label(
             &mut self.app.gpu,
@@ -2839,7 +2870,7 @@ impl Runtime<'_> {
     /// **Only the window whose button was pressed is collected**, which is rule
     /// ⑤ of the 2026-08-12 ruling at its plainest: DOCK is one window's control,
     /// and the others stay exactly where they are.
-    pub(crate) fn dock_float(&mut self, id: float::FloatId) -> Result<()> {
+    pub(in crate::runtime) fn dock_float(&mut self, id: float::FloatId) -> Result<()> {
         let Some(win) = self.window.float.wipe(id) else {
             return Ok(());
         };
@@ -2899,7 +2930,11 @@ impl Runtime<'_> {
     /// rectangle, and [`Self::advance_web_page`] retires it. A pane with a
     /// document under it and no browser is a pane; a pane with a browser
     /// nothing can address is a leak.
-    pub(crate) fn dock_the_page_of(&mut self, id: float::FloatId, landing: PreviewSurface) {
+    pub(in crate::runtime) fn dock_the_page_of(
+        &mut self,
+        id: float::FloatId,
+        landing: PreviewSurface,
+    ) {
         let Some(carried) = self
             .window
             .float
@@ -2992,7 +3027,7 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn drawn_rail(&self, now: Instant) -> (i32, u8) {
+    pub(in crate::runtime) fn drawn_rail(&self, now: Instant) -> (i32, u8) {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let state = self.sampled_rail(now);
         (
@@ -3003,7 +3038,7 @@ impl Runtime<'_> {
 
     /// The dock box's opacity as the overlay would draw it, quantised to the
     /// 1/255 a layer's alpha resolves to — `None` when there is no box.
-    pub(crate) fn drawn_dock_reveal(&self, now: Instant, motion: Motion) -> Option<u8> {
+    pub(in crate::runtime) fn drawn_dock_reveal(&self, now: Instant, motion: Motion) -> Option<u8> {
         self.window.drop_preview.as_ref().map(|shown| {
             let (reveal, _) = shown.reveal.sample(now, motion);
             (reveal.clamp(0.0, 1.0) * 255.0).round() as u8
@@ -3102,7 +3137,7 @@ impl Runtime<'_> {
     /// Answers the grid the focused leaf's own rectangle solved to — what the
     /// perf trace means by "the size this resize frame was about" — or `None`
     /// when the solver placed no rectangle for it.
-    pub(crate) fn resize_leaves_to_layout(
+    pub(in crate::runtime) fn resize_leaves_to_layout(
         &mut self,
         observed_at: Instant,
         context: &'static str,
@@ -3293,7 +3328,7 @@ impl Runtime<'_> {
     /// One lookup for both halves, for the reason [`Self::forwarded_mouse_hit`]
     /// records below: a hit and the pane it belongs to that were fetched
     /// separately can disagree about which pane they mean.
-    pub(crate) fn pane_frame_hit(&self) -> Option<(SeatId, bt_render::GridHit)> {
+    pub(in crate::runtime) fn pane_frame_hit(&self) -> Option<(SeatId, bt_render::GridHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
         let hit = self
             .window
@@ -3357,7 +3392,9 @@ impl Runtime<'_> {
     /// The hover's own pane and not the focused one, because a hyperlink hover belongs to whatever
     /// pane the pointer is over ([`Self::hover_pane`]'s whole reason for existing), and the link
     /// under it was printed by *that* pane's shell.
-    pub(crate) fn hovered_pane_path_namespace(&self) -> bt_transcript::paths::PrintedPathNamespace {
+    pub(in crate::runtime) fn hovered_pane_path_namespace(
+        &self,
+    ) -> bt_transcript::paths::PrintedPathNamespace {
         self.window
             .hover_pane
             .map(|seat| self.seat_path_namespace(seat))
@@ -3381,7 +3418,10 @@ impl Runtime<'_> {
     /// [`Self::seat_path_verdict`] for the pane the pointer is standing in, for
     /// [`Self::hovered_pane_path_namespace`]'s reason: the link under the pointer was printed by
     /// *that* pane's shell, so it is that pane's ledger that answers for it.
-    pub(crate) fn hovered_pane_path_verdict(&self, path: &Path) -> Option<bt_term::PathVerdict> {
+    pub(in crate::runtime) fn hovered_pane_path_verdict(
+        &self,
+        path: &Path,
+    ) -> Option<bt_term::PathVerdict> {
         self.seat_path_verdict(self.window.hover_pane?, path)
     }
 
@@ -3399,7 +3439,7 @@ impl Runtime<'_> {
     /// Clamping rather than refusing is also the terminal convention. Dragging
     /// below a pane selects to the end of what is there; it does not stop
     /// selecting at the edge and it does not reach into the pane below.
-    pub(crate) fn drag_hit_in_pane(&self, seat: SeatId) -> Option<bt_render::GridHit> {
+    pub(in crate::runtime) fn drag_hit_in_pane(&self, seat: SeatId) -> Option<bt_render::GridHit> {
         let position = self.window.pointer_position?;
         let frame = self.pane_frame(seat)?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -3422,7 +3462,7 @@ impl Runtime<'_> {
     /// "one selection to a tab" rule lives. Every route that gives a pane a
     /// selection — the drag, the double click, the triple click — comes through
     /// here, so it is the one door that rule has to be written on.
-    pub(crate) fn set_pane_view_selection(
+    pub(in crate::runtime) fn set_pane_view_selection(
         &mut self,
         seat: SeatId,
         selection: Option<ViewSelection>,
@@ -3437,7 +3477,9 @@ impl Runtime<'_> {
     /// answers about what it is pointing at; a hover that first required a click would be the
     /// window refusing to say what it can already see (user ruling 2026-08-10). Nothing reached
     /// from here writes focus either — reading is not taking.
-    pub(crate) fn hovered_leaf(&self) -> Option<(SeatId, &LeafSession, bt_render::GridHit)> {
+    pub(in crate::runtime) fn hovered_leaf(
+        &self,
+    ) -> Option<(SeatId, &LeafSession, bt_render::GridHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
         let hit = self
             .window
@@ -3453,7 +3495,7 @@ impl Runtime<'_> {
     /// already drew — nothing has published there, so nothing has scanned it, and a hover that
     /// waited for that pane's next PTY byte to answer would answer late or never on a quiet shell.
     /// Both panes owe a repaint, which is how the marks move across with the pointer.
-    pub(crate) fn observe_hovered_pane(&mut self) -> Result<Option<SeatId>> {
+    pub(in crate::runtime) fn observe_hovered_pane(&mut self) -> Result<Option<SeatId>> {
         let hovered = self.pane_hit_context().map(|(seat, _, _)| seat);
         if self.window.hover_pane == hovered {
             return Ok(hovered);
@@ -3471,7 +3513,7 @@ impl Runtime<'_> {
     /// Idempotent and cheap to repeat: it reads a frame that is already in hand and asks that
     /// pane's own shell what it draws, which is the same question `publish_frame_inner` asks for
     /// the focused pane on every frame.
-    pub(crate) fn rescan_pane_references(&mut self, seat: SeatId) {
+    pub(in crate::runtime) fn rescan_pane_references(&mut self, seat: SeatId) {
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return;
@@ -3495,7 +3537,7 @@ impl Runtime<'_> {
     /// takes to move its marks. Asking for both is correct and costs one frame: a pointer leaving
     /// the focused pane for a neighbour owes marks to the neighbour and owes their removal to the
     /// pane it left.
-    pub(crate) fn repaint_hovered_pane(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn repaint_hovered_pane(&mut self) -> Result<()> {
         hang_watch::during(hang_watch::Station::WindowRedraw, || {
             self.window.window.request_redraw()
         });
@@ -3527,14 +3569,14 @@ impl Runtime<'_> {
     /// runs the compositor, and the compositor rebuilds every other pane from
     /// that pane's own projection. Nothing is invented for the held pane; the
     /// panes that have something new to show simply stop being hostage to it.
-    pub(crate) fn repaint_pane_change(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn repaint_pane_change(&mut self, seat: SeatId) -> Result<()> {
         self.repaint_pane_change_inner(seat, None)
     }
 
     /// A wheel can leave the view at its clamp; other pane changes still owe
     /// their unconditional frame. The focused frame's digest cannot tell us
     /// whether an unfocused view moved, so carry that answer from the scroll.
-    pub(crate) fn repaint_pane_change_inner(
+    pub(in crate::runtime) fn repaint_pane_change_inner(
         &mut self,
         seat: SeatId,
         wheel_view_moved: Option<bool>,
@@ -3555,7 +3597,7 @@ impl Runtime<'_> {
     /// Drop one pane's selection — the pane named, and not whichever holds the
     /// keyboard. The two differ for a gesture, which belongs to the pane it began
     /// in for as long as the button is down.
-    pub(crate) fn clear_pane_selection(&mut self, seat: SeatId) {
+    pub(in crate::runtime) fn clear_pane_selection(&mut self, seat: SeatId) {
         let active = self.window.active_tab;
         self.window.tabs[active].clear_leaf_selection(seat);
     }
@@ -3567,7 +3609,10 @@ impl Runtime<'_> {
     /// clamp is unsatisfiable, are §2.4's and are not re-derived here. Red line
     /// L9 is upheld by the edit itself — `DragDivider`'s focus set is exactly
     /// that one split, so nothing rebalances mid-gesture.
-    pub(crate) fn drive_divider_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn drive_divider_drag(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some(drag) = self.window.divider_drag else {
             return Ok(false);
         };
@@ -3675,7 +3720,7 @@ impl Runtime<'_> {
     ///
     /// The whole of the test is [`divider_drag_still_holds_its_pointer`]; what is here is the one
     /// sample it is asked about, taken only while a drag is actually in the air.
-    pub(crate) fn end_a_divider_drag_that_lost_its_pointer(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn end_a_divider_drag_that_lost_its_pointer(&mut self) -> Result<bool> {
         let Some(drag) = self.window.divider_drag else {
             return Ok(false);
         };
@@ -3739,7 +3784,7 @@ impl Runtime<'_> {
     /// window were not there. It keeps `&self` because that is what it is — a
     /// walk of solved rectangles — and the router above it is the one that needs
     /// a face to measure a caption with.
-    pub(crate) fn docked_chrome_target_at(
+    pub(in crate::runtime) fn docked_chrome_target_at(
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<seats::ChromeTarget> {
@@ -3975,7 +4020,7 @@ impl Runtime<'_> {
             })
     }
 
-    pub(crate) fn update_chrome_hover_target_in_pane(
+    pub(in crate::runtime) fn update_chrome_hover_target_in_pane(
         &mut self,
         hover: Option<seats::ChromeTarget>,
         pane: Option<bt_layout::SeatId>,
@@ -4020,7 +4065,7 @@ impl Runtime<'_> {
     /// `×` never reaches the head's arm of the router in the first place. "The
     /// button is not the bar" is true at the hit test, which is the only place it
     /// can be true once rather than everywhere.
-    pub(crate) fn begin_pane_drag(
+    pub(in crate::runtime) fn begin_pane_drag(
         &mut self,
         seat: SeatId,
         position: PhysicalPosition<f64>,
@@ -4064,7 +4109,7 @@ impl Runtime<'_> {
     ///
     /// One tree walk and one solve per pointer move, on a tree of a few leaves,
     /// and only while a pane is actually resting on a foreign tab.
-    pub(crate) fn pane_adopt_fits(&self, leaf: LeafId, target: TabId) -> bool {
+    pub(in crate::runtime) fn pane_adopt_fits(&self, leaf: LeafId, target: TabId) -> bool {
         let Some(from) = self.tab_state(leaf.tab) else {
             return false;
         };
@@ -4124,7 +4169,7 @@ impl Runtime<'_> {
     /// leaf all reach disk through the one channel that already carries them.
     ///
     /// Answers whether the tree changed.
-    pub(crate) fn commit_layout_drop(&mut self, drag: &Drag) -> Result<bool> {
+    pub(in crate::runtime) fn commit_layout_drop(&mut self, drag: &Drag) -> Result<bool> {
         let Some(inputs) = self.plan_inputs_for(drag) else {
             return Ok(false);
         };
@@ -4283,7 +4328,11 @@ impl Runtime<'_> {
     /// Answers whether anything moved. `false` leaves the gesture to J120's slide
     /// home, which for a pane is a no-op — the tree was untouched for the whole
     /// drag.
-    pub(crate) fn commit_pane_extract(&mut self, drag: &Drag, slot: usize) -> Result<bool> {
+    pub(in crate::runtime) fn commit_pane_extract(
+        &mut self,
+        drag: &Drag,
+        slot: usize,
+    ) -> Result<bool> {
         let DragSource::Pane(leaf) = drag.source else {
             return Ok(false);
         };
@@ -4309,7 +4358,11 @@ impl Runtime<'_> {
     ///
     /// Answers whether anything moved. `false` leaves the gesture to J120's slide
     /// home, which for a pane is a no-op — the trees are untouched on that path.
-    pub(crate) fn commit_pane_adopt(&mut self, drag: &Drag, target: TabId) -> Result<bool> {
+    pub(in crate::runtime) fn commit_pane_adopt(
+        &mut self,
+        drag: &Drag,
+        target: TabId,
+    ) -> Result<bool> {
         let DragSource::Pane(leaf) = drag.source else {
             return Ok(false);
         };
@@ -4441,7 +4494,7 @@ impl Runtime<'_> {
     /// the focus. Whether the page is what typing goes into is then
     /// `settle_the_web_keyboard`'s answer on the next frame, as it is for every
     /// other page in this window.
-    pub(crate) fn carry_the_pages_of_moved_panes(
+    pub(in crate::runtime) fn carry_the_pages_of_moved_panes(
         &mut self,
         moves: &[(LeafId, LeafId)],
     ) -> Result<()> {
@@ -4521,7 +4574,10 @@ impl Runtime<'_> {
     /// key changing — the engine is not touched, the decoder does not restart,
     /// the playhead does not go back and the texture keeps its name — so there
     /// is no platform call to report on.
-    pub(crate) fn carry_the_recordings_of_moved_panes(&mut self, moves: &[(LeafId, LeafId)]) {
+    pub(in crate::runtime) fn carry_the_recordings_of_moved_panes(
+        &mut self,
+        moves: &[(LeafId, LeafId)],
+    ) {
         let hosted: BTreeSet<LeafId> = self
             .window
             .video
@@ -4552,7 +4608,7 @@ impl Runtime<'_> {
     }
 
     /// Where the box stands this frame.
-    pub(crate) fn palette_layout(&mut self) -> Option<palette::PaletteLayout> {
+    pub(in crate::runtime) fn palette_layout(&mut self) -> Option<palette::PaletteLayout> {
         let state = self.window.palette.as_ref()?;
         let listing = state.listing().clone();
         let scroll = state.scroll();
@@ -4579,7 +4635,7 @@ impl Runtime<'_> {
     ///
     /// One call so the seam the rail draws and the rows it hits are measured from
     /// one list — [`seats::pinned_run_len`]'s own argument, one level up.
-    pub(crate) fn rail_list(&self, now: Instant) -> (Vec<seats::TabTrailer>, usize) {
+    pub(in crate::runtime) fn rail_list(&self, now: Instant) -> (Vec<seats::TabTrailer>, usize) {
         let trailers = self.tab_trailers(now);
         let pinned = seats::pinned_run_len(&trailers);
         (trailers, pinned)
@@ -4620,7 +4676,7 @@ impl Runtime<'_> {
     /// width it currently has, and that is what keeps it from chattering: a test
     /// against the animating width would re-decide the question against a
     /// different boundary on every frame of the answer it just gave.
-    pub(crate) fn drive_rail_zone(&mut self, position: Option<PhysicalPosition<f64>>) {
+    pub(in crate::runtime) fn drive_rail_zone(&mut self, position: Option<PhysicalPosition<f64>>) {
         // Asked of the window's posture rather than of the stored preference: in
         // focus mode there is no icon rail to reach for, and a trigger that went
         // on opening one would be aiming a tween at a panel nobody is drawing.
@@ -4701,7 +4757,7 @@ impl Runtime<'_> {
     /// pair (v5's `tab_layout`/`sidebar_mode`) and has never carried this, so a
     /// window opens with its rail out, which is also what the mock-up's own
     /// `state.railCollapsed` does on reload.
-    pub(crate) fn toggle_rail_collapsed(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn toggle_rail_collapsed(&mut self) -> Result<()> {
         self.set_rail_state(seats::RailState {
             collapsed: !self.window.rail.collapsed,
             ..self.window.rail
@@ -4801,7 +4857,7 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    pub(crate) fn scroll_rail(&mut self, delta: MouseScrollDelta) -> Result<()> {
+    pub(in crate::runtime) fn scroll_rail(&mut self, delta: MouseScrollDelta) -> Result<()> {
         let now = Instant::now();
         // **The plain notch is this list's; `Alt` aims the seat under the
         // pointer** ([`column_notch`], user ruling 2026-08-21). The decision is
@@ -4873,7 +4929,7 @@ impl Runtime<'_> {
     /// column and the rail are the same panel, and a pointer inside it belongs to
     /// it either way. Asking only the rail was right until §7.1.6b′ gave the
     /// panel a second thing to hold.
-    pub(crate) fn panel_covers(&self, position: PhysicalPosition<f64>) -> bool {
+    pub(in crate::runtime) fn panel_covers(&self, position: PhysicalPosition<f64>) -> bool {
         let now = Instant::now();
         self.rail_geometry_now(now)
             .is_some_and(|rail| rail.covers(position.x, position.y))
@@ -4883,7 +4939,7 @@ impl Runtime<'_> {
     }
 
     /// Whether the pointer is over the rail's own box — the wheel's gate.
-    pub(crate) fn rail_contains(&self, position: PhysicalPosition<f64>) -> bool {
+    pub(in crate::runtime) fn rail_contains(&self, position: PhysicalPosition<f64>) -> bool {
         let now = Instant::now();
         self.rail_geometry_now(now)
             .map(|geometry| seats::rail_run(&geometry))
@@ -4910,7 +4966,7 @@ impl Runtime<'_> {
     /// **Inside the closure**, so the second solve happens only for a reader who
     /// asked for the file: a diagnostic nobody turned on must cost one atomic
     /// load and nothing else.
-    pub(crate) fn wheel_rail_trace(
+    pub(in crate::runtime) fn wheel_rail_trace(
         &self,
         now: Instant,
         position: PhysicalPosition<f64>,
@@ -4949,7 +5005,7 @@ impl Runtime<'_> {
     /// Claims the next rectangle sight unseen rather than recording one now: at this point the
     /// request has been made and the OS has not yet answered it, and predicting the answer is
     /// exactly the guess this mechanism exists to avoid.
-    pub(crate) fn claim_lawful_layout(&mut self) {
+    pub(in crate::runtime) fn claim_lawful_layout(&mut self) {
         self.window.size_policy = SizePolicy::Lawful;
         self.window.lawful_client_size = None;
     }
@@ -4978,7 +5034,7 @@ impl Runtime<'_> {
     /// and the horizontal strip has `tab_scroll`; all three are read by geometry
     /// that multiplies by the current scale, so all three are stale in exactly
     /// the same way. Restating one and not the others is the next report.
-    pub(crate) fn restate_panel_scroll(&mut self, measured_at: f64, now_at: f64) {
+    pub(in crate::runtime) fn restate_panel_scroll(&mut self, measured_at: f64, now_at: f64) {
         self.window.rail_scroll = restated_scroll(self.window.rail_scroll, measured_at, now_at);
         self.window.tab_scroll = restated_scroll(self.window.tab_scroll, measured_at, now_at);
     }
@@ -4990,7 +5046,7 @@ impl Runtime<'_> {
     /// identical question: a ring turning while a pane is mid-flight has to be
     /// drawn through the transform this instant, and a second copy of this
     /// arithmetic would be a second answer.
-    pub(crate) fn pane_draws(&mut self, now: Instant) -> Vec<PaneDraw> {
+    pub(in crate::runtime) fn pane_draws(&mut self, now: Instant) -> Vec<PaneDraw> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let motion = self.app.motion;
         let bodies: Vec<PaneDraw> = self
@@ -5095,7 +5151,7 @@ impl Runtime<'_> {
     /// 2026-08-22: `Ctrl+F` over a page opened a search on the shell next door).
     /// The capsule has two hosts now, so the question has two answers and this
     /// is where they are chosen between.
-    pub(crate) fn search_host_seat(&self) -> SeatId {
+    pub(in crate::runtime) fn search_host_seat(&self) -> SeatId {
         self.focused_web_seat().unwrap_or(self.focused_leaf)
     }
 
@@ -5129,7 +5185,7 @@ impl Runtime<'_> {
     /// `Reconfigure` both mean the swapchain handed back no image, so there is
     /// nothing new for the compositor to publish and the frame is re-filed by
     /// the caller.
-    pub(crate) fn present_seats_and_commit(
+    pub(in crate::runtime) fn present_seats_and_commit(
         gpu: &mut GpuContext,
         renderer: &mut WindowRenderer,
         compositor: &bt_platform::Compositor,
@@ -5269,7 +5325,7 @@ impl Runtime<'_> {
         })
     }
 
-    pub(crate) fn retained_seats<'a>(
+    pub(in crate::runtime) fn retained_seats<'a>(
         tab: &'a TabState,
         focused_frame: Option<&'a ViewportFrame>,
         bodies: &[PaneDraw],

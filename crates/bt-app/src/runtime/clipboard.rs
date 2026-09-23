@@ -83,14 +83,14 @@ impl Runtime<'_> {
     /// The path as the *user* would write it — `full_path`'s own separators —
     /// because the whole point of this verb is that the string is about to be
     /// pasted somewhere this window does not control.
-    pub(crate) fn copy_path_to_clipboard(&mut self, path: &Path) -> Result<()> {
+    pub(in crate::runtime) fn copy_path_to_clipboard(&mut self, path: &Path) -> Result<()> {
         let text = path.to_string_lossy().into_owned();
         let result = write_terminal_clipboard_text(&text);
         recoverable_clipboard_write(result, "copy a files row's path");
         Ok(())
     }
 
-    pub(crate) fn copy_selection(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn copy_selection(&mut self) -> Result<()> {
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].focused_mut() else {
             return Ok(());
@@ -110,7 +110,7 @@ impl Runtime<'_> {
     /// The text is that pane's, whatever pane the pointer let go over: it is the
     /// selection just made that the hand means, and there is only one pane it was
     /// ever made in.
-    pub(crate) fn copy_selection_on_release(&self, seat: SeatId) {
+    pub(in crate::runtime) fn copy_selection_on_release(&self, seat: SeatId) {
         let Some(leaf) = self.sessions.get(&seat) else {
             return;
         };
@@ -170,7 +170,7 @@ impl Runtime<'_> {
     /// Answers the address to write to — the one **both** readings agree on —
     /// rather than a `bool`, so that no caller can take the verdict from here and
     /// the destination from somewhere older.
-    pub(crate) fn paste_offer_kept(
+    pub(in crate::runtime) fn paste_offer_kept(
         &self,
         drag: &Drag,
         plan: &seats::DropPlan,
@@ -197,7 +197,7 @@ impl Runtime<'_> {
     /// clipboard another process is holding open is a condition that clears
     /// itself, and a box that raised a card about it would be interrupting a
     /// reader mid-query to report an event they can simply repeat.
-    pub(crate) fn clipboard_line(&self) -> String {
+    pub(in crate::runtime) fn clipboard_line(&self) -> String {
         hang_watch::during(hang_watch::Station::ClipboardRead, || {
             bt_platform::clipboard_text()
         })
@@ -209,7 +209,7 @@ impl Runtime<'_> {
 
     /// `Ctrl+V` / `Shift+Insert` — the keyboard's paste, into the shell the
     /// keyboard is in.
-    pub(crate) fn paste_from_clipboard(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn paste_from_clipboard(&mut self) -> Result<()> {
         self.paste_from_clipboard_into(self.focused_leaf)
     }
 
@@ -225,7 +225,7 @@ impl Runtime<'_> {
     /// The seat differs from `focused_leaf` for exactly one caller — the
     /// terminal menu, which is raised by a right press, and a right press does
     /// not move the focus.
-    pub(crate) fn paste_from_clipboard_into(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn paste_from_clipboard_into(&mut self, seat: SeatId) -> Result<()> {
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
             return Ok(());
@@ -299,7 +299,7 @@ impl Runtime<'_> {
     /// coming by a path. `context` is all they do not share: it names the write
     /// for a reader of the error, and a picture that could not reach a shell is
     /// not a drop that could not.
-    pub(crate) fn paste_paths_into(
+    pub(in crate::runtime) fn paste_paths_into(
         &mut self,
         target: PasteTarget,
         paths: Vec<PathBuf>,
@@ -350,7 +350,7 @@ impl Runtime<'_> {
     /// and left for another tab before the encode finished gets nothing, which
     /// is the honest half of that: the file is still on disk, the newest twenty
     /// are kept, and no shell they were not looking at was typed into.
-    pub(crate) fn live_paste_target(&self, target: PasteTarget) -> Option<usize> {
+    pub(in crate::runtime) fn live_paste_target(&self, target: PasteTarget) -> Option<usize> {
         let index = self.window.active_tab;
         let tab = self.window.tabs.get(index)?;
         let standing = tab.sessions.get(&target.seat).map(|leaf| leaf.incarnation);

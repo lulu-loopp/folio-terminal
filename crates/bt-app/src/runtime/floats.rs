@@ -29,7 +29,10 @@ impl Runtime<'_> {
         self.refresh_chrome_with_overlay(false)
     }
 
-    pub(crate) fn refresh_chrome_with_overlay(&mut self, include_overlay: bool) -> bool {
+    pub(in crate::runtime) fn refresh_chrome_with_overlay(
+        &mut self,
+        include_overlay: bool,
+    ) -> bool {
         // **The one heavy call in this window that borrowed whichever name
         // happened to be standing** (T-STATION-SPLIT). It is reached from two
         // hundred-odd doors — a keystroke, a hover, a press, a probe's answer,
@@ -1070,7 +1073,11 @@ impl Runtime<'_> {
     /// Exhaustive on the six rather than taking a closure, because which
     /// builder draws which surface is the one thing that differs, and a seventh
     /// with a band of its own must not reach this without saying so.
-    pub(crate) fn stage_menu(&mut self, popup: Popup, now: Instant) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn stage_menu(
+        &mut self,
+        popup: Popup,
+        now: Instant,
+    ) -> Vec<marks::OverlayLayer> {
         let paint = match popup {
             Popup::File => self.file_menu_layer(),
             Popup::Pane => self.pane_menu_layer(),
@@ -1125,7 +1132,7 @@ impl Runtime<'_> {
     /// **Both `⌄` clocks stop too** (2026-08-16). Whatever ran this has answered
     /// the question the clocks were asking, and a rest that matured a frame later
     /// would re-open a menu the press had just put away.
-    pub(crate) fn close_popups_except(&mut self, keep: Popup) {
+    pub(in crate::runtime) fn close_popups_except(&mut self, keep: Popup) {
         for popup in keep.others() {
             self.close_popup(popup);
         }
@@ -1206,7 +1213,7 @@ impl Runtime<'_> {
     /// The hover panels go with them for `close_popups_except`'s own reason, and
     /// the `⌄` clocks are cleared so that a rest maturing a frame later cannot
     /// re-open a menu onto the tab that has just arrived.
-    pub(crate) fn close_every_popup(&mut self) {
+    pub(in crate::runtime) fn close_every_popup(&mut self) {
         for popup in Popup::ALL {
             self.close_popup(popup);
         }
@@ -1283,7 +1290,7 @@ impl Runtime<'_> {
     /// *repaint* is the caller's, which is why this only sets the target — a
     /// turn that has begun is finished by `advance_strip_animation` off the
     /// deadline `strip_animation_work` asks for.
-    pub(crate) fn start_chevron_turn(&mut self) {
+    pub(in crate::runtime) fn start_chevron_turn(&mut self) {
         let now = Instant::now();
         self.window.chevron_turn.retarget(
             chevron_turn_target(
@@ -1309,7 +1316,7 @@ impl Runtime<'_> {
     /// ([`seats::Seats::mint_detached_seat`]) and never reused, so it cannot come
     /// to name another pane's page — the guarantee [`float::FloatPreview::page`]
     /// is written against.
-    pub(crate) fn open_minted_page_on_float(
+    pub(in crate::runtime) fn open_minted_page_on_float(
         &mut self,
         id: float::FloatId,
         mint: webnav::Mint,
@@ -1354,7 +1361,7 @@ impl Runtime<'_> {
     /// default", which is a setting, and "what does a row of this menu look
     /// like", which is the menu's own business — and the menu's business is a
     /// column of thin monochrome glyphs.
-    pub(crate) fn file_menu_look<'a>(
+    pub(in crate::runtime) fn file_menu_look<'a>(
         &self,
         subject: profiles::FileMenuSubject,
         powers: profiles::FileMenuPowers,
@@ -1383,7 +1390,11 @@ impl Runtime<'_> {
     /// a column with no root raises none either: [`RowActivation::Nowhere`] means
     /// there is no path to put on a clipboard, and a menu whose every verb does
     /// nothing is worse than no menu.
-    pub(crate) fn open_file_menu(&mut self, target: FileMenuTarget, point: [f32; 2]) -> Result<()> {
+    pub(in crate::runtime) fn open_file_menu(
+        &mut self,
+        target: FileMenuTarget,
+        point: [f32; 2],
+    ) -> Result<()> {
         if target.activation.path().is_none() {
             return Ok(());
         }
@@ -1427,7 +1438,11 @@ impl Runtime<'_> {
     /// re-derived from the live layout at the moment of the press, through the
     /// one function the hit test also uses, so a menu raised by a key and a menu
     /// raised by a click on the same row cannot come up in two places.
-    pub(crate) fn raise_file_menu_on_row(&mut self, seat: SeatId, key: &str) -> Result<()> {
+    pub(in crate::runtime) fn raise_file_menu_on_row(
+        &mut self,
+        seat: SeatId,
+        key: &str,
+    ) -> Result<()> {
         let now = Instant::now();
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let trees = self.files_trees(now);
@@ -1487,7 +1502,7 @@ impl Runtime<'_> {
         MenuPaint::plain(profiles::file_menu_build(&layout, &look, hover), travel)
     }
 
-    pub(crate) fn close_file_menu(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn close_file_menu(&mut self) -> Result<bool> {
         if self.window.file_menu.take().is_none() {
             return Ok(false);
         }
@@ -1535,7 +1550,7 @@ impl Runtime<'_> {
     /// E61 first: the opener closes every other popup, which for this one is the
     /// whole of what keeps a right press inside a pane from dropping a menu on
     /// top of the pane-head menu already hanging over it.
-    pub(crate) fn open_term_menu_at(
+    pub(in crate::runtime) fn open_term_menu_at(
         &mut self,
         seat: SeatId,
         position: PhysicalPosition<f64>,
@@ -1571,7 +1586,7 @@ impl Runtime<'_> {
     /// off — those are the pane's verbs and this seat always wears the head that
     /// holds them — and `Copy` is greyed unless there are bytes to write, which
     /// is the terminal's own question asked of this surface's own selection.
-    pub(crate) fn open_page_menu_at(
+    pub(in crate::runtime) fn open_page_menu_at(
         &mut self,
         seat: SeatId,
         position: PhysicalPosition<f64>,
@@ -1649,7 +1664,7 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn close_term_menu(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn close_term_menu(&mut self) -> Result<bool> {
         if self.window.term_menu.take().is_none() {
             return Ok(false);
         }
@@ -1671,7 +1686,10 @@ impl Runtime<'_> {
     /// `Duplicate pane` reached by right-clicking a lone pane and one reached
     /// from a head's `⌄` are the same call with the same seed, and there is
     /// nowhere for them to drift apart.
-    pub(crate) fn run_term_menu_row(&mut self, hit: profiles::TermMenuHit) -> Result<()> {
+    pub(in crate::runtime) fn run_term_menu_row(
+        &mut self,
+        hit: profiles::TermMenuHit,
+    ) -> Result<()> {
         // The menu's own padding, either rule, a greyed row. A press there is the
         // menu swallowing it — decided in `chrome_mouse_input` — so there is
         // nothing to spend and, in particular, no menu to take away.
@@ -1780,7 +1798,7 @@ impl Runtime<'_> {
 
     /// Open or shut this menu's `Split with` child, and report whether anything
     /// moved. [`Runtime::set_pane_submenu`]'s twin, on the second door.
-    pub(crate) fn set_term_submenu(&mut self, open: bool) -> Result<bool> {
+    pub(in crate::runtime) fn set_term_submenu(&mut self, open: bool) -> Result<bool> {
         let Some(menu) = self.window.term_menu.as_mut() else {
             return Ok(false);
         };
@@ -1809,7 +1827,7 @@ impl Runtime<'_> {
     /// [`Runtime::advance_pane_menu`]'s twin, and two clocks in one slot for its
     /// reason: a menu cannot be both waiting to open its child and holding it
     /// open against the rows.
-    pub(crate) fn advance_term_menu(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_term_menu(&mut self, now: Instant) -> Result<()> {
         let Some(menu) = self.window.term_menu.as_ref() else {
             return Ok(());
         };
@@ -1831,7 +1849,7 @@ impl Runtime<'_> {
     }
 
     /// The terminal menu's next wake-up, for the loop's set.
-    pub(crate) fn term_menu_deadline(&self) -> Option<Instant> {
+    pub(in crate::runtime) fn term_menu_deadline(&self) -> Option<Instant> {
         self.window.term_menu.as_ref()?.submenu_hold_until
     }
 
@@ -1845,7 +1863,7 @@ impl Runtime<'_> {
     /// `&mut self` for [`Self::layout_peek_target_at`]'s reason: the trigger is
     /// read through the float-aware router, so a `Files` button a window is
     /// standing on arms nothing.
-    pub(crate) fn float_trigger_at(
+    pub(in crate::runtime) fn float_trigger_at(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Option<float::FloatTrigger> {
@@ -1893,7 +1911,7 @@ impl Runtime<'_> {
     /// grace runs from it as from any other departure. Nothing here special-cases
     /// leaving: `None` simply fails both hit tests, exactly as a point in the
     /// middle of a pane does.
-    pub(crate) fn observe_chevrons(
+    pub(in crate::runtime) fn observe_chevrons(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
         now: Instant,
@@ -2051,7 +2069,7 @@ impl Runtime<'_> {
     /// raise a popover; the rest of its chassis — its head, its grip, its `DOCK`
     /// — raises none, and naming them here would be inventing triggers for
     /// popovers that do not exist.
-    pub(crate) fn popover_trigger_at(
+    pub(in crate::runtime) fn popover_trigger_at(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Option<PopoverTrigger> {
@@ -2084,7 +2102,7 @@ impl Runtime<'_> {
     /// button. Every press outside those four dismisses them and then goes on
     /// being the press it was, which is how a second right press moves a context
     /// menu from one row to another.
-    pub(crate) fn popup_trigger(&self, popup: Popup) -> Option<OwnTrigger> {
+    pub(in crate::runtime) fn popup_trigger(&self, popup: Popup) -> Option<OwnTrigger> {
         let button = |control| {
             Some(OwnTrigger {
                 control,
@@ -2143,7 +2161,7 @@ impl Runtime<'_> {
     /// ruling's "两处 ⌄ 语义完全对齐" — and the rail pill's later enrolment in it
     /// — a property of the code rather than a coincidence of three
     /// implementations.
-    pub(crate) fn advance_chevrons(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_chevrons(&mut self, now: Instant) -> Result<()> {
         if let Some(action) = self.window.chevrons.profile.due(now) {
             self.window.chevrons.profile.clear();
             match action {
@@ -2217,7 +2235,10 @@ impl Runtime<'_> {
     /// (8094): two of these verbs move the keyboard somewhere else, and a menu
     /// still on screen after the focus has left it is a menu the next Esc will
     /// be spent on.
-    pub(crate) fn run_file_menu_row(&mut self, row: profiles::FileMenuRow) -> Result<()> {
+    pub(in crate::runtime) fn run_file_menu_row(
+        &mut self,
+        row: profiles::FileMenuRow,
+    ) -> Result<()> {
         let Some(menu) = self.window.file_menu.take() else {
             return Ok(());
         };
@@ -2352,7 +2373,7 @@ impl Runtime<'_> {
     /// `.closing`, which is what stops a window that is on its way out from
     /// swallowing the click you aimed at what is behind it. `hit_order` filters
     /// those out, so a closing window is transparent to this by construction.
-    pub(crate) fn float_hit_at(
+    pub(in crate::runtime) fn float_hit_at(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Option<(float::FloatId, float::FloatPart)> {
@@ -2492,7 +2513,7 @@ impl Runtime<'_> {
     }
 
     /// Advance both of the float's clocks and its animation.
-    pub(crate) fn advance_float(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_float(&mut self, now: Instant) -> Result<()> {
         // **Everything down to the fade is state, and state is never paced**
         // (closure review O4, 2026-09-18). Behind the gate, a hover intent that
         // matured while a neighbouring pane was printing opened no window, a
@@ -2610,7 +2631,11 @@ impl Runtime<'_> {
     }
 
     /// Turn one commit's file list over, in a floating Git page (R15).
-    pub(crate) fn expand_float_commit(&mut self, id: float::FloatId, hash: &str) -> Result<()> {
+    pub(in crate::runtime) fn expand_float_commit(
+        &mut self,
+        id: float::FloatId,
+        hash: &str,
+    ) -> Result<()> {
         let tab = self.window.tabs[self.window.active_tab].id;
         let mut question = None;
         if let Some(files) = self
@@ -2644,7 +2669,7 @@ impl Runtime<'_> {
     }
 
     /// The next fifty commits, for a floating page (R16).
-    pub(crate) fn load_more_float_commits(&mut self, id: float::FloatId) -> Result<()> {
+    pub(in crate::runtime) fn load_more_float_commits(&mut self, id: float::FloatId) -> Result<()> {
         let tab = self.window.tabs[self.window.active_tab].id;
         let Some(question) = self
             .window
@@ -2675,7 +2700,7 @@ impl Runtime<'_> {
     /// launched process cannot — Explorer may open behind this window, or focus a
     /// window that was already open somewhere else, and without a word here the
     /// click reads as having done nothing.
-    pub(crate) fn reveal_float_root(&mut self, id: float::FloatId) -> Result<()> {
+    pub(in crate::runtime) fn reveal_float_root(&mut self, id: float::FloatId) -> Result<()> {
         let Some(root) = self
             .window
             .float
@@ -2708,7 +2733,7 @@ impl Runtime<'_> {
     /// showing, so a tree's points at a folder and a buffer's points at the file
     /// itself (the docked preview foot's own ruling, 2026-08-13 — "the directory
     /// it is in" is not an answer to "where is this file").
-    pub(crate) fn reveal_float_file(&mut self, id: float::FloatId) -> Result<()> {
+    pub(in crate::runtime) fn reveal_float_file(&mut self, id: float::FloatId) -> Result<()> {
         let surface = PreviewSurface::Float(id);
         // A file's door, for [`Self::reveal_preview_file`]'s reason — including
         // the working-tree file a git document is a reading of.
@@ -2742,7 +2767,7 @@ impl Runtime<'_> {
     /// Both halves run now, where the old shape ran one *or* the other: a peek
     /// and pinned windows can be on screen together, so dissolving the transient
     /// one is no longer a reason to leave the permanent ones un-clamped.
-    pub(crate) fn reclamp_float(&mut self) {
+    pub(in crate::runtime) fn reclamp_float(&mut self) {
         if self.window.float.wipe_peek().is_some() {
             // Every gesture aimed at the window that just went dies with it —
             // including a header press still waiting to become one, which if it
@@ -2767,7 +2792,7 @@ impl Runtime<'_> {
     /// screen the old blanket `float_drag = None` would cancel a *drag of another
     /// window* every time any window closed, which is the bug a list invites and
     /// the reason this is asked by identity.
-    pub(crate) fn forget_dead_float_gestures(&mut self) {
+    pub(in crate::runtime) fn forget_dead_float_gestures(&mut self) {
         if let Some(drag) = self.window.float_drag
             && self.window.float.live(drag.win).is_none()
         {
@@ -2798,7 +2823,7 @@ impl Runtime<'_> {
     }
 
     /// The float's next appointment.
-    pub(crate) fn float_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(in crate::runtime) fn float_deadline(&self, now: Instant) -> Option<Instant> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let owner = self.window.float.deadline(
             now,
@@ -2821,7 +2846,7 @@ impl Runtime<'_> {
     /// because reserving it is the whole of what makes "the dot appearing shoves
     /// nothing" true (P16), and a head laid out without room for a button it is
     /// then drawn with is a button standing on the name (D4).
-    pub(crate) fn float_head_tools(&self, id: float::FloatId) -> float::FloatHeadTools {
+    pub(in crate::runtime) fn float_head_tools(&self, id: float::FloatId) -> float::FloatHeadTools {
         let is_preview = self
             .window
             .float
@@ -2866,7 +2891,7 @@ impl Runtime<'_> {
     /// gesture that has already shown where the window came from, and one an
     /// entrance played on top of would only blur. So it is simply there, at full
     /// strength, from the frame it opens to the frame it is wiped.
-    pub(crate) fn float_fade_of(
+    pub(in crate::runtime) fn float_fade_of(
         &self,
         win: &float::FloatWin,
         now: Instant,
@@ -2922,7 +2947,7 @@ impl Runtime<'_> {
     /// this frame's stack has no layer for — a window whose fade has ended
     /// between the two passes — and a page with no level is a page with no hole,
     /// which is the window simply being there.
-    pub(crate) fn float_hole_level(&self, id: float::FloatId) -> Option<usize> {
+    pub(in crate::runtime) fn float_hole_level(&self, id: float::FloatId) -> Option<usize> {
         self.window.float_hole_level.get(&id).copied()
     }
 
@@ -2941,7 +2966,11 @@ impl Runtime<'_> {
     /// rounded face again. A resize re-solves this rectangle from the float's new
     /// frame every frame, so the engine's bounds and the scrollbar both follow
     /// the drag with nothing else asked ([`float::FloatGeometry::content_body`]).
-    pub(crate) fn float_body_rect(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
+    pub(in crate::runtime) fn float_body_rect(
+        &self,
+        id: float::FloatId,
+        scale: f32,
+    ) -> Option<[f32; 4]> {
         Some(self.float_chassis(id, scale)?.body)
     }
 
@@ -2963,7 +2992,11 @@ impl Runtime<'_> {
     /// Neither is a *band* and neither costs the document a pixel of height:
     /// this is one inset, on two tenants that are drawn inside the same body
     /// everything else fills.
-    pub(crate) fn float_inset_body_rect(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
+    pub(in crate::runtime) fn float_inset_body_rect(
+        &self,
+        id: float::FloatId,
+        scale: f32,
+    ) -> Option<[f32; 4]> {
         Some(self.float_chassis(id, scale)?.content_body(scale))
     }
 
@@ -3005,7 +3038,11 @@ impl Runtime<'_> {
     /// this function knows is which window is where inside its own family, and
     /// adding the two here is what makes [`WindowRuntime::float_hole_level`] an
     /// index into the one flattened list.
-    pub(crate) fn float_layer(&mut self, now: Instant, below: usize) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn float_layer(
+        &mut self,
+        now: Instant,
+        below: usize,
+    ) -> Vec<marks::OverlayLayer> {
         let ids: Vec<float::FloatId> = self.window.float.drawn().map(|win| win.epoch).collect();
         // Rebuilt from nothing on every pass, exactly as `git_pages_shown` is:
         // it is a record of what this frame drew, and a stale entry in it is a
@@ -3109,7 +3146,7 @@ impl Runtime<'_> {
     /// this reason: a picture is not a buffer (`preview_chrome_on`), so the two
     /// cannot both answer, and asking the picture first is what lets a window
     /// showing a refused `.png` wear a card at all.
-    pub(crate) fn float_refusal_words(
+    pub(in crate::runtime) fn float_refusal_words(
         &self,
         surface: PreviewSurface,
         open_label: &str,
@@ -3148,7 +3185,7 @@ impl Runtime<'_> {
     /// This overturns `M2-tiny-window-priority.md` §3.3, which clamped into the
     /// solved content box precisely so that no chrome could ever be covered; see
     /// the dated annotation there.
-    pub(crate) fn float_viewport(&self) -> [f32; 4] {
+    pub(in crate::runtime) fn float_viewport(&self) -> [f32; 4] {
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         float_viewport_rect(
             width,
@@ -3185,7 +3222,7 @@ impl Runtime<'_> {
     /// Raising is not gone, it is merely no longer the *trigger's* job: pressing
     /// a window brings it forward ([`float::FloatHost::raise`], from
     /// [`Self::press_float`]), which is where a stacking gesture belongs.
-    pub(crate) fn open_float(
+    pub(in crate::runtime) fn open_float(
         &mut self,
         trigger: float::FloatTrigger,
         mode: float::FloatMode,
@@ -3220,7 +3257,7 @@ impl Runtime<'_> {
     /// The caller's own list rather than the host's, because
     /// [`float::cascade_origin`] must not assume the newcomer is going into this
     /// host: a pop-out computes its frame before its window exists.
-    pub(crate) fn taken_float_origins(&self) -> Vec<[f32; 2]> {
+    pub(in crate::runtime) fn taken_float_origins(&self) -> Vec<[f32; 2]> {
         self.window
             .float
             .live_windows()
@@ -3234,7 +3271,7 @@ impl Runtime<'_> {
     /// second trigger, and a column popping out — because the four differ only in
     /// what they hand it, and four doors would be four places to forget the epoch
     /// or the clamp.
-    pub(crate) fn place_float(
+    pub(in crate::runtime) fn place_float(
         &mut self,
         mode: float::FloatMode,
         origin: float::FloatOrigin,
@@ -3306,7 +3343,7 @@ impl Runtime<'_> {
     }
 
     /// Begin one float's exit (§7.1.2's remaining closers, and only those).
-    pub(crate) fn dismiss_float(&mut self, id: float::FloatId) -> Result<bool> {
+    pub(in crate::runtime) fn dismiss_float(&mut self, id: float::FloatId) -> Result<bool> {
         if !self.window.float.dismiss(id, Instant::now()) {
             return Ok(false);
         }
@@ -3334,7 +3371,7 @@ impl Runtime<'_> {
     /// everywhere else: it takes the thing in front of you, and pressing it again
     /// takes the next. Closing them all would make one keystroke undo an
     /// arbitrary amount of work the user asked for.
-    pub(crate) fn dismiss_top_float(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn dismiss_top_float(&mut self) -> Result<bool> {
         let Some(id) = self.window.float.top().map(|win| win.epoch) else {
             return Ok(false);
         };
@@ -3349,7 +3386,7 @@ impl Runtime<'_> {
     /// (`row_geometry(RowHost::Float)`); this is the one writer a wheel gets,
     /// and it clamps at both ends the way the column's does (R2 乙案) — the
     /// body it clamps against is the very body the painter lays the rows into.
-    pub(crate) fn scroll_float_tree(
+    pub(in crate::runtime) fn scroll_float_tree(
         &mut self,
         id: float::FloatId,
         delta: MouseScrollDelta,
@@ -3446,7 +3483,7 @@ impl Runtime<'_> {
     }
 
     /// The same picture for a page a float is carrying, on that window's layer.
-    pub(crate) fn float_page_keepsake_icon(
+    pub(in crate::runtime) fn float_page_keepsake_icon(
         &self,
         float: float::FloatId,
     ) -> Option<bt_render::ChromeIcon> {
@@ -3468,7 +3505,7 @@ impl Runtime<'_> {
     /// debt. What this cannot be is a call *to* `press_float` — that function
     /// then goes on to act on the part that was pressed, and the part pressed
     /// here is not the window's at all.
-    pub(crate) fn raise_the_float_holding(&mut self, leaf: LeafId) -> Result<()> {
+    pub(in crate::runtime) fn raise_the_float_holding(&mut self, leaf: LeafId) -> Result<()> {
         let Some(id) = self.float_holding_the_page(leaf) else {
             return Ok(());
         };

@@ -35,7 +35,7 @@ impl Runtime<'_> {
     /// `docs/DESIGN.md` §247): the chord opens the default and never the picker,
     /// so there is one sentence about what "new tab" means rather than a button's
     /// and a key's.
-    pub(crate) fn new_tab(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn new_tab(&mut self) -> Result<()> {
         let profile = self.default_profile_id();
         self.new_tab_with_profile(&profile, None)
     }
@@ -59,7 +59,7 @@ impl Runtime<'_> {
     /// **The pair travels together and is taken from one leaf**, which is the
     /// rule [`new_tab_cwd`] already states: a profile from one pane and a folder
     /// from another describes a pane that does not exist.
-    pub(crate) fn new_tab_seeded_from(
+    pub(in crate::runtime) fn new_tab_seeded_from(
         &mut self,
         profile: &str,
         place: Option<PathBuf>,
@@ -246,7 +246,7 @@ impl Runtime<'_> {
         })
     }
 
-    pub(crate) fn close_tab(&mut self, index: usize) -> Result<()> {
+    pub(in crate::runtime) fn close_tab(&mut self, index: usize) -> Result<()> {
         if index >= self.window.tabs.len() {
             return Ok(());
         }
@@ -363,7 +363,7 @@ impl Runtime<'_> {
     /// sight" is a width that only exists once every tab has been given its
     /// share of the run. The measuring is here, beside the renderer, for exactly
     /// the reason the badge's is — only the font knows how wide a word is.
-    pub(crate) fn measure_open_rename(
+    pub(in crate::runtime) fn measure_open_rename(
         &mut self,
         tabs: &mut [seats::TabContent],
         scale: f32,
@@ -504,7 +504,7 @@ impl Runtime<'_> {
     /// an inset accent ring at 45%. The slot the drop will fill and the tab that
     /// has just filled it are the same picture, which is what makes the landing
     /// read as the thing you were dragging coming to rest.
-    pub(crate) fn strip_stand_in(&self) -> Option<(usize, seats::TabContent)> {
+    pub(in crate::runtime) fn strip_stand_in(&self) -> Option<(usize, seats::TabContent)> {
         // **F2 — a visitor's stand-in, dressed out of the label that travelled.**
         //
         // The same slot, the same wash, the same picture; the only difference is
@@ -637,7 +637,7 @@ impl Runtime<'_> {
     /// Of the *posture* and not of the stored preference, for
     /// [`Self::rail_posture`]'s own reason: a window in focus mode carries the
     /// `+` on the card column whatever `Tab layout` says.
-    pub(crate) fn tab_surface_now(&self) -> TabSurface {
+    pub(in crate::runtime) fn tab_surface_now(&self) -> TabSurface {
         let posture = self.rail_posture();
         tab_surface(posture.draws_focus_rail(), posture.layout)
     }
@@ -688,7 +688,7 @@ impl Runtime<'_> {
     /// out again, and a table nothing has drawn yet is laid out for the first time. The renderer is
     /// only told when something actually moved, so a window full of unchanged tables costs one map
     /// walk a frame and no allocation at all.
-    pub(crate) fn refresh_table_paints(&mut self, sources: &[String]) {
+    pub(in crate::runtime) fn refresh_table_paints(&mut self, sources: &[String]) {
         let palette = bt_render::chrome_palette();
         let stamp = self.table_paint_stamp(&palette);
         let mut changed = false;
@@ -737,7 +737,7 @@ impl Runtime<'_> {
     }
 
     /// Every rendered table a set of frames is showing, by source.
-    pub(crate) fn table_sources<'a>(
+    pub(in crate::runtime) fn table_sources<'a>(
         frames: impl Iterator<Item = &'a bt_viewport::ViewportFrame>,
     ) -> Vec<String> {
         let mut sources: Vec<String> = frames
@@ -760,7 +760,7 @@ impl Runtime<'_> {
     /// a table is — see [`bt_render::TableBlockPaint`]. The size is what the block reports as its
     /// artifact extent, so it is what decides how many transcript rows the block covers, and it is
     /// measured with the same shaper that will draw it.
-    pub(crate) fn table_raster(
+    pub(in crate::runtime) fn table_raster(
         &mut self,
         source: &str,
     ) -> std::result::Result<MathRaster, MathRenderError> {
@@ -781,7 +781,7 @@ impl Runtime<'_> {
     }
 
     /// Ctrl+Tab / Ctrl+Shift+Tab, wrapping at both ends.
-    pub(crate) fn step_tab(&mut self, forward: bool) -> Result<()> {
+    pub(in crate::runtime) fn step_tab(&mut self, forward: bool) -> Result<()> {
         match stepped_tab(self.window.tabs.len(), self.window.active_tab, forward) {
             Some(index) => self.activate_tab(index, false),
             None => Ok(()),
@@ -804,7 +804,7 @@ impl Runtime<'_> {
     /// **A tab that has been closed mid-handover is forgotten rather than
     /// eased**: there is no row left on the glass for a fade home to be drawn
     /// on, which is `settle_git_pending`'s argument one surface along.
-    pub(crate) fn settled_tab_ink(&mut self, now: Instant) -> Vec<(usize, f32)> {
+    pub(in crate::runtime) fn settled_tab_ink(&mut self, now: Instant) -> Vec<(usize, f32)> {
         let motion = self.app.motion;
         let active = self
             .window
@@ -895,7 +895,7 @@ impl Runtime<'_> {
     /// because everything downstream is written against an id that may stop
     /// naming a tab at any moment and this is the one place that can say the
     /// menu never should have opened at all.
-    pub(crate) fn open_tab_menu_at(
+    pub(in crate::runtime) fn open_tab_menu_at(
         &mut self,
         tab: TabId,
         position: PhysicalPosition<f64>,
@@ -924,7 +924,7 @@ impl Runtime<'_> {
     /// [`Runtime::term_menu_layout`]'s twin, anchored the same way: at the point
     /// the pointer was at, which no re-layout, no strip scroll and no reorder can
     /// move or destroy.
-    pub(crate) fn tab_menu_layout(&mut self) -> Option<profiles::TabMenuLayout> {
+    pub(in crate::runtime) fn tab_menu_layout(&mut self) -> Option<profiles::TabMenuLayout> {
         let menu = self.window.tab_menu.as_ref()?;
         let (point, subject, submenu_open) = (menu.point, menu.subject, menu.submenu_open);
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -945,7 +945,7 @@ impl Runtime<'_> {
 
     /// The tab menu's own level of the overlay stack, or nothing when none is
     /// up.
-    pub(crate) fn tab_menu_layer(&mut self) -> MenuPaint {
+    pub(in crate::runtime) fn tab_menu_layer(&mut self) -> MenuPaint {
         let Some(layout) = self.tab_menu_layout() else {
             return MenuPaint::none();
         };
@@ -972,7 +972,7 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn close_tab_menu(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn close_tab_menu(&mut self) -> Result<bool> {
         if self.window.tab_menu.take().is_none() {
             return Ok(false);
         }
@@ -989,7 +989,7 @@ impl Runtime<'_> {
     /// for: with no other window there is no `Move to window ▸` row at all
     /// (`profiles::TabMenuRow::rows`), so a `→` that opened one anyway would hang
     /// a list off a row that is not on the glass.
-    pub(crate) fn set_tab_submenu(&mut self, open: bool) -> Result<bool> {
+    pub(in crate::runtime) fn set_tab_submenu(&mut self, open: bool) -> Result<bool> {
         let elsewhere = !self.other_window_ids().is_empty();
         let Some(menu) = self.window.tab_menu.as_mut() else {
             return Ok(false);
@@ -1020,7 +1020,10 @@ impl Runtime<'_> {
     /// **The tab menu's hover, with the safety triangle in it** (#53) — the pane
     /// menu's own four steps, on the third door, and with B9's ring on top of
     /// them.
-    pub(crate) fn drive_tab_menu_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn drive_tab_menu_hover(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some(layout) = self.tab_menu_layout() else {
             return Ok(false);
         };
@@ -1104,7 +1107,7 @@ impl Runtime<'_> {
     /// The tab menu's own clocks, matured — [`Runtime::advance_term_menu`]'s
     /// twin, and two clocks in one slot for its reason: a menu cannot be both
     /// waiting to open its child and holding it open against the rows.
-    pub(crate) fn advance_tab_menu(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_tab_menu(&mut self, now: Instant) -> Result<()> {
         let Some(menu) = self.window.tab_menu.as_ref() else {
             return Ok(());
         };
@@ -1130,7 +1133,7 @@ impl Runtime<'_> {
     }
 
     /// The tab menu's next wake-up, for the loop's set.
-    pub(crate) fn tab_menu_deadline(&self) -> Option<Instant> {
+    pub(in crate::runtime) fn tab_menu_deadline(&self) -> Option<Instant> {
         self.window.tab_menu.as_ref()?.submenu_hold_until
     }
 
@@ -1149,7 +1152,7 @@ impl Runtime<'_> {
     /// slot. A tab that has gone in the meantime is not a fault: nothing happens,
     /// which is the same answer `run_pane_verb` gives for a seat whose shell has
     /// exited.
-    pub(crate) fn run_tab_menu_row(&mut self, hit: profiles::TabMenuHit) -> Result<()> {
+    pub(in crate::runtime) fn run_tab_menu_row(&mut self, hit: profiles::TabMenuHit) -> Result<()> {
         // The menu's own padding, the rule, a greyed row. A press there is the
         // menu swallowing it — decided in `mouse_input` — so there is nothing to
         // spend and, in particular, no menu to take away.
@@ -1352,7 +1355,7 @@ impl Runtime<'_> {
     /// any particular one, and a menu that could not be walked would be the one
     /// list in this window reachable only by a pointer. Which would be a poor
     /// joke on a menu that exists because a *gesture* was unreachable.
-    pub(crate) fn tab_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+    pub(in crate::runtime) fn tab_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
                 // One press, one layer — §7.1.5's ladder read inside a single
@@ -1455,7 +1458,7 @@ impl Runtime<'_> {
     /// because "wherever Folio happens to be running from" is
     /// `C:\WINDOWS\system32` for an installed shortcut, which is not a place
     /// anybody meant.
-    pub(crate) fn browse_for_new_tab_root(&mut self) {
+    pub(in crate::runtime) fn browse_for_new_tab_root(&mut self) {
         let start = self
             .focused()
             .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf))
@@ -1505,7 +1508,7 @@ impl Runtime<'_> {
     /// hand that would rather point twice than carry something across the window
     /// keeps the way it already knows, and the two never disagree because the row
     /// and the drag call one verb.
-    pub(crate) fn move_pane_to_new_tab(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn move_pane_to_new_tab(&mut self, seat: SeatId) -> Result<()> {
         let slot = self.window.tabs.len();
         let leaf = LeafId {
             tab: self.window.tabs[self.window.active_tab].id,
@@ -1531,7 +1534,7 @@ impl Runtime<'_> {
     /// A float torn out of a *pane* head or popped out of a column contributes
     /// nothing: neither has a tab-level trigger, so there is no row entitled to
     /// say "this one is mine".
-    pub(crate) fn float_shown_tabs(&self) -> Vec<usize> {
+    pub(in crate::runtime) fn float_shown_tabs(&self) -> Vec<usize> {
         let mut rows: Vec<usize> = self
             .window
             .float
@@ -1563,7 +1566,7 @@ impl Runtime<'_> {
     ///
     /// A tab with no shell has no live output to stabilise and answers `None`,
     /// which is the no-op §7.1.6h asks for.
-    pub(crate) fn live_stability_deadline(&self) -> Option<Instant> {
+    pub(in crate::runtime) fn live_stability_deadline(&self) -> Option<Instant> {
         self.window.tabs[self.window.active_tab]
             .leaves()
             .filter_map(|(_, leaf)| leaf.session.live_stability_deadline())
@@ -1617,7 +1620,7 @@ impl Runtime<'_> {
     ///
     /// **Any page is enough.** A tab is a container, the mark says the sound is
     /// inside it, and one page is as much inside it as two.
-    pub(crate) fn audible_tabs(&self) -> std::collections::BTreeSet<TabId> {
+    pub(in crate::runtime) fn audible_tabs(&self) -> std::collections::BTreeSet<TabId> {
         let mut tabs: std::collections::BTreeSet<TabId> = self
             .window
             .web
@@ -1690,7 +1693,7 @@ impl Runtime<'_> {
     /// `hit_tab_chrome` each answer `None` before they answer anything), which
     /// is what makes `is_some()` a usable reading of "the list covers this
     /// pixel".
-    pub(crate) fn tab_list_target_at(
+    pub(in crate::runtime) fn tab_list_target_at(
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<seats::ChromeTarget> {
@@ -1763,7 +1766,7 @@ impl Runtime<'_> {
     /// whole mechanism. The second press of a double click arms nothing either:
     /// the first one already put the view on this tab, so there is nothing left
     /// for it to owe.
-    pub(crate) fn press_tab(
+    pub(in crate::runtime) fn press_tab(
         &mut self,
         index: usize,
         position: PhysicalPosition<f64>,
@@ -1787,7 +1790,7 @@ impl Runtime<'_> {
     }
 
     /// The left button coming back up over `target`.
-    pub(crate) fn release_tab_press(
+    pub(in crate::runtime) fn release_tab_press(
         &mut self,
         mut press: TabPress,
         target: Option<seats::ChromeTarget>,
@@ -1886,7 +1889,7 @@ impl Runtime<'_> {
     /// named field on the window rather than a borrow handed out of this
     /// function, which is what lets the caller re-survey the drag in the same
     /// breath.
-    pub(crate) fn tab_run_scroll(&self) -> f32 {
+    pub(in crate::runtime) fn tab_run_scroll(&self) -> f32 {
         if self.window.focus_mode || self.window.rail.layout == seats::TabLayoutMode::Vertical {
             self.window.rail_scroll
         } else {
@@ -1896,7 +1899,7 @@ impl Runtime<'_> {
 
     /// [`Runtime::tab_run_scroll`]'s other half — put the run's list where the
     /// auto-scroll says it now stands.
-    pub(crate) fn set_tab_run_scroll(&mut self, scroll: f32) {
+    pub(in crate::runtime) fn set_tab_run_scroll(&mut self, scroll: f32) {
         if self.window.focus_mode || self.window.rail.layout == seats::TabLayoutMode::Vertical {
             self.window.rail_scroll = scroll;
         } else {
@@ -1916,7 +1919,7 @@ impl Runtime<'_> {
     /// pointer's position now. That is what `startDrag` does (6484-6486) and it
     /// is the difference between a tab that stays where your fingers put it and
     /// one that snaps 6px sideways the instant it comes free.
-    pub(crate) fn begin_tab_drag(
+    pub(in crate::runtime) fn begin_tab_drag(
         &mut self,
         press: TabPress,
         position: PhysicalPosition<f64>,
@@ -1972,7 +1975,7 @@ impl Runtime<'_> {
     /// Neither arm knows which surface it is judging, because a
     /// [`seats::TabRun`] does not say: the mids, the half and the pointer's
     /// coordinate all arrive already projected onto the axis that run is on.
-    pub(crate) fn survey_strip(
+    pub(in crate::runtime) fn survey_strip(
         &self,
         source: &DragSource,
         run: &seats::TabRun,
@@ -2400,7 +2403,7 @@ impl Runtime<'_> {
     /// times outside the strip and this runs on all of them: the slide home only
     /// has an offset to run down once, and the flip's own condition is false the
     /// moment it has happened.
-    pub(crate) fn leave_strip(
+    pub(in crate::runtime) fn leave_strip(
         &mut self,
         drag: &mut Drag,
         position: PhysicalPosition<f64>,
@@ -2451,7 +2454,7 @@ impl Runtime<'_> {
     /// `reorderWhileDragging` (6835) and the reason it can be: the strip has one
     /// axis and one kind of occupant, so the arrangement the drop would produce
     /// is a thing the strip can simply be in while you are still deciding.
-    pub(crate) fn settle_strip_reorder(
+    pub(in crate::runtime) fn settle_strip_reorder(
         &mut self,
         tab: TabId,
         mut carry: TabCarry,
@@ -2565,7 +2568,7 @@ impl Runtime<'_> {
     /// than re-derived, for the reason `move_tab_with_flip` states: it is an
     /// index into a run that just changed length, and the tab it must go on
     /// naming is the one the user is looking at — the target, which does not move.
-    pub(crate) fn absorb_tab(
+    pub(in crate::runtime) fn absorb_tab(
         &mut self,
         source: TabId,
         arrived: &[(SeatId, SeatId)],
@@ -2645,7 +2648,11 @@ impl Runtime<'_> {
     /// [`release_verdict`], because the verdict is a fact about the *landing* and
     /// this is a fact about the *hand*: the run gains an entry at this slot
     /// either way, and what that entry is made of is the payload's business.
-    pub(crate) fn commit_strip_extract(&mut self, drag: &Drag, slot: usize) -> Result<bool> {
+    pub(in crate::runtime) fn commit_strip_extract(
+        &mut self,
+        drag: &Drag,
+        slot: usize,
+    ) -> Result<bool> {
         match &drag.source {
             DragSource::Row(payload) => {
                 let payload = payload.clone();
@@ -2657,7 +2664,11 @@ impl Runtime<'_> {
 
     /// **Let go on one of the run's own entries** — [`DragRelease::Adopt`]'s two
     /// hands, and [`Runtime::commit_strip_extract`]'s argument one landing over.
-    pub(crate) fn commit_strip_adopt(&mut self, drag: &Drag, target: TabId) -> Result<bool> {
+    pub(in crate::runtime) fn commit_strip_adopt(
+        &mut self,
+        drag: &Drag,
+        target: TabId,
+    ) -> Result<bool> {
         match &drag.source {
             DragSource::Row(payload) => {
                 let payload = payload.clone();
@@ -3257,7 +3268,7 @@ impl Runtime<'_> {
     }
 
     /// Route an event-loop tick to the press promise and the rename caret.
-    pub(crate) fn advance_tab_press_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_tab_press_if_due(&mut self, now: Instant) -> Result<()> {
         let matured = self
             .window
             .tab_press
@@ -3274,7 +3285,7 @@ impl Runtime<'_> {
         self.activate_tab(self.tab_index(tab), false)
     }
 
-    pub(crate) fn advance_rename_blink_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_rename_blink_if_due(&mut self, now: Instant) -> Result<()> {
         if self.window.rename.is_none() || !self.window.rename_blink.advance(now) {
             return Ok(());
         }
@@ -3290,12 +3301,12 @@ impl Runtime<'_> {
     /// row naming a tab whose shell exited while the reader was typing should
     /// do nothing, rather than do something to whichever tab moved up into its
     /// place.
-    pub(crate) fn tab_index_of(&self, tab: TabId) -> Option<usize> {
+    pub(in crate::runtime) fn tab_index_of(&self, tab: TabId) -> Option<usize> {
         self.window.tabs.iter().position(|found| found.id == tab)
     }
 
     /// A wheel notch over the tab strip, turned into horizontal motion (A7/A8).
-    pub(crate) fn scroll_tab_strip(&mut self, delta: MouseScrollDelta) -> Result<()> {
+    pub(in crate::runtime) fn scroll_tab_strip(&mut self, delta: MouseScrollDelta) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let width = self
             .window
@@ -3363,7 +3374,7 @@ impl Runtime<'_> {
     /// only when a tab has no live shell left has the tab itself ended. That is
     /// the same rule §7.1.4 already gives closing — the last pane closing is the
     /// tab closing — read from the other direction.
-    pub(crate) fn reap_exited_tabs(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn reap_exited_tabs(&mut self) -> Result<()> {
         // Which panes of the *active* tab died: those are the ones that can be
         // closed as panes, because `close_pane` re-solves the tab the user is
         // looking at.
@@ -3531,7 +3542,7 @@ impl Runtime<'_> {
     /// are one sentence — this seat has been asked to go somewhere — and a
     /// receipt left lying about is a page that would be withdrawn by the *next*
     /// field to close over the same seat number.
-    pub(crate) fn forget_a_blank_page(&mut self, leaf: LeafId) {
+    pub(in crate::runtime) fn forget_a_blank_page(&mut self, leaf: LeafId) {
         if self.window.blank_page.as_ref().map(|door| door.leaf) == Some(leaf) {
             self.window.blank_page = None;
         }

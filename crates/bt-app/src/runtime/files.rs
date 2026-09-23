@@ -51,7 +51,11 @@ impl Runtime<'_> {
     /// against a caller: the row is offered from `file_menu`, and a host that
     /// cannot draw the box declines here rather than opening an editor nobody
     /// can see.
-    pub(crate) fn open_files_row_rename(&mut self, host: RowHost, key: &str) -> Result<()> {
+    pub(in crate::runtime) fn open_files_row_rename(
+        &mut self,
+        host: RowHost,
+        key: &str,
+    ) -> Result<()> {
         let RowHost::Column(seat) = host else {
             return Ok(());
         };
@@ -100,7 +104,12 @@ impl Runtime<'_> {
     /// re-pointed too, because a file may be open in a preview and listed in a
     /// column at the same time and a window that renamed it in one place and not
     /// the other would be holding two names for one file.
-    pub(crate) fn rename_files_row(&mut self, leaf: LeafId, key: &str, draft: &str) -> Result<()> {
+    pub(in crate::runtime) fn rename_files_row(
+        &mut self,
+        leaf: LeafId,
+        key: &str,
+        draft: &str,
+    ) -> Result<()> {
         let Some(tab) = self.tab_slot_of(leaf.tab) else {
             return Ok(());
         };
@@ -163,7 +172,7 @@ impl Runtime<'_> {
     /// reason: a float draws its rows through `float`'s own body, which has no
     /// box for an editor to be measured into, and a `RowHost::Git` draws a
     /// report rather than a tree.
-    pub(crate) fn open_files_row_new(
+    pub(in crate::runtime) fn open_files_row_new(
         &mut self,
         host: RowHost,
         parent: &str,
@@ -239,7 +248,7 @@ impl Runtime<'_> {
     /// volume will not take — is a fact about the machine that no box can show,
     /// so it raises a card and closes the field, which is the same division
     /// `rename_files_row` draws between its silent refusals and its one card.
-    pub(crate) fn create_files_row(
+    pub(in crate::runtime) fn create_files_row(
         &mut self,
         leaf: LeafId,
         parent: &str,
@@ -327,7 +336,7 @@ impl Runtime<'_> {
     /// nothing to recycle. The two verbs that act on a row now ask the same
     /// question before they act, so neither can be the one that resolves a stale
     /// key against a root that has since changed.
-    pub(crate) fn delete_files_row(&mut self, host: RowHost, key: &str) -> Result<()> {
+    pub(in crate::runtime) fn delete_files_row(&mut self, host: RowHost, key: &str) -> Result<()> {
         let RowHost::Column(seat) = host else {
             return Ok(());
         };
@@ -387,7 +396,7 @@ impl Runtime<'_> {
     /// reading lands afterwards and finds the listing already correct, which
     /// [`files::DirCache::accept`] answers with "not a change" and no second
     /// repaint. A folder on a share this process cannot watch has only this.
-    pub(crate) fn refresh_files_dirs_at(&mut self, directory: &std::path::Path) {
+    pub(in crate::runtime) fn refresh_files_dirs_at(&mut self, directory: &std::path::Path) {
         let active = self.window.active_tab;
         let asks: Vec<(SeatId, String)> = self.window.tabs[active]
             .files
@@ -425,7 +434,7 @@ impl Runtime<'_> {
     /// rung of §7.1.5's ladder. What stayed true is the sentence around it:
     /// giving a column the *keyboard* is a separate act from opening one, and
     /// opening one from a chord does not perform it.)
-    pub(crate) fn toggle_files_pane(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn toggle_files_pane(&mut self) -> Result<()> {
         if let Some(open) = self.seats.files_seat() {
             // Closing a files pane is closing a pane: the same verb, so the
             // state teardown, the tab-closes-with-its-last-pane rule and the
@@ -453,7 +462,10 @@ impl Runtime<'_> {
     /// `None` is the solver refusing — this window has no room for another pane —
     /// and it leaves the tree untouched, so the caller has nothing to undo and
     /// only something to report.
-    pub(crate) fn seat_a_files_column(&mut self, root: String) -> Result<Option<SeatId>> {
+    pub(in crate::runtime) fn seat_a_files_column(
+        &mut self,
+        root: String,
+    ) -> Result<Option<SeatId>> {
         let metrics = self.seat_metrics();
         let Some(seat) = self.seats.add_files_pane(&metrics, None) else {
             return Ok(None);
@@ -538,7 +550,10 @@ impl Runtime<'_> {
     /// answers a keyboard walking into them: the expansions are recorded and the
     /// reads are asked for, and the row is revealed when the disk comes back —
     /// see [`WindowRuntime::files_locate`].
-    pub(crate) fn locate_folder_in_files_column(&mut self, folder: &Path) -> Result<()> {
+    pub(in crate::runtime) fn locate_folder_in_files_column(
+        &mut self,
+        folder: &Path,
+    ) -> Result<()> {
         let existing = self.seats.files_seat();
         self.mouse_trace(|| {
             format!(
@@ -744,7 +759,7 @@ impl Runtime<'_> {
     /// is missing, because "missing" means *visibly* missing: an unopened folder
     /// is not missing, it is folded. Deriving the request list anywhere else
     /// would mean a second walk that could disagree with the one on screen.
-    pub(crate) fn files_trees(
+    pub(in crate::runtime) fn files_trees(
         &mut self,
         now: Instant,
     ) -> BTreeMap<SeatId, seats::FilesTreeContent> {
@@ -850,7 +865,11 @@ impl Runtime<'_> {
     /// all while the master switch is off — not because this checks it, but
     /// because nothing can reach here: there is no strip to press and the chord
     /// asks the same question first.
-    pub(crate) fn set_files_view(&mut self, seat: SeatId, view: seats::FilesView) -> Result<()> {
+    pub(in crate::runtime) fn set_files_view(
+        &mut self,
+        seat: SeatId,
+        view: seats::FilesView,
+    ) -> Result<()> {
         let active = self.window.active_tab;
         let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
             return Ok(());
@@ -894,7 +913,11 @@ impl Runtime<'_> {
     /// The judgement is made **here**, once, at the routing decision — not as a
     /// condition repeated on each key — and it is [`column_keyboard`]'s, which
     /// is answerable without a window.
-    pub(crate) fn files_column_key(&mut self, seat: SeatId, event: &KeyEvent) -> Result<bool> {
+    pub(in crate::runtime) fn files_column_key(
+        &mut self,
+        seat: SeatId,
+        event: &KeyEvent,
+    ) -> Result<bool> {
         match column_keyboard(seat, &self.window.git_pages_shown) {
             ColumnKeyboard::GitPage => self.git_page_key(seat, event),
             ColumnKeyboard::Tree => self.files_tree_key(seat, event),
@@ -908,7 +931,10 @@ impl Runtime<'_> {
     /// mechanism: the geometry, the painter and the hit test all key off a
     /// column's presence here, so there is exactly one place the switch is
     /// consulted and no way for one of them to miss it.
-    pub(crate) fn files_views(&mut self, scale: f32) -> BTreeMap<SeatId, seats::FilesViewContent> {
+    pub(in crate::runtime) fn files_views(
+        &mut self,
+        scale: f32,
+    ) -> BTreeMap<SeatId, seats::FilesViewContent> {
         if !self.git_panel_on() {
             return BTreeMap::new();
         }
@@ -965,7 +991,9 @@ impl Runtime<'_> {
     }
 
     /// The rows as the hit test sees them: walked, never asked for.
-    pub(crate) fn files_tree_contents(&self) -> BTreeMap<SeatId, seats::FilesTreeContent> {
+    pub(in crate::runtime) fn files_tree_contents(
+        &self,
+    ) -> BTreeMap<SeatId, seats::FilesTreeContent> {
         let ringed = self.files_ring_seat();
         self.files_tree_walk(self.files_edit_place())
             .into_iter()
@@ -986,7 +1014,7 @@ impl Runtime<'_> {
     /// with `direction: rtl` and a `<bdi>` around the path; we draw our own text,
     /// so we simply cut the string and lay it out left to right, and the bidi
     /// reordering bug that workaround exists for cannot occur.
-    pub(crate) fn dress_files_feet(
+    pub(in crate::runtime) fn dress_files_feet(
         &mut self,
         scale: f32,
         now: Instant,
@@ -1103,7 +1131,7 @@ impl Runtime<'_> {
     /// watching changes on the same events that produce news about it, and
     /// syncing after answering would act on a folder no column is showing any
     /// more.
-    pub(crate) fn advance_files_watch(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_files_watch(&mut self, now: Instant) -> Result<()> {
         let showing = self.watched_files_dirs();
         let wanted: BTreeSet<PathBuf> = showing.keys().cloned().collect();
         let armed = self.window.files_watch.sync(&wanted, &self.app.event_proxy);
@@ -1333,7 +1361,7 @@ impl Runtime<'_> {
     /// Both kinds of node take the selection, which is what keeps the mouse and
     /// the keyboard telling one story about where you are; only a directory also
     /// opens or shuts.
-    pub(crate) fn press_files_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
+    pub(in crate::runtime) fn press_files_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
         use crate::files::RowKind;
         let now = Instant::now();
         let motion = self.app.motion;
@@ -1421,7 +1449,7 @@ impl Runtime<'_> {
     /// and the report was a column headed `BetterTermina|`. So the focus is asked
     /// per seat rather than once: it is the same question the paint asks
     /// (`placement.id == seats.focus()`), and the two must give one answer.
-    pub(crate) fn measure_files_names(
+    pub(in crate::runtime) fn measure_files_names(
         &mut self,
         names: &BTreeMap<SeatId, String>,
     ) -> BTreeMap<SeatId, f32> {
@@ -1463,7 +1491,11 @@ impl Runtime<'_> {
     /// every key in it would silently mean somewhere else the moment the root
     /// moved. Dropping it is what turns the next walk into a fresh set of
     /// questions.
-    pub(crate) fn reroot_files_column(&mut self, seat: SeatId, root: &str) -> Result<()> {
+    pub(in crate::runtime) fn reroot_files_column(
+        &mut self,
+        seat: SeatId,
+        root: &str,
+    ) -> Result<()> {
         let active = self.window.active_tab;
         let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
             return Ok(());
@@ -1516,7 +1548,7 @@ impl Runtime<'_> {
     /// modal loops on one thread is not a thing a window survives — so which
     /// verb asked is remembered on this side, in [`WindowRuntime::folder_pick`], and
     /// spent here.
-    pub(crate) fn apply_folder_pick_result(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn apply_folder_pick_result(&mut self) -> Result<()> {
         let Some(result) = self.window.folder_picker.take_result() else {
             return Ok(());
         };
@@ -1575,7 +1607,7 @@ impl Runtime<'_> {
     /// press is the whole gesture, and a quiet window is a window in which it can
     /// be lost. What follows is a frame — the root menu's PINNED section is
     /// derived from the store every time the menu is built, never held.
-    pub(crate) fn toggle_folder_pin(&mut self, path: &str) -> Result<()> {
+    pub(in crate::runtime) fn toggle_folder_pin(&mut self, path: &str) -> Result<()> {
         self.app
             .pins_store
             .toggle(bt_persist::PinKind::Folder, path);
@@ -1620,7 +1652,7 @@ impl Runtime<'_> {
     /// now lives in [`Self::pointer_target_at`], the one router both gestures
     /// go through; what is left here is the part of the answer only a menu
     /// knows, which is which float parts have a file behind them.
-    pub(crate) fn file_row_under(
+    pub(in crate::runtime) fn file_row_under(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Option<FileMenuTarget> {
@@ -1759,7 +1791,7 @@ impl Runtime<'_> {
     /// [`ReferenceCard`] that is its own, and a reference is therefore never
     /// both a glance and a flyout nor — which is the failure that matters —
     /// neither because two readings of "is this a folder" disagreed.
-    pub(crate) fn folder_reference_trigger(&self) -> Option<float::FloatTrigger> {
+    pub(in crate::runtime) fn folder_reference_trigger(&self) -> Option<float::FloatTrigger> {
         if self.window.mouse_route.is_some() || self.math_hit().is_some() {
             return None;
         }
@@ -1791,7 +1823,7 @@ impl Runtime<'_> {
     /// **The row is asked for again**, on the live tree, because the menu can
     /// stand open while a directory lands and the tree behind it grows. A key
     /// that no longer names a row folds nothing, which is the honest answer.
-    pub(crate) fn fold_files_row(&mut self, host: RowHost, key: &str) -> Result<()> {
+    pub(in crate::runtime) fn fold_files_row(&mut self, host: RowHost, key: &str) -> Result<()> {
         let now = Instant::now();
         let motion = self.app.motion;
         match host {
@@ -1883,7 +1915,7 @@ impl Runtime<'_> {
     /// the dialog in front of it — the default profile, told where to stand,
     /// because "the default profile" is what *new tab* means everywhere else in
     /// this build.
-    pub(crate) fn new_terminal_in_folder(&mut self, path: &Path) -> Result<()> {
+    pub(in crate::runtime) fn new_terminal_in_folder(&mut self, path: &Path) -> Result<()> {
         let profile = self.default_profile_id();
         self.new_tab_with_profile(&profile, Some(path.to_path_buf()))
     }
@@ -1898,7 +1930,7 @@ impl Runtime<'_> {
     /// "the tree never runs a program" costs this button nothing and is enforced
     /// by the same gate that enforces it for a double-clicked row, rather than by
     /// this call site being careful.
-    pub(crate) fn reveal_files_root(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn reveal_files_root(&mut self, seat: SeatId) -> Result<()> {
         let root = self.window.tabs[self.window.active_tab]
             .files_state(seat)
             .root;
@@ -1927,7 +1959,7 @@ impl Runtime<'_> {
     /// that closed the report (2026-08-19) is the plain one — a pop-out is a
     /// *move*, and a move that changes what you were looking at is a different
     /// verb — so the page comes with the window and works there.
-    pub(crate) fn files_float_layer(
+    pub(in crate::runtime) fn files_float_layer(
         &mut self,
         id: float::FloatId,
         now: Instant,
@@ -2136,7 +2168,7 @@ impl Runtime<'_> {
     /// The page comes with it now, and so does everything the page is drawn
     /// from: the repository cache, its scroll and its selection. A move that
     /// re-read the repository would be a different verb too.
-    pub(crate) fn undock_files_column(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn undock_files_column(&mut self, seat: SeatId) -> Result<()> {
         let active = self.window.active_tab;
         let Some(state) = self.window.tabs[active].files.get(&seat).cloned() else {
             return Ok(());
@@ -2439,7 +2471,7 @@ impl Runtime<'_> {
     }
 
     /// Wheel over a files column's body (C28's `overflow-y: auto`).
-    pub(crate) fn scroll_files_tree(
+    pub(in crate::runtime) fn scroll_files_tree(
         &mut self,
         seat: SeatId,
         body: [f32; 4],
@@ -2488,7 +2520,7 @@ impl Runtime<'_> {
     /// funnel every path that rebuilds the picture already goes through, so
     /// "what is stored is what is drawn" holds for every frame rather than for
     /// the frames somebody remembered to heal.
-    pub(crate) fn heal_files_scroll(
+    pub(in crate::runtime) fn heal_files_scroll(
         &mut self,
         scale: f32,
         trees: &mut BTreeMap<SeatId, seats::FilesTreeContent>,
@@ -2520,7 +2552,7 @@ impl Runtime<'_> {
     /// **The caret line is published here too**, for the reason every other
     /// surface publishes its own: the IME's candidate list has to stand under
     /// what is being typed, and this is the one place that rectangle exists.
-    pub(crate) fn dress_files_tree_editor(
+    pub(in crate::runtime) fn dress_files_tree_editor(
         &mut self,
         scale: f32,
         trees: &mut BTreeMap<SeatId, seats::FilesTreeContent>,
@@ -2637,7 +2669,7 @@ impl Runtime<'_> {
     /// button you can press is the button you can see" are one number. Empty when
     /// the master switch is off, which is what makes the strip unpressable
     /// without a second condition anywhere.
-    pub(crate) fn files_seg_widths(&self) -> BTreeMap<SeatId, [f32; 2]> {
+    pub(in crate::runtime) fn files_seg_widths(&self) -> BTreeMap<SeatId, [f32; 2]> {
         self.window.files_view_widths.clone()
     }
 
@@ -2657,7 +2689,7 @@ impl Runtime<'_> {
     }
 
     /// Ask for any index the `Files` section needs and does not have.
-    pub(crate) fn ask_for_file_indexes(&mut self) {
+    pub(in crate::runtime) fn ask_for_file_indexes(&mut self) {
         // **It asks and it does not forget.** Forgetting is `App`'s
         // (`retain_file_indexes`), because the register is the app's: a window
         // that pruned it would be one window deciding, out of its own list of
@@ -2685,7 +2717,7 @@ impl Runtime<'_> {
     ///
     /// Building wins when both are true: a walk that is still going may yet
     /// turn the second answer into rows.
-    pub(crate) fn palette_files_note(&self) -> Option<i18n::Text> {
+    pub(in crate::runtime) fn palette_files_note(&self) -> Option<i18n::Text> {
         let roots = self.palette_files_roots();
         if roots
             .iter()
@@ -2701,7 +2733,7 @@ impl Runtime<'_> {
     }
 
     /// Unfold every files column of this tab that has the path under its root.
-    pub(crate) fn locate_path_in_files_columns(&mut self, path: &Path) -> Result<()> {
+    pub(in crate::runtime) fn locate_path_in_files_columns(&mut self, path: &Path) -> Result<()> {
         let targets: Vec<(bt_layout::SeatId, String)> = self
             .files
             .iter()
@@ -2831,7 +2863,7 @@ impl Runtime<'_> {
     /// 0.4.2 X-10), and travels here inside the batch. The keyboard's pane is
     /// what is left when even that answers nothing, which is a window on a
     /// session with no desktop to read.
-    pub(crate) fn dropped_files_seat(
+    pub(in crate::runtime) fn dropped_files_seat(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Option<SeatId> {

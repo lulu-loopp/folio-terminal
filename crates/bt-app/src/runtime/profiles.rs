@@ -105,7 +105,7 @@ impl Runtime<'_> {
     /// says it will add a line, and a strip that changed to "added" over a file
     /// that did not change would be this product lying about a file it had just
     /// failed to touch.
-    pub(crate) fn add_to_profile(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn add_to_profile(&mut self, seat: SeatId) -> Result<()> {
         let Some(profile) = self
             .sessions
             .get(&seat)
@@ -144,7 +144,9 @@ impl Runtime<'_> {
     ///
     /// `&mut self` because the menu is content-sized and measuring a string goes
     /// through the renderer's font system, which shapes and caches as it goes.
-    pub(crate) fn profile_menu_layout(&mut self) -> Option<profiles::ProfileMenuLayout> {
+    pub(in crate::runtime) fn profile_menu_layout(
+        &mut self,
+    ) -> Option<profiles::ProfileMenuLayout> {
         if !self.window.profile_menu.is_open() {
             return None;
         }
@@ -233,7 +235,7 @@ impl Runtime<'_> {
     /// stable id, because everything downstream of a new-tab door holds its
     /// profile across at least one gesture — a folder chooser, a tear-out, a
     /// save — and a position does not survive one.
-    pub(crate) fn default_profile_id(&self) -> String {
+    pub(in crate::runtime) fn default_profile_id(&self) -> String {
         profiles::id(self.default_profile())
     }
 
@@ -260,7 +262,7 @@ impl Runtime<'_> {
     /// "mutual exclusion left to a press falling through" the mock-up's own
     /// judgement forbids — it holds until some other door (a chord, a menu row,
     /// a restored gesture) opens this menu without a press in the right place.
-    pub(crate) fn toggle_profile_menu(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn toggle_profile_menu(&mut self) -> Result<()> {
         self.close_popups_except(Popup::Profile);
         self.window.profile_menu.toggle();
         self.start_chevron_turn();
@@ -273,7 +275,7 @@ impl Runtime<'_> {
     /// Put the picker away and repaint if it was up. Every press that is not the
     /// chevron's and not the menu's own goes through here first, exactly as the
     /// mock-up's document-level `click` handler does.
-    pub(crate) fn close_profile_menu(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn close_profile_menu(&mut self) -> Result<bool> {
         if !self.window.profile_menu.is_open() {
             return Ok(false);
         }
@@ -402,7 +404,7 @@ impl Runtime<'_> {
     ///
     /// A verb pressed on a card that is no longer the one holding the undo does
     /// nothing — see [`WindowRuntime::profile_undo`].
-    pub(crate) fn take_profile_undo(&mut self, card: toast::ToastId) -> Result<()> {
+    pub(in crate::runtime) fn take_profile_undo(&mut self, card: toast::ToastId) -> Result<()> {
         let Some((id, profile, at)) = self.window.profile_undo.take() else {
             return Ok(());
         };
@@ -626,7 +628,7 @@ impl Runtime<'_> {
     /// among the answers because this one's anchor cannot vanish — the button
     /// falls back to the caption it wraps — so what is left to decide is whether
     /// the column is on the glass at all and whether there is anywhere to go.
-    pub(crate) fn root_menu_stand(
+    pub(in crate::runtime) fn root_menu_stand(
         &self,
         seat: SeatId,
     ) -> Option<([f32; 4], Vec<profiles::RootChoice>)> {
@@ -651,7 +653,7 @@ impl Runtime<'_> {
     /// current layout is the fix the mock-up arrived at after the same bug three
     /// times, and it makes the second half free: an anchor that has gone folds
     /// the menu instead of measuring a rectangle that is no longer anywhere.
-    pub(crate) fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {
+    pub(in crate::runtime) fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {
         let seat = self.window.root_menu.seat()?;
         let (rect, choices) = self.root_menu_stand(seat)?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -685,7 +687,7 @@ impl Runtime<'_> {
 
     /// The button on the head: open the menu here, or shut it if it is already
     /// here (E57).
-    pub(crate) fn toggle_root_menu(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn toggle_root_menu(&mut self, seat: SeatId) -> Result<()> {
         // A popup opening closes whatever else was up, and it has to be the
         // opener that does it: E61's judgement is that mutual exclusion cannot
         // be left to a press falling through, because every opener stops its own
@@ -713,7 +715,7 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    pub(crate) fn close_root_menu(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn close_root_menu(&mut self) -> Result<bool> {
         if !self.window.root_menu.close() {
             return Ok(false);
         }

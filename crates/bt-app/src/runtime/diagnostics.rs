@@ -73,7 +73,7 @@ impl Runtime<'_> {
     /// happen, which no existing line reports. The owner's trace runs already record every
     /// `read(2)` boundary and arrival in the `BT_PTY_DUMP` `.chunks` sidecar, so a run traced
     /// with both can be replayed against its own recording and every decision here checked.
-    pub(crate) fn trace_drain(
+    pub(in crate::runtime) fn trace_drain(
         &self,
         slices: usize,
         bytes: usize,
@@ -125,7 +125,7 @@ impl Runtime<'_> {
     /// hearing of it is coalesced, at the 200 ms quiet boundary every `Resized` shares. A grid that
     /// is wider than its seat is the ordinary case for the renderer in between — the seat viewport
     /// scissors it — and it is the case a divider drag produces on every frame.
-    pub(crate) fn schedule_grid_change(
+    pub(in crate::runtime) fn schedule_grid_change(
         &mut self,
         next_grid: GridSize,
         physical: PhysicalSize<u32>,

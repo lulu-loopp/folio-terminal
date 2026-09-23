@@ -89,7 +89,7 @@ impl Runtime<'_> {
     /// is measured here, beside the renderer, because only the font can say how
     /// wide a line is — and measuring it twice is how the drawn `×` and the
     /// pressable `×` drift apart.
-    pub(crate) fn toast_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn toast_layer(&mut self) -> Vec<marks::OverlayLayer> {
         // Recorded at the end and only on the path that paints, so the debt is
         // against what is *on screen* — [`Self::tooltip_layer`]'s own note.
         self.window.toasts_drawn = Vec::new();
@@ -155,7 +155,7 @@ impl Runtime<'_> {
     /// belongs to: a second deletion while the first card is still standing
     /// replaces the pending undo, and a verb pressed on a card that is no longer
     /// the one holding it must do nothing rather than undo the wrong thing.
-    pub(crate) fn toast_with_verb(
+    pub(in crate::runtime) fn toast_with_verb(
         &mut self,
         kind: toast::ToastKind,
         anchor: toast::ToastAnchor,
@@ -210,7 +210,7 @@ impl Runtime<'_> {
 
     /// When this window next has notice work: an entrance landing, a life running
     /// out, an exit finishing — or this instant, when a frame is already owed.
-    pub(crate) fn toast_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(in crate::runtime) fn toast_deadline(&self, now: Instant) -> Option<Instant> {
         if self.toasts_owe_frame(now) || self.window.toasts.is_animating(now, self.app.motion) {
             return self.next_animation_deadline();
         }
@@ -218,7 +218,7 @@ impl Runtime<'_> {
     }
 
     /// Move every card's clock on, and pay the frames the movement owes.
-    pub(crate) fn advance_toasts(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_toasts(&mut self, now: Instant) -> Result<()> {
         // **The clocks first, and never paced** (closure review O4,
         // 2026-09-18). A notice's life running out and a departed card being
         // dropped are *state* rather than a frame of animation — see
@@ -244,7 +244,10 @@ impl Runtime<'_> {
     /// Note which card the pointer is on — the hover that holds a card's clock,
     /// and the one that lights its `×`. Returns whether the press should stop
     /// here.
-    pub(crate) fn drive_toast_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn drive_toast_hover(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let hit = toast::at(
             &self.window.toast_layouts,
             position.x as f32,
@@ -272,7 +275,10 @@ impl Runtime<'_> {
     /// **Swallowed, not ignored.** A toast stands over a list of files with a
     /// verb on every row; a press that fell through it would stage whatever
     /// happened to be under the card you were reaching for.
-    pub(crate) fn press_toast(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn press_toast(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some(hit) = toast::at(
             &self.window.toast_layouts,
             position.x as f32,
@@ -334,7 +340,7 @@ impl Runtime<'_> {
     /// as `Keep` — is written once and reaches the buffer whichever host was
     /// pressed. A terminal seat resolves to its tab's preview leaf, which holds
     /// no buffer, and the preview verbs it can never show therefore find none.
-    pub(crate) fn notice_surface(&self, host: NoticeHost) -> PreviewSurface {
+    pub(in crate::runtime) fn notice_surface(&self, host: NoticeHost) -> PreviewSurface {
         match host {
             NoticeHost::Seat(seat) => self.preview_here(seat),
             NoticeHost::Float(id) => PreviewSurface::Float(id),
@@ -353,7 +359,7 @@ impl Runtime<'_> {
     /// there would be a second answer to "where is this row and how much of the
     /// sentence fits", which is the disagreement between what is drawn and what
     /// is pressed that this map exists to prevent.
-    pub(crate) fn notice_layers(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn notice_layers(&mut self) -> Vec<marks::OverlayLayer> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let palette = bt_render::chrome_palette();
         let font = notice::FONT_LOGICAL_PX * scale;
@@ -483,7 +489,10 @@ impl Runtime<'_> {
     /// strip is staged with): a float's chassis has no passages at all (P49 ③ —
     /// a preview window is simply there at full strength), and a band inside a
     /// window's layer cannot arrive on a clock the window itself does not keep.
-    pub(crate) fn float_notice_layer(&mut self, id: float::FloatId) -> Option<marks::OverlayLayer> {
+    pub(in crate::runtime) fn float_notice_layer(
+        &mut self,
+        id: float::FloatId,
+    ) -> Option<marks::OverlayLayer> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let palette = bt_render::chrome_palette();
         let host = NoticeHost::Float(id);
@@ -504,7 +513,7 @@ impl Runtime<'_> {
     /// The `bool` is what the routing above it reads, for
     /// [`Self::drive_search_hover`]'s reason: a pointer standing on the strip is
     /// not standing on a cell, and the pane must not be told about it.
-    pub(crate) fn drive_notice_hover(
+    pub(in crate::runtime) fn drive_notice_hover(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<bool> {
@@ -537,7 +546,10 @@ impl Runtime<'_> {
     /// asked of a seat because only a seat can show them — a window is torn off
     /// a preview and its band can only ever say what a document's file did — and
     /// the two document verbs are asked of the *surface*, which both hosts have.
-    pub(crate) fn press_notice(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn press_notice(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let hit = self.window.notice_layouts.iter().find_map(|(host, strip)| {
             notice::hit(&strip.bar, position.x as f32, position.y as f32).map(|it| {
                 (
@@ -637,7 +649,7 @@ impl Runtime<'_> {
     /// `claude.cmd`, `codex.cmd` and `copilot.cmd` are, and a card that answered
     /// the question a different way could offer a row for a program the picker
     /// says is not installed.
-    pub(crate) fn agent_is_on_this_machine(&self, id: &str) -> bool {
+    pub(in crate::runtime) fn agent_is_on_this_machine(&self, id: &str) -> bool {
         // `position_of` and not `index_of_id`: that one must answer with *some*
         // profile because a pane has to start something, and "this table has no
         // such row" is exactly the answer this question needs.
@@ -900,7 +912,7 @@ impl Runtime<'_> {
     ///
     /// Silent when the seat has nothing unanswered, which is the ordinary case: every keystroke in
     /// every shell comes through here, and almost none of them is answering anything.
-    pub(crate) fn answer_attention(&mut self, seat: SeatId, by: UserInputKind) {
+    pub(in crate::runtime) fn answer_attention(&mut self, seat: SeatId, by: UserInputKind) {
         let index = self.window.active_tab;
         let reach = notify::desktop_reach(true, self.window.place());
         // Split rather than reached through `self`: the place is drawn from the window's own serial
@@ -928,7 +940,7 @@ impl Runtime<'_> {
     /// line up retires this tab's bells and failure codes, and a reader of these two lines has to be
     /// able to see that the standing requests were *offered the same event and kept*. A rule that
     /// held only because nobody had written the call is a rule one edit away from not holding.
-    pub(crate) fn mark_attention_seen(&mut self, index: usize) {
+    pub(in crate::runtime) fn mark_attention_seen(&mut self, index: usize) {
         let reach = notify::desktop_reach(true, self.window.place());
         // A look is not a program speaking, so this instant stamps nothing (`attention` plan
         // §11.10.4 — [`attention::Event::is_the_programs_voice`] answers `MarkSeen` with `false`).
@@ -984,7 +996,7 @@ impl Runtime<'_> {
     /// answering; the place stands until [`Runtime::answer_attention`] retires it — or until the
     /// program takes back what it asked. That is what makes a second press walk on to the next one
     /// instead of finding the queue one shorter than it was.
-    pub(crate) fn jump_to_attention(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn jump_to_attention(&mut self) -> Result<()> {
         let queue: Vec<((usize, SeatId), u64)> = self
             .window
             .tabs

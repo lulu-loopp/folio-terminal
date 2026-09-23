@@ -75,7 +75,7 @@ impl Runtime<'_> {
     /// glass is already the newest one anybody composed, that is all this asks
     /// for; otherwise it falls through to the ordinary whole-window publish,
     /// which is what the caller did unconditionally before.
-    pub(crate) fn publish_chrome_frame(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn publish_chrome_frame(&mut self, now: Instant) -> Result<()> {
         if chrome_tick_reuses_picture(self.picture_on_glass()) {
             let bodies = self.pane_draws(now);
             let (seat_ids, seats) = Self::retained_seats(
@@ -117,7 +117,7 @@ impl Runtime<'_> {
         })
     }
 
-    pub(crate) fn publish_frame_inner(
+    pub(in crate::runtime) fn publish_frame_inner(
         &mut self,
         trigger: FrameTrigger,
         skip_unchanged: bool,
@@ -481,7 +481,7 @@ impl Runtime<'_> {
     /// list at all and not the one seat under the pointer. Since 裁4 two can be
     /// up at once for a second reason: a menu standing on one head while the
     /// hand is in the pane beside it.
-    pub(crate) fn settled_head_ink(&mut self, now: Instant) -> Vec<(SeatId, f32)> {
+    pub(in crate::runtime) fn settled_head_ink(&mut self, now: Instant) -> Vec<(SeatId, f32)> {
         let motion = self.app.motion;
         // **Both arms of the predicate** (裁4, 2026-08-26). The register eases
         // toward whatever `seats::head_run_revealed` says, and it has to be the
@@ -562,7 +562,7 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    pub(crate) fn frame_hit(&self) -> Option<bt_render::GridHit> {
+    pub(in crate::runtime) fn frame_hit(&self) -> Option<bt_render::GridHit> {
         self.pane_frame_hit().map(|(_, hit)| hit)
     }
 
@@ -574,7 +574,7 @@ impl Runtime<'_> {
     /// established that the release came up on the cell the press went down on.
     /// It stays in the signature so the table can be tested with it false, which
     /// is what pins "a drag is only ever a selection".
-    pub(crate) fn activate_hyperlink(
+    pub(in crate::runtime) fn activate_hyperlink(
         &mut self,
         seat: SeatId,
         hyperlink: HyperlinkHit,
@@ -726,7 +726,7 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    pub(crate) fn publish_interaction_frame(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn publish_interaction_frame(&mut self) -> Result<()> {
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -744,7 +744,10 @@ impl Runtime<'_> {
     /// pane that is not the keyboard's gets to the screen when the keyboard's
     /// pane has nothing to say: not by inventing a picture for the held pane, but
     /// by running the pass its neighbours are painted in.
-    pub(crate) fn represent_on_screen_frame(&mut self, trigger: FrameTrigger) -> Result<()> {
+    pub(in crate::runtime) fn represent_on_screen_frame(
+        &mut self,
+        trigger: FrameTrigger,
+    ) -> Result<()> {
         // Not while a resize present is outstanding: that gate admits only the
         // newly projected grid, and the frame on screen is the previous one.
         if self.pending_resize_present.is_none()
@@ -818,7 +821,7 @@ impl Runtime<'_> {
     /// `ours` is passed in rather than asked again: [`Self::drive_drag`] has
     /// already spent that syscall on this very pointer, and asking twice invites
     /// two answers about one instant.
-    pub(crate) fn publish_to_broker(
+    pub(in crate::runtime) fn publish_to_broker(
         &mut self,
         drag: &Drag,
         position: PhysicalPosition<f64>,
@@ -889,7 +892,7 @@ impl Runtime<'_> {
     /// Only the layers that actually **overlap** the page are sent: a menu on the
     /// other side of the window is not a hole in this page, and a list of every
     /// layer in the stack would be a per-frame allocation for nothing.
-    pub(crate) fn chrome_over(
+    pub(in crate::runtime) fn chrome_over(
         &self,
         above: Option<usize>,
         body: Option<[f32; 4]>,
@@ -897,7 +900,7 @@ impl Runtime<'_> {
         chrome_over(&self.window.overlay_bounds, above, body)
     }
 
-    pub(crate) fn begin_present_attempt(
+    pub(in crate::runtime) fn begin_present_attempt(
         &mut self,
         source: FrameSource,
         retained: bool,
@@ -922,7 +925,7 @@ impl Runtime<'_> {
         )
     }
 
-    pub(crate) fn finish_present_attempt(
+    pub(in crate::runtime) fn finish_present_attempt(
         &mut self,
         mut attempt: present_diagnostics::Attempt,
         result: &Result<()>,
@@ -998,7 +1001,7 @@ impl Runtime<'_> {
     /// present this was, and outside the trace gate** — `since_previous_us` is
     /// about the gap between pictures reaching the glass, and a gap measured
     /// against only some of them is not that gap.
-    pub(crate) fn trace_present(
+    pub(in crate::runtime) fn trace_present(
         &mut self,
         source: FrameSource,
         receipt: bt_render::PresentReceipt,
@@ -1052,7 +1055,7 @@ impl Runtime<'_> {
         self.window.perf_trace_us = trace_started.elapsed().as_micros();
     }
 
-    pub(crate) fn present_conditions(
+    pub(in crate::runtime) fn present_conditions(
         &self,
         source: FrameSource,
     ) -> present_gate::PresentConditions {
@@ -1071,7 +1074,7 @@ impl Runtime<'_> {
     /// and placed previews. Equality includes the complete terminal projection,
     /// so selection, hover marks and both viewport origins advance a seat's
     /// picture revision even when its terminal bytes did not change.
-    pub(crate) fn present_signature(
+    pub(in crate::runtime) fn present_signature(
         &self,
         seat_ids: &[SeatId],
         seats: &[bt_render::SeatFrame<'_>],

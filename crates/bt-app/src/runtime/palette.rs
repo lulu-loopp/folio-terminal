@@ -84,7 +84,7 @@ impl Runtime<'_> {
     /// this window does (E61), and it takes the focus with it — see
     /// [`palette::PaletteState::opening`] for why the focus is a photograph
     /// rather than a live reading.
-    pub(crate) fn open_command_palette(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn open_command_palette(&mut self) -> Result<()> {
         // A second press of the chord puts it away. The mock-up has no such
         // gesture because a web page's palette is dismissed by the click that
         // raised it landing outside; a chord has no outside, so the chord is
@@ -171,7 +171,7 @@ impl Runtime<'_> {
     /// [`Runtime::search_field_look`]'s own shape and its reason: splicing a
     /// preedit into the buffer for display is the owner's job, and the caret is
     /// measured against the very string that will be drawn.
-    pub(crate) fn palette_field_look(&self) -> (String, String, bool) {
+    pub(in crate::runtime) fn palette_field_look(&self) -> (String, String, bool) {
         let Some(state) = self.window.palette.as_ref() else {
             return (String::new(), String::new(), false);
         };
@@ -190,7 +190,7 @@ impl Runtime<'_> {
     }
 
     /// The palette as one band of the overlay.
-    pub(crate) fn palette_layer(&mut self) -> MenuPaint {
+    pub(in crate::runtime) fn palette_layer(&mut self) -> MenuPaint {
         let Some(layout) = self.palette_layout() else {
             self.window.palette_layout = None;
             return MenuPaint::none();
@@ -218,7 +218,10 @@ impl Runtime<'_> {
     ///
     /// Returns whether the pointer was over the box at all, which is what tells
     /// the caller the move has been answered.
-    pub(crate) fn drive_palette_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn drive_palette_hover(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some(layout) = self.window.palette_layout.clone() else {
             return Ok(false);
         };
@@ -255,7 +258,7 @@ impl Runtime<'_> {
     /// rail's and the settings sheet's own sentence, and the reason the hover is
     /// re-seated against a layout measured *after* the scroll rather than the
     /// one that was handed in.
-    pub(crate) fn scroll_palette_list(
+    pub(in crate::runtime) fn scroll_palette_list(
         &mut self,
         layout: &palette::PaletteLayout,
         delta: MouseScrollDelta,
@@ -305,7 +308,7 @@ impl Runtime<'_> {
     /// added: Esc closes, the arrows walk, Enter runs, and everything else goes
     /// into the box. Nothing falls through — a palette that let a keystroke
     /// reach the shell behind it would be a box you cannot type a `p` into.
-    pub(crate) fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {
+    pub(in crate::runtime) fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {
         if event.state != ElementState::Pressed {
             return Ok(());
         }
@@ -480,7 +483,7 @@ impl Runtime<'_> {
     /// **Cancelling restores by construction and not by a branch**: the IME
     /// announces a cancel as an empty pre-edit, so the same `set_preedit` puts
     /// the reading back to the committed text and the same re-query answers it.
-    pub(crate) fn palette_ime(&mut self, event: &Ime) -> Result<()> {
+    pub(in crate::runtime) fn palette_ime(&mut self, event: &Ime) -> Result<()> {
         let Some(state) = self.window.palette.as_mut() else {
             return Ok(());
         };
@@ -497,7 +500,7 @@ impl Runtime<'_> {
     /// The box closes first, on the mock-up's own note — "close first: the
     /// action may open its own surface" — and because several of these verbs
     /// raise something the palette would otherwise be standing on top of.
-    pub(crate) fn run_palette_row(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn run_palette_row(&mut self) -> Result<()> {
         let Some(row) = self
             .window
             .palette

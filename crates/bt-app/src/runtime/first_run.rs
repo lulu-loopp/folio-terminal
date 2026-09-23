@@ -454,7 +454,7 @@ impl Runtime<'_> {
     /// Polled from the event loop rather than pushed from the probe thread,
     /// because raising a modal is a change to the window and the window is this
     /// thread's. The check is three comparisons on the common path.
-    pub(crate) fn raise_psreadline_invite_if_due(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn raise_psreadline_invite_if_due(&mut self) -> Result<()> {
         if self.window.psreadline_invite.is_open() || psreadline::probe().is_none() {
             return Ok(());
         }
@@ -493,7 +493,7 @@ impl Runtime<'_> {
     }
 
     /// The invitation, measured against a real font, or nothing while it is shut.
-    pub(crate) fn psreadline_invite_layout(&mut self) -> Option<restore::InviteLayout> {
+    pub(in crate::runtime) fn psreadline_invite_layout(&mut self) -> Option<restore::InviteLayout> {
         if !self.window.psreadline_invite.is_open() {
             return None;
         }
@@ -551,7 +551,7 @@ impl Runtime<'_> {
     /// **`Shown` is written the moment it goes up, not when it is answered.** A
     /// crash, an `Alt+F4`, or a process killed while the card is on screen must
     /// not bring it back.
-    pub(crate) fn raise_first_run_if_due(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn raise_first_run_if_due(&mut self) -> Result<()> {
         if self.window.first_run.is_open() || self.app.first_run_attempted {
             return Ok(());
         }
@@ -651,7 +651,7 @@ impl Runtime<'_> {
     /// Called from the anchor rebuild and from the two places that move the
     /// body under a pointer that has not itself moved, because an anchor is
     /// only ever allowed to describe a box the card is actually drawing.
-    pub(crate) fn rebuild_first_run_tip_anchors(&mut self) {
+    pub(in crate::runtime) fn rebuild_first_run_tip_anchors(&mut self) {
         let mut anchors = tooltip::TooltipAnchors::default();
         if let Some(layout) = self.first_run_layout() {
             for (index, rect, text) in layout.tips() {
@@ -662,7 +662,7 @@ impl Runtime<'_> {
     }
 
     /// The card, measured against a real font, or nothing while it is shut.
-    pub(crate) fn first_run_layout(&mut self) -> Option<first_run::Layout> {
+    pub(in crate::runtime) fn first_run_layout(&mut self) -> Option<first_run::Layout> {
         if !self.window.first_run.is_open() {
             return None;
         }
@@ -715,7 +715,7 @@ impl Runtime<'_> {
     }
 
     /// One press on the card, or the key that stands for one.
-    pub(crate) fn answer_first_run(&mut self, target: first_run::Target) -> Result<()> {
+    pub(in crate::runtime) fn answer_first_run(&mut self, target: first_run::Target) -> Result<()> {
         self.window.first_run.press(target);
         match target {
             first_run::Target::Panel => return Ok(()),
@@ -815,7 +815,7 @@ impl Runtime<'_> {
     /// touched, on the first surface a machine ever shows. Each arm below that
     /// moves, flips or scrolls lights it; `Tab` and the arrows light it by
     /// moving the focus, which is the same statement said once.
-    pub(crate) fn press_first_run_key(&mut self, key: &Key, shift: bool) -> Result<()> {
+    pub(in crate::runtime) fn press_first_run_key(&mut self, key: &Key, shift: bool) -> Result<()> {
         let switches = self.window.first_run.rows().len();
         let focus = self.window.first_run.focus();
         match key {
@@ -906,12 +906,12 @@ impl Runtime<'_> {
     }
 
     /// How tall one page of the card's body is, for the wheel's own travel rule.
-    pub(crate) fn first_run_page(&mut self) -> f32 {
+    pub(in crate::runtime) fn first_run_page(&mut self) -> f32 {
         self.first_run_layout().map_or(0.0, |layout| layout.page())
     }
 
     /// One wheel notch over the card.
-    pub(crate) fn scroll_first_run(&mut self, delta: f32) -> Result<()> {
+    pub(in crate::runtime) fn scroll_first_run(&mut self, delta: f32) -> Result<()> {
         let Some(layout) = self.first_run_layout() else {
             return Ok(());
         };
@@ -931,7 +931,10 @@ impl Runtime<'_> {
     }
 
     /// One press on the invitation, or Esc.
-    pub(crate) fn answer_psreadline_invite(&mut self, target: restore::InviteTarget) -> Result<()> {
+    pub(in crate::runtime) fn answer_psreadline_invite(
+        &mut self,
+        target: restore::InviteTarget,
+    ) -> Result<()> {
         match target {
             restore::InviteTarget::Panel => return Ok(()),
             restore::InviteTarget::Decline => {

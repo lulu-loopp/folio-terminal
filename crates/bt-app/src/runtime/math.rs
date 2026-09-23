@@ -38,7 +38,7 @@ impl Runtime<'_> {
     /// one `self.tabs` on one frame, so the case is unreachable rather than
     /// handled, and answering with nothing is what keeps it from becoming a panic
     /// if that ever stops being true.
-    pub(crate) fn tab_surface_tip_text(&self, id: tooltip::TooltipAnchorId) -> String {
+    pub(in crate::runtime) fn tab_surface_tip_text(&self, id: tooltip::TooltipAnchorId) -> String {
         match id {
             tooltip::TooltipAnchorId::TabPin(index) => self
                 .window
@@ -132,7 +132,7 @@ impl Runtime<'_> {
     /// this present draws. Keeping the handed lanes as an argument makes the
     /// flattened order — and therefore every `WebHole::above` index — pass
     /// through the same builder as every other overlay rebuild.
-    pub(crate) fn refresh_overlay_with_formula(
+    pub(in crate::runtime) fn refresh_overlay_with_formula(
         &mut self,
         now: Instant,
         formula_tools: Vec<marks::OverlayLayer>,
@@ -642,7 +642,10 @@ impl Runtime<'_> {
     /// The same question the terminal's menu asks before it offers `Copy`, asked
     /// of the same thing: not "is there a pair of places" but "are there bytes
     /// between them". A bare click has places and no bytes.
-    pub(crate) fn preview_selected_text(&self, surface: PreviewSurface) -> Option<String> {
+    pub(in crate::runtime) fn preview_selected_text(
+        &self,
+        surface: PreviewSurface,
+    ) -> Option<String> {
         // **One selection model, so one answer** (research §10 Q3, ruled). While
         // a caret is standing in this page the range is the caret's, and what
         // goes on the clipboard is the file's own bytes between its two ends.
@@ -678,7 +681,10 @@ impl Runtime<'_> {
 
     /// Put a rendered page's selection on the clipboard, through the door the
     /// terminal's own copy already uses.
-    pub(crate) fn copy_preview_text_selection(&mut self, surface: PreviewSurface) -> bool {
+    pub(in crate::runtime) fn copy_preview_text_selection(
+        &mut self,
+        surface: PreviewSurface,
+    ) -> bool {
         let Some(text) = self.preview_selected_text(surface) else {
             return false;
         };
@@ -693,7 +699,7 @@ impl Runtime<'_> {
 
     /// **One key aimed at a rendered page's selection**, or `false` if it was
     /// not one of the three.
-    pub(crate) fn preview_text_key(
+    pub(in crate::runtime) fn preview_text_key(
         &mut self,
         surface: PreviewSurface,
         event: &KeyEvent,
@@ -769,7 +775,7 @@ impl Runtime<'_> {
     /// [`Self::resolve_document_pictures`]' own sentence, said one lane over:
     /// the cache is bounded and the page's appetite is not, so whether the cache
     /// still holds a picture must not decide whether the engine is asked for one.
-    pub(crate) fn resolve_document_math(
+    pub(in crate::runtime) fn resolve_document_math(
         &mut self,
         blocks: &[preview::MarkdownBlock],
         metrics: seats::PreviewMarkdownMetrics,
@@ -849,7 +855,7 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn preview_doc_text_geometry(
+    pub(in crate::runtime) fn preview_doc_text_geometry(
         &self,
         surface: PreviewSurface,
         body: [f32; 4],
@@ -1216,7 +1222,7 @@ impl Runtime<'_> {
     /// visible sibling showing its own LaTeX until somebody clicked into it.
     /// `dispatch_tab_decoration_tasks` already visits every leaf of the tab, so
     /// once the settle does too there is nothing else to route.
-    pub(crate) fn advance_live_math_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_live_math_if_due(&mut self, now: Instant) -> Result<()> {
         let active = self.window.active_tab;
         let mut settled = false;
         for (_, leaf) in self.window.tabs[active].leaves_mut() {
@@ -1298,7 +1304,7 @@ impl Runtime<'_> {
     /// `None` when the pointer is over chrome, over a non-terminal pane, or over
     /// a pane that has not drawn yet — all three being "there is no cell here",
     /// which is exactly what the callers already do nothing about.
-    pub(crate) fn pane_hit_context(
+    pub(in crate::runtime) fn pane_hit_context(
         &self,
     ) -> Option<(bt_layout::SeatId, PhysicalPosition<f64>, &ViewportFrame)> {
         let position = self.window.pointer_position?;
@@ -1355,7 +1361,7 @@ impl Runtime<'_> {
     /// a generation counter, and every one of those is a per-session number. Asking "which session
     /// answers for this anchor" can therefore be answered by the wrong one; asking the pane the
     /// pointer was in cannot.
-    pub(crate) fn math_hit(&self) -> Option<(SeatId, MathHit)> {
+    pub(in crate::runtime) fn math_hit(&self) -> Option<(SeatId, MathHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
@@ -1389,7 +1395,10 @@ impl Runtime<'_> {
     /// what the owner reported, and no other hover in this window does it — a
     /// pane head's run, a tab's `×`, a link's underline and the tip all go on
     /// the pointer's own event.
-    pub(crate) fn update_math_hover(&mut self, now: Instant) -> Result<Option<MathHit>> {
+    pub(in crate::runtime) fn update_math_hover(
+        &mut self,
+        now: Instant,
+    ) -> Result<Option<MathHit>> {
         let Some(hit) = self.math_hit().map(|(_, hit)| hit) else {
             // On neither the band nor either mark: the hover is over, on this
             // event and not half a second after it. `leave_hovered_math` costs
@@ -1556,7 +1565,7 @@ impl Runtime<'_> {
     /// A seat the solver is not showing as a pane is skipped rather than ending
     /// the search: a folded seat is not the pane the band is in, and the band's
     /// own pane may be the next one in the map.
-    pub(crate) fn math_tool_placement<'a>(
+    pub(in crate::runtime) fn math_tool_placement<'a>(
         &self,
         frame_for: impl Fn(SeatId) -> Option<(bt_render::SeatViewport, &'a ViewportFrame)>,
     ) -> Option<bt_render::MathToolBoxes> {
@@ -1603,7 +1612,7 @@ impl Runtime<'_> {
     /// the ninety milliseconds is *drawn* rather than merely begun and finished.
     /// Until the owner's report of 2026-09-14 evening this asked for the end of
     /// the fade, which on a still window is two frames of a fade and no middle.
-    pub(crate) fn math_tools_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(in crate::runtime) fn math_tools_deadline(&self, now: Instant) -> Option<Instant> {
         self.animating_deadline(self.math_tools_owe_frames(now), now)
     }
 
@@ -1634,7 +1643,7 @@ impl Runtime<'_> {
     /// the pair of sheets again, and `math_copy_window` then answers `None` for
     /// it for ever after. **Both halves are needed**: filtering the deadline
     /// alone would leave the tick drawn until something else repainted the band.
-    pub(crate) fn advance_math_tools_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_math_tools_if_due(&mut self, now: Instant) -> Result<()> {
         // **On the window's own display frame** (owner's report 2026-09-18).
         // Geometry is deliberately absent here: the present this turn requests
         // will derive it from the picture that present actually draws. See
@@ -1703,7 +1712,7 @@ impl Runtime<'_> {
     /// construction rather than by two call sites agreeing.
     ///
     /// One layer or none: there is one pointer, so at most one band.
-    pub(crate) fn formula_tool_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn formula_tool_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
         let Some(follow) = self.window.math_tools.as_ref() else {
             return Vec::new();
         };
@@ -1736,7 +1745,7 @@ impl Runtime<'_> {
     }
 
     /// Sample diagnostics from the handed frame, before its ride receipt is consumed.
-    pub(crate) fn math_band_trace_for_present<'a>(
+    pub(in crate::runtime) fn math_band_trace_for_present<'a>(
         &self,
         frame_for: impl Fn(SeatId) -> Option<(bt_render::SeatViewport, &'a ViewportFrame)>,
     ) -> Option<(SeatId, bt_render::MathBandTrace, bool)> {
@@ -1772,7 +1781,7 @@ impl Runtime<'_> {
         })
     }
 
-    pub(crate) fn math_band_trace_line(
+    pub(in crate::runtime) fn math_band_trace_line(
         &self,
         now: Instant,
         trace: Option<(SeatId, bt_render::MathBandTrace, bool)>,
@@ -1822,7 +1831,7 @@ impl Runtime<'_> {
         )
     }
 
-    pub(crate) fn trace_math_band(&self, line: Option<String>) {
+    pub(in crate::runtime) fn trace_math_band(&self, line: Option<String>) {
         if let Some(line) = line {
             trace_sink::stderr_line(format!(
                 "BT_PERF_TRACE math_band frame={} {line}",
@@ -1844,7 +1853,7 @@ impl Runtime<'_> {
     /// frame set immediately before this call, after every visible pane was
     /// projected. A stationary band still pays its one geometry scan, but no
     /// allocation or overlay rebuild when the answer did not move.
-    pub(crate) fn refresh_formula_overlay_for_present(
+    pub(in crate::runtime) fn refresh_formula_overlay_for_present(
         &mut self,
         now: Instant,
         placement: Option<bt_render::MathToolBoxes>,
@@ -1922,7 +1931,10 @@ impl Runtime<'_> {
     /// one pays that plus a `u64` comparison on every turn, and the hit test
     /// only on the turns a new picture actually reached the glass — which is the
     /// same bargain [`Self::sync_math_tools`] already makes one clock over.
-    pub(crate) fn refresh_math_hover_against_the_picture(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn refresh_math_hover_against_the_picture(
+        &mut self,
+        now: Instant,
+    ) -> Result<()> {
         if self.window.pointer_position.is_none() {
             // The hand is not in this window, so there is nothing to ask on its
             // behalf — and the pictures that went by while it was away are not a
@@ -2069,7 +2081,7 @@ impl Runtime<'_> {
 
     /// **The `‹›` mark was pressed** — see [`formula_tools::FormulaToggleMotion`] for what the
     /// ninety milliseconds after it are made of.
-    pub(crate) fn press_math_toggle(
+    pub(in crate::runtime) fn press_math_toggle(
         &mut self,
         target: PasteTarget,
         anchor: &MathBlockAnchor,
@@ -2247,7 +2259,7 @@ impl Runtime<'_> {
     ///
     /// It refuses before it does anything at all when nothing is in flight, so a window nobody has
     /// pressed a formula in pays one `Option` read for every door it ever passes through.
-    pub(crate) fn settle_math_toggle(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn settle_math_toggle(&mut self) -> Result<()> {
         let Some(flight) = self.window.math_toggle.take() else {
             return Ok(());
         };
@@ -2310,7 +2322,7 @@ impl Runtime<'_> {
     /// `heights()` read one integer pair off it and drop the rest. [`Self::math_toggle_heights`]
     /// is that pair, counted rather than laid out. The rows are the press's business and the
     /// press asks for them once.
-    pub(crate) fn advance_math_toggle_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_math_toggle_if_due(&mut self, now: Instant) -> Result<()> {
         let motion = self.app.motion;
         let Some((target, anchor, landed)) = self.window.math_toggle.as_ref().map(|flight| {
             (
@@ -2360,7 +2372,7 @@ impl Runtime<'_> {
     /// The tip's own arrangement, through the marks': the next frame rather than the end of the
     /// span, so the ninety milliseconds is drawn rather than merely begun and finished. No span is
     /// spelled here either.
-    pub(crate) fn math_toggle_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(in crate::runtime) fn math_toggle_deadline(&self, now: Instant) -> Option<Instant> {
         let flight = self.window.math_toggle.as_ref()?;
         // **The landing, unpaced, and the next frame of the travel, paced — the
         // earlier of the two** (review 2026-09-18, P1). The travel is a picture
@@ -2383,7 +2395,7 @@ impl Runtime<'_> {
     /// picture yet, and when the handed frame does not know the named band.
     /// This is §7.1.5p ⑥'s re-ruled answer: the band is named and the picture is
     /// this frame's, so it says nothing rather than drawing over a neighbour.
-    pub(crate) fn formula_toggle_layers<'a>(
+    pub(in crate::runtime) fn formula_toggle_layers<'a>(
         &self,
         now: Instant,
         frame_for: impl Fn(SeatId) -> Option<(bt_render::SeatViewport, &'a ViewportFrame)>,
@@ -2446,7 +2458,11 @@ impl Runtime<'_> {
     /// copying from a formula in an unfocused pane asked a session where the anchor names nothing
     /// and copied nothing, or, where that session happened to hold a block of the same shape,
     /// copied the wrong formula. The seat comes from the press, like the other two verbs'.
-    pub(crate) fn copy_math_latex(&mut self, target: PasteTarget, anchor: &MathBlockAnchor) {
+    pub(in crate::runtime) fn copy_math_latex(
+        &mut self,
+        target: PasteTarget,
+        anchor: &MathBlockAnchor,
+    ) {
         // A block anchor names a place in a shell's transcript, so a tab with no
         // shell has no anchor anybody could have clicked and nothing to copy
         // (§7.1.6h) — the same `None` a stale anchor already answers with.
@@ -2474,7 +2490,7 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn apply_math_context_menu_result(&mut self) {
+    pub(in crate::runtime) fn apply_math_context_menu_result(&mut self) {
         let Some(result) = self.window.math_context_menu.take_result() else {
             return;
         };
@@ -2512,7 +2528,7 @@ impl Runtime<'_> {
     /// there is no single key to compute once and hand round: the walk builds one
     /// per leaf out of that leaf's columns. A tab with no shell has no leaves and
     /// therefore no bands to re-key, which is the no-op §7.1.6h asks for.
-    pub(crate) fn sync_math_layout_key(&mut self) {
+    pub(in crate::runtime) fn sync_math_layout_key(&mut self) {
         let dpi_milli = self.window.renderer.metrics().dpi_milli();
         // The window's own count, not a constant. It was `1` for as long as
         // nothing could change the face; the Terminal font row can, and a frozen
@@ -2536,7 +2552,7 @@ impl Runtime<'_> {
 
     /// Put one string on the clipboard, through the door every other copy in
     /// this window uses.
-    pub(crate) fn copy_text_to_clipboard(&mut self, text: &str) {
+    pub(in crate::runtime) fn copy_text_to_clipboard(&mut self, text: &str) {
         let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
             bt_platform::set_clipboard_text(text)
         })

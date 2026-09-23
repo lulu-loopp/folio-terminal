@@ -30,7 +30,7 @@ impl Runtime<'_> {
     /// (`el.title` is rewritten on every paint), and here it earns its keep
     /// twice: a chord recorded in the settings dialog takes effect on the next
     /// press, and the scope a row is in force in moves with the keyboard.
-    pub(crate) fn key_hint_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn key_hint_layer(&mut self) -> Vec<marks::OverlayLayer> {
         // Recorded at the end and only on the path that paints, so the
         // frame-debt comparison is against what is *on screen* — the tip's own
         // note, one surface over.
@@ -126,7 +126,7 @@ impl Runtime<'_> {
     /// When this window next has hint work: the 800ms while a hold is settling,
     /// the fade's frames until it lands — and nothing at all for a window whose
     /// hands are empty.
-    pub(crate) fn key_hint_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(in crate::runtime) fn key_hint_deadline(&self, now: Instant) -> Option<Instant> {
         let next_frame = self.next_animation_deadline();
         if self.key_hint_owes_frame(now) {
             return next_frame;
@@ -164,7 +164,7 @@ impl Runtime<'_> {
     /// alternative — refusing to promote — would leave the deadline armed and
     /// already in the past, which is the `WaitUntil` pin's own definition of a
     /// loop that never sleeps.
-    pub(crate) fn advance_key_hint_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_key_hint_if_due(&mut self, now: Instant) -> Result<()> {
         // The tip's own arrangement, for the tip's own reason (closure review
         // O4, 2026-09-18): the eight hundred milliseconds maturing is state and
         // is never paced, and only the fade that follows it is.
@@ -198,7 +198,7 @@ impl Runtime<'_> {
     /// It answers nothing and consumes nothing — there is no path from here that
     /// can stop an event — which is how "the hint never takes a gesture" stays
     /// structural rather than remembered.
-    pub(crate) fn spend_key_hint(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn spend_key_hint(&mut self) -> Result<()> {
         if self.window.key_hint.spend(self.window.modifiers) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -682,7 +682,7 @@ impl Runtime<'_> {
     /// leaves the editing keys to the IME mid-composition
     /// (`input::is_ime_owned_key`) keeps working for both owners without being
     /// told which one is composing.
-    pub(crate) fn shell_preedit(&self) -> Option<&Preedit> {
+    pub(in crate::runtime) fn shell_preedit(&self) -> Option<&Preedit> {
         matches!(ime_owner(self.keyboard_owner()), ImeOwner::Shell)
             .then_some(self.window.preedit.as_ref())
             .flatten()
@@ -750,7 +750,7 @@ impl Runtime<'_> {
     /// keystroke, a scroll, a resize and a capsule relaid all wake the loop, and
     /// [`ImeCursorThrottle`] turns a burst of identical rectangles into nothing
     /// and a burst of moving ones into one call per 60Hz slot.
-    pub(crate) fn offer_ime_caret(&mut self, grid: Option<&ViewportFrame>) {
+    pub(in crate::runtime) fn offer_ime_caret(&mut self, grid: Option<&ViewportFrame>) {
         if !self.window.ime_active {
             return;
         }
@@ -907,7 +907,7 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn flush_ime_cursor_area(&mut self, now: Instant) {
+    pub(in crate::runtime) fn flush_ime_cursor_area(&mut self, now: Instant) {
         if let Some(area) = self.window.ime_cursor_throttle.flush_due(now) {
             self.apply_ime_cursor_area(area, "flushed");
         }
@@ -939,7 +939,7 @@ impl Runtime<'_> {
     ///
     /// Not `reset`: that is a composition ending. This keeps the 60Hz cadence,
     /// so a drag across the seam costs the same as a caret moving.
-    pub(crate) fn reoffer_ime_cursor_area(&mut self) {
+    pub(in crate::runtime) fn reoffer_ime_cursor_area(&mut self) {
         let Some(area) = self.window.ime_cursor_throttle.last_sent() else {
             return;
         };
@@ -951,7 +951,7 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn reset_cursor_blink(&mut self, now: Instant) -> bool {
+    pub(in crate::runtime) fn reset_cursor_blink(&mut self, now: Instant) -> bool {
         let changed = self.window.cursor_blink.reset(now, self.app.motion);
         self.window
             .renderer
@@ -959,7 +959,7 @@ impl Runtime<'_> {
         changed
     }
 
-    pub(crate) fn advance_cursor_blink_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_cursor_blink_if_due(&mut self, now: Instant) -> Result<()> {
         // **A caret that is not the keyboard's does not blink** (ruling
         // 2026-08-13). There is no phase to advance and therefore no frame owed
         // for one — which is also the literal "冻结" the report asked for, and

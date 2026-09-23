@@ -45,7 +45,7 @@ impl Runtime<'_> {
     ///
     /// Answers with the numbers the jump was computed from when there was an
     /// anchor to jump to, for the rail's own trace line one method up.
-    pub(crate) fn jump_to_command_mark(
+    pub(in crate::runtime) fn jump_to_command_mark(
         &mut self,
         seat: SeatId,
         mark: bt_term::CommandMarkId,
@@ -126,7 +126,7 @@ impl Runtime<'_> {
     /// and deliberately the opposite of the search's ring: a rail is a history with
     /// a beginning and an end, and arriving at the oldest command and being thrown
     /// to the newest is not what the key said.
-    pub(crate) fn step_command_mark(&mut self, step: Step) -> Result<()> {
+    pub(in crate::runtime) fn step_command_mark(&mut self, step: Step) -> Result<()> {
         let seat = self.focused_leaf;
         let Some(leaf) = self.sessions.get(&seat) else {
             return Ok(());
@@ -158,7 +158,7 @@ impl Runtime<'_> {
     }
 
     /// The ghost is gone, and it goes in one frame — see [`Self::drag_ghost_layer`].
-    pub(crate) fn forget_the_ghost(&mut self) {
+    pub(in crate::runtime) fn forget_the_ghost(&mut self) {
         self.window.settling.forget(&Fading::DragGhost);
     }
 
@@ -310,7 +310,7 @@ impl Runtime<'_> {
     }
 
     /// Record, or clear, the intent the PowerShell row leaves behind.
-    pub(crate) fn record_powershell_install_pending(&mut self, pending: bool) {
+    pub(in crate::runtime) fn record_powershell_install_pending(&mut self, pending: bool) {
         if self.app.settings_store.loaded().powershell_install_pending == pending {
             return;
         }
@@ -331,7 +331,7 @@ impl Runtime<'_> {
     ///
     /// A profile that already loads the script clears the intent without
     /// writing, because that is the reader having the thing they asked for.
-    pub(crate) fn spend_powershell_intent(&mut self, profile: &std::path::Path) {
+    pub(in crate::runtime) fn spend_powershell_intent(&mut self, profile: &std::path::Path) {
         // The flag is read here rather than passed in as a `true` the caller
         // already checked: this function asks whether there is an intent, it
         // does not assert that there is one.
@@ -491,7 +491,7 @@ impl Runtime<'_> {
     /// way round: [`termscroll::visibility`] owns both suppressions, so a pane
     /// with no scrollback and a pane running `vim` are refused by the rule
     /// rather than by a `None` falling out of the arithmetic further down.
-    pub(crate) fn terminal_bar_layers(&self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn terminal_bar_layers(&self) -> Vec<marks::OverlayLayer> {
         let palette = bt_render::chrome_palette();
         let now = Instant::now();
         let motion = self.app.motion;
@@ -672,7 +672,7 @@ impl Runtime<'_> {
     /// needs the busy state machine of §7.1.5b, which this build does not have,
     /// and a confirmation that guessed would be a dialog in front of a fact
     /// nobody measured.
-    pub(crate) fn restart_shell(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn restart_shell(&mut self, seat: SeatId) -> Result<()> {
         if self.window.restarting.is_some() {
             return Ok(());
         }
@@ -772,7 +772,7 @@ impl Runtime<'_> {
     /// bracketed-paste mode is told this arrived as one lump — which is what
     /// distinguishes the paste from typing. The path encoder separately keeps
     /// each representable path in one argument at a fresh argument boundary.
-    pub(crate) fn insert_path_into_terminal(&mut self, path: &Path) -> Result<()> {
+    pub(in crate::runtime) fn insert_path_into_terminal(&mut self, path: &Path) -> Result<()> {
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].focused() else {
             return Ok(());
@@ -1205,7 +1205,7 @@ impl Runtime<'_> {
     /// passing through the drain. It is also the whole of [`coalesce::Pending`]'s invariant —
     /// this runs on every turn, so a deadline that has passed is published and disarmed on the
     /// next wake whatever else the window has been doing.
-    pub(crate) fn finish_pty_coalesce_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn finish_pty_coalesce_if_due(&mut self, now: Instant) -> Result<()> {
         let Some(until) = self.window.pty_coalesce.until else {
             return Ok(());
         };
@@ -1238,7 +1238,10 @@ impl Runtime<'_> {
         })
     }
 
-    pub(crate) fn hyperlink_hit(&self, hit: bt_render::GridHit) -> Option<HyperlinkHit> {
+    pub(in crate::runtime) fn hyperlink_hit(
+        &self,
+        hit: bt_render::GridHit,
+    ) -> Option<HyperlinkHit> {
         // Asked of the pane the pointer is in, so the link that lights up is the
         // link under the hand.
         let (_, _, frame) = self.pane_hit_context()?;
@@ -1252,7 +1255,7 @@ impl Runtime<'_> {
     /// A tab with no shell has no transcript to scroll: `Shift+PageUp` in a
     /// folder tab moves nothing, because there is nothing behind the column that
     /// scrolls in rows of cells (§7.1.6h).
-    pub(crate) fn scroll_view(&mut self, rows: i32) -> Result<()> {
+    pub(in crate::runtime) fn scroll_view(&mut self, rows: i32) -> Result<()> {
         if self.focused().is_none() {
             return Ok(());
         }
@@ -1272,7 +1275,7 @@ impl Runtime<'_> {
 
     /// Begin a selection in the pane the press landed in — `seat`, and not the
     /// focused leaf, even though D40 has just made them the same pane.
-    pub(crate) fn begin_local_selection(
+    pub(in crate::runtime) fn begin_local_selection(
         &mut self,
         seat: SeatId,
         hit: bt_render::GridHit,
@@ -1387,7 +1390,7 @@ impl Runtime<'_> {
     /// pointer is, but only the drag knows which pane's cells that point has to be
     /// spoken in, and [`Self::drag_hit_in_pane`] is the one place that translation
     /// is written.
-    pub(crate) fn extend_local_selection(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn extend_local_selection(&mut self) -> Result<()> {
         let Some(MouseRoute::Local(drag)) = self.window.mouse_route.as_ref() else {
             return Ok(());
         };
@@ -1453,7 +1456,7 @@ impl Runtime<'_> {
     /// same [`HyperlinkHover::underline_target`] the underline is painted from —
     /// so the shape and the mark cannot come to disagree about which cells are a
     /// link, nor the shape and the verb about what that link would do.
-    pub(crate) fn terminal_link_grasp(&self) -> bool {
+    pub(in crate::runtime) fn terminal_link_grasp(&self) -> bool {
         let namespace = self.hovered_pane_path_namespace();
         let namer = bt_transcript::paths::PathNamer::Pane(&namespace);
         terminal_link_answers_a_press(
@@ -1515,7 +1518,7 @@ impl Runtime<'_> {
     /// in another pane — or on the chrome — cannot answer that yes. Letting a
     /// neighbour's cell answer would let a release two panes away read as a click
     /// on the origin cell and quietly clear the selection the drag just made.
-    pub(crate) fn finish_local_selection(&mut self, drag: SelectionDrag) -> Result<()> {
+    pub(in crate::runtime) fn finish_local_selection(&mut self, drag: SelectionDrag) -> Result<()> {
         let seat = drag.origin_seat;
         self.extend_local_selection()?;
         let release_hit = self
@@ -1617,7 +1620,7 @@ impl Runtime<'_> {
     /// subpixel one physical notch left over, and a notch is a property of the
     /// mouse, not of the pane it landed on.
     /// Returns whether the clamped view moved, independently of thumb changes.
-    pub(crate) fn scroll_view_exact_in(
+    pub(in crate::runtime) fn scroll_view_exact_in(
         &mut self,
         seat: bt_layout::SeatId,
         event_subpixels: f64,

@@ -30,7 +30,7 @@ impl Runtime<'_> {
     /// standing on the rail, on a hyperlink or on a cell, and the pane must not be told about it
     /// (R5 — the two surfaces share the pane's top-right corner and a short pane puts the rail's
     /// own block under the capsule's box).
-    pub(crate) fn drive_search_hover(
+    pub(in crate::runtime) fn drive_search_hover(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<bool> {
@@ -52,7 +52,7 @@ impl Runtime<'_> {
     /// need a sentence about what it is, and the placeholder already says `Find`. The six that do
     /// are marks and two-letter labels — `Aa`, `ab`, `.*`, a chevron each way and a cross — which
     /// is exactly the case a tip exists for: an idiom is a guess until something says what it does.
-    pub(crate) fn search_tip_anchors(&self, anchors: &mut tooltip::TooltipAnchors) {
+    pub(in crate::runtime) fn search_tip_anchors(&self, anchors: &mut tooltip::TooltipAnchors) {
         let Some(capsule) = self.window.search_layout else {
             return;
         };
@@ -83,7 +83,7 @@ impl Runtime<'_> {
     /// Re-laid every frame rather than cached, and the reason is the counter: `1/17` and `10/17`
     /// are different widths, so the capsule's own width is a function of what it is saying. It is
     /// four `max`es and one row of additions — cheaper than deciding whether it is stale.
-    pub(crate) fn search_capsule(&mut self) -> Option<search::Capsule> {
+    pub(in crate::runtime) fn search_capsule(&mut self) -> Option<search::Capsule> {
         let seat = self.window.search.seat()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (rect, head) = seats::search_capsule_host(&self.seats, &self.seat_layout, seat, scale)?;
@@ -121,7 +121,7 @@ impl Runtime<'_> {
     /// *"Reopening refocuses the capsule and keeps the last query: search is a staying state, not a
     /// popup"* (B80). So this is one verb for both cases — a fresh capsule and a re-focus — and the
     /// difference between them is entirely inside [`search::SearchState::open`].
-    pub(crate) fn open_search(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn open_search(&mut self, seat: SeatId) -> Result<()> {
         if !self.seat_can_search(seat) {
             return Ok(());
         }
@@ -168,7 +168,7 @@ impl Runtime<'_> {
     /// set, the current match and the seat, and what survives is every character typed and every
     /// toggle switched. That is what makes `Ctrl+F` after a tab switch a continuation rather than a
     /// fresh start.
-    pub(crate) fn close_search(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn close_search(&mut self) -> Result<bool> {
         let Some(seat) = self.window.search.seat() else {
             return Ok(false);
         };
@@ -190,7 +190,7 @@ impl Runtime<'_> {
     }
 
     /// Take the highlights off one pane and repaint it.
-    pub(crate) fn clear_search_highlights(&mut self, seat: SeatId) {
+    pub(in crate::runtime) fn clear_search_highlights(&mut self, seat: SeatId) {
         if let Some(leaf) = self.sessions.get_mut(&seat) {
             leaf.projection.set_search_highlights(None);
         }
@@ -247,7 +247,7 @@ impl Runtime<'_> {
     ///
     /// **No debounce anywhere.** A keystroke's result is on the next frame; the thing that makes
     /// that affordable is [`SearchScanCache`]'s split by plane, not a timer.
-    pub(crate) fn refresh_search(&mut self, forced: bool) -> Result<()> {
+    pub(in crate::runtime) fn refresh_search(&mut self, forced: bool) -> Result<()> {
         let Some(seat) = self.window.search.seat() else {
             self.window.search_scan = None;
             return Ok(());
@@ -436,7 +436,7 @@ impl Runtime<'_> {
     }
 
     /// `Enter` / `F3` / the `▲▼` buttons — walk one match, wrapping at both ends.
-    pub(crate) fn step_search(&mut self, forwards: bool) -> Result<()> {
+    pub(in crate::runtime) fn step_search(&mut self, forwards: bool) -> Result<()> {
         // On a page the walk is the engine's: it owns the highlights, the
         // scroll and which match is current, and it reports the new tally back
         // through `WebOutcome::FindMatches`.
@@ -470,7 +470,7 @@ impl Runtime<'_> {
     /// only through a rail built against a hit set that has since been replaced —
     /// one frame's worth of staleness at most — and moving the reader to a hit
     /// they did not point at would be worse than the press appearing not to land.
-    pub(crate) fn select_search_hit(&mut self, index: usize) -> Result<()> {
+    pub(in crate::runtime) fn select_search_hit(&mut self, index: usize) -> Result<()> {
         if self.window.search.set_current(index).is_none() {
             return Ok(());
         }
@@ -530,7 +530,7 @@ impl Runtime<'_> {
     /// returns `true` and why this rung sits beside the files column's and the preview's rather
     /// than above the shortcut table: a field holding the keyboard is not a modal, so the window's
     /// own chords still work over it, and only *typing* is claimed.
-    pub(crate) fn search_field_key(&mut self, event: &KeyEvent) -> Result<bool> {
+    pub(in crate::runtime) fn search_field_key(&mut self, event: &KeyEvent) -> Result<bool> {
         if !self.window.search.is_focused() {
             return Ok(false);
         }
@@ -660,7 +660,10 @@ impl Runtime<'_> {
     }
 
     /// A press on the capsule. Returns whether it landed there at all.
-    pub(crate) fn press_search(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn press_search(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some(capsule) = self.window.search_layout else {
             return Ok(false);
         };
@@ -696,7 +699,7 @@ impl Runtime<'_> {
     /// painted the composition *over* the text would show both sharing cells neither can be read
     /// in — the bug the terminal's own preedit path was fixed for on 2026-08-13, and the shape the
     /// commit graph's field already answers.
-    pub(crate) fn search_field_look(&mut self) -> (String, bool, f32) {
+    pub(in crate::runtime) fn search_field_look(&mut self) -> (String, bool, f32) {
         let field = self.window.search.field();
         let typed = field.text().to_owned();
         let before = field.before_caret().to_owned();
@@ -720,7 +723,7 @@ impl Runtime<'_> {
     }
 
     /// The capsule's own level of the overlay stack, or nothing when it is down.
-    pub(crate) fn search_layers(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn search_layers(&mut self) -> Vec<marks::OverlayLayer> {
         let Some(capsule) = self.search_capsule() else {
             self.window.search_layout = None;
             return Vec::new();
@@ -783,7 +786,7 @@ impl Runtime<'_> {
     /// half-composed `ni'hao` is not a query anybody asked for, and scanning a
     /// hundred thousand lines for it on the way to the two characters it becomes
     /// would be work done for a string the reader never typed.
-    pub(crate) fn search_ime(&mut self, event: Ime) -> Result<()> {
+    pub(in crate::runtime) fn search_ime(&mut self, event: Ime) -> Result<()> {
         if !self.window.search.is_focused() {
             return Ok(());
         }

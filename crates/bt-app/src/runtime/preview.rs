@@ -85,7 +85,7 @@ impl Runtime<'_> {
     /// By index rather than on the active tab, because a restore builds every
     /// tab before it activates any of them, and the response carries the
     /// [`TabId`] it was asked for.
-    pub(crate) fn request_revived_previews(&mut self, index: usize) {
+    pub(in crate::runtime) fn request_revived_previews(&mut self, index: usize) {
         let Some(tab) = self.window.tabs.get(index) else {
             return;
         };
@@ -165,7 +165,7 @@ impl Runtime<'_> {
 
     /// The colour token under the pointer, as an anchor identity and the face its
     /// card is drawn in.
-    pub(crate) fn preview_hex_anchor(
+    pub(in crate::runtime) fn preview_hex_anchor(
         &self,
     ) -> Option<(tooltip::TooltipAnchorId, tooltip::TipFace)> {
         let hover = self.window.preview_hex_hover.as_ref()?;
@@ -186,7 +186,10 @@ impl Runtime<'_> {
     /// the second host has no seat: a torn-off window is a `PreviewSurface` and
     /// nothing else, and a question that could only be asked about a seat was
     /// the whole of why its reader was never told.
-    pub(crate) fn preview_disk_notice_on(&self, surface: PreviewSurface) -> Option<notice::Notice> {
+    pub(in crate::runtime) fn preview_disk_notice_on(
+        &self,
+        surface: PreviewSurface,
+    ) -> Option<notice::Notice> {
         let buffer = self.preview_buffer_on(surface)?;
         match buffer.disk {
             preview::DiskNews::Level => None,
@@ -217,7 +220,7 @@ impl Runtime<'_> {
     ///
     /// Asked of a host and resolved through `notice_surface`, so that the pane
     /// and the window re-read one buffer out of one pool by one door (B1).
-    pub(crate) fn reload_preview_from_disk(&mut self, host: NoticeHost) -> Result<()> {
+    pub(in crate::runtime) fn reload_preview_from_disk(&mut self, host: NoticeHost) -> Result<()> {
         let surface = self.notice_surface(host);
         if !self
             .preview_buffer_on_mut(surface)
@@ -239,7 +242,7 @@ impl Runtime<'_> {
     /// right shows the part nobody needs. A file that has since been moved keeps
     /// its name on the button, because the setting still names it — see
     /// `bt_persist::DEFAULT_BACKGROUND_IMAGE` on why the path is not validated.
-    pub(crate) fn background_image_name(&self) -> String {
+    pub(in crate::runtime) fn background_image_name(&self) -> String {
         let stored = &self.app.settings_store.loaded().background_image;
         if stored.is_empty() {
             return String::new();
@@ -286,7 +289,7 @@ impl Runtime<'_> {
     /// every repaint already passes through, so a resize, a DPI change or a theme
     /// switch re-plans without any of them having to know that a drag is in
     /// flight.
-    pub(crate) fn sync_drop_preview(&mut self, now: Instant) {
+    pub(in crate::runtime) fn sync_drop_preview(&mut self, now: Instant) {
         let motion = self.app.motion;
         let Some(inputs) = self.plan_inputs() else {
             self.retire_drop_preview(now, motion);
@@ -409,7 +412,10 @@ impl Runtime<'_> {
     /// `None` only when `source` is not a table, which cannot happen for a proven block and is
     /// answered honestly rather than asserted: the source travels through the transcript, and a
     /// function that took an unparseable one on trust would be a panic waiting for a reflow.
-    pub(crate) fn build_table_block(&mut self, source: &str) -> Option<table_block::TableBlock> {
+    pub(in crate::runtime) fn build_table_block(
+        &mut self,
+        source: &str,
+    ) -> Option<table_block::TableBlock> {
         let span = bt_detect::table::from_resolved_source(source)?;
         let metrics = table_block::metrics(self.window.renderer.metrics().font_size_px);
         let palette = bt_render::chrome_palette();
@@ -459,7 +465,7 @@ impl Runtime<'_> {
     /// window without a picture, and says so once in a card: a wallpaper on a
     /// drive that is not plugged in today is the ordinary case, and quietly
     /// erasing the setting would mean plugging the drive back in changed nothing.
-    pub(crate) fn reload_background_picture(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn reload_background_picture(&mut self) -> Result<()> {
         let stored = self.app.settings_store.loaded().background_image.clone();
         // Every call withdraws whatever the last one asked for, `None` included:
         // a clear that raced a slow decode must win, and the generation is how
@@ -612,7 +618,7 @@ impl Runtime<'_> {
     }
 
     /// Collect the picture chooser's answer, once, after its modal has shut.
-    pub(crate) fn apply_image_pick_result(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn apply_image_pick_result(&mut self) -> Result<()> {
         let Some(result) = self.window.image_picker.take_result() else {
             return Ok(());
         };
@@ -660,7 +666,7 @@ impl Runtime<'_> {
     /// [`preview::PreviewSource::file_path`] is the one door that answers, and
     /// the head simply stays a head. That is the same sentence a bundled colour
     /// scheme's missing marks make one dialog away.
-    pub(crate) fn open_preview_rename(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn open_preview_rename(&mut self, seat: SeatId) -> Result<()> {
         let surface = self.preview_here(seat);
         let Some(buffer) = self.preview_buffer_on(surface) else {
             return Ok(());
@@ -1008,7 +1014,7 @@ impl Runtime<'_> {
     /// does for a rename made in Explorer, and by the same code. A rename this
     /// window made must not be a special case, because the whole point of the
     /// follow rule is that it does not care who moved the file.
-    pub(crate) fn rename_preview_file(
+    pub(in crate::runtime) fn rename_preview_file(
         &mut self,
         surface: PreviewSurface,
         source: &preview::PreviewSource,
@@ -1076,7 +1082,7 @@ impl Runtime<'_> {
     }
 
     /// Move one buffer's identity, and everything keyed by it, onto a new path.
-    pub(crate) fn follow_renamed_preview(
+    pub(in crate::runtime) fn follow_renamed_preview(
         &mut self,
         source: &preview::PreviewSource,
         path: &std::path::Path,
@@ -1117,7 +1123,7 @@ impl Runtime<'_> {
     /// halves are one call for that function's reason: the set a window is
     /// watching changes on the same events that produce news about it, and
     /// syncing after answering would act on a file the seat has already left.
-    pub(crate) fn advance_preview_watch(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_preview_watch(&mut self, now: Instant) -> Result<()> {
         let wanted = self.watched_preview_files();
         self.window
             .preview_watch
@@ -1541,7 +1547,7 @@ impl Runtime<'_> {
     /// sentence: the pool a surface edits is the pool it reads. A float carried
     /// across a tab switch that saved into whichever pool was on screen would be
     /// writing one file's keystrokes into another tab's copy of it.
-    pub(crate) fn preview_buffer_on_mut(
+    pub(in crate::runtime) fn preview_buffer_on_mut(
         &mut self,
         surface: PreviewSurface,
     ) -> Option<&mut preview::PreviewBuffer> {
@@ -1678,7 +1684,7 @@ impl Runtime<'_> {
     /// window does, including its refusals: a truncated head is read-only
     /// wherever it is shown, and so is a `.pdf`, which has no source face to
     /// begin with.
-    pub(crate) fn preview_is_editable(&self, surface: PreviewSurface) -> bool {
+    pub(in crate::runtime) fn preview_is_editable(&self, surface: PreviewSurface) -> bool {
         let md_source = self.preview_md_source(surface);
         self.preview_buffer_on(surface)
             .is_some_and(|buffer| buffer.is_editable(md_source))
@@ -1968,7 +1974,7 @@ impl Runtime<'_> {
     /// believes is on screen — and the pool's dirty gates read exactly that
     /// belief, so a stale entry is a gate that stops asking about a file nobody
     /// can see any more.
-    pub(crate) fn sweep_preview_panes(&mut self) {
+    pub(in crate::runtime) fn sweep_preview_panes(&mut self) {
         let alive = self.preview_surfaces();
         // **Every tab's map, not only the active one.** A float is torn out of the
         // tab that owned the pane and keeps reading that tab's plane wherever you
@@ -2145,7 +2151,7 @@ impl Runtime<'_> {
     /// below it, and with it went the one reason a document's box ever depended
     /// on what was in the document. One rectangle, asked one way, for every
     /// buffer.
-    pub(crate) fn preview_surface_body_rect(
+    pub(in crate::runtime) fn preview_surface_body_rect(
         &self,
         surface: PreviewSurface,
         scale: f32,
@@ -2183,7 +2189,7 @@ impl Runtime<'_> {
     /// each gesture asked for its body directly. With the plane plural the
     /// gesture has to say *whose* body it landed in before it can say anything
     /// else, and asking that in one place is what stops two of them disagreeing.
-    pub(crate) fn preview_surface_at(
+    pub(in crate::runtime) fn preview_surface_at(
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, [f32; 4])> {
@@ -2214,7 +2220,7 @@ impl Runtime<'_> {
     /// *was* the focus, which stopped being an answer the moment a tab could
     /// hold two preview leaves — it would have named the first of them however
     /// far the focus was from it.
-    pub(crate) fn focused_preview_seat(&self) -> Option<SeatId> {
+    pub(in crate::runtime) fn focused_preview_seat(&self) -> Option<SeatId> {
         let seat = self.seats.focus();
         self.seats.preview_seats().contains(&seat).then_some(seat)
     }
@@ -2261,7 +2267,7 @@ impl Runtime<'_> {
 
     /// Land a picture on the surface a newly opened file goes to, then ask the shared
     /// worker/cache pipeline for it. Keyboard focus deliberately remains on the terminal.
-    pub(crate) fn open_preview_image(&mut self, path: PathBuf) -> Result<()> {
+    pub(in crate::runtime) fn open_preview_image(&mut self, path: PathBuf) -> Result<()> {
         self.mouse_trace(|| format!("open_preview_image enter path={}", path.display()));
         // Where it lands, before anything is written: `preview_landing_surface`
         // may have to mint a leaf, and a picture filed against a pane that then
@@ -2343,7 +2349,7 @@ impl Runtime<'_> {
     /// **The pool answers first.** A file already open is the same buffer, its
     /// edits intact, whichever pane showed it — so this is a *lookup* that
     /// sometimes reads a disk, never a read that sometimes finds a cache.
-    pub(crate) fn open_preview_file(&mut self, path: PathBuf) -> Result<()> {
+    pub(in crate::runtime) fn open_preview_file(&mut self, path: PathBuf) -> Result<()> {
         self.mouse_trace(|| format!("open_preview_file enter path={}", path.display()));
         // **The reuse target is `landing_preview()`** — the un-pinned preview
         // pane, and a fresh leaf beside the pinned one when there is no such
@@ -2373,7 +2379,7 @@ impl Runtime<'_> {
     /// [`Self::open_preview`]'s split, minus the landing rule: a picture goes
     /// down the decode lane and everything else goes through the tab's pool,
     /// exactly as they do for a double-click, and the surface is the caller's.
-    pub(crate) fn open_preview_onto(
+    pub(in crate::runtime) fn open_preview_onto(
         &mut self,
         surface: PreviewSurface,
         path: PathBuf,
@@ -2545,7 +2551,7 @@ impl Runtime<'_> {
     /// the spelling this window knows the file by is the only one there is —
     /// which retires a whole class of defect (§7.23 ⑩'s two-spellings bug) by
     /// retiring the second spelling.
-    pub(crate) fn play_video_on(&mut self, surface: PreviewSurface) -> Result<()> {
+    pub(in crate::runtime) fn play_video_on(&mut self, surface: PreviewSurface) -> Result<()> {
         let Some(path) = self
             .preview_picture(surface)
             .map(|picture| picture.path.clone())
@@ -2611,7 +2617,7 @@ impl Runtime<'_> {
     ///
     /// Silent on a surface with nothing playing: the tool is only drawn over one
     /// that has something, and a stop pressed twice is a stop.
-    pub(crate) fn stop_video_on(&mut self, surface: PreviewSurface) -> Result<()> {
+    pub(in crate::runtime) fn stop_video_on(&mut self, surface: PreviewSurface) -> Result<()> {
         if !self.window.video.close(surface) {
             return Ok(());
         }
@@ -2643,7 +2649,7 @@ impl Runtime<'_> {
     /// rather than off a filesystem, and G-1's git surfaces will come the same
     /// way: everything below this line is about a buffer and a view of it, and
     /// nothing below it asks where the bytes are.
-    pub(crate) fn open_preview_source_on(
+    pub(in crate::runtime) fn open_preview_source_on(
         &mut self,
         surface: PreviewSurface,
         source: preview::PreviewSource,
@@ -2741,7 +2747,7 @@ impl Runtime<'_> {
     /// far down. The pool itself is emptied only by the dirty gates, which are
     /// slice 4's — and until edits exist there is nothing dirty for them to
     /// guard, so nothing here has anything to confirm.
-    pub(crate) fn clear_preview_view(&mut self, surface: PreviewSurface) {
+    pub(in crate::runtime) fn clear_preview_view(&mut self, surface: PreviewSurface) {
         self.leave_preview_buffer(surface);
         self.refresh_preview_body();
     }
@@ -2753,7 +2759,7 @@ impl Runtime<'_> {
     /// with no `image` contributes nothing to it. There is no lane to release
     /// and therefore no way for one preview closing to blank another's, which is
     /// exactly what the release this replaced had to be careful about.
-    pub(crate) fn clear_preview_image(&mut self, surface: PreviewSurface) {
+    pub(in crate::runtime) fn clear_preview_image(&mut self, surface: PreviewSurface) {
         self.preview_pane_mut(surface).image = None;
     }
 
@@ -2765,7 +2771,11 @@ impl Runtime<'_> {
     /// ([`Self::open_web_page_on`], since F1b′): `preview_pane_mut` resolves a
     /// seat number against the first tab whose tree holds it, so it answers for a
     /// tab that is not this page's when two tabs number a preview seat the same.
-    pub(crate) fn clear_preview_image_in(&mut self, index: usize, surface: PreviewSurface) {
+    pub(in crate::runtime) fn clear_preview_image_in(
+        &mut self,
+        index: usize,
+        surface: PreviewSurface,
+    ) {
         self.window.tabs[index].preview_panes.entry(surface).image = None;
     }
 
@@ -2793,7 +2803,11 @@ impl Runtime<'_> {
     /// asked whose the view was, and filing a torn-off window's caret into
     /// whichever tab happened to be on screen is how a scroll position ends up
     /// remembered against the wrong file.
-    pub(crate) fn leave_preview_buffer_in(&mut self, index: usize, surface: PreviewSurface) {
+    pub(in crate::runtime) fn leave_preview_buffer_in(
+        &mut self,
+        index: usize,
+        surface: PreviewSurface,
+    ) {
         // A surface that has never shown anything has no view to file, and
         // vivifying one here only to empty it would leave a pane behind for the
         // sweep to retire a moment later.
@@ -2900,7 +2914,7 @@ impl Runtime<'_> {
     /// the one place this slice stops: the chrome layer draws one preview head,
     /// `refresh_chrome` asks it about `seats.preview()`, and drawing a head per
     /// preview leaf is a step of its own.
-    pub(crate) fn dress_preview_head(
+    pub(in crate::runtime) fn dress_preview_head(
         &mut self,
         seat: SeatId,
         scale: f32,
@@ -3083,7 +3097,7 @@ impl Runtime<'_> {
     /// asks: a buffer's own path, or a picture's. A composed document — a diff,
     /// a commit's reading of a file, a graph — answers `None`, and a seat that
     /// answers `None` grows no breadcrumb.
-    pub(crate) fn preview_rail_path(&self, surface: PreviewSurface) -> Option<PathBuf> {
+    pub(in crate::runtime) fn preview_rail_path(&self, surface: PreviewSurface) -> Option<PathBuf> {
         self.preview_buffer_on(surface)
             .and_then(|buffer| buffer.source.file_path().map(Path::to_path_buf))
             .or_else(|| {
@@ -3112,7 +3126,7 @@ impl Runtime<'_> {
     /// keyboard and retirement question in this file also asks: the engine is
     /// genuinely on this pane and every one of those must go on knowing it. What
     /// changes is only what the pane *says it is*.
-    pub(crate) fn preview_rail_kind(
+    pub(in crate::runtime) fn preview_rail_kind(
         &self,
         surface: PreviewSurface,
     ) -> Option<seats::PreviewRailKind> {
@@ -3146,7 +3160,7 @@ impl Runtime<'_> {
     }
 
     /// The same as a yes or no, for the callers that only need the fork.
-    pub(crate) fn surface_is_playing_a_video(&self, surface: PreviewSurface) -> bool {
+    pub(in crate::runtime) fn surface_is_playing_a_video(&self, surface: PreviewSurface) -> bool {
         self.video_playing_on(surface).is_some()
     }
 
@@ -3156,7 +3170,7 @@ impl Runtime<'_> {
     /// [`Runtime::settle_pane_notices`]'s shape and its contract, for its
     /// reason: the row changes what a pane's body is, so a change here is a
     /// layout change and everything downstream of a rectangle has to follow.
-    pub(crate) fn settle_preview_rails(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn settle_preview_rails(&mut self) -> Result<()> {
         let rails: BTreeMap<SeatId, seats::PreviewRailKind> = self
             .seats
             .preview_seats()
@@ -3182,7 +3196,7 @@ impl Runtime<'_> {
     /// segments, the widths the geometry has to be laid out to, and the open
     /// editor when this rail is the one holding it. A seat with no rail answers
     /// `None`, and the paint draws nothing rather than an empty band.
-    pub(crate) fn dress_preview_rail(
+    pub(in crate::runtime) fn dress_preview_rail(
         &mut self,
         surface: PreviewSurface,
         scale: f32,
@@ -3351,7 +3365,7 @@ impl Runtime<'_> {
     /// so it reads the number the picture was built from. A seat whose rail has
     /// not been drawn yet has no entry, and a row that has never been drawn has
     /// nothing to press.
-    pub(crate) fn preview_rail_measure(
+    pub(in crate::runtime) fn preview_rail_measure(
         &self,
         surface: PreviewSurface,
     ) -> Option<seats::PreviewRailMeasure> {
@@ -3365,7 +3379,10 @@ impl Runtime<'_> {
     /// the paint's own ([`seats::preview_rail_tip_boxes`] off the very geometry
     /// the hit test reads), and the words are this window's, because two of the
     /// five are a *path* rather than a phrase.
-    pub(crate) fn preview_rail_tip_anchors(&mut self, anchors: &mut tooltip::TooltipAnchors) {
+    pub(in crate::runtime) fn preview_rail_tip_anchors(
+        &mut self,
+        anchors: &mut tooltip::TooltipAnchors,
+    ) {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         // **Every rail on the glass and not only the tree's** (§7.7 ⑩ 欠账,
         // 2026-08-25). A `⧉` does not stop needing a word for what it copies
@@ -3443,7 +3460,7 @@ impl Runtime<'_> {
         self.preview_menu_items(seat).len()
     }
 
-    pub(crate) fn preview_head_tools(&self, seat: SeatId) -> seats::PreviewHeadTools {
+    pub(in crate::runtime) fn preview_head_tools(&self, seat: SeatId) -> seats::PreviewHeadTools {
         let surface = self.preview_here(seat);
         let buffer = self.preview_buffer_on(surface);
         let measured = self
@@ -3498,7 +3515,7 @@ impl Runtime<'_> {
     /// Nothing here is allowed to answer with the empty string:
     /// `TooltipAnchors::push` would drop the anchor, and the control would be
     /// back where the report found it.
-    pub(crate) fn preview_head_tool_tip(
+    pub(in crate::runtime) fn preview_head_tool_tip(
         &self,
         seat: SeatId,
         tool: seats::PreviewHeadTool,
@@ -3546,7 +3563,7 @@ impl Runtime<'_> {
     /// left, "what is true of it" on the right — and a flash owns both: while
     /// the left is confirming, the right is empty, which is
     /// [`seats::dress_foot`]'s rule and not this function's.
-    pub(crate) fn dress_preview_foot(
+    pub(in crate::runtime) fn dress_preview_foot(
         &mut self,
         seat: SeatId,
         scale: f32,
@@ -3816,7 +3833,7 @@ impl Runtime<'_> {
     /// clicks on a button is a chain of button presses — and none of them arms a
     /// drag: this row is not a drag handle on either host, so there is nothing to
     /// decline.
-    pub(crate) fn press_preview_rail(
+    pub(in crate::runtime) fn press_preview_rail(
         &mut self,
         surface: PreviewSurface,
         part: seats::PreviewRailPart,
@@ -3987,7 +4004,10 @@ impl Runtime<'_> {
     /// named, and it lists its own hidden levels now
     /// ([`Self::open_preview_crumb_menu`]). One control about this document, one
     /// control about the path behind the fold.
-    pub(crate) fn open_preview_rail_menu(&mut self, surface: PreviewSurface) -> Result<()> {
+    pub(in crate::runtime) fn open_preview_rail_menu(
+        &mut self,
+        surface: PreviewSurface,
+    ) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(pill) = self
             .rail_geometry(surface, scale)
@@ -4018,7 +4038,7 @@ impl Runtime<'_> {
 
     /// Show the file on the seat in File Explorer — `.preview-pane .files-foot`
     /// (P32), the same verb and the same confirmation a files column's foot has.
-    pub(crate) fn reveal_preview_file(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn reveal_preview_file(&mut self, seat: SeatId) -> Result<()> {
         // **A page's band hands the page over instead** (§7.7 ③): 「外链一律外
         // 交」, and this is the one place a web seat has to say it. The flash is
         // the same flash — one band, one confirmation, one duration.
@@ -4113,7 +4133,10 @@ impl Runtime<'_> {
     /// answers were usually the same one. A page's address row ended that — see
     /// the `ChromeTarget::PreviewFlip` arm — and the door with no argument is
     /// gone rather than left standing for the next caller to reach for.
-    pub(crate) fn flip_preview_source_on(&mut self, surface: PreviewSurface) -> Result<()> {
+    pub(in crate::runtime) fn flip_preview_source_on(
+        &mut self,
+        surface: PreviewSurface,
+    ) -> Result<()> {
         // **A page's two faces are turned by the same button** (user ruling
         // 2026-08-26; DESIGN §7.7 ⑭), and the arm is chosen by the seat rather
         // than by the buffer: a page seat's buffer is its `PreviewSource::Web`,
@@ -4185,7 +4208,7 @@ impl Runtime<'_> {
     /// The text surface is rebuilt rather than repainted, because the lines
     /// *are* the offset: which of them exist this frame is what scrolling
     /// changes.
-    pub(crate) fn scroll_preview_body(
+    pub(in crate::runtime) fn scroll_preview_body(
         &mut self,
         surface: PreviewSurface,
         body: [f32; 4],
@@ -4406,7 +4429,7 @@ impl Runtime<'_> {
     /// The `body` is handed in because one caller cannot ask for it — the glance
     /// card's box is a number its own layout produced and it is in no tree; see
     /// [`Self::preview_surface_pane_rect`]'s third arm.
-    pub(crate) fn preview_surface_bar(
+    pub(in crate::runtime) fn preview_surface_bar(
         &self,
         surface: PreviewSurface,
         axis: preview::ScrollAxis,
@@ -4492,7 +4515,7 @@ impl Runtime<'_> {
     /// beside the window it belongs to ([`Self::float_layer`]). These are the
     /// panes in the tree, and they belong at the very bottom of the overlay —
     /// see [`OverlayStack::preview_bars`].
-    pub(crate) fn preview_seat_bar_layers(&self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn preview_seat_bar_layers(&self) -> Vec<marks::OverlayLayer> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         self.seats
             .preview_seats()
@@ -4597,7 +4620,7 @@ impl Runtime<'_> {
 
     /// The play button of a float or a card, as a layer — the pane's is cut by
     /// the chrome pass instead, which is the one place it has always been.
-    pub(crate) fn video_play_mark_layer(
+    pub(in crate::runtime) fn video_play_mark_layer(
         &self,
         surface: PreviewSurface,
     ) -> Option<marks::OverlayLayer> {
@@ -4640,7 +4663,10 @@ impl Runtime<'_> {
     /// obvious: P149 takes the glance card down on every press before the press
     /// means anything, and a press on the card's own play mark would otherwise
     /// dismiss the card it was starting.
-    pub(crate) fn press_video_at(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn press_video_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let at = [position.x as f32, position.y as f32];
         let now = Instant::now();
         for surface in self.video_pointer_surfaces() {
@@ -4783,7 +4809,10 @@ impl Runtime<'_> {
     /// bar** — a scrub that stopped tracking the moment the hand left a
     /// thirty-four pixel strip would make the end of a recording a matter of
     /// aim. The same sentence every other drag in this window is written with.
-    pub(crate) fn drag_video_bar(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn drag_video_bar(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some(surface) = self.window.video_bar_drag else {
             return Ok(false);
         };
@@ -4806,7 +4835,7 @@ impl Runtime<'_> {
     /// Told to *every* seat and not only to the one under the pointer, because
     /// "the pointer is somewhere else" is the fact that ends a reveal and a seat
     /// that was never told it would hold its bar up for ever.
-    pub(crate) fn note_video_hover(&mut self, position: Option<PhysicalPosition<f64>>) {
+    pub(in crate::runtime) fn note_video_hover(&mut self, position: Option<PhysicalPosition<f64>>) {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let now = Instant::now();
         let at = position.map(|at| [at.x as f32, at.y as f32]);
@@ -4848,7 +4877,7 @@ impl Runtime<'_> {
     /// One layer per playing pane, or none at all, which is the ordinary cost of
     /// this band on the overwhelming majority of frames: the map is empty and
     /// this is one iteration over nothing.
-    pub(crate) fn preview_seat_video_bars(&self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn preview_seat_video_bars(&self) -> Vec<marks::OverlayLayer> {
         let mut layers = Vec::new();
         for (surface, _) in self.window.video.iter() {
             if !matches!(surface, PreviewSurface::Seat(_)) {
@@ -4869,7 +4898,10 @@ impl Runtime<'_> {
     /// body while the picture is fitted to a tween's box would sit a few pixels
     /// off its own video for the length of every FLIP, and the two would agree
     /// again exactly when nothing was moving.
-    pub(crate) fn video_bar_layer(&self, surface: PreviewSurface) -> Option<marks::OverlayLayer> {
+    pub(in crate::runtime) fn video_bar_layer(
+        &self,
+        surface: PreviewSurface,
+    ) -> Option<marks::OverlayLayer> {
         let seat = self.window.video.get(surface)?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let now = Instant::now();
@@ -4892,7 +4924,7 @@ impl Runtime<'_> {
     /// ([`Self::video_meta_sentence`]); what this pass adds is the width it is
     /// drawn at, which decides where the speed button stands and is therefore
     /// what the hit test has to be resolved against.
-    pub(crate) fn measure_video_meta(&mut self) {
+    pub(in crate::runtime) fn measure_video_meta(&mut self) {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let font = video_seat::bar_font_logical_px() * scale;
         let surfaces: Vec<PreviewSurface> = self
@@ -4928,7 +4960,10 @@ impl Runtime<'_> {
         )
     }
 
-    pub(crate) fn preview_float_bar_layers(&self, id: float::FloatId) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn preview_float_bar_layers(
+        &self,
+        id: float::FloatId,
+    ) -> Vec<marks::OverlayLayer> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let surface = PreviewSurface::Float(id);
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
@@ -4976,7 +5011,7 @@ impl Runtime<'_> {
     /// furniture the surface has: it is drawn over both of them, and a hit test
     /// that disagreed with the picture is the defect the block's bar already had
     /// once.
-    pub(crate) fn press_preview_body_thumb(
+    pub(in crate::runtime) fn press_preview_body_thumb(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
@@ -5004,7 +5039,7 @@ impl Runtime<'_> {
     /// It keeps the pointer *outside* the pane too, which is every scrollbar's
     /// rule: a drag that stopped tracking the moment it left a seven-pixel band
     /// would make the end of a long file a matter of aim.
-    pub(crate) fn drag_preview_body_thumb(
+    pub(in crate::runtime) fn drag_preview_body_thumb(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
@@ -5039,7 +5074,7 @@ impl Runtime<'_> {
     }
 
     /// Light the body thumb under the pointer, or put the last one out.
-    pub(crate) fn note_preview_body_hover(
+    pub(in crate::runtime) fn note_preview_body_hover(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<()> {
@@ -5305,7 +5340,7 @@ impl Runtime<'_> {
     /// its own selection ([`preview_edit::EditCaret`]) and a picture has none,
     /// so this is the question "is there a document on the glass here whose
     /// words can be picked up".
-    pub(crate) fn preview_rendered_surface_at(
+    pub(in crate::runtime) fn preview_rendered_surface_at(
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<PreviewSurface> {
@@ -5336,7 +5371,10 @@ impl Runtime<'_> {
     /// arm the drag; [`Self::release_preview_text`] spends the record. The page
     /// keeps the face it had, and what the gesture draws in the meantime is the
     /// page's own pieces — the model that needs no block to be source.
-    pub(crate) fn press_preview_text(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn press_preview_text(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some(surface) = self.preview_rendered_surface_at(position) else {
             return Ok(false);
         };
@@ -5708,7 +5746,10 @@ impl Runtime<'_> {
     /// stops, and what the drag does from there is remember the byte it reached
     /// for [`Self::release_preview_text`] to spend. Every other gesture extends
     /// the rendered selection being drawn over the page as it stands.
-    pub(crate) fn drag_preview_text(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn drag_preview_text(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let scale = self.window.renderer.metrics().scale_factor;
         let Some(drag) = self.preview_text_drag.as_mut() else {
             return Ok(false);
@@ -5780,7 +5821,10 @@ impl Runtime<'_> {
     /// *link* and the caret is owed whichever side of it this gesture falls —
     /// the same moment either way, which is what leaves 点=跟随链接、拖=选中
     /// exactly as it was.
-    pub(crate) fn release_preview_text(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn release_preview_text(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some(drag) = self.preview_text_drag.take() else {
             return Ok(false);
         };
@@ -5884,7 +5928,7 @@ impl Runtime<'_> {
     }
 
     /// Light the link under the pointer, or put the last one out.
-    pub(crate) fn note_preview_link_hover(
+    pub(in crate::runtime) fn note_preview_link_hover(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<()> {
@@ -5979,7 +6023,10 @@ impl Runtime<'_> {
     /// in the anchor list the next frame builds, and the tip host's own clock
     /// decides whether anything is drawn. A pointer crossing a scheme file
     /// therefore costs exactly what a pointer crossing a tab strip costs.
-    pub(crate) fn note_preview_hex_hover(&mut self, position: Option<PhysicalPosition<f64>>) {
+    pub(in crate::runtime) fn note_preview_hex_hover(
+        &mut self,
+        position: Option<PhysicalPosition<f64>>,
+    ) {
         let over = position.and_then(|position| self.preview_hex_at(position));
         if over != self.window.preview_hex_hover {
             self.window.preview_hex_hover = over;
@@ -5992,7 +6039,7 @@ impl Runtime<'_> {
     /// claims the press, because the bar stands *over* the block it scrolls: a
     /// press there means the bar, the same way a press on a scrollbar in a text
     /// editor is never a press in the text.
-    pub(crate) fn press_preview_block_thumb(
+    pub(in crate::runtime) fn press_preview_block_thumb(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
@@ -6015,7 +6062,7 @@ impl Runtime<'_> {
     /// [`Self::drag_preview_selection`]'s rule and every scrollbar's: a drag
     /// that stopped tracking the moment it left a two-pixel band would be no
     /// better than the indicator it replaced.
-    pub(crate) fn drag_preview_block_thumb(
+    pub(in crate::runtime) fn drag_preview_block_thumb(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
@@ -6067,7 +6114,7 @@ impl Runtime<'_> {
     }
 
     /// Light the thumb under the pointer, or put the last one out.
-    pub(crate) fn note_preview_block_hover(
+    pub(in crate::runtime) fn note_preview_block_hover(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<()> {
@@ -6088,7 +6135,7 @@ impl Runtime<'_> {
     /// own end on either axis. The two bodies with no scroller of their own (a
     /// table and a rendered markdown, which fit their pane or overflow it in
     /// ways slice 2 does not scroll) clamp to nothing, which is the truth.
-    pub(crate) fn clamped_preview_scroll(
+    pub(in crate::runtime) fn clamped_preview_scroll(
         &self,
         surface: PreviewSurface,
         body: [f32; 4],
@@ -6152,7 +6199,7 @@ impl Runtime<'_> {
     /// The acknowledgement is only printed when the system took it. A word that
     /// says "Opened" over a launch that was refused is the one thing worse than
     /// silence — the foot's own rule, applied to the card.
-    pub(crate) fn open_preview_externally(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn open_preview_externally(&mut self) -> Result<()> {
         let Some(seat) = self.seats.preview() else {
             return Ok(());
         };
@@ -6167,7 +6214,10 @@ impl Runtime<'_> {
     /// file. Since the owner's ruling of 2026-09-12 the pane's own button comes
     /// through here too, because there is one verb and naming the surface is the
     /// only question it has.
-    pub(crate) fn open_preview_externally_on(&mut self, surface: PreviewSurface) -> Result<()> {
+    pub(in crate::runtime) fn open_preview_externally_on(
+        &mut self,
+        surface: PreviewSurface,
+    ) -> Result<()> {
         let Some(path) = self.preview_file_on(surface) else {
             return Ok(());
         };
@@ -6203,7 +6253,7 @@ impl Runtime<'_> {
     /// — the same acknowledgement, and the same duration, the foot's "Revealed"
     /// uses (ruling 6, 2026-08-12: the four mock-up durations collapse to this
     /// one).
-    pub(crate) fn preview_open_button_label(&self, now: Instant) -> &'static str {
+    pub(in crate::runtime) fn preview_open_button_label(&self, now: Instant) -> &'static str {
         match self.window.preview_opened_at {
             Some(at) if now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK => {
                 preview_opened_label()
@@ -6247,7 +6297,7 @@ impl Runtime<'_> {
     /// surface is asked — which is what "from any focus state" (mock-up
     /// 6139-6150) means when the condition is data rather than two call sites
     /// agreeing.
-    pub(crate) fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {
+    pub(in crate::runtime) fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {
         let Some(surface) = self.preview_edit_focus() else {
             return self.preview_browse_key(event);
         };
@@ -6514,7 +6564,7 @@ impl Runtime<'_> {
     /// typed character uses — so the dirty bit, the caret reveal, the notice and
     /// the read-only refusal all answer exactly as they do for the keyboard.
     /// One insert path per surface, not one per input method.
-    pub(crate) fn preview_ime(&mut self, event: Ime) -> Result<()> {
+    pub(in crate::runtime) fn preview_ime(&mut self, event: Ime) -> Result<()> {
         match event {
             Ime::Preedit(text, cursor_range) => {
                 // A collapsed range is the caret; an open one is the IME's
@@ -6555,7 +6605,7 @@ impl Runtime<'_> {
     /// one surface along — the answer that places the list has to be the answer
     /// that routed the letters — and it is one door here for the same reason it
     /// is one door there.
-    pub(crate) fn preview_ime_cursor_area(&self) -> Option<ImeCursorArea> {
+    pub(in crate::runtime) fn preview_ime_cursor_area(&self) -> Option<ImeCursorArea> {
         let surface = self.preview_keyboard_surface()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = self.preview_surface_body_rect(surface, scale)?;
@@ -6832,7 +6882,7 @@ impl Runtime<'_> {
 
     /// When the refusal now on the glass is due to go away, so the loop can be
     /// up for it — the acknowledgements' own wake-up, one surface along.
-    pub(crate) fn preview_refusal_deadline(&self) -> Option<Instant> {
+    pub(in crate::runtime) fn preview_refusal_deadline(&self) -> Option<Instant> {
         let (_, at) = self.window.preview_refusal?;
         Some(at + PREVIEW_REFUSAL_HOLD)
     }
@@ -6855,7 +6905,7 @@ impl Runtime<'_> {
     /// worn as the padlock in the row above, and a sentence that stood on the
     /// glass for as long as the file was open would be the band this ruling
     /// retired wearing a new shape.
-    pub(crate) fn preview_pill_say(
+    pub(in crate::runtime) fn preview_pill_say(
         &self,
         surface: PreviewSurface,
         now: Instant,
@@ -6915,7 +6965,7 @@ impl Runtime<'_> {
     ///
     /// The two can never both be owed: a read-only buffer has no save to
     /// report.
-    pub(crate) fn preview_standing_fact(
+    pub(in crate::runtime) fn preview_standing_fact(
         &self,
         surface: PreviewSurface,
         now: Instant,
@@ -7103,7 +7153,7 @@ impl Runtime<'_> {
 
     /// Put the selection on the clipboard, through the door the terminal's own
     /// copy already uses.
-    pub(crate) fn copy_preview_selection(&mut self) {
+    pub(in crate::runtime) fn copy_preview_selection(&mut self) {
         let Some(surface) = self.preview_keyboard_surface() else {
             return;
         };
@@ -7128,7 +7178,7 @@ impl Runtime<'_> {
     /// A clipboard on this platform carries CRLF whatever it was copied from, so
     /// pasting it verbatim into a file written with bare newlines is how a
     /// one-line paste turns the next diff into a whole-file rewrite.
-    pub(crate) fn paste_into_preview(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn paste_into_preview(&mut self) -> Result<()> {
         let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
             bt_platform::clipboard_text()
         }) {
@@ -7156,7 +7206,7 @@ impl Runtime<'_> {
     /// reason is the acknowledgement: "Saved" printed over a save that had
     /// nothing to write teaches the word to mean "the key worked" rather than
     /// "the file changed".
-    pub(crate) fn save_preview(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn save_preview(&mut self) -> Result<()> {
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(());
         };
@@ -7186,7 +7236,7 @@ impl Runtime<'_> {
     /// The notice comes down for `edit_preview`'s reason: a conflict still
     /// standing over a body that has moved on is a sentence about a state that no
     /// longer exists.
-    pub(crate) fn step_preview_history(&mut self, step: Step) -> Result<()> {
+    pub(in crate::runtime) fn step_preview_history(&mut self, step: Step) -> Result<()> {
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(());
         };
@@ -7219,7 +7269,7 @@ impl Runtime<'_> {
     /// mock-up's "from any focus state", 6139-6150), a button means the window it
     /// is drawn on. Splitting the naming from the verb is what keeps them one
     /// verb.
-    pub(crate) fn save_preview_on(&mut self, surface: PreviewSurface) -> Result<()> {
+    pub(in crate::runtime) fn save_preview_on(&mut self, surface: PreviewSurface) -> Result<()> {
         if !self.preview_is_editable(surface) {
             return Ok(());
         }
@@ -7266,7 +7316,7 @@ impl Runtime<'_> {
     /// wakes for the nearest thing owed: two panes each flashing "Saved" are two
     /// words that expire independently, and the earlier of the two is what the
     /// window has to be up for. The sweep at that instant asks all of them again.
-    pub(crate) fn preview_notice_deadline(&self) -> Option<Instant> {
+    pub(in crate::runtime) fn preview_notice_deadline(&self) -> Option<Instant> {
         self.preview_panes
             .iter()
             .filter_map(|(_, pane)| pane.notice.as_ref())
@@ -7280,7 +7330,7 @@ impl Runtime<'_> {
     /// All of them at once, because the clock the wake-up was set on is the
     /// window's: it fires for the soonest, and a second pane whose word expired
     /// in the same instant must not have to wait for a third event to notice.
-    pub(crate) fn advance_preview_notice(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_preview_notice(&mut self, now: Instant) -> Result<()> {
         let expired: Vec<PreviewSurface> = self
             .preview_panes
             .iter()
@@ -7306,7 +7356,7 @@ impl Runtime<'_> {
     /// run out stayed on the glass until something else happened to redraw the
     /// window. Forgotten rather than merely hidden, so that the frame after this
     /// one has no expired state left to ask about.
-    pub(crate) fn advance_preview_refusal(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_preview_refusal(&mut self, now: Instant) -> Result<()> {
         let Some((surface, _)) = self.window.preview_refusal else {
             return Ok(());
         };
@@ -7324,7 +7374,10 @@ impl Runtime<'_> {
     /// the pointer is, and arm the drag that selects.
     ///
     /// Returns whether the press was the surface's.
-    pub(crate) fn press_preview_body(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn press_preview_body(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         // **A press inside a face that edits is asking to edit** (T2 ③,
         // 2026-09-10) — asked *above* the gate below, because for a file the
@@ -7399,7 +7452,10 @@ impl Runtime<'_> {
     /// A picture is never editable and has no links, so this consumes the press
     /// whole; it lands where [`Self::press_preview_body`] would have refused and
     /// the press would have died as "inside a seat with no grid" anyway.
-    pub(crate) fn press_preview_image(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn press_preview_image(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some((surface, _)) = self.preview_surface_at(position) else {
             return Ok(false);
         };
@@ -7428,7 +7484,10 @@ impl Runtime<'_> {
     /// The gesture's own surface, not the one under the pointer — the rule every
     /// drag on this desk follows, and the reason a pan that outruns the pane
     /// keeps panning instead of jumping to whatever is next door.
-    pub(crate) fn drag_preview_image(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn drag_preview_image(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some(drag) = self.preview_image_drag else {
             return Ok(false);
         };
@@ -7457,7 +7516,7 @@ impl Runtime<'_> {
     }
 
     /// The pointer travelling with the button down, mid-selection.
-    pub(crate) fn drag_preview_selection(
+    pub(in crate::runtime) fn drag_preview_selection(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
@@ -7491,7 +7550,7 @@ impl Runtime<'_> {
     }
 
     /// The edit surface the pointer is inside, and its rectangle.
-    pub(crate) fn preview_edit_body(
+    pub(in crate::runtime) fn preview_edit_body(
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, [f32; 4])> {
@@ -8119,7 +8178,7 @@ impl Runtime<'_> {
     /// which is the text face's own rule. Leaving on purpose — `Esc` — is what
     /// puts the block back, and it does it by clearing the flag rather than by
     /// being a second kind of focus.
-    pub(crate) fn preview_live_caret(
+    pub(in crate::runtime) fn preview_live_caret(
         &self,
         surface: PreviewSurface,
     ) -> Option<preview_edit::EditCaret> {
@@ -8317,7 +8376,10 @@ impl Runtime<'_> {
     }
 
     /// Take delivery of one exact-size markdown raster.
-    pub(crate) fn complete_markdown_raster(&mut self, scaled: bt_term::ScaledInlineImage) {
+    pub(in crate::runtime) fn complete_markdown_raster(
+        &mut self,
+        scaled: bt_term::ScaledInlineImage,
+    ) {
         let key = MarkdownRasterKey {
             content: scaled.content_key.clone(),
             width_px: scaled.width_px,
@@ -8363,7 +8425,7 @@ impl Runtime<'_> {
     }
 
     /// [`preview_document_height`] for the document **this surface** is holding.
-    pub(crate) fn preview_surface_document_height(
+    pub(in crate::runtime) fn preview_surface_document_height(
         &self,
         surface: PreviewSurface,
         body: [f32; 4],
@@ -8429,7 +8491,7 @@ impl Runtime<'_> {
     /// computed, from a height that depends on how tall this very document turns
     /// out to be. Handing the rectangle in is what breaks that circle without
     /// giving the card a second renderer.
-    pub(crate) fn build_preview_body_in(
+    pub(in crate::runtime) fn build_preview_body_in(
         &mut self,
         surface: PreviewSurface,
         body: [f32; 4],
@@ -9185,7 +9247,7 @@ impl Runtime<'_> {
     /// The glance card is answered `Fit` whatever it happens to be storing —
     /// [`surface_takes_image_zoom`] is the whole of that rule and this is one of
     /// its two readers, the other being the door below that declines to write.
-    pub(crate) fn preview_image_zoom(&self, surface: PreviewSurface) -> ImageZoom {
+    pub(in crate::runtime) fn preview_image_zoom(&self, surface: PreviewSurface) -> ImageZoom {
         if !self.picture_takes_zoom(surface) {
             return ImageZoom::FIT;
         }
@@ -9245,7 +9307,7 @@ impl Runtime<'_> {
     /// moves the picture across its body without changing how many pixels of it
     /// are shown, so the raster it is already holding is still the exact right
     /// one and there is nothing to settle.
-    pub(crate) fn set_preview_image_zoom(
+    pub(in crate::runtime) fn set_preview_image_zoom(
         &mut self,
         surface: PreviewSurface,
         zoom: ImageZoom,
@@ -9301,7 +9363,7 @@ impl Runtime<'_> {
     /// `None` when the surface is showing a document, or a picture whose decode
     /// has not landed: a zoom about a size nobody knows yet would be arithmetic
     /// on a guess, and the gesture is better spent on nothing than on that.
-    pub(crate) fn preview_image_geometry(
+    pub(in crate::runtime) fn preview_image_geometry(
         &self,
         surface: PreviewSurface,
     ) -> Option<([f32; 4], [u32; 2])> {
@@ -9349,7 +9411,10 @@ impl Runtime<'_> {
     }
 
     /// The picture one surface is showing, if it is showing one.
-    pub(crate) fn preview_picture(&self, surface: PreviewSurface) -> Option<&PreviewImageState> {
+    pub(in crate::runtime) fn preview_picture(
+        &self,
+        surface: PreviewSurface,
+    ) -> Option<&PreviewImageState> {
         self.preview_pane(surface)?.image.as_ref()
     }
 
@@ -9386,7 +9451,7 @@ impl Runtime<'_> {
     /// happened to redraw. A zoom defers one picture — the one under the wheel —
     /// but it is read from the same place, because the question a wake answers
     /// is "is any picture owed a raster yet", not "which gesture owes it".
-    pub(crate) fn preview_resample_deadline(&self) -> Option<Instant> {
+    pub(in crate::runtime) fn preview_resample_deadline(&self) -> Option<Instant> {
         self.preview_picture_hosts()
             .into_iter()
             .filter_map(|surface| self.preview_picture(surface)?.scale_settle_deadline)
@@ -9398,7 +9463,7 @@ impl Runtime<'_> {
             .min()
     }
 
-    pub(crate) fn defer_preview_resample(&mut self, observed_at: Instant) {
+    pub(in crate::runtime) fn defer_preview_resample(&mut self, observed_at: Instant) {
         for surface in self.preview_picture_hosts() {
             if let Some(picture) = self.preview_picture_mut(surface) {
                 picture.defer_scale_settle(observed_at);
@@ -9409,7 +9474,7 @@ impl Runtime<'_> {
         }
     }
 
-    pub(crate) fn finish_preview_scale_if_quiet(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn finish_preview_scale_if_quiet(&mut self, now: Instant) -> Result<()> {
         let mut due = false;
         for surface in self.preview_picture_hosts() {
             if let Some(picture) = self.preview_picture_mut(surface) {
@@ -9634,7 +9699,7 @@ impl Runtime<'_> {
     /// would be painted straight over the frame that moved. This is the same
     /// refusal `surface_is_playing_a_video` earns for a recording, said for the
     /// other kind of moving picture.
-    pub(crate) fn animation_running_on(&self, surface: PreviewSurface) -> bool {
+    pub(in crate::runtime) fn animation_running_on(&self, surface: PreviewSurface) -> bool {
         self.animation_path_of(surface)
             .map(|path| normalized_local_image_path_key(&path))
             .and_then(|key| self.window.animations.get(&key))
@@ -9913,7 +9978,7 @@ impl Runtime<'_> {
     /// record of what is on the glass, and the set the refills are asked for.
     /// Three walks with three conditions is what let the clock and the decoder
     /// disagree about which animations were alive.
-    pub(crate) fn refresh_video_layers(&mut self) -> bool {
+    pub(in crate::runtime) fn refresh_video_layers(&mut self) -> bool {
         let drawn = self.drawn_animations();
         self.present_animations(&drawn, Instant::now());
         let layers = self.video_layers(&drawn);
@@ -10410,7 +10475,7 @@ impl Runtime<'_> {
 
     /// What the window knows about its own picture, for
     /// [`chrome_tick_reuses_picture`].
-    pub(crate) fn picture_on_glass(&self) -> PictureOnGlass {
+    pub(in crate::runtime) fn picture_on_glass(&self) -> PictureOnGlass {
         PictureOnGlass {
             frame_pending: self.window.pending_frames.pending_frame().is_some(),
             has_presented_frame: self.window.last_presented_frame.is_some(),
@@ -10619,7 +10684,11 @@ impl Runtime<'_> {
     /// laziness: the card is rebuilt whenever the chrome is, the cache answers in
     /// one lookup once it is warm, and the two `pending` guards below mean a
     /// question already in flight is never asked twice.
-    pub(crate) fn file_peek_picture(&mut self, path: &Path, scale: f32) -> file_peek::PeekBody {
+    pub(in crate::runtime) fn file_peek_picture(
+        &mut self,
+        path: &Path,
+        scale: f32,
+    ) -> file_peek::PeekBody {
         let (width, height) = self
             .file_peek_fitted_pixels(
                 path,
@@ -10641,7 +10710,7 @@ impl Runtime<'_> {
     /// been asked about yet answers `VideoFacts::default()`, which is three `None`s — the same
     /// answer a file whose decode has not landed gives, and the same one a file that never decodes
     /// keeps for its length and its resolution.
-    pub(crate) fn video_facts_of(&self, path: &Path) -> preview::VideoFacts {
+    pub(in crate::runtime) fn video_facts_of(&self, path: &Path) -> preview::VideoFacts {
         self.window
             .video_facts
             .get(&normalized_local_image_path_key(path))
@@ -10671,7 +10740,10 @@ impl Runtime<'_> {
         (leaf.tab == self.id).then_some(leaf.seat)
     }
 
-    pub(crate) fn preview_menu_items(&self, seat: SeatId) -> Vec<profiles::PreviewMenuItem> {
+    pub(in crate::runtime) fn preview_menu_items(
+        &self,
+        seat: SeatId,
+    ) -> Vec<profiles::PreviewMenuItem> {
         switcher_rows(
             &self.preview_pool,
             self.preview_pane(self.preview_here(seat))
@@ -10723,7 +10795,7 @@ impl Runtime<'_> {
     /// what was pressed. Hanging the list from what is actually drawn is what
     /// keeps the buffer list reachable at every width — by pointer and, through
     /// the swallow below, by keyboard.
-    pub(crate) fn preview_menu_stand(
+    pub(in crate::runtime) fn preview_menu_stand(
         &self,
         seat: SeatId,
     ) -> Option<([f32; 4], Vec<profiles::PreviewMenuItem>)> {
@@ -10752,7 +10824,9 @@ impl Runtime<'_> {
     /// impossible rather than unlikely, and it makes the other half free: an
     /// anchor that has gone folds the menu instead of measuring a rectangle that
     /// is no longer anywhere.
-    pub(crate) fn preview_menu_layout(&mut self) -> Option<profiles::PreviewMenuLayout> {
+    pub(in crate::runtime) fn preview_menu_layout(
+        &mut self,
+    ) -> Option<profiles::PreviewMenuLayout> {
         let seat = self.preview_menu_seat()?;
         let (anchor, items) = self.preview_menu_stand(seat)?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -10770,7 +10844,7 @@ impl Runtime<'_> {
 
     /// The name button: open the switcher here, or shut it if it is already here
     /// (P136 — the second press on the same pane collapses it).
-    pub(crate) fn toggle_preview_menu(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn toggle_preview_menu(&mut self, seat: SeatId) -> Result<()> {
         // A popup opening closes whatever else was up, and it is the opener that
         // does it (E61): mutual exclusion cannot be left to a press falling
         // through, because every opener stops its own press from travelling.
@@ -10789,7 +10863,7 @@ impl Runtime<'_> {
     /// There is nothing to un-flip because there is nothing holding a flipped
     /// state: the chevron's angle is derived from `preview_menu_seat()` on the
     /// next frame, so shutting the menu *is* turning it back.
-    pub(crate) fn close_preview_menu(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn close_preview_menu(&mut self) -> Result<bool> {
         if !self.window.preview_menu.close() {
             return Ok(false);
         }
@@ -10805,7 +10879,11 @@ impl Runtime<'_> {
     /// nothing else: the buffer keeps its edits, its dirty bit and — through
     /// `open_preview_file`'s own filing — its caret and scroll, which is why
     /// §7.1.3 promises the switch costs "零提示零打断".
-    pub(crate) fn choose_preview_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
+    pub(in crate::runtime) fn choose_preview_row(
+        &mut self,
+        seat: SeatId,
+        index: usize,
+    ) -> Result<()> {
         // **The row decides which buffer, and whether there is one.** A kept
         // file nobody has opened has no pool entry (user ruling 2026-08-19), and
         // that row's press is an *opening* rather than a change of view — which
@@ -10870,7 +10948,7 @@ impl Runtime<'_> {
     /// the rectangle a tip hangs off has to be the rectangle the button was
     /// drawn in, by one derivation and not by two that agree today. It is the
     /// hit test's own derivation, down to the stored measurement.
-    pub(crate) fn preview_browser_box(&self, seat: SeatId) -> Option<[f32; 4]> {
+    pub(in crate::runtime) fn preview_browser_box(&self, seat: SeatId) -> Option<[f32; 4]> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         // **On the rail since 2026-08-24.** The derivation is the same one — the
@@ -10885,7 +10963,11 @@ impl Runtime<'_> {
     /// The same derivation the paint and the hit test read, for their reason: a
     /// tip anchored on a second computation is a tip that stands beside the
     /// button rather than on it.
-    pub(crate) fn preview_web_tool_box(&self, seat: SeatId, verb: WebHeadVerb) -> Option<[f32; 4]> {
+    pub(in crate::runtime) fn preview_web_tool_box(
+        &self,
+        seat: SeatId,
+        verb: WebHeadVerb,
+    ) -> Option<[f32; 4]> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         // **Three of the four moved down** (user ruling 2026-08-24), so the tip
@@ -10924,7 +11006,7 @@ impl Runtime<'_> {
     /// Read off `drawn` rather than `live` for [`Self::float_holding_the_page`]'s
     /// reason: a window on its way out is still on the glass, and a band taken
     /// off it a frame early would leave a hole in a window still drawing itself.
-    pub(crate) fn preview_float_ids(&self) -> Vec<float::FloatId> {
+    pub(in crate::runtime) fn preview_float_ids(&self) -> Vec<float::FloatId> {
         self.window
             .float
             .drawn()
@@ -10942,7 +11024,7 @@ impl Runtime<'_> {
     /// [`marks::OverlayLayer::body`], which is drawn inside this layer and above
     /// this window's own face; handing it to the seat lane instead would paint it
     /// a whole pass earlier and therefore *behind* the window containing it.
-    pub(crate) fn preview_float_layer(
+    pub(in crate::runtime) fn preview_float_layer(
         &mut self,
         id: float::FloatId,
         now: Instant,
@@ -11328,7 +11410,7 @@ impl Runtime<'_> {
     /// today for a third reason as well — a tab always holds at least one
     /// terminal (I106), so a preview leaf is never the only pane — but the
     /// structural answer is the one that survives that stopping being true.
-    pub(crate) fn pop_out_preview(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn pop_out_preview(&mut self, seat: SeatId) -> Result<()> {
         let surface = self.preview_here(seat);
         // **The page travels too, and it is named here** (§7.14a). Read *before*
         // the seat leaves the tree, because after that there is no leaf to build
@@ -11482,7 +11564,7 @@ impl Runtime<'_> {
     /// out here as its own two-tab case, which was the same sentence in a second
     /// place — and the two would have parted company the first time either was
     /// amended.
-    pub(crate) fn dock_preview_float(&mut self, id: float::FloatId) -> Result<()> {
+    pub(in crate::runtime) fn dock_preview_float(&mut self, id: float::FloatId) -> Result<()> {
         let Some(origin) = self
             .window
             .float
@@ -11604,7 +11686,7 @@ impl Runtime<'_> {
     /// precision the reference's *printer* rarely has; landing on the line is what
     /// every editor's `+N` does with a `file:line` and it is what the reader asked
     /// for.
-    pub(crate) fn open_preview_at(
+    pub(in crate::runtime) fn open_preview_at(
         &mut self,
         path: PathBuf,
         at: Option<bt_transcript::paths::PrintedPathLocation>,
@@ -11908,7 +11990,7 @@ impl Runtime<'_> {
     /// "changed" here is the animation itself — a breath and a spin move on
     /// every frame they are alive, and neither moves at all once its session
     /// stops working.
-    pub(crate) fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {
         // **[`pace::DEFAULT_FRAME_INTERVAL`] is a rate, and a rate nothing enforces is
         // not a rate.** `about_to_wait` runs after *every* event, not only when
         // a deadline expires — and the present each tick asks for is itself an
@@ -12271,7 +12353,7 @@ impl Runtime<'_> {
     /// before the first present the current turn is due immediately, while the
     /// fold has no absolute frame epoch to retain yet.
     #[allow(dead_code)]
-    pub(crate) fn next_animation_frame(&self, now: Instant) -> Instant {
+    fn next_animation_frame(&self, now: Instant) -> Instant {
         self.window
             .frame_clock
             .next_frame(self.window.last_present_at, now)
@@ -12355,7 +12437,7 @@ impl Runtime<'_> {
         false
     }
 
-    pub(crate) fn strip_animation_work(&self, now: Instant) -> AnimationWork {
+    pub(in crate::runtime) fn strip_animation_work(&self, now: Instant) -> AnimationWork {
         let motion = self.app.motion;
         let tabs_moving = self.window.tabs.iter().any(|tab| {
             tab.mark_is_animating(now, motion)
@@ -12626,7 +12708,10 @@ impl Runtime<'_> {
     /// scan's `verified` (the decoration worker's record of this file) or the peek's own cache
     /// entry, which is the same worker and the same decoder reached by hovering rather than by
     /// detection.
-    pub(crate) fn local_image_path_hit(&self, hit: bt_render::GridHit) -> Option<PathBuf> {
+    pub(in crate::runtime) fn local_image_path_hit(
+        &self,
+        hit: bt_render::GridHit,
+    ) -> Option<PathBuf> {
         let (_, leaf, _) = self.hovered_leaf()?;
         let reference = leaf.frame_image_references.at(hit)?;
         (reference.verified
@@ -12647,7 +12732,9 @@ impl Runtime<'_> {
     /// pure function of "where is the pointer" and "what does that pane draw there", and both can
     /// change without a pointer event: a decode landing turns plain text into an underlined
     /// reference under a pointer that never moved.
-    pub(crate) fn hovered_image_reference(&self) -> Option<(SeatId, bt_term::FrameImageReference)> {
+    pub(in crate::runtime) fn hovered_image_reference(
+        &self,
+    ) -> Option<(SeatId, bt_term::FrameImageReference)> {
         let (seat, leaf, hit) = self.hovered_leaf()?;
         leaf.frame_image_references
             .at(hit)
@@ -12662,7 +12749,7 @@ impl Runtime<'_> {
     /// The other direction — a decode landing under a pointer that never moved — needs nothing
     /// here: `apply_math_results` already republishes when a completion changed session state, and
     /// the compose step asks the session afresh.
-    pub(crate) fn refresh_image_reference_underline(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn refresh_image_reference_underline(&mut self) -> Result<()> {
         let hovered = self.hovered_image_reference();
         if hovered == self.window.underlined_image_reference {
             return Ok(());
@@ -12673,7 +12760,7 @@ impl Runtime<'_> {
 
     /// Record a peek decode outcome and, when the hover is still settled on that path, show the
     /// flyout at the settle pointer.
-    pub(crate) fn complete_peek_image(
+    pub(in crate::runtime) fn complete_peek_image(
         &mut self,
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
@@ -12808,7 +12895,7 @@ impl Runtime<'_> {
     /// card and the pane have something true to draw either way: the format and the size. So the
     /// facts are filed **before** the frame is looked at, and the cache is marked `Failed` without
     /// anybody's failure line being written.
-    pub(crate) fn complete_peek_video_frame(
+    pub(in crate::runtime) fn complete_peek_video_frame(
         &mut self,
         path: PathBuf,
         glance: VideoGlance,
@@ -12878,7 +12965,7 @@ impl Runtime<'_> {
     /// later refit answer "already asked", so the picture never came back at
     /// all. The target tuple travels with the pane because it lives on it, which
     /// is why looking the asker up by it is a routing that a move cannot break.
-    pub(crate) fn complete_preview_scale(
+    pub(in crate::runtime) fn complete_preview_scale(
         &mut self,
         scaled: bt_term::ScaledInlineImage,
     ) -> Result<()> {
@@ -12910,7 +12997,7 @@ impl Runtime<'_> {
         self.present_chrome_change()
     }
 
-    pub(crate) fn activate_local_image_path(&self, path: &std::path::Path) {
+    pub(in crate::runtime) fn activate_local_image_path(&self, path: &std::path::Path) {
         let result = native_window(&self.window.window).and_then(|native| {
             bt_platform::open_local_file(native, path)
                 .map_err(|error| anyhow!(error))
@@ -12934,7 +13021,7 @@ impl Runtime<'_> {
     /// A document with no folder resolves no link and therefore answers no
     /// press, which is [`Self::open_preview_link`]'s own first gate said as a
     /// shape.
-    pub(crate) fn preview_link_grasp(&self) -> bool {
+    pub(in crate::runtime) fn preview_link_grasp(&self) -> bool {
         let Some((surface, link)) = self.preview_link_hover.as_ref() else {
             return false;
         };
@@ -12959,7 +13046,7 @@ impl Runtime<'_> {
     /// [`float_grasp`] reads it: a picture carried past its own pane keeps the
     /// closed hand, because the shape changing mid-drag would say something
     /// happened when nothing did (K113, and the mock-up's own line 1710).
-    pub(crate) fn image_grasp(&self) -> Option<ImageGrasp> {
+    pub(in crate::runtime) fn image_grasp(&self) -> Option<ImageGrasp> {
         if self.preview_image_drag.is_some() {
             return Some(ImageGrasp::Closed);
         }
@@ -12983,7 +13070,7 @@ impl Runtime<'_> {
     /// **In the workers' band and not below it.** The wallpaper decoder runs at
     /// `BelowNormal` because nobody is waiting for a wallpaper; somebody is
     /// waiting for this, with their hand still on the keyboard.
-    pub(crate) fn save_clipboard_picture(
+    pub(in crate::runtime) fn save_clipboard_picture(
         &mut self,
         target: PasteTarget,
         offered: Vec<bt_platform::PictureBytes>,
@@ -13105,7 +13192,7 @@ impl Runtime<'_> {
 
     /// **Take in every picture the shrinker has finished.** Returns whether any
     /// card owes a repaint.
-    pub(crate) fn collect_page_pictures(&mut self) -> bool {
+    pub(in crate::runtime) fn collect_page_pictures(&mut self) -> bool {
         let Some(shrinker) = self.window.web_shrinker.as_ref() else {
             return false;
         };
@@ -13117,14 +13204,14 @@ impl Runtime<'_> {
         changed
     }
 
-    pub(crate) fn picture_is_owed(&self) -> bool {
+    pub(in crate::runtime) fn picture_is_owed(&self) -> bool {
         self.window.pending_frames.pending_frame().is_some()
             || self.window.chrome_present_pending
             || self.window.unpainted_pane_output
             || self.pending_resize_present.is_some()
     }
 
-    pub(crate) fn check_picture_freshness(&mut self, instant: Instant, landed: bool) {
+    pub(in crate::runtime) fn check_picture_freshness(&mut self, instant: Instant, landed: bool) {
         let owed = self.picture_is_owed();
         let now = present_diagnostics::timestamp(instant);
         let state = &mut self.window.present_diagnostics;
@@ -13180,7 +13267,7 @@ impl Runtime<'_> {
     /// pane transforms, which are re-sampled because they are a function of
     /// this instant. See [`chrome_tick_reuses_picture`] for why that is a
     /// complete account of what an animation tick can have moved.
-    pub(crate) fn present_retained_picture(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn present_retained_picture(&mut self) -> Result<()> {
         let mut attempt = self.begin_present_attempt(FrameSource::Expose, true, true);
         let result = hang_watch::during(hang_watch::Station::RetainedPicture, || {
             self.window.chrome_present_pending = false;

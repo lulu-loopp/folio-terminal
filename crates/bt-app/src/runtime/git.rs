@@ -52,7 +52,7 @@ impl Runtime<'_> {
     /// hands back on the surface — is a reader who has deliberately given the
     /// page the keyboard, and taking it away from them once per match count
     /// would be this window arguing with a click.
-    pub(crate) fn web_find_reported(&mut self, count: i32, active: i32) -> Result<()> {
+    pub(in crate::runtime) fn web_find_reported(&mut self, count: i32, active: i32) -> Result<()> {
         if self.window.search.is_focused()
             && let Ok(native) = native_window(&self.window.window)
         {
@@ -94,7 +94,7 @@ impl Runtime<'_> {
     /// It goes through the same door every other checkout goes through, so the
     /// tree being dirty asks the same question here as it does on a menu row —
     /// undoing a move is still a move.
-    pub(crate) fn take_checkout_undo(&mut self, card: toast::ToastId) -> Result<()> {
+    pub(in crate::runtime) fn take_checkout_undo(&mut self, card: toast::ToastId) -> Result<()> {
         let Some((id, root, branch)) = self.window.checkout_undo.take() else {
             return Ok(());
         };
@@ -146,7 +146,7 @@ impl Runtime<'_> {
     /// ([`build_preview_markdown_body`]'s gap arm), because a candidate list
     /// placed from a second derivation is a list standing beside the caret it
     /// claims to follow.
-    pub(crate) fn markdown_gap_paragraphs(
+    pub(in crate::runtime) fn markdown_gap_paragraphs(
         &self,
         surface: PreviewSurface,
         scale: f32,
@@ -536,7 +536,7 @@ impl Runtime<'_> {
     /// is already in flight or already answered asks for nothing. What is
     /// temporary is only *who calls it* — today the debug channel, tomorrow the
     /// Git page being open.
-    pub(crate) fn ask_git_for_column(&mut self, seat: SeatId, root: &str) {
+    pub(in crate::runtime) fn ask_git_for_column(&mut self, seat: SeatId, root: &str) {
         if root.trim().is_empty() {
             return;
         }
@@ -571,7 +571,7 @@ impl Runtime<'_> {
     /// (`Ctrl+Shift+B`) opens. A chord with no column to work does nothing, and
     /// so does one pressed while the Git panel is off: a chord for a surface that
     /// is not there is not an error.
-    pub(crate) fn toggle_git_page(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn toggle_git_page(&mut self) -> Result<()> {
         if !self.git_panel_on() {
             return Ok(());
         }
@@ -594,7 +594,7 @@ impl Runtime<'_> {
     /// reading of it. Nothing is decided here — this resolves the repository the
     /// press is about and carries out the answer, exactly as
     /// [`Self::press_git_act`] carries out `press_outcome`'s.
-    pub(crate) fn press_git_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
+    pub(in crate::runtime) fn press_git_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
         // **A press does not reach the page's furniture** (user report,
         // 2026-08-25). A heading, the masthead and a notice are not controls,
         // and the hit test hands this function their index for one reason only:
@@ -711,7 +711,7 @@ impl Runtime<'_> {
     /// something else while you were reading it would be the one surface here
     /// that changes under you. Pressing the row again re-asks, because that is a
     /// person saying "now".
-    pub(crate) fn open_git_document(
+    pub(in crate::runtime) fn open_git_document(
         &mut self,
         seat: SeatId,
         source: preview::PreviewSource,
@@ -792,7 +792,11 @@ impl Runtime<'_> {
     /// What each key *means* is [`git_panel::panel_key`]'s, which speaks the
     /// graph's vocabulary — so the two git surfaces answer the same six keys and
     /// the rule about where `↓` lands is written once.
-    pub(crate) fn git_page_key(&mut self, seat: SeatId, event: &KeyEvent) -> Result<bool> {
+    pub(in crate::runtime) fn git_page_key(
+        &mut self,
+        seat: SeatId,
+        event: &KeyEvent,
+    ) -> Result<bool> {
         let Some(key) = graph_key_of(&event.logical_key, self.window.modifiers) else {
             // Still the column's key: it owns the keyboard, so nothing here
             // reaches a shell. This page simply has nothing to do with this one.
@@ -871,7 +875,7 @@ impl Runtime<'_> {
     /// **The gate is here and not in the worker** (R14): a discard is stopped
     /// *before* a question is built, so the confirmation is a door in front of the
     /// verb rather than a message about one that has already run.
-    pub(crate) fn press_git_act(
+    pub(in crate::runtime) fn press_git_act(
         &mut self,
         seat: SeatId,
         index: usize,
@@ -1179,7 +1183,7 @@ impl Runtime<'_> {
     /// and an empty rectangle — the picture is chrome ([`git_graph::push_graph`])
     /// and the document's body is empty by construction, so there was nothing
     /// else on the surface to give it away.
-    pub(crate) fn git_graphs(
+    pub(in crate::runtime) fn git_graphs(
         &mut self,
         scale: f32,
     ) -> BTreeMap<PreviewSurface, git_graph::GraphContent> {
@@ -1393,7 +1397,11 @@ impl Runtime<'_> {
     /// **On whichever surface is showing the graph.** A pane and a torn-off
     /// window are one document in two hosts (§7.1.3), so the verbs are one set
     /// of verbs addressed by [`PreviewSurface`] rather than two written twice.
-    pub(crate) fn press_graph_row(&mut self, surface: PreviewSurface, index: usize) -> Result<()> {
+    pub(in crate::runtime) fn press_graph_row(
+        &mut self,
+        surface: PreviewSurface,
+        index: usize,
+    ) -> Result<()> {
         let tab = self.preview_tab_index(surface);
         let Some(root) = self.window.tabs[tab]
             .git_graph_view
@@ -1516,7 +1524,7 @@ impl Runtime<'_> {
     }
 
     /// One of the detail block's own parts, pressed (D2/D6/D7).
-    pub(crate) fn press_graph_detail(
+    pub(in crate::runtime) fn press_graph_detail(
         &mut self,
         surface: PreviewSurface,
         part: git_graph::GraphDetailPart,
@@ -1666,7 +1674,7 @@ impl Runtime<'_> {
     /// key is not one of the six, so the surface under this one may have it",
     /// which for `Esc` with nothing open is the whole point: the float dismissal
     /// and, under that, `vim` are entitled to an `Esc` this page has no use for.
-    pub(crate) fn graph_key(
+    pub(in crate::runtime) fn graph_key(
         &mut self,
         surface: PreviewSurface,
         key: git_graph::GraphKey,
@@ -1939,7 +1947,7 @@ impl Runtime<'_> {
     }
 
     /// A notch over a graph (R23's virtual list scrolls like every other list).
-    pub(crate) fn scroll_git_graph(
+    pub(in crate::runtime) fn scroll_git_graph(
         &mut self,
         surface: PreviewSurface,
         body: [f32; 4],
@@ -1975,7 +1983,7 @@ impl Runtime<'_> {
     /// for the reason [`Self::default_profile`] is one reader: a setting consulted
     /// in four places is four places to consult it differently, and the symptom
     /// of that here would be a strip you can press but cannot see.
-    pub(crate) fn git_panel_on(&self) -> bool {
+    pub(in crate::runtime) fn git_panel_on(&self) -> bool {
         self.app.settings_store.loaded().git_panel
     }
 
@@ -1984,7 +1992,7 @@ impl Runtime<'_> {
     /// Built from the cache and thrown away, like every other content map here:
     /// the page holds no state of its own, so a frame is a pure function of what
     /// the repository last said.
-    pub(crate) fn git_pages(
+    pub(in crate::runtime) fn git_pages(
         &mut self,
         scale: f32,
         views: &BTreeMap<SeatId, seats::FilesViewContent>,
@@ -2147,7 +2155,7 @@ impl Runtime<'_> {
     /// The same, for a row of a column's Git page — the *page's* answer
     /// ([`git_panel::row_peek`]) with this column's repository put in front of
     /// it, which is all this window contributes.
-    pub(crate) fn git_peek_row(
+    pub(in crate::runtime) fn git_peek_row(
         &self,
         seat: SeatId,
         index: usize,
@@ -2220,7 +2228,7 @@ impl Runtime<'_> {
     /// pointer was at — which is [`Runtime::file_menu_layout`]'s ruling and
     /// doubly load-bearing here: the row this menu is about lives in a list that
     /// pages, scrolls and is rebuilt by every repository answer.
-    pub(crate) fn git_menu_layout(&mut self) -> Option<profiles::GitMenuLayout> {
+    pub(in crate::runtime) fn git_menu_layout(&mut self) -> Option<profiles::GitMenuLayout> {
         let draw = self.git_menu_draw()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
@@ -2236,7 +2244,7 @@ impl Runtime<'_> {
     }
 
     /// The git menu's own level of the overlay stack.
-    pub(crate) fn git_menu_layer(&mut self) -> MenuPaint {
+    pub(in crate::runtime) fn git_menu_layer(&mut self) -> MenuPaint {
         let Some(draw) = self.git_menu_draw() else {
             return MenuPaint::none();
         };
@@ -2247,7 +2255,7 @@ impl Runtime<'_> {
         MenuPaint::plain(profiles::git_menu_build(&layout, &draw.look()), travel)
     }
 
-    pub(crate) fn close_git_menu(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn close_git_menu(&mut self) -> Result<bool> {
         if self.window.git_menu.take().is_none() {
             return Ok(false);
         }
@@ -2406,7 +2414,10 @@ impl Runtime<'_> {
     /// ruling: with nothing to compare against there is no verb to offer, and a
     /// popup that opened in order to show one greyed line would be worse than
     /// the press doing nothing.
-    pub(crate) fn open_git_menu_at(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn open_git_menu_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some((origin, root, target, graph_row)) = self.git_menu_target_at(position) else {
             return Ok(false);
         };
@@ -2535,7 +2546,7 @@ impl Runtime<'_> {
     /// still standing over the answer would be a menu covering the thing it
     /// asked for. The three prompt rows are the exception, and they do not
     /// close the menu — they *are* the menu, one state further on.
-    pub(crate) fn run_git_menu_row(&mut self, row: profiles::GitMenuRow) -> Result<()> {
+    pub(in crate::runtime) fn run_git_menu_row(&mut self, row: profiles::GitMenuRow) -> Result<()> {
         if let Some(kind) = row.prompt() {
             return self.open_git_prompt(kind);
         }
@@ -2905,7 +2916,7 @@ impl Runtime<'_> {
     /// a `git add` raised from a panel has no root of its own — one function that
     /// takes the origin answers both without either surface learning about the
     /// other.
-    pub(crate) fn issue_git_write(
+    pub(in crate::runtime) fn issue_git_write(
         &mut self,
         origin: &GitOrigin,
         verb: git::GitWriteVerb,
@@ -3009,7 +3020,7 @@ impl Runtime<'_> {
     /// answer, which is what makes "every verb that moves `HEAD` has answered the
     /// tiers" a property of the call graph rather than of three call sites
     /// remembering to.
-    pub(crate) fn checkout_at(
+    pub(in crate::runtime) fn checkout_at(
         &mut self,
         origin: &GitOrigin,
         target: String,
@@ -3099,7 +3110,7 @@ impl Runtime<'_> {
     /// where these menus mostly come from, and either surface's cache re-reads
     /// the whole repository when the receipt arrives anyway (see
     /// [`git::GitWriteVerb::moves_refs`]).
-    pub(crate) fn git_origin_for_root(&self, root: &Path) -> Option<GitOrigin> {
+    pub(in crate::runtime) fn git_origin_for_root(&self, root: &Path) -> Option<GitOrigin> {
         let active = self.window.active_tab;
         if self.window.tabs[active].git_graphs.contains_key(root) {
             return Some(GitOrigin::Graph(root.to_owned()));
@@ -3134,7 +3145,7 @@ impl Runtime<'_> {
     /// behind it to type into. What changes when the menu has become a prompt is
     /// only *what* the keys mean — there is now something to type into, and it
     /// takes every key exactly as the graph's search field does.
-    pub(crate) fn git_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+    pub(in crate::runtime) fn git_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
         use text_field::TextMove;
         // The application's modifier — see `search_field_key`'s note (M1-7).
         let control = input::is_command_chord(self.window.modifiers);
@@ -3255,7 +3266,7 @@ impl Runtime<'_> {
     }
 
     /// A composition, with a git prompt holding the keyboard (v2 ④).
-    pub(crate) fn git_prompt_ime(&mut self, event: &Ime) -> Result<()> {
+    pub(in crate::runtime) fn git_prompt_ime(&mut self, event: &Ime) -> Result<()> {
         let Some(prompt) = self
             .window
             .git_menu
@@ -3281,7 +3292,7 @@ impl Runtime<'_> {
     /// which is the same `&self`-hit-test discipline `git_pages_shown` exists
     /// for: the rectangle a control can be pressed in has to be the rectangle it
     /// was drawn in, by one derivation and not by two that agree today.
-    pub(crate) fn graph_toolbar_rects(
+    pub(in crate::runtime) fn graph_toolbar_rects(
         &self,
         surface: PreviewSurface,
     ) -> Option<git_graph::GraphToolbarRects> {
@@ -3298,7 +3309,7 @@ impl Runtime<'_> {
     }
 
     /// One of the toolbar's four controls, pressed.
-    pub(crate) fn press_graph_tool(
+    pub(in crate::runtime) fn press_graph_tool(
         &mut self,
         surface: PreviewSurface,
         tool: git_graph::GraphTool,
@@ -3320,12 +3331,17 @@ impl Runtime<'_> {
     /// exactly when this answers, and [`Self::popups_up`] counts the popup as up
     /// exactly then. Its rows never fold — a repository with no branch still
     /// lists `All branches` — so the stand is the anchor alone.
-    pub(crate) fn graph_filter_menu_stand(&self, surface: PreviewSurface) -> Option<[f32; 4]> {
+    pub(in crate::runtime) fn graph_filter_menu_stand(
+        &self,
+        surface: PreviewSurface,
+    ) -> Option<[f32; 4]> {
         Some(self.graph_toolbar_rects(surface)?.filter)
     }
 
     /// Where the filter menu hangs, or nothing when it is not up.
-    pub(crate) fn graph_filter_menu_layout(&mut self) -> Option<profiles::GitFilterMenuLayout> {
+    pub(in crate::runtime) fn graph_filter_menu_layout(
+        &mut self,
+    ) -> Option<profiles::GitFilterMenuLayout> {
         let surface = self.window.graph_filter_menu.as_ref()?.surface;
         let anchor = self.graph_filter_menu_stand(surface)?;
         let rows = profiles::git_filter_rows(&self.graph_filter_branches(surface));
@@ -3371,7 +3387,7 @@ impl Runtime<'_> {
     }
 
     /// Whether this surface's search field holds the keyboard (T4).
-    pub(crate) fn graph_search_focused(&self, surface: PreviewSurface) -> bool {
+    pub(in crate::runtime) fn graph_search_focused(&self, surface: PreviewSurface) -> bool {
         self.window.tabs[self.preview_tab_index(surface)]
             .git_graph_view
             .get(&surface)
@@ -3385,7 +3401,7 @@ impl Runtime<'_> {
     /// in the list underneath as a travel command. What "the field's" means for a
     /// key it has no use for is *nothing*, said by returning `true` — which is
     /// the answer the files column and the read-only preview both already give.
-    pub(crate) fn graph_search_key(
+    pub(in crate::runtime) fn graph_search_key(
         &mut self,
         surface: PreviewSurface,
         event: &KeyEvent,
@@ -3492,7 +3508,7 @@ impl Runtime<'_> {
     }
 
     /// A composition, with the search field holding the keyboard (T4).
-    pub(crate) fn graph_search_ime(&mut self, event: &Ime) -> Result<()> {
+    pub(in crate::runtime) fn graph_search_ime(&mut self, event: &Ime) -> Result<()> {
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(());
         };
@@ -3618,7 +3634,7 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    pub(crate) fn close_graph_filter_menu(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn close_graph_filter_menu(&mut self) -> Result<bool> {
         if self.window.graph_filter_menu.take().is_none() {
             return Ok(false);
         }
@@ -3636,7 +3652,10 @@ impl Runtime<'_> {
     /// happens, so the menu has done its job. This is a list of *settings*, and
     /// picking two branches means picking one and then the other; a menu that
     /// shut on the first would make the second gesture a second opening.
-    pub(crate) fn run_graph_filter_row(&mut self, row: &profiles::GitFilterRow) -> Result<()> {
+    pub(in crate::runtime) fn run_graph_filter_row(
+        &mut self,
+        row: &profiles::GitFilterRow,
+    ) -> Result<()> {
         let Some(surface) = self
             .window
             .graph_filter_menu
@@ -3889,7 +3908,7 @@ impl Runtime<'_> {
     /// unless a notification has already arrived, which is why this can be called
     /// on every turn of the loop beside every other clock in this window without
     /// being the polling R31 forbids.
-    pub(crate) fn advance_git_watch(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_git_watch(&mut self, now: Instant) -> Result<()> {
         // Asked on every turn of the loop, so the switch is read before the list
         // is built rather than used to filter one: with the panel off there is
         // nothing to enumerate and `sync` is handed an empty set, which drops
@@ -3987,7 +4006,7 @@ impl Runtime<'_> {
     /// page. A float on its tree costs exactly what a float cost before this
     /// slice — not one process — and a window that never turned to the page
     /// never reads a repository, however git-shaped the folder it is looking at.
-    pub(crate) fn ask_git_for_floats(&mut self) {
+    pub(in crate::runtime) fn ask_git_for_floats(&mut self) {
         // The float host first, because it is the cheaper of the two questions
         // and the one that is false far more often (closure review 2,
         // 2026-09-18).
@@ -4041,7 +4060,11 @@ impl Runtime<'_> {
     /// sub-group opens and shuts, a changed file opens its diff, a commit turns
     /// its file list over, and a branch row is a checkout that answers the three
     /// tiers at [`Self::ask_to_checkout`].
-    pub(crate) fn press_float_git_row(&mut self, id: float::FloatId, index: usize) -> Result<()> {
+    pub(in crate::runtime) fn press_float_git_row(
+        &mut self,
+        id: float::FloatId,
+        index: usize,
+    ) -> Result<()> {
         // A press does not reach the page's furniture — the docked page's own
         // first line, and it is first here for the same reason: the guard has to
         // stand ahead of the selection or the selection is the bug (user report,
@@ -4183,7 +4206,7 @@ impl Runtime<'_> {
     /// One of a floating Git row's verbs, pressed — [`Self::press_git_act`] with
     /// the window for a column, and the judgement is still
     /// [`git_panel::press_outcome`]'s alone.
-    pub(crate) fn press_float_git_act(
+    pub(in crate::runtime) fn press_float_git_act(
         &mut self,
         id: float::FloatId,
         index: usize,
@@ -4304,7 +4327,7 @@ impl Runtime<'_> {
     /// takes the keyboard — the keys, which is exactly the arrangement
     /// `git_pages_shown` gives a column and exactly what the docked bug was the
     /// absence of.
-    pub(crate) fn float_shows_git_page(&self, id: float::FloatId) -> bool {
+    pub(in crate::runtime) fn float_shows_git_page(&self, id: float::FloatId) -> bool {
         self.window
             .float
             .drawn()
@@ -4321,7 +4344,7 @@ impl Runtime<'_> {
     /// a press lands on the row it landed on. The record is the floating half of
     /// `git_graphs_shown`, which is the same map the docked graphs are in —
     /// because a graph is a document, and a document's address is its surface.
-    pub(crate) fn push_float_graph(
+    pub(in crate::runtime) fn push_float_graph(
         &mut self,
         id: float::FloatId,
         body: [f32; 4],
@@ -4376,7 +4399,7 @@ impl Runtime<'_> {
     /// `git_pages_shown`'s reason exactly: the hit test is `&self` by
     /// construction and cannot measure a string, so a press lands on the row
     /// that was drawn because it **is** the row that was drawn.
-    pub(crate) fn push_float_git_page(
+    pub(in crate::runtime) fn push_float_git_page(
         &mut self,
         id: float::FloatId,
         body: [f32; 4],
@@ -4459,7 +4482,7 @@ impl Runtime<'_> {
     /// different bounds and share only the rectangle. The bound is read from the
     /// page that was actually **drawn** (`float_git_pages_shown`) and never from
     /// a recomputation.
-    pub(crate) fn scroll_float_git_page(
+    pub(in crate::runtime) fn scroll_float_git_page(
         &mut self,
         id: float::FloatId,
         delta: MouseScrollDelta,
@@ -4507,7 +4530,7 @@ impl Runtime<'_> {
     /// lists have different row heights and different bounds and share only the
     /// rectangle — and because the bound has to be read from the page that is
     /// actually drawn, which is `git_pages_shown` and not a recomputation.
-    pub(crate) fn scroll_git_panel(
+    pub(in crate::runtime) fn scroll_git_panel(
         &mut self,
         seat: SeatId,
         body: [f32; 4],
@@ -4570,7 +4593,7 @@ impl Runtime<'_> {
     /// The floating host has the same two wheels and already re-asks on both
     /// (`scroll_float_tree`, `scroll_float_git_page`); its pages are rebuilt in
     /// `float_layer`, which runs after this and does its own asking.
-    pub(crate) fn heal_git_hover(&mut self, scale: f32) {
+    pub(in crate::runtime) fn heal_git_hover(&mut self, scale: f32) {
         let Some(seats::ChromeTarget::GitRow { .. } | seats::ChromeTarget::GitAct { .. }) =
             self.window.seat_pointer.hover
         else {

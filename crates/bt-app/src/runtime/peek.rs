@@ -32,7 +32,7 @@ impl Runtime<'_> {
     /// One predicate, read by both the arming path and the retiring one, because
     /// the two asking different questions is exactly how a popup survives the
     /// death of its own subject.
-    pub(crate) fn layout_peek_eligible(&self, tab: usize) -> bool {
+    pub(in crate::runtime) fn layout_peek_eligible(&self, tab: usize) -> bool {
         let Some(state) = self.window.tabs.get(tab) else {
             return false;
         };
@@ -76,7 +76,7 @@ impl Runtime<'_> {
     /// now and a window's claim is measured, not remembered — which is also what
     /// makes "a tab a float is covering is not under the pointer" true here
     /// without a word about floats.
-    pub(crate) fn layout_peek_target_at(
+    pub(in crate::runtime) fn layout_peek_target_at(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Option<usize> {
@@ -90,7 +90,7 @@ impl Runtime<'_> {
     }
 
     /// Track the tab under the pointer (L131, L135).
-    pub(crate) fn note_layout_peek(&mut self, tab: Option<usize>) -> Result<()> {
+    pub(in crate::runtime) fn note_layout_peek(&mut self, tab: Option<usize>) -> Result<()> {
         if self.window.layout_peek.observe(tab, Instant::now()) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -105,7 +105,7 @@ impl Runtime<'_> {
     /// a candidate held past its own deadline would report that deadline
     /// forever, and a `WaitUntil` on an instant already in the past is a loop
     /// that never sleeps.
-    pub(crate) fn advance_layout_peek_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_layout_peek_if_due(&mut self, now: Instant) -> Result<()> {
         if !self.window.layout_peek.activate_if_due(now) {
             return Ok(());
         }
@@ -117,7 +117,7 @@ impl Runtime<'_> {
     }
 
     /// Take the peek down — any press, a lost window, a drag starting (L135).
-    pub(crate) fn hide_layout_peek(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn hide_layout_peek(&mut self) -> Result<()> {
         if self.window.layout_peek.hide() && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -129,7 +129,10 @@ impl Runtime<'_> {
     /// The other half of §6, and the half that handles the pointer *moving*
     /// inside a tab whose peek is up: promotion silenced the tip once, and this
     /// is what stops the next mouse-move from arming it again.
-    pub(crate) fn layout_peek_suppresses(&self, anchor: tooltip::TooltipAnchorId) -> bool {
+    pub(in crate::runtime) fn layout_peek_suppresses(
+        &self,
+        anchor: tooltip::TooltipAnchorId,
+    ) -> bool {
         peek_strip::suppresses(self.window.layout_peek.active(), anchor)
     }
 
@@ -138,7 +141,7 @@ impl Runtime<'_> {
     /// Everything is read out of *this* frame — the tree, the names, the focus,
     /// the breath — for the tip's reason: a schematic that remembered the frame
     /// it appeared on would keep showing a pane that has since closed.
-    pub(crate) fn layout_peek_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn layout_peek_layer(&mut self) -> Vec<marks::OverlayLayer> {
         let Some(index) = self.window.layout_peek.active() else {
             return Vec::new();
         };
@@ -352,7 +355,7 @@ impl Runtime<'_> {
     ///
     /// Answers whether the question went out. `false` is a worker that has stopped or a channel
     /// that has closed, which each caller turns into its own kind of silence.
-    pub(crate) fn request_peek_pixels(&self, path: &Path) -> bool {
+    pub(in crate::runtime) fn request_peek_pixels(&self, path: &Path) -> bool {
         // **The door itself asks whether this is a file to read** (routes A and E of the
         // untrusted-path audit, 2026-09-08). Three surfaces reach this line — the preview pane,
         // the glance card and a markdown page's own pictures — and each of them used to decide
@@ -394,7 +397,7 @@ impl Runtime<'_> {
     /// owes a frame for. Arming an intent owes nothing — nothing is drawn for
     /// 350ms — and that asymmetry is the whole of what this returns: the paint
     /// debt is for the card, not for the timer.
-    pub(crate) fn observe_file_peek(
+    pub(in crate::runtime) fn observe_file_peek(
         &mut self,
         host: Option<(RowHost, usize)>,
         now: Instant,
@@ -700,7 +703,7 @@ impl Runtime<'_> {
     ///
     /// An intent that has not matured holds nothing: there is no card yet, and
     /// the rectangle a previous one left behind is not a place to stand.
-    pub(crate) fn file_peek_holds(&self, at: [f32; 2]) -> bool {
+    pub(in crate::runtime) fn file_peek_holds(&self, at: [f32; 2]) -> bool {
         self.window.file_peek.as_ref().is_some_and(|peek| {
             peek.clock.is_shown()
                 && peek
@@ -959,7 +962,7 @@ impl Runtime<'_> {
     /// is already on screen, and a buffer being edited in a pane behind the card
     /// has to reach it too. Both are the same fact — the glance is a *view* of a
     /// buffer, never a copy of one.
-    pub(crate) fn file_peek_subject(&self) -> Option<FilePeekSubject> {
+    pub(in crate::runtime) fn file_peek_subject(&self) -> Option<FilePeekSubject> {
         let peek = self.window.file_peek.as_ref()?;
         if !peek.clock.is_shown() {
             return None;
@@ -1110,7 +1113,7 @@ impl Runtime<'_> {
     /// situations — the decode is out, the decode failed, the resample is out, the box has no
     /// extent. There is no "loading" among them for the same reason there is none in the document:
     /// a word that appears for two frames and is replaced is worse than the space it occupied.
-    pub(crate) fn file_peek_fitted_pixels(
+    pub(in crate::runtime) fn file_peek_fitted_pixels(
         &mut self,
         path: &Path,
         scale: f32,
@@ -1354,7 +1357,7 @@ impl Runtime<'_> {
     /// that owes frames owes them at the window's animation rate, and a card
     /// whose fade has landed owes nothing at all. **Hiding owes nothing either**:
     /// the card leaves in one frame, so there is no exit to schedule.
-    pub(crate) fn file_peek_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(in crate::runtime) fn file_peek_deadline(&self, now: Instant) -> Option<Instant> {
         if self.file_peek_owes_frame(now) {
             return self.next_animation_deadline();
         }
@@ -1370,7 +1373,7 @@ impl Runtime<'_> {
     }
 
     /// The 350ms is up — put the card on screen (P145).
-    pub(crate) fn advance_file_peek(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_file_peek(&mut self, now: Instant) -> Result<()> {
         // The card's three clocks, in the order they can fire: the dwell that
         // moves it to another row, the 350ms that puts it up and the grace that
         // takes it down. All through one tick, because a card that matured and
@@ -1431,7 +1434,7 @@ impl Runtime<'_> {
     /// goes **after** the card's own layers for the reason a float's does: the
     /// video is drawn over the card's face and under everything the card draws
     /// on top of it, and the bar is the topmost of those.
-    pub(crate) fn file_peek_layer(
+    pub(in crate::runtime) fn file_peek_layer(
         &mut self,
         below: usize,
         now: Instant,
@@ -1904,7 +1907,7 @@ impl Runtime<'_> {
     ///
     /// Only the left button; a right press falls through to be whatever it
     /// already was, and the generic dismissal below takes the card down with it.
-    pub(crate) fn press_file_peek(&mut self, button: MouseButton) -> Result<bool> {
+    pub(in crate::runtime) fn press_file_peek(&mut self, button: MouseButton) -> Result<bool> {
         if button != MouseButton::Left {
             return Ok(false);
         }
@@ -2075,7 +2078,10 @@ impl Runtime<'_> {
     /// [`Self::drag_preview_block_thumb`]'s rule and every scrollbar's: a drag
     /// that trusted a stored rectangle would be dragging where the thumb *was*.
     /// Answers whether the pointer was the thumb's, so the caller stops.
-    pub(crate) fn drag_file_peek_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn drag_file_peek_thumb(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let Some(grab) = self
             .window
             .file_peek
@@ -2116,7 +2122,7 @@ impl Runtime<'_> {
     ///
     /// Answers whether the pointer has been spent, so the move that promoted
     /// does not go on to be a hover as well.
-    pub(crate) fn promote_file_peek_press(
+    pub(in crate::runtime) fn promote_file_peek_press(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
@@ -2253,7 +2259,7 @@ impl Runtime<'_> {
     ///
     /// Answers whether the release was the head's, so the caller knows whether
     /// anything else may still have it.
-    pub(crate) fn release_file_peek_press(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn release_file_peek_press(&mut self) -> Result<bool> {
         if self.window.file_peek_press.take().is_none() {
             return Ok(false);
         }
@@ -2276,7 +2282,7 @@ impl Runtime<'_> {
     /// 2026-08-14). Consuming nothing is because a release is never *only* the
     /// thumb's: the same button coming up still has to reach whatever else was
     /// waiting for it.
-    pub(crate) fn release_file_peek_thumb(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn release_file_peek_thumb(&mut self) -> Result<()> {
         let released = self
             .window
             .file_peek
@@ -2327,7 +2333,7 @@ impl Runtime<'_> {
     /// a files column, over a Git page or over a terminal reference has nothing to
     /// do with this window, and holding a window open under one would be a peek
     /// that never closes while an unrelated card happens to be up.
-    pub(crate) fn pointer_is_in_the_peeks_own_glance(
+    pub(in crate::runtime) fn pointer_is_in_the_peeks_own_glance(
         &self,
         position: PhysicalPosition<f64>,
     ) -> bool {
@@ -2349,7 +2355,7 @@ impl Runtime<'_> {
     /// against, for [`Self::trigger_rect`]'s reason: the run is on a grid that
     /// scrolls, and a hand held still over a reference that has moved under it
     /// is not on it any more.
-    pub(crate) fn pointer_is_on_the_peeks_reference(
+    pub(in crate::runtime) fn pointer_is_on_the_peeks_reference(
         &self,
         position: PhysicalPosition<f64>,
     ) -> bool {
@@ -2392,7 +2398,7 @@ impl Runtime<'_> {
     /// all, and one summoned from a pane head names a leaf rather than a tab;
     /// both answer `None` here, and both are right to — see
     /// [`tab_trailing_targets`].
-    pub(crate) fn peeking_tab(&self) -> Option<usize> {
+    pub(in crate::runtime) fn peeking_tab(&self) -> Option<usize> {
         match self.window.float.peek().and_then(|win| win.origin)? {
             float::FloatTrigger::Tab(id) => self.window.tabs.iter().position(|tab| tab.id == id),
             float::FloatTrigger::Pane(_) | float::FloatTrigger::Reference { .. } => None,
@@ -2419,7 +2425,10 @@ impl Runtime<'_> {
     /// Every question below is asked of the pane the pointer is in — its frame, its scan, its
     /// shell's admission rule. Asking the focused pane instead is how a hover over the pane you
     /// are not typing in came to be answered by a cell the pointer is nowhere near.
-    pub(crate) fn peek_target(&self, hit: bt_render::GridHit) -> Option<(PeekSubject, SeatId)> {
+    pub(in crate::runtime) fn peek_target(
+        &self,
+        hit: bt_render::GridHit,
+    ) -> Option<(PeekSubject, SeatId)> {
         let (seat, leaf, _) = self.hovered_leaf()?;
         // **The glance card goes first, and this flyout keeps what it does not
         // take** (user ruling 2026-08-27, §7.29: *一个文件,不论从哪指向它,都是
@@ -2470,7 +2479,10 @@ impl Runtime<'_> {
     /// `redraw` would find nothing queued and skip: when nothing newer is pending, the frame that
     /// is already on screen re-enters the slot; a queued newer frame carries the overlay along on
     /// its own redraw.
-    pub(crate) fn present_peek_overlay(&mut self, overlay: Option<PeekImageOverlay>) -> Result<()> {
+    pub(in crate::runtime) fn present_peek_overlay(
+        &mut self,
+        overlay: Option<PeekImageOverlay>,
+    ) -> Result<()> {
         if !self.window.renderer.set_peek_overlay(overlay) {
             return Ok(());
         }
@@ -2500,7 +2512,7 @@ impl Runtime<'_> {
 
     /// Drop peek hover state and hide the flyout. Idempotent; used by every dismiss gesture
     /// (pointer off the span, pointer left, wheel, click, any key).
-    pub(crate) fn dismiss_peek(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn dismiss_peek(&mut self) -> Result<()> {
         self.window.peek_hover.clear();
         self.present_peek_overlay(None)
     }
@@ -2517,7 +2529,7 @@ impl Runtime<'_> {
         )
     }
 
-    pub(crate) fn activate_peek_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn activate_peek_if_due(&mut self, now: Instant) -> Result<()> {
         if let Some(candidate) = self.window.peek_hover.activate_if_due(now) {
             self.show_or_request_peek(&candidate)?;
         }
@@ -2528,7 +2540,10 @@ impl Runtime<'_> {
     /// into the box this viewport will draw it in if that raster is not the one already held, and
     /// present when display-sized pixels are in hand. Each miss is one worker round trip and the
     /// completion re-enters here, so the event thread neither decodes nor resamples.
-    pub(crate) fn show_or_request_peek(&mut self, candidate: &PeekCandidate) -> Result<()> {
+    pub(in crate::runtime) fn show_or_request_peek(
+        &mut self,
+        candidate: &PeekCandidate,
+    ) -> Result<()> {
         let cache_key = candidate.subject.key.clone();
         let (content_key, native_rgba, native_width_px, native_height_px) =
             match self.window.peek_cache.get(&cache_key) {
@@ -2630,7 +2645,7 @@ impl Runtime<'_> {
     /// One file still has one entry: the key is `normalized_local_image_path_key`, the very key
     /// `PeekSubject::from_path` computes, so this fills the entry the peek would have created
     /// rather than adding a second one that could disagree.
-    pub(crate) fn remember_decode_for_peek(
+    pub(in crate::runtime) fn remember_decode_for_peek(
         &mut self,
         task: &bt_term::InlineImageTask,
         decoded: Option<&bt_term::DecodedInlineImage>,
@@ -2662,7 +2677,7 @@ impl Runtime<'_> {
     /// they were drawn at, including the `None` that means this file will not raster — a card that
     /// kept the *previous* file's page because this one failed would be a card showing the wrong
     /// document.
-    pub(crate) fn complete_peek_page(
+    pub(in crate::runtime) fn complete_peek_page(
         &mut self,
         path: &Path,
         page: u32,
@@ -2716,7 +2731,10 @@ impl Runtime<'_> {
     /// Take delivery of the flyout's display-sized raster. Only the question still outstanding is
     /// answered here: an earlier size arriving after the viewport moved on leaves the newer request
     /// in flight rather than asking for it twice.
-    pub(crate) fn complete_peek_scale(&mut self, scaled: bt_term::ScaledInlineImage) -> Result<()> {
+    pub(in crate::runtime) fn complete_peek_scale(
+        &mut self,
+        scaled: bt_term::ScaledInlineImage,
+    ) -> Result<()> {
         let delivered: PeekThumbnailTarget = (
             scaled.content_key.clone(),
             scaled.width_px,
@@ -2758,7 +2776,7 @@ impl Runtime<'_> {
     /// K113: a press that has not become a drag has not made anything happen,
     /// and a cursor that changed there would say it had. The closed hand arrives
     /// with the carry, through the float the promotion opens.
-    pub(crate) fn file_peek_head_grasp(&self) -> Option<FloatGrasp> {
+    pub(in crate::runtime) fn file_peek_head_grasp(&self) -> Option<FloatGrasp> {
         if !self.file_peek_promotes() {
             return None;
         }

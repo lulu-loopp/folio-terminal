@@ -26,11 +26,11 @@ impl Runtime<'_> {
     /// Slice ③ made the field a map keyed by seat, F1b′ re-keyed it by
     /// [`LeafId`], and on both days the lookup changed here and in no other
     /// place — which is what the pair was for.
-    pub(crate) fn web_on(&self, seat: SeatId) -> Option<&webhost::WebSeat> {
+    pub(in crate::runtime) fn web_on(&self, seat: SeatId) -> Option<&webhost::WebSeat> {
         self.window.web.get(&self.leaf_here(seat))
     }
 
-    pub(crate) fn web_on_mut(&mut self, seat: SeatId) -> Option<&mut webhost::WebSeat> {
+    pub(in crate::runtime) fn web_on_mut(&mut self, seat: SeatId) -> Option<&mut webhost::WebSeat> {
         let leaf = self.leaf_here(seat);
         self.window.web.get_mut(&leaf)
     }
@@ -40,7 +40,7 @@ impl Runtime<'_> {
     /// Its rectangle is stored beside the layer for the search capsule's own
     /// reason: the press router is `&self` and cannot lay anything out, so the
     /// box you can press has to be the box that was drawn.
-    pub(crate) fn web_sheet_layers(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn web_sheet_layers(&mut self) -> Vec<marks::OverlayLayer> {
         self.window.web_sheet_layouts.clear();
         // **Every page of *this tab* that is showing one** (user ruling
         // 2026-09-06). A sheet is drawn over the body of the page it came from,
@@ -110,7 +110,7 @@ impl Runtime<'_> {
     }
 
     /// [`Self::web_on`] for a surface — the pair's second half, moved across.
-    pub(crate) fn web_of(&self, surface: PreviewSurface) -> Option<&webhost::WebSeat> {
+    pub(in crate::runtime) fn web_of(&self, surface: PreviewSurface) -> Option<&webhost::WebSeat> {
         self.window.web.get(&self.rail_page(surface)?)
     }
 
@@ -135,7 +135,7 @@ impl Runtime<'_> {
     /// `webnav::check` only offers one where there is none — and is folded in
     /// with the refusal rather than given a verb of its own, so that an arm
     /// which can never run cannot grow a behaviour nobody meant.
-    pub(crate) fn open_web_address_here(&mut self, url: &str) -> Result<bool> {
+    pub(in crate::runtime) fn open_web_address_here(&mut self, url: &str) -> Result<bool> {
         match webnav::address_bar(url) {
             webnav::Decision::Navigate(url) => {
                 self.open_web_page(&url)?;
@@ -153,7 +153,7 @@ impl Runtime<'_> {
     /// surface is transparent; a frame that moved one and not the other would be
     /// a page peeping out beside its own pane, and there is no third place the
     /// two could be reconciled.
-    pub(crate) fn sync_web_page(&mut self, now: Instant) {
+    pub(in crate::runtime) fn sync_web_page(&mut self, now: Instant) {
         // **A station inside a frame** (see [`hang_watch::Station::WebPlace`]).
         // This runs from `pane_draws`, which is inside whatever the frame's own
         // station is, so the one being left is put back below rather than the
@@ -619,7 +619,7 @@ impl Runtime<'_> {
 
     /// The clock the browser-exit deadline is hung on, the seat's own mortality,
     /// and the chord list the focus keeps changing.
-    pub(crate) fn advance_web_page(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_web_page(&mut self, now: Instant) -> Result<()> {
         hang_watch::at(hang_watch::Station::WebPage);
         if self.window.web.is_empty() {
             return Ok(());
@@ -972,7 +972,7 @@ impl Runtime<'_> {
     /// room" means here: the editor, its seeding and its selection are decided
     /// once, so a URL typed after a double click and one typed after the chord
     /// cannot be seeded differently.
-    pub(crate) fn open_web_address(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn open_web_address(&mut self) -> Result<()> {
         // **The page holding the keyboard, and not the seat holding it**
         // (§7.7 ⑩ 欠账, 2026-08-25; user report: `Ctrl+L` did nothing over a
         // torn-off page). `focused_web_seat` is docked-only *by design* — it
@@ -1051,7 +1051,7 @@ impl Runtime<'_> {
     /// needs a seat; this one opens a window of the engine's own and needs
     /// nothing of the layout, so it answers for a page carried into a float
     /// exactly as it does for a docked one.
-    pub(crate) fn open_web_dev_tools(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn open_web_dev_tools(&mut self) -> Result<()> {
         let Some(leaf) = self.page_with_the_keyboard() else {
             return Ok(());
         };
@@ -1068,7 +1068,7 @@ impl Runtime<'_> {
     }
 
     /// One of the head's three navigation buttons, or the `</>` beside them.
-    pub(crate) fn run_web_head_verb(
+    pub(in crate::runtime) fn run_web_head_verb(
         &mut self,
         surface: PreviewSurface,
         verb: WebHeadVerb,
@@ -1096,7 +1096,7 @@ impl Runtime<'_> {
     }
 
     /// The one verb on the failure card this seat is showing (§7.7 ④).
-    pub(crate) fn run_web_fault_verb(&mut self, seat: SeatId) -> Result<()> {
+    pub(in crate::runtime) fn run_web_fault_verb(&mut self, seat: SeatId) -> Result<()> {
         let Some(verb) = self
             .web_on(seat)
             .and_then(|web| web.fault())
@@ -1155,7 +1155,10 @@ impl Runtime<'_> {
     }
 
     /// A press anywhere on the download sheet. Returns whether it landed there.
-    pub(crate) fn press_web_sheet(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+    pub(in crate::runtime) fn press_web_sheet(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
         let (x, y) = (position.x as f32, position.y as f32);
         // **The card the press landed in, and no other.** With a card per page
         // the scrim is a card's own and stops at that page's body, so a press is
@@ -1207,7 +1210,7 @@ impl Runtime<'_> {
     /// thing I am looking at. Pressing it twice to clear two cards would be a
     /// hidden order nobody can see; the `×` on each card is the way to spend
     /// them one at a time, and it names its own page.
-    pub(crate) fn dismiss_web_sheet(&mut self) -> Result<bool> {
+    pub(in crate::runtime) fn dismiss_web_sheet(&mut self) -> Result<bool> {
         let seats = self.seats.preview_seats();
         let mut dismissed = false;
         for seat in seats {
@@ -1222,7 +1225,7 @@ impl Runtime<'_> {
         Ok(dismissed)
     }
 
-    pub(crate) fn revive_web_pages(&mut self, index: usize) -> Result<()> {
+    pub(in crate::runtime) fn revive_web_pages(&mut self, index: usize) -> Result<()> {
         let Some(tab) = self.window.tabs.get(index) else {
             return Ok(());
         };
@@ -1344,7 +1347,10 @@ impl Runtime<'_> {
     /// surface that is not drawn by wgpu: *a surface drawn over another surface
     /// answers for every pixel it covers*. It was already true of the files tree
     /// the rail covers; a page is the same case with a different painter.
-    pub(crate) fn web_page_at(&self, position: PhysicalPosition<f64>) -> Option<LeafId> {
+    pub(in crate::runtime) fn web_page_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<LeafId> {
         let (x, y) = (position.x as f32, position.y as f32);
         // **And a hand that is already carrying something is not a hand the page
         // can have** (user report, 0.2.2: a pane dragged over a page could not be
@@ -1399,12 +1405,15 @@ impl Runtime<'_> {
     }
 
     /// Whether a point is inside any page this frame.
-    pub(crate) fn point_is_on_the_web_page(&self, position: PhysicalPosition<f64>) -> bool {
+    pub(in crate::runtime) fn point_is_on_the_web_page(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> bool {
         self.web_page_at(position).is_some()
     }
 
     /// Forward one mouse event to a page, in the window's own coordinates.
-    pub(crate) fn send_to_web_page(
+    pub(in crate::runtime) fn send_to_web_page(
         &mut self,
         leaf: LeafId,
         event: bt_platform::WebMouseEvent,
@@ -1437,7 +1446,7 @@ impl Runtime<'_> {
     /// not take a `LEAVE` at all (`w0p-evidence.md` §1 gate 3): what tells a page
     /// the pointer has gone is a move to a point outside its rectangle, which is
     /// what the position already is on the frame the pointer crosses out.
-    pub(crate) fn drive_web_pointer(&mut self, position: PhysicalPosition<f64>) {
+    pub(in crate::runtime) fn drive_web_pointer(&mut self, position: PhysicalPosition<f64>) {
         if self.window.web.is_empty() {
             return;
         }
@@ -1476,7 +1485,7 @@ impl Runtime<'_> {
     }
 
     /// A button, over the page.
-    pub(crate) fn press_web_page(
+    pub(in crate::runtime) fn press_web_page(
         &mut self,
         state: ElementState,
         button: MouseButton,
@@ -1560,7 +1569,12 @@ impl Runtime<'_> {
     /// **Not the window's scroll**: the pane a page sits in has no document of
     /// its own to move, and the two axes are the page's exactly as they are in
     /// any other browser.
-    pub(crate) fn scroll_web_page(&mut self, position: PhysicalPosition<f64>, x: f32, y: f32) {
+    pub(in crate::runtime) fn scroll_web_page(
+        &mut self,
+        position: PhysicalPosition<f64>,
+        x: f32,
+        y: f32,
+    ) {
         // **`Ctrl`+wheel zooms the page** (方案 §0's five extras).
         //
         // Nothing is being taken from anything: this product has no type-size

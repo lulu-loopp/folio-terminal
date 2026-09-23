@@ -615,7 +615,10 @@ impl Runtime<'_> {
 
     /// The three things showing a window does, said once for the two doors that
     /// do it.
-    pub(crate) fn put_the_window_on_the_glass(&mut self, maximized: bool) -> Result<()> {
+    pub(in crate::runtime) fn put_the_window_on_the_glass(
+        &mut self,
+        maximized: bool,
+    ) -> Result<()> {
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -673,7 +676,7 @@ impl Runtime<'_> {
     ///
     /// Index 0 is "the one I just closed", which is the whole of what undo-close
     /// is: not a separate store, just the front of this one.
-    pub(crate) fn reopen_recent(&mut self, index: usize) -> Result<()> {
+    pub(in crate::runtime) fn reopen_recent(&mut self, index: usize) -> Result<()> {
         let Some(entry) = self.app.recent.take(index) else {
             return Ok(());
         };
@@ -962,7 +965,10 @@ impl Runtime<'_> {
     /// open yet, and a `Runtime` is one window by construction — so it goes where
     /// the other two things a window can ask of the process go, and the loop's
     /// door spends it. `App::pending_new_windows`'s shape, for its reason.
-    pub(crate) fn answer_restore_prompt(&mut self, answer: restore::RestoreAnswer) -> Result<()> {
+    pub(in crate::runtime) fn answer_restore_prompt(
+        &mut self,
+        answer: restore::RestoreAnswer,
+    ) -> Result<()> {
         self.window.restore_prompt.close();
         self.app.pending_restore_answer = Some(answer == restore::RestoreAnswer::Restore);
         if self.refresh_chrome() {
@@ -984,7 +990,7 @@ impl Runtime<'_> {
     /// mark the compositor never asked for. So it stands on the inner edge,
     /// which is where every other ring in this build stands (a selected tree
     /// row, a focused card).
-    pub(crate) fn window_ring_layer(&self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn window_ring_layer(&self) -> Vec<marks::OverlayLayer> {
         if self.app.window_ring != Some(self.window_id()) {
             return Vec::new();
         }
@@ -1026,7 +1032,7 @@ impl Runtime<'_> {
     /// reusing the old number is more honest than inventing one. Having never
     /// succeeded is a different state with a different answer — no minimum at
     /// all, rather than a guess that could lock the user's window.
-    pub(crate) fn refresh_work_area(&mut self) {
+    pub(in crate::runtime) fn refresh_work_area(&mut self) {
         let Ok(native) = native_window(&self.window.window) else {
             return;
         };
@@ -1268,7 +1274,7 @@ impl Runtime<'_> {
     ///
     /// Best-effort and silent about the ordinary case: an old Windows refuses
     /// the attribute and keeps the border it had.
-    pub(crate) fn apply_window_dark_mode(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn apply_window_dark_mode(&mut self) -> Result<()> {
         let Some(dark) = dwm_dark_mode_owed(self.window.dwm_dark_mode, bt_render::background_rgb())
         else {
             return Ok(());
@@ -1302,7 +1308,7 @@ impl Runtime<'_> {
     /// Read off [`Self::keyboard_owner`] rather than from a list of surfaces of
     /// its own, so that a modal added to this window is covered by this the day
     /// it takes the keyboard.
-    pub(crate) fn a_modal_holds_the_window(&self) -> bool {
+    pub(in crate::runtime) fn a_modal_holds_the_window(&self) -> bool {
         self.keyboard_owner().is_modal()
     }
 
@@ -1331,7 +1337,7 @@ impl Runtime<'_> {
     /// the reader and one line in the log**, which is that door's own rule:
     /// there is nothing a person can do about a foreground lock, and the path is
     /// on the command line either way.
-    pub(crate) fn bring_this_window_forward(&mut self) {
+    pub(in crate::runtime) fn bring_this_window_forward(&mut self) {
         if self.window.window.is_minimized() == Some(true) {
             self.window.window.set_minimized(false);
         }
@@ -1380,7 +1386,10 @@ impl Runtime<'_> {
     /// order and never the other: the gate raises itself off the pool, so a
     /// re-run against a pool still holding dirty buffers would put the same
     /// question again forever.
-    pub(crate) fn answer_dirty_gate(&mut self, answer: restore::GateAnswer) -> Result<()> {
+    pub(in crate::runtime) fn answer_dirty_gate(
+        &mut self,
+        answer: restore::GateAnswer,
+    ) -> Result<()> {
         let Some(request) = self.window.dirty_gate.take() else {
             return Ok(());
         };
@@ -1616,7 +1625,7 @@ impl Runtime<'_> {
     ///
     /// **This window is not in it.** A pane already in this window has nothing
     /// to move, and a row that did nothing would be a row.
-    pub(crate) fn other_window_rows(&self) -> Vec<String> {
+    pub(in crate::runtime) fn other_window_rows(&self) -> Vec<String> {
         let here = self.window.window.id();
         self.app
             .windows_open
@@ -1628,7 +1637,7 @@ impl Runtime<'_> {
 
     /// The same list as ids, in the same order — what a press on row `n` is
     /// about.
-    pub(crate) fn other_window_ids(&self) -> Vec<WindowId> {
+    pub(in crate::runtime) fn other_window_ids(&self) -> Vec<WindowId> {
         let here = self.window.window.id();
         self.app
             .windows_open
@@ -1645,7 +1654,7 @@ impl Runtime<'_> {
     /// window the pointer is in — the whole point of the mark. `FolioApp` spends
     /// it in the same turn (`settle_window_ring`), which is
     /// [`App::pending_new_windows`]'s standing shape and its standing reason.
-    pub(crate) fn aim_at_window(&mut self, window: Option<WindowId>) {
+    pub(in crate::runtime) fn aim_at_window(&mut self, window: Option<WindowId>) {
         self.app.window_ring = window;
     }
 
@@ -1655,7 +1664,7 @@ impl Runtime<'_> {
     /// three strips, which is P49's difference table made structural: one branch
     /// per tenant, both handing the same [`float::build`] a [`float::FloatChrome`]
     /// and a body.
-    pub(crate) fn float_window(
+    pub(in crate::runtime) fn float_window(
         &mut self,
         id: float::FloatId,
         now: Instant,
@@ -1681,7 +1690,7 @@ impl Runtime<'_> {
     /// through goes back to the order it was in — and everything it cannot, it
     /// writes down: moving a tab into another window, or opening a window to hold
     /// it, are [`FolioApp`]'s and are spent at the loop's door in this same turn.
-    pub(crate) fn hand_over_across_windows(&mut self, drag: &Drag) -> Result<bool> {
+    pub(in crate::runtime) fn hand_over_across_windows(&mut self, drag: &Drag) -> Result<bool> {
         let Some(broker) = self.app.drag_broker.as_ref() else {
             return Ok(false);
         };
@@ -1772,7 +1781,7 @@ impl Runtime<'_> {
 
     /// Whether this window is iconic — Win32's own answer, and the same one
     /// [`Runtime::window_snapshot`] asks before it believes a rectangle.
-    pub(crate) fn window_is_iconic(&self) -> bool {
+    pub(in crate::runtime) fn window_is_iconic(&self) -> bool {
         let iconic = native_window(&self.window.window)
             .ok()
             .is_some_and(bt_platform::is_window_minimized);

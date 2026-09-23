@@ -32,7 +32,12 @@ impl Runtime<'_> {
     /// the sidebar toggle actually lives. First match wins in
     /// [`tooltip::TooltipAnchors`] and the phantom was pushed first, so hovering
     /// the visible toggle answered with some tab's name.
-    pub(crate) fn rebuild_tooltip_anchors(&mut self, scale: f32, width: f32, now: Instant) {
+    pub(in crate::runtime) fn rebuild_tooltip_anchors(
+        &mut self,
+        scale: f32,
+        width: f32,
+        now: Instant,
+    ) {
         // **A modal card owns every anchor there is.** The first-run card is
         // drawn over a scrim that swallows the pointer outright, so a tip about
         // a tab or a pane head under it would be this window explaining
@@ -505,7 +510,7 @@ impl Runtime<'_> {
 
     /// When this window next has tooltip work: the settle deadline, or the next
     /// frame of a fade that has not landed.
-    pub(crate) fn tooltip_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(in crate::runtime) fn tooltip_deadline(&self, now: Instant) -> Option<Instant> {
         let next_frame = self.next_animation_deadline();
         if self.tooltip_owes_frame(now) {
             return next_frame;
@@ -525,7 +530,7 @@ impl Runtime<'_> {
     /// because that is what decides how long the pointer has to hold still
     /// ([`tooltip::TipFace::intent_delay`]) — and repaint if the answer took a tip
     /// down.
-    pub(crate) fn note_tooltip(
+    pub(in crate::runtime) fn note_tooltip(
         &mut self,
         anchor: Option<(tooltip::TooltipAnchorId, tooltip::TipFace)>,
     ) -> Result<()> {
@@ -536,7 +541,7 @@ impl Runtime<'_> {
     }
 
     /// The anchor under the pointer right now and the face its tip wears, if any.
-    pub(crate) fn tooltip_anchor_at(
+    pub(in crate::runtime) fn tooltip_anchor_at(
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<(tooltip::TooltipAnchorId, tooltip::TipFace)> {
@@ -547,7 +552,7 @@ impl Runtime<'_> {
     }
 
     /// Show a settled tip, and keep paying the fade's frames until it lands.
-    pub(crate) fn advance_tooltip_if_due(&mut self, now: Instant) -> Result<()> {
+    pub(in crate::runtime) fn advance_tooltip_if_due(&mut self, now: Instant) -> Result<()> {
         // **The wait maturing is state, and state is never paced** (closure
         // review O4, 2026-09-18): behind the gate, a tip whose three hundred and
         // eighty milliseconds ran out while a neighbouring pane was printing
@@ -566,7 +571,7 @@ impl Runtime<'_> {
     }
 
     /// Take the tip down — any press, a lost window, a menu opening (M142, I94).
-    pub(crate) fn hide_tooltip(&mut self) -> Result<()> {
+    pub(in crate::runtime) fn hide_tooltip(&mut self) -> Result<()> {
         if self.window.tooltip.hide() && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -579,7 +584,7 @@ impl Runtime<'_> {
     /// the frame the tip appeared on, so a tab renamed under an open tip says its
     /// new name on the next frame — the mock-up rewrites `el.title` on every
     /// paint for the same reason (line 4331).
-    pub(crate) fn tooltip_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn tooltip_layer(&mut self) -> Vec<marks::OverlayLayer> {
         // Recorded at the end and only on the paths that actually paint, so the
         // frame-debt comparison is against what is *on screen*. Recording the
         // intent instead would let a tip that could not be laid out report itself
