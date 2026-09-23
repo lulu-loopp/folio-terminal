@@ -28116,7 +28116,7 @@ fn only_the_blocks_that_refuse_to_reflow_ask_for_a_horizontal_scroll() {
         blocks: Vec::new(),
         ranges: Vec::new(),
         maps: Vec::new(),
-        source: None,
+        source: SourceBlocks::default(),
         layout: prose_only.into(),
         math: DocumentMath::default(),
         pictures: DocumentPictures::default(),
@@ -28141,7 +28141,7 @@ fn only_the_blocks_that_refuse_to_reflow_ask_for_a_horizontal_scroll() {
         blocks: Vec::new(),
         ranges: Vec::new(),
         maps: Vec::new(),
-        source: None,
+        source: SourceBlocks::default(),
         layout: vec![
             MarkdownBlockLayout::solid(metrics.line_height),
             MarkdownBlockLayout {
@@ -29343,7 +29343,7 @@ fn a_page_holding(pictures: DocumentPictures) -> PreviewPane {
             blocks: Vec::new(),
             ranges: Vec::new(),
             maps: Vec::new(),
-            source: None,
+            source: SourceBlocks::default(),
             intrinsic: Vec::new(),
             layout: preview_viewport::Layout::default(),
             math: DocumentMath::default(),
@@ -30905,7 +30905,7 @@ fn the_card_and_the_pane_ask_the_engine_for_one_and_the_same_picture() {
         lay_markdown_out(
             &blocks,
             &intrinsic,
-            None,
+            &NO_SOURCE_BLOCKS,
             right - left,
             metrics,
             PageArt {
@@ -31609,7 +31609,7 @@ fn a_freshly_parsed_document_leaves_no_selection_standing() {
         ],
         ranges: vec![0..4, 5..11],
         maps: Vec::new(),
-        source: None,
+        source: SourceBlocks::default(),
         intrinsic: Vec::new(),
         layout: preview_viewport::Layout::default(),
         math: DocumentMath::default(),
@@ -31776,7 +31776,11 @@ fn the_caret_the_ime_and_the_column_are_one_arithmetic_on_a_chinese_line() {
             (&mut quads, &mut paragraphs),
             &source,
             Some(&MarkdownCaretPaint {
-                seat: MarkdownCaretSeat::Source(0, column),
+                seat: MarkdownCaretSeat::Source {
+                    block: source.index,
+                    line: 0,
+                    column,
+                },
                 lit: true,
                 selection: 0..0,
                 band: 0..0,
@@ -31915,7 +31919,7 @@ fn a_press_anywhere_in_an_empty_page_names_its_only_byte() {
             blocks,
             ranges,
             maps,
-            source: None,
+            source: SourceBlocks::default(),
             intrinsic: Vec::new(),
             layout: preview_viewport::Layout::default(),
             math: DocumentMath::default(),
@@ -32642,7 +32646,7 @@ fn nothing_a_preview_body_produces_is_drawn_outside_the_preview() {
         blocks: blocks.clone(),
         ranges: Vec::new(),
         maps: Vec::new(),
-        source: None,
+        source: SourceBlocks::default(),
         layout: layout.clone(),
         math: DocumentMath::default(),
         pictures: DocumentPictures::default(),
@@ -32899,7 +32903,7 @@ fn a_resize_reflows_the_markdown_without_re_measuring_it() {
     let heavy_layout = lay_markdown_out(
         &heavy,
         &heavy_intrinsic,
-        None,
+        &NO_SOURCE_BLOCKS,
         400.0,
         metrics,
         PageArt {
@@ -32926,7 +32930,7 @@ fn a_resize_reflows_the_markdown_without_re_measuring_it() {
         let layout = lay_markdown_out(
             &blocks,
             &intrinsic,
-            None,
+            &NO_SOURCE_BLOCKS,
             width,
             metrics,
             PageArt {
@@ -33032,14 +33036,22 @@ fn the_carets_block_is_laid_out_as_its_own_source_lines() {
         line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
     };
     let width = 400.0;
-    let rendered = lay_markdown_out(&blocks, &intrinsic, None, width, metrics, art, &mut shaper);
+    let rendered = lay_markdown_out(
+        &blocks,
+        &intrinsic,
+        &NO_SOURCE_BLOCKS,
+        width,
+        metrics,
+        art,
+        &mut shaper,
+    );
 
     let source = mono_caret_block(1, 6, "one\ntwo\nthree\nfour");
     let asked = calls.get();
     let live = lay_markdown_out(
         &blocks,
         &intrinsic,
-        Some(&source),
+        &SourceBlocks::from(source.clone()),
         width,
         metrics,
         art,
@@ -33072,7 +33084,7 @@ fn the_carets_block_is_laid_out_as_its_own_source_lines() {
     let folded = lay_markdown_out(
         &blocks,
         &intrinsic,
-        Some(&long),
+        &SourceBlocks::from(long.clone()),
         width,
         metrics,
         art,
@@ -33131,7 +33143,7 @@ fn a_paragraph_under_the_caret_keeps_the_body_face_and_shows_its_marks() {
         let layout = lay_markdown_out(
             &blocks,
             &intrinsic,
-            Some(&source),
+            &SourceBlocks::from(source.clone()),
             400.0,
             metrics,
             art,
@@ -33147,7 +33159,7 @@ fn a_paragraph_under_the_caret_keeps_the_body_face_and_shows_its_marks() {
                 intrinsic: &intrinsic,
                 layout: &layout,
                 live: MarkdownLive {
-                    source: Some(&source),
+                    source: &SourceBlocks::from(source.clone()),
                     caret: None,
                 },
             },
@@ -33237,7 +33249,7 @@ fn a_heading_under_the_caret_keeps_its_size_and_shows_its_hashes() {
     let layout = lay_markdown_out(
         &blocks,
         &intrinsic,
-        Some(&source),
+        &SourceBlocks::from(source.clone()),
         400.0,
         metrics,
         art,
@@ -33253,7 +33265,7 @@ fn a_heading_under_the_caret_keeps_its_size_and_shows_its_hashes() {
             intrinsic: &intrinsic,
             layout: &layout,
             live: MarkdownLive {
-                source: Some(&source),
+                source: &SourceBlocks::from(source.clone()),
                 caret: None,
             },
         },
@@ -33443,13 +33455,21 @@ fn seating_a_caret_in_a_prose_block_reflows_and_does_not_reparse() {
         line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
     };
     let width = 400.0;
-    let rendered = lay_markdown_out(&blocks, &intrinsic, None, width, metrics, art, &mut shaper);
+    let rendered = lay_markdown_out(
+        &blocks,
+        &intrinsic,
+        &NO_SOURCE_BLOCKS,
+        width,
+        metrics,
+        art,
+        &mut shaper,
+    );
     asked.borrow_mut().clear();
     let source = prose_caret_block(1, 6, "**middle**\nsecond line");
     let live = lay_markdown_out(
         &blocks,
         &intrinsic,
-        Some(&source),
+        &SourceBlocks::from(source.clone()),
         width,
         metrics,
         art,
@@ -33499,7 +33519,15 @@ fn the_empty_page_and_a_gap_take_the_prose_face() {
     };
     let blocks = prose(&["first", "last"]);
     let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
-    let layout = lay_markdown_out(&blocks, &intrinsic, None, 400.0, metrics, art, &mut shaper);
+    let layout = lay_markdown_out(
+        &blocks,
+        &intrinsic,
+        &NO_SOURCE_BLOCKS,
+        400.0,
+        metrics,
+        art,
+        &mut shaper,
+    );
     let caret = MarkdownCaretPaint {
         seat: MarkdownCaretSeat::Gap {
             after: Some(0),
@@ -33521,7 +33549,7 @@ fn the_empty_page_and_a_gap_take_the_prose_face() {
             intrinsic: &intrinsic,
             layout: &layout,
             live: MarkdownLive {
-                source: None,
+                source: &NO_SOURCE_BLOCKS,
                 caret: Some(&caret),
             },
         },
@@ -33541,7 +33569,7 @@ fn the_empty_page_and_a_gap_take_the_prose_face() {
         blocks: Vec::new(),
         ranges: Vec::new(),
         maps: Vec::new(),
-        source: None,
+        source: SourceBlocks::default(),
         intrinsic: Vec::new(),
         layout: preview_viewport::Layout::default(),
         math: DocumentMath::default(),
@@ -33741,7 +33769,11 @@ fn a_composition_is_drawn_at_the_caret_in_a_monospace_block() {
             (&mut quads, &mut paragraphs),
             &source,
             Some(&MarkdownCaretPaint {
-                seat: MarkdownCaretSeat::Source(0, column),
+                seat: MarkdownCaretSeat::Source {
+                    block: source.index,
+                    line: 0,
+                    column,
+                },
                 lit: true,
                 selection: 0..0,
                 band: 0..0,
@@ -33847,7 +33879,11 @@ fn a_composition_is_never_written_into_the_buffer() {
         (&mut quads, &mut paragraphs),
         &source,
         Some(&MarkdownCaretPaint {
-            seat: MarkdownCaretSeat::Source(0, 2),
+            seat: MarkdownCaretSeat::Source {
+                block: source.index,
+                line: 0,
+                column: 2,
+            },
             lit: true,
             selection: 0..0,
             band: 0..0,
@@ -34052,7 +34088,15 @@ fn a_gap_and_the_empty_page_draw_a_composition_too() {
     let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
         line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
     };
-    let layout = lay_markdown_out(&blocks, &intrinsic, None, 400.0, metrics, art, &mut shaper);
+    let layout = lay_markdown_out(
+        &blocks,
+        &intrinsic,
+        &NO_SOURCE_BLOCKS,
+        400.0,
+        metrics,
+        art,
+        &mut shaper,
+    );
     let page = |caret: &MarkdownCaretPaint| {
         build_preview_markdown_body(
             body,
@@ -34064,7 +34108,7 @@ fn a_gap_and_the_empty_page_draw_a_composition_too() {
                 intrinsic: &intrinsic,
                 layout: &layout,
                 live: MarkdownLive {
-                    source: None,
+                    source: &NO_SOURCE_BLOCKS,
                     caret: Some(caret),
                 },
             },
@@ -34105,7 +34149,15 @@ fn a_gap_and_the_empty_page_draw_a_composition_too() {
              seams rather than twice: {:#?}",
         built.body.quads,
     );
-    let laid_again = lay_markdown_out(&blocks, &intrinsic, None, 400.0, metrics, art, &mut shaper);
+    let laid_again = lay_markdown_out(
+        &blocks,
+        &intrinsic,
+        &NO_SOURCE_BLOCKS,
+        400.0,
+        metrics,
+        art,
+        &mut shaper,
+    );
     assert_eq!(layout, laid_again, "and the page did not move to make room");
 
     // A page with nothing on it is the same gap with no block in front of
@@ -34299,14 +34351,18 @@ fn a_source_block_bands_its_rows_from_the_band_it_is_handed() {
     let layout = lay_markdown_out(
         &blocks,
         &intrinsic,
-        Some(&source),
+        &SourceBlocks::from(source.clone()),
         400.0,
         metrics,
         art,
         &mut shaper,
     );
     let caret = MarkdownCaretPaint {
-        seat: MarkdownCaretSeat::Source(0, 0),
+        seat: MarkdownCaretSeat::Source {
+            block: source.index(),
+            line: 0,
+            column: 0,
+        },
         lit: true,
         selection: 6..6,
         band: 0..40,
@@ -34323,7 +34379,7 @@ fn a_source_block_bands_its_rows_from_the_band_it_is_handed() {
             intrinsic: &intrinsic,
             layout: &layout,
             live: MarkdownLive {
-                source: Some(&source),
+                source: &SourceBlocks::from(source.clone()),
                 caret: Some(&caret),
             },
         },
@@ -34469,14 +34525,18 @@ fn the_carets_block_is_drawn_as_source_and_a_fence_keeps_its_highlighting() {
     let layout = lay_markdown_out(
         &blocks,
         &intrinsic,
-        Some(&source),
+        &SourceBlocks::from(source.clone()),
         400.0,
         metrics,
         art,
         &mut shaper,
     );
     let caret = MarkdownCaretPaint {
-        seat: MarkdownCaretSeat::Source(1, 2),
+        seat: MarkdownCaretSeat::Source {
+            block: source.index(),
+            line: 1,
+            column: 2,
+        },
         lit: true,
         selection: 0..0,
         band: 0..0,
@@ -34493,7 +34553,7 @@ fn the_carets_block_is_drawn_as_source_and_a_fence_keeps_its_highlighting() {
             intrinsic: &intrinsic,
             layout: &layout,
             live: MarkdownLive {
-                source: Some(&source),
+                source: &SourceBlocks::from(source.clone()),
                 caret: Some(&caret),
             },
         },
@@ -34568,7 +34628,7 @@ fn the_carets_block_is_drawn_as_source_and_a_fence_keeps_its_highlighting() {
     let layout = lay_markdown_out(
         &blocks,
         &intrinsic,
-        Some(&source),
+        &SourceBlocks::from(source.clone()),
         400.0,
         metrics,
         art,
@@ -34584,7 +34644,7 @@ fn the_carets_block_is_drawn_as_source_and_a_fence_keeps_its_highlighting() {
             intrinsic: &intrinsic,
             layout: &layout,
             live: MarkdownLive {
-                source: Some(&source),
+                source: &SourceBlocks::from(source.clone()),
                 caret: None,
             },
         },
@@ -34636,7 +34696,15 @@ fn a_caret_in_the_gap_between_two_blocks_is_one_empty_source_line() {
         calls.set(calls.get() + 1);
         line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
     };
-    let layout = lay_markdown_out(&blocks, &intrinsic, None, 400.0, metrics, art, &mut shaper);
+    let layout = lay_markdown_out(
+        &blocks,
+        &intrinsic,
+        &NO_SOURCE_BLOCKS,
+        400.0,
+        metrics,
+        art,
+        &mut shaper,
+    );
     let page = |caret: &MarkdownCaretPaint| {
         build_preview_markdown_body(
             body,
@@ -34648,7 +34716,7 @@ fn a_caret_in_the_gap_between_two_blocks_is_one_empty_source_line() {
                 intrinsic: &intrinsic,
                 layout: &layout,
                 live: MarkdownLive {
-                    source: None,
+                    source: &NO_SOURCE_BLOCKS,
                     caret: Some(caret),
                 },
             },
@@ -34687,7 +34755,15 @@ fn a_caret_in_the_gap_between_two_blocks_is_one_empty_source_line() {
         "one line tall, at the column a line starts in, directly under the \
              block the caret has just left",
     );
-    let laid_again = lay_markdown_out(&blocks, &intrinsic, None, 400.0, metrics, art, &mut shaper);
+    let laid_again = lay_markdown_out(
+        &blocks,
+        &intrinsic,
+        &NO_SOURCE_BLOCKS,
+        400.0,
+        metrics,
+        art,
+        &mut shaper,
+    );
     assert_eq!(layout, laid_again, "and the page did not move to make room");
 
     let ahead = MarkdownCaretPaint {
@@ -35008,7 +35084,7 @@ fn rebuild_cost(
     let layout = lay_markdown_out(
         &blocks,
         &intrinsic,
-        Some(&source),
+        &SourceBlocks::from(source.clone()),
         1000.0,
         metrics,
         art,
@@ -36667,7 +36743,7 @@ fn a_long_markdown_and_a_long_table_scroll_and_stop_at_their_own_ends() {
         blocks,
         ranges: Vec::new(),
         maps: Vec::new(),
-        source: None,
+        source: SourceBlocks::default(),
         intrinsic: Vec::new(),
         layout: layout.into(),
         math: DocumentMath::default(),

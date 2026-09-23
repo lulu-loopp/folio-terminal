@@ -82,7 +82,7 @@ impl Harness {
         drop(timer);
         let timer = preview_typing::Timer::new("layout");
         let mut anchor = edits.and_then(|_| capture(&old, self.view, &mut self.measure));
-        let source = caret.and_then(|at| {
+        let source = SourceBlocks::from(caret.and_then(|at| {
             preview_typing::source_at(text, &blocks, &ranges, at).or_else(|| {
                 let index = preview_live::caret_seat(text, &ranges, at).block()?;
                 let raw = preview_live::block_source(text, &ranges[index]).to_owned();
@@ -110,7 +110,7 @@ impl Harness {
                     advance,
                 })))
             })
-        });
+        }));
         let frame = preview_wrap::Frame::new(self.width, self.scale, 0);
         let mut pass = self.cache.prepare(&old, edits.is_some(), frame);
         let (mut state, mut layout, mut intrinsic) = State::reconcile(Reconcile {
@@ -118,7 +118,7 @@ impl Harness {
             blocks: &blocks,
             ranges: &ranges,
             content: text,
-            source: source.as_deref(),
+            source: &source,
             frame,
             edits,
             art_changed: false,
@@ -129,13 +129,7 @@ impl Harness {
             } = &old
         {
             state.remap_anchor(anchor, old_ranges, &ranges, edits.unwrap_or_default());
-            anchor.remap_text(
-                source.as_deref(),
-                &blocks,
-                &ranges,
-                &maps,
-                edits.unwrap_or_default(),
-            );
+            anchor.remap_text(&source, &blocks, &ranges, &maps, edits.unwrap_or_default());
         }
         self.view.padding = frame.metrics().padding_y;
         let math = DocumentMath::default();
@@ -143,7 +137,7 @@ impl Harness {
         let palette = bt_render::chrome_palette();
         self.realized = Realize {
             blocks: &blocks,
-            source: source.as_deref(),
+            source: &source,
             art: PageArt {
                 math: &math,
                 pictures: &pictures,
@@ -213,7 +207,7 @@ impl Harness {
         if Arc::make_mut(wrap).viewport.pending(layout, self.view) {
             Realize {
                 blocks,
-                source: source.as_deref(),
+                source,
                 art: PageArt {
                     math,
                     pictures,
@@ -388,7 +382,7 @@ fn viewport_corrections_above_preserve_anchor_and_caret_text() {
             };
             let p = preview_wrap::anchor_paragraphs(
                 &blocks[anchor.index],
-                source.as_deref(),
+                source.get(anchor.index),
                 &h.layout().get(anchor.index).unwrap(),
                 wrap.frame.unwrap(),
                 PageArt {
@@ -509,7 +503,7 @@ fn viewport_width_and_scale_preserve_text_with_affinity() {
     };
     let paragraphs = preview_wrap::anchor_paragraphs(
         &blocks[after.index],
-        source.as_deref(),
+        source.get(after.index),
         &h.layout().get(after.index).unwrap(),
         wrap.frame.unwrap(),
         PageArt {
@@ -635,7 +629,7 @@ fn viewport_append_and_split_keep_the_anchored_source_text() {
         panic!()
     };
     mapped.remap_text(
-        source.as_deref(),
+        source,
         blocks,
         ranges,
         maps,
@@ -647,7 +641,7 @@ fn viewport_append_and_split_keep_the_anchored_source_text() {
     );
     let paragraphs = preview_wrap::anchor_paragraphs(
         &blocks[current.index],
-        source.as_deref(),
+        source.get(current.index),
         &h.layout().get(current.index).unwrap(),
         wrap.frame.unwrap(),
         PageArt {

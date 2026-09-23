@@ -2308,17 +2308,20 @@ enum PreviewDocument {
         /// letter under the pointer is, and the highlight of a caret selection
         /// asks [`preview_provenance::place_of`] the same question backwards.
         maps: Vec<preview_provenance::BlockOrigins>,
-        /// **The block the caret is in, drawn as the file's own bytes**
-        /// (§7.1.3q). `None` when nothing on this surface holds a caret, and
-        /// when the caret stands in the tissue between two blocks
-        /// ([`preview_live::CaretSeat::Gap`]).
+        /// **The blocks drawn as the file's own bytes** (§7.1.3q, as the
+        /// owner's ruling of 2026-09-23 widened it from the caret's one block
+        /// to every block its selection touches). Empty when nothing on this
+        /// surface holds a caret, and when the caret stands in the tissue
+        /// between two blocks ([`preview_live::CaretSeat::Gap`]) with nothing
+        /// selected.
         ///
-        /// **Boxed**, which is the one place in this enum that pays for a
-        /// pointer: `None` is the answer on every rendered document nobody has
-        /// clicked into, and a variant carrying the block's bytes inline would
-        /// make every `PreviewDocument` — a diff, a table, an empty pane — as
-        /// large as the rarest thing any of them can hold.
-        source: Option<Box<MarkdownCaretBlock>>,
+        /// Held out of line in a `Vec`, which is the one place in this enum
+        /// that pays for a pointer: empty is the answer on every rendered
+        /// document nobody has clicked into and allocates nothing, and a variant
+        /// carrying the blocks' bytes inline would make every `PreviewDocument`
+        /// — a diff, a table, an empty pane — as large as the rarest thing any
+        /// of them can hold.
+        source: SourceBlocks,
         /// One entry per block, measured **once per content change** — see
         /// [`MarkdownBlockIntrinsic`].
         intrinsic: Vec<MarkdownBlockIntrinsic>,
@@ -2508,6 +2511,63 @@ impl MarkdownCaretBlock {
             Self::Prose(block) => Some(block),
             Self::Mono(_) => None,
         }
+    }
+}
+
+/// **Every block drawn as the file's own bytes, in block order** (owner's
+/// ruling 2026-09-23: every block the selection touches is drawn as source).
+///
+/// What used to be one optional block is a set of them: the caret's own block,
+/// and every block its selection reaches ([`preview_live::SourceSpan`]). Empty
+/// on every page nobody has entered and whenever the caret stands in a gap with
+/// nothing selected. A plain `Vec` because the empty set is the common answer
+/// and costs no allocation, and ordered by index so that asking for one block
+/// is a binary search and not a walk — the painter asks once per visible block.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SourceBlocks(Vec<MarkdownCaretBlock>);
+
+/// The empty set, for a caller with a page and no source block on it.
+static NO_SOURCE_BLOCKS: SourceBlocks = SourceBlocks(Vec::new());
+
+impl SourceBlocks {
+    /// The set, from blocks built in ascending index order.
+    fn new(blocks: Vec<MarkdownCaretBlock>) -> Self {
+        debug_assert!(
+            blocks
+                .windows(2)
+                .all(|pair| pair[0].index() < pair[1].index())
+        );
+        Self(blocks)
+    }
+
+    /// Block `index` as source, when it is drawn that way.
+    fn get(&self, index: usize) -> Option<&MarkdownCaretBlock> {
+        self.0
+            .binary_search_by_key(&index, MarkdownCaretBlock::index)
+            .ok()
+            .map(|at| &self.0[at])
+    }
+
+    /// Every source block, in document order.
+    fn iter(&self) -> std::slice::Iter<'_, MarkdownCaretBlock> {
+        self.0.iter()
+    }
+
+    /// Whether no block is drawn as source.
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<Option<Box<MarkdownCaretBlock>>> for SourceBlocks {
+    fn from(block: Option<Box<MarkdownCaretBlock>>) -> Self {
+        Self(block.map(|block| vec![*block]).unwrap_or_default())
+    }
+}
+
+impl From<MarkdownCaretBlock> for SourceBlocks {
+    fn from(block: MarkdownCaretBlock) -> Self {
+        Self(vec![block])
     }
 }
 
@@ -4395,6 +4455,15 @@ struct PreviewPane {
     /// the rows Up and Down walk. §7.1.3u is the account of what a second
     /// derivation of any one of those costs.
     md_prose: Option<preview_live::ProseRows>,
+    /// **Every prose source block on the glass, as the shaper laid it out**
+    /// (2026-09-23) — [`Self::md_prose`] for each block a selection has drawn as
+    /// source and not only the caret's, which is always one of them.
+    ///
+    /// Two readers: the band a selection draws over each of those blocks, and
+    /// the byte a press inside one of them names. The caret, the composition
+    /// and the arrow keys stand in exactly one block and go on reading
+    /// [`Self::md_prose`].
+    md_prose_blocks: Vec<preview_live::ProseRows>,
     /// Where the caret is in this surface's buffer, and what it has selected.
     caret: preview_edit::EditCaret,
     /// The sentence this surface's body owes about its last save, and when it
@@ -6246,17 +6315,24 @@ struct BlockScrollPaint<'a> {
 /// draw one anyway.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MarkdownCaretSeat {
-    /// Inside the block the document is already carrying as its source block:
-    /// the line of that block's own source, and the column in it.
-    Source(usize, usize),
+    /// Inside a block the document is already carrying as a monospace source
+    /// block: which block, the line of that block's own source, and the column
+    /// in it. The block is named because a selection can draw several blocks
+    /// as source (2026-09-23) and the caret stands in exactly one of them.
+    Source {
+        block: usize,
+        line: usize,
+        column: usize,
+    },
     /// Inside the block the document is carrying as its **prose** block
     /// (§7.1.3w), at this byte of the file.
     ///
     /// A byte and not a row and a column, because the face it is drawn in has
     /// neither: where that byte stands is the shaper's answer
     /// ([`preview_live::ProseRows`]), and it is asked in the one pass that holds
-    /// a shaper rather than guessed at here.
-    Prose(usize),
+    /// a shaper rather than guessed at here. The block is named for
+    /// [`Self::Source`]'s reason.
+    Prose { block: usize, offset: usize },
     /// In the tissue between two blocks, where no block was parsed from and none
     /// ever will be. **One empty source line, standing immediately under the
     /// block in front of it** — see [`preview_live`]'s module note for why that
@@ -6266,6 +6342,21 @@ enum MarkdownCaretSeat {
         after: Option<usize>,
         line_height: f32,
     },
+}
+
+/// **The caret's own prose rows, out of every prose source block's**
+/// (2026-09-23) — the one [`preview_live::ProseRows`] the caret, the
+/// composition, the IME's candidate box and the arrow keys read.
+///
+/// `seat` is the block the caret stands in (`None` for a gap or no caret):
+/// the rows of that block when it is drawn as prose, or the gap's composition
+/// line — measured only while a composition stands in a gap — when it is
+/// `None`. Nothing for a caret in a monospace block, which has no rows here.
+fn preview_caret_prose(
+    blocks: &[preview_live::ProseRows],
+    seat: Option<usize>,
+) -> Option<preview_live::ProseRows> {
+    blocks.iter().find(|rows| rows.index == seat).cloned()
 }
 
 /// **The caret and what it has dragged over, on a rendered page** —
@@ -6360,10 +6451,21 @@ impl MarkdownPreedit {
 /// Empty on every surface that holds no caret, which — until the markdown
 /// block's T5 gives the rendered face one — is every surface in the window. That is why this ticket
 /// changes nothing a reader can see.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct MarkdownLive<'a> {
-    source: Option<&'a MarkdownCaretBlock>,
+    /// Every block drawn as source — the caret's, and every block its
+    /// selection touches (2026-09-23).
+    source: &'a SourceBlocks,
     caret: Option<&'a MarkdownCaretPaint>,
+}
+
+impl Default for MarkdownLive<'_> {
+    fn default() -> Self {
+        Self {
+            source: &NO_SOURCE_BLOCKS,
+            caret: None,
+        }
+    }
 }
 
 /// **One parsed page, in the four things the painter walks together**: the
@@ -6546,7 +6648,7 @@ fn build_preview_markdown_body(
         // paragraph under the caret are the same monospace lines, and the only
         // thing the block's kind still decides is whether the highlighting the
         // measuring pass computed for it applies.
-        match live.source.filter(|block| block.index() == block_index) {
+        match live.source.get(block_index) {
             Some(MarkdownCaretBlock::Mono(source)) => {
                 push_markdown_source_block(
                     (quads, paragraphs),
@@ -6579,7 +6681,7 @@ fn build_preview_markdown_body(
                     // rule under them and the input method's caret inside them
                     // are places on a proportional row, which only the shaper
                     // can say ([`Runtime::preview_prose_geometry`]).
-                    markdown_prose_composition(live.caret),
+                    markdown_prose_composition(live.caret, prose.index),
                     palette,
                 ) {
                     if line.paragraph.rect[3] > body[1] && line.paragraph.rect[1] < body[3] {
@@ -7315,11 +7417,17 @@ fn markdown_prose_runs(
 /// ([`markdown_gap_paragraph`]).
 fn markdown_prose_composition(
     caret: Option<&MarkdownCaretPaint>,
+    block: usize,
 ) -> Option<(usize, &MarkdownPreedit)> {
     let caret = caret.filter(|caret| caret.lit)?;
     match caret.seat {
-        MarkdownCaretSeat::Prose(offset) => Some((offset, caret.preedit.as_ref()?)),
-        MarkdownCaretSeat::Source(..) | MarkdownCaretSeat::Gap { .. } => None,
+        MarkdownCaretSeat::Prose {
+            block: seat,
+            offset,
+        } if seat == block => Some((offset, caret.preedit.as_ref()?)),
+        MarkdownCaretSeat::Prose { .. }
+        | MarkdownCaretSeat::Source { .. }
+        | MarkdownCaretSeat::Gap { .. } => None,
     }
 }
 
@@ -7503,11 +7611,17 @@ fn push_markdown_source_block(
         .filter(|caret| caret.lit)
         .and_then(|caret| Some((caret.preedit.as_ref()?, caret.seat)))
         .and_then(|(preedit, seat)| match seat {
-            MarkdownCaretSeat::Source(line, column) => {
+            MarkdownCaretSeat::Source {
+                block,
+                line,
+                column,
+            } if block == source.index => {
                 let (row, column) = preview_caret_row(&wrap, line, column);
                 Some((row, column, preedit))
             }
-            MarkdownCaretSeat::Prose(_) | MarkdownCaretSeat::Gap { .. } => None,
+            MarkdownCaretSeat::Source { .. }
+            | MarkdownCaretSeat::Prose { .. }
+            | MarkdownCaretSeat::Gap { .. } => None,
         });
     // **The fills first and the letters after**, which is not a preference:
     // [`bt_render::PreviewBody`] draws its quads and then its text, so a band is
@@ -7546,7 +7660,12 @@ fn push_markdown_source_block(
             });
         }
         if caret.lit
-            && let MarkdownCaretSeat::Source(line, column) = caret.seat
+            && let MarkdownCaretSeat::Source {
+                block,
+                line,
+                column,
+            } = caret.seat
+            && block == source.index
         {
             let (row, column) = preview_caret_row(&wrap, line, column);
             if rows.contains(&row) {
@@ -45176,7 +45295,7 @@ fn measure_markdown_intrinsics(
 fn lay_markdown_out(
     blocks: &[preview::MarkdownBlock],
     intrinsic: &[MarkdownBlockIntrinsic],
-    source: Option<&MarkdownCaretBlock>,
+    source: &SourceBlocks,
     width: f32,
     metrics: seats::PreviewMarkdownMetrics,
     art: PageArt<'_>,
@@ -45197,7 +45316,7 @@ fn lay_markdown_out(
             let mut measured = measure_markdown_local(
                 block,
                 intrinsic,
-                source.filter(|source| source.index() == index),
+                source.get(index),
                 width,
                 metrics,
                 art,
