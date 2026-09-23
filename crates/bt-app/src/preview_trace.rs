@@ -29,6 +29,14 @@
 //!   intrinsic_us=<n> layout_us=<n> total_us=<n> hits=<n> misses=<n>` — what one
 //!   markdown document cost to build, split three ways (ticket T4). This is the
 //!   station a keystroke is measured with: see [`DocumentBuild`].
+//! * `reflow bytes=<n> blocks=<n> why=<source+width+art+font|frame>
+//!   source=<index|none>-><index|none> face=<mono|prose|none> realized=<n>
+//!   math_us=<n> pictures_us=<n> reconcile_us=<n> realize_us=<n> total_us=<n>`
+//!   — the same document laid out again with no re-parse (2026-09-23): what
+//!   asked for it, which block stopped and which started being drawn as source,
+//!   how many blocks were measured, and where the time went. This is the station
+//!   a caret moving into another block — a table flipping to its source — is
+//!   measured with; before it the arm wrote nothing. See [`ReflowBuild`].
 //! * `math formulas=<n> drawn=<n> asked=<n> worker=<0|1>` and
 //!   `math answered set=<0|1> mode=<Display|Inline> em_milli=<n> chars=<n>` —
 //!   **why a page is standing on its source text** (M2-7, §13.40). A formula
@@ -143,6 +151,112 @@ pub fn document(trace: Option<&Trace>, build: DocumentBuild) {
     });
 }
 
+/// **Which part of a document's key moved**, when the parse did not — the
+/// `why=` of a `reflow` line.
+///
+/// Four names for the four halves of the key a re-flow can come from, and
+/// `frame` when none of them moved and the wrap frame alone did (a scale or a
+/// font environment the key had not caught up with yet).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReflowCause {
+    /// Another block is drawn as source — the caret crossed into it.
+    pub source: bool,
+    /// The pane's width or the window's scale.
+    pub width: bool,
+    /// A formula or a picture landed, the ink or the theme changed, or the
+    /// reader scrolled into another band of pictures.
+    pub art: bool,
+    /// The installed fonts changed.
+    pub font: bool,
+}
+
+impl ReflowCause {
+    fn names(self) -> String {
+        let names: Vec<&str> = [
+            (self.source, "source"),
+            (self.width, "width"),
+            (self.art, "art"),
+            (self.font, "font"),
+        ]
+        .into_iter()
+        .filter_map(|(moved, name)| moved.then_some(name))
+        .collect();
+        if names.is_empty() {
+            "frame".to_owned()
+        } else {
+            names.join("+")
+        }
+    }
+}
+
+/// The face the block now drawn as source wears, for a `reflow` line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceFace {
+    /// A fence, a table, a formula, a rule or a picture: the monospace fold.
+    Mono,
+    /// A heading, a paragraph, a list or a quote: the body face.
+    Prose,
+}
+
+/// **What one re-flow cost** — [`DocumentBuild`]'s opposite number, for the
+/// arm that does not parse (2026-09-23).
+///
+/// Born of a report this file could not answer: a table under the caret
+/// flipped to its source and the window hitched, and the only line in the log
+/// was a 573 ms self-report whose thread had burned 31 ms of CPU. A seat change
+/// takes the no-parse arm, and that arm wrote nothing here, so whether the
+/// window's own work or something it waited on was the cost could not be said.
+/// This is the line that says it: the four passes the arm runs over the whole
+/// document, each timed, and how many blocks it measured.
+///
+/// **The clock only runs when the trace is open**, [`DocumentBuild`]'s rule.
+#[derive(Clone, Copy, Debug)]
+pub struct ReflowBuild {
+    pub bytes: usize,
+    pub blocks: usize,
+    pub cause: ReflowCause,
+    /// The block drawn as source before this re-flow, and the one after it.
+    pub source: (Option<usize>, Option<usize>),
+    pub face: Option<SourceFace>,
+    /// Blocks measured by this re-flow — two for a caret crossing from one
+    /// visible block into another, the band for a resize.
+    pub realized: usize,
+    pub math: std::time::Duration,
+    pub pictures: std::time::Duration,
+    pub reconcile: std::time::Duration,
+    pub realize: std::time::Duration,
+}
+
+/// `reflow bytes=<n> blocks=<n> why=<…> source=<a>-><b> face=<mono|prose|none>
+/// realized=<n> math_us=<n> pictures_us=<n> reconcile_us=<n> realize_us=<n>
+/// total_us=<n>`
+pub fn reflow(trace: Option<&Trace>, build: ReflowBuild) {
+    emit(trace, || {
+        let index = |at: Option<usize>| at.map_or_else(|| "none".to_owned(), |at| at.to_string());
+        let total = build.math + build.pictures + build.reconcile + build.realize;
+        format!(
+            "reflow bytes={} blocks={} why={} source={}->{} face={} realized={} \
+             math_us={} pictures_us={} reconcile_us={} realize_us={} total_us={}",
+            build.bytes,
+            build.blocks,
+            build.cause.names(),
+            index(build.source.0),
+            index(build.source.1),
+            match build.face {
+                Some(SourceFace::Mono) => "mono",
+                Some(SourceFace::Prose) => "prose",
+                None => "none",
+            },
+            build.realized,
+            build.math.as_micros(),
+            build.pictures.as_micros(),
+            build.reconcile.as_micros(),
+            build.realize.as_micros(),
+            total.as_micros(),
+        )
+    });
+}
+
 /// `frame …` — what the renderer did with every preview body it holds.
 pub fn frame(trace: Option<&Trace>, echo: &mut FrameEcho, frame: bt_render::PreviewTextFrame) {
     if trace.is_none() || !echo.changed(frame) {
@@ -200,6 +314,86 @@ mod tests {
             prepared: true,
             ..bt_render::PreviewTextFrame::default()
         }
+    }
+
+    /// RED (preview report 2026-09-23, C1) — **a re-flow's line says what
+    /// flipped, what asked for it, how many blocks it measured and where the
+    /// time went.**
+    ///
+    /// Written to a real trace file, in the station format every other line of
+    /// `BT_PREVIEW_TRACE` keeps: a millisecond stamp, the event, and
+    /// `field=value` pairs. The report this is for is a table flipping into
+    /// source, which is `why=source`, a `source=a->b` naming both blocks, and a
+    /// face; and the four durations add up to the total.
+    ///
+    /// MUTATION: drop a field from the format, or leave `names` answering
+    /// `frame` for a cause that moved, and the comparison goes red.
+    #[test]
+    fn a_reflow_line_names_the_flip_and_what_it_cost() {
+        let path = std::env::temp_dir().join(format!(
+            "bt-preview-trace-{}-reflow.log",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let trace = Trace::create(&path, "# BT_PREVIEW_TRACE_V1 elapsed_ms event field=value…");
+        let micros = std::time::Duration::from_micros;
+        reflow(
+            Some(&trace),
+            ReflowBuild {
+                bytes: 53_000,
+                blocks: 412,
+                cause: ReflowCause {
+                    source: true,
+                    ..ReflowCause::default()
+                },
+                source: (Some(96), Some(101)),
+                face: Some(SourceFace::Mono),
+                realized: 2,
+                math: micros(1_200),
+                pictures: micros(300),
+                reconcile: micros(2_500),
+                realize: micros(4_000),
+            },
+        );
+        reflow(
+            Some(&trace),
+            ReflowBuild {
+                bytes: 10,
+                blocks: 1,
+                cause: ReflowCause::default(),
+                source: (None, None),
+                face: None,
+                realized: 0,
+                math: micros(0),
+                pictures: micros(0),
+                reconcile: micros(0),
+                realize: micros(0),
+            },
+        );
+        let written = std::fs::read_to_string(&path).expect("the trace file was created");
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "a header and one line per re-flow: {written:?}"
+        );
+        assert!(
+            lines[1].ends_with(
+                "reflow bytes=53000 blocks=412 why=source source=96->101 face=mono realized=2 \
+                 math_us=1200 pictures_us=300 reconcile_us=2500 realize_us=4000 total_us=8000"
+            ),
+            "{:?}",
+            lines[1],
+        );
+        assert!(
+            lines[2].ends_with(
+                "why=frame source=none->none face=none realized=0 \
+                 math_us=0 pictures_us=0 reconcile_us=0 realize_us=0 total_us=0"
+            ),
+            "{:?}",
+            lines[2],
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// **A pane standing still writes one line, not sixty a second.**

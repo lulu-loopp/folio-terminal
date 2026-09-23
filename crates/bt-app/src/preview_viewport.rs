@@ -665,12 +665,17 @@ pub(super) struct Realize<'a> {
 }
 
 impl Realize<'_> {
+    /// Make every block in the visible band exact, and say **how many blocks
+    /// this call measured** — the number `BT_PREVIEW_TRACE`'s `reflow` line
+    /// reports (2026-09-23), so a caret flipping one block into source can be
+    /// told apart from a pass that re-measured the page.
     pub(super) fn ensure(
         &mut self,
         view: &mut View,
         anchor: Option<Anchor>,
         measure: &mut dyn Measure,
-    ) {
+    ) -> usize {
+        let mut realized = 0;
         self.cache
             .ensure_environment(self.pass.frame().intrinsic_environment());
         let anchor = if view.end {
@@ -751,6 +756,7 @@ impl Realize<'_> {
                 self.state.records[index].exact = true;
                 self.state.unknown.remove(&index);
                 self.state.records[index].intrinsic = true;
+                realized += 1;
                 #[cfg(test)]
                 preview_typing::count("realized blocks", 1);
             }
@@ -805,6 +811,7 @@ impl Realize<'_> {
             }
         }
         self.state.height = view.height;
+        realized
     }
 }
 
@@ -899,6 +906,22 @@ impl Measure for RuntimeMeasure<'_> {
     fn rows(&mut self, paragraph: &bt_render::PreviewParagraph) -> Vec<bt_render::PreviewTextRow> {
         self.renderer.measure_preview_rows(self.gpu, paragraph)
     }
+}
+
+/// **What one geometry rebuild cost** — [`Runtime::rebuild_markdown_geometry`]'s
+/// account of itself, for `BT_PREVIEW_TRACE`'s `reflow` line (2026-09-23).
+///
+/// The two durations are zero when the trace is closed: nothing is timed then.
+/// `realized` is counted either way, because it is a count and costs nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct GeometryCost {
+    /// Blocks [`Realize::ensure`] measured.
+    pub realized: usize,
+    /// [`State::reconcile`]: the old document's records matched to the new
+    /// blocks, and a fresh height tree.
+    pub reconcile: std::time::Duration,
+    /// The anchor remapped and the visible band made exact.
+    pub realize: std::time::Duration,
 }
 
 pub(super) struct Build<'a> {
@@ -1123,7 +1146,10 @@ impl Runtime<'_> {
         Layout,
         Vec<MarkdownBlockIntrinsic>,
         Arc<preview_wrap::Document>,
+        GeometryCost,
     ) {
+        // The clock runs only when the trace is open, `DocumentBuild`'s rule.
+        let clock = preview_trace::global().map(|_| Instant::now());
         let metrics = seats::preview_markdown_metrics(scale);
         let (left, right) = preview::markdown_measure_box(body, metrics);
         let frame =
@@ -1167,6 +1193,8 @@ impl Runtime<'_> {
             edits: build.edits,
             art_changed: build.art_changed,
         });
+        let reconciled = clock.map(|clock| clock.elapsed());
+        let clock = clock.map(|_| Instant::now());
         if let Some(anchor) = &mut anchor
             && let PreviewDocument::Markdown { ranges, .. } = old
         {
@@ -1185,7 +1213,7 @@ impl Runtime<'_> {
             );
         }
         let palette = bt_render::chrome_palette();
-        Realize {
+        let realized = Realize {
             blocks: build.blocks,
             source: build.source,
             art: build.art,
@@ -1204,11 +1232,16 @@ impl Runtime<'_> {
             cache: &mut self.window.markdown_intrinsics,
         }
         .ensure(&mut view, anchor, &mut measure);
+        let cost = GeometryCost {
+            realized,
+            reconcile: reconciled.unwrap_or_default(),
+            realize: clock.map(|clock| clock.elapsed()).unwrap_or_default(),
+        };
         let pane = self.preview_pane_mut(surface);
         pane.scroll[1] = view.scroll;
         let mut wrap = pass.document();
         Arc::make_mut(&mut wrap).viewport = state;
-        (layout, intrinsic, wrap)
+        (layout, intrinsic, wrap, cost)
     }
 
     /// Called even on parse-key equality: scroll and viewport-height changes do

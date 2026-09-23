@@ -13,6 +13,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- In the Markdown preview, a selection dragged across the paragraph or table
+  you are editing highlights it too, instead of skipping it.
+
 - On macOS the Git page found no git, and the dark scheme setting named a
   Windows folder.
 

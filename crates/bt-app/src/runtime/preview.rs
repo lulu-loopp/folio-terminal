@@ -5774,8 +5774,17 @@ impl Runtime<'_> {
         // against the button coming up somewhere the page has no byte to name:
         // off the bottom of the pane, which is how the last line of a document
         // is selected.
-        if spends && let Some(offset) = self.preview_md_file_offset_at(surface, position) {
+        //
+        // **Kept for every gesture, not only the ones the release spends**
+        // (2026-09-23): it is also where the source block's band ends while the
+        // hand is inside that block ([`preview_live::source_band`]), and a drag
+        // that began on a link — which records no press — crosses the source
+        // block like any other. The release still reads it only for a press it
+        // spends, so what this changes is what is drawn and nothing else.
+        let mut reach_moved = false;
+        if let Some(offset) = self.preview_md_file_offset_at(surface, position) {
             if let Some(drag) = self.preview_text_drag.as_mut() {
+                reach_moved = drag.reached != Some(offset);
                 drag.reached = Some(offset);
             }
             // **The caret follows the hand while the seat holds** — the band
@@ -5783,23 +5792,29 @@ impl Runtime<'_> {
             // again on every report rather than remembered, because it is the
             // same question the press asked and the caret has not left it: a
             // page whose face cannot change is one this may write to.
-            if seated && self.preview_press_keeps_the_caret_seat(surface, Some(offset)) {
+            if spends && seated && self.preview_press_keeps_the_caret_seat(surface, Some(offset)) {
                 if self.preview_pane(surface).map(|pane| pane.caret.caret) != Some(offset) {
                     self.place_preview_caret_on(surface, offset, true)?;
                 }
                 return Ok(true);
             }
         }
-        let Some(place) = self.preview_place_at(surface, position) else {
-            return Ok(true);
-        };
         let was = self.preview_pane(surface).and_then(|pane| pane.md_select);
         let Some(selection) = was else {
             return Ok(true);
         };
-        if selection.head == place {
+        // **A hand moving inside the source block moves no piece** — the
+        // nearest piece to it is in the paragraph above or below, and stays
+        // there — but it does move the end of that block's band, which is
+        // drawn from [`PreviewTextDrag::reached`]. So a report that moved only
+        // the reach still asks for a frame.
+        let place = self.preview_place_at(surface, position);
+        let Some(place) = place.filter(|place| selection.head != *place) else {
+            if reach_moved {
+                self.repaint_preview()?;
+            }
             return Ok(true);
-        }
+        };
         self.preview_pane_mut(surface).md_select = Some(preview_select::Selection {
             head: place,
             ..selection
@@ -7847,28 +7862,52 @@ impl Runtime<'_> {
                 key.art.picture_generation,
             )
         });
+        // **Which half of the key moved**, read while the key being replaced is
+        // still standing — the `why=` of the `reflow` line below, which is what
+        // tells a caret crossing into another block from a resize.
+        let cause = key
+            .as_ref()
+            .zip(pane.doc_key.as_ref())
+            .map(|(new, old)| preview_trace::ReflowCause {
+                source: new.source != old.source,
+                width: new.body_width_px != old.body_width_px
+                    || new.scale_factor_bits != old.scale_factor_bits,
+                art: new.art != old.art,
+                font: new.font_environment_epoch != old.font_environment_epoch,
+            })
+            .unwrap_or_default();
         pane.doc_key = key;
         if reflow_only && matches!(pane.doc, PreviewDocument::Markdown { .. }) {
+            // **Measured, because this is the arm a caret crossing into another
+            // block takes** (2026-09-23): no byte moved, so nothing is parsed,
+            // and until this line existed a table flipping to its source left
+            // no trace at all. The clock runs only when the trace is open.
+            let trace = preview_trace::global();
             let old = std::mem::take(&mut pane.doc);
             let PreviewDocument::Markdown {
                 blocks,
                 ranges,
                 maps,
+                source: was_source,
                 ..
             } = &old
             else {
                 unreachable!()
             };
+            let was_source = was_source.as_deref().map(MarkdownCaretBlock::index);
             let metrics = seats::preview_markdown_metrics(scale);
             let (left, right) = preview::markdown_measure_box(body, metrics);
             let source =
                 self.markdown_caret_block(surface, standing_source.as_ref(), blocks, scale);
+            let clock = trace.map(|_| Instant::now());
             let math = self.resolve_document_math(
                 blocks,
                 metrics,
                 &bt_render::chrome_palette(),
                 &standing_math,
             );
+            let math_took = clock.map(|clock| clock.elapsed());
+            let clock = clock.map(|_| Instant::now());
             let pictures = self.resolve_document_pictures(
                 blocks,
                 document.as_deref(),
@@ -7876,11 +7915,12 @@ impl Runtime<'_> {
                 picture_reach,
                 &standing_pictures,
             );
+            let pictures_took = clock.map(|clock| clock.elapsed());
             let content = self
                 .preview_buffer_on(surface)
                 .and_then(|b| b.content.clone())
                 .unwrap_or_default();
-            let (layout, intrinsic, wrap) = self.rebuild_markdown_geometry(
+            let (layout, intrinsic, wrap, cost) = self.rebuild_markdown_geometry(
                 surface,
                 body,
                 scale,
@@ -7911,6 +7951,24 @@ impl Runtime<'_> {
             else {
                 unreachable!()
             };
+            preview_trace::reflow(
+                trace,
+                preview_trace::ReflowBuild {
+                    bytes: content.len(),
+                    blocks: blocks.len(),
+                    cause,
+                    source: (was_source, source.as_deref().map(MarkdownCaretBlock::index)),
+                    face: source.as_deref().map(|block| match block {
+                        MarkdownCaretBlock::Mono(_) => preview_trace::SourceFace::Mono,
+                        MarkdownCaretBlock::Prose(_) => preview_trace::SourceFace::Prose,
+                    }),
+                    realized: cost.realized,
+                    math: math_took.unwrap_or_default(),
+                    pictures: pictures_took.unwrap_or_default(),
+                    reconcile: cost.reconcile,
+                    realize: cost.realize,
+                },
+            );
             self.preview_pane_mut(surface)
                 .reflow_document(PreviewDocument::Markdown {
                     blocks,
@@ -8052,7 +8110,7 @@ impl Runtime<'_> {
                 );
                 let clock = clock.map(|_| Instant::now());
                 let old = std::mem::take(&mut self.preview_pane_mut(surface).doc);
-                let (layout, intrinsic, wrap) = self.rebuild_markdown_geometry(
+                let (layout, intrinsic, wrap, _) = self.rebuild_markdown_geometry(
                     surface,
                     body,
                     scale,
@@ -8808,7 +8866,7 @@ impl Runtime<'_> {
             // against the monospace face.
             built.quads.extend(
                 prose
-                    .bands(&caret.selection)
+                    .bands(&caret.band)
                     .into_iter()
                     .filter_map(|band| bt_render::crop_to(band, built.clip))
                     .map(|rect| bt_render::PreviewQuad {
@@ -9031,7 +9089,14 @@ impl Runtime<'_> {
     ) -> Option<MarkdownCaretPaint> {
         let caret = self.preview_live_caret(surface)?;
         let content = self.preview_buffer_on(surface)?.content.as_deref()?;
-        let PreviewDocument::Markdown { ranges, source, .. } = &self.preview_pane(surface)?.doc
+        let pane = self.preview_pane(surface)?;
+        let PreviewDocument::Markdown {
+            blocks,
+            ranges,
+            maps,
+            source,
+            ..
+        } = &pane.doc
         else {
             return None;
         };
@@ -9063,6 +9128,22 @@ impl Runtime<'_> {
             // has no caret because nothing is going to land there.
             lit: self.preview_edit_focus() == Some(surface),
             selection: caret.range(),
+            // **The source block's half of whatever is selected** (2026-09-23):
+            // the caret's selection, or else the rendered one mapped back to the
+            // file, stretched while a drag is in flight to the byte the hand
+            // last reached — which is the one place a hand standing inside the
+            // source block is recorded, because no piece stands there.
+            band: preview_live::source_band(
+                caret.range(),
+                pane.md_select.as_ref(),
+                self.preview_text_drag
+                    .as_ref()
+                    .filter(|drag| drag.surface == surface)
+                    .and_then(|drag| drag.reached),
+                blocks,
+                ranges,
+                maps,
+            ),
             caret_width: (bt_render::CURSOR_BAR_WIDTH_LOGICAL_PX * scale)
                 .round()
                 .max(1.0),

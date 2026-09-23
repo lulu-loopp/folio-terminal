@@ -31217,6 +31217,7 @@ fn the_caret_the_ime_and_the_column_are_one_arithmetic_on_a_chinese_line() {
                 seat: MarkdownCaretSeat::Source(0, column),
                 lit: true,
                 selection: 0..0,
+                band: 0..0,
                 caret_width: 2.0,
                 preedit: None,
             }),
@@ -32944,6 +32945,7 @@ fn the_empty_page_and_a_gap_take_the_prose_face() {
         },
         lit: true,
         selection: 0..0,
+        band: 0..0,
         caret_width: 2.0,
         preedit: None,
     };
@@ -33180,6 +33182,7 @@ fn a_composition_is_drawn_at_the_caret_in_a_monospace_block() {
                 seat: MarkdownCaretSeat::Source(0, column),
                 lit: true,
                 selection: 0..0,
+                band: 0..0,
                 caret_width: 2.0,
                 preedit,
             }),
@@ -33285,6 +33288,7 @@ fn a_composition_is_never_written_into_the_buffer() {
             seat: MarkdownCaretSeat::Source(0, 2),
             lit: true,
             selection: 0..0,
+            band: 0..0,
             caret_width: 2.0,
             preedit: Some(preedit),
         }),
@@ -33513,6 +33517,7 @@ fn a_gap_and_the_empty_page_draw_a_composition_too() {
         },
         lit: true,
         selection: 0..0,
+        band: 0..0,
         caret_width: 2.0,
         preedit: Some(MarkdownPreedit {
             text: "nikan".to_owned(),
@@ -33699,6 +33704,169 @@ fn cancelling_a_composition_goes_through_one_door() {
     );
 }
 
+/// RED (preview report 2026-09-23, A) — **the source block is banded from the
+/// band it is handed, not from the caret's own selection.**
+///
+/// The paint half of the fix. A rendered selection crossing the source block
+/// reaches the painter as [`MarkdownCaretPaint::band`] while the caret's own
+/// range stays collapsed where it stands; the monospace block — a table under
+/// the caret, as in the report's appendix table — has to band its rows from the
+/// first and not from the second. The rows are the block's own two lines, each
+/// banded whole because the band runs past both ends of the block.
+///
+/// MUTATION: cut `caret.selection` in `push_markdown_source_block` (the old
+/// painter) and the block draws its caret and no band at all.
+#[test]
+fn a_source_block_bands_its_rows_from_the_band_it_is_handed() {
+    let metrics = seats::preview_markdown_metrics(1.0);
+    let palette = bt_render::chrome_palette();
+    let body = [0.0, 0.0, 400.0, 400.0];
+    let (left, _) = preview::markdown_measure_box(body, metrics);
+    let blocks = prose(&["first", "middle", "last"]);
+    let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
+    let art = PageArt {
+        math: &DocumentMath::default(),
+        pictures: &DocumentPictures::default(),
+        theme: bt_render::Theme::Dark,
+    };
+    let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+        line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
+    };
+    let source = mono_caret_block(1, 6, "| a |\n| bb |");
+    let mono = source.mono().expect("a table wears the mono face");
+    let layout = lay_markdown_out(
+        &blocks,
+        &intrinsic,
+        Some(&source),
+        400.0,
+        metrics,
+        art,
+        &mut shaper,
+    );
+    let caret = MarkdownCaretPaint {
+        seat: MarkdownCaretSeat::Source(0, 0),
+        lit: true,
+        selection: 6..6,
+        band: 0..40,
+        caret_width: 2.0,
+        preedit: None,
+    };
+    let built = build_preview_markdown_body(
+        body,
+        metrics,
+        [0.0, 0.0],
+        rested_bars(&[]),
+        MarkdownPage {
+            blocks: &blocks,
+            intrinsic: &intrinsic,
+            layout: &layout,
+            live: MarkdownLive {
+                source: Some(&source),
+                caret: Some(&caret),
+            },
+        },
+        &palette,
+        art,
+    );
+    let bands: Vec<[f32; 4]> = built
+        .body
+        .quads
+        .iter()
+        .filter(|quad| quad.color == palette.preview_selection)
+        .map(|quad| quad.rect)
+        .collect();
+    let top = metrics.padding_y + layout[1].top;
+    assert_eq!(bands.len(), 2, "one band per row of the block: {bands:?}");
+    for (row, (band, columns)) in bands.iter().zip([5.0, 6.0]).enumerate() {
+        let row_top = top + mono.line_height * row as f32;
+        assert_eq!(
+            [band[0], band[1], band[3]],
+            [left, row_top, row_top + mono.line_height],
+            "row {row} is banded from its first column, on its own row",
+        );
+        assert!(
+            band[2] >= left + mono.advance * columns,
+            "and to the end of its text at least: {band:?}",
+        );
+    }
+}
+
+/// RED (preview report 2026-09-23, A) — **the source block's band is chosen by
+/// one function and drawn from it in both faces.**
+///
+/// The pure half ([`preview_live::source_band`]) is held by its own tests and
+/// the monospace painter by
+/// `a_source_block_bands_its_rows_from_the_band_it_is_handed`; what is left is
+/// the wiring those cannot see, because it lives where the shaper does. The
+/// caret's paint asks `source_band` with the page's rendered selection and the
+/// in-flight drag's `reached`; the prose face bands `caret.band`; and the drag
+/// records `reached` for every gesture — a drag begun on a link spends no press
+/// and must still move the source block's band.
+///
+/// MUTATION: put `.bands(&caret.selection)` back in `build_preview_body_in`, or
+/// gate the `reached` write on `spends` again, and a clause below goes red.
+#[test]
+fn the_source_blocks_band_is_wired_through_one_function_in_both_faces() {
+    let paint = squeezed_body("Runtime", "preview_markdown_caret");
+    assert!(
+        paint.contains("band:preview_live::source_band(caret.range(),pane.md_select.as_ref(),")
+            && paint.contains(".and_then(|drag|drag.reached)"),
+        "the caret's paint asks source_band with md_select and the drag's reach",
+    );
+    let body = squeezed_body("Runtime", "build_preview_body_in");
+    assert!(
+        body.contains(".bands(&caret.band)") && !body.contains(".bands(&caret.selection)"),
+        "the prose face bands what it is handed",
+    );
+    let drag = squeezed_body("Runtime", "drag_preview_text");
+    assert!(
+        drag.contains("ifletSome(offset)=self.preview_md_file_offset_at(surface,position){")
+            && drag.contains("drag.reached=Some(offset);"),
+        "every gesture records the byte it reached, not only one the release spends",
+    );
+    assert!(
+        drag.contains("ifreach_moved{self.repaint_preview()?;}"),
+        "and a hand moving only inside the source block still asks for a frame",
+    );
+}
+
+/// RED (preview report 2026-09-23, C1) — **the arm that re-flows without
+/// parsing writes a `reflow` line to `BT_PREVIEW_TRACE`.**
+///
+/// A caret crossing into another block changes only the key's `source`, so
+/// `rebuild_preview_document` takes its no-parse arm — and that arm wrote no
+/// line, which is why the report's table flip could not be measured. The line
+/// is written on that arm, before it returns, with the cause read off the key
+/// being replaced and the cost the geometry pass reports. The formatter is held
+/// by `preview_trace`'s own test; the count by
+/// `a_realize_pass_reports_the_blocks_it_measured`.
+///
+/// MUTATION: delete the `preview_trace::reflow(` call and the arm is dark
+/// again.
+#[test]
+fn the_no_parse_arm_writes_a_reflow_line() {
+    let body = squeezed_body("Runtime", "rebuild_preview_document");
+    let arm = body
+        .find("ifreflow_only&&")
+        .expect("the no-parse arm is where it was");
+    let returns = arm
+        + body[arm..]
+            .find("return;")
+            .expect("and it returns before the parse");
+    let line = body[arm..returns]
+        .find("preview_trace::reflow(trace,")
+        .map(|at| arm + at);
+    assert!(
+        line.is_some(),
+        "the no-parse arm writes its line before it returns",
+    );
+    assert!(
+        body[arm..returns].contains("realized:cost.realized")
+            && body[..arm].contains("source:new.source!=old.source"),
+        "with the blocks it measured and whether the source block moved",
+    );
+}
+
 /// **The caret's block is drawn as the file's own bytes, and a fence keeps
 /// its highlighting while it is** (§7.1.3q, ticket T4).
 ///
@@ -33749,6 +33917,7 @@ fn the_carets_block_is_drawn_as_source_and_a_fence_keeps_its_highlighting() {
         seat: MarkdownCaretSeat::Source(1, 2),
         lit: true,
         selection: 0..0,
+        band: 0..0,
         caret_width: 2.0,
         preedit: None,
     };
@@ -33932,6 +34101,7 @@ fn a_caret_in_the_gap_between_two_blocks_is_one_empty_source_line() {
         },
         lit: true,
         selection: 0..0,
+        band: 0..0,
         caret_width: 2.0,
         preedit: None,
     };
