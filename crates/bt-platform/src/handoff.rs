@@ -112,7 +112,9 @@ pub enum Handoff {
     Reveal(PathBuf),
     /// [`reveal_verified`] — the same, for a path the ledger answered for.
     RevealVerified(PathBuf, VerifiedTarget),
-    /// [`shell_execute`] — an address that has already passed the caller's scheme policy.
+    /// [`shell_execute`] — an address that has already passed the caller's policy: the web
+    /// through `webnav::address_bar`, and since ticket 14 a `Ctrl`+click on a URI of any other
+    /// scheme, which the owner's ruling of 2026-09-21 admits whole.
     Address(String),
     /// [`open_local_file`] — a decoded local picture, to the system viewer.
     LocalImage(PathBuf),
@@ -925,9 +927,10 @@ mod macos_handoff {
     /// Ask the workspace to open one already-policy-checked address with its
     /// registered default handler.
     ///
-    /// Scheme allowlisting deliberately belongs to the caller — in this product
-    /// that is `webnav::address_bar`, which every caller passes through — and
-    /// this bridge supplies the parse. `URLWithString:` is that parse, and its
+    /// Which schemes may reach here deliberately belongs to the caller — in this
+    /// product `webnav::address_bar` for a web address, and the reader's own
+    /// `Ctrl`/`⌘`+click for a URI of any other scheme (owner ruling 2026-09-21) —
+    /// and this bridge supplies the parse. `URLWithString:` is that parse, and its
     /// refusal is the honest one: a string that is not a URL never reaches
     /// LaunchServices, so there is nothing here for a target to be reparsed as.
     pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), String> {
@@ -1941,8 +1944,9 @@ mod windows_handoff {
     /// Ask Windows to open one already-policy-checked address with its
     /// registered default handler.
     ///
-    /// Scheme allowlisting deliberately belongs to the caller — in this product
-    /// that is `webnav::address_bar`, which every caller passes through — and
+    /// Which schemes may reach here deliberately belongs to the caller — in this
+    /// product `webnav::address_bar` for a web address, and the reader's own
+    /// `Ctrl`+click for a URI of any other scheme (owner ruling 2026-09-21) — and
     /// this bridge supplies the audited UTF-16 boundary and the working
     /// directory. No parameters are supplied, so the address is never reparsed
     /// as a command line.

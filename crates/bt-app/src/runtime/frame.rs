@@ -636,7 +636,7 @@ impl Runtime<'_> {
             // Two refusals and one sentence: the address door's, answered here, and the
             // system's, answered when the OS hand-off lane does (2026-09-22) — both under the
             // cells the address is printed in, as they always were.
-            HyperlinkActivation::Browser => match self.hand_url_to_the_browser(&hyperlink.uri)? {
+            HyperlinkActivation::Browser(url) => match self.hand_url_to_the_browser(&url)? {
                 Some(handed) => {
                     self.if_refused(
                         handed,
@@ -701,6 +701,24 @@ impl Runtime<'_> {
                 self.open_local_path_verified(&path, facts);
             }
             HyperlinkActivation::Preview(path, at) => self.open_preview_at(path, at)?,
+            // **A share on another machine, handed to the system** (ticket 14, owner ruling
+            // 2026-09-21). Nothing was asked about it — not on the hover, not on this press — so
+            // it leaves through the door that needs no ledger, on the OS hand-off lane, where a
+            // cold `\\server` holds that lane and not this window. The door refuses a program by
+            // the list a local file meets, and says so in the files notice.
+            HyperlinkActivation::Share(path) => {
+                self.open_unverified_reference(&path);
+            }
+            // **Any other scheme, handed to whatever this machine has registered for it** (ticket
+            // 14, owner ruling 2026-09-21). A machine with no handler refuses it, and the refusal
+            // is said where the web arm's is: under the cells the address is printed in.
+            HyperlinkActivation::Scheme(uri) => {
+                let handed = self.hand_uri_to_the_system(&uri);
+                self.if_refused(
+                    handed,
+                    crate::handoff_lane::OnRefused::HyperlinkBlocked(hyperlink),
+                );
+            }
             // **Shown where it lives, whatever it is** (audit 3 C-4). A folder took this arm from
             // the beginning; a file takes it since the day `ShellExecuteW`'s `open` verb turned
             // out to be an interpreter for half a dozen extensions nobody had listed. Nothing
