@@ -615,8 +615,10 @@ each refused line named; *settings* through `parse_document` — an older part
 migrated, a future part refused whole — and then **each changed value through the
 function a press on its row calls, never by writing `settings.json` and waiting**,
 with the store's writes held so the batch lands as one write. A part the file does
-not carry is left alone. Two keys are this machine's own records and are not
-imported (`first_run_card`, `powershell_install_pending`); a row this platform
+not carry is left alone. Three keys are receipts about this machine and are not
+imported (`first_run_card`, `powershell_install_pending`,
+`cards_gesture_hint_offer`); `Focus mode` and `Offer PowerShell integration` are
+imported by pressing the row's own item, their only door; a row this platform
 does not have is stored and named. No confirmation before an import — it is the
 reader's deliberate gesture — and no network: syncing the file or the folder is a
 folder-sync tool's job. `Settings folder` opens the data directory through the

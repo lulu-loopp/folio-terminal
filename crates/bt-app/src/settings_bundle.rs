@@ -30,11 +30,14 @@
 //!
 //! # What an import leaves alone
 //!
-//! Two keys of `settings.json` are records about *this machine's* first run and
-//! not preferences: whether the first-run card has been put up here
-//! (`first_run_card`), and whether this machine owes its `$PROFILE` a line
-//! (`powershell_install_pending`). Another machine's answer to either is not a
-//! fact about this one, so they are kept as they stand. A row this platform
+//! Three keys of `settings.json` are receipts about *this machine* and not
+//! preferences: whether the first-run card has been put up here
+//! (`first_run_card`), whether this machine owes its `$PROFILE` a line
+//! (`powershell_install_pending`), and whether the cards' gesture hint has been
+//! shown here (`cards_gesture_hint_offer`, which has one spender and one
+//! restorer and no third opinion — `the_cards_offer_is_spent_in_one_place_and_given_back_in_one`).
+//! Another machine's answer to any of them is not a fact about this one, so they
+//! are kept as they stand. A row this platform
 //! does not have — `Acrylic` on a Mac, `Option key sends Alt` on Windows — is
 //! stored as it came, so the file still says it for the machine it belongs to,
 //! and named, because nothing on this screen will show it.
@@ -98,7 +101,6 @@ pub(crate) enum SettingChange {
     TerminalNotifications(bool),
     PowerShellOffer(bool),
     FocusCardHeight(u32),
-    CardsGestureHintOffer(bool),
     LineWrapping(bool),
     KeyHints(bool),
     TurnEndNotification(bool),
@@ -118,7 +120,7 @@ pub(crate) enum SettingChange {
 
 impl SettingChange {
     /// The Settings row this value is chosen on, for the platform question and
-    /// for the name a report gives it. `None` for the three values no row shows.
+    /// for the name a report gives it. `None` for the two values no row shows.
     pub(crate) const fn row(&self) -> Option<SettingsRow> {
         Some(match self {
             Self::Theme(_) => SettingsRow::Theme,
@@ -162,10 +164,9 @@ impl SettingChange {
             Self::LaunchOpens(_) => SettingsRow::LaunchOpens,
             Self::OptionSendsAlt(_) => SettingsRow::OptionSendsAlt,
             Self::MultilinePaste(_) => SettingsRow::MultilinePaste,
-            // The three with no row: an answer the PSReadLine card was given,
-            // which pages' Advanced groups are open, and whether the cards'
-            // gesture hint has been shown. Each is read where it is used.
-            Self::PsReadLineInvite(_) | Self::AdvancedOpen(_) | Self::CardsGestureHintOffer(_) => {
+            // The two with no row: an answer the PSReadLine card was given, and
+            // which pages' Advanced groups are open. Each is read where it is used.
+            Self::PsReadLineInvite(_) | Self::AdvancedOpen(_) => {
                 return None;
             }
         })
@@ -212,7 +213,6 @@ impl SettingChange {
             Self::TerminalNotifications(value) => settings.terminal_notifications = value,
             Self::PowerShellOffer(value) => settings.powershell_integration_offer = value,
             Self::FocusCardHeight(value) => settings.focus_card_height = value,
-            Self::CardsGestureHintOffer(value) => settings.cards_gesture_hint_offer = value,
             Self::LineWrapping(value) => settings.line_wrapping = value,
             Self::KeyHints(value) => settings.key_hints = value,
             Self::TurnEndNotification(value) => settings.turn_end_notification = value,
@@ -249,7 +249,7 @@ pub(crate) struct SettingsPlan {
 ///
 /// The document is taken apart field by field with no `..`, so a key added to
 /// `SettingsV1` does not compile here until somebody has said which door it
-/// enters by. The two machine records are named and left behind; see the
+/// enters by. The three machine receipts are named and left behind; see the
 /// module header.
 pub(crate) fn plan_settings(
     current: &SettingsV1,
@@ -288,7 +288,7 @@ pub(crate) fn plan_settings(
         terminal_notifications,
         powershell_integration_offer,
         focus_card_height,
-        cards_gesture_hint_offer,
+        cards_gesture_hint_offer: _,
         line_wrapping,
         key_hints,
         turn_end_notification,
@@ -301,7 +301,8 @@ pub(crate) fn plan_settings(
         quake_startup_command,
         quake_top_gap,
         quake_restore,
-        // This machine's own two records — see the module header.
+        // This machine's own receipts — see the module header, and the third
+        // one above.
         first_run_card: _,
         powershell_install_pending: _,
         launch_opens,
@@ -425,10 +426,6 @@ pub(crate) fn plan_settings(
     offer(
         current.focus_card_height != focus_card_height,
         SettingChange::FocusCardHeight(focus_card_height),
-    );
-    offer(
-        current.cards_gesture_hint_offer != cards_gesture_hint_offer,
-        SettingChange::CardsGestureHintOffer(cards_gesture_hint_offer),
     );
     offer(
         current.line_wrapping != line_wrapping,
@@ -690,6 +687,7 @@ mod tests {
             let expected = SettingsV1 {
                 first_run_card: current.first_run_card,
                 powershell_install_pending: current.powershell_install_pending,
+                cards_gesture_hint_offer: current.cards_gesture_hint_offer,
                 ..imported.clone()
             };
             assert_eq!(folded, expected, "{platform:?}");

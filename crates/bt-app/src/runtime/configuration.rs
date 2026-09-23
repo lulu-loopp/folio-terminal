@@ -28,11 +28,11 @@ impl Runtime<'_> {
     pub(crate) fn open_configuration_door(&mut self, door: settings::ConfigurationDoor) {
         match door {
             settings::ConfigurationDoor::Export => {
-                if let Err(error) = self
-                    .window
-                    .save_picker
-                    .request(None, bt_persist::EXPORT_FILE_NAME)
-                {
+                let asked = match &self.window.save_picker {
+                    Some(picker) => picker.request(None, bt_persist::EXPORT_FILE_NAME),
+                    None => Err("this window has no save dialog".to_owned()),
+                };
+                if let Err(error) = asked {
                     eprintln!("recoverable save dialog failure: {error}");
                 }
             }
@@ -54,7 +54,12 @@ impl Runtime<'_> {
 
     /// Collect the save dialog's answer, once, after it has shut.
     pub(in crate::runtime) fn apply_save_pick_result(&mut self) -> Result<()> {
-        let Some(result) = self.window.save_picker.take_result() else {
+        let Some(result) = self
+            .window
+            .save_picker
+            .as_ref()
+            .and_then(bt_platform::SaveFilePicker::take_result)
+        else {
             return Ok(());
         };
         match result {
@@ -396,11 +401,12 @@ impl Runtime<'_> {
             SettingChange::Scrollback(lines) => {
                 self.apply_scrollback_lines(lines)?;
             }
-            // The row's door turns this window's posture and records it — but
-            // only when the posture moves. A window already standing in the
-            // imported posture still owes the file the value.
+            // **Through the row's own press**, because the posture has two doors
+            // and this is one of them (`only_the_chord_and_the_settings_row_write_the_bit`).
+            // That door records the value only when the posture moves; a window
+            // already standing in the imported posture still owes the file it.
             ref change @ SettingChange::FocusMode(on) => {
-                self.set_focus_mode(on)?;
+                self.press_imported_switch(settings::SettingsRow::FocusMode, on)?;
                 self.store_imported_value(change);
             }
             SettingChange::MinimumContrast(floor) => {
@@ -409,8 +415,10 @@ impl Runtime<'_> {
             SettingChange::TerminalNotifications(enabled) => {
                 self.apply_terminal_notifications(enabled);
             }
+            // Through the row's own press too: its door is more than the store —
+            // it starts the `$PROFILE` work the answer asks for.
             SettingChange::PowerShellOffer(enabled) => {
-                self.press_powershell_integration_offer(enabled)?;
+                self.press_imported_switch(settings::SettingsRow::PowerShellOffer, enabled)?;
             }
             SettingChange::FocusCardHeight(height) => {
                 self.apply_focus_card_height(height)?;
@@ -456,16 +464,28 @@ impl Runtime<'_> {
             }
             // Read where they are used, so the store is their door: the answer
             // the PSReadLine card was given, the open Advanced groups, the
-            // gesture hint's receipt, the summoned terminal's profile — stored
+            // summoned terminal's profile — stored
             // by id, which is what its row's press stores too, rather than
             // through the row's index into this table — and its top gap.
             ref change @ (SettingChange::PsReadLineInvite(_)
             | SettingChange::AdvancedOpen(_)
-            | SettingChange::CardsGestureHintOffer(_)
             | SettingChange::QuakeProfile(_)
             | SettingChange::QuakeTopGap(_)) => self.store_imported_value(change),
         }
         Ok(())
+    }
+
+    /// **Press an On/Off row's item for an imported value** — the very target a
+    /// click on that item is, through `apply_settings_choice`, for the two rows
+    /// whose press is a door with rules of its own about who may walk through it.
+    fn press_imported_switch(&mut self, row: settings::SettingsRow, on: bool) -> Result<()> {
+        let Some(index) = settings::FORMULA_OPTIONS
+            .iter()
+            .position(|item| *item == on)
+        else {
+            return Ok(());
+        };
+        self.apply_settings_choice(settings::SettingsTarget::Choice(row, index))
     }
 
     /// Write one imported value into the settings document as it stands.

@@ -12779,7 +12779,9 @@ struct WindowRuntime {
     /// The system's save dialog behind the About page's `Export…` (0.4.4 ticket
     /// 05). Its own bridge, for [`Self::image_picker`]'s reason: one gesture in
     /// flight per bridge, and the answer is a place to write, not a file to read.
-    save_picker: bt_platform::SaveFilePicker,
+    /// `None` when it could not be installed, which is not a reason for the
+    /// window not to open.
+    save_picker: Option<bt_platform::SaveFilePicker>,
     /// Whether a picture chooser is out. A `bool` and not a
     /// [`FolderPick`]-shaped enum, because there is exactly one row that opens
     /// this one and the answer has nowhere else to go.
@@ -38747,7 +38749,7 @@ struct NewWindowParts {
     math_context_menu: bt_platform::MathContextMenu,
     folder_picker: bt_platform::FolderPicker,
     image_picker: bt_platform::ImagePicker,
-    save_picker: bt_platform::SaveFilePicker,
+    save_picker: Option<bt_platform::SaveFilePicker>,
     ime_system_caret: bt_platform::ImeSystemCaret,
     rail: seats::RailState,
     seat_viewport: LogicalRect,
@@ -39918,9 +39920,12 @@ impl Runtime<'_> {
         let image_picker = bt_platform::ImagePicker::new(native)
             .map_err(|error| anyhow!(error))
             .context("install deferred picture chooser")?;
+        // **Reported, not propagated** (`the_m1_startup_path_has_no_fatal_platform_call_off_windows`):
+        // the export's dialog is not a reason for a window not to open. A window
+        // without one says so when `Export…` is pressed.
         let save_picker = bt_platform::SaveFilePicker::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("install deferred save dialog")?;
+            .inspect_err(|error| eprintln!("recoverable save dialog install failure: {error}"))
+            .ok();
         // Asked of DWM once, before anything reads the Acrylic row, by writing
         // the attribute's own default: a Windows that has never heard of
         // `DWMWA_SYSTEMBACKDROP_TYPE` refuses it, and one that has is unchanged.
@@ -41819,7 +41824,25 @@ impl Runtime<'_> {
             self.apply_turn_end_notification(enabled);
         }
         if let Some(enabled) = settings::powershell_integration_offer_requested(target) {
-            self.press_powershell_integration_offer(enabled)?;
+            self.apply_powershell_integration_offer(enabled)?;
+            if !enabled
+                && !self
+                    .app
+                    .settings_store
+                    .loaded()
+                    .powershell_integration_offer
+            {
+                shell_integration::begin_removal();
+            }
+            if enabled
+                && self
+                    .app
+                    .settings_store
+                    .loaded()
+                    .powershell_integration_offer
+            {
+                shell_integration::begin_enable();
+            }
         }
         // The machine fact travels with the press: what the switch's `On` reaches
         // is `explorer_menu::place_when_on`'s answer about this Windows and this

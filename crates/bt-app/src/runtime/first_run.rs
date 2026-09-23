@@ -3,8 +3,7 @@
 
 use crate::{
     Announce, Runtime, attention_codex, attention_copilot, attention_hooks, attention_ownership,
-    diagnostics, explorer_menu, first_run, i18n, persist, psreadline, restore, shell_integration,
-    toast, tooltip,
+    diagnostics, explorer_menu, first_run, i18n, persist, psreadline, restore, toast, tooltip,
 };
 use anyhow::Result;
 use std::path::PathBuf;
@@ -978,28 +977,5 @@ impl Runtime<'_> {
             return Ok(());
         }
         self.settle_pane_notices()
-    }
-
-    /// **Everything a press on the `Offer PowerShell integration` row does** —
-    /// the stored answer, and the `$PROFILE` work the answer starts: Off takes
-    /// Folio's lines out, On puts them back where they were wanted.
-    ///
-    /// One function for the press and for an import that changes the row (0.4.4
-    /// ticket 05), because an imported value goes through the door a press on
-    /// its row goes through, and this row's door is more than the store.
-    pub(crate) fn press_powershell_integration_offer(&mut self, enabled: bool) -> Result<()> {
-        self.apply_powershell_integration_offer(enabled)?;
-        let offered = self
-            .app
-            .settings_store
-            .loaded()
-            .powershell_integration_offer;
-        if !enabled && !offered {
-            shell_integration::begin_removal();
-        }
-        if enabled && offered {
-            shell_integration::begin_enable();
-        }
-        Ok(())
     }
 }
