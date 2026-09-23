@@ -1940,14 +1940,13 @@ impl Runtime<'_> {
         // A root is a *place*, so it is opened rather than selected — see
         // `bt_platform::reveal_arguments` for why `/select` on a folder is one
         // level too far out. A failure to reach Explorer withholds the
-        // confirmation rather than claiming one, which is the honest report.
-        if !self.reveal_in_explorer(Path::new(&root)) {
-            return Ok(());
-        }
-        self.window.revealed_foot = Some((RevealedFoot::Column(seat), Instant::now()));
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
+        // confirmation rather than claiming one, which is the honest report —
+        // so the confirmation waits for the lane to say Explorer took it.
+        let handed = self.reveal_in_explorer(Path::new(&root));
+        self.when_handed_over(
+            handed,
+            crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Column(seat)),
+        );
         Ok(())
     }
 

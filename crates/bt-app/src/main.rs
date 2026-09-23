@@ -73,6 +73,7 @@ mod git_graph;
 mod git_panel;
 mod git_watch;
 mod glyph_trace;
+mod handoff_lane;
 mod hang_watch;
 mod hex_peek;
 mod highlight;
@@ -647,6 +648,14 @@ enum AppEvent {
     /// window's own picture mailbox by the time this is sent, and this says only
     /// that there is one.
     ClipboardPictureReady,
+    /// **A hand-off to the system has been answered** (`handoff_lane`, `docs/DESIGN.md`
+    /// 2026-09-22 — *a hand-off to the system runs on its own lane*).
+    ///
+    /// The same family as every lane above, and owed its own wake because the answer can land
+    /// with nothing else happening: a reveal's confirmation, or a refusal the reader is owed,
+    /// arrives after the press that asked for it has long been drawn. Carries nothing: the answers
+    /// are in the lane's own channel, and this says only that there is one.
+    HandoffAnswered,
 }
 
 impl AppEvent {
@@ -692,7 +701,8 @@ impl AppEvent {
             | Self::StorageChanged
             | Self::SystemPreferencesChanged
             | Self::WindowChromeChanged
-            | Self::NotificationClicked => Station::Chrome,
+            | Self::NotificationClicked
+            | Self::HandoffAnswered => Station::Chrome,
             Self::PtyOutput
             | Self::GitChanged
             | Self::PreviewFileChanged
@@ -11482,6 +11492,10 @@ struct App {
     /// different pictures. A number minted here is unique wherever it is read.
     animation_serials: u64,
     event_proxy: EventLoopProxy<AppEvent>,
+    /// **The OS hand-off lane** — the one thread every hand-off that leaves a window runs on
+    /// (`handoff_lane`). On the application, like the workers beside it: the ids it mints have to
+    /// be unique across windows, because an answer finds its window by id.
+    handoff_lane: handoff_lane::HandoffLane,
     math_worker: MathWorker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
@@ -14152,6 +14166,11 @@ struct WindowRuntime {
     /// reason those two do not have: they each have exactly one sentence to say
     /// and say it once per run, while this one is said as often as it is earned.
     files_notice: Option<(String, Instant)>,
+    /// **What this window owes the answers to its own hand-offs** (`handoff_lane`), by id.
+    ///
+    /// On the window and not on the lane, because that is what makes an answer find the window
+    /// that asked and no other: a closed window takes its duties with it.
+    handoffs: handoff_lane::Pending<handoff_lane::Duty>,
     /// The files column holding the keyboard, or `None` when a shell has it.
     ///
     /// **This is `InputOwner::FilesTree`** (`docs/DESIGN.md` §7.1.5, D47) — the
@@ -38599,6 +38618,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         git_graphs_shown: BTreeMap::new(),
         files_view_widths: BTreeMap::new(),
         files_notice: None,
+        handoffs: handoff_lane::Pending::default(),
         files_focus: FilesKeyboardFocus::default(),
         rename: None,
         blank_page: None,
@@ -39668,6 +39688,12 @@ impl Runtime<'_> {
         }
         let pty_time = phase_started.elapsed();
         let math_worker = MathWorker::spawn(proxy.clone())?;
+        let handoff_lane = handoff_lane::HandoffLane::spawn({
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(AppEvent::HandoffAnswered);
+            }
+        })?;
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
         let file_index_worker = palette_index::IndexWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
@@ -39688,6 +39714,7 @@ impl Runtime<'_> {
             animation_serials: 0,
             event_proxy: proxy.clone(),
             git_watch: git_watch::GitWatch::default(),
+            handoff_lane,
             math_worker,
             math_worker_running: true,
             math_worker_notice_pending: false,
@@ -42980,18 +43007,18 @@ impl Runtime<'_> {
     /// A refusal is a card and not a silence, because the reader is looking at
     /// this window and the answer arrived somewhere else: nothing appearing at
     /// all is indistinguishable from a page that opened behind us.
+    ///
+    /// **Handed to the OS hand-off lane** (2026-09-22), so the card arrives when the lane answers
+    /// rather than while the press is still being handled — with the door's words, as before.
     fn open_font_settings(&mut self) -> Result<()> {
-        let result = native_window(&self.window.window).and_then(|native| {
-            bt_platform::open_system_fonts_page(native).map_err(anyhow::Error::msg)
-        });
-        if let Err(error) = result {
-            return self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                Some(i18n::Text::InstallFonts.text().to_owned()),
-                format!("{error:#}"),
-            );
-        }
+        let handed = self.hand_off(
+            bt_platform::Handoff::FontsPage,
+            handoff_lane::Refusal {
+                stderr: None,
+                program_notice: false,
+            },
+        );
+        self.if_refused(handed, handoff_lane::OnRefused::FontsToast);
         Ok(())
     }
 
@@ -44240,10 +44267,12 @@ impl Runtime<'_> {
     /// The card's button says `Opened` for 1300ms after — the window-level ack
     /// [`Self::preview_open_button_label`] reads — and it is one timer because it
     /// is one press at a time, whichever surface's card was the one pressed.
+    ///
+    /// The ack is the lane's to trigger since 2026-09-22: it is drawn when the system has taken
+    /// the file, which is what `Opened` claims.
     fn open_path_in_default_app(&mut self, path: &Path) -> Result<()> {
-        if self.open_local_path(path) {
-            self.window.preview_opened_at = Some(Instant::now());
-        }
+        let handed = self.open_local_path(path);
+        self.when_handed_over(handed, handoff_lane::OnAccepted::PreviewOpened);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -46048,7 +46077,9 @@ impl Runtime<'_> {
     }
 
     /// Hand one path to the system's default handler, and say so when the window
-    /// declines. Returns whether the system took it.
+    /// declines. Returns the hand-off's id: the answer arrives later, on the OS
+    /// hand-off lane's completion (2026-09-22), and a caller that owes the reader
+    /// something on success says so with [`Self::when_handed_over`].
     ///
     /// The refusal is spoken rather than logged: a double click that does
     /// nothing at all is indistinguishable from a double click that was not
@@ -46059,21 +46090,17 @@ impl Runtime<'_> {
     /// The answer is reported because a *foot* has something to do with it that
     /// a row has not: it confirms in place, and a confirmation printed over a
     /// reveal that never happened would be the one thing worse than silence.
-    fn open_local_path(&mut self, path: &Path) -> bool {
-        let result = native_window(&self.window.window).and_then(|native| {
-            bt_platform::open_local_path(native, path)
-                .map_err(|error| anyhow!(error))
-                .context("open an activated files row with its default handler")
-        });
-        if let Err(error) = result {
-            if format!("{error:#}").contains(bt_platform::PROGRAM_REFUSED) {
-                self.window.files_notice =
-                    Some((files_program_refused_notice().to_owned(), Instant::now()));
-            }
-            eprintln!("recoverable files row open failure: {error:#}");
-            return false;
-        }
-        true
+    fn open_local_path(&mut self, path: &Path) -> handoff_lane::HandoffId {
+        self.hand_off(
+            bt_platform::Handoff::Open(path.to_path_buf()),
+            handoff_lane::Refusal {
+                stderr: Some((
+                    "recoverable files row open failure",
+                    "open an activated files row with its default handler",
+                )),
+                program_notice: true,
+            },
+        )
     }
 
     /// Show a path in Explorer — **the one door all three feet go through**
@@ -46087,21 +46114,20 @@ impl Runtime<'_> {
     /// highlights a file inside its folder and opens a folder as itself.
     ///
     /// Reported, because a foot confirms in place and a confirmation printed
-    /// over a reveal that never happened is the one thing worse than silence.
-    fn reveal_in_explorer(&mut self, path: &Path) -> bool {
-        let result = native_window(&self.window.window).and_then(|native| {
-            bt_platform::reveal_in_explorer(native, path)
-                .map_err(|error| anyhow!(error))
-                .context("show a path in File Explorer")
-        });
-        if let Err(error) = result {
-            // A courtesy, not an error path: a window that refuses to keep
-            // working because a file manager would not start is a worse answer
-            // than a button that quietly did nothing.
-            eprintln!("recoverable reveal failure: {error:#}");
-            return false;
-        }
-        true
+    /// over a reveal that never happened is the one thing worse than silence —
+    /// which since 2026-09-22 is the lane's answer arriving: the foot names a
+    /// confirmation with [`Self::when_handed_over`] and it is drawn when the
+    /// system has taken the reveal. A refusal is a courtesy, not an error path: a
+    /// window that refuses to keep working because a file manager would not start
+    /// is a worse answer than a button that quietly did nothing.
+    fn reveal_in_explorer(&mut self, path: &Path) -> handoff_lane::HandoffId {
+        self.hand_off(
+            bt_platform::Handoff::Reveal(path.to_path_buf()),
+            handoff_lane::Refusal {
+                stderr: Some(("recoverable reveal failure", "show a path in File Explorer")),
+                program_notice: false,
+            },
+        )
     }
 
     /// [`Self::reveal_in_explorer`] for a path a worker has already answered for — the door a
@@ -46135,34 +46161,34 @@ impl Runtime<'_> {
         &mut self,
         path: &Path,
         target: bt_platform::VerifiedTarget,
-    ) -> bool {
-        let result = native_window(&self.window.window).and_then(|native| {
-            bt_platform::open_local_path_verified(native, path, target)
-                .map_err(|error| anyhow!(error))
-                .context("open a printed reference with its default handler")
-        });
-        if let Err(error) = result {
-            if format!("{error:#}").contains(bt_platform::PROGRAM_REFUSED) {
-                self.window.files_notice =
-                    Some((files_program_refused_notice().to_owned(), Instant::now()));
-            }
-            eprintln!("recoverable reference open failure: {error:#}");
-            return false;
-        }
-        true
+    ) -> handoff_lane::HandoffId {
+        self.hand_off(
+            bt_platform::Handoff::OpenVerified(path.to_path_buf(), target),
+            handoff_lane::Refusal {
+                stderr: Some((
+                    "recoverable reference open failure",
+                    "open a printed reference with its default handler",
+                )),
+                program_notice: true,
+            },
+        )
     }
 
-    fn reveal_verified(&mut self, path: &Path, target: bt_platform::VerifiedTarget) -> bool {
-        let result = native_window(&self.window.window).and_then(|native| {
-            bt_platform::reveal_verified(native, path, target)
-                .map_err(|error| anyhow!(error))
-                .context("show a verified path in the file manager")
-        });
-        if let Err(error) = result {
-            eprintln!("recoverable reveal failure: {error:#}");
-            return false;
-        }
-        true
+    fn reveal_verified(
+        &mut self,
+        path: &Path,
+        target: bt_platform::VerifiedTarget,
+    ) -> handoff_lane::HandoffId {
+        self.hand_off(
+            bt_platform::Handoff::RevealVerified(path.to_path_buf(), target),
+            handoff_lane::Refusal {
+                stderr: Some((
+                    "recoverable reveal failure",
+                    "show a verified path in the file manager",
+                )),
+                program_notice: false,
+            },
+        )
     }
 
     /// Whether it is worth writing down which tabs spoke on this turn.
@@ -57627,6 +57653,23 @@ impl FolioApp {
         (batch, gone)
     }
 
+    /// **Give every hand-off answer to the window that asked for it** (`handoff_lane`).
+    ///
+    /// Each answer is offered to every open window and claimed by the one whose duties hold its
+    /// id — at most one, because the ids are the lane's and unique in the process. A window that
+    /// has closed, or is on its way out, is not offered anything, so an answer to it is dropped
+    /// here rather than raised somewhere else.
+    fn answer_handoffs(&mut self) -> Result<()> {
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        let answers = app.handoff_lane.answers();
+        for answer in &answers {
+            self.for_each_window(|runtime| runtime.answer_handoff(answer))?;
+        }
+        Ok(())
+    }
+
     /// Answer every toast clicked since the last turn.
     ///
     /// **Here and not in a `Runtime`**, because this is the one lane whose answer names its own
@@ -60713,6 +60756,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // somebody installs a font. Every window when it does, because the
             // list is a fact about the machine and any of them may be showing a
             // picker drawn from it.
+            AppEvent::HandoffAnswered => self.answer_handoffs(),
             AppEvent::FontsScanned => {
                 if settings::adopt_scanned_families() {
                     self.for_each_window(|runtime| {

@@ -55,7 +55,7 @@ use crate::{
     wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
 };
 use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{
     FrameSource, FrameTrigger, ImeCursorArea, PREVIEW_BODY_INSET_LOGICAL_PX, Preedit,
@@ -4073,13 +4073,11 @@ impl Runtime<'_> {
         // something rather than to open it, so the foot can finally name what
         // it prints: in a folder of two hundred rows, "the directory it is in"
         // is not an answer to "where is this file".
-        if !self.reveal_in_explorer(&path) {
-            return Ok(());
-        }
-        self.window.revealed_foot = Some((RevealedFoot::Preview(seat), Instant::now()));
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
+        let handed = self.reveal_in_explorer(&path);
+        self.when_handed_over(
+            handed,
+            crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Preview(seat)),
+        );
         Ok(())
     }
 
@@ -5157,14 +5155,16 @@ impl Runtime<'_> {
                 }
             }
             PreviewLinkActivation::Browser(url) => {
-                let result = native_window(&self.window.window).and_then(|native| {
-                    bt_platform::shell_execute(native, &url)
-                        .map_err(|error| anyhow!(error))
-                        .context("open a markdown link in the system browser")
-                });
-                if let Err(error) = result {
-                    eprintln!("recoverable markdown link open failure: {error:#}");
-                }
+                self.hand_off(
+                    bt_platform::Handoff::Address(url),
+                    crate::handoff_lane::Refusal {
+                        stderr: Some((
+                            "recoverable markdown link open failure",
+                            "open a markdown link in the system browser",
+                        )),
+                        program_notice: false,
+                    },
+                );
             }
             PreviewLinkActivation::Blocked(url) => self.say_address_refused(surface, &url)?,
             // A scheme this window does not open, or an anchor it cannot yet
@@ -12997,15 +12997,17 @@ impl Runtime<'_> {
         self.present_chrome_change()
     }
 
-    pub(in crate::runtime) fn activate_local_image_path(&self, path: &std::path::Path) {
-        let result = native_window(&self.window.window).and_then(|native| {
-            bt_platform::open_local_file(native, path)
-                .map_err(|error| anyhow!(error))
-                .context("open decoded local image in the system viewer")
-        });
-        if let Err(error) = result {
-            eprintln!("recoverable local image open failure: {error:#}");
-        }
+    pub(in crate::runtime) fn activate_local_image_path(&mut self, path: &std::path::Path) {
+        self.hand_off(
+            bt_platform::Handoff::LocalImage(path.to_path_buf()),
+            crate::handoff_lane::Refusal {
+                stderr: Some((
+                    "recoverable local image open failure",
+                    "open decoded local image in the system viewer",
+                )),
+                program_notice: false,
+            },
+        );
     }
 
     /// [`Self::terminal_link_grasp`] on the other surface links are drawn on

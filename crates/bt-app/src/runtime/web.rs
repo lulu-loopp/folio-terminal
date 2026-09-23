@@ -8,8 +8,7 @@ use crate::{
     preview_image_placement, restore, revived_page_of, seats, shown_address, web_mouse_button,
     web_trace, webhost, webnav, websheet,
 };
-use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use bt_layout::SeatId;
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -947,22 +946,27 @@ impl Runtime<'_> {
     /// so one address leaving this window is always one press that asked for
     /// it.
     ///
-    /// Answers whether the address was handed over, so a caller that owes the
-    /// reader a refusal can say one.
-    pub(crate) fn hand_url_to_the_browser(&mut self, url: &str) -> Result<bool> {
+    /// Answers the hand-off's id when the address passed the door and went to the
+    /// OS hand-off lane, and `None` when the door refused it — so a caller that owes
+    /// the reader a refusal can say one now, and one for the system's refusal with
+    /// [`Self::if_refused`] when the lane answers (2026-09-22).
+    pub(crate) fn hand_url_to_the_browser(
+        &mut self,
+        url: &str,
+    ) -> Result<Option<crate::handoff_lane::HandoffId>> {
         let webnav::Decision::Navigate(target) = webnav::address_bar(url) else {
-            return Ok(false);
+            return Ok(None);
         };
-        let result = native_window(&self.window.window).and_then(|native| {
-            bt_platform::shell_execute(native, &target)
-                .map_err(|error| anyhow!(error))
-                .context("hand a page's address to the system browser")
-        });
-        if let Err(error) = result {
-            eprintln!("recoverable web hand-off failure: {error:#}");
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(Some(self.hand_off(
+            bt_platform::Handoff::Address(target),
+            crate::handoff_lane::Refusal {
+                stderr: Some((
+                    "recoverable web hand-off failure",
+                    "hand a page's address to the system browser",
+                )),
+                program_notice: false,
+            },
+        )))
     }
 
     /// **`Ctrl+L`, and the double click on the name cell** — the address

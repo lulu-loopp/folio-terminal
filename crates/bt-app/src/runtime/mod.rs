@@ -17,6 +17,7 @@ mod first_run;
 mod floats;
 mod frame;
 mod git;
+mod handoff;
 mod i18n;
 mod keyboard;
 mod math;

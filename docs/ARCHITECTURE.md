@@ -307,6 +307,9 @@ per row.
 
 The seams that already implement this shape: `bt-app::main::run_path_verify_worker`
 (*one question, one call, one answer, and nothing else runs here*),
+`bt-app::handoff_lane` (the OS hand-off lane: request id, the asking window's
+`Pending` as the target incarnation, press order, a bound of 32 with no
+coalescing, completion as the door's own `Result`),
 `bt-pty::PtySession`, `bt-app::persist::SessionWriter`,
 `bt-app::trace_sink::Queue`, `bt-app::main::Runtime::present_seats_and_commit`.
 
@@ -354,7 +357,7 @@ this list that blocks on something outside the process is a defect.
 
 | # | call | where | disposition |
 |---|---|---|---|
-| 1 | `ShellExecuteW` / `NSWorkspace::openURL:` — synchronous, no timeout; the measured ~1.4 s Ctrl+click stall | `bt-platform::handoff::{windows_handoff,macos_handoff}::hand_over`, reached from `Runtime::open_local_path`, `reveal_in_explorer`, `open_local_path_verified`, `reveal_verified`, `open_preview_link`, `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings` | **0.4.4** — move to the OS hand-off lane; ticket to be issued |
+| 1 | `ShellExecuteW` / `NSWorkspace::openURL:` — synchronous, no timeout; the measured ~1.4 s Ctrl+click stall | `bt-platform::handoff::{windows_handoff,macos_handoff}::hand_over`, reached from `Runtime::open_local_path`, `reveal_in_explorer`, `open_local_path_verified`, `reveal_verified`, `open_preview_link`, `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings` | **done** — *a hand-off to the system runs on its own lane, and the window that receives it may take the front* (`DESIGN.md`, 2026-09-22) |
 | 2 | the marks lock: `try_lock` then `sleep` up to `OUR_TURN` = 2 s, then a dated `$PROFILE` copy, an atomic write and two marks writes | `Runtime::add_to_profile`, `spend_powershell_intent` → `profile_runtime::install_recorded` | **0.4.4** — storage lane; the enable and removal halves are already on workers, the install half is not |
 | 3 | `psreadline::apply_recorded` — nine files, ~429 KB, under the same lock | `Runtime::apply_psreadline` | **0.4.4** — storage lane; named by the 2026-09-21 history entry |
 | 4 | `psreadline::installed_copy` — a recursive walk of the module directory | `Runtime::refresh_psreadline_installed` | **0.4.4** — observation lane |
@@ -474,7 +477,7 @@ A bare absolute path a program printed in the terminal, made clickable.
 | verdict | `bt-term` | `session::verify_path`, `DualPlaneSession::ask_about_reprinted_path` / `re_ask_about_link_target`, the `path_verdicts` ledger | `PathVerdict` | asked on `bt-path-verify-worker`; the ledger is per pane and bounded |
 | projection | `bt-viewport` | `implicit_hyperlinks`, `mark_osc_8_dotted`, `ViewportFrame::hyperlink_at` | `CellHyperlink` (defined in `bt-transcript`), `HyperlinkHit` | window thread, at frame build |
 | activation | `bt-app` | `Runtime::activate_hyperlink`, `verified_target_of` | `bt_platform::VerifiedTarget` | window thread, from `mouse_input` |
-| hand-off | `bt-platform` | `handoff::resolved_for_a_door`, `handoff::open_local_path_verified` | the OS's acceptance or refusal | window thread today; row 1 of §5.3 moves it |
+| hand-off | `bt-platform` | `handoff::resolved_for_a_door`, `handoff::open_local_path_verified` | the OS's acceptance or refusal | the OS hand-off lane (`bt-app::handoff_lane`), answered through `AppEvent::HandoffAnswered` |
 
 The chain **should remain layered** — five crates are not five excessive
 dependencies. Its defect is the absence of one current contract covering
