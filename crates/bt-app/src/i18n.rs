@@ -3174,9 +3174,7 @@ impl Text {
                 "The same for a dark window. Your own scheme files go in %APPDATA%\\Folio\\schemes.",
                 "深色窗口同理。你自己的配色文件放在 %APPDATA%\\Folio\\schemes。",
                 "The same for a dark window. Your own schemes go in ~/Library/Application Support/Folio/schemes.",
-                // zh: pending opus46 — the Windows sentence's Chinese with the
-                // Mac folder in it.
-                "The same for a dark window. Your own schemes go in ~/Library/Application Support/Folio/schemes.",
+                "深色窗口同理。你自己的配色文件放在 ~/Library/Application Support/Folio/schemes。",
             ),
             Self::SchemeFileSkipped => pick(lang, "Colour scheme skipped", "配色文件已跳过"),
 
@@ -6225,10 +6223,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 1] = [
-        // The Mac folder in the dark scheme row (0.4.4 ticket 07).
-        (Self::DescDarkScheme, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
