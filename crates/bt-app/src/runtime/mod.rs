@@ -24,6 +24,7 @@ mod mouse;
 mod palette;
 mod panes;
 mod peek;
+mod preview;
 mod profiles;
 mod quake;
 mod search;
