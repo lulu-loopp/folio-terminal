@@ -402,28 +402,6 @@ impl Runtime<'_> {
         host: Option<(RowHost, usize)>,
         now: Instant,
     ) -> bool {
-        // The card's life first, because it may take the card down or put up
-        // another; then its one hover, on whatever card is left standing.
-        let owed = self.observe_file_peek_life(host, now);
-        self.relight_file_peek_foot() | owed
-    }
-
-    /// **The hand crossed the foot's address**, in either direction: a frame
-    /// is owed so the strip lights or goes dark under it (owner report
-    /// 2026-09-23). Read against the painter's own receipt, so a move that
-    /// stays on one side of the edge owes nothing — the card is otherwise drawn
-    /// identically wherever the hand rests in it.
-    fn relight_file_peek_foot(&self) -> bool {
-        let lit = self.file_peek_foot_grasp();
-        self.window
-            .file_peek
-            .as_ref()
-            .is_some_and(|peek| peek.foot_lit != lit)
-    }
-
-    /// [`Self::observe_file_peek`]'s first half: the card's life under the
-    /// pointer — kept, re-armed, released or taken down.
-    fn observe_file_peek_life(&mut self, host: Option<(RowHost, usize)>, now: Instant) -> bool {
         let at = self
             .window
             .pointer_position
@@ -494,6 +472,22 @@ impl Runtime<'_> {
         let taken = self.hide_file_peek();
         self.window.file_peek = self.armed_file_peek(host, index, now);
         taken
+    }
+
+    /// **The hand crossed the foot's address**, in either direction: a frame
+    /// is owed so the strip lights or goes dark under it (owner report
+    /// 2026-09-23). Read against the painter's own receipt, so a move that
+    /// stays on one side of the edge owes nothing — the card is otherwise drawn
+    /// identically wherever the hand rests in it.
+    ///
+    /// Asked by both pointer callers right after [`Self::observe_file_peek`],
+    /// on whatever card that left standing.
+    pub(in crate::runtime) fn relight_file_peek_foot(&self) -> bool {
+        let lit = self.file_peek_foot_grasp();
+        self.window
+            .file_peek
+            .as_ref()
+            .is_some_and(|peek| peek.foot_lit != lit)
     }
 
     /// **The card this row would put up**, armed and not yet matured.

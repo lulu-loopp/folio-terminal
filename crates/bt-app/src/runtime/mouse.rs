@@ -348,7 +348,9 @@ impl Runtime<'_> {
             .flatten();
         self.window.float.observe(trigger, now);
         let row = self.glancing_row_at(position);
-        if self.observe_file_peek(row, now) && self.refresh_overlay() {
+        // And the foot's hover on whatever card is left (0.4.4 ticket 41).
+        let owed = self.observe_file_peek(row, now) | self.relight_file_peek_foot();
+        if owed && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         let tab = self
@@ -2084,7 +2086,11 @@ impl Runtime<'_> {
         // repaint would stay on the glass until some unrelated event redrew it —
         // which under a hand that has come to rest is never (real-machine
         // capture, 2026-08-13: the glance survived the move onto a folder row).
-        if self.observe_file_peek(row, Instant::now()) && self.refresh_overlay() {
+        // And the foot's hover on whatever card is left, on the same frame
+        // (0.4.4 ticket 41): the address lights or goes dark as the hand
+        // crosses its edge.
+        let owed = self.observe_file_peek(row, Instant::now()) | self.relight_file_peek_foot();
+        if owed && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         // Below every gesture that owns the pointer and beside the hover it

@@ -51223,7 +51223,7 @@ fn a_key_other_than_enter_tab_or_esc_reaches_nothing_and_leaves_the_card_up() {
     assert!(pending_paste_in(&tab).is_some());
 
     let ladder = squeezed_body("Runtime", "keyboard_input");
-    let rung = "ifletSome(default)=self.paste_card_default(){if!event.repeat&&letSome(answer)=paste_card_key(&event.logical_key,self.window.modifiers,default){self.answer_paste_card(answer)?;}returnOk(());}";
+    let rung = "ifself.paste_card_seat().is_some(){if!event.repeat&&letSome(default)=self.paste_card_default()&&letSome(answer)=paste_card_key(&event.logical_key,self.window.modifiers,default){self.answer_paste_card(answer)?;}returnOk(());}";
     let at = ladder
         .find(rung)
         .unwrap_or_else(|| panic!("the card's rung is not whole"));

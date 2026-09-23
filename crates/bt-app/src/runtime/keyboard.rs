@@ -1164,8 +1164,9 @@ impl Runtime<'_> {
         //
         // `Enter` is the card's default, which is `Join` for a block wrapped with the shell's
         // continuation mark (0.4.4 ticket 45).
-        if let Some(default) = self.paste_card_default() {
+        if self.paste_card_seat().is_some() {
             if !event.repeat
+                && let Some(default) = self.paste_card_default()
                 && let Some(answer) =
                     paste_card_key(&event.logical_key, self.window.modifiers, default)
             {
