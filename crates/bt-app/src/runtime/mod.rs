@@ -12,6 +12,7 @@ mod attention;
 mod clipboard;
 mod diagnostics;
 mod dpi;
+mod files;
 mod first_run;
 mod floats;
 mod frame;
