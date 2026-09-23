@@ -25702,7 +25702,8 @@ fn reference_run_rect(
 /// function that reads a `file:` URL as the path it names
 /// ([`webnav::LocalFileUrl`]) — never by string surgery, and never for an
 /// address from anywhere else, which is why a page on `http` still answers
-/// `None`: it has no file to hand anybody.
+/// `None` here: it has no *file* to hand anybody, and is handed to the browser
+/// as an address by the caller ([`preview_page_browser_hand_off`], ticket 39).
 fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
     if let Some(url) = source.web_url() {
         let path = webnav::LocalFileUrl::parse(url)?.into_path_and_tail().0;
@@ -25713,6 +25714,83 @@ fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
         .filter(|path| path_opens_as_a_page(path))
         .map(Path::to_path_buf)
 }
+
+/// **What a press on a page's `↗` hands to the machine** (§7.1.5g; ticket 39,
+/// owner ruling 2026-09-23: 「这个肯定是要能打开的」).
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PageHandOff {
+    /// A file on this machine, opened through [`Runtime::open_local_path`] —
+    /// the files column's door, which reads the program list.
+    File(PathBuf),
+    /// A share on another machine, handed over through
+    /// [`Runtime::open_unverified_reference`] exactly as ticket 14's
+    /// `HyperlinkActivation::Share` is.
+    Share(PathBuf),
+    /// An address that names no file, as the engine reports it
+    /// ([`preview::PreviewSource::web_url`]), query and fragment included: a
+    /// browser opens addresses, and the file was only ever the local case.
+    Address(String),
+}
+
+/// **The arrow's road is a property of the address, decided once.**
+///
+/// * A `file:` URL [`webnav::LocalFileUrl`] reads is a file on this machine,
+///   whatever kind of file: it takes the file door, so the program list
+///   applies — a `file:///…/x.exe` never leaves as a bare address for the
+///   shell to run.
+/// * A `file:` URL naming a share on another machine takes the share's door,
+///   the one `Ctrl` on a printed share takes.
+/// * Any other `file:` URL leaves by no road: a path never leaves as a URI
+///   (the reference table's rule, `terminal_reference_row`), because the shell
+///   would read it a second way and skip the list.
+/// * Every other address — `http`, `https`, whatever the engine is standing
+///   on — is handed over as that address.
+///
+/// A seat showing a file rather than an engine page answers with
+/// [`preview_page_hand_off`], which keeps its page-ness contract for the head
+/// that asks whether to draw the arrow at all.
+///
+/// Until ticket 39 the press asked [`preview_page_hand_off`] alone, so a page
+/// on `http://127.0.0.1:8732/…` drew the arrow in its head and its address row
+/// and both did nothing.
+fn preview_page_browser_hand_off(source: &preview::PreviewSource) -> Option<PageHandOff> {
+    let Some(url) = source.web_url() else {
+        return preview_page_hand_off(source).map(PageHandOff::File);
+    };
+    if let Some(local) = webnav::LocalFileUrl::parse(url) {
+        return Some(PageHandOff::File(local.into_path_and_tail().0));
+    }
+    if webnav::scheme_of(url).as_deref() == Some("file") {
+        return bt_platform::file_uri_to_path(url)
+            .filter(|path| bt_transcript::paths::is_a_share_on_another_machine(path))
+            .map(PageHandOff::Share);
+    }
+    Some(PageHandOff::Address(url.to_owned()))
+}
+
+/// **What the address arm puts on the OS hand-off lane, and what a refusal of
+/// it raises on the surface that was pressed** — the address unchanged, and the
+/// notice a refused address already has on a preview surface (ticket 14's
+/// `HyperlinkActivation::Scheme` arm), so a page the machine cannot open is not
+/// silent either.
+fn page_address_hand_off(
+    surface: PreviewSurface,
+    address: &str,
+) -> (bt_platform::Handoff, handoff_lane::OnRefused) {
+    (
+        bt_platform::Handoff::Address(address.to_owned()),
+        handoff_lane::OnRefused::PreviewAddressRefused(surface, address.to_owned()),
+    )
+}
+
+/// **The stderr words of a refused page address** — this button's own.
+const PAGE_ADDRESS_REFUSAL: handoff_lane::Refusal = handoff_lane::Refusal {
+    stderr: Some((
+        "recoverable page hand-off failure",
+        "open a web page in the system browser",
+    )),
+    program_notice: false,
+};
 
 /// **The file a page's `</>` would show you**, or `None` when that page has no
 /// second face (user ruling 2026-08-26; DESIGN §7.7 ⑭).

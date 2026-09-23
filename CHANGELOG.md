@@ -69,6 +69,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- The open-in-browser arrow on a web pane showing an `http` or `https` page
+  now opens that page in your browser; it used to do nothing.
 - While a divider is dragged, the pane under the pointer keeps the rounded
   top-right corner its card has.
 - On a slow disk, turning on PowerShell integration from the welcome card

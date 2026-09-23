@@ -11639,6 +11639,167 @@ fn only_a_page_with_a_file_behind_it_is_handed_over_to_a_browser() {
     );
 }
 
+/// RED (39) — **A page on an http address is handed to the browser as that address.**
+///
+/// A web pane on `http://127.0.0.1:8732/…` drew the `↗` in its head and in its address row, and
+/// pressing either did nothing: the press asked only for the file under the page, and an `http`
+/// page has none, so the handler returned before handing anything (owner, 2026-09-23:
+/// 「这个肯定是要能打开的」). The seat's source is minted by the producer the window commits a page
+/// with (`webnav::switcher_key`), and the request is the one `Runtime::open_preview_in_browser`
+/// puts on the OS hand-off lane — one `Handoff::Address`, the whole address, query and fragment
+/// included, and nothing else.
+///
+/// MUTATION: delete the new arm — answer `None` in `preview_page_browser_hand_off` where it maps
+/// `source.web_url()` to `PageHandOff::Address` — and no page on `http` hands anything.
+#[test]
+fn a_page_on_an_http_address_is_handed_to_the_browser_as_that_address() {
+    let surface = seat_of(TAB_ONE, SeatId(1));
+    for url in [
+        "http://127.0.0.1:8732/x.html",
+        "http://127.0.0.1:8732/design05/wireframe/menus-b.html",
+        "https://example.test/manual.pdf",
+        "https://example.test/a.html?q=1&r=two#section-3",
+        "http://localhost:5173/app",
+    ] {
+        let source = preview::PreviewSource::Web(webnav::switcher_key(url));
+        let Some(PageHandOff::Address(address)) = preview_page_browser_hand_off(&source) else {
+            panic!("a page with no file behind it is handed over by its address: {url:?}");
+        };
+        let (request, _) = page_address_hand_off(surface, &address);
+        assert_eq!(
+            request,
+            bt_platform::Handoff::Address(url.to_owned()),
+            "the lane receives the address as the engine reports it, and nothing else"
+        );
+    }
+}
+
+/// RED (39) — **A `file:` address hands the file it names, whatever the file is, never the address.**
+///
+/// The road is a property of the address, not of page-ness. A `.html` on this disk keeps the path
+/// road it has had since 2026-08-23 (`Runtime::open_local_path`, the files column's door), and so
+/// does a `file:` address that is not a page — a picture, a program — because that door reads the
+/// program list: a `file:///…/x.exe` must never leave as a bare address for the shell to run.
+/// Real files, minted by the real `webnav::Mint::file`, read back by the real
+/// `webnav::LocalFileUrl`.
+///
+/// MUTATION: in `preview_page_browser_hand_off`, answer a `web_url()` with
+/// `preview_page_hand_off(source).map(PageHandOff::File)` instead of `LocalFileUrl::parse` — the
+/// `.png` and the `.exe` hand nothing (or, with the `file:` fork removed too, the address).
+#[test]
+fn a_file_address_hands_the_file_it_names_whatever_the_file_is() {
+    let dir = std::env::temp_dir().join(format!(
+        "folio-t39-page-file-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for (name, bytes) in [
+        ("a.html", &b"<h1>a</h1>"[..]),
+        ("b.png", &b"PNG"[..]),
+        ("x.exe", &b"MZ"[..]),
+    ] {
+        let file = dir.join(name);
+        std::fs::write(&file, bytes).expect("a file on a disk");
+        let canonical = std::fs::canonicalize(&file).expect("canonicalise it");
+        let url = webnav::Mint::file(&canonical)
+            .expect("a local path mints")
+            .target()
+            .expect("a mint names its URL")
+            .to_owned();
+        let Some(PageHandOff::File(path)) =
+            preview_page_browser_hand_off(&preview::PreviewSource::Web(webnav::switcher_key(&url)))
+        else {
+            panic!("a file: address takes the file door, never the address: {url:?}");
+        };
+        assert_eq!(
+            std::fs::canonicalize(&path).expect("the handed path names a file on the disk"),
+            canonical,
+            "the path handed over is the address's own file: {url:?}"
+        );
+    }
+    // A local page shown as a file keeps the page answer, and a seat with no page has nothing.
+    let page = std::fs::canonicalize(dir.join("a.html")).expect("the page");
+    assert_eq!(
+        preview_page_browser_hand_off(&preview::PreviewSource::file(&page)),
+        Some(PageHandOff::File(page.clone()))
+    );
+    assert_eq!(
+        preview_page_browser_hand_off(&preview::PreviewSource::file(dir.join("notes.md"))),
+        None
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RED (39) — **A `file:` address on another machine's share is handed over as a share, and no
+/// `file:` address ever leaves as a bare address.**
+///
+/// A share takes the door ticket 14's `HyperlinkActivation::Share` takes
+/// (`Runtime::open_unverified_reference`, which reads the program list). A `file:` address this
+/// machine names no share from — a distribution's share, a POSIX host on a Mac — leaves by no
+/// road: a path never leaves as a URI. The expected path is the real `bt_platform::file_uri_to_path`
+/// answer on this platform, held to `is_a_share_on_another_machine`.
+///
+/// MUTATION: delete the `file:` fork in `preview_page_browser_hand_off` — the share leaves as
+/// `PageHandOff::Address("file://server/…")`.
+#[test]
+fn a_file_address_on_a_share_is_handed_over_as_a_share() {
+    for url in [
+        "file://server/share/page.html",
+        "file://server/share/run.cmd",
+    ] {
+        let answer = preview_page_browser_hand_off(&preview::PreviewSource::Web(url.to_owned()));
+        match bt_platform::file_uri_to_path(url)
+            .filter(|path| bt_transcript::paths::is_a_share_on_another_machine(path))
+        {
+            Some(share) => assert_eq!(answer, Some(PageHandOff::Share(share)), "{url:?}"),
+            None => assert_eq!(
+                answer, None,
+                "no share here, and no address either: {url:?}"
+            ),
+        }
+    }
+    assert_eq!(
+        preview_page_browser_hand_off(&preview::PreviewSource::Web(
+            "file://wsl.localhost/Debian/etc/hosts".to_owned()
+        )),
+        None,
+        "a file: address that is neither a local file nor a share is not handed to the shell"
+    );
+}
+
+/// RED (39) — **A page address the machine refuses is said on the surface that was pressed.**
+///
+/// The address leaves on the lane, so a refusal arrives later; it is said where a refused address
+/// is already said on a preview surface (ticket 14's `OnRefused::PreviewAddressRefused`, the
+/// surface's toast), and the stderr line names this button, so a page the machine cannot open is
+/// not a silent button either.
+///
+/// MUTATION: answer any other `OnRefused` in `page_address_hand_off` (e.g. `FontsToast`) — the
+/// refusal is raised somewhere other than the page that was pressed.
+#[test]
+fn a_page_address_the_machine_refuses_is_said_on_the_surface_that_was_pressed() {
+    let surface = seat_of(TAB_ONE, SeatId(2));
+    let address = "http://127.0.0.1:8732/x.html";
+    let (_, refused) = page_address_hand_off(surface, address);
+    assert_eq!(
+        refused,
+        handoff_lane::OnRefused::PreviewAddressRefused(surface, address.to_owned())
+    );
+    let words = PAGE_ADDRESS_REFUSAL.words("no handler");
+    assert_eq!(
+        words.line.as_deref(),
+        Some(
+            "recoverable page hand-off failure: open a web page in the system browser: no handler"
+        )
+    );
+    assert_eq!(
+        words.notice, None,
+        "an address is not a program the reader picked"
+    );
+}
+
 #[test]
 fn local_image_click_routes_preview_external_and_no_effect() {
     let verified = std::path::Path::new(r"C:\tmp\decoded.png");
