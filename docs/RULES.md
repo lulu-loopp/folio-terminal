@@ -123,7 +123,15 @@ command boundary; **a "no" is re-asked** whenever the program prints the name
 onto a freshly changed row (a repaint is not a printing); and **the press puts
 the question again** as its own re-check. The gesture is plain click = open it
 in this window, `Ctrl`/`⌘`+click = hand it to this machine's registered handler,
-reveal for a folder. **All verification runs on a lane of its own, never the
+reveal for a folder. **A share on another machine (`\\server\share\…`) is never
+asked about** — not on a hover, a press or the modifier going down; a plain click
+raises the preview's network card, and `Ctrl`/`⌘`+click hands it to the system
+through the files column's door on the OS hand-off lane, where it meets the same
+program list a local file meets. A device path, a verbatim spelling and a WSL
+distribution the pane is not standing in are not another machine's share and keep
+their answers. **A link written in a previewed document answers the same row**
+(`preview::link_action` feeds the one table, `reference_activation`).
+**All verification runs on a lane of its own, never the
 window thread**, and the worker produces the door's input with the door's own
 function (`bt_platform::resolved_for_a_door`), arriving as `VerifiedTarget`.
 **From.** §7.1.5j *bare printed paths are recognised, underlined and clickable,
@@ -143,10 +151,16 @@ folder or not at all*; trailing entry 2026-09-22 *a trailing slash is not the
 evidence a bare reference is admitted on; it is the person naming a directory*;
 trailing entry 2026-09-22 *a full-width stop needs no witness*;
 the project owner's ruling of 2026-09-21 that Ctrl+click on a printed path opens
-it, as before; and the owner's ruling of 2026-09-21 that a relative name's folder
-is never guessed.
+it, as before; the owner's ruling of 2026-09-21 that a relative name's folder
+is never guessed; trailing entry 2026-09-23 *Ctrl+click hands a share on another
+machine and a link of any scheme to the system; a plain click and a hover are
+unchanged, and a document's links answer the same row*.
 **Overrides.** The owner's 2026-09-21 ruling withdrew the 2026-09-20 reveal-only
-rule and removed the volume question it had introduced. The per-component link
+rule and removed the volume question it had introduced. The owner's 2026-09-21
+ruling (「UNC 与任意协议链接 Ctrl+点击交给系统、悬停不碰 UNC、普通点击不变」) and
+2026-09-23 ruling (document links follow the terminal's rule) replaced "a share is
+the card under either modifier" for `Ctrl` only, landed with ticket 14 once
+hand-offs were off the window thread. The per-component link
 walk, its hop limit and its locality type were withdrawn the same day. The
 denial-permanence rule was reversed twice: on 2026-08-25 (denials expire) and
 again on 2026-09-20 (re-ask on reprint).
@@ -157,12 +171,27 @@ bare path is written into the cell as an implicit `CellHyperlink` carrying a
 `file:` target, so both travel one routing table with one gesture policy, and an
 `OSC 8` target is asked of the same verdict ledger on the pointer event that
 meets it. `OSC 8` is exempt from the end-of-row truncation gate alone, because
-the application declared the whole target itself.
+the application declared the whole target itself. The gesture: plain click = this
+window's answer (the seat for a page or a file, the files column for a folder,
+the network card for a share, nothing for `mailto:` or any other scheme);
+`Ctrl`/`⌘`+click = the system's — the browser for `http`/`https`, the registered
+handler for a file, Explorer for a folder, **the system for a share on another
+machine, and whatever the machine has registered for any other scheme**
+(`mailto:`, `vscode:`, `ssh:` …), with no list of schemes; what the machine
+refuses is said on the hover line as a refused address. A single letter before a
+colon is a drive, not a scheme, and a path never leaves as a URI. **A link in a
+previewed document follows this row**, both halves.
 **From.** §7.1.5g *link activation and the five-arm routing table*; §7.1.5j ①
-(a hit folds into a `file:` target and feeds the existing table); §7.1.5k ①.
+(a hit folds into a `file:` target and feeds the existing table); §7.1.5k ①;
+trailing entry 2026-09-23 *Ctrl+click hands a share on another machine and a link
+of any scheme to the system; a plain click and a hover are unchanged, and a
+document's links answer the same row*.
 **Overrides.** §7.1.5g's original "plain click does nothing, Ctrl hands it over"
 was reversed by the 2026-08-20 ruling *plain click stays in the window, Ctrl+click
-hands it over*, aligning hyperlinks with image references.
+hands it over*, aligning hyperlinks with image references. The owner's rulings of
+2026-09-21 (share and any-scheme links to the system on `Ctrl`) and 2026-09-23
+(document links follow the same rule) replaced the refusal of every scheme but
+`http`, `https` and `file` under `Ctrl`.
 
 ### 7. Math and table detection (`bt-detect`) — `not yet folded`
 Entries: §4.6b *a window may begin in the middle of a block without needing
@@ -259,8 +288,13 @@ Entries: §7.54 and its lettered continuations §7.54a–§7.54e, of which §7.5
 ### 17. The files column — `not yet folded`
 Entries: §7.5 *"go in" and "pin" in the files column*; §7.15 *a row in the tree
 has a two-faced menu*; §7.24 *the files column watches those folders itself*;
-the `files.rs` module doc. **Note the door gap**: this subsystem's directory
-enumeration has no read-ledger lane (see row 52).
+the `files.rs` module doc; the trailing entry of 2026-09-23 *the glance card's
+foot names the folder that holds the file* — rulings of 2026-09-20 (the glance
+card's foot locates its file in this column: the folder kept when it is inside
+the root, re-rooted when it is not, the file's row selected) and 2026-09-23 (the
+column does not switch back afterwards; it is navigation, not a peek). **Note
+the door gap**: this subsystem's directory enumeration has no read-ledger lane
+(see row 52).
 
 ### 18. The preview dispatcher — `folded`
 **Rule.** Exactly one ladder decides what a preview surface shows:
@@ -272,11 +306,16 @@ focus thumbnail — reads that one answer** instead of descending a ladder of it
 own. A new preview kind joins by adding a variant and one rung at the ruled
 position (the rung order is itself a ruling: a diff name is tested before the
 text surface so a patch never gets a text area) and by declaring which chrome
-paints it.
+paints it. **A document's links are answered by the terminal's table**
+(2026-09-23): `preview::link_action` says what a target names and
+`reference_activation` — the table row 6 reads — says what a press spends; plain
+click stays in the window, `Ctrl`/`⌘`+click hands it over.
 **From.** §7.1.3 *the file tree, the preview minimum contract, and the tab-level
 shared buffer pool*; §7.10 *a local file can also be a web page*; §7.32 *when a
 name cannot answer, ask the file itself: text is decided by content, and a page's
-source face is an editor*.
+source face is an editor*; trailing entry 2026-09-23 *Ctrl+click hands a share on
+another machine and a link of any scheme to the system; a plain click and a hover
+are unchanged, and a document's links answer the same row*.
 **Overrides.** §7.32 overrode extension-only classification and made the source
 face editable; §7.10 moved `html`/`htm` from the text extensions to the page
 extensions by the owner's 2026-08-23 ruling; the video view was split out of the
@@ -387,6 +426,27 @@ scans every `Text` × `Lang` × `HostPlatform`; its allowlist names keys that ar
 not table rows (the search field's `Shift+Enter`) and may not hold a table chord.
 `docs/features.md` names verbs, not keys, and points at `docs/shortcuts.md`. The
 row stays `not yet folded` (the rung order is still unwritten).
+
+Rulings added 2026-09-22 and 2026-09-23 (owner, keybinding-panel design note,
+rulings 1 and 2; 0.4.4 ticket 04): **a bare `Ctrl`+letter is recordable, at the
+recorder and in `keybindings.json`; the row says `shell` instead of being
+refused.** The note is on every row whose chord is a bare `Ctrl` and one ASCII
+letter, default or recorded, in any scope (2026-09-23;
+`shortcuts::takes_a_shell_control_key`, read by `Shortcuts::editor_rows`). The
+AltGr zone and "a desktop-wide key needs a modifier" stay refusals. **The default
+table does not change**: no two-key-first re-derivation, and a reader who wants
+`Ctrl+N` records it once. This supersedes, for recordings, discipline ① of the
+2026-08-17 audit. Held by `shortcuts::tests::a_bare_ctrl_letter_is_free_and_the_row_says_shell`,
+`the_file_door_keeps_a_recorded_ctrl_letter` and
+`every_row_on_a_shell_control_key_says_shell_default_or_custom`. **The terminal's copy and paste answer before the table** (owner, 2026-09-23):
+in `Runtime::keyboard_input` the copy rung (`input::should_copy_selection`, a
+selection present) and the paste rung (`input::is_paste_shortcut`) are asked
+before `Shortcuts::lookup`, so a row recorded on `Ctrl+V` never fires on a
+terminal and one on `Ctrl+C` fires only with nothing selected (macOS: `Cmd`;
+`Ctrl+Shift+V`/`C` the same). This is kept, not fixed: the terminal's own copy
+and paste are never displaced by a recording. Still `not yet
+folded`: folding this row (the full rung order of `Runtime::keyboard_input`) is
+design-note T5, not this ticket.
 
 Entry added 2026-09-23 (0.4.4 ticket 02; owner's ruling 2026-09-23: "the card
 is modal and answers only Enter, the Join key and Esc"): **the multi-line paste

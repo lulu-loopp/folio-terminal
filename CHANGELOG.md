@@ -14,8 +14,39 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- A shortcut can now use Ctrl with a letter; the row notes that the key no
+  longer reaches the shell.
+- Ctrl+click on a network-share path or on a mailto:, vscode: or other link now
+  hands it to Windows or macOS. Links inside a previewed document do the same.
+- The glance card's bottom line shows the file's folder; click it to find the
+  file, Ctrl+click to show it in Explorer.
+
 - In the Markdown preview, a paragraph turns into its source when the gesture
   ends, not while a selection is being drawn across it.
+
+- The glance card's shadow and the tooltip's padding and corners now match the
+  rest of the float-tag family.
+
+- The Git page's row height, head and row type, and section labels now match
+  the rest of the window.
+
+- Every pane's head title is the same size as the float and glance heads', and
+  the pane head's `⌄`, the preview switch, the float's dock and the files
+  root button now stand in the same tool box every other head control uses.
+  The formula band's own buttons, which already reuse
+  the pane head's, grow with it.
+
+- The command palette's field and rows are the same text size as the rest of
+  the window.
+
+- The first-run card's option rows are the same height as a Settings row.
+
+- The section labels inside the right-click and `⌄` menus are the same size
+  and spacing as Settings and the rail.
+
+- Every Settings combo wears the same `⌄` every other drop-down opener wears,
+  and the dialog title, the combo drop-down rows, the row titles and the nav
+  items are on the same scale as the rest of the window.
 
 ### Fixed
 

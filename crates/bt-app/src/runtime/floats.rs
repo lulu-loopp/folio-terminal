@@ -2257,7 +2257,7 @@ impl Runtime<'_> {
                 return Ok(());
             };
             let folder = level.folder.clone();
-            return self.locate_folder_in_files_column(&folder);
+            return self.locate_folder_in_files_column(&folder, None);
         }
         let Some(path) = activation.path().map(Path::to_path_buf) else {
             return Ok(());

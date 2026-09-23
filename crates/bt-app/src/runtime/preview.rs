@@ -6,20 +6,20 @@ use crate::{
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
     DOCK_PREVIEW_FADE, DiffRow, DocumentMath, DocumentPictures, DragLatch, DrawnAnimation,
     DropPreview, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FilePick, FootSaying, ForeignPane,
-    FormulaSwitches, FrameTraces, ImageDrag, ImageGrasp, ImageZoom, ImeOwner, LeafId, LeafSeed,
-    MARKDOWN_CHIP_RADIUS_LOGICAL_PX, MarkdownBlockLayout, MarkdownCaretBlock, MarkdownCaretPaint,
-    MarkdownCaretSeat, MarkdownLive, MarkdownPage, MarkdownPicture, MarkdownPreedit,
-    MarkdownProseBlock, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest,
+    FormulaSwitches, FrameTraces, HyperlinkActivation, ImageDrag, ImageGrasp, ImageZoom, ImeOwner,
+    LeafId, LeafSeed, MARKDOWN_CHIP_RADIUS_LOGICAL_PX, MarkdownBlockLayout, MarkdownCaretBlock,
+    MarkdownCaretPaint, MarkdownCaretSeat, MarkdownLive, MarkdownPage, MarkdownPicture,
+    MarkdownPreedit, MarkdownProseBlock, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest,
     MarkdownSourceBlock, MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost,
     PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PagePicture, PasteTarget, PeekCacheEntry,
     PeekThumbnailTarget, PictureErrand, PictureOnGlass, PictureReach, PictureRefusal,
     PopoverTrigger, Popup, PresentIntent, PreviewBlockDrag, PreviewBodyDrag, PreviewDocument,
     PreviewEditPaint, PreviewHeadFrame, PreviewHexHover, PreviewImageState, PreviewLink,
-    PreviewLinkActivation, PreviewMathSite, PreviewOpenLane, PreviewPane, PreviewPreedit,
-    PreviewRailFrame, PreviewSurface, PreviewTextDrag, PreviewTextSite, PreviewViewState,
-    RenameSubject, Reparse, RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest,
-    ScrollThumbState, Step, SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState,
-    TabTriggerHand, VideoGlance, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime,
+    PreviewMathSite, PreviewOpenLane, PreviewPane, PreviewPreedit, PreviewRailFrame,
+    PreviewSurface, PreviewTextDrag, PreviewTextSite, PreviewViewState, RenameSubject, Reparse,
+    RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState, Step,
+    SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState, TabTriggerHand,
+    VideoGlance, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime,
     advance_drawn_animations, animation, animation_layer_key, animation_refusal_notice,
     animations_opened, answer_one_picture, answers_for, attention_trace, build_preview_diff_body,
     build_preview_markdown_body, build_preview_table_body, build_preview_text_body,
@@ -3673,7 +3673,7 @@ impl Runtime<'_> {
                     // from a path, whose file name is its identity. Same band,
                     // same ellipsis, opposite ends, because the two kinds of
                     // address are read from opposite ends.
-                    cut_left: false,
+                    cut: seats::LeadCut::Back,
                     font_px: font,
                     gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
                 },
@@ -3736,7 +3736,7 @@ impl Runtime<'_> {
                 notice: &notice,
                 // **Left-truncated** (P35): the ellipsis goes at the head so the
                 // file name — the part you actually care about — survives.
-                cut_left: true,
+                cut: seats::LeadCut::Front,
                 font_px: font,
                 gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
             },
@@ -3813,7 +3813,7 @@ impl Runtime<'_> {
         let Some(folder) = folder else {
             return Ok(());
         };
-        self.locate_folder_in_files_column(&folder)
+        self.locate_folder_in_files_column(&folder, None)
     }
 
     /// **One control of a preview rail, pressed — the ladder both hosts run**
@@ -5140,8 +5140,9 @@ impl Runtime<'_> {
             // menu's first row go through — so a file reached by pointing at it
             // in prose lands exactly where a file reached any other way does,
             // pool and all. Anything unreadable arrives as the "no preview"
-            // card, which carries its own way out to the system.
-            PreviewLinkActivation::Preview(path) => self.open_preview(path)?,
+            // card, which carries its own way out to the system — a share
+            // included, which reads nothing to say so.
+            HyperlinkActivation::Preview(path, _) => self.open_preview(path)?,
             // **The same address, kept in this window** — the terminal's own
             // `Page` arm, spent through the terminal's own door
             // ([`Self::open_web_address_here`]). A refusal is said out loud
@@ -5149,12 +5150,12 @@ impl Runtime<'_> {
             // the press landed on: the terminal's mouth for this is a status
             // line under the cells the address is printed in, and a link inside
             // a document has no cells.
-            PreviewLinkActivation::Page(url) => {
+            HyperlinkActivation::Page(url) => {
                 if !self.open_web_address_here(&url)? {
                     self.say_address_refused(surface, &url)?;
                 }
             }
-            PreviewLinkActivation::Browser(url) => {
+            HyperlinkActivation::Browser(url) => {
                 self.hand_off(
                     bt_platform::Handoff::Address(url),
                     crate::handoff_lane::Refusal {
@@ -5166,11 +5167,37 @@ impl Runtime<'_> {
                     },
                 );
             }
-            PreviewLinkActivation::Blocked(url) => self.say_address_refused(surface, &url)?,
-            // A scheme this window does not open, or an anchor it cannot yet
-            // honour. The press is still the link's: it landed on a control,
-            // and letting it fall through would put a caret in the prose.
-            PreviewLinkActivation::None => {}
+            // **`Ctrl` hands the named file, or a share, to the system** (ticket 14, owner
+            // ruling 2026-09-23: "click stays in the window, Ctrl+click hands over"). A document's
+            // targets are never asked about, so both leave by the door that needs no ledger, on
+            // the OS hand-off lane, and meet the program list a printed file meets.
+            HyperlinkActivation::External(path) | HyperlinkActivation::Share(path) => {
+                self.open_unverified_reference(&path);
+            }
+            // **Any other scheme, to whatever the machine has registered for it** (ticket 14).
+            // A refusal from the machine is said on this surface, in the words a refused address
+            // already has here.
+            HyperlinkActivation::Scheme(uri) => {
+                let handed = self.hand_uri_to_the_system(&uri);
+                self.if_refused(
+                    handed,
+                    crate::handoff_lane::OnRefused::PreviewAddressRefused(surface, uri),
+                );
+            }
+            // The table's two folder answers, spent the way the terminal spends them. A
+            // document's own file row does not produce them — it never asks the disk whether a
+            // target is a folder — and the match says what each would do rather than nothing.
+            HyperlinkActivation::Reveal(path) => {
+                self.reveal_in_explorer(&path);
+            }
+            HyperlinkActivation::FilesColumn(path) => {
+                self.locate_folder_in_files_column(&path, None)?
+            }
+            HyperlinkActivation::Blocked => self.say_address_refused(surface, target.trim())?,
+            // A scheme-less target this window cannot place, or an anchor it
+            // cannot yet honour. The press is still the link's: it landed on a
+            // control, and letting it fall through would put a caret in the prose.
+            HyperlinkActivation::None => {}
         }
         Ok(true)
     }
@@ -11242,7 +11269,7 @@ impl Runtime<'_> {
                         // Left-truncated, exactly as the docked foot is (P35):
                         // the ellipsis goes at the head so the file name
                         // survives.
-                        cut_left: true,
+                        cut: seats::LeadCut::Front,
                         font_px: foot_font,
                         gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
                     },

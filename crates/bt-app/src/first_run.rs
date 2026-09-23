@@ -931,9 +931,12 @@ const TITLE_LINE_LOGICAL_PX: f32 = 21.0;
 /// with it.
 const HEADER_MARGIN_BOTTOM_LOGICAL_PX: f32 = 18.0;
 
-/// **One 13px line, vertically centred in 42** (v4 §2). The extra height per row
-/// is what "looser rhythm" buys once the second line is gone.
-const ROW_HEIGHT_LOGICAL_PX: f32 = 42.0;
+/// The settings single-line row (`UI-SPEC.md` H4;
+/// `settings.rs::ROW_PADDING_Y_LOGICAL_PX` 11 × 2 +
+/// `settings.rs::ROW_TITLE_LINE_LOGICAL_PX` 16.5, both private there), not
+/// v4 §2's own "one 13px line, vertically centred in 42". The same options
+/// used to sit airier here than in Settings.
+const ROW_HEIGHT_LOGICAL_PX: f32 = 38.5;
 const ROW_FONT_LOGICAL_PX: f32 = 13.0;
 /// How far the row's band runs past the content column on each side.
 ///
@@ -1981,6 +1984,23 @@ mod tests {
     use super::*;
     use crate::settings;
 
+    /// RED (ticket 21) — **the first-run card's option rows are as tall as a
+    /// Settings single-line row, not airier.**
+    ///
+    /// `UI-SPEC.md` H4: `settings.rs::ROW_PADDING_Y_LOGICAL_PX` 11 × 2 +
+    /// `settings.rs::ROW_TITLE_LINE_LOGICAL_PX` 16.5 (both private there) is
+    /// 38.5, where the row used to sit at 42.
+    ///
+    /// MUTATION: revert `ROW_HEIGHT_LOGICAL_PX` to a literal and this goes red.
+    #[test]
+    fn ui_spec_first_run_class_a_values_follow_the_rule() {
+        assert_eq!(
+            ROW_HEIGHT_LOGICAL_PX, 38.5,
+            "UI-SPEC.md H4, settings.rs::ROW_PADDING_Y_LOGICAL_PX + \
+             settings.rs::ROW_TITLE_LINE_LOGICAL_PX"
+        );
+    }
+
     /// A machine with everything: Windows 11 with the package beside the
     /// executable, all three agents on the path, none of them configured yet.
     fn every_row() -> Machine {
@@ -3024,8 +3044,27 @@ mod tests {
             Target::Row(0),
             "the lit band answered a hover and not a press"
         );
+        // **The footer is pinned to the viewport, not to how many rows
+        // overflow it** (`cursor = viewport[3] + FOOT_GAP…` in [`layout`]), so
+        // shortening every row (`UI-SPEC.md` H4) moves the last row's switch
+        // up without moving the footer — and on this fixture the two used to
+        // clear each other by more room than they do now. The switch's own
+        // *centre* is no longer reliably past the footer, but the switch is
+        // still taller than the gap: probe low in the switch instead of at
+        // its middle, between the footer's own foot and the switch's, which
+        // stays correct regardless of exactly how much room is left.
         let last = placed.rows.len() - 1;
-        let (x, y) = middle(placed.rows[last].switch);
+        let switch = placed.rows[last].switch;
+        let below_the_foot = placed.done.1[3]
+            .max(placed.later.1[3])
+            .max(placed.body_clip[3]);
+        assert!(
+            switch[3] > below_the_foot,
+            "this fixture needs the last row's switch to still reach below \
+             the footer, or the probe below tests nothing"
+        );
+        let x = f64::from((switch[0] + switch[2]) / 2.0);
+        let y = f64::from((below_the_foot + switch[3]) / 2.0);
         assert_eq!(
             hit(&placed, x, y),
             Target::Panel,

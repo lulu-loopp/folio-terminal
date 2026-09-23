@@ -1720,8 +1720,9 @@ impl Runtime<'_> {
         // "we claim this chord" means: the table is consulted before any key is
         // encoded, and a chord that is in it never reaches the child. Only chords
         // in the table are taken — `Shortcuts::lookup` matches modifiers exactly,
-        // so ordinary typing, bare `Ctrl+letter` control codes and the AltGr
-        // family all fall straight through to the encoder below.
+        // so ordinary typing, the `Ctrl+letter` control codes no row holds and
+        // the AltGr family all fall straight through to the encoder below. A row
+        // that holds one takes it (0.4.4 ticket 04), and says `shell` for it.
         //
         // **The table asked is the effective one** (2026-08-17): defaults with
         // `keybindings.json` laid over them. Dispatch reads one table and the

@@ -701,8 +701,9 @@ pub const PALETTE_TOP_LOGICAL_PX: f32 = 84.0;
 pub const PALETTE_RADIUS_LOGICAL_PX: f32 = 10.0;
 /// `border: 1px solid var(--border)`.
 pub const PALETTE_BORDER_LOGICAL_PX: f32 = 1.0;
-/// `font-size: 13.5px` in the input.
-pub const FIELD_FONT_LOGICAL_PX: f32 = 13.5;
+/// Primary text (`UI-SPEC.md` T3), not the mock-up's own `font-size: 13.5px`
+/// in the input.
+pub const FIELD_FONT_LOGICAL_PX: f32 = 13.0;
 /// The `14px` of the input's `padding: 12px 14px`.
 pub const FIELD_PADDING_X_LOGICAL_PX: f32 = 14.0;
 /// The `12px` of the same, doubled around an 18px line box, which is the
@@ -717,9 +718,9 @@ pub const FIELD_CARET_INSET_LOGICAL_PX: f32 = 11.0;
 pub const LIST_MAX_HEIGHT_LOGICAL_PX: f32 = 336.0;
 /// `padding: 5px` on `.pal-list`.
 pub const LIST_PADDING_LOGICAL_PX: f32 = 5.0;
-/// `.pal-item`'s `padding: 7px 10px` around a 12.5px line, rounded to an even
-/// number of logical pixels so that no two rows in a column disagree by half a
-/// pixel about where their middle is.
+/// `.pal-item`'s `padding: 7px 10px` around a 13px line (`UI-SPEC.md` T4),
+/// rounded to an even number of logical pixels so that no two rows in a
+/// column disagree by half a pixel about where their middle is.
 pub const ROW_HEIGHT_LOGICAL_PX: f32 = 30.0;
 /// `.pal-item { border-radius: 7px }`.
 pub const ROW_RADIUS_LOGICAL_PX: f32 = 7.0;
@@ -731,8 +732,9 @@ pub const ROW_GAP_LOGICAL_PX: f32 = 9.0;
 pub const ROW_ICON_COLUMN_LOGICAL_PX: f32 = 16.0;
 /// `.pico svg { width: 14px }` — the mark inside that column.
 pub const ROW_ICON_LOGICAL_PX: f32 = 14.0;
+/// Primary text (`UI-SPEC.md` T4), not the mock-up's own
 /// `.pal-item { font-size: 12.5px }`.
-pub const ROW_FONT_LOGICAL_PX: f32 = 12.5;
+pub const ROW_FONT_LOGICAL_PX: f32 = 13.0;
 /// `.pal-hint { font-size: 11px }`.
 pub const HINT_FONT_LOGICAL_PX: f32 = 11.0;
 /// `.pal-hint { max-width: 45% }` — the hint never takes the row.

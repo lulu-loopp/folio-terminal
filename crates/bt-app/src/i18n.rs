@@ -1443,17 +1443,20 @@ pub enum Text {
     ShortcutNoteOnePerMember,
     ShortcutNoteNoneAssigned,
     ShortcutNoteSomeUnassigned,
+    /// The word on a row whose chord is a bare `Ctrl` and one letter: the key no
+    /// longer reaches the program in the pane (owner rulings 2026-09-22 and
+    /// 2026-09-23). It replaced the recorder's refusal of the same chord.
+    ShortcutNoteShell,
     /// What stands where the caps would be on a row with no chord.
     ShortcutUnbound,
     /// The two rows the audit listed and declined, and the line under them.
     ShortcutReservedMoveFocus,
     ShortcutReservedResizePane,
     ShortcutReservedAltArrow,
-    /// The recorder's two standing refusals. The chords in them are key caps and
-    /// stay as they are; what is translated is the reason.
+    /// The recorder's standing refusal. The chord in it is key caps and stays as
+    /// it is; what is translated is the reason.
     ShortcutHintAltGrZone,
-    ShortcutHintShellControlLetter,
-    /// The recorder's third, and the only one that is about which row is asking:
+    /// The recorder's second, and the only one that is about which row is asking:
     /// the summon's key is claimed from Windows, so a chord with no modifier on
     /// it would be taken from every program on the machine.
     ShortcutHintGlobalNeedsModifier,
@@ -1744,9 +1747,7 @@ pub enum Text {
     RefNameShape,
 
     // ── the file peek card and the diff document ───────────────────────────
-    /// The card's foot. `Enter` is a key cap.
-    PeekFoot,
-    /// Its refusal — the preview pane's own sentence said in one line, and a
+    /// The card's refusal — the preview pane's own sentence said in one line, and a
     /// different sentence from [`Self::PreviewRefusalBinary`] because this one
     /// covers the unrecognised type as well.
     PeekUnknown,
@@ -3919,6 +3920,7 @@ impl Text {
                 "One chord for each; some are not set yet",
                 "每一个各有一组键；有些还没设",
             ),
+            Self::ShortcutNoteShell => pick(lang, "shell", "终端键"),
             Self::ShortcutUnbound => pick(lang, "Not set", "未设置"),
             Self::ShortcutReservedMoveFocus => {
                 pick(lang, "Move the focus between panes", "在窗格之间移动焦点")
@@ -3933,11 +3935,6 @@ impl Text {
                 lang,
                 "Ctrl+Alt is reserved for AltGr keyboards",
                 "Ctrl+Alt 留给 AltGr 键盘",
-            ),
-            Self::ShortcutHintShellControlLetter => pick(
-                lang,
-                "Ctrl+letter belongs to the shell",
-                "Ctrl+字母属于 shell",
             ),
             // **The three keys are named, so they have to be the ones on the
             // reader’s own keyboard** (§13.32 ②). `Win` is a keycap that does
@@ -4201,11 +4198,6 @@ impl Text {
             ),
 
             // ── the file peek card and the diff document ───────────────────
-            Self::PeekFoot => pick(
-                lang,
-                "Enter / double-click opens the preview pane",
-                "Enter / 双击打开预览窗格",
-            ),
             Self::PeekUnknown => pick(
                 lang,
                 "No preview: binary or unrecognised type.",
@@ -5365,7 +5357,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 750] = [
+    pub const ALL: [Self; 749] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5748,12 +5740,12 @@ impl Text {
         Self::ShortcutNoteOnePerMember,
         Self::ShortcutNoteNoneAssigned,
         Self::ShortcutNoteSomeUnassigned,
+        Self::ShortcutNoteShell,
         Self::ShortcutUnbound,
         Self::ShortcutReservedMoveFocus,
         Self::ShortcutReservedResizePane,
         Self::ShortcutReservedAltArrow,
         Self::ShortcutHintAltGrZone,
-        Self::ShortcutHintShellControlLetter,
         Self::ShortcutHintGlobalNeedsModifier,
         Self::GitNotARepository,
         Self::GitReading,
@@ -5887,7 +5879,6 @@ impl Text {
         Self::RefNameDash,
         Self::RefNameLock,
         Self::RefNameShape,
-        Self::PeekFoot,
         Self::PeekUnknown,
         Self::PeekFileGone,
         Self::GitDocumentEmpty,
