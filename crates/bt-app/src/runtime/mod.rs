@@ -21,3 +21,4 @@ mod quake;
 mod search;
 mod terminal;
 mod tooltips;
+mod web;
