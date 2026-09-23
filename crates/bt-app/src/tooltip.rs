@@ -70,14 +70,18 @@ pub const PEEK_INTENT_DELAY: Duration = Duration::from_millis(120);
 /// this tip is where the archive got the number from.
 pub const TOOLTIP_FADE: Duration = bt_render::MOTION_FAST;
 
-/// `border-radius: 5px`.
-pub const TIP_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// The float-tag family's radius (`UI-SPEC.md` R1; [`PEEK_RADIUS_LOGICAL_PX`]
+/// below), not the mock-up's own `border-radius: 5px` — every other member of
+/// the family is r8.
+pub const TIP_RADIUS_LOGICAL_PX: f32 = PEEK_RADIUS_LOGICAL_PX;
 /// `border: 1px solid var(--border)`.
 pub const TIP_BORDER_LOGICAL_PX: f32 = 1.0;
-/// The `7px` of `padding: 3px 7px`.
-pub const TIP_PADDING_X_LOGICAL_PX: f32 = 7.0;
-/// The `3px` of `padding: 3px 7px`.
-pub const TIP_PADDING_Y_LOGICAL_PX: f32 = 3.0;
+/// The float-tag family's padding (`UI-SPEC.md` S1; [`PEEK_PADDING_X_LOGICAL_PX`]
+/// below), not the mock-up's own `padding: 3px 7px`.
+pub const TIP_PADDING_X_LOGICAL_PX: f32 = PEEK_PADDING_X_LOGICAL_PX;
+/// The float-tag family's padding (`UI-SPEC.md` S1; [`PEEK_PADDING_Y_LOGICAL_PX`]
+/// below), not the mock-up's own `padding: 3px 7px`.
+pub const TIP_PADDING_Y_LOGICAL_PX: f32 = PEEK_PADDING_Y_LOGICAL_PX;
 /// `font-size: 11px`.
 pub const TIP_FONT_LOGICAL_PX: f32 = 11.0;
 /// The one number `showTip` uses for both jobs (mock-up 8698-8703): how far the
@@ -1582,8 +1586,8 @@ mod tests {
         let (two, ..) = place(anchor, &[50.0, 120.0], WINDOW, SCALE).unwrap();
 
         // Width answers to the widest line, never the first or the last.
-        assert!((one[2] - one[0] - (50.0 + 2.0 * (7.0 + 1.0))).abs() < 1.0);
-        assert!((two[2] - two[0] - (120.0 + 2.0 * (7.0 + 1.0))).abs() < 1.0);
+        assert!((one[2] - one[0] - (50.0 + 2.0 * (10.0 + 1.0))).abs() < 1.0);
+        assert!((two[2] - two[0] - (120.0 + 2.0 * (10.0 + 1.0))).abs() < 1.0);
         // Height answers to the count.
         assert!(((two[3] - two[1]) - (one[3] - one[1]) - line_height).abs() < 1.0);
         assert!((border - 1.0).abs() < 0.001);
@@ -1602,7 +1606,7 @@ mod tests {
         assert!(laid.lines[0].0[1] >= laid.frame[1]);
         assert!(laid.lines[1].0[3] <= laid.frame[3] + 0.001);
         // The text box is inset by the border and the horizontal padding.
-        assert!((laid.lines[0].0[0] - (laid.frame[0] + 1.0 + 7.0)).abs() < 0.001);
+        assert!((laid.lines[0].0[0] - (laid.frame[0] + 1.0 + 10.0)).abs() < 0.001);
     }
 
     // ── M141: an anchor with nothing to say is not an anchor ────────────────
@@ -2234,6 +2238,31 @@ mod tests {
         assert!(!peek.wraps(), "one line, cut — never reflowed");
         assert_eq!(TipFace::Chrome.font_logical_px(), TIP_FONT_LOGICAL_PX);
         assert!(TipFace::Chrome.wraps() && !TipFace::Chrome.monospace());
+    }
+
+    /// RED (ticket 16) — **the tip's padding and corner are the float-tag
+    /// family's, not the mock-up's own tighter, less rounded `.tip`.**
+    ///
+    /// `UI-SPEC.md` R1/S1: every member of the float-tag family (the glance
+    /// card, the single-line `#cmd-peek` tag) shares one padding and one
+    /// radius; the chrome tip used to be the odd one out at `7×3` / `r5`.
+    ///
+    /// MUTATION: revert `TIP_RADIUS_LOGICAL_PX`, `TIP_PADDING_X_LOGICAL_PX` or
+    /// `TIP_PADDING_Y_LOGICAL_PX` to a literal and this goes red.
+    #[test]
+    fn ui_spec_float_tag_class_a_values_follow_the_rule() {
+        assert_eq!(
+            TIP_RADIUS_LOGICAL_PX, PEEK_RADIUS_LOGICAL_PX,
+            "UI-SPEC.md R1"
+        );
+        assert_eq!(
+            TIP_PADDING_X_LOGICAL_PX, PEEK_PADDING_X_LOGICAL_PX,
+            "UI-SPEC.md S1"
+        );
+        assert_eq!(
+            TIP_PADDING_Y_LOGICAL_PX, PEEK_PADDING_Y_LOGICAL_PX,
+            "UI-SPEC.md S1"
+        );
     }
 
     /// **The card stands to the left of its tick and eight pixels above it**, and

@@ -98,9 +98,10 @@ pub const PEEK_MAX_HEIGHT_LOGICAL_PX: f32 = 264.0;
 pub const PEEK_RADIUS_LOGICAL_PX: f32 = 8.0;
 /// `.file-peek { border: 1px solid var(--border) }`.
 pub const PEEK_BORDER_LOGICAL_PX: f32 = 1.0;
-/// `box-shadow: 0 10px 28px` — the spread half, which is what this renderer's
-/// halo takes.
-pub const PEEK_SHADOW_LOGICAL_PX: f32 = 28.0;
+/// The float-tag family's shadow (`UI-SPEC.md` E1;
+/// [`bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX`]) — every other float's, not
+/// the mock-up's own `box-shadow: 0 10px 28px` spread half.
+pub const PEEK_SHADOW_LOGICAL_PX: f32 = bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX;
 
 /// `.fpeek-head { padding: 7px 10px 5px }` — the three sides that differ.
 pub const PEEK_HEAD_PADDING_TOP_LOGICAL_PX: f32 = 7.0;
@@ -1700,6 +1701,23 @@ mod tests {
     /// measurement of the shipped font.
     fn ruler(text: &str, size: f32) -> f32 {
         text.chars().count() as f32 * size / 2.0
+    }
+
+    /// RED (ticket 16) — **the glance card's shadow is the float-tag family's,
+    /// not nine times wider than every other card's.**
+    ///
+    /// `UI-SPEC.md` E1: every float passes
+    /// [`bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX`] (3); the mock-up's own
+    /// `box-shadow: 0 10px 28px` spread half left this card at 28.
+    ///
+    /// MUTATION: revert `PEEK_SHADOW_LOGICAL_PX` to a literal and this goes red.
+    #[test]
+    fn ui_spec_float_tag_class_a_values_follow_the_rule() {
+        assert_eq!(
+            PEEK_SHADOW_LOGICAL_PX,
+            bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX,
+            "UI-SPEC.md E1"
+        );
     }
 
     /// The card's foot, dressed the way [`crate::Runtime::file_peek_layer`]

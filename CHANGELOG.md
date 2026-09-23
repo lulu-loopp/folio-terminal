@@ -16,6 +16,30 @@ All notable changes to Folio are recorded here. The format follows
 - In the Markdown preview, a paragraph turns into its source when the gesture
   ends, not while a selection is being drawn across it.
 
+- The glance card's shadow and the tooltip's padding and corners now match the
+  rest of the float-tag family.
+
+- The Git page's row height, head and row type, and section labels now match
+  the rest of the window.
+
+- Every pane's head title is the same size as the float and glance heads', and
+  the pane head's `⌄`, the preview switch, the float's dock and the files
+  root button now stand in the same tool box every other head control uses.
+  The formula band's own buttons, which already reuse
+  the pane head's, grow with it.
+
+- The command palette's field and rows are the same text size as the rest of
+  the window.
+
+- The first-run card's option rows are the same height as a Settings row.
+
+- The section labels inside the right-click and `⌄` menus are the same size
+  and spacing as Settings and the rail.
+
+- Every Settings combo wears the same `⌄` every other drop-down opener wears,
+  and the dialog title, the combo drop-down rows, the row titles and the nav
+  items are on the same scale as the rest of the window.
+
 ### Fixed
 
 - The Cards setting named the wrong shortcut on macOS and after a rebind.

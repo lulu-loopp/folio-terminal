@@ -15,7 +15,7 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 - **Platform:** every deviation is in code shared by the Windows and macOS builds, so every row applies to **both**.
 - **Rulings of 2026-09-22 folded in:** the icon-to-label gap is 8 everywhere (G1–G3); every head title is 11 (T1). The terminal pane's resting radius (0) and the two boolean controls (combo in Settings, switch on the first-run card) are rules as they stand and produce no rows.
 
-**Totals: 49 deviations, touching 100 constants.** A 13 · B 11 · C 13 · D 12.
+**Totals: 36 deviations, touching 72 constants.** A 0 · B 11 · C 13 · D 12.
 
 ---
 
@@ -23,19 +23,6 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 
 | # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
 |---|---|---|---|---|---|---|
-| 1 | E1 | Glance / peek card shadow | `file_peek.rs::PEEK_SHADOW_LOGICAL_PX` | 28.0 | 3.0 | Every other float passes `theme.rs::FLOAT_WINDOW_SHADOW_LOGICAL_PX` (3). The glance card's soft shadow is about 9× wider than any other card's. |
-| 2 | I1 | Settings combo chevron (every combo row) | `settings.rs::COMBO_CHEVRON` (`"\u{25bc}"`), `settings.rs::COMBO_CHEVRON_FONT_LOGICAL_PX` | solid ▼ text glyph at 8.5 | vector `⌄` mark in the 10 slot | Every other drop-down opener wears `⌄`. Solid glyphs need a reason on `icons.rs` `FILLED_WITH_A_REASON`, and ▼ has none. |
-| 3 | S1 | Tooltip padding | `tooltip.rs::TIP_PADDING_X_LOGICAL_PX`, `tooltip.rs::TIP_PADDING_Y_LOGICAL_PX` | 7 × 3 | 10 × 5 | Single-line tag (`tooltip.rs::PEEK_PADDING_*`, `file_peek.rs::PEEK_FOOT_PADDING_*`). This is the tightest box in the product. |
-| 4 | R1 | Tooltip radius | `tooltip.rs::TIP_RADIUS_LOGICAL_PX` | 5 | 8 | Float-tag family (`docs/DESIGN.md` §7.28). Every other member is r8, including `tooltip.rs::PEEK_RADIUS_LOGICAL_PX`. |
-| 5 | T7 | Section labels: git panel, menus, rail | `git_panel.rs::GIT_LABEL_FONT_LOGICAL_PX`, `git_panel.rs::GIT_LABEL_TRACKING_EM`, `git_panel.rs::GIT_LABEL_LINE_LOGICAL_PX`, `profiles.rs::SECTION_LABEL_FONT_LOGICAL_PX`, `profiles.rs::SECTION_LABEL_LINE_LOGICAL_PX`, `theme.rs::RAIL_LABEL_TRACKING_EM` | 9.5 / 0.09 / 12; 10.5 / 12.5; 0.04 | 11 / 0.05 em / 13 | `settings.rs::GROUP_LABEL_*`, `theme.rs::RAIL_LABEL_FONT_LOGICAL_PX`. The git labels are the smallest, most widely spaced text in the window. |
-| 6 | T4 | List-row labels: palette, git panel, settings nav, git graph | `palette.rs::ROW_FONT_LOGICAL_PX`, `git_panel.rs::GIT_ROW_FONT_LOGICAL_PX`, `settings.rs::NAV_ITEM_FONT_LOGICAL_PX`, `git_graph.rs::GRAPH_BODY_FONT_LOGICAL_PX` | 12.5, 12.5, 12.5, 12 | 13 | Primary text: menu items, tree rows, tabs, buttons and combos are all 13. |
-| 7 | T3 | Settings row titles, palette field, git head | `settings.rs::ROW_TITLE_FONT_LOGICAL_PX`, `palette.rs::FIELD_FONT_LOGICAL_PX`, `git_panel.rs::GIT_HEAD_FONT_LOGICAL_PX` | 13.5 | 13 | Primary text. The settings title sits half a point above its own combo text. |
-| 8 | H3 | 19-pt boxes: pane head `⌄`, preview switch, float dock, files root button | `seats.rs::PANE_HEAD_TRIGGER_BOX_LOGICAL_PX`, `seats.rs::PREVIEW_SWITCH_HEIGHT_LOGICAL_PX`, `float.rs::FLOAT_DOCK_HEIGHT_LOGICAL_PX`, `seats.rs::FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX` | 19 | 22 | Tool box in a head (`seats.rs::PREVIEW_TOOL_BOX_LOGICAL_PX`, `git_graph.rs::GRAPH_TOOL_HEIGHT_LOGICAL_PX`, `search.rs::BUTTON_BOX_LOGICAL_PX` and 5 more). The hover plate grows by 3 pt. |
-| 9 | T2 | Settings dialog title | `settings.rs::HEADER_TITLE_FONT_LOGICAL_PX` | 16 | 15 | Dialog title (`first_run.rs::TITLE_FONT_LOGICAL_PX`, `restore.rs::TITLE_FONT_LOGICAL_PX`). |
-| 10 | H4 | First-run option rows | `first_run.rs::ROW_HEIGHT_LOGICAL_PX` | 42 | 38.5 | The settings single-line row is `ROW_PADDING_Y_LOGICAL_PX` 11 × 2 + `ROW_TITLE_LINE_LOGICAL_PX` 16.5. The same options sit airier in first-run than in Settings. |
-| 11 | H1 | Settings combo drop-down rows | `settings.rs::ITEM_HEIGHT_LOGICAL_PX` | 27.5 | 29.5 | Menu row (`profiles.rs::ITEM_HEIGHT_LOGICAL_PX`). Every other menu uses it. |
-| 12 | H2 | Git panel rows | `git_panel.rs::GIT_ROW_HEIGHT_LOGICAL_PX` | 27 | 24 | The files-column row (`seats.rs::FILES_ROW_HEIGHT_LOGICAL_PX`); the row height changes when switching `Files` ↔ `Git`. |
-| 13 | T1 | Pane head title (every pane) | `theme.rs::SEAT_TITLE_FONT_LOGICAL_PX` | 11.5 | 11 | Every head title is 11 (ruled 2026-09-22); the float and glance heads already use `theme.rs::HEAD_TITLE_FONT_LOGICAL_PX` 11. Subtle (0.5 pt) but on every pane. |
 
 ## Class B: visible side by side, or on a rare surface
 

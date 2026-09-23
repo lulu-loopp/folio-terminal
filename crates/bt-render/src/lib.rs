@@ -209,8 +209,10 @@ const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 /// that box stood on the terminal's own ground beside the band, where nothing
 /// else could be pressed and a generous box cost nothing. These stand inside the
 /// block, on its floor, in a right inset cut to hold exactly them; the run they
-/// now belong to is the window's run of head controls, and its box is 19.
-pub const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 19.0;
+/// now belong to is the window's run of head controls, and its box is theirs
+/// (`UI-SPEC.md` H3, 2026-09-23: the run's tool box moved from 19 to 22, and
+/// this reuse moves with it).
+pub const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 22.0;
 /// `.math-tools { gap: 2px }` (mock-up 2117).
 const MATH_TOOL_GAP_LOGICAL_PX: f32 = 2.0;
 /// `.math-tools button { border-radius: 5px }` (mock-up 2129) — the pill a
@@ -20245,13 +20247,17 @@ mod tests {
         // ① The substance is the fifteen columns the rows really take, and the
         //    region is ⑨ i's ground round it: one whole cell column on the left,
         //    which the pane edge takes straight back because a source row begins
-        //    at column zero, and on the right that column plus the four the two
-        //    marks need. The same rectangle the ground is drawn under and the
-        //    same one `math_band_face` answers with.
+        //    at column zero, and on the right that column plus the five the two
+        //    marks need (`UI-SPEC.md` H3, 2026-09-23: `MATH_TOOL_BUTTON_LOGICAL_PX`
+        //    grew from 19 to 22, and `math_tool_cluster_width_px`'s two marks
+        //    plus their gap now round up to five ten-pixel cells at this
+        //    fixture's own metrics rather than four). The same rectangle the
+        //    ground is drawn under and the same one `math_band_face` answers
+        //    with.
         let ink_right = metrics.padding_px + 15.0 * metrics.cell_width_px;
         assert_eq!(geometry.ink, [metrics.padding_px, 28.0, ink_right, 88.0]);
         assert_eq!(geometry.block[0], metrics.padding_px);
-        assert_eq!(geometry.block[2], ink_right + 5.0 * metrics.cell_width_px);
+        assert_eq!(geometry.block[2], ink_right + 6.0 * metrics.cell_width_px);
         assert_eq!([geometry.block[1], geometry.block[3]], [28.0, 88.0]);
         assert_eq!(boxes.block, geometry.block);
         assert!(

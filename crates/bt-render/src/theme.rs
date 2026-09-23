@@ -2639,8 +2639,10 @@ pub const RAIL_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
 /// A ratio would have been the wrong thing to store — `normal` is resolved from
 /// the font's own ascent/descent/line-gap, so it is a measurement, not a rule.
 pub const RAIL_LABEL_LINE_LOGICAL_PX: f32 = 13.0;
-/// `.rail .label { letter-spacing: .04em }`, as a fraction of the font size.
-pub const RAIL_LABEL_TRACKING_EM: f32 = 0.04;
+/// The section-label tracking (`UI-SPEC.md` T7; `settings.rs::GROUP_LABEL_TRACKING_EM`,
+/// private in `bt-app`), not the mock-up's own
+/// `.rail .label { letter-spacing: .04em }`.
+pub const RAIL_LABEL_TRACKING_EM: f32 = 0.05;
 /// `.rail .label { padding: 4px 10px 6px }`.
 pub const RAIL_LABEL_PADDING_TOP_LOGICAL_PX: f32 = 4.0;
 pub const RAIL_LABEL_PADDING_X_LOGICAL_PX: f32 = 10.0;
@@ -2959,8 +2961,11 @@ pub const FOCUS_MINI_SEAM_LOGICAL_PX: f32 = 1.0;
 // `focus_thumb`: the four gates and the 10 Hz ceiling bound the *rate*, and the
 // row count is bounded by the card's own height, which is bounded by this file.
 
-/// A seat title's font size (`.panehead { font-size: 11.5px }`).
-pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;
+/// A seat title's font size — every head title is 11 (ruled 2026-09-22;
+/// `UI-SPEC.md` T1), not the mock-up's own `.panehead { font-size: 11.5px }`.
+/// The float and glance heads already draw [`HEAD_TITLE_FONT_LOGICAL_PX`]
+/// below.
+pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = HEAD_TITLE_FONT_LOGICAL_PX;
 
 /// **The one typeface a file-name head wears** — whether it is drawn on a hover
 /// preview card (`bt_app::file_peek`) or on the header of the pinned float that
@@ -3635,6 +3640,26 @@ fn ansi_16_rgb_for(theme: Theme) -> [[u8; 3]; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (ticket 19) — **every head title is 11, and the rail's section
+    /// label carries the same tracking Settings and the git page do.**
+    ///
+    /// `UI-SPEC.md` T1 (ruled 2026-09-22: "Every head title is 11") and T7:
+    /// the pane head's title used to sit at 11.5, half a point above
+    /// [`HEAD_TITLE_FONT_LOGICAL_PX`] (the float and glance heads' own), and
+    /// the rail label's tracking used to sit at 0.04 against the section-label
+    /// scale's 0.05.
+    ///
+    /// MUTATION: revert `SEAT_TITLE_FONT_LOGICAL_PX` or
+    /// `RAIL_LABEL_TRACKING_EM` to a literal and this goes red.
+    #[test]
+    fn ui_spec_pane_head_class_a_values_follow_the_rule() {
+        assert_eq!(
+            SEAT_TITLE_FONT_LOGICAL_PX, HEAD_TITLE_FONT_LOGICAL_PX,
+            "UI-SPEC.md T1"
+        );
+        assert_eq!(RAIL_LABEL_TRACKING_EM, 0.05, "UI-SPEC.md T7");
+    }
 
     #[test]
     fn cursor_style_snapshot_survives_one_writer_for_200_frames() {
