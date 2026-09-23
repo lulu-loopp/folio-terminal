@@ -19,6 +19,41 @@ a line number written today is wrong within the week.
 
 ---
 
+## 0. The map
+
+Two pictures of what the sections below say in prose. They are drawn by hand
+from the code and from this file, so a commit that changes a lane, a thread, a
+door or a ruling redraws them in the same commit (`docs/architecture/PROVENANCE.md`).
+
+- **[Today](architecture/today.svg)** — every production thread by name, the lane
+  it serves and the `AppEvent` it answers with; the processes that talk to
+  Folio, the children it starts, the owners as §4.1 finds them, and the crates.
+- **[After the ruled migration](architecture/after-the-ruled-migration.svg)** —
+  the same frame after §5.4 steps 2–5, §4.1 and §12, each move carrying the
+  version this file rules for it; what this file leaves open says *not ruled*.
+
+### 0.1 The census behind them
+
+Counted on 2026-09-23 at `b6ca4329`, product code only: `#[cfg(test)]` and
+`#[cfg(all(test, …))]` items, `tests/`, `src/bin/`, `*tests.rs` files and
+`build.rs` are left out. To re-count, grep the patterns in the last column and
+drop the test items; a number that moves edits this table and the pictures.
+
+| what | count | pattern |
+|---|---|---|
+| thread-spawn sites | **45** — `bt-app` 29, `bt-platform` 12, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
+| through the thread door | **23**, every one in `bt-app` | `spawn_at_priority` |
+| bare spawns | **22**: in `bt-app`, `folio-web-thumb` and five unnamed (`explorer_menu` ×4, `attention_wire::payload_on_stdin`); in `bt-platform`, twelve named `Builder`s (the two endpoints and the directory watch on each platform, six video threads); in `bt-pty`, the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | as above |
+| of those, in a door process rather than the window process | **3**: `explorer_menu::remove_from_explorer_menu`, `explorer_menu::cleanup_registrations`, `attention_wire::payload_on_stdin` | — |
+| named sites / distinct names | **37 / 32**, besides the pool | the first argument, or `.name(…)` |
+| `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
+| channel constructions | **30** — 26 `mpsc::channel`, 4 `mpsc::sync_channel`; `bt-app` 24, `bt-platform` 6 — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
+| `AppEvent` variants | **29** | `enum AppEvent` in `main.rs` |
+| child-process construction | **one** `Command::new`, inside the door `bt_platform::quiet_command`, with **6** product callers — `attention_copilot::run_probe`, `explorer_menu::serve`, `git::git_command`, `psreadline::run_probe`, `shell_integration::run_profile_probe`, and `bt_platform`'s macOS `quiet_command_text` (two programs); besides the door, `bt-pty::PtySession::spawn`'s `spawn_command` and the one `ShellExecuteW` in `bt_platform::handoff` | `quiet_command(_named)?\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(` |
+| `Runtime` methods | **1,424** — 1,223 in the 27 `runtime/*.rs` topics, 201 still in `main.rs` (§13) | a four-space-indented `fn` in an `impl Runtime<'_>` block |
+
+---
+
 ## 1. How to read this file, and where to stop
 
 **The reading rule: a subsystem's contract is the stopping point for a caller.**
@@ -114,24 +149,26 @@ number rather than a silence.
 
 ### 3.1 The graph
 
-Fifteen first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
-Edges as the manifests declare them:
+Sixteen first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
+Normal and target-specific edges as the manifests declare them (2026-09-23):
 
 ```
 bt-unicode      ← bt-transcript, bt-platform, bt-viewport, bt-render, bt-detect
-bt-transcript   ← bt-doc, bt-detect, bt-viewport, bt-render, bt-term, bt-pty
+bt-transcript   ← bt-doc, bt-detect, bt-viewport, bt-render, bt-term, bt-pty,
+                  bt-platform (Windows only)
 bt-doc          ← bt-detect, bt-viewport, bt-render, bt-term, bt-math
 bt-layout       ← (nothing; pure solver, no dependencies at all)
 bt-platform     ← bt-persist, bt-math, bt-render, bt-term, bt-app
 bt-viewport     ← bt-render, bt-term
 bt-detect       ← bt-term
 bt-math         ← bt-term
-bt-term         ← bt-pty, bt-app
+bt-term         ← bt-app (bt-pty only as a dev-dependency, since 2026-09-21)
 bt-pty          ← bt-app
 bt-app          ← (nothing; the top)
 ```
 
-`bt-corpus` and `bt-winres` are tools. `bt-app` is the only crate that may ask
+`bt-corpus` and `bt-winres` are tools; `bt-source` is read by tests only
+(a dev-dependency of `bt-app`, `bt-layout` and `bt-render`). `bt-app` is the only crate that may ask
 what platform it is on, and only in the files named by
 `FILES_THAT_MAY_NAME_A_PLATFORM` in `main.rs`.
 
@@ -145,7 +182,9 @@ dependencies and deleting the edge leaves a broken target.
 `docs/plans/bt-app-split-prep.md` §8.1 lists three faithful alternatives — move
 the probe into `bt-corpus`, which already depends on both; make the need a
 feature; or accept and record the edge — and rules the choice a ticket of its
-own, outside the preparation and outside the relocation commit.
+own, outside the preparation and outside the relocation commit. **Done
+2026-09-21** (`21cf1ef8`): the probe lives in `bt-corpus`, and `bt-pty`'s
+manifest names `bt-term` only under `[dev-dependencies]`.
 
 **`bt-term → bt-platform` — right direction, broader than its manifest says.**
 The manifest comment calls it one call; there are three product import surfaces:
@@ -284,8 +323,8 @@ interface that hands a subsystem `&mut tabs` is a boundary.
 
 ### 5.1 The seven lanes
 
-Forty-five production thread-spawn sites exist across five crates, plus one lazy
-rayon pool. **The thread count is not the defect; the absence of a contract
+Forty-five production thread-spawn sites exist across three crates (`bt-app`
+29, `bt-platform` 12, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1). **The thread count is not the defect; the absence of a contract
 is.** `MathWorker::spawn` starts path verification and image scaling as well as
 math and returns all three through one `MathWorkerResult` — a historical hosting
 decision wearing a subsystem's name. `Runtime::apply_psreadline` performs an
@@ -456,9 +495,12 @@ is decided, the ledger's totals are not an account of what this process reads
 from disk, and the next enumeration-shaped effect will land the same way.
 
 `folio-web-thumb` is the matching bypass of the thread door: a bare
-`Builder::new().name(...)` at inherited `Normal` priority, and the only
-production thread in `bt-app` outside `main.rs` that does not go through
-`spawn_at_priority`.
+`Builder::new().name(...)` at inherited `Normal` priority. It is not the only
+one in `bt-app`: five unnamed `std::thread::spawn` sites also skip
+`spawn_at_priority` — `explorer_menu`'s `begin_probe` and `run_request` in the
+window process, and `remove_from_explorer_menu`, `cleanup_registrations` and
+`attention_wire::payload_on_stdin` in door processes (§0.1). Whether a door
+process's thread owes the door is not ruled.
 
 ---
 
@@ -498,23 +540,69 @@ remote `PathBuf` must not silently become a path on the viewing machine.
 `bt-transcript::paths::may_read_unasked` and `Runtime::activate_hyperlink` are
 where the namespace boundary is visible.
 
-### 7.2 The other chains — to be filled
+### 7.2 The other chains — first pass, 2026-09-23
 
-Named so that the list exists and a hop cannot be added silently. Each is a
-stub: the hops are known, the single current contract is not yet written.
+Named so that the list exists and a hop cannot be added silently. Each line is
+the hops as the code runs them today, in order, with the lane; each ends with
+where the single current contract is written, or that it is not. None of them
+has the §7.1 table yet.
 
-- **Attention ingress** — three lanes into one ledger (the escape sequence
-  through `AdapterEvent`, the named pipe through `bt-app::attention_wire` and
-  `AppEvent::AttentionSpoke`, the `folio attention` verb process), converging at
-  `AttentionLedger::apply` and splitting again into `deliver_attention`,
-  `settle_attention`, `answer_attention` and `raise_attention`.
+- **Attention marks** — three ingress lanes: the escape sequence
+  (`bt-term::adapter`'s `AdapterEvent::AttentionRequest` → `lifecycle` →
+  `DualPlaneSession::apply_attention_request`, a level read off the status
+  snapshot during `Runtime::drain_pty`); the endpoint (`bt-platform::attention_pipe`
+  on `folio-attention-endpoint` → `attention_wire::park` → `AppEvent::AttentionSpoke`
+  → `attention_wire::take`); and the `folio attention` verb process, which
+  writes to that endpoint. They converge at `AttentionLedger::apply` through
+  `main.rs`'s `settle_attention` and `deliver_attention`, then
+  `notify::desktop_reach` → `Runtime::raise_attention` → `notify::interruption`
+  (a flash or a desktop toast); input answers through `answer_attention` /
+  `answer_attention_in` and `mark_attention_seen`; `TabState::mark_state`
+  paints the tab mark at frame build. Everything after the endpoint runs on the
+  window thread. Contract: `docs/RULES.md` §29, reach also in §30. Which
+  function paints the per-pane mark: not traced.
 - **Resize** — `ResizePlan` and `DualPlaneSession::resize_at`, the viewport's
   reflow, `bt-pty::PtySession::resize`, and roughly ten free functions in
   `main.rs` that sequence them. The ordering `flush_pending_pty_resize`
   represents is the contract.
-- **Paste convergence** — `Runtime::prepare_clipboard_paste`, `paste_text`,
-  `bt-term`'s `input::paste_bytes`, and the clipboard read that today happens on
-  the window thread.
+- **Paste** — `runtime/clipboard.rs`'s `paste_from_clipboard` →
+  `bt_platform::clipboard_payload`, **synchronous on the window thread**
+  (`Station::ClipboardRead`) → `prepare_clipboard_paste` (paths through
+  `shell_literal`) → `deliver_paste` → `stage_paste` (send, the input line, or
+  held behind the multi-line card) → `send_paste` → `paste_text` →
+  `bt-term::input::paste_bytes` (bracketed or not) → `offer_pty_input` →
+  `PtySession::write_with_reason` → `InputRing::try_push` → `pump_pty_input` on
+  the pane's writer thread. Contract: `docs/RULES.md` §9 and `deliver_paste`'s
+  doc comment ("all four doors arrive here").
+- **Preview** — `open_preview_file` → `open_preview_source_on` → the
+  `PreviewWorker` on `bt-preview-worker` (the `file_reads` lane `Preview`) →
+  `AppEvent::PreviewReady` → `drain_preview_answers` → `apply_preview_results`
+  into the `PreviewBuffer`; formulas go to `bt-math-worker` and come back as
+  `MathReady` → `apply_math_results`; `preview_watch` on `bt-dir-watch` →
+  `PreviewFileChanged` → `advance_preview_watch` → `refresh_preview_file` asks
+  the worker again; `save_preview_on` → `PreviewBuffer::save` runs
+  **synchronously on the window thread** (`Station::PreviewSave`, §5.3 row 20).
+  Contract: `docs/RULES.md` §18 (what a preview shows) and §19 (the buffer and
+  its save); the load, watch and math sequence as one contract: not written.
+- **Web pane** — `open_web_page` → `open_web_page_on` → `webhost::WebSeat::open`
+  → `bt_platform::WebHost` (WebView2, or WKWebView), on the window thread; the
+  host queues the engine's events and wakes the loop with
+  `AppEvent::WebPageSpoke` → `drive_web_page` → `WebSeat::drive` →
+  `apply_web_outcomes`; page pictures go to `web_thumb::PageShrinker` on
+  `folio-web-thumb`, which wakes with the same event; `hand_url_to_the_browser`
+  → `Runtime::hand_off` → the OS hand-off lane. Contract: not written —
+  `docs/RULES.md` §49 is not yet folded. Which thread the engine's callbacks
+  run on: not traced.
+- **Settings** — `settings_mouse_input` → `apply_settings_choice` /
+  `apply_settings_choice_announcing` (both still in `main.rs`) → the row's
+  `*_requested` decoder in `settings.rs` → its `apply_*` →
+  `persist::SettingsStore::store` → `bt_persist::write_settings_atomic`,
+  **synchronous on the window thread** with no debounce
+  (`Station::SettingsWrite`, §5.3 row 20). `settings.json` is read at
+  `SettingsStore::open` and never again in a run; `storage_watch`
+  (`bt-dir-watch` → `StorageChanged` → `advance_storage_watch`) re-reads only
+  `profiles.json` and the pins (§9). Contract: the write-now rule is only in
+  `SettingsStore`'s doc comment; `docs/RULES.md` §31 is not yet folded.
 
 ---
 
@@ -616,7 +704,7 @@ the only map of the window thread that exists anywhere in the tree — that enum
 is a description of what was **measured**, not of what is **allowed**, and this
 file is where what is allowed now lives.
 
-`AppEvent` has nineteen wake variants and `AppEvent::station` maps each to a
+`AppEvent` has twenty-nine wake variants and `AppEvent::station` maps each to a
 `hang_watch::Station`. **A new off-thread answer shares an existing lane unless
 this file records why it cannot.**
 
@@ -710,7 +798,7 @@ capability routing, which today traverses tabs, belongs beside the session
 registry. `Runtime::raise_attention` stays where it is, a client adapter for
 taskbar and native notification delivery. The order of extraction is attention
 and session identity, then editable documents, then terminal lifecycle — not all
-1,310 methods.
+1,424 methods (§13).
 
 ### 12.2 The three 0.6 decisions
 
@@ -737,6 +825,58 @@ What breaks if this is done wrong: session identity changing during detach and
 reconnect; delayed input delivered to a replacement shell; *seen* treated as
 *answered*; duplicated desktop notifications; client-specific font and layout
 state moved into the authoritative backend.
+
+---
+
+## 13. `bt-app`'s runtime topics — where a `Runtime` method lives
+
+The address step between a subsystem's contract and its implementation (§1).
+Every method below runs on the **window thread** and holds `&mut App` and
+`&mut WindowRuntime` (§4.3); the file a method sits in is navigation, not
+ownership. "Asks" names the lanes of §5.1 whose requests the file sends or
+whose answers it applies; "doors and rows" names the §6 doors and the §5.3
+rows its own methods reach. Counts are the census of §0.1, 2026-09-23.
+
+| file | methods | owns | asks | doors and rows |
+|---|---|---|---|---|
+| `attention.rs` | 27 | toasts, pane notices, the Agents rows, terminal and turn-end notifications; raising, answering, marking seen and jumping to an attention request | ingress (the ledger the endpoint feeds, §7.2) | none; `notify::desktop_reach` and `interruption` decide what reaches the desktop |
+| `clipboard.rs` | 19 | copy, copy on select, the paste target and its delivery, the multi-line paste card | session (bytes into `InputRing`) | the clipboard read, on this thread (§7.2) |
+| `configuration.rs` | 10 | Settings ▸ About ▸ Export… and Import…, each imported part through its own door (§9) | — | `file_reads` (the settings lane, through `bt_persist::read_export`); store writes, row 20 |
+| `diagnostics.rs` | 5 | the OS theme change, application-change notes, the trace drain, grid-change scheduling | ingress (trace) | — |
+| `dpi.rs` | 11 | window resize, scale-factor change, DPI settling | session | row 12 (`flush_pending_pty_resize`) |
+| `files.rs` | 59 | the files column and its float: the tree, rename, new, delete, locate, pins, drops, the palette's roots | observation (`bt-files-worker`, `bt-index-worker`); ingress (`files_watch`); hand-off (reveal) | `std::fs::rename`, `create_dir`, `File::create_new` here, row 20; `files::read_directory` has no door (§6) |
+| `first_run.rs` | 24 | the first-run card, the PSReadLine invite and install, the Explorer package row, the agent hook installers, the PowerShell integration offer | observation (`psreadline-probe`, the package probe); storage (the package job) | rows 3 and 4 (`apply_psreadline`, `refresh_psreadline_installed`) |
+| `floats.rs` | 61 | floating windows, popups and chevron menus; the file, terminal and page menus | observation (files, git); hand-off (reveal) | — |
+| `frame.rs` | 23 | chrome refresh, frame publication and present attempts, `turn`, hyperlink activation | presentation (on this thread); session (the drain frame); observation (math); hand-off (refusals) | row 6 (the search refresh in `publish_frame`) |
+| `git.rs` | 103 | the git column, graph, compare and checkout; its menus, prompts and writes to a repository | observation (`bt-git-worker`, whose `git` children go through `quiet_command`); ingress (`git_watch`) | — |
+| `handoff.rs` | 4 | the `Runtime` side of the OS hand-off lane: submit, owe a duty, answer | hand-off | never calls `bt_platform::handoff` itself (`no_handoff_runs_on_the_window_thread`) |
+| `i18n.rs` | 2 | applying and adopting the language | — | — |
+| `keyboard.rs` | 35 | `keyboard_input` and its rung order (§8), shortcuts and key hints, the IME caret, cursor blink | session (input) | IME native affinity (§5.2); `store_keybindings`, row 20 |
+| `math.rs` | 46 | formulas in terminal and preview: requests, results, hover tools, toggles, copying LaTeX | observation (`bt-math-worker`) | — |
+| `mouse.rs` | 64 | `mouse_input` and its rungs, hover, drag and drop, wheel, the pointer cursor, asking about the link under the pointer | session (mouse reports); observation (path verification, through `main.rs`'s asks) | — |
+| `palette.rs` | 15 | the command palette | observation (`bt-index-worker`) | — |
+| `panes.rs` | 130 | seat layout, split, close, duplicate, zoom and move of panes; command rails; pane menus; `present_seats_and_commit` | session (pane birth through `create_leaf_session`); presentation (on this thread) | rows 9 and 11 |
+| `peek.rs` | 59 | the layout peek and the file glance card | observation (math, preview, git; video) | — |
+| `preview.rs` | 286 | preview panes and documents: open, land, rename, save, watch; markdown pictures, the background picture, video seats, the drop preview, clipboard pictures, the tab strip's animation | observation (`bt-preview-worker`, `bt-math-worker`; starts `background-picture` and `clipboard-picture`); ingress (`preview_watch`); hand-off | `spawn_at_priority` ×2; `std::fs::rename`, row 20; rows 13 (`advance_strip_animation`) and 20 (`save_preview_on`) |
+| `profiles.rs` | 23 | the profile table: launching, menus, the editor, store and re-read, the default profile, the root menu | storage; ingress (`storage_watch`) | row 2 (`add_to_profile`) |
+| `quake.rs` | 9 | the summoned window: show, hide, its profile and arrangement | — | — |
+| `search.rs` | 22 | the find box, its highlights and stepping | — | row 6 (`refresh_search`) |
+| `tabs.rs` | 71 | the tab strip: new, close, activate, rename, drag, tear out; the tab menu; tables | — | row 14 (`activate_tab`, `finish_rename`) |
+| `terminal.rs` | 34 | the terminal pane: `drain_pty`, command marks, scroll and column bars, restart, fonts, selection, the PowerShell intent | session (drain, pane birth) | rows 2 (`spend_powershell_intent`), 5 (`apply_terminal_font`), 13 and 14 (`drain_pty`), 19 |
+| `tooltips.rs` | 9 | tooltips | — | — |
+| `web.rs` | 36 | the web pane: open, sync and advance the page, apply its outcomes, dev tools, sheets, the colour scheme, handing a URL to the browser | hand-off; `folio-web-thumb` | web view native affinity (§5.2) |
+| `windows.rs` | 36 | windows: open, dress, show, restore, the dirty gate, the quit save, close, retire and vault a window, moves | storage (`quit_save` through `SessionWriter`) | `let_the_system_translate_touch`; rows 14 (`dress_new_window`) and 16 |
+
+**Still in `main.rs`** — 201 methods in the two `impl Runtime<'_>` blocks, by the
+2026-09-21 manifest (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
+
+| topic | methods | owns | why it has not moved |
+|---|---|---|---|
+| `launch` | 4 | `Runtime::create` — starts the endpoints and probes and registers their wakes — `reseed_editor_env`, `apply_launch_opens`, `arrival_fits` | a source reader bound to `main.rs` by `include_str!` (`docs/plans/bt-app-split-prep.md` Appendix C) |
+| `settings` | 31 | the settings modal, `apply_settings_choice`, schemes and their watch, `open_font_settings` | a reader that compares door lines in universe order (same appendix) |
+| `focus` | 51 | focus mode, cards and their hints, terminal thumbs, focus seats, the quit card | the same reader shape as `settings` |
+| unassigned | 112 | appearance applies, the storage watch and pins, minted pages, `open_local_path` and `reveal_in_explorer` (hand-off), path-verification asks, `send_user_input`, composition, retirement, `finish_synchronized_update_if_due` (row 14) | the theme regex assigns them no topic; not ruled |
+| newer than the manifest | 3 | `apply_web_color_scheme`, `open_unverified_reference`, `hand_uri_to_the_system` | added after the move; no topic yet |
 
 ---
 
