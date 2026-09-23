@@ -116,8 +116,8 @@ use objc2_web_kit::{
 use super::{
     CloseStep, INSTALL_SEQUENCE, InstallStep, PageVisual, RehostCompensation, RehostOutcome,
     RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebDpiOwnership, WebEvent,
-    WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict, WebRequestKind,
-    WebRequestVerdict, WebSetting, install_rollback,
+    WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict, WebRequestGate,
+    WebRequestKind, WebRequestVerdict, WebSetting, install_rollback,
 };
 use crate::macos_impl::{window_for, window_thread};
 use crate::{Compositor, NativeWindow};
