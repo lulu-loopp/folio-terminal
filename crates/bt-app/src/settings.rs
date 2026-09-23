@@ -10424,6 +10424,58 @@ pub(crate) fn ellipsized_left(
     format!("{ELLIPSIS}{}", &text[start..])
 }
 
+/// The same, cut from the **middle**: `text` if it fits, else its first and last
+/// characters with a `…` between them, as many of each as fit.
+///
+/// The rule for a *folder address* (user ruling 2026-09-20: 「地址过长从中间省略」).
+/// A path cut from the front loses the drive or the home it stands on, and one cut
+/// from the back loses the folder it names; the middle is the part of an address
+/// a reader reconstructs anyway. The tail takes the odd character, because the end
+/// of an address is the half that answers "which folder".
+///
+/// The search is over how many characters survive, which a measure grows with
+/// monotonically for the left-to-right chrome face — the premise the two cuts
+/// above already stand on — and over char boundaries, never bytes.
+pub(crate) fn ellipsized_middle(
+    text: &str,
+    max_width: f32,
+    font_size_px: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> String {
+    if measure(text, font_size_px) <= max_width {
+        return text.to_owned();
+    }
+    let bounds: Vec<usize> = text
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let chars = bounds.len() - 1;
+    let kept = |count: usize| {
+        let head = count / 2;
+        let tail = count - head;
+        format!(
+            "{}{ELLIPSIS}{}",
+            &text[..bounds[head]],
+            &text[bounds[chars - tail]..]
+        )
+    };
+    // The floor is a lone `…`, for the reason both searches above give it; the
+    // whole string was refused, so at most `chars - 1` characters can survive.
+    let mut best = 0;
+    let (mut low, mut high) = (1, chars);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if measure(&kept(middle), font_size_px) <= max_width {
+            best = middle;
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    kept(best)
+}
+
 /// Where every part of the dialog lands in a window this size, or `None` when
 /// the window cannot host it.
 ///
