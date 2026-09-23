@@ -109,7 +109,11 @@ pane that has neither marks nothing, and no parent, sibling, workspace root or
 recently printed absolute path is tried. A seam is one character-class
 transition, not a list of stops: a mark a path is never spelled with ends the
 name in whichever width it was typed (`is_seam_separator` reads its class off
-`is_path_tail_char`). **The separator that admits a bare relative name is one
+`is_path_tail_char`). An ASCII separator needs a witness — a non-ASCII character
+glued behind it — because it may be part of a name (`a.md,b`); a non-ASCII
+separator is prose and needs none, so `…md。18` ends at the `。`. Every reading is
+still offered longest first, so a name that really holds a `、` is asked about
+whole before the shorter one. **The separator that admits a bare relative name is one
 that divides two segments**, so that test is asked of the name with its trailing
 separators taken off: `docs/` is `docs` with a slash after it and is refused,
 while `docs/plans/` is a directory somebody named and is a link whose span
@@ -137,6 +141,7 @@ real*; trailing entry 2026-09-22 *a seam sits on the mark that ended the name,
 whichever keyboard wrote it; and a relative name is read against the pane's own
 folder or not at all*; trailing entry 2026-09-22 *a trailing slash is not the
 evidence a bare reference is admitted on; it is the person naming a directory*;
+trailing entry 2026-09-22 *a full-width stop needs no witness*;
 the project owner's ruling of 2026-09-21 that Ctrl+click on a printed path opens
 it, as before; and the owner's ruling of 2026-09-21 that a relative name's folder
 is never guessed.

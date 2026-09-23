@@ -1807,9 +1807,10 @@ fn release_prose_tail(text: &str, start: usize, end: usize) -> usize {
 /// `、`, `。` and the rest of another script's punctuation now sit in the class their ASCII twins
 /// have always been in — which is one word of this function, not a list to be added to per report.
 ///
-/// Boundary table row 19 is untouched, and it is [`prose_seam_ends`] that keeps it so: a seam needs
-/// **both** halves of the transition, and `D:\资料\A、B.md` has an ASCII `B` behind its `、`, so
-/// there is no seam there and the name is still read whole.
+/// Boundary table row 19 is kept by the order readings are asked in, not by this class: since the
+/// later 2026-09-22 entry a non-ASCII separator seams whatever follows it ([`prose_seam_ends`]), so
+/// `D:\资料\A、B.md` also offers `D:\资料\A` — behind the whole name, which the disk is asked
+/// about first.
 fn is_seam_separator(character: char) -> bool {
     !is_path_tail_char(character) && !character.is_whitespace()
 }
@@ -1874,16 +1875,20 @@ fn token_may_carry_a_seam(token: &str) -> bool {
 
 /// Where one unquoted token offers a **shorter form** of itself, longest first — §7.30.
 ///
-/// A seam is one **character-class transition** and not a list of stops: a [`is_seam_separator`]
-/// with a non-ASCII character glued straight onto it. That is a person writing another script
-/// through an ASCII keyboard — `docs/a.md,这里是操作顺序` — and the separator is the sentence's,
-/// not the name's. Both halves of the transition are load-bearing:
+/// A seam is one **character-class transition** and not a list of stops: an ASCII
+/// [`is_seam_separator`] with a non-ASCII character glued straight onto it. That is a person
+/// writing another script through an ASCII keyboard — `docs/a.md,这里是操作顺序` — and the
+/// separator is the sentence's, not the name's. For an ASCII separator both halves of the
+/// transition are load-bearing: ASCII → ASCII is **not** a seam. `D:\x\a.md,b` is one name; a
+/// comma is legal in a Windows filename and nothing on the line says this one is punctuation.
 ///
-/// * ASCII → ASCII is **not** a seam. `D:\x\a.md,b` is one name; a comma is legal in a Windows
-///   filename and nothing on the line says this one is punctuation.
-/// * non-ASCII → anything is **not** a seam. A full-width stop is released whole by
-///   [`release_prose_tail`] (boundary table row 17), and `D:\资料\A、B.md` is somebody's filename
-///   read whole (row 19 stands unmoved).
+/// **A non-ASCII separator needs no witness** (owner report 2026-09-22). The witness exists
+/// because an ASCII mark may sit inside a name as easily as behind one; a full-width stop, comma,
+/// colon or bracket is a person writing prose, and it ends the name whatever follows it —
+/// `D:\x\a.md。18 条` offers `D:\x\a.md` exactly as `D:\x\a.md。十八条` does. The seam adds a
+/// reading and takes none away: the whole token is still offered first, so `D:\资料\A、B.md` is
+/// somebody's filename read whole whenever the disk holds it (row 19), and the shorter
+/// `D:\资料\A` is asked only behind it.
 ///
 /// **An opening bracket needs no seam of its own any more** (user report 2026-09-17). It had one
 /// from 2026-08-28, because a bracket carries its own evidence and needs no witness behind it —
@@ -1914,14 +1919,16 @@ fn prose_seam_ends(token: &str, limit: usize) -> Vec<usize> {
         if offset > limit {
             break;
         }
-        // Past the separator's **own** width, which since 2026-09-22 is not always one byte: the
-        // class is a mark a path is not spelled with ([`is_seam_separator`]) and `：` is three.
+        // An ASCII separator needs its witness behind it; a non-ASCII one is its own witness
+        // (2026-09-22, *a full-width stop needs no witness*). The witness is read past the
+        // separator's **own** width, which is not always one byte: `：` is three.
         let seams_here = offset >= stops_from
             || (is_seam_separator(character)
-                && token[offset + character.len_utf8()..]
-                    .chars()
-                    .next()
-                    .is_some_and(|next| !next.is_ascii()));
+                && (!character.is_ascii()
+                    || token[offset + character.len_utf8()..]
+                        .chars()
+                        .next()
+                        .is_some_and(|next| !next.is_ascii())));
         if seams_here {
             seams.push(offset);
         }
@@ -6221,9 +6228,13 @@ mod tests {
         assert_eq!(spans("见 docs/a.md。"), ["docs/a.md"]);
         assert_eq!(spans("见 D:\\x\\a.md:12。"), ["D:\\x\\a.md:12"]);
         assert_eq!(spans("见 D:\\x\\a.md》"), ["D:\\x\\a.md"]);
-        // Interior punctuation is a filename's own: only the tail is released, so a name that
-        // really carries a `、` in the middle of it is still read whole.
-        assert_eq!(spans("D:\\资料\\A、B.md"), ["D:\\资料\\A、B.md"]);
+        // Only the tail is released, so a name that really carries a `、` in the middle of it is
+        // still read whole, and asked about first. The `、` is a seam too (2026-09-22, *a
+        // full-width stop needs no witness*), so the name in front of it is offered behind.
+        assert_eq!(
+            spans("D:\\资料\\A、B.md"),
+            ["D:\\资料\\A、B.md", "D:\\资料\\A"]
+        );
         // A sentence that goes on **past** the punctuation puts its own words inside the token, and
         // words are what a filename is made of — so the whole token is a reading, and it is the
         // first one asked about. What used to be written here as the limit of that ("the line
@@ -6616,9 +6627,9 @@ mod tests {
     ///
     /// Row 43 was the second half of this test until 2026-09-22, when the owner's report showed it
     /// was the defect rather than the rule: it asked for a full-width separator to weld the
-    /// sentence behind it onto the name. Both halves of the transition are still load-bearing —
-    /// what changed is that the separator is read as a mark a path is not spelled with rather than
-    /// as an ASCII byte ([`is_seam_separator`]).
+    /// sentence behind it onto the name. For an ASCII separator both halves of the transition are
+    /// still load-bearing; a non-ASCII separator is its own witness (2026-09-22, *a full-width
+    /// stop needs no witness*).
     #[test]
     fn a_seam_is_one_character_class_transition_and_not_a_list_of_stops() {
         // Row 42: `,b` is as much a name as `.md` is, so nothing is cut and the token stands whole.
@@ -6626,15 +6637,41 @@ mod tests {
         // The bare spelling of the same text offers nothing at all, exactly as it did before this
         // slice: a comma is not a path character, so the run rule refuses the opening.
         assert!(spans("docs/a.md,b").is_empty());
-        // And the half that keeps row 19 whole is the **other** one: `、` is a separator now, but
-        // what stands behind it is the ASCII `B` of somebody's filename, so there is no transition
-        // and no seam.
-        assert_eq!(spans("D:\\资料\\A、B.md"), ["D:\\资料\\A、B.md"]);
+        // Row 19: a full-width `、` needs no witness, so it is a seam even with the ASCII `B`
+        // behind it — and the whole name is still the first reading, so a file that really
+        // carries the `、` is found before the shorter name is asked about.
+        assert_eq!(
+            spans("D:\\资料\\A、B.md"),
+            ["D:\\资料\\A、B.md", "D:\\资料\\A"]
+        );
         // Row 43, as the report leaves it: the name in front of the full-width separator is a
         // reading of its own, offered behind the whole token.
         assert_eq!(
             spans("见 D:\\x\\a.md，然后"),
             ["D:\\x\\a.md，然后", "D:\\x\\a.md"]
+        );
+    }
+
+    /// 2026-09-22, *a full-width stop needs no witness*: a non-ASCII separator ends the name
+    /// whatever follows it, while an ASCII one still needs a non-ASCII character glued behind it.
+    #[test]
+    fn a_non_ascii_separator_is_a_seam_whatever_follows_it() {
+        for separator in ['。', '，', '）'] {
+            let token = format!("D:\\x\\a.md{separator}1");
+            assert_eq!(
+                prose_seam_ends(&token, token.len()),
+                [token.find(separator).unwrap()],
+                "{token}"
+            );
+        }
+        // The ASCII twin is unchanged: `,1` is a name's own comma, so there is no seam.
+        let ascii = "D:\\x\\a.md,1";
+        assert!(prose_seam_ends(ascii, ascii.len()).is_empty());
+        // The owner's row: the reading without the stop is offered, and it comes behind the
+        // whole token.
+        assert_eq!(
+            spans("草稿在 D:\\x\\a.md。18"),
+            ["D:\\x\\a.md。18", "D:\\x\\a.md"]
         );
     }
 
