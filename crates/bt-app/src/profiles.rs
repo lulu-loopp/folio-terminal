@@ -45,6 +45,7 @@ use bt_persist::{
     CandidateV1, MarkV1, NamedStartAtV1, NamedStartingDirV1, PROFILES_SCHEMA_VERSION,
     ProfileEntryV1, ProfilesV1, ProgramV1, ResolutionV1, StartAtV1, StartingDirV1,
 };
+use bt_platform::HostPlatform;
 use bt_pty::{ShellEnvironment, resolve_powershell_seven};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, FLOAT_WINDOW_BORDER_LOGICAL_PX,
@@ -4721,7 +4722,7 @@ fn git_fallbacks() -> [ProgramCandidate; 3] {
     ]
 }
 
-/// Where `git.exe` is on this machine, or `None` when it is nowhere.
+/// Where git is on this machine, or `None` when it is nowhere.
 ///
 /// **`PATH` first, and it is more than a shortcut.** The Git block asks `git`
 /// questions whose answers sit three inches from a pane where the user types
@@ -4738,14 +4739,136 @@ fn git_fallbacks() -> [ProgramCandidate; 3] {
 ///
 /// `None` is an answer and not a failure (W5): a machine with no Git gets a Git
 /// page that says so once, and every other part of the product is untouched.
+///
+/// **This machine's answer** — [`find_git_on`] asked about the platform this
+/// process is running on. The two callers (the Git worker and the tests that
+/// need a real git) want the host; the platform is a parameter one level down so
+/// that a test on one machine can ask what the other one answers.
 #[must_use]
 pub fn find_git(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
-    search_path(environment, "git.exe").or_else(|| {
-        git_fallbacks().iter().find_map(|candidate| {
-            ProfilePrograms::candidate_path(candidate, environment)
-                .filter(|path| environment.is_file(path))
-        })
-    })
+    find_git_on(bt_platform::host_platform(), environment)
+}
+
+/// The file git is started from on `platform`: `git.exe` on Windows and `git`
+/// everywhere else.
+///
+/// `std::env::consts::EXE_SUFFIX` spelled as a function of the platform rather
+/// than of the build, so the Mac answer can be asked on a Windows test host.
+/// For the platform this process runs on the two agree, and
+/// `the_git_file_name_is_this_builds_executable_suffix` holds them together.
+#[must_use]
+pub(crate) const fn git_file_name_on(platform: HostPlatform) -> &'static str {
+    match platform {
+        HostPlatform::Windows => "git.exe",
+        HostPlatform::MacOs | HostPlatform::OtherUnix => "git",
+    }
+}
+
+/// [`find_git`] on a named platform (0.4.4 ticket 07).
+///
+/// **Windows** is what it always was, byte for byte: `git.exe` on `PATH`, then
+/// the three installers' default roots of [`git_fallbacks`].
+///
+/// **macOS and other Unix** look for `git`. Until 0.4.4 every Mac looked for
+/// `git.exe` under three Windows variables, found nothing, and the whole Git page
+/// said git was missing on a machine that had it. `PATH` first for the reason
+/// above, then [`unix_git_fallbacks`]: the places a Mac's git is installed to
+/// that the `PATH` of an application started from Finder does not name.
+///
+/// **On macOS `/usr/bin/git` is not proof of a git** ([`is_a_git_on`]): it is
+/// Apple's stub, present on every Mac, which hands the call on to the selected
+/// developer directory — or, on a Mac with neither Xcode nor the command line
+/// tools, raises the dialog that offers to install them. Asking whether the file
+/// exists would answer yes on every Mac; running it to find out would put that
+/// dialog in front of a reader who only opened a window. The honest question is
+/// whether the developer directory behind it holds a git, and it is asked of the
+/// filesystem, never of the stub.
+#[must_use]
+pub(crate) fn find_git_on(
+    platform: HostPlatform,
+    environment: &dyn ShellEnvironment,
+) -> Option<PathBuf> {
+    match platform {
+        HostPlatform::Windows => {
+            search_path(environment, git_file_name_on(platform)).or_else(|| {
+                git_fallbacks().iter().find_map(|candidate| {
+                    ProfilePrograms::candidate_path(candidate, environment)
+                        .filter(|path| environment.is_file(path))
+                })
+            })
+        }
+        HostPlatform::MacOs | HostPlatform::OtherUnix => {
+            let is_a_git = |path: &Path| is_a_git_on(platform, path, environment);
+            let on_path = environment.var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    // `search_path`'s rule — an empty or relative entry is the
+                    // working directory, and that is not where a program is
+                    // installed — asked as "starts at the root", which is what
+                    // absolute means on Unix and which a Windows test host can
+                    // also answer about a Unix path.
+                    .filter(|directory| directory.has_root())
+                    .map(|directory| directory.join(git_file_name_on(platform)))
+                    .find(|candidate| is_a_git(candidate))
+            });
+            on_path.or_else(|| {
+                unix_git_fallbacks(platform)
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|candidate| is_a_git(candidate))
+            })
+        }
+    }
+}
+
+/// Where git is looked for on `platform` when `PATH` does not name it, in order.
+///
+/// **macOS**: Homebrew on Apple silicon, Homebrew on Intel, then the system's
+/// `/usr/bin/git`. An application opened from Finder is started by `launchd`
+/// with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, not with the login shell's, so a
+/// Homebrew git the reader types every day is invisible to the `PATH` walk; the
+/// two prefixes are Homebrew's own defaults. The system's is last because it is
+/// the one that is only a stub unless a developer directory stands behind it.
+///
+/// **Other Unix**: `/usr/bin/git`, where every distribution's package puts it.
+/// Windows never reads this list; [`git_fallbacks`] is its.
+const fn unix_git_fallbacks(platform: HostPlatform) -> &'static [&'static str] {
+    match platform {
+        HostPlatform::MacOs => &["/opt/homebrew/bin/git", "/usr/local/bin/git", MAC_GIT_STUB],
+        HostPlatform::Windows | HostPlatform::OtherUnix => &["/usr/bin/git"],
+    }
+}
+
+/// Apple's `/usr/bin/git`, which runs the selected developer directory's git
+/// (see [`find_git_on`]).
+const MAC_GIT_STUB: &str = "/usr/bin/git";
+
+/// The developer directories the stub can hand a call to, as `xcrun` finds
+/// them — after the one `DEVELOPER_DIR` names, which is read separately: the
+/// one `xcode-select -s` recorded, Xcode's own and the command line tools'.
+const MAC_DEVELOPER_DIRS: [&str; 3] = [
+    "/var/db/xcode_select_link",
+    "/Applications/Xcode.app/Contents/Developer",
+    "/Library/Developer/CommandLineTools",
+];
+
+/// Whether `path` is a git this machine can run, on `platform`.
+///
+/// A startable file — and on macOS, when that file is [`MAC_GIT_STUB`], a
+/// developer directory that holds the git the stub would run.
+fn is_a_git_on(platform: HostPlatform, path: &Path, environment: &dyn ShellEnvironment) -> bool {
+    if !environment.is_file(path) {
+        return false;
+    }
+    if platform != HostPlatform::MacOs || path != Path::new(MAC_GIT_STUB) {
+        return true;
+    }
+    let git_under = |directory: &Path| environment.is_file(&directory.join("usr/bin/git"));
+    environment
+        .var_os("DEVELOPER_DIR")
+        .is_some_and(|directory| git_under(Path::new(&directory)))
+        || MAC_DEVELOPER_DIRS
+            .iter()
+            .any(|directory| git_under(Path::new(directory)))
 }
 
 // `vscode_fallbacks` and `find_vscode` are **retired** (user ruling 2026-08-25:
@@ -17124,6 +17247,267 @@ mod tests {
         assert_eq!(
             both.program("gitbash"),
             Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe"))
+        );
+    }
+
+    /// A test `PATH` of these directories, joined the way this host joins one.
+    fn path_of(directories: &[&str]) -> String {
+        std::env::join_paths(directories)
+            .expect("test PATH joins cleanly")
+            .into_string()
+            .expect("ASCII test paths")
+    }
+
+    /// RED (0.4.4 ticket 07) — **on macOS git is found as `git`, and a
+    /// `git.exe` is never what is found.**
+    ///
+    /// Until 0.4.4 `find_git` asked for `git.exe` on every platform and then
+    /// under three Windows variables, so on every Mac it answered `None` and the
+    /// whole Git page said git was missing — with `/usr/bin` on the `PATH` and a
+    /// git in it. Asked through [`find_git_on`] with the platform named, so this
+    /// runs on the Windows build server as well as it would on a Mac.
+    ///
+    /// `/opt/tools/bin` stands for "a `PATH` entry that is none of the places
+    /// asked after it", so that a found git can only have come from the `PATH`
+    /// walk; the fallbacks and the stub rule are
+    /// `the_mac_fallbacks_are_asked_in_order_when_path_has_no_git`'s.
+    ///
+    /// MUTATION: answer `"git.exe"` for macOS in `git_file_name_on` (or send
+    /// macOS down the Windows arm) and the first assertion finds nothing.
+    #[test]
+    fn find_git_on_macos_finds_git_and_never_git_exe() {
+        let mac = HostPlatform::MacOs;
+        let with_git = FakeMachine::default()
+            .with_var("PATH", &path_of(&["/opt/tools/bin"]))
+            .with_file("/opt/tools/bin/git");
+        assert_eq!(
+            find_git_on(mac, &with_git),
+            Some(PathBuf::from("/opt/tools/bin/git")),
+            "a Mac with git on its PATH has a git"
+        );
+
+        // The system's own folder, as a Finder launch's PATH names it, with the
+        // command line tools behind its stub.
+        let system = FakeMachine::default()
+            .with_var("PATH", &path_of(&["/usr/bin"]))
+            .with_file("/usr/bin/git")
+            .with_file("/Library/Developer/CommandLineTools/usr/bin/git");
+        assert_eq!(
+            find_git_on(mac, &system),
+            Some(PathBuf::from("/usr/bin/git"))
+        );
+
+        let only_exe = FakeMachine::default()
+            .with_var("PATH", &path_of(&["/opt/tools/bin"]))
+            .with_file("/opt/tools/bin/git.exe");
+        assert_eq!(
+            find_git_on(mac, &only_exe),
+            None,
+            "a Mac does not start a git.exe"
+        );
+
+        // And the Windows variables mean nothing there: a Mac that happened to
+        // carry them is not a Mac with Git for Windows installed.
+        let windows_roots = FakeMachine::default()
+            .with_var("ProgramFiles", "/Program Files")
+            .with_file("/Program Files/Git/cmd/git.exe")
+            .with_file("/Program Files/Git/cmd/git");
+        assert_eq!(find_git_on(mac, &windows_roots), None);
+    }
+
+    /// PIN (0.4.4 ticket 07) — **Windows finds git exactly as it did before
+    /// the platform became a parameter.**
+    ///
+    /// `git.exe` on `PATH` first, the three installers' roots after it in their
+    /// order, a relative `PATH` entry ignored (R1-17), and a `git` with no
+    /// `.exe` not a Windows git. These are the answers the old one-arm
+    /// `find_git` gave, written down so that the Mac arm cannot move them.
+    ///
+    /// MUTATION: send Windows down the Unix arm and `git.exe` is never asked
+    /// for; swap two of [`git_fallbacks`]' roots and the order assertion names
+    /// the wrong install.
+    #[test]
+    fn find_git_on_windows_is_unchanged() {
+        let windows = HostPlatform::Windows;
+        let roots = || {
+            FakeMachine::default()
+                .with_var("ProgramFiles", r"C:\Program Files")
+                .with_var("ProgramFiles(x86)", r"C:\Program Files (x86)")
+                .with_var("LocalAppData", r"C:\Users\dev\AppData\Local")
+        };
+
+        // PATH first, over every root.
+        let on_path = roots()
+            .with_var("PATH", &path_of(&[r"C:\Other", r"D:\Tools\Git\cmd"]))
+            .with_file(r"D:\Tools\Git\cmd\git.exe")
+            .with_file(r"C:\Program Files\Git\cmd\git.exe");
+        assert_eq!(
+            find_git_on(windows, &on_path),
+            Some(PathBuf::from(r"D:\Tools\Git\cmd\git.exe"))
+        );
+
+        // The three roots, each found on its own, in this order.
+        let cases: [(&[&str], &str); 3] = [
+            (
+                &[
+                    r"C:\Program Files\Git\cmd\git.exe",
+                    r"C:\Program Files (x86)\Git\cmd\git.exe",
+                    r"C:\Users\dev\AppData\Local\Programs\Git\cmd\git.exe",
+                ],
+                r"C:\Program Files\Git\cmd\git.exe",
+            ),
+            (
+                &[
+                    r"C:\Program Files (x86)\Git\cmd\git.exe",
+                    r"C:\Users\dev\AppData\Local\Programs\Git\cmd\git.exe",
+                ],
+                r"C:\Program Files (x86)\Git\cmd\git.exe",
+            ),
+            (
+                &[r"C:\Users\dev\AppData\Local\Programs\Git\cmd\git.exe"],
+                r"C:\Users\dev\AppData\Local\Programs\Git\cmd\git.exe",
+            ),
+        ];
+        for (installed, expected) in cases {
+            let machine = installed
+                .iter()
+                .fold(roots(), |machine, file| machine.with_file(file));
+            assert_eq!(
+                find_git_on(windows, &machine),
+                Some(PathBuf::from(expected))
+            );
+        }
+
+        // A relative PATH entry is the working directory, and is never asked.
+        let relative = roots()
+            .with_var("PATH", &path_of(&["repo"]))
+            .with_file(r"repo\git.exe");
+        assert_eq!(find_git_on(windows, &relative), None);
+
+        // `git` without the suffix is not what Windows starts.
+        let bare = roots()
+            .with_var("PATH", &path_of(&[r"D:\Tools\bin"]))
+            .with_file(r"D:\Tools\bin\git");
+        assert_eq!(find_git_on(windows, &bare), None);
+    }
+
+    /// RED (0.4.4 ticket 07) — **with no git on `PATH`, a Mac asks Homebrew on
+    /// Apple silicon, Homebrew on Intel, then the system's `/usr/bin/git` — and
+    /// that last one only counts when a developer directory stands behind it.**
+    ///
+    /// An application opened from Finder gets `launchd`'s
+    /// `/usr/bin:/bin:/usr/sbin:/sbin`, not the login shell's `PATH`, so a
+    /// Homebrew git is invisible to the `PATH` walk and has to be asked for by
+    /// place. `/usr/bin/git` is Apple's stub on every Mac (the Mac mini's is
+    /// one of 78 hard links to the same 118 KB file as `/usr/bin/make`); with
+    /// neither Xcode nor the command line tools, running it raises the install
+    /// dialog. So the stub is a git only when the directory it would hand the
+    /// call to holds one — asked of the filesystem, never by running it.
+    ///
+    /// MUTATION: drop the developer-directory condition from `is_a_git_on`
+    /// and the stub-alone Mac has a git; reorder `unix_git_fallbacks` and the
+    /// order assertions name the wrong install.
+    #[test]
+    fn the_mac_fallbacks_are_asked_in_order_when_path_has_no_git() {
+        let mac = HostPlatform::MacOs;
+        let finder_path =
+            || FakeMachine::default().with_var("PATH", &path_of(&["/bin", "/usr/sbin", "/sbin"]));
+
+        let both_brews = finder_path()
+            .with_file("/opt/homebrew/bin/git")
+            .with_file("/usr/local/bin/git")
+            .with_file("/usr/bin/git")
+            .with_file("/Library/Developer/CommandLineTools/usr/bin/git");
+        assert_eq!(
+            find_git_on(mac, &both_brews),
+            Some(PathBuf::from("/opt/homebrew/bin/git"))
+        );
+        let intel_brew = finder_path()
+            .with_file("/usr/local/bin/git")
+            .with_file("/usr/bin/git")
+            .with_file("/Library/Developer/CommandLineTools/usr/bin/git");
+        assert_eq!(
+            find_git_on(mac, &intel_brew),
+            Some(PathBuf::from("/usr/local/bin/git"))
+        );
+
+        // The stub alone is not a git.
+        let stub_only = finder_path().with_file("/usr/bin/git");
+        assert_eq!(find_git_on(mac, &stub_only), None);
+
+        // The stub with each developer directory behind it is one.
+        for developer in [
+            "/var/db/xcode_select_link",
+            "/Applications/Xcode.app/Contents/Developer",
+            "/Library/Developer/CommandLineTools",
+        ] {
+            let backed = finder_path()
+                .with_file("/usr/bin/git")
+                .with_file(&format!("{developer}/usr/bin/git"));
+            assert_eq!(
+                find_git_on(mac, &backed),
+                Some(PathBuf::from("/usr/bin/git")),
+                "the stub with {developer} behind it"
+            );
+        }
+        let chosen = finder_path()
+            .with_var(
+                "DEVELOPER_DIR",
+                "/Volumes/Tools/Xcode-beta.app/Contents/Developer",
+            )
+            .with_file("/usr/bin/git")
+            .with_file("/Volumes/Tools/Xcode-beta.app/Contents/Developer/usr/bin/git");
+        assert_eq!(
+            find_git_on(mac, &chosen),
+            Some(PathBuf::from("/usr/bin/git"))
+        );
+
+        // And the same rule on the PATH walk: `/usr/bin` on the PATH (which a
+        // Finder launch has) does not stop a Homebrew git being found when the
+        // stub in it has nothing behind it.
+        let stub_on_path = FakeMachine::default()
+            .with_var("PATH", &path_of(&["/usr/bin", "/bin"]))
+            .with_file("/usr/bin/git")
+            .with_file("/opt/homebrew/bin/git");
+        assert_eq!(
+            find_git_on(mac, &stub_on_path),
+            Some(PathBuf::from("/opt/homebrew/bin/git"))
+        );
+        let backed_on_path = FakeMachine::default()
+            .with_var("PATH", &path_of(&["/usr/bin", "/bin"]))
+            .with_file("/usr/bin/git")
+            .with_file("/Library/Developer/CommandLineTools/usr/bin/git")
+            .with_file("/opt/homebrew/bin/git");
+        assert_eq!(
+            find_git_on(mac, &backed_on_path),
+            Some(PathBuf::from("/usr/bin/git")),
+            "PATH first, as on Windows, once the stub has a git behind it"
+        );
+
+        // Another Unix has no stub: its `/usr/bin/git` is the package's.
+        let linux = FakeMachine::default().with_file("/usr/bin/git");
+        assert_eq!(
+            find_git_on(HostPlatform::OtherUnix, &linux),
+            Some(PathBuf::from("/usr/bin/git"))
+        );
+    }
+
+    /// PIN (0.4.4 ticket 07) — **the name git is looked for by is this
+    /// build's own executable suffix on the platform this process runs on.**
+    ///
+    /// [`git_file_name_on`] is `EXE_SUFFIX` spelled as a function of the
+    /// platform so that the other machine's answer can be asked; this is what
+    /// keeps the host's answer from drifting away from the constant.
+    ///
+    /// MUTATION: answer `git` for Windows in `git_file_name_on` and this goes
+    /// red on Windows; answer `git.exe` for every platform and it goes red on
+    /// any Mac or Linux host that runs it (no CI job runs `bt-app`'s tests off
+    /// Windows today — `core-macos` compiles them).
+    #[test]
+    fn the_git_file_name_is_this_builds_executable_suffix() {
+        assert_eq!(
+            git_file_name_on(bt_platform::host_platform()),
+            format!("git{}", std::env::consts::EXE_SUFFIX)
         );
     }
 

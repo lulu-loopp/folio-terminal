@@ -3164,10 +3164,19 @@ impl Text {
                 "The palette a light window uses for terminal text and for the window itself.",
                 "浅色窗口用的配色，终端与窗口本身共用一套。",
             ),
-            Self::DescDarkScheme => pick(
+            // **The folder is a platform fact** (0.4.4 ticket 07): the Mac
+            // column used to send a Mac reader to `%APPDATA%`, which that
+            // machine does not have. `persist::storage_dir` is where the
+            // folder really is on each.
+            Self::DescDarkScheme => pick_platform(
                 lang,
+                platform,
                 "The same for a dark window. Your own scheme files go in %APPDATA%\\Folio\\schemes.",
                 "深色窗口同理。你自己的配色文件放在 %APPDATA%\\Folio\\schemes。",
+                "The same for a dark window. Your own schemes go in ~/Library/Application Support/Folio/schemes.",
+                // zh: pending opus46 — the Windows sentence's Chinese with the
+                // Mac folder in it.
+                "The same for a dark window. Your own schemes go in ~/Library/Application Support/Folio/schemes.",
             ),
             Self::SchemeFileSkipped => pick(lang, "Colour scheme skipped", "配色文件已跳过"),
 
@@ -6184,6 +6193,11 @@ impl Text {
         Self::ShellIntegrationPending,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
+        // The refusal `shell_integration::install_into_profile` gives when the
+        // data folder is not under `%APPDATA%`. The install is reached only from
+        // the strip above and the first-run PowerShell intent, and neither
+        // rises off Windows.
+        Self::ShellProfileScriptLocation,
         // — the Acrylic row's reason, which only a Windows with no backdrop
         //   reads: off Windows this build has no backdrop to ask for and
         //   `settings::visible_rows_for` does not offer the row at all (§13.32
@@ -6211,7 +6225,10 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 1] = [
+        // The Mac folder in the dark scheme row (0.4.4 ticket 07).
+        (Self::DescDarkScheme, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -9087,7 +9104,10 @@ mod tests {
     /// exemption list, and this names it.
     #[test]
     fn no_string_a_mac_reader_meets_names_a_windows_program() {
-        const WINDOWS_WORDS: [&str; 11] = [
+        const WINDOWS_WORDS: [&str; 12] = [
+            // A folder only one machine has (0.4.4 ticket 07: the dark scheme
+            // row sent a Mac reader to `%APPDATA%\Folio\schemes`).
+            "APPDATA",
             "Explorer",
             "资源管理器",
             "taskbar",

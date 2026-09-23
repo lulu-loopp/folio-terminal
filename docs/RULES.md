@@ -577,6 +577,12 @@ content. **0.4.4 owns this** — either the preservation transaction in
 ### 44. Git status — `not yet folded`
 Entries: §7.1.3g; the git backend adjudication document under `docs/plans/`; the
 no-polling rule recorded there. Owner: the git worker, its cache and its watch.
+Where the git binary is found (`profiles::find_git_on`, DESIGN 2026-09-22
+*on macOS the Git page finds git*): Windows — `git.exe` on `PATH`, then
+`%ProgramFiles%`, `%ProgramFiles(x86)%`, `%LocalAppData%\Programs`; macOS — `git` on
+`PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, where Apple's
+`/usr/bin/git` stub counts only when a developer directory holds a git and is
+never run to find out; other Unix — `git` on `PATH`, then `/usr/bin/git`.
 
 ### 45. WSL — `not yet folded`
 Entries: §7.40 *a terminal may not open another terminal at startup, nor boot a

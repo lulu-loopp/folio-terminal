@@ -13,6 +13,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- On macOS the Git page found no git, and the dark scheme setting named a
+  Windows folder.
+
 - Touch input — a touch screen, or a remote-desktop tool that sends touch —
   now reaches Folio the way it reaches other Windows programs: a tap is a
   click, and press-and-hold opens the menu. Windows does the translating.

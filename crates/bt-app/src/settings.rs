@@ -17511,7 +17511,7 @@ mod tests {
     /// read off this machine, so their length is a fact about the machine rather
     /// than about the copy. What is held here instead is the entry each of them
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 24] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 25] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -17609,6 +17609,9 @@ mod tests {
             ),
             (SettingsRow::QuakeHotkey, Text::DescQuakeHotkey, MacOs),
             (SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt, MacOs),
+            // The folder a reader's own schemes go in, which is a different
+            // folder on each machine (0.4.4 ticket 07).
+            (SettingsRow::DarkScheme, Text::DescDarkScheme, MacOs),
         ]
     };
 
@@ -18209,6 +18212,95 @@ mod tests {
                 "{row:?} is a row this dialog draws and its sentence was never \
                  measured"
             );
+        }
+    }
+
+    /// RED (0.4.4 ticket 07) — **the Dark scheme row names the folder this
+    /// platform keeps scheme files in, and says it in two lines.**
+    ///
+    /// Until 0.4.4 the sentence was one `pick` for every machine, so a Mac
+    /// reader looking for where their own scheme files go was sent to
+    /// `%APPDATA%\Folio\schemes` — a folder that machine does not have. The
+    /// folder is `persist::storage_dir`'s on each platform with
+    /// `schemes::USER_SCHEME_DIR` under it, and both halves are read from the
+    /// constants the product itself uses rather than written out again here.
+    ///
+    /// Every column in both languages, each held to the budget
+    /// [`no_settings_sentence_needs_a_third_line`] holds the English to, wrapped
+    /// in the column the Appearance page really draws — the Mac sentence is the
+    /// longer of the two and the one no walk of the host's own dialog measures
+    /// on a Windows build server. The Chinese of the Mac column is owed
+    /// (`Text::CHINESE_PENDING`) and stands on the English until opus46 writes it.
+    ///
+    /// MUTATION: turn `Text::DescDarkScheme` back into a `pick` of the Windows
+    /// pair, and the Mac half of this names `%APPDATA%`.
+    #[test]
+    fn the_dark_scheme_row_names_this_platforms_folder() {
+        use crate::i18n::{Lang, Text};
+        use bt_platform::HostPlatform;
+        fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
+            bt_unicode::graphemes(text)
+                .map(|cluster| bt_unicode::cluster_width(cluster) as f32)
+                .sum::<f32>()
+                * font_size_px
+                * TEST_ADVANCE_PER_EM
+        }
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let dialog_pages = pages(held, editing);
+        let row = SettingsRow::DarkScheme;
+        let page = &dialog_pages
+            .iter()
+            .find(|(category, _)| *category == row.category())
+            .expect("the Dark scheme row is on a page")
+            .1;
+        assert!(page.contains(&row), "the walk reached the row it measures");
+        let column = page_description_column(page, span);
+
+        let windows = format!(
+            r"%APPDATA%\{}\{}",
+            crate::persist::STORAGE_NAME,
+            crate::schemes::USER_SCHEME_DIR
+        );
+        let mac = format!(
+            "~/Library/Application Support/{}/{}",
+            crate::persist::STORAGE_NAME,
+            crate::schemes::USER_SCHEME_DIR
+        );
+        for (platform, folder, not_this) in [
+            (HostPlatform::Windows, &windows, "~/Library"),
+            (HostPlatform::MacOs, &mac, "APPDATA"),
+        ] {
+            for lang in Lang::ALL {
+                let said = Text::DescDarkScheme.on(lang, platform);
+                assert!(
+                    said.contains(folder.as_str()),
+                    "{platform:?} ({lang:?}) should name {folder}: {said:?}"
+                );
+                assert!(
+                    !said.contains(not_this),
+                    "{platform:?} ({lang:?}) names the other machine's folder: {said:?}"
+                );
+                let lines = match lang {
+                    Lang::English => {
+                        wrapped_description(said, column, ROW_DESC_FONT_LOGICAL_PX, &mut measure)
+                    }
+                    Lang::Chinese => wrapped_description(
+                        said,
+                        column,
+                        ROW_DESC_FONT_LOGICAL_PX,
+                        &mut measure_in_a_cjk_face,
+                    ),
+                };
+                assert!(
+                    lines.len() <= SETTINGS_DESCRIPTION_MAX_LINES,
+                    "{platform:?} ({lang:?}) needs {} lines: {lines:#?}",
+                    lines.len()
+                );
+            }
         }
     }
 
