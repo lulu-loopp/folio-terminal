@@ -18,6 +18,7 @@ mod i18n;
 mod keyboard;
 mod math;
 mod palette;
+mod peek;
 mod profiles;
 mod quake;
 mod search;
