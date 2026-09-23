@@ -75,6 +75,21 @@ WHAT THE DRY RUN (P11, 2026-09-22) ESTABLISHED, AND THIS SCRIPT ENFORCES
   declaration comparison has to allow that one re-wrap, and `--check` reports
   every occurrence by name rather than passing it over.
 
+WHAT STEP 2a ITSELF ADDED (2026-09-22)
+
+* **The import finder reads four shapes**: path heads, types, macros, and
+  bare values (constants, statics, functions named as values), skipping what
+  the item binds itself, a `fn`'s own name, anything after a `.`, and the
+  anonymous `const _`. `launch`, `clipboard` and `settings` each found a gap.
+
+* **Two import edits stay the compiler's, not this script's.** A trait
+  imported for its methods (`.context(…)` names no trait) is found from
+  rustc's E0599 suggestion, taking the one candidate the crate root itself
+  imports. And a crate-root import whose last user moved out goes unused in
+  `main.rs`; rustc's warning names it, and it is removed only when no other
+  unqualified spelling of the name remains in `main.rs`. Each such edit is
+  named in its topic's commit.
+
 Written for `docs/plans/bt-app-split-prep.md` §6.4 P11 and
 `docs/plans/bt-app-split.md` §6.1/§6.5.
 """
@@ -260,26 +275,76 @@ def root_bindings(src, root):
             from_use(node.child_by_field_name('argument'), '')
         elif node.type in carriers:
             name = node.child_by_field_name('name')
-            if name is not None:
+            # `const _: … = …;` binds nothing: `_` is the anonymous item, and
+            # `use crate::{_};` does not parse.
+            if name is not None and text(src, name) != '_':
                 items.add(text(src, name))
     return modules, items, uses
+
+
+# The fields under which an identifier is a binding the item makes, not a name
+# it reads: `let x`, `|x|`, `fn f(x: T)`, `for x in`, `if let Some(x)`, a match
+# arm's pattern, and the name of a `fn` nested in a body.
+BINDING_FIELDS = {
+    'let_declaration': 'pattern', 'parameter': 'pattern', 'for_expression': 'pattern',
+    'let_condition': 'pattern', 'match_arm': 'pattern', 'function_item': 'name',
+}
+
+
+def bound_names(src, tree):
+    bound = set()
+    for node in walk(tree):
+        field = BINDING_FIELDS.get(node.type)
+        # The moved method's own name binds nothing in its body: a method is
+        # reached through `self`, so a bare call of the same spelling is a
+        # crate-root free function (`copy_selection` is both).
+        if (node.type == 'function_item' and node.parent is not None
+                and node.parent.type == 'declaration_list'
+                and node.parent.parent is not None
+                and node.parent.parent.type == 'impl_item'):
+            continue
+        if field is not None:
+            target = node.child_by_field_name(field)
+            if target is not None:
+                bound.update(text(src, n) for n in walk(target) if n.type == 'identifier')
+        elif node.type == 'closure_parameters':
+            bound.update(text(src, n) for n in walk(node) if n.type == 'identifier')
+    return bound
 
 
 def named_by(cuts):
     """Every name the moved items write, as a set. Over-approximate on purpose:
     the filter below keeps only the ones written unqualified, and `cargo build`
-    is the authority on what is left over."""
+    is the authority on what is left over.
+
+    Four shapes: the head of a path (`settings::Choice`), a type
+    (`LogicalSize`), a macro (`anyhow!`), and a bare value — a constant, a
+    static or a function named as a value (`INITIAL_WIDTH`, `.map(revive_plan)`),
+    including inside a macro's arguments. A bare identifier the item itself
+    binds (a local, a parameter, a closure argument, a pattern) is its own and
+    is not asked of the crate root. An import of a root name can never make a
+    name resolve differently from how it resolved at the root; an extra one is
+    a warning and a missing one an error, so either way the build says so."""
     wanted = set()
     for cut in cuts:
         src = ("impl X {\n" + cut['item'] + "\n}\n").encode('utf-8')
         tree = parse(src, cut['name'])
+        bound = bound_names(src, tree)
         for node in walk(tree):
             if node.type in ('scoped_identifier', 'scoped_type_identifier'):
                 wanted.add(text(src, node).split('::')[0].strip())
-            elif node.type == 'call_expression':
-                fn = node.child_by_field_name('function')
-                if fn is not None and fn.type == 'identifier':
-                    wanted.add(text(src, fn))
+            elif node.type == 'macro_invocation':
+                name = node.child_by_field_name('macro')
+                if name is not None and name.type == 'identifier':
+                    wanted.add(text(src, name))
+            elif node.type == 'identifier':
+                spelling = text(src, node)
+                parent = node.parent
+                declared = (parent is not None and parent.type == 'function_item'
+                            and parent.child_by_field_name('name').start_byte == node.start_byte)
+                # a `fn` item's own name is a declaration, never a use
+                if spelling not in bound and not declared:
+                    wanted.add(spelling)
             elif node.type in ('type_identifier', 'generic_type'):
                 spelling = text(src, node).split('<')[0].strip()
                 if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', spelling):
@@ -289,11 +354,13 @@ def named_by(cuts):
 
 def imports(cuts, modules, items, uses, type_name):
     """Step 6. A name earns a `use` line when the crate root binds it AND the
-    moved code writes it unqualified at least once outside a comment."""
+    moved code writes it unqualified at least once outside a comment. After
+    a `.` it is a field or a method (inside a macro's arguments the parser
+    hands those over as bare identifiers), not a name the module binds."""
     code = code_only('\n'.join(cut['item'] for cut in cuts))
     unqualified = set()
     for name in named_by(cuts):
-        if re.search(r'(?<![\w:])' + re.escape(name) + r'(?![\w])', code):
+        if re.search(r'(?<![\w:.])' + re.escape(name) + r'(?![\w])', code):
             unqualified.add(name)
 
     from_crate, from_elsewhere, unresolved = {type_name}, {}, set()
