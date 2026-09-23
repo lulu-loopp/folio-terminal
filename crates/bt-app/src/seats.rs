@@ -26642,7 +26642,11 @@ mod tests {",
     ///
     /// Everything the resize machinery is handed — the grid, and the pixel size
     /// ConPTY is told — is a function of the terminal seat's rectangle and
-    /// nothing else (`grid_for_pixels(seat)`, `terminal_pty_physical(seat)`), so
+    /// whether the pane has a command rail, and nothing else
+    /// (`cmdrail::terminal_grid_for(metrics, seat, has_rail)`, and the seat's own
+    /// pixel size; since 2026-09-23, when a pane with a rail began reserving the
+    /// rail's resting band). Whether a pane has a rail is a fact about its shell
+    /// and not about the layout, so neither path below can change it, and
     /// the pin is that the rectangle a preview leaves the terminal is *exactly*
     /// the rectangle a lone leaf gets from a window of that size. If that holds
     /// at every DPI, the two paths cannot hand the coalescer different numbers,

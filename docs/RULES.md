@@ -62,6 +62,9 @@ Entries: §3.1; §7.53a *a resize transaction is opened by a reflow and can only
 closed by one*; the M1.7 and M1.8 plan documents. Owner: `ResizePlan`,
 `DualPlaneSession::resize_at`, and roughly ten free functions in `main.rs`.
 The rule is spread across four places and that is itself the finding.
+Also: trailing entry 2026-09-23 *Decoration never covers text* — a pane's first
+shell-integration mark causes at most one extra grid change in its lifetime (the
+rail's reserve); the alternate screen and later marks cause none.
 
 ### 3. PTY and ConPTY — `not yet folded`
 Entries: §1.3 *the thread and resource model*; the `bt-pty` crate doc. Owner:
@@ -818,13 +821,18 @@ used to answer two ways:
 - **Every head title is 11** (2026-09-22). The pane head's 11.5
   (`SEAT_TITLE_FONT_LOGICAL_PX`) is a deviation to 11, the float and glance heads'
   `HEAD_TITLE_FONT_LOGICAL_PX`; 11.5 is not on the type ladder.
+- **Decoration never covers text** (2026-09-23). The terminal grid reserves the
+  command rail's width when the pane has a rail: the resting band (tick plus its
+  padding, inboard of the scroll lane), not the hover crest. A pane has a rail from
+  its shell's first mark for the rest of its life, alternate screen included; one
+  function, `cmdrail::terminal_grid_for`, turns every seat into a grid.
 **From.** trailing entry 2026-09-22 *The current UI gets its written
 specification*; `docs/UI-UX.md` §二 (accent is attention, not position), §六 (the
 divider drag); §7.28 *the small tags floating over the text wear one outfit: one
 face, one hairline, one legible ink*; §7.18 *the icon system: one verb table, one
 slot table, one optical gate*; §7.18 *motion tokens: three steps, one travel
 distance, two curves, and a register that forbids a fourth* (two entries share
-the number).
+the number); trailing entry 2026-09-23 *Decoration never covers text*.
 **Overrides.** The two redesign proposals of 2026-09-22 were declined; nothing of
 them is a rule. The motion entry's "two curves" predates `GRAB_EASE`; the code's
 three are the rule.

@@ -10959,6 +10959,30 @@ struct LeafSession {
     /// at prompt-shaped lines; what covers those panes is the window-focus
     /// trigger, the kernel's own change notifications and the masthead's button.
     last_finished_command: Option<bt_term::CommandMarkId>,
+    /// **This pane has a command rail, and has had one since its shell's first
+    /// mark** (owner, 2026-09-23: decoration never covers text).
+    ///
+    /// The terminal grid leaves room for the rail's resting band whenever this
+    /// is true ([`cmdrail::terminal_grid_for`]), so the answer has to be one that
+    /// does not move under the pane, or every change of it is a resize — a
+    /// reflow of the shell, or of the TUI in front of it. So it is not the
+    /// rail's per-frame stack: it turns true at the first `OSC 133` mark the
+    /// ledger records, which is the first prompt of an integrated shell and the
+    /// one moment the screen is nearly empty, and it stays true for the rest of
+    /// the leaf's life. **Including on the alternate screen**, where
+    /// [`cmdrail::host_rect`] hides the rail: the room stays, so opening and
+    /// closing `vim` never resizes anything; and including after a `clear` has
+    /// retired every mark. At most one grid change per pane lifetime, then.
+    ///
+    /// A shell that never sends a mark — `cmd.exe` without its prompt, a program
+    /// run bare, a WSL shell without the init file — never sets it and keeps the
+    /// grid it always had. A pane is born `false`: the ledger is not restored,
+    /// so a revived pane earns its rail at its first prompt like any other.
+    ///
+    /// One owner: [`LeafSession::hear_first_mark`], asked in [`drain_leaf_pty`]
+    /// where every leaf's bytes pass. It travels with the struct, so a pane torn
+    /// out into its own tab keeps it.
+    has_rail: bool,
     /// How much this shell has said, counted by [`output_revision`].
     ///
     /// Kept here rather than read off the session because the question is
@@ -17949,6 +17973,27 @@ impl TabState {
 const TITLE_ACTIVITY_SEPARATOR: &str = " - ";
 
 impl LeafSession {
+    /// **Turn [`Self::has_rail`] on at the ledger's first mark**, and answer
+    /// whether this call was the one that did — true at most once per leaf.
+    ///
+    /// Asked of the ledger and not of the bytes: a mark the ledger refused (an
+    /// alternate-screen `OSC 133`, §3.2's isolated namespace) is a mark no rail
+    /// will ever draw, so it reserves nothing either.
+    fn hear_first_mark(&mut self) -> bool {
+        if self.has_rail || self.session.command_marks().is_empty() {
+            return false;
+        }
+        self.has_rail = true;
+        true
+    }
+
+    /// The grid this pane is given for the rectangle `body` — the seat's pixels
+    /// and whether this pane has a rail, through the one function that turns a
+    /// seat into a grid ([`cmdrail::terminal_grid_for`]).
+    fn grid_for(&self, metrics: &bt_render::CellMetrics, body: SeatViewport) -> GridSize {
+        cmdrail::terminal_grid_for(metrics, body, self.has_rail)
+    }
+
     /// The title this pane's program **announced**, as opposed to one it merely
     /// repeated back.
     ///
@@ -36137,7 +36182,9 @@ fn create_leaf_session(
     // neighbour that read the file for itself would be a second place for the answer to live.
     line_wrapping: bool,
 ) -> Result<LeafSession> {
-    let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
+    // **Born without a rail**: a shell that has not started has sent no mark, and
+    // [`LeafSession::has_rail`] is turned on only by one (owner, 2026-09-23).
+    let grid = cmdrail::terminal_grid_for(&renderer.metrics(), body, false);
     // **The machine is asked before anything is composed for it** (review row
     // R4-1). `startable_profile` carries the whole rule and its argument; what is
     // decided here is which profile everything below is about, because the
@@ -36450,6 +36497,8 @@ fn create_leaf_session(
         pending_pty_resize: None,
         pending_psreadline_resize_reanchor: false,
         last_finished_command: None,
+        // Its shell has not said anything yet, let alone marked a prompt.
+        has_rail: false,
         output_revision: 0,
         last_seen_revision: 0,
         last_presented_frame: None,
@@ -37835,6 +37884,10 @@ struct DrainOutcome {
     /// The shell reported a different working directory, which is **durable**
     /// state: it is the `cwd` of this leaf in `session.json`.
     moved: bool,
+    /// **A pane heard its first shell-integration mark this turn**, so it now
+    /// has a rail and its grid owes the rail room (`LeafSession::has_rail`).
+    /// True at most once per pane lifetime.
+    rail_began: bool,
     /// **Where the shells that just finished a command are standing** (R31's
     /// third invalidation moment, A).
     ///
@@ -37868,6 +37921,7 @@ impl DrainOutcome {
         self.arrived_off_focus |= other.arrived_off_focus;
         self.renamed |= other.renamed;
         self.moved |= other.moved;
+        self.rail_began |= other.rail_began;
         self.command_ends.extend(other.command_ends);
         self.notifications.extend(other.notifications);
     }
@@ -38133,6 +38187,10 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         if ended {
             leaf.last_finished_command = finished;
         }
+        // **And the first mark is heard here too**, for the same reason: it is
+        // what gives this pane a rail, and a pane behind another tab earns one at
+        // its first prompt exactly as the pane on screen does.
+        let rail_began = leaf.hear_first_mark();
         let name_after = leaf.name_evidence();
         Ok(DrainOutcome {
             // Taken here because this is the one place every leaf of every tab
@@ -38176,6 +38234,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
             arrived_off_focus: false,
             renamed: name_after != name_before,
             moved: name_after.1 != name_before.1,
+            rail_began,
         })
     })();
     hang_watch::at(outcome_parent);
@@ -40374,7 +40433,11 @@ impl Runtime<'_> {
             // Short of the reserved scroll lane, which is the mock-up's own
             // arrangement seen from the other side: `.term` carries an 18px right
             // padding and the flash is a background on a block inside it, so the
-            // band has never reached under the rail.
+            // band has never reached under the rail. The text half of that
+            // arrangement is enforced now (2026-09-23): a pane with a rail is
+            // given a grid whose last column ends left of the rail's resting band
+            // (`cmdrail::terminal_grid_for`). The band itself is unchanged — it is
+            // a row's background, not text, and runs to the lane as it always did.
             body[2] - bt_render::TERMINAL_SCROLL_LANE_LOGICAL_PX * scale,
             bottom.min(body[3]),
         ];

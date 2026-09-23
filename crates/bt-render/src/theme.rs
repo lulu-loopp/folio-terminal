@@ -2325,6 +2325,15 @@ pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 30.0;
 /// nine-pixel tick that grows to twenty-seven under the pointer would cover it.
 /// Eight is the mock-up's own `thin` gutter, which is what its `right: 11px`
 /// (this, plus a three-pixel gap) was derived from.
+///
+/// **The grid enforces this now** (owner, 2026-09-23: decoration never covers
+/// text). A pane that has a command rail is given a grid whose last column ends
+/// left of the rail's *resting* band — the nine-pixel tick with its padding,
+/// inboard of this lane — so no resting tick covers a glyph; the twenty-seven-pixel
+/// crest may still reach over the last column while the pointer is on the rail,
+/// which the ruling accepts. The arithmetic lives in `bt-app`'s `cmdrail`, which
+/// owns the rail; this crate's `CellMetrics::grid_for_pixels` is handed the width
+/// that is left.
 pub const TERMINAL_SCROLL_LANE_LOGICAL_PX: f32 = 8.0;
 /// The self-drawn window title bar (`--titleh`).
 pub const WINDOW_TITLE_BAR_LOGICAL_PX: f32 = 40.0;
