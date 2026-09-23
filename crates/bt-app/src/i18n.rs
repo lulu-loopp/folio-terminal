@@ -1443,17 +1443,20 @@ pub enum Text {
     ShortcutNoteOnePerMember,
     ShortcutNoteNoneAssigned,
     ShortcutNoteSomeUnassigned,
+    /// The word on a row whose chord is a bare `Ctrl` and one letter: the key no
+    /// longer reaches the program in the pane (owner rulings 2026-09-22 and
+    /// 2026-09-23). It replaced the recorder's refusal of the same chord.
+    ShortcutNoteShell,
     /// What stands where the caps would be on a row with no chord.
     ShortcutUnbound,
     /// The two rows the audit listed and declined, and the line under them.
     ShortcutReservedMoveFocus,
     ShortcutReservedResizePane,
     ShortcutReservedAltArrow,
-    /// The recorder's two standing refusals. The chords in them are key caps and
-    /// stay as they are; what is translated is the reason.
+    /// The recorder's standing refusal. The chord in it is key caps and stays as
+    /// it is; what is translated is the reason.
     ShortcutHintAltGrZone,
-    ShortcutHintShellControlLetter,
-    /// The recorder's third, and the only one that is about which row is asking:
+    /// The recorder's second, and the only one that is about which row is asking:
     /// the summon's key is claimed from Windows, so a chord with no modifier on
     /// it would be taken from every program on the machine.
     ShortcutHintGlobalNeedsModifier,
@@ -3901,6 +3904,8 @@ impl Text {
                 "One chord for each; some are not set yet",
                 "每一个各有一组键；有些还没设",
             ),
+            // zh: pending opus46
+            Self::ShortcutNoteShell => pick(lang, "shell", "shell"),
             Self::ShortcutUnbound => pick(lang, "Not set", "未设置"),
             Self::ShortcutReservedMoveFocus => {
                 pick(lang, "Move the focus between panes", "在窗格之间移动焦点")
@@ -3915,11 +3920,6 @@ impl Text {
                 lang,
                 "Ctrl+Alt is reserved for AltGr keyboards",
                 "Ctrl+Alt 留给 AltGr 键盘",
-            ),
-            Self::ShortcutHintShellControlLetter => pick(
-                lang,
-                "Ctrl+letter belongs to the shell",
-                "Ctrl+字母属于 shell",
             ),
             // **The three keys are named, so they have to be the ones on the
             // reader’s own keyboard** (§13.32 ②). `Win` is a keycap that does
@@ -5712,12 +5712,12 @@ impl Text {
         Self::ShortcutNoteOnePerMember,
         Self::ShortcutNoteNoneAssigned,
         Self::ShortcutNoteSomeUnassigned,
+        Self::ShortcutNoteShell,
         Self::ShortcutUnbound,
         Self::ShortcutReservedMoveFocus,
         Self::ShortcutReservedResizePane,
         Self::ShortcutReservedAltArrow,
         Self::ShortcutHintAltGrZone,
-        Self::ShortcutHintShellControlLetter,
         Self::ShortcutHintGlobalNeedsModifier,
         Self::GitNotARepository,
         Self::GitReading,
@@ -6226,7 +6226,12 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 2] = [
+        // The `shell` note on a Shortcuts row (0.4.4 ticket 04), on both
+        // platforms: a bare Ctrl+letter is recordable on either.
+        (Self::ShortcutNoteShell, HostPlatform::Windows),
+        (Self::ShortcutNoteShell, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
