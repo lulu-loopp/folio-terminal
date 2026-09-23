@@ -4362,10 +4362,15 @@ impl Text {
             // the row does to the key rather than what the key sends, because
             // the sentence under it is about the key and not about a press.
             Self::RowOptionSendsAlt => pick(lang, "Option key sends Alt", "Option 键当作 Alt"),
+            //
+            // **Two lines, like every other sentence on the page** (owner
+            // ruling 2026-09-23, which ends the 2026-09-13/14 exemption): the
+            // two states and who each one is for — terminal programs, or the
+            // accents every other Mac app types — and nothing past the budget.
             Self::DescOptionSendsAlt => pick(
                 lang,
-                "Off: Option types the accented characters macOS gives it, as in other apps. On: Option is the Alt key terminal programs expect, so Option with a letter is an Alt chord to the shell.",
-                "关闭时，Option 和在其他应用里一样，打出 macOS 给它的重音字符。打开时，Option 就是终端程序要的 Alt 键，Option 加上字母就是送到 shell 的 Alt 组合键。",
+                "On, Option is Alt to terminal programs. Off, it types accents as in other apps.",
+                "「开」时 Option 是终端程序的 Alt。「关」时像其他应用一样输入重音字符。",
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
