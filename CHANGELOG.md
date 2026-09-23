@@ -55,6 +55,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- While a divider is dragged, the pane under the pointer keeps the rounded
+  top-right corner its card has.
 - On a slow disk, turning on PowerShell integration from the welcome card
   could report a lock error although everything was written; it no longer
   does.
