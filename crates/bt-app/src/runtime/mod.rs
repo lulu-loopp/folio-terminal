@@ -12,6 +12,7 @@ mod clipboard;
 mod diagnostics;
 mod dpi;
 mod i18n;
+mod palette;
 mod profiles;
 mod quake;
 mod tooltips;
