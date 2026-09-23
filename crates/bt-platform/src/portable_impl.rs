@@ -933,12 +933,15 @@ pub fn thread_mouse_capture() -> Option<NativeWindow> {
 ///
 /// The `report` is dropped for that reason rather than kept: it says *a touch
 /// arrived and was handed over*, and a host that hands nothing over would be
-/// reporting a road it has not got.
+/// reporting a road it has not got. `panned` is dropped for the same reason: a
+/// trackpad's two-finger scroll already arrives as `MouseWheel` with a
+/// `PixelDelta`, so there is no pan gesture here for anything to answer.
 pub fn let_the_system_translate_touch(
     window: NativeWindow,
     report: Box<dyn Fn()>,
+    panned: Box<dyn Fn(crate::PanStep)>,
 ) -> Result<(), String> {
-    let _ = (window, report);
+    let _ = (window, report, panned);
     Ok(())
 }
 

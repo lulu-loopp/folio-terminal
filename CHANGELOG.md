@@ -6,6 +6,11 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- Sliding a finger over a pane now scrolls it, with the system's own flick.
+  A one-finger slide no longer selects text.
+
 ### Changed
 
 - A shortcut can now use Ctrl with a letter; the row notes that the key no

@@ -656,6 +656,16 @@ enum AppEvent {
     /// arrives after the press that asked for it has long been drawn. Carries nothing: the answers
     /// are in the lane's own channel, and this says only that there is one.
     HandoffAnswered,
+    /// **A finger slid over a window, and the system called it a pan** (0.4.4
+    /// ticket 11).
+    ///
+    /// Sent by the touch door from inside the window's own message dispatch,
+    /// where nothing may reach a `Runtime` — so the door parks the step in the
+    /// window's [`WindowRuntime::parked_pans`] and this is the nudge that gets
+    /// it read (`docs/ARCHITECTURE.md` §5.1, way (2)). Carries nothing, for
+    /// [`Self::HandoffAnswered`]'s reason: the steps are where the window keeps
+    /// them, and this says only that there are some.
+    TouchPanned,
 }
 
 impl AppEvent {
@@ -703,6 +713,9 @@ impl AppEvent {
             | Self::WindowChromeChanged
             | Self::NotificationClicked
             | Self::HandoffAnswered => Station::Chrome,
+            // The station winit's own pan event would have been charged to:
+            // this is the same gesture, answered by the system instead.
+            Self::TouchPanned => Station::EventPan,
             Self::PtyOutput
             | Self::GitChanged
             | Self::PreviewFileChanged
@@ -12879,6 +12892,11 @@ struct WindowRuntime {
     /// The notches that have arrived since the loop last acted on one. See
     /// [`WheelBurst`].
     wheel_burst: Option<WheelBurst>,
+    /// **The system's pan gestures this window's touch door has answered and
+    /// the loop has not yet read** (0.4.4 ticket 11). Written by the door from
+    /// inside message dispatch, emptied by [`Runtime::spend_parked_pans`] on
+    /// the wake the door sent; see [`ParkedPans`].
+    parked_pans: ParkedPans,
     /// **The drop this window is holding, waiting for the turn boundary**
     /// (GitHub issue #1 ②).
     ///
@@ -38346,6 +38364,10 @@ fn drain_tab_pty(
 /// instead of drifting between a launch and a `New window`.
 struct NewWindowParts {
     ime_report: ime_report::Report,
+    /// Where this window's touch door parks the pans the system recognised —
+    /// see [`WindowRuntime::parked_pans`]. Made where the door is opened,
+    /// because the door is opened before there is a window runtime to hold it.
+    parked_pans: ParkedPans,
     /// The application's favicon store, handed to this window's mark rasterizer
     /// so that a page drawn here wears what any window in the process learned
     /// about its site — see [`App::favicons`].
@@ -38412,6 +38434,7 @@ fn display_frame_rate_millihertz(window: &Window) -> Option<u32> {
 fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
     let NewWindowParts {
         ime_report,
+        parked_pans,
         favicons,
         renderer,
         tabs,
@@ -38542,6 +38565,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         wheel_events: 0,
         wheel_routings: 0,
         wheel_burst: None,
+        parked_pans,
         dropped_files: None,
         last_present_at: None,
         present_diagnostics: present_diagnostics::State::default(),
@@ -39507,7 +39531,7 @@ impl Runtime<'_> {
         // winit made the registration this undoes when it built the window.
         // Reported and never propagated: a window that answers nothing to a
         // finger is a window, and a launch that died instead is not.
-        let_the_system_translate_touch(native);
+        let parked_pans = let_the_system_translate_touch(native, &proxy);
         // **This window's own chrome, read where it was measured** (M3-3;
         // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
         // where the platform is asked what it still draws in this bar, and the
@@ -39971,6 +39995,7 @@ impl Runtime<'_> {
         }
         let mut window = new_window_runtime(NewWindowParts {
             ime_report,
+            parked_pans,
             favicons: Rc::clone(&app.favicons),
             renderer,
             tabs,
@@ -61016,6 +61041,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 .adopt_motion_preference()
                 .and_then(|()| self.adopt_system_canvas()),
             AppEvent::WindowChromeChanged => self.adopt_platform_chrome(),
+            // Every window, on this family's standing reason: a window whose
+            // finger did nothing has nothing parked, and the walk costs a
+            // `RefCell` borrow each.
+            AppEvent::TouchPanned => self.for_each_window(|runtime| runtime.spend_parked_pans()),
             AppEvent::NotificationClicked => self.route_clicked_notifications(),
             // Every window, on this family's standing reason: an answer carries
             // its own address and a window with no page finds nothing to read.
@@ -66160,13 +66189,74 @@ fn native_window(window: &Window) -> Result<bt_platform::NativeWindow> {
 /// Both window constructors call it, and neither lets it decide whether a
 /// window opens: a refusal is a window that answers nothing to a finger, which
 /// is precisely what it did before this door existed.
-fn let_the_system_translate_touch(native: bt_platform::NativeWindow) {
+///
+/// **And the one gesture the window answers** (0.4.4 ticket 11): a slide the
+/// system recognised as a pan. The door hands each step of it to the closure
+/// below from inside the window's message dispatch, where no `Runtime` can be
+/// reached, so the closure parks the step and wakes the loop — one value and
+/// one wake per `WM_GESTURE`, and nothing at all while no finger is down — and
+/// [`Runtime::spend_parked_pans`] puts it on the wheel's road on the turn that
+/// wake buys. The slot it parks in is returned, for the window runtime to own.
+fn let_the_system_translate_touch(
+    native: bt_platform::NativeWindow,
+    proxy: &EventLoopProxy<AppEvent>,
+) -> ParkedPans {
+    let parked = ParkedPans::default();
+    let panned = {
+        let parked = Rc::clone(&parked);
+        let proxy = proxy.clone();
+        Box::new(move |step| {
+            parked.borrow_mut().push(step);
+            let _ = proxy.send_event(AppEvent::TouchPanned);
+        })
+    };
     if let Err(error) = bt_platform::let_the_system_translate_touch(
         native,
         Box::new(|| diagnostics::note("touch arrived; handed to the system")),
+        panned,
     ) {
-        diagnostics::note(&format!("touch is not handed to the system: {error}"));
+        diagnostics::note(&format!("touch door: {error}"));
     }
+    parked
+}
+
+/// **The pans a window's touch door has answered, waiting for the loop**
+/// (0.4.4 ticket 11).
+///
+/// `Rc<RefCell<_>>` and not a lock: the writer is the door's subclass and the
+/// reader is [`Runtime::spend_parked_pans`], and both run on the window's own
+/// thread — the subclass inside message dispatch, the reader on the turn after
+/// it. A `Vec` rather than a sum, because a pan's opening step carries a point
+/// and two pans in one turn would otherwise have one point between them.
+type ParkedPans = Rc<RefCell<Vec<bt_platform::PanStep>>>;
+
+/// **What one answered pan step is on the wheel's road** (0.4.4 ticket 11):
+/// where the pointer is to be before the wheel turns, if the step opens a
+/// pan, and the wheel report it makes, if it moved.
+///
+/// A pan is answered as a wheel turned under a still pointer. The pointer is
+/// put where the pan went down because the wheel routes by where the pointer
+/// is and a recognised pan is not promoted to mouse input — nothing else says
+/// where the finger is — and it is put there **once**, so the pane under the
+/// finger when it went down keeps the whole pan, the system's inertia
+/// included, the way a pane under a still mouse keeps a spun wheel.
+///
+/// The report is **pixels, one for one**: the travel is physical pixels, which
+/// is `PixelDelta`'s currency, and the sign is already the wheel's — a finger
+/// moving down is positive `y`, which the wheel road reads as travel back up
+/// the document, so the content follows the finger. It is the currency a
+/// precision touchpad speaks, so every scroller that already answers a
+/// trackpad answers a finger without learning anything.
+fn pan_on_the_wheel_road(
+    step: bt_platform::PanStep,
+) -> (Option<PhysicalPosition<f64>>, Option<MouseScrollDelta>) {
+    let pointer = step
+        .began_at
+        .map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y)));
+    let (x, y) = step.travel;
+    let wheel = ((x, y) != (0, 0))
+        .then(|| MouseScrollDelta::PixelDelta(PhysicalPosition::new(f64::from(x), f64::from(y))));
+    (pointer, wheel)
 }
 
 fn cell_width_subpixels(metrics: bt_render::CellMetrics) -> NonZeroI64 {

@@ -429,6 +429,25 @@ Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; �
 cannot be settled by reading*. Same finding as row 27 for the rung order of
 `Runtime::mouse_input`.
 
+Ruling added 2026-09-23 (owner, next86 touch test, 2026-09-22; 0.4.4 ticket 11),
+refining the 2026-09-21 entry *Owner ruling: touch is handed to the system, which
+turns it into the mouse*: **the system recognises every gesture; Folio answers one
+of them, the pan, as the wheel.** The touch door asks for single-finger pan with
+the system's gutter and inertia (`SetGestureConfig` at window creation) and
+answers `WM_GESTURE` / `GID_PAN` by parking its travel — the difference between
+successive `ptsLocation`s, `bt_platform::PanTrack` — for
+`Runtime::spend_parked_pans`, which moves the pointer to where the pan went down
+(`pointer_moved`) and enters `Runtime::queue_wheel` with a `PixelDelta`. No
+recogniser, threshold, timer or inertia of Folio's own; no second scroll road.
+Every other gesture id, `WM_GESTURENOTIFY` and `WM_TABLET_QUERYSYSTEMGESTURESTATUS`
+still reach `DefWindowProc`. A one-finger slide no longer selects text. Held by
+`bt_platform::touch_pan::tests::a_pans_travel_is_the_difference_between_successive_points`,
+`a_pan_gesture_is_answered_and_every_other_gesture_goes_to_the_system`,
+`the_gesture_configuration_enables_single_finger_pan` and
+`bt_app::tests::a_pan_enters_the_wheel_road_as_pixels`. Entry: DESIGN
+2026-09-23 *A finger sliding over a pane scrolls it*. The row stays `not yet
+folded` (the rung order of `Runtime::mouse_input` is still unwritten).
+
 ### 29. Attention — `folded`
 **Rule.** An **episode** is one unanswered request from one pane.
 `bt_app::attention::AttentionLedger` keeps a per-leaf account — strictly

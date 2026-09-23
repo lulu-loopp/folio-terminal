@@ -12,12 +12,13 @@ use crate::{
     files_row_activation, first_run, float, float_grasp, float_sizing_of, formula_tools,
     glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
     live_viewport_mouse_hit, marks, mouse_trace, native_window, over_home_ground, palette,
-    platform_pointer_of, pointer_cursor, press_after_blur, press_files_node, press_reaches_no_grid,
-    press_spends_itself_closing, pressed_row_identity, profiles, protocol_mouse_button, quit,
-    recoverable_wheel_scroll_amount, release_verdict, restore, right_press_raises_terminal_menu,
-    risen_frame, route_forwarded_mouse_button, route_forwarded_mouse_motion, search, seats,
-    settings, settling, toast, tooltip, upright_wheel, web_page_cursor, websheet, wheel_axis,
-    wheel_points_sideways, wheel_route, wheel_zoom_notches, write_pty_input,
+    pan_on_the_wheel_road, platform_pointer_of, pointer_cursor, press_after_blur, press_files_node,
+    press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity, profiles,
+    protocol_mouse_button, quit, recoverable_wheel_scroll_amount, release_verdict, restore,
+    right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
+    route_forwarded_mouse_motion, search, seats, settings, settling, toast, tooltip, upright_wheel,
+    web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
+    write_pty_input,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -5109,6 +5110,33 @@ impl Runtime<'_> {
                 }
             },
             None => self.window.wheel_burst = Some(WheelBurst::of(delta)),
+        }
+        Ok(())
+    }
+
+    /// **The pans the touch door parked, put on the wheel's road** (0.4.4
+    /// ticket 11).
+    ///
+    /// Each step enters by the doors a mouse would use: a pan's opening point
+    /// is [`Self::pointer_moved`] — after the wheel held so far is spent, as
+    /// the dispatcher spends it before any pointer move — and its travel is
+    /// [`Self::queue_wheel`], the wheel's own entrance, so the routing, the
+    /// merging into one burst per turn, the scroll-back rules and every
+    /// scroller that already answers a trackpad apply unchanged. There is no
+    /// second scroll road, and nothing here recognises anything: the system
+    /// said it was a pan, and [`pan_on_the_wheel_road`] only changes its
+    /// currency.
+    pub(crate) fn spend_parked_pans(&mut self) -> Result<()> {
+        let steps = std::mem::take(&mut *self.window.parked_pans.borrow_mut());
+        for step in steps {
+            let (pointer, wheel) = pan_on_the_wheel_road(step);
+            if let Some(position) = pointer {
+                self.flush_wheel()?;
+                self.pointer_moved(position)?;
+            }
+            if let Some(delta) = wheel {
+                self.queue_wheel(delta)?;
+            }
         }
         Ok(())
     }

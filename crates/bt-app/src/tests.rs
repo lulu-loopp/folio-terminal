@@ -15379,6 +15379,137 @@ fn wheel_accumulator_truncates_symmetrically_and_never_flips_sign_on_reversal() 
     assert!((down + 0.4).abs() < 1e-9);
 }
 
+/// RED (0.4.4 ticket 11) — **a pan enters the wheel road as pixels, and a finger moving down
+/// scrolls back into the history.**
+///
+/// The producer is the real one: `bt_platform::PanTrack`, the arithmetic the Windows touch door
+/// runs on every `GID_PAN` message, fed a synthetic flick — a begin, a finger moving down, and
+/// the system's inertia after it lifted. Its steps go through [`pan_on_the_wheel_road`], merge in
+/// a [`WheelBurst`] as [`Runtime::queue_wheel`] merges them, and the burst is spent on a real
+/// terminal pane with the arithmetic the local wheel route uses on a `PixelDelta`
+/// (`event_subpixels = y × SUBPIXELS_PER_PX`, then `scroll_by_subpixels`). The opening step puts
+/// the pointer where the pan went down and turns no wheel; every later step is travel, one pixel
+/// for one pixel, in the currency a precision touchpad speaks — so the content follows the
+/// finger, which is the sign a trackpad already has on this road.
+///
+/// MUTATION: negate `y` in `pan_on_the_wheel_road` and the burst reads -46 and the pane does not
+/// move off the live bottom; drop the opening point and the first assertion goes red.
+#[test]
+fn a_pan_enters_the_wheel_road_as_pixels() {
+    let mut track = bt_platform::PanTrack::default();
+    let window_origin = (300, 200);
+    let records = [
+        (true, false, (640, 500)),
+        (false, false, (640, 510)),
+        (false, false, (641, 530)),
+        (false, false, (641, 540)),
+        (false, false, (641, 546)),
+        (false, true, (641, 546)),
+    ];
+    let steps: Vec<_> = records
+        .iter()
+        .filter_map(|&(begins, ends, (x, y))| {
+            track.step(
+                begins,
+                ends,
+                (x, y),
+                (x - window_origin.0, y - window_origin.1),
+            )
+        })
+        .collect();
+    let entries: Vec<_> = steps.into_iter().map(pan_on_the_wheel_road).collect();
+    assert_eq!(
+        entries[0],
+        (Some(PhysicalPosition::new(340.0, 300.0)), None),
+        "a pan opens by putting the pointer where it went down, in client pixels, and turns no \
+         wheel: the first pan message performs no panning"
+    );
+    let mut burst: Option<WheelBurst> = None;
+    for (pointer, wheel) in &entries[1..] {
+        assert_eq!(
+            *pointer, None,
+            "the pointer is put down once per pan, not followed"
+        );
+        let delta = wheel.expect("every later step of this flick moved");
+        assert!(
+            matches!(delta, MouseScrollDelta::PixelDelta(_)),
+            "a pan is travel in pixels, never lines: {delta:?}"
+        );
+        burst = Some(match burst {
+            None => WheelBurst::of(delta),
+            Some(held) => held.plus(delta).expect("pixels merge into a pixel burst"),
+        });
+    }
+    let travel = burst.expect("the flick moved").delta();
+    assert_eq!(
+        travel,
+        MouseScrollDelta::PixelDelta(PhysicalPosition::new(1.0, 46.0)),
+        "the whole flick, inertia included, is its last point minus its first, and a finger \
+         moving down is positive y — the wheel road's travel back up the document"
+    );
+
+    let mut pane = PtyPresentationHarness::new(20, 3);
+    pane.feed_drain(b"zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven");
+    pane.publish_expose_frame();
+    pane.present_pending();
+    assert_eq!(
+        pane.projection.scroll_offset_subpixels(),
+        0,
+        "the pane starts live"
+    );
+    let MouseScrollDelta::PixelDelta(position) = travel else {
+        unreachable!("asserted above");
+    };
+    let mut remainder = position.y * bt_viewport::SUBPIXELS_PER_PX as f64;
+    pane.projection
+        .scroll_by_subpixels(drain_whole_units(&mut remainder, 1.0));
+    assert!(
+        pane.projection.scroll_offset_subpixels() > 0,
+        "a finger sliding down pulls the history into view, as the content follows the finger"
+    );
+}
+
+/// RED (0.4.4 ticket 11) — **a parked pan is spent through the wheel's own entrance, and the
+/// wake that carries it is answered once.**
+///
+/// Ticket 11's second blocking criterion is a second scroll road beside the wheel's. The runtime
+/// half of the pan needs a window and a GPU, so this pins its shape by reading its items through
+/// `bt-source`: the method that spends parked pans moves the pointer through `pointer_moved` and
+/// turns the wheel through `queue_wheel` — the two doors a mouse uses — and scrolls nothing
+/// itself; and the wake the touch door sends is answered in one place, by that method, in every
+/// window.
+///
+/// MUTATION: spend the travel with `scroll_view_exact_in` instead of `queue_wheel` and the first
+/// assertion goes red; answer `TouchPanned` with `Ok(())` and the last one does.
+#[test]
+fn a_parked_pan_is_spent_through_the_wheels_own_entrance() {
+    let spend = squeezed_body("Runtime", "spend_parked_pans");
+    assert!(
+        spend.contains("self.queue_wheel(delta)?"),
+        "the travel enters the wheel road where a notch does"
+    );
+    assert!(
+        spend.contains("self.flush_wheel()?;self.pointer_moved(position)?;"),
+        "the opening point is a pointer move, after what the wheel already held is spent"
+    );
+    assert!(
+        !spend.contains("scroll"),
+        "and nothing here scrolls anything itself: {spend}"
+    );
+    let answers = found(
+        Needle::new(Pattern::text(concat!("AppEvent::TouchPanned", " =>"))),
+        View::Raw,
+    );
+    assert_eq!(answers.len(), 1, "the pan wake is answered once");
+    assert!(
+        source().union()[answers.spans()[0].start()..].starts_with(concat!(
+            "AppEvent::TouchPanned",
+            " => self.for_each_window(|runtime| runtime.spend_parked_pans()),"
+        )),
+        "and it is answered by spending every window's parked pans"
+    );
+}
+
 #[test]
 fn disconnected_math_dispatch_downgrades_once_and_leaves_the_real_session_usable() {
     let start = Instant::now();
