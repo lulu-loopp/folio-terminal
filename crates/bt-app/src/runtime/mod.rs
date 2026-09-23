@@ -11,6 +11,7 @@
 mod clipboard;
 mod diagnostics;
 mod dpi;
+mod frame;
 mod i18n;
 mod palette;
 mod profiles;
