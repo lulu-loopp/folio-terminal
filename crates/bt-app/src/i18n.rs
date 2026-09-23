@@ -1898,6 +1898,14 @@ pub enum Text {
     /// the fact a reader has to know before they turn it on — that this is the
     /// one row in the dialog that overrides a colour a program asked for.
     DescMinimumContrast,
+    /// `Appearance ▸ Advanced ▸ Web pages`, which colour scheme a web pane asks its page for
+    /// (0.4.4 ticket 09).
+    RowWebPages,
+    /// Its sentence.
+    DescWebPages,
+    /// The row's first answer, the shipped one (`Theme`): the
+    /// page asks Folio's own light or dark. `Light` and `Dark` are the theme row's own two words.
+    OptionFollowTheme,
 
     // ── desktop notifications (§7.6, Windows landing slice 3, 2026-08-20) ──
     //
@@ -4486,6 +4494,16 @@ impl Text {
                 "Lightens or darkens terminal text to this ratio. Above Off, program colours give way.",
                 "终端文字提亮或压暗到这个对比度。关以上会覆盖程序指定的颜色。",
             ),
+            // The web pane's colour-scheme row (0.4.4 ticket 09); Chinese by opus46, 2026-09-23.
+            Self::RowWebPages => pick(lang, "Web pages", "网页"),
+            Self::DescWebPages => pick(
+                lang,
+                "Asks web pages for light or dark. A site with no dark style stays as it is.",
+                "向网页请求浅色或深色。没有深色样式的网站保持原样。",
+            ),
+            // `Theme` and not the ticket's `Follow theme`: the picker's button is 118px and
+            // the longer label is drawn `Follow th…` on every machine, in the shipped state.
+            Self::OptionFollowTheme => pick(lang, "Theme", "主题"),
             // 「通知」and not 「桌面通知」: Windows itself calls the surface
             // 「通知」in its own Settings, and the row's sentence says where it
             // lands. English keeps the plural for the same reason — the row is
@@ -5396,7 +5414,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 763] = [
+    pub const ALL: [Self; 766] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5953,6 +5971,9 @@ impl Text {
         Self::DescFocusMode,
         Self::RowMinimumContrast,
         Self::DescMinimumContrast,
+        Self::RowWebPages,
+        Self::DescWebPages,
+        Self::OptionFollowTheme,
         Self::RowNotifications,
         Self::DescNotifications,
         Self::RowTurnEndNotifications,

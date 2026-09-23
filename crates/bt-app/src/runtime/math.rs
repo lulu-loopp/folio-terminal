@@ -582,7 +582,10 @@ impl Runtime<'_> {
         stack.window_ring = self.window_ring_layer();
         let flattened = stack.flattened();
         dump_overlay_frame(&flattened);
-        let layers = self.window.settings_marks.resolve_overlay(flattened);
+        let layers = self
+            .window
+            .settings_marks
+            .resolve_overlay(flattened, &bt_render::chrome_palette());
         // **Where each layer stands, kept for the pages under them** (M4-3).
         // Read here because this is the one place the stack's order is settled,
         // which is the order `WebHole::above` is an index into - the same

@@ -1030,7 +1030,12 @@ impl Runtime<'_> {
             flight,
         } = chrome;
         dump_chrome_frame(&seats);
-        let mut icons = self.window.chrome_marks.resolve(&seats.sprites);
+        // **With the quads under them** (0.4.4 ticket 09): a site's icon is asked about the head,
+        // the strip or the bar it is drawn on, and those are what the quads are.
+        let mut icons = self
+            .window
+            .chrome_marks
+            .resolve_on(&seats.sprites, &seats.quads, &palette);
         // **And the last frame of every page a modal is standing over** (§7.8
         // ⑩), which joins the same channel the marks just went down and is drawn
         // in the same pass — under every overlay layer, and therefore under the

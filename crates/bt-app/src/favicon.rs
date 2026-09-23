@@ -176,6 +176,13 @@ struct Site {
     sized: HashMap<(u32, u32), Raster>,
     /// Which learn this was, for the eviction order.
     learned: u64,
+    /// **How light the icon's visible pixels are**, measured once when it was learned — see
+    /// [`visible_luminance`] (0.4.4 ticket 09). `None` for an icon with no visible pixel at all.
+    ///
+    /// Stored beside the pixels rather than measured where a site icon is drawn, because a frame
+    /// that asked it would be deciding from pixels on every rebuild of the chrome: the drawing
+    /// path costs one comparison per icon and no decode work (the ticket's A4 and B2).
+    luminance: Option<f64>,
 }
 
 /// **Every icon this session has been told about**, by site.
@@ -216,6 +223,7 @@ impl Favicons {
         self.next_serial += 1;
         self.learns += 1;
         let id = FaviconId(self.next_serial);
+        let luminance = visible_luminance(&source);
         if let Some(previous) = self.sites.insert(
             site.to_owned(),
             Site {
@@ -223,6 +231,7 @@ impl Favicons {
                 source,
                 sized: HashMap::new(),
                 learned: self.learns,
+                luminance,
             },
         ) {
             self.by_id.remove(&previous.id);
@@ -261,6 +270,15 @@ impl Favicons {
     #[must_use]
     pub fn id_for(&self, site: &str) -> Option<FaviconId> {
         self.sites.get(site).map(|held| held.id)
+    }
+
+    /// **How light this icon's visible pixels are**, as measured when it was learned (0.4.4
+    /// ticket 09) — `None` for an id the store no longer holds or an icon with nothing visible.
+    ///
+    /// `&self` and a lookup: the drawing path asks it once per site icon it draws.
+    #[must_use]
+    pub fn luminance(&self, id: FaviconId) -> Option<f64> {
+        self.sites.get(self.by_id.get(&id)?)?.luminance
     }
 
     /// **The pixels, cut to the box a mark is drawn in.**
@@ -351,6 +369,40 @@ pub fn decode(png: &[u8]) -> Option<Raster> {
     let scale = f64::from(SOURCE_CEILING_PX) / f64::from(width.max(height));
     let ceiling = |side: u32| ((f64::from(side) * scale).round() as u32).max(1);
     Some(resample(&source, ceiling(width), ceiling(height)))
+}
+
+/// **How light an icon reads**: the alpha-weighted mean of WCAG 2's relative luminance over its
+/// pixels (0.4.4 ticket 09).
+///
+/// Weighted by alpha, because that is how much of each pixel lands on the ground: a mark drawn in
+/// black on a transparent square is black, however much transparent margin it came with, and a
+/// half-transparent edge counts for half. A mean and not a median, because a site's icon is
+/// usually one ink on nothing and the two agree there — and where it is several inks, the mean is
+/// what the eye integrates at fourteen pixels. `None` for an icon with no visible pixel, which
+/// has no contrast to lack.
+///
+/// Called once per icon learned, and by nothing that runs per frame.
+#[must_use]
+pub fn visible_luminance(raster: &Raster) -> Option<f64> {
+    #[cfg(test)]
+    MEASURED.with(|count| count.set(count.get() + 1));
+    let (mut weighted, mut coverage) = (0.0_f64, 0.0_f64);
+    for pixel in raster.rgba.chunks_exact(4) {
+        let alpha = f64::from(pixel[3]) / 255.0;
+        if alpha > 0.0 {
+            weighted += alpha * bt_render::relative_luminance([pixel[0], pixel[1], pixel[2]]);
+            coverage += alpha;
+        }
+    }
+    (coverage > 0.0).then(|| weighted / coverage)
+}
+
+// How many times this thread measured an icon — the budget pin's counter
+// (`the_icon_luminance_is_computed_once_per_raster`). Per thread, so parallel tests do not
+// count each other's icons.
+#[cfg(test)]
+thread_local! {
+    pub static MEASURED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Cut a decoded icon to one box.

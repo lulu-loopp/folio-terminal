@@ -44,8 +44,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use bt_persist::SearchEngineV1;
-use bt_platform::{WebChord, WebEvent, WebHost, WebNavigationVerdict};
+use bt_persist::{SearchEngineV1, WebColorSchemeV1};
+use bt_platform::{WebChord, WebColorScheme, WebEvent, WebHost, WebNavigationVerdict};
 use winit::keyboard::{ModifiersState, NamedKey};
 
 use crate::shortcuts::{Action, ChordKey, Focus, Shortcuts};
@@ -472,6 +472,50 @@ pub(crate) fn development_target() -> Option<&'static str> {
                 .filter(|value| !value.is_empty())
         })
         .as_deref()
+}
+
+// ── The colour scheme a page prefers (0.4.4 ticket 09) ──────────────────────
+
+/// **Which colour scheme a page is told to prefer**, from the `Web pages` row and whether Folio's
+/// own ground is dark right now (0.4.4 ticket 09, owner's ruling 2026-09-21).
+///
+/// The whole rule, and a function of two values so it can be read without a window: the row pins
+/// one or follows the theme, and "the theme" is the ground in force — the same fact
+/// `set_window_dark_mode` tells the system about, asked by the caller at the same threshold
+/// (`bt_render::background_is_light`), so a page and the window it stands in cannot disagree.
+pub(crate) fn web_color_scheme(setting: WebColorSchemeV1, theme_is_dark: bool) -> WebColorScheme {
+    match setting {
+        WebColorSchemeV1::FollowTheme if theme_is_dark => WebColorScheme::Dark,
+        WebColorSchemeV1::FollowTheme | WebColorSchemeV1::Light => WebColorScheme::Light,
+        WebColorSchemeV1::Dark => WebColorScheme::Dark,
+    }
+}
+
+/// **Tell every live seat of one window the colour scheme its pages prefer**, and answer how many
+/// engines had to be told (0.4.4 ticket 09).
+///
+/// Every seat and not the one in front: a page on a tab nobody is looking at is still a page, and
+/// it would come back into view in the old scheme. A seat already holding the answer is not told
+/// again, so a palette change that did not move light to dark — a new dark scheme, a contrast
+/// floor — costs no engine anything; one that did costs one call per seat. The first failure is
+/// reported and the rest are still told.
+pub(crate) fn tell_every_seat_its_color_scheme<'a>(
+    seats: impl IntoIterator<Item = &'a mut WebSeat>,
+    scheme: WebColorScheme,
+) -> (usize, Option<String>) {
+    let mut told = 0;
+    let mut first_failure = None;
+    for seat in seats {
+        match seat.set_color_scheme(scheme) {
+            Ok(true) => told += 1,
+            Ok(false) => {}
+            Err(error) => {
+                told += 1;
+                first_failure.get_or_insert(error);
+            }
+        }
+    }
+    (told, first_failure)
 }
 
 // ── The user data folder ───────────────────────────────────────────────────
@@ -1871,6 +1915,7 @@ impl WebSeat {
         url: &str,
         minted: Mint,
         scale: f64,
+        scheme: WebColorScheme,
         wake: Box<dyn Fn()>,
     ) -> Result<(Self, Vec<WebOutcome>), String> {
         let folder = user_data_folder().ok_or_else(|| {
@@ -1999,6 +2044,11 @@ impl WebSeat {
         // The host decides what to do with it. On Windows the answer is
         // nothing, and the door says so in one line.
         web.host.set_request_rules(&content_rules(&web.minted))?;
+        // **And the colour scheme its pages prefer, said before the engine is asked for**
+        // (0.4.4 ticket 09). There is no page to tell yet, so this is remembered by the host and
+        // said in the install step that runs before the first navigation — the same step the
+        // engine's other settings are said in.
+        web.host.set_color_scheme(scheme)?;
         let effect = web.machine.request(url);
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
         // **A refusal here is an answer, not a reason to have no seat** (§7.36).
@@ -2099,6 +2149,26 @@ impl WebSeat {
         // report the silence that follows. A speaker left burning through a
         // ten-second teardown is a mark pointing at nothing.
         !self.is_closing() && self.playing_audio
+    }
+
+    /// **Tell this seat which colour scheme its pages prefer**, and answer whether the engine had
+    /// to be told (0.4.4 ticket 09).
+    ///
+    /// `false` when the host already holds the answer — the one comparison a palette change that
+    /// did not cross light and dark costs this seat. The host remembers it across a rebuilt
+    /// engine, so nothing here has to be said again when the browser comes back.
+    pub(crate) fn set_color_scheme(&mut self, scheme: WebColorScheme) -> Result<bool, String> {
+        if self.host.color_scheme() == Some(scheme) {
+            return Ok(false);
+        }
+        self.host.set_color_scheme(scheme)?;
+        Ok(true)
+    }
+
+    /// The scheme this seat's pages were last told to prefer.
+    #[cfg(test)]
+    pub(crate) fn color_scheme(&self) -> Option<WebColorScheme> {
+        self.host.color_scheme()
     }
 
     /// The chords the window takes back from a focused page.
@@ -6006,6 +6076,100 @@ mod search_tests {
 /// `stderr` — because `CreateCoreWebView2EnvironmentWithOptions` answered
 /// `0x80070002` where it stood, `WebSeat::open` handed that back as an `Err`,
 /// and its caller inserted no seat. A card is something a seat draws.
+#[cfg(test)]
+mod color_scheme_tests {
+    use super::rehost_address_tests::{detached, page, window};
+    use super::*;
+
+    /// RED (0.4.4 ticket 09) — **the scheme a page is told follows the `Web pages` row, and where
+    /// the row follows the theme, it follows Folio's ground.**
+    ///
+    /// The whole rule is six cells, and every one of them is written out: the two pinned rows
+    /// ignore the theme entirely, and the followed one is the theme. The owner's ruling of
+    /// 2026-09-21 is the first row; the other two are the setting it asked for.
+    ///
+    /// MUTATION: make `FollowTheme` answer `Light` whatever the theme (what the engine's own
+    /// default amounts to on a light desktop) and the dark cell of the first row goes red.
+    #[test]
+    fn the_scheme_a_page_is_told_follows_the_setting_and_the_theme() {
+        use WebColorScheme::{Dark, Light};
+        for (setting, on_light, on_dark) in [
+            (WebColorSchemeV1::FollowTheme, Light, Dark),
+            (WebColorSchemeV1::Light, Light, Light),
+            (WebColorSchemeV1::Dark, Dark, Dark),
+        ] {
+            assert_eq!(
+                web_color_scheme(setting, false),
+                on_light,
+                "{setting:?} on a light theme"
+            );
+            assert_eq!(
+                web_color_scheme(setting, true),
+                on_dark,
+                "{setting:?} on a dark theme"
+            );
+        }
+    }
+
+    /// RED (0.4.4 ticket 09) — **a theme change reaches every live web seat of the window, once
+    /// each, and a palette change that did not cross light and dark reaches none.**
+    ///
+    /// The window keeps one page per pane across every tab, and a page on a tab nobody is
+    /// looking at comes back into view in whatever scheme it was last told — so the change has to
+    /// reach all of them, not the one in front. And the budget the ticket sets (A4): one platform
+    /// call per live seat when the answer moves, none when it does not.
+    ///
+    /// The seats are real `WebSeat`s over the real host of this platform, with no engine asked
+    /// for; what is read back is what each host was told, which is the value the install step
+    /// hands the engine before its first navigation.
+    ///
+    /// MUTATION: tell only the first seat, or drop the "already holds it" comparison in
+    /// `WebSeat::set_color_scheme`, and this fails — on the second seat, or on the count.
+    #[test]
+    fn a_theme_change_reaches_every_live_web_seat() {
+        let mut seats: Vec<WebSeat> = [(1, 1), (1, 2), (2, 1)]
+            .into_iter()
+            .map(|(tab, seat)| {
+                detached(SeatAddress {
+                    page: page(tab, seat),
+                    window: window(0x51),
+                })
+            })
+            .collect();
+        assert!(seats.iter().all(|seat| seat.color_scheme().is_none()));
+
+        let dark = web_color_scheme(WebColorSchemeV1::FollowTheme, true);
+        assert_eq!(
+            tell_every_seat_its_color_scheme(seats.iter_mut(), dark),
+            (3, None),
+            "every seat is told, background tabs included"
+        );
+        assert!(
+            seats
+                .iter()
+                .all(|seat| seat.color_scheme() == Some(WebColorScheme::Dark))
+        );
+
+        // A new dark scheme, or a contrast floor: the palette moved and the answer did not.
+        assert_eq!(
+            tell_every_seat_its_color_scheme(seats.iter_mut(), dark),
+            (0, None),
+            "an answer a seat already holds costs it nothing"
+        );
+
+        let light = web_color_scheme(WebColorSchemeV1::FollowTheme, false);
+        assert_eq!(
+            tell_every_seat_its_color_scheme(seats.iter_mut(), light),
+            (3, None)
+        );
+        assert!(
+            seats
+                .iter()
+                .all(|seat| seat.color_scheme() == Some(WebColorScheme::Light))
+        );
+    }
+}
+
 #[cfg(test)]
 mod engine_absence_tests {
     use super::rehost_address_tests::{detached, page, window};

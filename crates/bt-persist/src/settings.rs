@@ -314,7 +314,16 @@ use serde::{Deserialize, Serialize};
 /// every build before this one sent the lines straight in, and the owner ruled that a paste into
 /// such a shell asks first. The row is what keeps the question a choice — a reader who wants the
 /// old road has one press that gives it back.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 37;
+///
+/// **v38 carries `web_color_scheme`**, the Appearance page's `Web pages` row: which colour scheme a
+/// web pane tells the page to prefer (`prefers-color-scheme`) — Folio's own theme, or always light,
+/// or always dark (owner's ruling 2026-09-21, 0.4.4 ticket 09) — see [`WebColorSchemeV1`].
+///
+/// **It lands on `FollowTheme`**, which is the ruling rather than a behaviour carried forward:
+/// every build before this one told the page nothing, so the engine answered with the operating
+/// system's own mode, and the owner ruled that a page follows Folio instead. The row is what keeps
+/// that a choice — `Light` or `Dark` pins either.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 38;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -559,6 +568,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "scrollback_lines": 25000 | 50000 | 100000 | 200000,
 ///   "focus_mode": true | false,
 ///   "minimum_contrast": "Off" | "Ratio2" | "Ratio3" | "Ratio45",
+///   "web_color_scheme": "FollowTheme" | "Light" | "Dark",
 ///   "terminal_notifications": true | false,
 ///   "powershell_integration_offer": true | false
 ///   "focus_card_height": 160 | 240 | 320,
@@ -940,6 +950,14 @@ pub struct SettingsV1 {
     /// duty, so the floor is offered rather than assumed.
     #[serde(default)]
     pub minimum_contrast: MinimumContrastV1,
+    /// **Which colour scheme a web pane tells its page to prefer** (v38, owner's ruling
+    /// 2026-09-21) — see [`WebColorSchemeV1`].
+    ///
+    /// `#[serde(default)]` because [`WebColorSchemeV1::FollowTheme`] is both the shipped answer
+    /// and the honest reading of a file that never named one: nobody who left the line out asked
+    /// for a page that disagrees with the window it is in.
+    #[serde(default)]
+    pub web_color_scheme: WebColorSchemeV1,
 
     /// **Whether a program may put a message on the desktop** — the Terminal page's
     /// `Notifications` row, and the switch behind `OSC 9` / `OSC 777;notify` (DESIGN §7.6).
@@ -1463,6 +1481,8 @@ impl Default for SettingsV1 {
             focus_mode: false,
             // Every colour a program asks for, drawn as it was asked for.
             minimum_contrast: MinimumContrastV1::Off,
+            // A page asks the window it is in, which is the owner's ruling of 2026-09-21.
+            web_color_scheme: WebColorSchemeV1::FollowTheme,
 
             terminal_notifications: true,
             // A PowerShell with no integration is told so, once, in its own pane.
@@ -1693,6 +1713,24 @@ pub enum MinimumContrastV1 {
     Ratio3,
     /// 4.5:1 — WCAG AA for body text.
     Ratio45,
+}
+
+/// **Which colour scheme a web pane asks its page for** — the `prefers-color-scheme` the engine
+/// reports (owner's ruling 2026-09-21, 0.4.4 ticket 09).
+///
+/// Three values and not a switch, because none of them is the absence of another: `FollowTheme`
+/// reads Folio's light or dark at the moment it is asked, and the other two pin one. What a page
+/// does with the answer is the page's: a site with no dark style looks the same under all three,
+/// and nothing here forces one on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum WebColorSchemeV1 {
+    /// Light while Folio's ground is light, dark while it is dark.
+    #[default]
+    FollowTheme,
+    /// Always light.
+    Light,
+    /// Always dark.
+    Dark,
 }
 
 /// `docs/DESIGN.md` §7.1.6: "主题 System/Light/Dark 跟随系统".

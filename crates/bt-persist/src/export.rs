@@ -8,7 +8,7 @@
 //! {
 //!   "folio_export": 1,
 //!   "exported_by": "Folio 0.4.4 (abc1234)",
-//!   "settings": { "schema_version": 37, … },
+//!   "settings": { "schema_version": 38, … },
 //!   "profiles": { "schema_version": 1, … },
 //!   "keybindings": { "schema_version": 1, … },
 //!   "schemes": { "Nord (custom).json": { "name": "Nord (custom)", … } }
@@ -255,6 +255,8 @@ mod tests {
             // v37's key (ticket 02), away from its default so the round trip
             // has to carry it.
             multiline_paste_ask: false,
+            // And v38's (ticket 09), for the same reason.
+            web_color_scheme: crate::WebColorSchemeV1::Light,
             ..SettingsV1::default()
         };
         let profiles = ProfilesV1::default();

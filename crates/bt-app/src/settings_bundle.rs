@@ -47,6 +47,7 @@ use std::collections::BTreeMap;
 use bt_persist::{
     BackgroundFitV1, KeybindingsV1, LanguageV1, LaunchOpensV1, MinimumContrastV1,
     PsReadLineInviteV1, QuakeRestoreV1, SearchEngineV1, SettingsV1, SplitDirectionV1, ThemeModeV1,
+    WebColorSchemeV1,
 };
 use serde_json::Value;
 
@@ -116,6 +117,8 @@ pub(crate) enum SettingChange {
     LaunchOpens(LaunchOpensV1),
     OptionSendsAlt(bool),
     MultilinePaste(bool),
+    /// Which colour scheme a web pane asks its page for (0.4.4 ticket 09).
+    WebPages(WebColorSchemeV1),
 }
 
 impl SettingChange {
@@ -164,6 +167,7 @@ impl SettingChange {
             Self::LaunchOpens(_) => SettingsRow::LaunchOpens,
             Self::OptionSendsAlt(_) => SettingsRow::OptionSendsAlt,
             Self::MultilinePaste(_) => SettingsRow::MultilinePaste,
+            Self::WebPages(_) => SettingsRow::WebPages,
             // The two with no row: an answer the PSReadLine card was given, and
             // which pages' Advanced groups are open. Each is read where it is used.
             Self::PsReadLineInvite(_) | Self::AdvancedOpen(_) => {
@@ -228,6 +232,7 @@ impl SettingChange {
             Self::LaunchOpens(value) => settings.launch_opens = value,
             Self::OptionSendsAlt(value) => settings.option_sends_alt = value,
             Self::MultilinePaste(value) => settings.multiline_paste_ask = value,
+            Self::WebPages(value) => settings.web_color_scheme = value,
         }
     }
 }
@@ -308,6 +313,7 @@ pub(crate) fn plan_settings(
         launch_opens,
         option_sends_alt,
         multiline_paste_ask,
+        web_color_scheme,
     } = imported.clone();
     let mut changes = Vec::new();
     let mut offer = |differs: bool, change: SettingChange| {
@@ -487,6 +493,10 @@ pub(crate) fn plan_settings(
         current.multiline_paste_ask != multiline_paste_ask,
         SettingChange::MultilinePaste(multiline_paste_ask),
     );
+    offer(
+        current.web_color_scheme != web_color_scheme,
+        SettingChange::WebPages(web_color_scheme),
+    );
     let (apply, elsewhere) = changes.into_iter().partition(|change| {
         change
             .row()
@@ -652,6 +662,7 @@ mod tests {
             launch_opens: LaunchOpensV1::TabInLastWindow,
             option_sends_alt: !base.option_sends_alt,
             multiline_paste_ask: !base.multiline_paste_ask,
+            web_color_scheme: WebColorSchemeV1::Dark,
             ..base
         }
     }

@@ -830,6 +830,11 @@ files on this machine are the engine's to answer* — the network rule (owner,
 browser allows, no Folio list; a script's `fetch`/XHR of a local file is refused
 by the engine, not by Folio's door), which supersede R1-10's "reads its own
 folder and reaches no server".
+2026-09-23 *a web pane asks its page for Folio's light or dark* (0.4.4 ticket 09):
+the page is told `prefers-color-scheme` — WebView2's profile `PreferredColorScheme`,
+WKWebView's own `appearance` — from Settings ▸ Appearance ▸ *Web pages* (`Theme`
+by default, or `Light` / `Dark`), in the install step before the first navigation and
+again on every theme or setting change; nothing else about a page is changed.
 
 ### 50. The video engine — `not yet folded`
 Entries: §7.23 *video has a face: the first frame comes from the platform decoder,
@@ -925,6 +930,14 @@ used to answer two ways:
 - **Every head title is 11** (2026-09-22). The pane head's 11.5
   (`SEAT_TITLE_FONT_LOGICAL_PX`) is a deviation to 11, the float and glance heads'
   `HEAD_TITLE_FONT_LOGICAL_PX`; 11.5 is not on the type ladder.
+- **A site's icon that would vanish into its ground stands on a plate** (2026-09-21,
+  colour 2026-09-23). Where a site icon's luminance (measured once, when it is
+  learned) and the ground it is drawn on are under 3:1 — WCAG 2.1 SC 1.4.11,
+  `marks::SITE_ICON_CONTRAST_MINIMUM` — it is drawn on a circle of its own box, no
+  border, no shadow, in the light theme's panel tone `#F7F7F5` in both themes
+  (`marks::SITE_ICON_PLATE`), never pure white (2026-09-23). A pale icon on the light
+  theme gains little from it (1.07:1), and that is accepted. The ground is whatever the
+  frame laid under that box.
 - **Decoration never covers text** (2026-09-23). The terminal grid reserves the
   command rail's width when the pane has a rail: the resting band (tick plus its
   padding, inboard of the scroll lane), not the hover crest. A pane has a rail from
@@ -936,7 +949,9 @@ divider drag); §7.28 *the small tags floating over the text wear one outfit: on
 face, one hairline, one legible ink*; §7.18 *the icon system: one verb table, one
 slot table, one optical gate*; §7.18 *motion tokens: three steps, one travel
 distance, two curves, and a register that forbids a fourth* (two entries share
-the number); trailing entry 2026-09-23 *Decoration never covers text*.
+the number); trailing entry 2026-09-23 *Decoration never covers text*; 2026-09-23 *a
+web pane asks its page for Folio's light or dark, and a site's icon without contrast
+stands on a plate*.
 **Overrides.** The two redesign proposals of 2026-09-22 were declined; nothing of
 them is a rule. The motion entry's "two curves" predates `GRAB_EASE`; the code's
 three are the rule.

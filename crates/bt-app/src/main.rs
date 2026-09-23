@@ -41270,6 +41270,7 @@ impl Runtime<'_> {
             search_engine: self.app.settings_store.loaded().search_engine,
             launch_opens: self.app.settings_store.loaded().launch_opens,
             minimum_contrast: self.app.settings_store.loaded().minimum_contrast,
+            web_color_scheme: self.app.settings_store.loaded().web_color_scheme,
             language: self.app.settings_store.loaded().language,
             default_profile: self.default_profile(),
             terminal_font: settings::family_index(
@@ -41940,6 +41941,9 @@ impl Runtime<'_> {
         if let Some(floor) = settings::minimum_contrast_requested(target) {
             self.apply_minimum_contrast(floor)?;
         }
+        if let Some(scheme) = settings::web_color_scheme_requested(target) {
+            self.apply_web_color_scheme(scheme)?;
+        }
         if let Some(language) = settings::language_requested(target) {
             self.apply_language(language)?;
         }
@@ -42257,6 +42261,9 @@ impl Runtime<'_> {
             }
             Row::MinimumContrast => {
                 self.apply_minimum_contrast(defaults.minimum_contrast)?;
+            }
+            Row::WebPages => {
+                self.apply_web_color_scheme(defaults.web_color_scheme)?;
             }
             // Not in any group, and therefore never handed here — see
             // `SettingsContent::advanced_rows`, which is what this loop walks.
@@ -43325,6 +43332,22 @@ impl Runtime<'_> {
             return Ok(false);
         }
         install_minimum_contrast(floor);
+        self.adopt_new_palette()?;
+        Ok(true)
+    }
+
+    /// **Point the `Web pages` row at `scheme`** (0.4.4 ticket 09).
+    ///
+    /// [`Self::apply_minimum_contrast`]'s shape and its door: [`Self::adopt_new_palette`] is the
+    /// one place every window already tells its pages their colour scheme, and it records the
+    /// change for every other window too — so this row reaches every page in every window through
+    /// the same call a theme flip does, rather than through a second walk of its own.
+    fn apply_web_color_scheme(&mut self, scheme: bt_persist::WebColorSchemeV1) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.web_color_scheme = scheme;
+        if !self.app.settings_store.store(settings) {
+            return Ok(false);
+        }
         self.adopt_new_palette()?;
         Ok(true)
     }

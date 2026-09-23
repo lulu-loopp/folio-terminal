@@ -99,7 +99,10 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
-use objc2_app_kit::{NSResponder, NSView};
+use objc2_app_kit::{
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSResponder, NSView,
+};
 use objc2_foundation::{
     NSBundle, NSError, NSHTTPURLResponse, NSObjectProtocol, NSRect, NSString, NSURL,
     NSURLAuthenticationChallenge, NSURLAuthenticationMethodServerTrust, NSURLCredential,
@@ -115,9 +118,9 @@ use objc2_web_kit::{
 
 use super::{
     CloseStep, INSTALL_SEQUENCE, InstallStep, PageVisual, RehostCompensation, RehostOutcome,
-    RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebDpiOwnership, WebEvent,
-    WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict, WebRequestVerdict,
-    WebSetting, install_rollback,
+    RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebColorScheme,
+    WebDpiOwnership, WebEvent, WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict,
+    WebRequestVerdict, WebSetting, install_rollback,
 };
 use crate::macos_impl::{window_for, window_thread};
 use crate::{Compositor, NativeWindow};
@@ -1249,6 +1252,32 @@ pub struct WebHost {
     /// The window the page's view belongs to, kept so that
     /// [`WebHost::focus_page`] can reach the responder chain.
     window: Option<NativeWindow>,
+    /// **The colour scheme this seat's pages are told to prefer**, as last said by the caller
+    /// (0.4.4 ticket 09) — the Windows arm's field, for its reason: a page rebuilt after a crash
+    /// is told again in [`WebHost::configure`], before anything navigates.
+    color_scheme: Cell<Option<WebColorScheme>>,
+}
+
+/// **Tell one page which colour scheme it prefers** — the view's own `appearance`
+/// (0.4.4 ticket 09).
+///
+/// WebKit answers `prefers-color-scheme` from the view's *effective* appearance, which a view
+/// with none of its own inherits from its window — and `macos_impl::set_window_dark_mode` already
+/// sets the window's from Folio's ground. So with the reader following Folio's theme this call
+/// states what the page would have inherited anyway, and it is made regardless: the two pinned
+/// answers are exactly the case where the page must **not** inherit the window's, and one door
+/// that always says the answer is simpler to trust than one that says it only when it differs.
+fn apply_color_scheme(view: &WKWebView, scheme: WebColorScheme) -> Result<(), String> {
+    let what = "the page's colour scheme";
+    // SAFETY: two `NSString` constants AppKit exports; reading one is reading a pointer.
+    let name = match scheme {
+        WebColorScheme::Light => unsafe { NSAppearanceNameAqua },
+        WebColorScheme::Dark => unsafe { NSAppearanceNameDarkAqua },
+    };
+    let appearance = NSAppearance::appearanceNamed(name)
+        .ok_or_else(|| format!("{what}: this system has no appearance named {name}"))?;
+    view.setAppearance(Some(&appearance));
+    Ok(())
 }
 
 /// What every door of this host answers with when the page is not there.
@@ -1287,7 +1316,29 @@ impl WebHost {
             gate: None,
             pending_view: None,
             window: None,
+            color_scheme: Cell::new(None),
         }
+    }
+
+    /// **Which colour scheme this seat's pages prefer** (0.4.4 ticket 09).
+    ///
+    /// Remembered whether or not there is a page yet, so that the view this seat is given later
+    /// is told in [`Self::configure`], and told at once when there is one up.
+    pub fn set_color_scheme(&self, scheme: WebColorScheme) -> Result<(), String> {
+        self.color_scheme.set(Some(scheme));
+        match self.view.as_ref() {
+            Some(view) => {
+                window_thread("the page's colour scheme")?;
+                apply_color_scheme(view, scheme)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The scheme this host was last told, `None` before it was told one.
+    #[must_use]
+    pub fn color_scheme(&self) -> Option<WebColorScheme> {
+        self.color_scheme.get()
     }
 
     /// Everything the engine has said since the last time it was asked.
@@ -1594,6 +1645,11 @@ impl WebHost {
             if !stands {
                 unapplied.push(setting);
             }
+        }
+        // **The colour scheme a page prefers, in the same step and before anything navigates**
+        // (0.4.4 ticket 09) — the Windows arm's line, for its reason.
+        if let Some(scheme) = self.color_scheme.get() {
+            apply_color_scheme(view, scheme)?;
         }
         Ok(unapplied)
     }

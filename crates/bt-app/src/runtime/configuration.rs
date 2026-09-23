@@ -462,6 +462,9 @@ impl Runtime<'_> {
             SettingChange::MultilinePaste(enabled) => {
                 self.apply_multiline_paste_ask(enabled);
             }
+            SettingChange::WebPages(scheme) => {
+                self.apply_web_color_scheme(scheme)?;
+            }
             // Read where they are used, so the store is their door: the answer
             // the PSReadLine card was given, the open Advanced groups, the
             // summoned terminal's profile — stored

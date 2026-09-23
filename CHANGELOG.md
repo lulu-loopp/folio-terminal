@@ -15,6 +15,9 @@ All notable changes to Folio are recorded here. The format follows
 - Pasting several lines into a shell that would run them one by one now asks
   first: run them line by line, join them into one line, or cancel. A setting
   under Terminal turns the question off.
+- Web panes follow Folio's light or dark theme; a setting can pin either. A
+  site's icon that would disappear into the bar it sits on gets a small round
+  plate.
 
 ### Changed
 
