@@ -7199,8 +7199,14 @@ pub struct PaneHeadGeometry {
     /// wall every control in the *leading* run has to stop at.
     pub run: Option<[f32; 4]>,
     /// **The ground the run stands on** — [`Self::run`] grown left by one
-    /// character of the title's own type and right to the head's edge, or
+    /// character of the title's own type, ending where [`Self::title`] ends, or
     /// `None` when there is no run.
+    ///
+    /// Not out to the head's own edge (2026-09-23): the ground exists to cover
+    /// letters and the letters stop at the title's right edge, so the trailing
+    /// padding beyond it has nothing to cover — and on a pane drawn as a
+    /// resizing card that padding is where the card's rounded top-right corner
+    /// is cut.
     ///
     /// Drawn in the head's ground colour over the title, at the run's own
     /// opacity, so the two arrive and leave together: see
@@ -7453,14 +7459,19 @@ pub fn pane_head_geometry(
         ],
         run,
         // One character of the title's own type at the left edge, and the
-        // head's own right edge at the other: the ramp is a fact about the
-        // letters it dissolves, and what lies under the run's own boxes and
-        // under the padding beside them is covered flat.
+        // title's own right edge at the other: the ramp is a fact about the
+        // letters it dissolves, what lies under the run's own boxes is covered
+        // flat, and the trailing padding past the last letter is left alone —
+        // there is nothing in it to cover (2026-09-23, see the field). The two
+        // right edges are the same place said twice — the `×` stands at
+        // `padding-right` and so does the name — except that the `×`'s box is
+        // snapped to the pixel and the name's edge is not, so at a fractional
+        // scale they part by up to half a pixel; the ground covers both.
         scrim: run.map(|run| {
             [
                 (run[0] - HEAD_RUN_SCRIM_FADE_LOGICAL_PX * scale).max(rect[0]),
                 rect[1],
-                rect[2],
+                title_right.max(run[2]),
                 content_bottom,
             ]
         }),
@@ -11183,20 +11194,31 @@ fn resizing_cards(
         ] {
             quads.push(ChromeQuad::ink(band, floor));
         }
+        // **The corners are the card's clip, so they are drawn over the card**
+        // (2026-09-23). Everything the pane drew is already in `sprites` — the
+        // pane loop ran first — and part of it went to the pass after the
+        // letters: the head run and the scrim it stands on. A corner left in
+        // the pass under the letters was painted over by that scrim and the
+        // card's top-right came out square. In the last pass and pushed after
+        // every mark the pane made, no mark a pane makes, today's or a later
+        // one, can stand on a corner the card has cut away.
         for (corner, at) in [
             (Corner::TopLeft, [card[0], card[1]]),
             (Corner::TopRight, [card[2] - radius, card[1]]),
             (Corner::BottomLeft, [card[0], card[3] - radius]),
             (Corner::BottomRight, [card[2] - radius, card[3] - radius]),
         ] {
-            sprites.push(ChromeSprite::new(
-                ChromeMark::CardCorner {
-                    radius_px: radius as u32,
-                    corner,
-                },
-                [at[0], at[1], at[0] + radius, at[1] + radius],
-                floor,
-            ));
+            sprites.push(
+                ChromeSprite::new(
+                    ChromeMark::CardCorner {
+                        radius_px: radius as u32,
+                        corner,
+                    },
+                    [at[0], at[1], at[0] + radius, at[1] + radius],
+                    floor,
+                )
+                .above_text(),
+            );
         }
     }
 }
@@ -35232,8 +35254,9 @@ mod tests {",
             assert!(head.control_limit <= run[0], "and no control does");
 
             // The scrim: one character of the title's type of ramp at its left
-            // edge, and every pixel of the run and the padding beside it
-            // covered flat.
+            // edge, every pixel of the run covered flat, and nothing past the
+            // last letter (2026-09-23: the padding beyond is where a resizing
+            // card cuts its corner).
             let scrim = head.scrim.expect("a head with a run stands it on a ground");
             assert_eq!(
                 scrim[0],
@@ -35241,7 +35264,15 @@ mod tests {",
                 "the ramp is one character of the caption's own type at {scale}x",
             );
             assert!(scrim[2] >= run[2], "and the ground covers the whole run");
-            assert_eq!(scrim[2], rect[2], "out to the head's own edge");
+            assert_eq!(
+                scrim[2],
+                head.title[2].max(run[2]),
+                "out to where the letters and the run stop, and no further",
+            );
+            assert!(
+                scrim[2] < rect[2],
+                "the trailing padding is not the ground's at {scale}x",
+            );
             assert_eq!([scrim[1], scrim[3]], [rect[1], head.content_bottom]);
         }
 
@@ -38014,6 +38045,138 @@ mod tests {",
                 SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
             );
         }
+    }
+
+    /// A files column on the left of a terminal — [`term_beside_files`] the
+    /// other way round, so the pane whose head keeps the pointer when a divider
+    /// is pressed from its left is the column.
+    fn files_beside_term() -> Seats {
+        Seats::from_persisted(&LayoutNodeV1::Split(SplitNodeV1 {
+            dir: SplitDirV1::Row,
+            ratio: 300_000,
+            children: [
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
+                    bt_persist::FilesLeafV1 {
+                        view: bt_persist::FilesViewV1::Files,
+                        root: "D:\\".to_owned(),
+                        open: Vec::new(),
+                        sel: None,
+                        width: 240,
+                        remotes_open: false,
+                    },
+                ))),
+                term_leaf(),
+            ],
+        }))
+    }
+
+    /// **A resizing card's corners are its clip: nothing its pane draws is
+    /// painted over one** (owner's screenshots 2026-09-23 13:35 and 13:36).
+    ///
+    /// RED EVIDENCE: with a divider held, the card left of it came out with a
+    /// square top-right corner — the files column in one capture, a terminal in
+    /// the other — while its other three corners and all four of the card on
+    /// the right were round. The pane under the pointer shows its head run
+    /// (`⌄ □ ×` on a terminal, `↗ ×` on a column), and that run stands on
+    /// [`PaneHeadGeometry::scrim`], drawn in the pass after the letters. The
+    /// four `CardCorner` marks were in the pass before them, so the scrim, which
+    /// ran out to the card's right edge, was painted over the top-right mask.
+    ///
+    /// What this measures is the renderer's paint order, read off the chrome:
+    /// every mark in the under pass in push order, then the letters, then every
+    /// mark in the over pass in push order (`bt_render`'s
+    /// `partition(|icon| !icon.above_text)`). Nothing drawn after a corner may
+    /// overlap the corner's box.
+    ///
+    /// The letters count too, as their laid-out box: a corner in the pass
+    /// before the letters has every caption box that reaches the card's edge
+    /// drawn after it.
+    ///
+    /// RED (run 2026-09-23): on base the terminal cell fails, naming the
+    /// `HeadRunScrim` at `[517,45,595,74]` over the left card's top-right
+    /// corner `[587,45,595,53]`. MUTATION: drop
+    /// `.above_text()` from the corners in [`resizing_cards`], keeping the
+    /// shortened scrim, and both cells still go red on the scrim
+    /// (`[517,45,589,74]` against the corner `[587,45,595,53]`): the name and
+    /// its ground stop at `padding-right: 6px`, which is inside the 8px corner
+    /// box, so the corners being last is what keeps them, and the scrim's
+    /// shorter reach is the scrim covering only what it is for.
+    #[test]
+    fn nothing_a_pane_draws_is_painted_over_its_resizing_cards_corners() {
+        // Every cell is walked before anything is asserted, so a red run names
+        // each head it fails for rather than the first.
+        let mut painted_over = Vec::new();
+        for (head, seats) in [
+            ("terminal", two_terminals()),
+            ("files", files_beside_term()),
+        ] {
+            let metrics = seat_metrics(1_000);
+            let viewport = viewport_of(1200, 800, 1_000);
+            let layout = solved(&seats, viewport, &metrics);
+            let split = seats.split_slots(&layout)[0].id;
+            let left = layout
+                .rects
+                .iter()
+                .map(|placement| placement.id)
+                .min_by(|a, b| {
+                    device_rect_of(&layout, *a)[0].total_cmp(&device_rect_of(&layout, *b)[0])
+                })
+                .expect("two panes");
+            // Pressed from the left side of the band: the pointer is still in
+            // the left pane, so its run is revealed — the owner's gesture.
+            let pointer = ChromePointer {
+                dragging: Some(split),
+                pane_hover: Some(left),
+                ..ChromePointer::default()
+            };
+            let (_, labels, sprites) = head_chrome(&seats, &layout, 1.0, pointer);
+            assert!(
+                sprites
+                    .iter()
+                    .any(|sprite| matches!(sprite.mark, ChromeMark::HeadRunScrim { .. })),
+                "the {head} head's run is revealed, standing on its ground",
+            );
+
+            // The order the renderer paints them in.
+            let under: Vec<&ChromeSprite> =
+                sprites.iter().filter(|sprite| !sprite.above_text).collect();
+            let over: Vec<&ChromeSprite> =
+                sprites.iter().filter(|sprite| sprite.above_text).collect();
+            let order: Vec<&ChromeSprite> = under.iter().chain(over.iter()).copied().collect();
+
+            let mut corners = 0;
+            for (at, corner) in order.iter().enumerate() {
+                if !matches!(corner.mark, ChromeMark::CardCorner { .. }) {
+                    continue;
+                }
+                corners += 1;
+                for later in &order[at + 1..] {
+                    if box_intersection(later.rect, corner.rect).is_some() {
+                        painted_over.push(format!(
+                            "{head}: {:?} at {:?} over {:?} at {:?}",
+                            later.mark, later.rect, corner.mark, corner.rect,
+                        ));
+                    }
+                }
+                // The letters go down between the two passes.
+                if !corner.above_text {
+                    for label in &labels {
+                        if box_intersection(label.rect, corner.rect).is_some() {
+                            painted_over.push(format!(
+                                "{head}: the letters {:?} at {:?} over {:?} at {:?}",
+                                label.text, label.rect, corner.mark, corner.rect,
+                            ));
+                        }
+                    }
+                }
+            }
+            assert_eq!(corners, 8, "{head}: four corners on each of the two cards");
+        }
+        assert!(
+            painted_over.is_empty(),
+            "drawn after a card corner and over it:\n{}",
+            painted_over.join("\n"),
+        );
     }
 
     /// PIN — B22. The cards keep drawing after the divider is let go, and draw
