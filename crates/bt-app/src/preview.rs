@@ -7394,9 +7394,10 @@ pub enum LinkAction {
     /// 2026-09-08) — a share, a device path, a distribution nobody here is standing in.
     ///
     /// Apart from [`Self::Nowhere`] because the two readers of this table owe a reader two
-    /// different sentences about it. A *link* wearing it is not a link: pressing it does nothing,
-    /// exactly as pressing a `mailto:` does nothing, and the row says so by wearing no finger. An
-    /// *image source* wearing it is a picture this window will not fetch, which is the "not shown"
+    /// different sentences about it. A *link* wearing it is answered by the terminal's own row for
+    /// a path this window may not read (ticket 14, owner ruling 2026-09-23): a plain press raises
+    /// the card §7.1.3 already has, which reads nothing, and `Ctrl` hands a share on another
+    /// machine to the system. An *image source* wearing it is a picture this window will not fetch, which is the "not shown"
     /// placeholder a markdown page already draws over a source it cannot read — and drawing
     /// "resolves to nothing" over a source that resolves perfectly well would be the page saying
     /// something untrue about a file that is there.
@@ -7404,6 +7405,14 @@ pub enum LinkAction {
     /// The path travels because both of those sentences are about a file somebody named, and a
     /// diagnostic that could not name it would be a diagnostic about nothing.
     Refused(PathBuf),
+    /// **A URI of any other scheme** — `mailto:`, `vscode:`, `obsidian:` (ticket 14, owner rulings
+    /// 2026-09-21 and 2026-09-23).
+    ///
+    /// Not a verb either: a plain press on one does nothing, and `Ctrl` hands it to whatever the
+    /// machine has registered for its scheme — the terminal's own row, read by
+    /// [`crate::preview_link_activation`]. It carries the target as written, trimmed, because
+    /// that is what is handed over.
+    Scheme(String),
     /// Nothing this window will act on.
     Nowhere,
 }
@@ -7424,11 +7433,11 @@ pub enum LinkAction {
 /// `http`/`https` come back as [`LinkAction::Web`] and go no further here: what
 /// a press on a web address spends is the terminal's own `http(s)` row, read
 /// once for both surfaces ([`crate::web_address_activation`]). **Every other
-/// scheme is refused** — `mailto:`, `ftp:`, `javascript:` and whatever else a
-/// document may carry — for the reason the terminal's own OSC-8 handler refuses
-/// them: a document is untrusted text, and handing an arbitrary scheme to
-/// `ShellExecute` is handing it whatever the machine has registered for that
-/// scheme.
+/// scheme** comes back as [`LinkAction::Scheme`] since ticket 14 (owner rulings
+/// 2026-09-21 and 2026-09-23): it was refused here for the reason the terminal's
+/// own OSC-8 handler refused it, and both refusals are withdrawn together — a
+/// plain press still does nothing, and `Ctrl` hands the link to whatever the
+/// machine has registered for its scheme.
 ///
 /// **「Open the containing folder」 is not here**, deliberately. That is the
 /// foot's Reveal button and it stays the foot's: a link names a *file*, and
@@ -7443,9 +7452,9 @@ pub enum LinkAction {
 ///   names `DESIGN.md`, and the anchor is simply a part of the address this
 ///   window cannot honour yet;
 /// * `file:` is unwrapped to the path it carries, percent-escapes and all;
-/// * anything else carrying a `scheme:` is refused, *except* that a bare
-///   Windows drive letter (`C:\x`) is a path and not a scheme — one letter
-///   before the colon cannot be a scheme, and RFC 3986 says so too;
+/// * anything else carrying a `scheme:` is [`LinkAction::Scheme`], *except*
+///   that a bare Windows drive letter (`C:\x`) is a path and not a scheme — one
+///   letter before the colon is a drive ([`handover_scheme`]);
 /// * an absolute path is taken as it stands; a relative one is resolved
 ///   against the **document's own directory**, which is the only frame a
 ///   relative link has ever meant.
@@ -7464,13 +7473,8 @@ pub fn link_action(target: &str, document: &Path) -> LinkAction {
             return LinkAction::Nowhere;
         };
         path
-    } else if let Some(scheme) = scheme_of(target) {
-        // A drive letter is not a scheme; every real scheme left here is one
-        // this window does not open.
-        if scheme.len() > 1 {
-            return LinkAction::Nowhere;
-        }
-        PathBuf::from(strip_fragment(target))
+    } else if handover_scheme(target).is_some() {
+        return LinkAction::Scheme(target.to_owned());
     } else {
         PathBuf::from(strip_fragment(target))
     };
@@ -7562,6 +7566,18 @@ fn normalized(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// **The scheme of a link a press may hand to the system**, or nothing when the text is not
+/// spelled as a URI (ticket 14).
+///
+/// RFC 3986's grammar ([`scheme_of`]) and at least two characters: a single letter before a colon
+/// is a Windows drive (`C:\x`), which is a *path*, and a path leaves through the path doors, where
+/// `names_a_program` is asked. [`link_action`] and the terminal's own row both read it here, so
+/// the two surfaces cannot disagree about what is a URI and what is a path.
+#[must_use]
+pub fn handover_scheme(target: &str) -> Option<&str> {
+    scheme_of(target).filter(|scheme| scheme.len() > 1)
 }
 
 /// The `scheme` of `scheme:rest`, when the text in front of the first colon
@@ -10375,20 +10391,21 @@ mod tests {
             "unwrapped, and its escapes undone"
         );
 
-        // ③ The web leaves the window, and nothing else does.
+        // ③ The web is the web row's; every other scheme is the scheme row's (ticket 14, owner
+        //    ruling 2026-09-23), which hands it to the machine only under `Ctrl`.
         assert_eq!(
             link_action("https://example.com/x", document),
             LinkAction::Web("https://example.com/x".to_owned())
         );
-        for refused in [
+        for other in [
             "mailto:someone@example.com",
             "ftp://example.com/x",
             "javascript:alert(1)",
         ] {
             assert_eq!(
-                link_action(refused, document),
-                LinkAction::Nowhere,
-                "{refused}: a document does not get to name a handler"
+                link_action(other, document),
+                LinkAction::Scheme(other.to_owned()),
+                "{other}: another scheme, for the table to answer"
             );
         }
 

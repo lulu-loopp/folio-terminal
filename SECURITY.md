@@ -235,6 +235,10 @@ checked against the source by a test.
   the settings gear; it downloads nothing. Settings > General > **Update check**,
   or `"update_check": false` in `settings.json`, switches it off. The only other
   thing that reaches the network is a page you asked the preview to open, fetched
-  by WebView2.
+  by WebView2 — and a link you `Ctrl`/`⌘`+click, which Folio hands to the system:
+  a web address to your browser, a network share (`\\server\share\…`) to Windows,
+  which opens it from inside Folio's process, and a link of any other scheme to
+  whatever is registered for it. A share is never read, probed or asked about
+  before that click.
 - Nothing is read from, or written to, a working directory or a repository as
   configuration.

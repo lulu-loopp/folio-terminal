@@ -1,9 +1,10 @@
 //! `Runtime`'s side of the OS hand-off lane (`crate::handoff_lane`): putting a hand-off on it,
 //! and answering what comes back.
 //!
-//! The eight surfaces that hand something to the system — `open_local_path`,
+//! The surfaces that hand something to the system — `open_local_path`,
 //! `reveal_in_explorer`, `open_local_path_verified`, `reveal_verified`, `open_preview_link`,
-//! `hand_url_to_the_browser`, `activate_local_image_path` and `open_font_settings` — each call
+//! `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings`, and since
+//! ticket 14 `open_unverified_reference` and `hand_uri_to_the_system` — each call
 //! [`Runtime::hand_off`] with the request and the words its refusal has always had. None of them
 //! calls a `bt_platform::handoff` door itself (`no_handoff_runs_on_the_window_thread`).
 
@@ -98,6 +99,9 @@ impl Runtime<'_> {
                     Some(OnRefused::HyperlinkBlocked(hyperlink)) => {
                         self.window.hyperlink_hover.show_blocked(hyperlink);
                         self.publish_interaction_frame()?;
+                    }
+                    Some(OnRefused::PreviewAddressRefused(surface, address)) => {
+                        self.say_address_refused(surface, &address)?;
                     }
                     Some(OnRefused::FontsToast) => {
                         self.toast(
