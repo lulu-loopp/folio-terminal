@@ -55,6 +55,19 @@ with it, confirmed or refuted, with the discriminating evidence.
 <symbol, or `unknown` — then the investigation resolves it before any fix>
 Its writers, readers, invalidators and retirement paths, once known.
 
+## Architecture impact (rule 10 — every implementation ticket; filled when drafted, checked at acceptance)
+- facts touched: <fact · owner symbol · what this change does to it: reads / writes / adds a reader / changes its lifecycle>
+  (the single-owner facts of `docs/ARCHITECTURE.md` §4, the ownership contracts named in `docs/plans/structural-debt.md`)
+- doors gone through: <effect · door · lane> for each file read, child process, hand-off to the OS, thread, PTY write …
+  (`docs/ARCHITECTURE.md` §6; an effect with no single entrance is written `no door`; a new kind of effect gets a door first)
+- structural debt: adds / repays / neither — <D-n in `docs/plans/structural-debt.md`, or the `docs/plans/MIGRATION-DEBT.tsv` row>
+  (added debt is recorded in the ledger in the same commit)
+- changes who owns a fact (moves it to another owner, or splits it — e.g. per-window → per-pane): yes / no
+  - if yes — rule 11: design note `docs/plans/design/<slug>-<date>.md`, reviewed by Codex in
+    `docs/plans/review/<slug>-review-codex-<date>.md`, BEFORE dispatch; each review point marked taken / not taken, with why
+  - if no — a pure feature ticket; no design note
+"none" is an answer when it says why; a blank is not.
+
 ## Class and general rule
 Which class of defect this is, and the one rule that, if it held everywhere,
 would make the whole class impossible. If this is the second ticket of the same

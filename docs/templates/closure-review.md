@@ -40,6 +40,10 @@ repair after that is structural.
 3. Budgets on the complete changed operation, after the endpoint included.
 4. Tests actually selected and their counts — a green command that ran zero
    tests is not evidence.
+5. Architecture impact (CONVENTIONS §十 rules 10 and 11): the facts, doors and
+   structural debt the final diff actually touches match the brief's section.
+   One that is not listed is a finding. A change of who owns a fact without a
+   design note Codex reviewed sends the ticket back.
 
 ## Findings
 Each: criterion ID (or "none") · obligation ID · commit + symbol · minimal

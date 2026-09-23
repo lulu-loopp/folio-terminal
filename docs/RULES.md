@@ -22,7 +22,8 @@ to `folded` in the same commit. Never cite a line number.
 The subsystem list is the one the 2026-09-21 breadth survey opened: its
 fifty-one rows, plus two cross-cutting rows (doors, threads and lanes) that are
 not a subsystem but are a rule. Row 54, the look of the window, was added on
-2026-09-22 with the written UI spec.
+2026-09-22 with the written UI spec. Row 55, tickets, was added on 2026-09-23:
+it is not a subsystem either, but a ruling about how every change is drafted.
 
 ---
 
@@ -981,12 +982,35 @@ three are the rule.
 **Open.** The deviations are scheduled for 0.4.4 and 0.4.5 by the ticket groups at
 the end of `docs/design/UI-DEVIATIONS.md`.
 
+### 55. Tickets — what a change states about the structure — `folded`
+**Rule.** **Every implementation ticket carries an "Architecture impact"
+section** (2026-09-23), filled when the ticket is drafted and checked at
+acceptance against the final diff: which owned facts it touches — the
+single-owner facts of `docs/ARCHITECTURE.md` §4 and the ownership contracts
+named in `docs/plans/structural-debt.md` — each with its owner and what the
+change does to it; which doors it goes through — file reads, child processes,
+hand-offs to the operating system, threads, PTY writes — each with its door and
+lane, or `no door` stated as a fact; and which structural debt it adds or
+repays, with the ledger's D-n entry or the `docs/plans/MIGRATION-DEBT.tsv` row.
+A fact, door or debt the diff touches and the section does not list is a
+finding. **A ticket that changes who owns a fact** — moves it from one owner
+to another, or splits it, as per-window into per-pane — **first gets a
+one-page design note reviewed by Codex** (2026-09-23), before an implementer
+is dispatched; the note lives under `docs/plans/design/`, the review under
+`docs/plans/review/`. A pure feature ticket, one that moves no ownership, has
+no design note.
+**From.** `docs/CONVENTIONS.md` §十 rules 10 and 11 and the field in
+`docs/templates/brief.md`; the vocabulary is `docs/ARCHITECTURE.md` §4
+(ownership) and §6 (doors), and the debt ledger is
+`docs/plans/structural-debt.md`.
+**Overrides.** none found.
+
 ---
 
 ## What is folded, and what is not
 
-**Folded (19 rows):** 4, 5, 6, 8, 9, 18, 19, 22, 23, 29, 30, 33, 38, 41, 42, 43,
-52, 53, 54. Row 46 is folded for the layering rule only.
+**Folded (20 rows):** 4, 5, 6, 8, 9, 18, 19, 22, 23, 29, 30, 33, 38, 41, 42, 43,
+52, 53, 54, 55. Row 46 is folded for the layering rule only.
 
 **Not yet folded (35 rows):** everything else. For those rows the entries listed
 are still the authority, and a ticket that depends on one of them folds it — into
