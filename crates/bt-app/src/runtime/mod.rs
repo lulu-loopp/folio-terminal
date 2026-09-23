@@ -13,6 +13,7 @@ mod clipboard;
 mod diagnostics;
 mod dpi;
 mod first_run;
+mod floats;
 mod frame;
 mod i18n;
 mod keyboard;
