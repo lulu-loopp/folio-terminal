@@ -606,7 +606,7 @@ pub(super) fn anchor_paragraphs(
 pub(super) fn lay_markdown_out_cached(
     blocks: &[preview::MarkdownBlock],
     intrinsic: &[MarkdownBlockIntrinsic],
-    source: Option<&MarkdownCaretBlock>,
+    source: &crate::SourceBlocks,
     art: PageArt<'_>,
     pass: &mut Pass,
     measure: &mut WrapMeasure<'_>,
@@ -620,7 +620,7 @@ pub(super) fn lay_markdown_out_cached(
         .zip(intrinsic)
         .enumerate()
         .map(|(index, (block, intrinsic))| {
-            let source = source.filter(|s| s.index() == index);
+            let source = source.get(index);
             let mut measured = if let Some(key) = recipe(block, source, pass.frame, art) {
                 let measured = pass.measure(key.clone(), measure);
                 pass.current.insert(
@@ -680,7 +680,7 @@ mod tests {
             let mut pass = self.cache.prepare(&self.doc, true, frame);
             let (blocks, ranges, maps) = preview::parse_markdown_mapped(text);
             // Deliberately use the NEW ranges and blocks, just like the runtime.
-            let source = caret.and_then(|at| {
+            let source = SourceBlocks::from(caret.and_then(|at| {
                 let index = preview_live::caret_seat(text, &ranges, at).block()?;
                 let heading = markdown_prose_face(&blocks[index])?;
                 let raw = preview_live::block_source(text, &ranges[index]).to_owned();
@@ -701,7 +701,7 @@ mod tests {
                     font_size,
                     line_height,
                 })))
-            });
+            }));
             let intrinsic = vec![MarkdownBlockIntrinsic::default(); blocks.len()];
             let pictures = DocumentPictures::default();
             let art = PageArt {
@@ -720,14 +720,8 @@ mod tests {
                     .sum();
                 (ink / width).ceil().max(1.0) * line
             };
-            let layout = lay_markdown_out_cached(
-                &blocks,
-                &intrinsic,
-                source.as_deref(),
-                art,
-                &mut pass,
-                &mut shaper,
-            );
+            let layout =
+                lay_markdown_out_cached(&blocks, &intrinsic, &source, art, &mut pass, &mut shaper);
             self.doc = PreviewDocument::Markdown {
                 blocks,
                 ranges,
@@ -785,7 +779,7 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(source.as_ref().unwrap().index(), 2);
+        assert_eq!(source.iter().next().unwrap().index(), 2);
         assert_eq!(ranges[2].start, text.rfind("same").unwrap());
         assert_eq!(maps.len(), ranges.len());
         assert_eq!(
@@ -912,14 +906,10 @@ mod tests {
         };
         pane.caret.anchor = 2;
         pane.caret.caret = 5;
-        let PreviewDocument::Markdown {
-            source: Some(source),
-            ..
-        } = &pane.doc
-        else {
+        let PreviewDocument::Markdown { source, .. } = &pane.doc else {
             panic!()
         };
-        let MarkdownCaretBlock::Prose(prose) = source.as_ref() else {
+        let Some(MarkdownCaretBlock::Prose(prose)) = source.iter().next() else {
             panic!()
         };
         let preedit = MarkdownPreedit {
@@ -1168,7 +1158,7 @@ mod tests {
             let baseline = lay_markdown_out(
                 blocks,
                 intrinsic,
-                source.as_deref(),
+                source,
                 400.0,
                 seats::preview_markdown_metrics(1.0),
                 PageArt {
@@ -1202,7 +1192,7 @@ mod tests {
         lay_markdown_out(
             blocks,
             intrinsic,
-            source.as_deref(),
+            source,
             400.0,
             seats::preview_markdown_metrics(1.0),
             PageArt {

@@ -9,15 +9,15 @@ use crate::{
     FormulaSwitches, FrameTraces, HyperlinkActivation, ImageDrag, ImageGrasp, ImageZoom, ImeOwner,
     LeafId, LeafSeed, MARKDOWN_CHIP_RADIUS_LOGICAL_PX, MarkdownBlockLayout, MarkdownCaretBlock,
     MarkdownCaretPaint, MarkdownCaretSeat, MarkdownLive, MarkdownPage, MarkdownPicture,
-    MarkdownPreedit, MarkdownProseBlock, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest,
-    MarkdownSourceBlock, MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost,
-    PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PagePicture, PasteTarget, PeekCacheEntry,
-    PeekThumbnailTarget, PictureErrand, PictureOnGlass, PictureReach, PictureRefusal,
-    PopoverTrigger, Popup, PresentIntent, PreviewBlockDrag, PreviewBodyDrag, PreviewDocument,
-    PreviewEditPaint, PreviewHeadFrame, PreviewHexHover, PreviewImageState, PreviewLink,
-    PreviewMathSite, PreviewOpenLane, PreviewPane, PreviewPreedit, PreviewRailFrame,
-    PreviewSurface, PreviewTextDrag, PreviewTextSite, PreviewViewState, RenameSubject, Reparse,
-    RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState, Step,
+    MarkdownPreedit, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest, MarkdownSourceBlock,
+    MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost, PREVIEW_REFUSAL_HOLD, PageArt,
+    PageArtKey, PagePicture, PasteTarget, PeekCacheEntry, PeekThumbnailTarget, PictureErrand,
+    PictureOnGlass, PictureReach, PictureRefusal, PopoverTrigger, Popup, PresentIntent,
+    PreviewBlockDrag, PreviewBodyDrag, PreviewDocument, PreviewEditPaint, PreviewHeadFrame,
+    PreviewHexHover, PreviewImageState, PreviewLink, PreviewMathSite, PreviewOpenLane, PreviewPane,
+    PreviewPreedit, PreviewRailFrame, PreviewSurface, PreviewTextDrag, PreviewTextSite,
+    PreviewViewState, ProseParagraph, RenameSubject, Reparse, RevealTween, RevealedFoot,
+    RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState, SourceBlocks, Step,
     SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState, TabTriggerHand,
     VideoGlance, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime,
     advance_drawn_animations, animation, animation_layer_key, animation_refusal_notice,
@@ -30,13 +30,13 @@ use crate::{
     hang_watch, hex_peek, highlight, i18n, image_clamped_pan, image_destination, image_is_pannable,
     image_meta_sentence, image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale,
     image_zoom_settles, image_zoom_toggled, ime_owner, input, markdown_empty_page_offset,
-    markdown_prose_composition, markdown_prose_face, markdown_prose_paragraphs, markdown_runs,
-    markdown_source_cell, markdown_source_offset_at, marks, measure_preview_links,
-    name_is_writable, native_window, notice, owe_sharpened_rasters, page_destination,
-    page_foot_flash, page_foot_lead, page_source_file, peek_scale_task, picture_channel_owner,
-    picture_errand, picture_files_of, pictures_awaited_by, pictures_need_handing_over,
-    place_preview_math, preedit_caret_byte, present_diagnostics, present_drawn_animations, preview,
-    preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_row,
+    markdown_prose_composition, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
+    markdown_source_offset_at, marks, measure_preview_links, name_is_writable, native_window,
+    notice, owe_sharpened_rasters, page_destination, page_foot_flash, page_foot_lead,
+    page_source_file, peek_scale_task, picture_channel_owner, picture_errand, picture_files_of,
+    pictures_awaited_by, pictures_need_handing_over, place_preview_math, preedit_caret_byte,
+    present_diagnostics, present_drawn_animations, preview, preview_block_bar_at,
+    preview_block_wheel, preview_body_bar, preview_caret_prose, preview_caret_row,
     preview_copies_on_select, preview_document_height, preview_document_key,
     preview_document_max_scroll, preview_edit, preview_edit_bands, preview_image_placement,
     preview_link_activation, preview_link_answers_a_press, preview_live,
@@ -45,13 +45,13 @@ use crate::{
     preview_select, preview_selection_bands, preview_tab_index_among, preview_text,
     preview_text_box_at, preview_text_boxes, preview_text_grain, preview_trace, preview_viewport,
     preview_watch, preview_wide_blocks, preview_wrap, preview_wrap_columns, profiles,
-    prose_source_lines, recoverable_clipboard_write, resolve_document_pictures,
-    revealable_preview_file, same_path_ignoring_case, sample_window_place, scroll_bar_layer,
-    scrollback_quota, seats, settings, settle_attention, shown_address, source_opens_as_a_page,
-    step_preview_caret_by_row, strip_animation_tick_is_due, surface_pixels, surface_subject_of,
-    surface_takes_image_zoom, switcher_rows, tab_owes_frame, tab_trailing_targets, table_block,
-    text_field, tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key,
-    video_seat, video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
+    recoverable_clipboard_write, resolve_document_pictures, revealable_preview_file,
+    same_path_ignoring_case, sample_window_place, scroll_bar_layer, scrollback_quota, seats,
+    settings, settle_attention, shown_address, source_opens_as_a_page, step_preview_caret_by_row,
+    strip_animation_tick_is_due, surface_pixels, surface_subject_of, surface_takes_image_zoom,
+    switcher_rows, tab_owes_frame, tab_trailing_targets, table_block, text_field,
+    tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key, video_seat,
+    video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
     wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
 };
 use anyhow::Context;
@@ -5260,10 +5260,29 @@ impl Runtime<'_> {
     /// folds on the source face's own terms (§7.1.3q) and the prose one wraps
     /// like any paragraph (§7.1.3w) — so unlike a table or a fence its box is
     /// the page's column and no block offset is subtracted from it.
+    ///
+    /// **The caret's own block**, now that a selection can draw several blocks
+    /// as source (2026-09-23): the caret, the composition and the arrow keys
+    /// stand in exactly one of them, and it is the block the caret's seat names
+    /// ([`Self::preview_caret_seat_block`]). `None` when that block is not drawn
+    /// as source — the one frame between a keystroke that moved the caret into
+    /// another block and the layout that follows it.
     fn markdown_caret_box(
         &self,
         surface: PreviewSurface,
         scale: f32,
+    ) -> Option<([f32; 4], &MarkdownCaretBlock, MarkdownBlockLayout)> {
+        let index = self.preview_caret_seat_block(surface)?;
+        self.markdown_source_block_box(surface, scale, index)
+    }
+
+    /// **The box one source block is drawn in** — [`Self::markdown_caret_box`]'s
+    /// arithmetic, for any block of the set and not only the caret's.
+    fn markdown_source_block_box(
+        &self,
+        surface: PreviewSurface,
+        scale: f32,
+        index: usize,
     ) -> Option<([f32; 4], &MarkdownCaretBlock, MarkdownBlockLayout)> {
         let body = self.preview_surface_body_rect(surface, scale)?;
         let metrics = seats::preview_markdown_metrics(scale);
@@ -5272,14 +5291,60 @@ impl Runtime<'_> {
         let PreviewDocument::Markdown { source, layout, .. } = &pane.doc else {
             return None;
         };
-        let source = source.as_deref()?;
-        let placed = layout.get(source.index())?;
+        let source = source.get(index)?;
+        let placed = layout.get(index)?;
         let top = body[1] + metrics.padding_y - pane.scroll[1] + placed.top;
         Some((
             [left, top, right.max(left), top + placed.height],
             source,
             placed,
         ))
+    }
+
+    /// **Every source block on the glass, with the box it is drawn in** — the
+    /// set a press, a band and the prose geometry walk (2026-09-23).
+    ///
+    /// Only the blocks the layout says are visible: a selection over the whole
+    /// of a long document draws every block as source, and a press or a frame
+    /// that walked all of them would put the file's size into its cost.
+    fn markdown_visible_source_boxes(
+        &self,
+        surface: PreviewSurface,
+        scale: f32,
+    ) -> Vec<([f32; 4], &MarkdownCaretBlock, MarkdownBlockLayout)> {
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+            return Vec::new();
+        };
+        let metrics = seats::preview_markdown_metrics(scale);
+        let Some(pane) = self.preview_pane(surface) else {
+            return Vec::new();
+        };
+        let PreviewDocument::Markdown { source, layout, .. } = &pane.doc else {
+            return Vec::new();
+        };
+        if source.is_empty() {
+            return Vec::new();
+        }
+        let scroll = pane.scroll[1];
+        layout
+            .visible(
+                scroll - metrics.padding_y,
+                scroll - metrics.padding_y + body[3] - body[1],
+            )
+            .filter_map(|index| self.markdown_source_block_box(surface, scale, index))
+            .collect()
+    }
+
+    /// **Which block the caret stands in**, off the parse this surface is
+    /// already showing — `None` for a page with no caret and for a caret in a
+    /// gap.
+    pub(crate) fn preview_caret_seat_block(&self, surface: PreviewSurface) -> Option<usize> {
+        let caret = self.preview_live_caret(surface)?;
+        let content = self.preview_buffer_on(surface)?.content.as_deref()?;
+        let PreviewDocument::Markdown { ranges, .. } = &self.preview_pane(surface)?.doc else {
+            return None;
+        };
+        preview_live::caret_seat(content, ranges, caret.caret).block()
     }
 
     /// The monospace block's box, when the caret's block wears that face.
@@ -5328,11 +5393,19 @@ impl Runtime<'_> {
     ) -> Option<usize> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (x, y) = (position.x as f32, position.y as f32);
-        if let Some((box_of_block, source)) = self.markdown_source_box(surface, scale)
-            && y >= box_of_block[1]
-            && y < box_of_block[3]
+        // **Every monospace source block on the glass**, not only the caret's:
+        // a selection can draw several blocks as source (2026-09-23), and none
+        // of them has a piece under it for the page's own hit test to find.
+        if let Some(offset) = self
+            .markdown_visible_source_boxes(surface, scale)
+            .into_iter()
+            .find_map(|(box_of_block, block, _)| {
+                let source = block.mono()?;
+                (y >= box_of_block[1] && y < box_of_block[3])
+                    .then(|| markdown_source_offset_at(source, box_of_block, x, y))
+            })
         {
-            return Some(markdown_source_offset_at(source, box_of_block, x, y));
+            return Some(offset);
         }
         // **And the prose block is hit-tested first for the same reason**
         // (§7.1.3w). It pushes no [`PreviewTextSite`]s either — what it draws is
@@ -5340,14 +5413,13 @@ impl Runtime<'_> {
         // provenance under it to ask — and the geometry it is drawn in is the
         // geometry it is read back in: the nearest seam to the pointer, which is
         // the very seam the caret will be struck at.
-        if let Some(prose) = self
-            .preview_pane(surface)
-            .and_then(|pane| pane.md_prose.as_ref())
-            && let (Some(first), Some(last)) = (prose.rows.first(), prose.rows.last())
-            && y >= first.top
-            && y < last.top + last.height
-        {
-            return Some(prose.press(x, y));
+        if let Some(offset) = self.preview_pane(surface).and_then(|pane| {
+            pane.md_prose_blocks.iter().find_map(|prose| {
+                let (first, last) = (prose.rows.first()?, prose.rows.last()?);
+                (y >= first.top && y < last.top + last.height).then(|| prose.press(x, y))
+            })
+        }) {
+            return Some(offset);
         }
         if let Some(body) = self.preview_surface_body_rect(surface, scale)
             && let Some(pane) = self.preview_pane(surface)
@@ -5465,7 +5537,7 @@ impl Runtime<'_> {
             .filter(|_| shift);
         // Asked before anything moves, because it is a question about the page
         // as the hand found it.
-        let in_the_seat = self.preview_press_keeps_the_caret_seat(surface, caret_at);
+        let in_the_seat = self.preview_press_keeps_the_span(surface, caret_at);
         if pressed.is_some() && !shift {
             // **A plain press lets go of what was selected**, and that is the
             // one thing left that happens at once: dropping a highlight moves no
@@ -5553,15 +5625,19 @@ impl Runtime<'_> {
         pane.md_select = None;
     }
 
-    /// **Whether a byte of the file is in the seat this page is already drawing
-    /// from** ([`preview_press::keeps_the_seat`], asked of a surface).
+    /// **Whether a byte of the file is in the source this page is already
+    /// drawing** ([`preview_press::keeps_the_span`], asked of a surface).
     ///
     /// Two questions turn on it and they are one question. A press there may be
-    /// answered where it stands, because putting the caret inside the seat the
-    /// page is already drawing changes no block's face; and a gesture there has
-    /// no rendered pieces under it, because what the seat is drawn as is the
-    /// file's own bytes and it pushes no [`PreviewTextSite`]s.
-    pub(crate) fn preview_press_keeps_the_caret_seat(
+    /// answered where it stands, because putting the caret inside a block the
+    /// page already draws as source changes no block's face — the span is held
+    /// until the gesture ends; and a gesture there has no rendered pieces under
+    /// it, because what a source block is drawn as is the file's own bytes and
+    /// it pushes no [`PreviewTextSite`]s.
+    ///
+    /// The span asked about is the one on the glass, `doc_key.source`, which
+    /// while a gesture is in flight is the one it started on.
+    pub(crate) fn preview_press_keeps_the_span(
         &self,
         surface: PreviewSurface,
         offset: Option<usize>,
@@ -5575,17 +5651,37 @@ impl Runtime<'_> {
         else {
             return false;
         };
-        let Some(PreviewDocument::Markdown { ranges, .. }) =
-            self.preview_pane(surface).map(|pane| &pane.doc)
-        else {
+        let Some(pane) = self.preview_pane(surface) else {
             return false;
         };
-        preview_press::keeps_the_seat(
+        let PreviewDocument::Markdown { blocks, ranges, .. } = &pane.doc else {
+            return false;
+        };
+        preview_press::keeps_the_span(
             content,
             ranges,
+            blocks,
+            pane.doc_key.as_ref().and_then(|key| key.source.as_ref()),
             self.preview_live_caret(surface).map(|caret| caret.caret),
             offset,
         )
+    }
+
+    /// **A gesture on a rendered page that will get no release** — the window
+    /// lost the focus, and with it the pointer capture, mid-drag (K129's
+    /// `pointercancel`, one surface along).
+    ///
+    /// The record is dropped unspent, as every other press this window cancels
+    /// on a blur is: a gesture nobody finished chose nothing. What it frees is
+    /// the span the gesture was holding (owner's ruling 2026-09-23): a drag left
+    /// standing would keep the page drawing the span it began on however the
+    /// caret moved after, so the page is laid out again from where the caret and
+    /// the rendered selection stand now.
+    pub(crate) fn cancel_preview_text_drag(&mut self) -> Result<()> {
+        if self.preview_text_drag.take().is_some() {
+            self.repaint_preview()?;
+        }
+        Ok(())
     }
 
     /// **Whether a press on this surface may put a caret in the page** (T5 ①).
@@ -5826,7 +5922,7 @@ impl Runtime<'_> {
             // again on every report rather than remembered, because it is the
             // same question the press asked and the caret has not left it: a
             // page whose face cannot change is one this may write to.
-            if spends && seated && self.preview_press_keeps_the_caret_seat(surface, Some(offset)) {
+            if spends && seated && self.preview_press_keeps_the_span(surface, Some(offset)) {
                 if self.preview_pane(surface).map(|pane| pane.caret.caret) != Some(offset) {
                     self.place_preview_caret_on(surface, offset, true)?;
                 }
@@ -7770,14 +7866,33 @@ impl Runtime<'_> {
             picture_reach,
             theme,
         };
-        // **Which block the caret is in** (§7.1.3q). Read before the key,
-        // because it is part of it — and read off the document *already* on this
-        // surface, which is the only parse whose ranges describe the bytes the
-        // caret is an offset into. When the content has moved under it, the
+        // **Which blocks the caret and its selection draw as source** (§7.1.3q).
+        // Read before the key, because it is part of it — and read off the
+        // document *already* on this surface, which is the only parse whose
+        // ranges describe the bytes the caret is an offset into. When the content has moved under it, the
         // answer below is stale and the key differs on its revision anyway; the
         // parse that follows fills the true one in.
+        //
+        // **And held while a gesture is in flight** (owner's ruling 2026-09-23):
+        // the span a press finds on the glass is the span the page draws until
+        // the button comes up, whatever the press and the drag do to the caret
+        // and to either selection model in the meantime — so a hand drawing a
+        // selection across the page never sees it change shape, and the release,
+        // which moves the caret, changes it once.
         let live_caret = self.preview_live_caret(surface);
-        let standing_source = self.standing_source_block(surface, live_caret);
+        let in_flight = self
+            .preview_text_drag
+            .as_ref()
+            .is_some_and(|drag| drag.surface == surface);
+        let standing_source = live_caret.and_then(|caret| {
+            preview_press::held_span(
+                in_flight,
+                self.preview_pane(surface)
+                    .and_then(|pane| pane.doc_key.as_ref())
+                    .and_then(|key| key.source.as_ref()),
+                || self.standing_source_span(surface, Some(caret)),
+            )
+        });
         let mut key = self.preview_buffer_on(surface).map(|buffer| {
             preview_document_key(
                 buffer,
@@ -7928,11 +8043,19 @@ impl Runtime<'_> {
             else {
                 unreachable!()
             };
-            let was_source = was_source.as_deref().map(MarkdownCaretBlock::index);
+            let was_source = (
+                was_source.iter().next().map(MarkdownCaretBlock::index),
+                was_source.len(),
+            );
             let metrics = seats::preview_markdown_metrics(scale);
             let (left, right) = preview::markdown_measure_box(body, metrics);
-            let source =
-                self.markdown_caret_block(surface, standing_source.as_ref(), blocks, scale);
+            let source = self.markdown_source_blocks(
+                surface,
+                standing_source.as_ref(),
+                blocks,
+                ranges,
+                scale,
+            );
             let clock = trace.map(|_| Instant::now());
             let math = self.resolve_document_math(
                 blocks,
@@ -7966,7 +8089,7 @@ impl Runtime<'_> {
                         content: &content,
                         ranges,
                     },
-                    source: source.as_deref(),
+                    source: &source,
                     art: PageArt {
                         math: &math,
                         pictures: &pictures,
@@ -7991,11 +8114,15 @@ impl Runtime<'_> {
                     bytes: content.len(),
                     blocks: blocks.len(),
                     cause,
-                    source: (was_source, source.as_deref().map(MarkdownCaretBlock::index)),
-                    face: source.as_deref().map(|block| match block {
+                    source: (
+                        was_source.0,
+                        source.iter().next().map(MarkdownCaretBlock::index),
+                    ),
+                    set: (was_source.1, source.len()),
+                    face: preview_trace::SourceFace::of(source.iter().map(|block| match block {
                         MarkdownCaretBlock::Mono(_) => preview_trace::SourceFace::Mono,
                         MarkdownCaretBlock::Prose(_) => preview_trace::SourceFace::Prose,
-                    }),
+                    })),
                     realized: cost.realized,
                     math: math_took.unwrap_or_default(),
                     pictures: pictures_took.unwrap_or_default(),
@@ -8037,7 +8164,7 @@ impl Runtime<'_> {
         // Filled in by the markdown arm alone, and written back into the key
         // under the match: every other view has no blocks and therefore no block
         // the caret could be in.
-        let mut parsed_source: Option<(usize, std::ops::Range<usize>)> = None;
+        let mut parsed_source: Option<preview_live::SourceSpan> = None;
         let doc = match view {
             // The editor's own line model, not [`str::lines`]: a body ending in
             // a break has an empty line after it, the caret can stand on that
@@ -8116,18 +8243,29 @@ impl Runtime<'_> {
                 let parsed = clock.map(|clock| clock.elapsed());
                 let (measure_left, measure_right) = preview::markdown_measure_box(body, metrics);
                 let width = (measure_right - measure_left).max(1.0);
-                // **The caret's own block, now that there is a parse to index**
-                // (§7.1.3q). Written back into the key below, because the key
-                // was built before this parse existed and a key that said `None`
-                // where the document says `Some` would re-lay-out the whole page
-                // on the very next frame.
-                parsed_source = live_caret
-                    .and_then(|caret| {
-                        preview_live::caret_seat(&content, &ranges, caret.caret).block()
-                    })
-                    .and_then(|index| Some((index, ranges.get(index)?.clone())));
-                let source =
-                    self.markdown_caret_block(surface, parsed_source.as_ref(), &blocks, scale);
+                // **The source span, now that there is a parse to index**
+                // (§7.1.3q; owner's ruling 2026-09-23). Written back into the
+                // key below, because the key was built before this parse existed
+                // and a key that said `None` where the document says `Some` would
+                // re-lay-out the whole page on the very next frame.
+                parsed_source = live_caret.and_then(|caret| {
+                    preview_live::selection_span(
+                        &content,
+                        &blocks,
+                        &ranges,
+                        &maps,
+                        &caret,
+                        self.preview_pane(surface)
+                            .and_then(|pane| pane.md_select.as_ref()),
+                    )
+                });
+                let source = self.markdown_source_blocks(
+                    surface,
+                    parsed_source.as_ref(),
+                    &blocks,
+                    &ranges,
+                    scale,
+                );
 
                 let math = self.resolve_document_math(
                     &blocks,
@@ -8156,7 +8294,7 @@ impl Runtime<'_> {
                             content: &content,
                             ranges: &ranges,
                         },
-                        source: source.as_deref(),
+                        source: &source,
                         art: PageArt {
                             math: &math,
                             pictures: &pictures,
@@ -8178,7 +8316,7 @@ impl Runtime<'_> {
                         preview_trace::DocumentBuild {
                             bytes: content.len(),
                             blocks: blocks.len(),
-                            source: parsed_source.as_ref().map(|(index, _)| *index),
+                            source: source.iter().next().map(MarkdownCaretBlock::index),
                             hits: self.window.markdown_intrinsics.hits,
                             misses: self.window.markdown_intrinsics.misses,
                             parse: parsed,
@@ -8290,11 +8428,12 @@ impl Runtime<'_> {
         Some(self.preview_pane(surface)?.caret)
     }
 
-    /// **The caret's block, cut out of the buffer and dressed in the face its
-    /// kind wears** (§7.1.3q for the one, §7.1.3w for the other).
+    /// **The source blocks, cut out of the buffer and each dressed in the face
+    /// its kind wears** (§7.1.3q for the one, §7.1.3w for the other; the set is
+    /// the owner's ruling of 2026-09-23, [`preview_live::SourceSpan`]).
     ///
     /// Built from the buffer rather than from the parse, because the whole point
-    /// of the caret's block is that it is **the file's own bytes** and not a
+    /// of a source block is that it is **the file's own bytes** and not a
     /// rendering of them: the block beside it in `blocks` has already lost its
     /// hashes, its pipes and its indent.
     ///
@@ -8304,47 +8443,29 @@ impl Runtime<'_> {
     /// those the alignment is the content and monospace is the honest face for
     /// it. Nothing else about this depends on the kind — the bytes, the range
     /// and the line breaks are the same bytes, range and breaks either way.
-    fn markdown_caret_block(
+    ///
+    /// Every block the span draws is built, which is a copy of the bytes it
+    /// covers: one pass over the selection per change of span, the same order
+    /// as the whole-document passes a re-flow already makes.
+    fn markdown_source_blocks(
         &self,
         surface: PreviewSurface,
-        source: Option<&(usize, std::ops::Range<usize>)>,
+        span: Option<&preview_live::SourceSpan>,
         blocks: &[preview::MarkdownBlock],
+        ranges: &[std::ops::Range<usize>],
         scale: f32,
-    ) -> Option<Box<MarkdownCaretBlock>> {
-        let (index, range) = source?;
-        let content = self.preview_buffer_on(surface)?.content.as_deref()?;
-        let text = preview_live::block_source(content, range).to_owned();
-        let Some(heading) = markdown_prose_face(blocks.get(*index)?) else {
-            let metrics = seats::preview_text_metrics(scale);
-            return Some(Box::new(MarkdownCaretBlock::Mono(MarkdownSourceBlock {
-                index: *index,
-                range: range.clone(),
-                lines: preview_edit::display_lines(&text),
-                text,
-                font_size: metrics.font_size,
-                line_height: metrics.line_height,
-                advance: self
-                    .preview_pane(surface)
-                    .map_or(0.0, |pane| pane.mono_advance),
-            })));
+    ) -> SourceBlocks {
+        let (Some(span), Some(content)) = (
+            span,
+            self.preview_buffer_on(surface)
+                .and_then(|buffer| buffer.content.as_deref()),
+        ) else {
+            return SourceBlocks::default();
         };
-        let metrics = seats::preview_markdown_metrics(scale);
-        let (font_size, line_height) = match heading {
-            Some(level) => (
-                metrics.heading_font(level),
-                metrics.heading_line_height(level),
-            ),
-            None => (metrics.font_size, metrics.line_height),
-        };
-        Some(Box::new(MarkdownCaretBlock::Prose(MarkdownProseBlock {
-            index: *index,
-            range: range.clone(),
-            lines: prose_source_lines(&text),
-            text,
-            heading: heading.is_some(),
-            font_size,
-            line_height,
-        })))
+        let advance = self
+            .preview_pane(surface)
+            .map_or(0.0, |pane| pane.mono_advance);
+        SourceBlocks::build(content, span, blocks, ranges, scale, advance)
     }
 
     /// **Find every picture this page needs, and ask for the ones that are
@@ -8755,7 +8876,7 @@ impl Runtime<'_> {
                         intrinsic,
                         layout,
                         live: MarkdownLive {
-                            source: source.as_deref(),
+                            source,
                             caret: caret_paint.as_ref(),
                         },
                     },
@@ -8893,21 +9014,24 @@ impl Runtime<'_> {
         // question only the shaper answers, and the builder holds no shaper.
         // Asked once and read five times — by the bar below, by the bands below
         // it, and between frames by the press, the IME and the arrow keys.
-        let prose = self.preview_prose_geometry(surface, scale, caret_paint.as_ref());
-        if let (Some(prose), Some(caret)) = (&prose, &caret_paint) {
-            // The selection is the file's and this block is a window onto it,
-            // exactly as [`push_markdown_source_block`] cuts the same range
-            // against the monospace face.
+        let prose_blocks = self.preview_prose_geometry(surface, scale, caret_paint.as_ref());
+        if let Some(caret) = &caret_paint {
+            // The selection is the file's and each prose source block is a
+            // window onto it, exactly as [`push_markdown_source_block`] cuts the
+            // same range against the monospace face.
             built.quads.extend(
-                prose
-                    .bands(&caret.band)
-                    .into_iter()
+                prose_blocks
+                    .iter()
+                    .flat_map(|prose| prose.bands(&caret.band))
                     .filter_map(|band| bt_render::crop_to(band, built.clip))
                     .map(|rect| bt_render::PreviewQuad {
                         rect,
                         color: palette.preview_selection,
                     }),
             );
+        }
+        let prose = preview_caret_prose(&prose_blocks, self.preview_caret_seat_block(surface));
+        if let (Some(prose), Some(caret)) = (&prose, &caret_paint) {
             // **A composition stands between the caret's byte and the caret**,
             // which is the text face's own sentence ([`build_preview_text_body`])
             // and the monospace block's ([`push_markdown_source_block`]), said
@@ -8936,8 +9060,8 @@ impl Runtime<'_> {
             let bar = match composed {
                 Some(composition) => composition.caret,
                 None => match caret.seat {
-                    MarkdownCaretSeat::Prose(offset) => prose.caret(offset),
-                    MarkdownCaretSeat::Source(..) | MarkdownCaretSeat::Gap { .. } => None,
+                    MarkdownCaretSeat::Prose { offset, .. } => prose.caret(offset),
+                    MarkdownCaretSeat::Source { .. } | MarkdownCaretSeat::Gap { .. } => None,
                 },
             };
             if caret.lit
@@ -8952,6 +9076,7 @@ impl Runtime<'_> {
             }
         }
         self.preview_pane_mut(surface).md_prose = prose;
+        self.preview_pane_mut(surface).md_prose_blocks = prose_blocks;
         // The hover's rule is drawn from the boxes measured above, so the line
         // under a link cannot be anywhere but under it — and it is struck here,
         // last of the fills, so that nothing else is laid over it.
@@ -9049,71 +9174,81 @@ impl Runtime<'_> {
     /// Every row, not only the ones on screen: a page scrolled so that half the
     /// block is above it still has to answer Up and Down about the rows that are
     /// not showing, and the count is the block's lines rather than the document's.
+    ///
+    /// **One answer per prose source block on the glass** (2026-09-23): a
+    /// selection can draw several blocks as source, and each of them needs its
+    /// rows for the band drawn over it and for a press landing in it. The
+    /// caret's own block is one of them, and only it carries the composition;
+    /// [`preview_caret_prose`] picks it back out for the readers that stand in
+    /// one block.
     pub(crate) fn preview_prose_geometry(
         &mut self,
         surface: PreviewSurface,
         scale: f32,
         caret: Option<&MarkdownCaretPaint>,
-    ) -> Option<preview_live::ProseRows> {
+    ) -> Vec<preview_live::ProseRows> {
         let palette = bt_render::chrome_palette();
         // The document's borrow ends with this expression, before the shaper's
         // begins.
-        let (index, paragraphs) = {
-            match self.markdown_caret_box(surface, scale) {
-                Some((box_of_block, block, placed)) if block.prose().is_some() => {
-                    let body = self.preview_surface_body_rect(surface, scale)?;
-                    if box_of_block[3] <= body[1] || box_of_block[1] >= body[3] {
-                        return None;
-                    }
-                    let prose = block.prose()?;
-                    (
-                        Some(prose.index),
-                        markdown_prose_paragraphs(
-                            prose,
-                            box_of_block,
-                            &placed.rows,
-                            markdown_prose_composition(caret),
-                            &palette,
-                        ),
-                    )
-                }
-                // **The gap's empty line is measured too, and only while
-                // something is being composed on it** (§7.1.3q). It is no block
-                // of the document, so there is nothing to splice into and
-                // nothing to read back: the whole paragraph is the composition,
-                // and what the shaper is being asked is where the input method's
-                // own caret stands inside letters that are not in the file.
-                _ => (None, self.markdown_gap_paragraphs(surface, scale, caret)?),
-            }
-        };
-        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let mut rows = Vec::new();
-        let mut composition = preview_live::ProseComposition::default();
-        for line in &paragraphs {
-            for row in renderer.measure_preview_rows(gpu, &line.paragraph) {
-                let cut = preview_live::split_prose_row(
-                    row.top,
-                    row.height,
-                    &row.seams
-                        .iter()
-                        .map(|seam| preview_live::ProseSeam {
-                            offset: seam.offset,
-                            x: seam.x,
-                        })
-                        .collect::<Vec<_>>(),
-                    line.start,
-                    line.splice,
-                );
-                rows.push(cut.row);
-                composition.rows.extend(cut.composition);
-                composition.caret = composition.caret.or(cut.caret);
-            }
+        let mut blocks: Vec<(Option<usize>, Vec<ProseParagraph>)> = self
+            .markdown_visible_source_boxes(surface, scale)
+            .into_iter()
+            .filter_map(|(box_of_block, block, placed)| {
+                let prose = block.prose()?;
+                Some((
+                    Some(prose.index),
+                    markdown_prose_paragraphs(
+                        prose,
+                        box_of_block,
+                        &placed.rows,
+                        markdown_prose_composition(caret, prose.index),
+                        &palette,
+                    ),
+                ))
+            })
+            .collect();
+        // **The gap's empty line is measured too, and only while something is
+        // being composed on it** (§7.1.3q). It is no block of the document, so
+        // there is nothing to splice into and nothing to read back: the whole
+        // paragraph is the composition, and what the shaper is being asked is
+        // where the input method's own caret stands inside letters that are not
+        // in the file.
+        if let Some(gap) = self.markdown_gap_paragraphs(surface, scale, caret) {
+            blocks.push((None, gap));
         }
-        Some(preview_live::ProseRows {
-            index,
-            rows,
-            composition: (!composition.is_empty()).then_some(composition),
-        })
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        blocks
+            .into_iter()
+            .map(|(index, paragraphs)| {
+                let mut rows = Vec::new();
+                let mut composition = preview_live::ProseComposition::default();
+                for line in &paragraphs {
+                    for row in renderer.measure_preview_rows(gpu, &line.paragraph) {
+                        let cut = preview_live::split_prose_row(
+                            row.top,
+                            row.height,
+                            &row.seams
+                                .iter()
+                                .map(|seam| preview_live::ProseSeam {
+                                    offset: seam.offset,
+                                    x: seam.x,
+                                })
+                                .collect::<Vec<_>>(),
+                            line.start,
+                            line.splice,
+                        );
+                        rows.push(cut.row);
+                        composition.rows.extend(cut.composition);
+                        composition.caret = composition.caret.or(cut.caret);
+                    }
+                }
+                preview_live::ProseRows {
+                    index,
+                    rows,
+                    composition: (!composition.is_empty()).then_some(composition),
+                }
+            })
+            .collect()
     }
 
     fn preview_markdown_caret(
@@ -9135,17 +9270,21 @@ impl Runtime<'_> {
             return None;
         };
         let seat = match preview_live::caret_seat(content, ranges, caret.caret) {
-            preview_live::CaretSeat::Block(index) => {
-                let source = source.as_deref().filter(|block| block.index() == index)?;
-                match source {
-                    MarkdownCaretBlock::Mono(_) => {
-                        let (line, column) =
-                            preview_live::place_in_block(content, ranges, index, caret.caret)?;
-                        MarkdownCaretSeat::Source(line, column)
+            preview_live::CaretSeat::Block(index) => match source.get(index)? {
+                MarkdownCaretBlock::Mono(_) => {
+                    let (line, column) =
+                        preview_live::place_in_block(content, ranges, index, caret.caret)?;
+                    MarkdownCaretSeat::Source {
+                        block: index,
+                        line,
+                        column,
                     }
-                    MarkdownCaretBlock::Prose(_) => MarkdownCaretSeat::Prose(caret.caret),
                 }
-            }
+                MarkdownCaretBlock::Prose(_) => MarkdownCaretSeat::Prose {
+                    block: index,
+                    offset: caret.caret,
+                },
+            },
             // **A gap takes the prose face too** (§7.1.3w): it is an empty line
             // of a document whose prose is set in the body face, and a caret a
             // monospace line tall standing between two paragraphs would be a
