@@ -48409,3 +48409,18 @@ fn unchanged_main_menu_inputs_are_silent_before_appkit() {
         "a language revision rebuilds the menu",
     );
 }
+
+/// RED (ticket 20) — **the command palette's field and rows are primary
+/// text, not half a point above and below it.**
+///
+/// `UI-SPEC.md` T3/T4: the field used to sit at 13.5 and the rows at 12.5,
+/// where every menu item, tree row, tab, button and combo is 13.
+/// `palette.rs` has no test module of its own, so this lives here.
+///
+/// MUTATION: revert `palette::FIELD_FONT_LOGICAL_PX` or
+/// `palette::ROW_FONT_LOGICAL_PX` to a literal and this goes red.
+#[test]
+fn ui_spec_palette_class_a_values_follow_the_rule() {
+    assert_eq!(crate::palette::FIELD_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T3");
+    assert_eq!(crate::palette::ROW_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T4");
+}

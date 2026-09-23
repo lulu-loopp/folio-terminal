@@ -21,6 +21,9 @@ All notable changes to Folio are recorded here. The format follows
   the pane head's `⌄`, the preview switch, the float's dock and the files
   root button now stand in the same tool box every other head control uses.
 
+- The command palette's field and rows are the same text size as the rest of
+  the window.
+
 ### Fixed
 
 - Touch input — a touch screen, or a remote-desktop tool that sends touch —
