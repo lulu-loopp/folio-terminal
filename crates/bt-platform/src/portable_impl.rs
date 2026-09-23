@@ -555,6 +555,9 @@ pub enum ShellPickKind {
     /// reason: what may be started is the operating system's answer rather than
     /// this dialog's.
     Program,
+    /// An exported settings file (0.4.4 ticket 05: `Settings ▸ Import…`),
+    /// filtered to `*.json` — the one type an export is written as.
+    SettingsFile,
 }
 
 /// The public name for [`ShellPickKind`], as on Windows.
@@ -664,6 +667,38 @@ impl ImagePicker {
     }
 
     /// The chooser's answer. There is never one.
+    #[must_use]
+    pub fn take_result(&self) -> Option<Result<Option<PathBuf>, String>> {
+        None
+    }
+}
+
+/// **The save dialog, on a platform with no panel to put up** (0.4.4 ticket 05
+/// wrote the Windows and macOS arms).
+///
+/// As [`ImagePicker`]: constructed harmlessly, refuses when asked, and
+/// **Linux-only** — macOS sheets a real `NSSavePanel` onto the window
+/// (`macos_dialogs::SaveFilePicker`).
+#[cfg(not(any(windows, target_os = "macos")))]
+pub struct SaveFilePicker {
+    #[expect(dead_code, reason = "a Linux arm would put its panel over this window")]
+    window: NativeWindow,
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+impl SaveFilePicker {
+    /// Install the deferred dialog. Never fails.
+    pub fn new(window: NativeWindow) -> Result<Self, String> {
+        Ok(Self { window })
+    }
+
+    /// Ask for the dialog. Refused.
+    pub fn request(&self, start: Option<&Path>, name: &str) -> Result<bool, String> {
+        let _ = (start, name);
+        Err(not_here("the save dialog"))
+    }
+
+    /// The dialog's answer. There is never one.
     #[must_use]
     pub fn take_result(&self) -> Option<Result<Option<PathBuf>, String>> {
         None
@@ -1689,6 +1724,7 @@ mod refusal_tests {
             assert!(MathContextMenu::new(window()).is_ok(), "the formula menu");
             assert!(FolderPicker::new(window()).is_ok(), "the folder chooser");
             assert!(ImagePicker::new(window()).is_ok(), "the picture chooser");
+            assert!(SaveFilePicker::new(window()).is_ok(), "the save dialog");
         }
         // The settings watch is only this module's where no backend has one:
         // on macOS it is `macos_impl`'s, and the constructor that has to be
@@ -1739,6 +1775,13 @@ mod refusal_tests {
                 picture.request(ShellPickKind::Image, None).is_err(),
                 "there is no panel to sheet"
             );
+
+            let save = SaveFilePicker::new(window()).expect("built above");
+            assert!(
+                save.request(None, "folio-settings.json").is_err(),
+                "there is no save panel to sheet"
+            );
+            assert!(save.take_result().is_none());
         }
 
         // The composition is only this module's where no backend has one:

@@ -1566,12 +1566,13 @@ impl Runtime<'_> {
         // hand is the one the window is keeping. It is a no-op on every road
         // where a `Resized` did arrive, which is most of them.
         self.settle_dpi_rectangle()?;
-        // The three answers a platform modal can have left behind, under their
+        // The four answers a platform modal can have left behind, under their
         // own name (T-STATION-SPLIT) — see [`hang_watch::Station::Pickers`].
         hang_watch::at(hang_watch::Station::Pickers);
         self.apply_math_context_menu_result();
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
+        self.apply_save_pick_result()?;
         self.drain_pty()?;
         if !self.window.first_text_presented && now >= self.window.startup_poll_at {
             advance_periodic_deadline(

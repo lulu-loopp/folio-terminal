@@ -363,6 +363,28 @@ On macOS that setting names an application rather than a command, so there is no
 `folio-here` for it to run. Finder's **Open in Folio** above is the way to put a
 folder in front of a shell.
 
+## Settings in one file
+
+**Settings > About** has three doors at the foot of the page.
+
+- **Export…** writes one JSON file holding the settings, the profiles, the
+  shortcuts and every colour scheme in your schemes folder. The file is
+  pretty-printed in a fixed order, so two exports diff line by line.
+- **Import…** reads such a file and puts it in force at once. Each part is read
+  the way the same file would be read if you had edited it by hand: a shortcut
+  line Folio refuses, or a scheme that does not parse, is skipped and named
+  on a card, and the rest lands. A setting this platform has no row for
+  (**Acrylic** on a Mac, **Option key sends Alt** on Windows) is kept in the file
+  and named.
+- **Settings folder** opens the folder all of this lives in — `%APPDATA%\Folio`
+  on Windows, `~/Library/Application Support/Folio` on macOS.
+
+Folio does not sync anything over the network. To keep two machines alike, let a
+folder-sync tool carry the exported file, or the folder itself.
+
+The export holds your profiles as they are, including each profile's command
+line and environment rows — read it before you share it.
+
 ## English and Chinese
 
 Every string in Folio's own interface is written in both, and the interface is

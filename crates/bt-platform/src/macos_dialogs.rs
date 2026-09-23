@@ -1,5 +1,6 @@
 //! **The two choosers, the formula menu and the last-resort alert, on macOS** —
-//! the AppKit twin of the four dialog doors in `windows_impl` (ticket M2-3).
+//! the AppKit twin of the four dialog doors in `windows_impl` (ticket M2-3) —
+//! and, since 0.4.4 ticket 05, the save dialog `Settings ▸ Export…` puts up.
 //!
 //! # What this file is, and why it is not part of `macos_impl`
 //!
@@ -105,7 +106,7 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSApplication, NSEvent, NSMenu, NSMenuItem, NSModalResponse,
-    NSModalResponseCancel, NSModalResponseOK, NSOpenPanel, NSView, NSWindow,
+    NSModalResponseCancel, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSView, NSWindow,
 };
 use objc2_foundation::{NSArray, NSObjectNSDelayedPerforming, NSString, NSURL, ns_string};
 use objc2_uniform_type_identifiers::UTType;
@@ -285,6 +286,16 @@ fn dress(panel: &NSOpenPanel, kind: ShellPickKind) {
             // (M2-2) opens and what a reader recognises in the row.
             panel.setTreatsFilePackagesAsDirectories(false);
         }
+        ShellPickKind::SettingsFile => {
+            panel.setCanChooseDirectories(false);
+            panel.setCanChooseFiles(true);
+            // The one type an export is written as. A system with no type for
+            // the extension leaves the panel unfiltered, and the reader of the
+            // file is still what decides.
+            if let Some(json) = UTType::typeWithFilenameExtension(ns_string!("json")) {
+                panel.setAllowedContentTypes(&NSArray::from_retained_slice(&[json]));
+            }
+        }
     }
 }
 
@@ -295,7 +306,7 @@ fn dress(panel: &NSOpenPanel, kind: ShellPickKind) {
 /// deleted or unplugged is not this function's failure either — the panel opens
 /// at the system's last place instead, which is a perfectly good outcome and not
 /// one worth refusing to open over.
-fn start_at(panel: &NSOpenPanel, start: Option<&Path>) {
+fn start_at(panel: &NSSavePanel, start: Option<&Path>) {
     let Some(start) = start else {
         return;
     };
@@ -314,8 +325,11 @@ fn start_at(panel: &NSOpenPanel, start: Option<&Path>) {
 /// The panel is retained by the block, so it is alive for as long as AppKit
 /// needs it and is released when the block is — which is the whole of this
 /// arm's memory management, and the reason it is not written out anywhere else.
+///
+/// An `NSSavePanel`, which an `NSOpenPanel` is: the save dialog (ticket 05) and
+/// the two choosers are one sheet with one answer, read by one function.
 fn sheet(
-    panel: Retained<NSOpenPanel>,
+    panel: Retained<NSSavePanel>,
     host: &NSWindow,
     window: NativeWindow,
     state: Arc<Deferred<Choice>>,
@@ -358,7 +372,7 @@ fn settled_by_the_response(response: NSModalResponse, noun: &str) -> Option<Choi
 }
 
 /// What the sheet came back with, in the three shapes `take_result` promises.
-fn read_choice(panel: &NSOpenPanel, response: NSModalResponse, noun: &str) -> Choice {
+fn read_choice(panel: &NSSavePanel, response: NSModalResponse, noun: &str) -> Choice {
     if let Some(settled) = settled_by_the_response(response, noun) {
         return settled;
     }
@@ -425,7 +439,13 @@ impl FolderPicker {
         let panel = NSOpenPanel::openPanel(mtm);
         dress(&panel, ShellPickKind::Folder);
         start_at(&panel, start);
-        sheet(panel, &host, self.window, Arc::clone(&self.state), "folder");
+        sheet(
+            Retained::into_super(panel),
+            &host,
+            self.window,
+            Arc::clone(&self.state),
+            "folder",
+        );
         Ok(true)
     }
 
@@ -488,12 +508,71 @@ impl ImagePicker {
             ShellPickKind::Folder => "folder",
             ShellPickKind::Image => "picture",
             ShellPickKind::Program => "program",
+            ShellPickKind::SettingsFile => "settings file",
         };
-        sheet(panel, &host, self.window, Arc::clone(&self.state), noun);
+        sheet(
+            Retained::into_super(panel),
+            &host,
+            self.window,
+            Arc::clone(&self.state),
+            noun,
+        );
         Ok(true)
     }
 
     /// The chosen file, `None` for a cancelled sheet, or the reason the panel
+    /// could not be shown — once, and only once the sheet is gone.
+    pub fn take_result(&self) -> Option<Choice> {
+        self.state.take()
+    }
+}
+
+// ── the save dialog (0.4.4 ticket 05) ──────────────────────────────────────
+
+/// **The system's own save dialog, as a sheet on the window** — `NSSavePanel`,
+/// the twin of the Windows arm's `IFileSaveDialog` door (`Settings ▸ Export…`).
+///
+/// A sheet and not a modal loop, for [`FolderPicker`]'s reason: `request`
+/// returns before the reader has decided anything, and the answer is parked for
+/// the next turn of the loop exactly as the choosers' is.
+pub struct SaveFilePicker {
+    window: NativeWindow,
+    state: Arc<Deferred<Choice>>,
+}
+
+impl SaveFilePicker {
+    /// Install the dialog. Never fails; there is nothing to install.
+    pub fn new(window: NativeWindow) -> Result<Self, String> {
+        Ok(Self {
+            window,
+            state: Arc::new(Deferred::new()),
+        })
+    }
+
+    /// Put the dialog up once, opening in `start` if that names a folder and
+    /// offering `name`, whose extension is the one type the panel allows.
+    pub fn request(&self, start: Option<&Path>, name: &str) -> Result<bool, String> {
+        let what = "the save dialog";
+        if !self.state.begin() {
+            return Ok(false);
+        }
+        let (mtm, host) = self
+            .state
+            .give_back_on_refusal(window_for(self.window, what))?;
+        let panel = NSSavePanel::savePanel(mtm);
+        panel.setCanCreateDirectories(true);
+        panel.setNameFieldStringValue(&NSString::from_str(name));
+        if let Some((_, extension)) = name.rsplit_once('.')
+            && let Some(kind) = UTType::typeWithFilenameExtension(&NSString::from_str(extension))
+        {
+            panel.setAllowedContentTypes(&NSArray::from_retained_slice(&[kind]));
+        }
+        start_at(&panel, start);
+        sheet(panel, &host, self.window, Arc::clone(&self.state), "file");
+        Ok(true)
+    }
+
+    /// The chosen path, `None` for a cancelled sheet, or the reason the panel
     /// could not be shown — once, and only once the sheet is gone.
     pub fn take_result(&self) -> Option<Choice> {
         self.state.take()
@@ -868,6 +947,7 @@ mod tests {
         let window = NativeWindow::stand_in(2);
         let folder = FolderPicker::new(window).expect("the folder chooser builds");
         let picture = ImagePicker::new(window).expect("the picture chooser builds");
+        let save = SaveFilePicker::new(window).expect("the save dialog builds");
         let menu = MathContextMenu::new(window).expect("the formula menu builds");
         assert!(folder.request(None).is_err(), "the folder chooser");
         assert!(
@@ -878,12 +958,21 @@ mod tests {
             picture.request(ShellPickKind::Program, None).is_err(),
             "the program chooser"
         );
+        assert!(
+            picture.request(ShellPickKind::SettingsFile, None).is_err(),
+            "the settings file chooser"
+        );
+        assert!(
+            save.request(None, "folio-settings.json").is_err(),
+            "the save dialog"
+        );
         assert!(menu.request().is_err(), "the formula menu");
         assert!(
             folder.take_result().is_none(),
             "a request that refused leaves no answer to collect"
         );
         assert!(picture.take_result().is_none(), "and nor does the file one");
+        assert!(save.take_result().is_none(), "and nor does the save dialog");
         assert!(menu.take_result().is_none(), "and nor does the menu");
     }
 

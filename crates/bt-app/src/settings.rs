@@ -3365,6 +3365,26 @@ pub enum SettingsRow {
     AboutIssues,
     /// The notices for everything this window is built out of.
     AboutLicences,
+    /// **`Export…`** (0.4.4 ticket 05, owner rulings 2026-09-22 and 2026-09-23):
+    /// `settings.json`, `profiles.json`, `keybindings.json` and the reader's
+    /// colour schemes, written as one JSON file where a save dialog says.
+    ///
+    /// On the About page, under the three doors, because it is a door too and
+    /// holds no setting of its own — the page's own rule — and because what it
+    /// carries is every other page of this dialog at once, which no one of
+    /// them could be the home of.
+    ExportSettings,
+    /// **`Import…`** — the same file read back, each part through the door the
+    /// same file takes when it is edited by hand, and what is valid put in force
+    /// at once. No question first: importing is the reader's deliberate gesture
+    /// (ticket 05's scope).
+    ImportSettings,
+    /// **`Open`** on the folder these files live in — `%APPDATA%\Folio` or
+    /// `~/Library/Application Support/Folio` — through the reveal door every
+    /// other `Show in Explorer` goes through. Syncing that folder to another
+    /// machine is a folder-sync tool's job; Folio speaks no network protocol for
+    /// it (owner ruling 2026-09-22).
+    SettingsFolder,
     /// **Which language the window writes in** (user ruling 2026-08-10, shipped
     /// 2026-08-17) — `General`'s first row, above the two that were already here.
     ///
@@ -3755,7 +3775,10 @@ impl SettingsRow {
             | Self::AboutPlatform
             | Self::AboutReleaseNotes
             | Self::AboutIssues
-            | Self::AboutLicences => SettingsCategory::About,
+            | Self::AboutLicences
+            // The three configuration doors (0.4.4 ticket 05), under the three
+            // that leave for an address — see [`Self::ExportSettings`].
+            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => SettingsCategory::About,
             // **The eight rows of one window** (§7.54e ⑤, user ruling 2026-09-05). Four of them
             // stood on `General` until that ruling, under `Default profile`, on the argument that
             // the row above said what a new terminal starts as; what the page they are on now says
@@ -3928,6 +3951,9 @@ impl SettingsRow {
             Self::AboutReleaseNotes => Text::RowAboutReleaseNotes.text(),
             Self::AboutIssues => Text::RowAboutIssues.text(),
             Self::AboutLicences => Text::RowAboutLicences.text(),
+            Self::ExportSettings => Text::RowExportSettings.text(),
+            Self::ImportSettings => Text::RowImportSettings.text(),
+            Self::SettingsFolder => Text::RowSettingsFolder.text(),
         }
     }
 
@@ -4227,6 +4253,9 @@ impl SettingsRow {
             Self::AboutReleaseNotes => Text::DescAboutReleaseNotes.text(),
             Self::AboutIssues => Text::DescAboutIssues.text(),
             Self::AboutLicences => Text::DescAboutLicences.text(),
+            Self::ExportSettings => Text::DescExportSettings.text(),
+            Self::ImportSettings => Text::DescImportSettings.text(),
+            Self::SettingsFolder => Text::DescSettingsFolder.text(),
         }
     }
 
@@ -4294,6 +4323,11 @@ impl SettingsRow {
             // [`SettingsControl::Link`].
             Self::AboutVersion | Self::AboutPlatform => SettingsControl::Text,
             Self::AboutReleaseNotes | Self::AboutIssues | Self::AboutLicences => {
+                SettingsControl::Link
+            }
+            // A door with a verb on it, drawn the way the three above are: the
+            // row names what it does and the verb is the one thing to press.
+            Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => {
                 SettingsControl::Link
             }
             _ => SettingsControl::Combo,
@@ -4432,7 +4466,8 @@ impl SettingsRow {
             | Self::AboutPlatform
             | Self::AboutReleaseNotes
             | Self::AboutIssues
-            | Self::AboutLicences => false,
+            | Self::AboutLicences
+            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => false,
             // And the four the disclosure exists for — by the same measure that
             // put `Customise scheme…` behind one.
             Self::ProfileArgs
@@ -4612,7 +4647,8 @@ impl SettingsRow {
             | Self::AboutPlatform
             | Self::AboutReleaseNotes
             | Self::AboutIssues
-            | Self::AboutLicences => 0,
+            | Self::AboutLicences
+            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => 0,
         }
     }
 
@@ -4757,7 +4793,10 @@ impl SettingsRow {
             | Self::AboutPlatform
             | Self::AboutReleaseNotes
             | Self::AboutIssues
-            | Self::AboutLicences => None,
+            | Self::AboutLicences
+            | Self::ExportSettings
+            | Self::ImportSettings
+            | Self::SettingsFolder => None,
         }
     }
 
@@ -5252,7 +5291,10 @@ impl SettingsRow {
             | Self::AboutPlatform
             | Self::AboutReleaseNotes
             | Self::AboutIssues
-            | Self::AboutLicences => None,
+            | Self::AboutLicences
+            | Self::ExportSettings
+            | Self::ImportSettings
+            | Self::SettingsFolder => None,
         }
     }
 
@@ -5273,6 +5315,9 @@ impl SettingsRow {
             Self::AboutReleaseNotes | Self::AboutIssues | Self::AboutLicences => {
                 Some(Text::AboutOpen.text())
             }
+            Self::ExportSettings => Some(Text::ExportVerb.text()),
+            Self::ImportSettings => Some(Text::ImportVerb.text()),
+            Self::SettingsFolder => Some(Text::AboutOpen.text()),
             _ => None,
         }
     }
@@ -5294,8 +5339,20 @@ impl SettingsRow {
             Self::AboutReleaseNotes => Some(LinkDestination::Address(crate::update::RELEASES_PAGE)),
             Self::AboutIssues => Some(LinkDestination::Address(ISSUES_PAGE)),
             Self::AboutLicences => Some(notices_destination()),
+            Self::ExportSettings => Some(LinkDestination::Configuration(ConfigurationDoor::Export)),
+            Self::ImportSettings => Some(LinkDestination::Configuration(ConfigurationDoor::Import)),
+            Self::SettingsFolder => Some(LinkDestination::Configuration(ConfigurationDoor::Folder)),
             _ => None,
         }
+    }
+
+    /// **Whether this row's verb opens a dialog of the system's own** rather
+    /// than leaving the window — the two rows that end in `…`, which is the
+    /// mark a verb that asks something first already wears, so they carry no
+    /// `↗` beside it.
+    #[must_use]
+    pub const fn opens_a_dialog(self) -> bool {
+        matches!(self, Self::ExportSettings | Self::ImportSettings)
     }
 }
 
@@ -5315,6 +5372,18 @@ pub enum LinkDestination {
     Address(&'static str),
     /// A file on this machine, opened with its own default handler.
     File(&'static std::path::Path),
+    /// One of the three configuration doors (0.4.4 ticket 05). Not a place: the
+    /// window answers it itself — a save dialog, an open dialog, or the storage
+    /// folder handed to the reveal door.
+    Configuration(ConfigurationDoor),
+}
+
+/// **Which configuration door a row is** — see [`SettingsRow::ExportSettings`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigurationDoor {
+    Export,
+    Import,
+    Folder,
 }
 
 /// **The tracker a defect is filed in.**
@@ -5719,6 +5788,12 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::AboutReleaseNotes);
     rows.push(SettingsRow::AboutIssues);
     rows.push(SettingsRow::AboutLicences);
+    // **The configuration doors, last** (0.4.4 ticket 05): take everything this
+    // dialog holds away in one file, bring it back, and the folder it all lives
+    // in — the order a reader moving to a new machine does them in.
+    rows.push(SettingsRow::ExportSettings);
+    rows.push(SettingsRow::ImportSettings);
+    rows.push(SettingsRow::SettingsFolder);
     rows
 }
 
@@ -13202,8 +13277,10 @@ pub fn build(
                     // this row leaves the window is a fact about the row;
                     // resolving *where* it goes touches the disk, and a draw
                     // that asked it would ask on every hover.
-                    matches!(placed.row.control(), SettingsControl::Link)
-                        .then_some(MENU_ACTION_MARK_AWAY),
+                    (matches!(placed.row.control(), SettingsControl::Link)
+                        && !placed.row.opens_a_dialog())
+                    .then_some(MENU_ACTION_MARK_AWAY),
+                    matches!(placed.row.control(), SettingsControl::Link),
                     hover == Some(SettingsTarget::Link(placed.row)),
                     scale,
                     palette,
@@ -15113,6 +15190,7 @@ fn push_stated_value(
     rect: [f32; 4],
     value: &str,
     mark: Option<&str>,
+    door: bool,
     lit: bool,
     scale: f32,
     palette: bt_render::ChromePalette,
@@ -15137,9 +15215,12 @@ fn push_stated_value(
         text: ellipsized(value, text_right - rect[0], font_size_px, measure),
         rect: [rect[0], rect[1], text_right, rect[3]],
         font_size_px,
+        // A door is drawn in the ink of something to press, with or without
+        // the `↗` beside it — `Export…` and `Import…` open a dialog of the
+        // system's own and wear no mark (0.4.4 ticket 05); a fact is muted.
         color: if lit {
             palette.accent
-        } else if mark.is_some() {
+        } else if door {
             palette.dialog_title_text
         } else {
             palette.dialog_muted_text
@@ -16233,8 +16314,11 @@ mod tests {
                 SettingsRow::AboutReleaseNotes,
                 SettingsRow::AboutIssues,
                 SettingsRow::AboutLicences,
+                SettingsRow::ExportSettings,
+                SettingsRow::ImportSettings,
+                SettingsRow::SettingsFolder,
             ],
-            "what this is, then where to go about it"
+            "what this is, then where to go about it, then the configuration doors"
         );
 
         let banner = crate::version::banner();
@@ -16286,8 +16370,11 @@ mod tests {
                 SettingsTarget::Link(SettingsRow::AboutReleaseNotes),
                 SettingsTarget::Link(SettingsRow::AboutIssues),
                 SettingsTarget::Link(SettingsRow::AboutLicences),
+                SettingsTarget::Link(SettingsRow::ExportSettings),
+                SettingsTarget::Link(SettingsRow::ImportSettings),
+                SettingsTarget::Link(SettingsRow::SettingsFolder),
             ],
-            "the keyboard reaches the three doors and stops on neither fact"
+            "the keyboard reaches the six doors and stops on neither fact"
         );
         for row in page {
             assert_eq!(
@@ -26507,7 +26594,10 @@ mod tests {
                 SettingsRow::AboutPlatform,
                 SettingsRow::AboutReleaseNotes,
                 SettingsRow::AboutIssues,
-                SettingsRow::AboutLicences
+                SettingsRow::AboutLicences,
+                SettingsRow::ExportSettings,
+                SettingsRow::ImportSettings,
+                SettingsRow::SettingsFolder
             ]
         );
         assert_eq!(
@@ -26574,7 +26664,10 @@ mod tests {
                 SettingsRow::AboutPlatform,
                 SettingsRow::AboutReleaseNotes,
                 SettingsRow::AboutIssues,
-                SettingsRow::AboutLicences
+                SettingsRow::AboutLicences,
+                SettingsRow::ExportSettings,
+                SettingsRow::ImportSettings,
+                SettingsRow::SettingsFolder
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
              next to each other because they are one decision in two halves, the \

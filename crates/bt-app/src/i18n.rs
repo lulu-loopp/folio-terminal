@@ -483,6 +483,28 @@ pub enum Text {
     DescAboutIssues,
     RowAboutLicences,
     DescAboutLicences,
+    /// **The three configuration doors on the About page** (0.4.4 ticket 05):
+    /// one file out, one file in, and the folder they come from. Two verbs end
+    /// in `…` because each opens the system's own dialog first.
+    RowExportSettings,
+    DescExportSettings,
+    ExportVerb,
+    RowImportSettings,
+    DescImportSettings,
+    ImportVerb,
+    RowSettingsFolder,
+    DescSettingsFolder,
+    /// The titles of the cards an export and an import raise — a state is one
+    /// word (owner, 2026-09-20). The body is the file, or the rows by name.
+    SettingsExported,
+    SettingsExportFailed,
+    SettingsImported,
+    SettingsImportFailed,
+    /// What an export or an import left out, named one by one in the card's body.
+    SettingsSkipped,
+    /// Rows the file carries that this platform has no row for: kept in the
+    /// file for the machine they belong to, and named rather than dropped.
+    SettingsNotOnThisMachine,
 
     RowTheme,
     RowCursor,
@@ -3002,6 +3024,30 @@ impl Text {
                 "The open-source components Folio is made of, and their licences.",
                 "Folio 使用的开源组件及其许可证。",
             ),
+            Self::RowExportSettings => pick(lang, "Export settings", "导出设置"),
+            Self::DescExportSettings => pick(
+                lang,
+                "Settings, profiles, shortcuts and colour schemes, in one file.",
+                "设置、配置文件、快捷键和配色，合为一个文件。",
+            ),
+            Self::ExportVerb => pick(lang, "Export…", "导出…"),
+            Self::RowImportSettings => pick(lang, "Import settings", "导入设置"),
+            Self::DescImportSettings => pick(
+                lang,
+                "Applies an exported file at once.",
+                "一次性应用导出文件。",
+            ),
+            Self::ImportVerb => pick(lang, "Import…", "导入…"),
+            Self::RowSettingsFolder => pick(lang, "Settings folder", "设置文件夹"),
+            Self::DescSettingsFolder => {
+                pick(lang, "Where these files are kept.", "这些文件的存放位置。")
+            }
+            Self::SettingsExported => pick(lang, "Exported", "已导出"),
+            Self::SettingsExportFailed => pick(lang, "Not exported", "未导出"),
+            Self::SettingsImported => pick(lang, "Imported", "已导入"),
+            Self::SettingsImportFailed => pick(lang, "Not imported", "未导入"),
+            Self::SettingsSkipped => pick(lang, "Skipped", "已跳过"),
+            Self::SettingsNotOnThisMachine => pick(lang, "Not on this machine", "本机不适用"),
 
             Self::RowTheme => pick(lang, "Theme", "主题"),
             Self::RowCursor => pick(lang, "Cursor", "光标"),
@@ -5350,7 +5396,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 749] = [
+    pub const ALL: [Self; 763] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5428,6 +5474,20 @@ impl Text {
         Self::DescAboutIssues,
         Self::RowAboutLicences,
         Self::DescAboutLicences,
+        Self::RowExportSettings,
+        Self::DescExportSettings,
+        Self::ExportVerb,
+        Self::RowImportSettings,
+        Self::DescImportSettings,
+        Self::ImportVerb,
+        Self::RowSettingsFolder,
+        Self::DescSettingsFolder,
+        Self::SettingsExported,
+        Self::SettingsExportFailed,
+        Self::SettingsImported,
+        Self::SettingsImportFailed,
+        Self::SettingsSkipped,
+        Self::SettingsNotOnThisMachine,
         Self::RowTheme,
         Self::RowCursor,
         Self::RowFormulas,

@@ -988,6 +988,15 @@ pub struct SettingsStore {
     /// reads it beside the stored `first_run_card` rather than instead of it —
     /// a damaged file must not be mistaken for a new machine.
     missing: bool,
+    /// **Whether writes are held for one batch of changes** (0.4.4 ticket 05),
+    /// and whether anything was stored while they were.
+    ///
+    /// An import puts each setting through the door a press on that row goes
+    /// through, and every one of those doors ends in [`Self::store`]. Forty rows
+    /// changed by one gesture are one choice, and they reach the disk as one
+    /// write — the one a single press makes — rather than forty. `None` is the
+    /// ordinary state: every store writes at once.
+    held: Option<bool>,
 }
 
 impl SettingsStore {
@@ -1013,6 +1022,7 @@ impl SettingsStore {
             fault,
             writer_of_record: is_writer_of(&dir),
             missing: report == ReadReport::NotFound,
+            held: None,
         }
     }
 
@@ -1038,6 +1048,7 @@ impl SettingsStore {
             // writes, rather than asserted about it.
             writer_of_record,
             missing: true,
+            held: None,
         }
     }
 
@@ -1072,11 +1083,35 @@ impl SettingsStore {
         if changed {
             self.writes.rearm();
         }
+        if let Some(stored) = self.held.as_mut() {
+            *stored = true;
+            return changed;
+        }
+        self.write_now();
+        changed
+    }
+
+    /// **Hold every write until [`Self::release_writes`]** — one gesture's worth
+    /// of stores, landing as one write. See the `held` field.
+    pub fn hold_writes(&mut self) {
+        self.held.get_or_insert(false);
+    }
+
+    /// Let the held writes go: the document as it now stands reaches the disk
+    /// once, if anything was stored while they were held.
+    pub fn release_writes(&mut self) {
+        if self.held.take() == Some(true) {
+            self.write_now();
+        }
+    }
+
+    /// Put the document in force on disk, now.
+    fn write_now(&mut self) {
         if !self.writer_of_record {
             // The second Folio over this directory (review row R4-5): the choice
             // is live in this window and reaches no file. Not recorded as a
             // failure, because nothing was attempted and nothing is owed.
-            return changed;
+            return;
         }
         self.writes.record(
             SETTINGS_FILE_NAME,
@@ -1085,7 +1120,6 @@ impl SettingsStore {
             })
             .map_err(|error| error.to_string()),
         );
-        changed
     }
 }
 
@@ -2050,6 +2084,48 @@ mod tests {
             "but the write was attempted again, and this time it landed"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.4 ticket 05) — **a batch of settings held for one gesture is in
+    /// force the moment each is stored, and reaches the file once, when the
+    /// batch is let go.**
+    ///
+    /// An import puts every changed row through the door a press on it goes
+    /// through, and each of those ends in `store`. Held, the in-process document
+    /// is what every reader sees at once — nothing waits on the disk, and nothing
+    /// re-reads it — while the file is written a single time, as one press
+    /// writes it.
+    ///
+    /// MUTATION: let `store` write while held and the file exists before the
+    /// release.
+    #[test]
+    fn a_held_batch_of_settings_is_in_force_at_once_and_on_disk_once() {
+        let root = appdata("held");
+        let path = root.join("settings.json");
+        let mut store = SettingsStore::at(path.clone());
+        store.hold_writes();
+        let first = SettingsV1 {
+            terminal_font_size: 19,
+            ..SettingsV1::default()
+        };
+        assert!(store.store(first.clone()));
+        let second = SettingsV1 {
+            git_panel: !first.git_panel,
+            ..first
+        };
+        assert!(store.store(second.clone()));
+        assert_eq!(store.loaded(), &second, "both are in force at once");
+        assert!(!path.exists(), "and neither has been written yet");
+        store.release_writes();
+        let written = read(&path).expect("the batch is written when it is let go");
+        let on_disk: SettingsV1 = serde_json::from_str(&written).unwrap();
+        assert_eq!(on_disk, second, "as the document in force");
+        std::fs::remove_file(&path).unwrap();
+        store.release_writes();
+        assert!(!path.exists(), "and a second release writes nothing more");
+        assert!(store.store(SettingsV1::default()));
+        assert!(path.exists(), "once let go, a store writes at once again");
         let _ = std::fs::remove_dir_all(&root);
     }
 

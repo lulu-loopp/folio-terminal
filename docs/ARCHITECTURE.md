@@ -567,6 +567,16 @@ ladder would be wrong.
 | CLI flags — `bt-app::cli::parse`, `CliRequest` | whoever launches this run, including Explorer and another Folio | per-launch placement and the six doors of §2.1 | no | none; consumed once |
 | `BT_*` environment variables — `docs/BT-ENVIRONMENT.md` | someone diagnosing this build | diagnostics only | no | read where used |
 
+**The export is not a fourth entrance.** `Settings > About > Export…` writes
+`settings.json`, `profiles.json`, `keybindings.json` and the reader's scheme files
+as one JSON document (`bt_persist::export`, `folio_export` version 1), and
+`Import…` hands each part to the door that document takes when it is edited by
+hand — `bt_app::settings_bundle` names the doors, `Runtime::import_settings_from`
+walks them: schemes through `parse_scheme` into the folder, profiles through
+`take_profile_table`, shortcuts through `Shortcuts::apply_overrides`, and settings
+through the file's own migrations and then each row's own apply function, never
+through a re-read.
+
 The `BT_*` catalogue is held complete by `bt_app::diagnostics::bt_environment_doc_tests`,
 which scans every non-binary, non-integration-test `.rs` file under `crates/`
 and `vendor/` for `BT_` literals and fails if the document and the scan disagree

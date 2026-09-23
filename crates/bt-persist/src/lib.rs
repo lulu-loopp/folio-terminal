@@ -31,6 +31,8 @@
 //!   URLs the user said to keep.
 //! - [`update`] / [`UpdateCheckV1`] — `update-check.json`, when the releases
 //!   page was last asked and what it said.
+//! - [`export`] — the one-file settings export (`folio_export`), whose parts
+//!   are read back through the same chain their own files are.
 //! - [`scheme`] — one Windows Terminal colour-scheme object, parsed. The one
 //!   reader here that is not versioned by this crate, because the format is
 //!   somebody else's; where scheme files live and which of them exist is
@@ -39,6 +41,7 @@
 mod atomic;
 mod debounce;
 mod error;
+mod export;
 mod keybindings;
 mod layout;
 mod migrate;
@@ -54,6 +57,10 @@ mod write_tracker;
 pub use atomic::{atomic_replace_keeping_metadata, atomic_replace_preserving, atomic_write};
 pub use debounce::Debouncer;
 pub use error::WriteError;
+pub use export::{
+    EXPORT_FILE_NAME, ExportParts, ExportRefusal, FOLIO_EXPORT_VERSION, ImportedParts,
+    parse_export, read_export, serialize_export,
+};
 pub use keybindings::{BindingOverrideV1, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1};
 pub use layout::{
     FilesLeafV1, FilesViewV1, LayoutNodeV1, LeafNodeV1, MAX_LAST_COMMAND_CHARS, PreviewLeafV1,

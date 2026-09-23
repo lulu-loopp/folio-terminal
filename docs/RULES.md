@@ -567,7 +567,10 @@ lands the block unexecuted.
 ### 31. Settings and migrations — `not yet folded`
 Entries: the M2 schema document §2; the `migrate.rs` module doc; §7.19 *the words
 on the settings page are written for the reader: a copy standard, a forbidden-word
-table, and a punctuation gate* (the second §7.19).
+table, and a punctuation gate* (the second §7.19); 2026-09-23 *settings travel as
+one exported file* — the bundle's own shape version is `folio_export` 1
+(`bt_persist::FOLIO_EXPORT_VERSION`), separate from each part's `schema_version`,
+and a part is read by `migrate::parse_document`, the chain its own file is read by.
 
 ### 32. Profiles — `not yet folded`
 Entries: §7.1.6c-6 *profiles as data*; §7.1.6c-6d *`profiles.json` is followed
@@ -598,6 +601,31 @@ already, before a fourth entrance exists.
 failure policy); §7.2 *the command-line front door* and the `cli.rs` module doc;
 `docs/BT-ENVIRONMENT.md`, held complete in both directions by
 `bt_app::diagnostics::bt_environment_doc_tests`; §7.1.6c-6 and §7.1.6c-6d.
+**The export is not a fourth entrance** — it is the configuration files carried
+by hand (owner rulings 2026-09-22: "Export / Import, no WebDAV … import validates through the
+same doors as a hand edit and reports faults per row", and
+2026-09-23: "ONE JSON file bundling settings + profiles + keybindings + schemes,
+with a schema version — readable and diffable"). `Settings > About > Export…`
+writes what is in force as one pretty-printed JSON document in a fixed key order
+(`bt_persist::export`, `folio_export` 1; each part keeps its own
+`schema_version`). `Import…` enters each part by that document's own door:
+*schemes* through `parse_scheme`, each bad one named by its file and the rest
+written into the `schemes` folder, which is then re-read in process
+(`reread_schemes`); *profiles* through the store's compare and
+`take_profile_table`, the half of `reread_profiles` a changed file takes;
+*keybindings* through this build's defaults and `Shortcuts::apply_overrides`,
+each refused line named; *settings* through `parse_document` — an older part
+migrated, a future part refused whole — and then **each changed value through the
+function a press on its row calls, never by writing `settings.json` and waiting**,
+with the store's writes held so the batch lands as one write. A part the file does
+not carry is left alone. Three keys are receipts about this machine and are not
+imported (`first_run_card`, `powershell_install_pending`,
+`cards_gesture_hint_offer`); `Focus mode` and `Offer PowerShell integration` are
+imported by pressing the row's own item, their only door; a row this platform
+does not have is stored and named. No confirmation before an import — it is the
+reader's deliberate gesture — and no network: syncing the file or the folder is a
+folder-sync tool's job. `Settings folder` opens the data directory through the
+reveal door on the OS hand-off lane.
 **Overrides.** §7.1.6c-6d reverses §7.1.6c-6 on watching `profiles.json`.
 **Open.** 0.5's outward interface is a fourth entrance and declares its row in
 `docs/ARCHITECTURE.md` §9 before it accepts its first flag.
