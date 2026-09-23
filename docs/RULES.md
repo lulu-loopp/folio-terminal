@@ -367,10 +367,15 @@ table does not change**: no two-key-first re-derivation, and a reader who wants
 `Ctrl+N` records it once. This supersedes, for recordings, discipline ① of the
 2026-08-17 audit. Held by `shortcuts::tests::a_bare_ctrl_letter_is_free_and_the_row_says_shell`,
 `the_file_door_keeps_a_recorded_ctrl_letter` and
-`every_row_on_a_shell_control_key_says_shell_default_or_custom`. Still `not yet
-folded`: folding this row (the rung order of `Runtime::keyboard_input`, where the
-terminal's copy and paste answer before the table) is design-note T5, not this
-ticket.
+`every_row_on_a_shell_control_key_says_shell_default_or_custom`. **The terminal's copy and paste answer before the table** (owner, 2026-09-23):
+in `Runtime::keyboard_input` the copy rung (`input::should_copy_selection`, a
+selection present) and the paste rung (`input::is_paste_shortcut`) are asked
+before `Shortcuts::lookup`, so a row recorded on `Ctrl+V` never fires on a
+terminal and one on `Ctrl+C` fires only with nothing selected (macOS: `Cmd`;
+`Ctrl+Shift+V`/`C` the same). This is kept, not fixed: the terminal's own copy
+and paste are never displaced by a recording. Still `not yet
+folded`: folding this row (the full rung order of `Runtime::keyboard_input`) is
+design-note T5, not this ticket.
 
 ### 28. Mouse routing — `not yet folded`
 Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; §7.60
