@@ -264,6 +264,10 @@ impl Runtime<'_> {
     /// a restored gesture) opens this menu without a press in the right place.
     pub(in crate::runtime) fn toggle_profile_menu(&mut self) -> Result<()> {
         self.close_popups_except(Popup::Profile);
+        // Whichever way the toggle goes, the picker that was up (if any) is
+        // gone and takes its pin with it (owner ruling 2026-09-23); a press that
+        // opened a fresh one pins it on its own way out.
+        self.window.chevrons.menu_gone(Popup::Profile);
         self.window.profile_menu.toggle();
         self.start_chevron_turn();
         if self.refresh_chrome() {

@@ -2134,6 +2134,11 @@ impl Runtime<'_> {
         }
         // E61: the opener closes the others.
         self.close_popups_except(Popup::Pane);
+        // **A pane menu already up — another head's — is replaced, which is its
+        // going away** (owner ruling 2026-09-23): the pin follows the menu that
+        // is up, so the new one starts unpinned and a press that raised it pins
+        // it on its own way out.
+        self.window.chevrons.menu_gone(Popup::Pane);
         self.window.pane_menu = Some(PaneMenuState {
             point,
             seat,
@@ -2252,6 +2257,7 @@ impl Runtime<'_> {
         if self.window.pane_menu.take().is_none() {
             return Ok(false);
         }
+        self.window.chevrons.menu_gone(Popup::Pane);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -2553,6 +2559,7 @@ impl Runtime<'_> {
         };
         let seat = menu.seat;
         self.window.chevrons.clear();
+        self.window.chevrons.menu_gone(Popup::Pane);
         // **The ring goes with the menu**, wherever the press lands: a window
         // still wearing the mark after the list that put it there has gone is a
         // window claiming to be a destination nobody is choosing.

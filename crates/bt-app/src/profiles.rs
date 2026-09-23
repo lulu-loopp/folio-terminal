@@ -10064,6 +10064,15 @@ pub fn term_menu_build(
 // comes; take the pointer off both the button and the menu and it goes after a
 // short grace.**
 //
+// The owner's ruling of 2026-09-23 splits that last clause by the gesture that
+// is in charge. A rest opens a **peek**, and a peek is what the grace takes
+// away: hover is looking, and looking is free. A click on the button **pins**
+// the menu — the peek if one is up, or straight from closed — and a pinned
+// menu goes only on Esc, a click elsewhere or a second click on its button:
+// clicking is doing, and a hand that asked for a menu and then moved toward
+// the terminal has not taken the request back. "再点即收" holds for a pinned
+// menu only; a click on a peek pins it instead of closing it.
+//
 // The ruling's own argument for the hover half is discoverability: "用户此前从
 // 没发现 pane 头右键有菜单". A verb reachable only by right click is a verb most
 // people never learn exists, and the answer is not a fifth button — it is that
@@ -10092,8 +10101,12 @@ pub fn term_menu_build(
 /// here", which is a different and worse instruction.
 pub const CHEVRON_HOVER_OPEN_DELAY: Duration = Duration::from_millis(250);
 
-/// How long a menu a `⌄` opened stays up once the pointer has left **both** it
-/// and the button.
+/// How long a **peek** a `⌄` opened stays up once the pointer has left **both**
+/// it and the button.
+///
+/// A pinned menu has no grace at all (owner ruling 2026-09-23): a click put it
+/// there, and only Esc, a click elsewhere or a second click on the button takes
+/// it away. See [`ChevronGate::pin`].
 ///
 /// The grace exists because the button and its menu are two rectangles with a
 /// four-pixel gap between them ([`MENU_OFFSET_LOGICAL_PX`]), and a hand
@@ -10132,7 +10145,21 @@ pub enum ChevronAction {
 }
 
 /// One `⌄`'s two clocks: how long the pointer has rested on it, and how long it
-/// has been gone from both surfaces.
+/// has been gone from both surfaces — and one bit, whether the menu it governs
+/// is **pinned** (owner ruling 2026-09-23).
+///
+/// **The bit** is the fact "a click has pinned the menu that is up", and nothing
+/// about how that menu opened. Its one writer is [`Self::pin`], called by a
+/// press on the gate's own button — on a peek (which it keeps open) or on a
+/// closed button (after the press has opened it). Its reader is
+/// [`Self::observe`]: the `(Away, true)` arm starts the leave clock only for an
+/// unpinned menu, so a pinned menu has no deadline and costs no wake-ups; and
+/// the `(Button, false)` arm — a rest on another of this gate's buttons, a
+/// second pane head or a second pill — starts no rest while the menu that is
+/// up is pinned, since a rest there would raise a menu in its place. Its one clearer is [`Self::menu_gone`], which every path that
+/// takes the menu away or replaces it goes through. [`Self::clear`] stops the
+/// clocks and leaves the bit alone, because `observe` calls it on every move
+/// over the menu.
 ///
 /// Two `Option<Instant>` rather than one enum, because the two are genuinely
 /// exclusive by construction — [`Self::observe`] never leaves both set — and
@@ -10146,6 +10173,7 @@ pub enum ChevronAction {
 pub struct ChevronGate {
     resting_since: Option<Instant>,
     leaving_since: Option<Instant>,
+    pinned: bool,
 }
 
 impl ChevronGate {
@@ -10157,19 +10185,33 @@ impl ChevronGate {
     /// why each clock is started with `get_or_insert` rather than assigned.
     pub fn observe(&mut self, pointer: ChevronPointer, open: bool, now: Instant) {
         match (pointer, open) {
-            // Resting on a shut chevron is the one state that earns an open.
+            // Resting on a shut chevron is the one state that earns an open —
+            // unless a click has pinned this gate's menu on *another* of its
+            // buttons (a second pane head, a second pill). A pinned menu goes
+            // only on Esc, a click elsewhere or a second click on its button,
+            // so a rest here must not raise a menu in its place; a click here
+            // still does, as a click elsewhere.
             (ChevronPointer::Button, false) => {
                 self.leaving_since = None;
-                self.resting_since.get_or_insert(now);
+                if self.pinned {
+                    self.resting_since = None;
+                } else {
+                    self.resting_since.get_or_insert(now);
+                }
             }
             // On the button of a menu that is already up, or anywhere on the
             // menu itself: nothing is owed in either direction, and both clocks
             // are cleared so that leaving again starts a fresh grace.
             (ChevronPointer::Button, true) | (ChevronPointer::Surface, _) => self.clear(),
-            // Gone, with a menu up: the grace runs.
+            // Gone, with a peek up: the grace runs. Gone, with a pinned menu
+            // up: nothing is owed — only a press or Esc takes it away.
             (ChevronPointer::Away, true) => {
                 self.resting_since = None;
-                self.leaving_since.get_or_insert(now);
+                if self.pinned {
+                    self.leaving_since = None;
+                } else {
+                    self.leaving_since.get_or_insert(now);
+                }
             }
             // Gone, with nothing up: there is no clock to run.
             (ChevronPointer::Away, false) => self.clear(),
@@ -10214,9 +10256,39 @@ impl ChevronGate {
     /// Stop both clocks — what a caller does once it has acted on [`Self::due`],
     /// and what every other door onto these menus (a click, Esc, another popup
     /// opening) does on its way through.
+    ///
+    /// **The pin is not a clock and stays.** `observe` calls this on every move
+    /// over the menu; a pinned menu the hand merely crossed must still be pinned
+    /// when the hand leaves it.
     pub fn clear(&mut self) {
         self.resting_since = None;
         self.leaving_since = None;
+    }
+
+    /// **A click pinned the menu that is up** (owner ruling 2026-09-23): from
+    /// now on leaving does not close it, and the next press on its button does.
+    ///
+    /// Stops the clocks too: a grace that was running against the peek this
+    /// press has just pinned is a close nobody is owed any more.
+    pub fn pin(&mut self) {
+        self.clear();
+        self.pinned = true;
+    }
+
+    /// Whether a click has pinned the menu that is up.
+    #[must_use]
+    pub fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    /// **The menu this gate governs went away**, by whatever path — Esc, a
+    /// click elsewhere, a second click on its button, a row run, another popup
+    /// opening, the grace's own close, or a new menu raised in its place. Both
+    /// clocks stop and the pin goes with the menu, so the next menu starts as
+    /// what its own opening makes it.
+    pub fn menu_gone(&mut self) {
+        self.clear();
+        self.pinned = false;
     }
 }
 
@@ -19871,6 +19943,246 @@ mod tests {
             head.deadline(),
             Some(start + Duration::from_millis(700) + CHEVRON_LEAVE_GRACE),
         );
+    }
+
+    // ── peek and pin (owner ruling, 2026-09-23) ─────────────────────────────
+
+    /// A gate whose menu a rest has just opened: the hand rested on the button
+    /// for the ruled quarter second, the clock owed an `Open`, and the caller
+    /// acted on it and cleared the clocks — exactly what `advance_chevrons` does.
+    fn peeking(start: Instant) -> ChevronGate {
+        let mut gate = ChevronGate::default();
+        gate.observe(ChevronPointer::Button, false, start);
+        assert_eq!(
+            gate.due(start + CHEVRON_HOVER_OPEN_DELAY),
+            Some(ChevronAction::Open)
+        );
+        gate.clear();
+        assert!(
+            !gate.is_pinned(),
+            "a rest opens a peek, never a pinned menu"
+        );
+        gate
+    }
+
+    /// PIN (35) — **a hover peek closes after the leave grace.**
+    ///
+    /// Ruling 1 of 2026-09-23 keeps the 2026-08-16 half unchanged: a menu a rest
+    /// raised is looking, and looking stops when the hand goes. Kept green here
+    /// so that the pin below cannot be bought by making every menu sticky.
+    ///
+    /// MUTATION: make `observe`'s `(Away, true)` arm skip the leave clock
+    /// unconditionally and the `Close` is never owed.
+    #[test]
+    fn a_hover_peek_closes_after_the_leave_grace() {
+        let start = Instant::now();
+        let mut gate = peeking(start);
+        let away = start + CHEVRON_HOVER_OPEN_DELAY + Duration::from_millis(40);
+        gate.observe(ChevronPointer::Away, true, away);
+        assert_eq!(gate.deadline(), Some(away + CHEVRON_LEAVE_GRACE));
+        assert_eq!(
+            gate.due(away + CHEVRON_LEAVE_GRACE),
+            Some(ChevronAction::Close)
+        );
+    }
+
+    /// RED (35) — **a click on a peek pins it, and a pinned menu survives the
+    /// hand leaving.**
+    ///
+    /// Ruling 2 of 2026-09-23: 「窥视中点按钮=钉住」. Until today every `⌄` menu
+    /// closed 150ms after the pointer left the button and the menu, however it
+    /// had been opened, so a reader who clicked the chevron and then moved
+    /// toward the terminal lost the menu they had asked for. The pin is one bit
+    /// on the gate, read where the leave clock would start; a pinned menu owes
+    /// nothing and registers no wake-up however long the hand stays away.
+    ///
+    /// MUTATION: make `observe`'s `(Away, true)` arm ignore `pinned` (always
+    /// start `leaving_since`) and this goes red.
+    #[test]
+    fn a_click_on_a_peek_pins_it_and_it_survives_leaving() {
+        let start = Instant::now();
+        let mut gate = peeking(start);
+        let press = start + CHEVRON_HOVER_OPEN_DELAY + Duration::from_millis(80);
+        // The press lands on the button, where a hand on an open menu's button
+        // owes nothing in either direction — and pins it.
+        gate.observe(ChevronPointer::Button, true, press);
+        gate.pin();
+        assert!(gate.is_pinned());
+        for step in 1..=10u32 {
+            let now = press + CHEVRON_LEAVE_GRACE * step;
+            gate.observe(ChevronPointer::Away, true, now);
+            assert_eq!(gate.deadline(), None, "a pinned menu owes no wake-up");
+            assert_eq!(gate.due(now), None, "and nothing is due {step} graces on");
+        }
+    }
+
+    /// RED (35) — **a click on a closed `⌄` pins the menu it opens, and it
+    /// survives the hand leaving.**
+    ///
+    /// Ruling 3 of 2026-09-23: 「直接点按钮=钉住」. The press opens the menu
+    /// through the button's own door and pins it on its way out; no rest ever
+    /// ran, and none is needed for the pin to hold.
+    ///
+    /// MUTATION: make `observe`'s `(Away, true)` arm ignore `pinned` and this
+    /// goes red.
+    #[test]
+    fn a_direct_click_pins_and_survives_leaving() {
+        let start = Instant::now();
+        let mut gate = ChevronGate::default();
+        gate.observe(ChevronPointer::Button, false, start);
+        // The press, a few milliseconds into the rest: the menu comes up at
+        // once, and the rest that was running is answered.
+        gate.pin();
+        assert_eq!(gate.deadline(), None, "the press has answered the rest");
+        for step in 1..=10u32 {
+            let now = start + CHEVRON_LEAVE_GRACE * step;
+            gate.observe(ChevronPointer::Away, true, now);
+            assert_eq!(gate.due(now), None, "still up {step} graces on");
+        }
+        assert_eq!(gate.deadline(), None);
+    }
+
+    /// RED (35) — **moving over the menu stops the clocks and keeps the pin;
+    /// only the menu going away takes the pin with it.**
+    ///
+    /// `observe` calls `clear` on every move over the menu and over its own
+    /// button, so a `clear` that dropped the pin would unpin a menu the hand had
+    /// merely crossed, and the next step off it would start the grace a click
+    /// had switched off. `menu_gone` is the one clearer, and after it the next
+    /// menu a rest raises is a peek again, whose grace runs.
+    ///
+    /// MUTATION: set `pinned = false` in `clear` and the second block goes red;
+    /// leave it out of `menu_gone` and the last block does.
+    #[test]
+    fn crossing_a_pinned_menu_keeps_the_pin_and_only_its_going_drops_it() {
+        let start = Instant::now();
+        let mut gate = peeking(start);
+        gate.pin();
+        let later = start + Duration::from_secs(1);
+        gate.observe(ChevronPointer::Surface, true, later);
+        gate.observe(ChevronPointer::Button, true, later);
+        assert!(
+            gate.is_pinned(),
+            "the hand crossing the menu is not a close"
+        );
+        gate.observe(ChevronPointer::Away, true, later);
+        assert_eq!(gate.deadline(), None);
+
+        gate.menu_gone();
+        assert!(!gate.is_pinned(), "the pin goes with the menu");
+        let mut next = gate;
+        let again = later + Duration::from_secs(1);
+        next.observe(ChevronPointer::Button, false, again);
+        let opened = again + CHEVRON_HOVER_OPEN_DELAY;
+        assert_eq!(next.due(opened), Some(ChevronAction::Open));
+        next.clear();
+        next.observe(ChevronPointer::Away, true, opened);
+        assert_eq!(
+            next.due(opened + CHEVRON_LEAVE_GRACE),
+            Some(ChevronAction::Close),
+            "the next rest-open is a peek again, and its grace runs"
+        );
+    }
+
+    /// RED (35) — **a rest on another of the gate's buttons does not raise a
+    /// menu in place of a pinned one.**
+    ///
+    /// The pane gate serves every pane head and the rail gate every pill, so a
+    /// hand resting on head B's `⌄` while head A's menu is up is told `Button`
+    /// with `open` false. For a peek that is still how a hand walks a menu
+    /// across a split without clicking. For a pinned menu it would be a fourth
+    /// way to close it, and the ruling names three: Esc, a click elsewhere, a
+    /// second click on its button. A *click* on head B is a click elsewhere,
+    /// and still moves the menu.
+    ///
+    /// MUTATION: make `observe`'s `(Button, false)` arm start `resting_since`
+    /// regardless of `pinned` and this goes red.
+    #[test]
+    fn a_rest_on_another_button_does_not_replace_a_pinned_menu() {
+        let start = Instant::now();
+        let mut pinned = peeking(start);
+        pinned.pin();
+        pinned.observe(ChevronPointer::Button, false, start);
+        assert_eq!(pinned.deadline(), None);
+        assert_eq!(pinned.due(start + CHEVRON_HOVER_OPEN_DELAY * 4), None);
+
+        // The walk across a split is unchanged for a peek.
+        let mut peek = peeking(start);
+        peek.observe(ChevronPointer::Button, false, start);
+        assert_eq!(
+            peek.due(start + CHEVRON_HOVER_OPEN_DELAY),
+            Some(ChevronAction::Open)
+        );
+    }
+
+    /// RED (35) — **`Split with` opens and closes its submenu the same way
+    /// peeked and pinned; the pin decides only whether the whole menu goes when
+    /// the hand leaves.**
+    ///
+    /// The submenu's own rows count as the menu for the leave grace — that is
+    /// [`PaneMenuLayout::holds`], the safety triangle — in both states. Leaving
+    /// both surfaces closes a peek after the grace and leaves a pinned menu up.
+    /// The submenu's opening and closing is `drive_pane_menu_hover`'s, which
+    /// reads no pin (`tests.rs` holds that by name).
+    ///
+    /// MUTATION: make `observe`'s `(Away, true)` arm ignore `pinned` and the
+    /// pinned half goes red.
+    #[test]
+    fn the_split_with_submenu_works_peeked_and_pinned() {
+        let layout = pane_menu_layout(
+            [300.0, 120.0],
+            (1600.0, 900.0),
+            1.0,
+            Some(PaneMenuRow::SplitWith),
+            false,
+            &[],
+            &chord_table(),
+            &equipped(),
+            &mut fake_measure,
+        );
+        let child = layout.submenu_frame().expect("an open submenu has a frame");
+        let heading = layout.item(PaneMenuRow::SplitWith);
+        let on_heading = [heading[0] + 4.0, (heading[1] + heading[3]) / 2.0];
+        let on_child = [child[0] + 4.0, child[1] + 4.0];
+        let gone = [child[2] + 200.0, child[3] + 200.0];
+        let place = |from: [f32; 2], at: [f32; 2]| {
+            if layout.holds(Some(from), at) {
+                ChevronPointer::Surface
+            } else {
+                ChevronPointer::Away
+            }
+        };
+        let start = Instant::now();
+        for pin in [false, true] {
+            let mut gate = peeking(start);
+            if pin {
+                gate.pin();
+            }
+            // Heading, then the child, then back to the parent: the whole trip
+            // is the menu's, and nothing is owed in either state.
+            let mut now = start + Duration::from_secs(1);
+            for (from, at) in [
+                (on_heading, on_heading),
+                (on_heading, on_child),
+                (on_child, on_heading),
+            ] {
+                gate.observe(place(from, at), true, now);
+                assert_eq!(gate.deadline(), None, "pinned={pin}: {at:?} is the menu's");
+                now += Duration::from_millis(50);
+            }
+            // Off both surfaces.
+            gate.observe(place(on_heading, gone), true, now);
+            let owed = gate.due(now + CHEVRON_LEAVE_GRACE);
+            if pin {
+                assert_eq!(owed, None, "a pinned menu stays when the hand leaves");
+            } else {
+                assert_eq!(
+                    owed,
+                    Some(ChevronAction::Close),
+                    "a peek goes after the grace"
+                );
+            }
+        }
     }
 
     // ── the pane head's own menu ────────────────────────────────────────────

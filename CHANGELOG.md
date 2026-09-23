@@ -18,6 +18,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- A ⌄ menu you click now stays open until you press Esc, click elsewhere or
+  click the ⌄ again; resting on it still shows it only while the pointer is
+  there.
 - A multi-line paste into PowerShell now waits on the input line for Enter.
 - A shortcut can now use Ctrl with a letter; the row notes that the key no
   longer reaches the shell.
