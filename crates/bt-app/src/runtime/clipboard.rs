@@ -3,7 +3,7 @@
 
 use crate::{
     Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteOffer, PasteTarget,
-    PreparedClipboardPaste, Runtime, StagedPaste, UserInputKind, copy_selection, hang_watch, i18n,
+    PreparedClipboardPaste, Runtime, StagedPaste, UserInputKind, copy_selection, hang_watch,
     input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_body,
     paste_offer_is_kept, paste_target_is_live, pending_paste_in, prepare_clipboard_paste,
     prepare_dropped_paste, profile_banner_name, recoverable_clipboard_write, restore, seats,
@@ -544,33 +544,15 @@ impl Runtime<'_> {
         let tab = self.window.tabs.get(self.window.active_tab)?;
         let (seat, pending) = pending_paste_in(tab)?;
         let shell = profile_banner_name(&tab.sessions.get(&seat)?.profile);
-        let title = i18n::paste_card_title(pending.lines, &shell);
-        let run_text = i18n::Text::PasteCardRun.text();
-        let join_text = i18n::Text::PasteCardJoin.text();
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.metrics().scale_factor as f32;
+        let lines = pending.lines;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let content = restore::PasteCardContent {
-            title_width: renderer.measure_chrome_text(
-                gpu,
-                &title,
-                restore::TITLE_FONT_LOGICAL_PX * scale,
-            ),
-            title,
-            run_text,
-            join_text,
-            run_text_width: renderer.measure_chrome_text(
-                gpu,
-                run_text,
-                restore::BUTTON_FONT_LOGICAL_PX * scale,
-            ),
-            join_text_width: renderer.measure_chrome_text(
-                gpu,
-                join_text,
-                restore::BUTTON_FONT_LOGICAL_PX * scale,
-            ),
-        };
+        let content =
+            restore::paste_card_content(lines, &shell, width, scale, &mut |text, size, weight| {
+                renderer.measure_chrome_label(gpu, text, size, weight, 0.0, false)
+            });
         Some(restore::paste_card_layout(&content, width, height, scale))
     }
 }

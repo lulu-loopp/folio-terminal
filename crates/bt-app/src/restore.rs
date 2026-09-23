@@ -2535,6 +2535,59 @@ pub struct PasteCardLayout {
 const PASTE_CLOSE_LOGICAL_PX: f32 = 18.0;
 const PASTE_CLOSE_GAP_LOGICAL_PX: f32 = 8.0;
 const PASTE_CLOSE_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// The weight the card's line is drawn in, and therefore the weight it is measured in: a line
+/// measured regular and drawn semibold is a line the card is a few pixels too narrow for, and
+/// its last letter goes under the `×` (owner's screenshot 2026-09-23, next89).
+const PASTE_TITLE_WEIGHT: ChromeLabelWeight = ChromeLabelWeight::SemiBold;
+
+/// **The card's words, measured** (0.4.4 ticket 44) — `measure` is the caller's font, asked for
+/// a string at a size in a weight.
+///
+/// The line is measured in the weight it is drawn in ([`PASTE_TITLE_WEIGHT`]). And the card grows
+/// only up to the family's measure: past it, the room the line has is what is left of the card's
+/// widest face beside the `×` and its gap, and the profile's name — the one part of the line that
+/// is the reader's own and has no bound — gives way from its end (`settings::ellipsized`, the
+/// back cut [`crate::seats::LeadCut::Back`] names), so the count and the arrow stay whole and the
+/// line never runs under the cross.
+#[must_use]
+pub fn paste_card_content(
+    lines: usize,
+    shell: &str,
+    surface_width: f32,
+    scale: f32,
+    measure: &mut dyn FnMut(&str, f32, ChromeLabelWeight) -> f32,
+) -> PasteCardContent {
+    let px = |value: f32| value * scale;
+    let title_font = px(TITLE_FONT_LOGICAL_PX);
+    let room = dialog_width(surface_width, scale)
+        - paste_card_chrome(scale)
+        - px(PASTE_CLOSE_GAP_LOGICAL_PX + PASTE_CLOSE_LOGICAL_PX);
+    let shell = crate::settings::ellipsized(shell, room, title_font, &mut |shell, size| {
+        measure(
+            &crate::i18n::paste_card_title(lines, shell),
+            size,
+            PASTE_TITLE_WEIGHT,
+        )
+    });
+    let title = crate::i18n::paste_card_title(lines, &shell);
+    let run_text = crate::i18n::Text::PasteCardRun.text();
+    let join_text = crate::i18n::Text::PasteCardJoin.text();
+    let button_font = px(BUTTON_FONT_LOGICAL_PX);
+    PasteCardContent {
+        title_width: measure(&title, title_font, PASTE_TITLE_WEIGHT),
+        title,
+        run_text,
+        join_text,
+        run_text_width: measure(run_text, button_font, ChromeLabelWeight::Regular),
+        join_text_width: measure(join_text, button_font, ChromeLabelWeight::Regular),
+    }
+}
+
+/// The card's border and side padding, both sides: what its face gives up before any word.
+fn paste_card_chrome(scale: f32) -> f32 {
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    2.0 * (border + DIALOG_PADDING_X_LOGICAL_PX * scale)
+}
 
 /// Where every part of the paste card lands in a window this size.
 #[must_use]
@@ -2556,7 +2609,7 @@ pub fn paste_card_layout(
     );
     let row_width = join_width + px(ACTIONS_GAP_LOGICAL_PX) + run_width;
     let head_width = content.title_width + px(PASTE_CLOSE_GAP_LOGICAL_PX + PASTE_CLOSE_LOGICAL_PX);
-    let chrome = 2.0 * (border + px(DIALOG_PADDING_X_LOGICAL_PX));
+    let chrome = paste_card_chrome(scale);
     // As wide as its line and its two words ask, never wider than the family's measure.
     let width = (row_width.max(head_width) + chrome)
         .ceil()
@@ -2697,7 +2750,7 @@ pub fn paste_card_build(
         align_right: false,
         align_center: false,
         letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::SemiBold,
+        weight: PASTE_TITLE_WEIGHT,
         tabular_numerals: false,
         clip: Some(layout.title),
     });
@@ -4239,5 +4292,80 @@ in the folders you left them, as new shells."
                 assert_eq!(layer[0].quads[0].rect, [0.0, 0.0, width, height]);
             }
         }
+    }
+
+    /// RED (44) — **the card's line ends before the `×`, however long the profile's name is.**
+    ///
+    /// The owner's screenshot (2026-09-23, next89, dark, cmd) showed `7 行 → Command Prompt` with
+    /// its last letter under the `×`. The line was measured in the regular weight and drawn
+    /// semibold, so the card was sized for a line a few pixels shorter than the one it drew; and
+    /// a profile name longer than the family's measure had no bound at all. The face here is a
+    /// stand-in that draws semibold 8% wider than regular and a CJK character twice as wide as a
+    /// Latin one, which is the shape of the real face; the claim is about where the drawn line
+    /// ends against the cross, for Latin and CJK names, at every scale.
+    ///
+    /// MUTATION: measure the title without the `×` box (drop
+    /// `- px(PASTE_CLOSE_GAP_LOGICAL_PX + PASTE_CLOSE_LOGICAL_PX)` from the room in
+    /// `paste_card_content`) — the long names' lines run under the cross and the first
+    /// assertion goes red; measure its width regular (`ChromeLabelWeight::Regular` in place of
+    /// `PASTE_TITLE_WEIGHT` for `title_width`) and the drawn line outruns the card it sized, and
+    /// the same assertion goes red.
+    #[test]
+    fn the_paste_cards_line_ends_before_its_close_box() {
+        let mut face = |text: &str, size: f32, weight: ChromeLabelWeight| {
+            let em: f32 = text
+                .chars()
+                .map(|c| if c.is_ascii() { 0.5 } else { 1.0 })
+                .sum();
+            let bold = if weight == ChromeLabelWeight::SemiBold {
+                1.08
+            } else {
+                1.0
+            };
+            em * size * bold
+        };
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let (width, height) = (1600.0 * scale, 900.0 * scale);
+            for shell in [
+                "Command Prompt",
+                "cmd",
+                "Developer Command Prompt for Visual Studio 2022 (x64 Native Tools)",
+                "命令提示符 — 开发人员命令提示符 Visual Studio 2022 本机工具",
+            ] {
+                let content = paste_card_content(7, shell, width, scale, &mut face);
+                let layout = paste_card_layout(&content, width, height, scale);
+                let drawn = face(
+                    &layout.title_text,
+                    TITLE_FONT_LOGICAL_PX * scale,
+                    PASTE_TITLE_WEIGHT,
+                );
+                let limit = layout.close[0] - PASTE_CLOSE_GAP_LOGICAL_PX * scale;
+                assert!(
+                    layout.title[0] + drawn <= limit + 0.5,
+                    "{scale}x {shell:?}: the line ends at {} and the × gap starts at {limit}",
+                    layout.title[0] + drawn
+                );
+                assert!(layout.title[2] <= limit + 0.5, "{scale}x {shell:?}");
+                // The count and the arrow stay whole; only the name gives way, from its end.
+                assert!(
+                    layout.title_text.starts_with("7 "),
+                    "{:?}",
+                    layout.title_text
+                );
+                let frame = paste_card_frame(&layout);
+                assert!(frame[2] - frame[0] <= dialog_width(width, scale) + 0.5);
+            }
+        }
+        // A long name is cut, and a short one is not.
+        let long = paste_card_content(
+            7,
+            "Developer Command Prompt for Visual Studio 2022 (x64 Native Tools)",
+            1600.0,
+            1.0,
+            &mut face,
+        );
+        assert!(long.title.ends_with('\u{2026}'), "{:?}", long.title);
+        let short = paste_card_content(7, "cmd", 1600.0, 1.0, &mut face);
+        assert!(short.title.ends_with("cmd"), "{:?}", short.title);
     }
 }

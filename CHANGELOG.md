@@ -69,6 +69,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- The multi-line paste card's title no longer runs under its × button; a very
+  long profile name is shortened with an ellipsis.
 - A zoomed picture in a floating window can be dragged to pan it, and a
   double-click zooms it in or out, as in a pane.
 - The folder at the bottom of the glance card now lights up under the
