@@ -41315,6 +41315,9 @@ fn leaf_saying(text: &str) -> LeafSession {
         grid,
         conpty_grid: grid,
         last_finished_command: None,
+        // A fixture's bytes were fed before it was a leaf; whether they marked a
+        // prompt is heard the way the drain hears it, by asking.
+        has_rail: false,
         pending_pty_resize: None,
         pending_psreadline_resize_reanchor: false,
         output_revision: 0,
@@ -49359,6 +49362,240 @@ fn a_ctrl_click_on_the_foot_reveals_the_file() {
 fn ui_spec_palette_class_a_values_follow_the_rule() {
     assert_eq!(crate::palette::FIELD_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T3");
     assert_eq!(crate::palette::ROW_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T4");
+}
+
+// ── ticket 32: the command rail never covers text ─────────────────────────
+
+/// A shell that ran one command which failed and is back at its prompt: `OSC 133`
+/// `A`/`B`/`C`/`D;1` and a fresh `A`, the bytes an integrated PowerShell prints
+/// around `t15nosuchcommand`. Fed through a real session, so the ledger the rail
+/// is laid out from is the one the product would hold.
+const RAIL_FAILED_THEN_PROMPT: &str = "\u{1b}]133;A\u{7}PS> \u{1b}]133;B\u{7}t15nosuchcommand\r\n\
+     \u{1b}]133;C\u{7}not recognized\r\n\u{1b}]133;D;1\u{7}\u{1b}]133;A\u{7}PS> \u{1b}]133;B\u{7}";
+
+/// The scales a real display runs at, and three pane widths in logical pixels: a
+/// narrow pane (the report's, squeezed beside a graph pane), a medium one and a
+/// wide one. Odd numbers, so no width lands on a cell boundary by luck.
+const RAIL_SCALES: [f64; 4] = [1.0, 1.25, 1.5, 2.0];
+const RAIL_LOGICAL_WIDTHS: [u32; 3] = [331, 797, 1913];
+
+/// A pane body `logical` wide at `scale`, standing somewhere other than the
+/// window's origin, because a real pane in a split does.
+fn rail_test_body(logical: u32, scale: f64) -> SeatViewport {
+    SeatViewport {
+        x: (37.0 * scale).round() as u32,
+        y: (61.0 * scale).round() as u32,
+        width: (f64::from(logical) * scale).round() as u32,
+        height: (600.0 * scale).round() as u32,
+    }
+}
+
+/// RED (ticket 32) — **with a rail, the last text column ends left of the rail's
+/// resting band, at every width and scale.**
+///
+/// The owner's ruling of 2026-09-23 is that decoration never covers text. The
+/// grid used to reserve only its symmetric `padding_px`, while the rail stands
+/// inboard of the eight-pixel scroll lane — so a line that filled the pane ran
+/// under the ticks, and a failed command's rose tick sat on its last letters
+/// (ticket 15's `12-crop-rail-over-text.png`). The rail here is the real
+/// [`cmdrail::lay_out`] of a real ledger, and the grid is the one function every
+/// seat-to-grid site asks. The reserve is the resting band's width
+/// ([`cmdrail::Rail::bounds`]), not the hot crest's (owner, 2026-09-23). It is
+/// also no wider than it has to be: one more column would cross the band.
+///
+/// MUTATION: return `metrics.grid_for_pixels(body.width, body.height)`
+/// unconditionally from `cmdrail::terminal_grid_for` — red at the narrow width
+/// (and at every other: the resting tick always overlapped the old last column).
+#[test]
+fn a_rail_never_covers_the_last_text_column() {
+    let leaf = leaf_saying(RAIL_FAILED_THEN_PROMPT);
+    let stack = cmdrail::commands(leaf.session.command_marks());
+    assert!(
+        stack
+            .entries
+            .iter()
+            .any(|entry| entry.signal == cmdrail::Signal::Fail),
+        "the fixture must hold the failed command whose rose tick the report saw"
+    );
+    let mut fonts = bt_render::preview_measure_font_system();
+    for scale in RAIL_SCALES {
+        let metrics = bt_render::CellMetrics::measure(&mut fonts, scale).unwrap();
+        for logical in RAIL_LOGICAL_WIDTHS {
+            let body = rail_test_body(logical, scale);
+            let edges = [
+                body.x as f32,
+                body.y as f32,
+                (body.x + body.width) as f32,
+                (body.y + body.height) as f32,
+            ];
+            let rail = cmdrail::lay_out(edges, &stack, scale as f32, None);
+            assert!(!rail.ticks.is_empty(), "a ledger with marks draws a rail");
+            let grid = cmdrail::terminal_grid_for(&metrics, body, true);
+            let columns = f32::from(grid.columns.get());
+            let text_right = edges[0] + metrics.padding_px + columns * metrics.cell_width_px;
+            assert!(
+                text_right <= rail.bounds[0],
+                "{logical} logical px at {scale}x: the last column ends at {text_right}, \
+                 the rail's resting band starts at {}",
+                rail.bounds[0]
+            );
+            for tick in &rail.ticks {
+                assert!(
+                    tick.rect[0] >= text_right,
+                    "{logical} logical px at {scale}x: a tick starts at {} inside the text",
+                    tick.rect[0]
+                );
+            }
+            assert!(
+                text_right + metrics.cell_width_px > rail.bounds[0],
+                "{logical} logical px at {scale}x: the reserve took a column the band \
+                 does not stand on"
+            );
+        }
+    }
+}
+
+/// PIN (ticket 32) — **a pane with no rail keeps exactly the grid it always had.**
+///
+/// `cmd.exe` without its prompt marks, a WSL shell without the init file and a
+/// program run bare never send a mark, and the ruling changes nothing for them:
+/// the same columns and rows [`bt_render::CellMetrics::grid_for_pixels`] gives the
+/// rectangle, at every width and scale the rail test uses.
+///
+/// MUTATION: reserve the band whatever `has_rail` says — red at every width.
+#[test]
+fn without_a_rail_the_grid_is_unchanged() {
+    let mut fonts = bt_render::preview_measure_font_system();
+    for scale in RAIL_SCALES {
+        let metrics = bt_render::CellMetrics::measure(&mut fonts, scale).unwrap();
+        for logical in RAIL_LOGICAL_WIDTHS {
+            let body = rail_test_body(logical, scale);
+            assert_eq!(
+                cmdrail::terminal_grid_for(&metrics, body, false),
+                metrics.grid_for_pixels(body.width, body.height),
+                "{logical} logical px at {scale}x"
+            );
+        }
+    }
+}
+
+/// RED (ticket 32) — **the first mark reserves the rail's room once, and the
+/// alternate screen keeps it.**
+///
+/// A width that followed the per-frame rail would resize the shell whenever a
+/// mark arrived and whenever `vim` entered or left the alternate screen, where
+/// [`cmdrail::host_rect`] hides the rail — a reflow of the TUI because it
+/// started. So `LeafSession::has_rail` turns on at the ledger's first mark and
+/// never turns back: a leaf fed its first `OSC 133` schedules exactly one grid
+/// change, and entering and leaving the alternate screen afterwards schedule
+/// none. Driven through the real session, the real `hear_first_mark` the drain
+/// asks and the real `schedule_leaf_grid_change` every solve goes through.
+///
+/// MUTATION: make `LeafSession::grid_for` pass
+/// `self.has_rail && !self.session.terminal_modes().alternate_screen` — red at
+/// the alternate screen's entry; or drop `leaf.hear_first_mark()` from
+/// `drain_leaf_pty` — red on the pin at the end.
+#[test]
+fn the_first_mark_reserves_the_room_once_and_the_alternate_screen_keeps_it() {
+    let mut fonts = bt_render::preview_measure_font_system();
+    let metrics = bt_render::CellMetrics::measure(&mut fonts, 1.0).unwrap();
+    let body = rail_test_body(797, 1.0);
+    let physical = PhysicalSize::new(body.width, body.height);
+    let unreserved = metrics.grid_for_pixels(body.width, body.height);
+    let mut leaf = leaf_saying("");
+    let mut heard = 0;
+    let mut step = |leaf: &mut LeafSession, bytes: &str| -> bool {
+        leaf.session
+            .feed(bytes.as_bytes())
+            .expect("feed the shell's bytes");
+        if leaf.hear_first_mark() {
+            heard += 1;
+        }
+        let next = leaf.grid_for(&metrics, body);
+        schedule_leaf_grid_change(
+            leaf,
+            next,
+            physical,
+            Instant::now(),
+            LeafOnStage::Shown,
+            "ticket 32",
+            card_trace::Pane::untraced(),
+        )
+        .unwrap()
+    };
+    // Born into the pane at the grid it has always had.
+    step(&mut leaf, "");
+    assert_eq!(leaf.grid, unreserved);
+    assert!(
+        !step(&mut leaf, "a banner, before any prompt\r\n"),
+        "output without a mark is not a rail"
+    );
+    assert!(
+        step(&mut leaf, RAIL_FAILED_THEN_PROMPT),
+        "the first mark makes room for the rail"
+    );
+    let reserved = leaf.grid;
+    assert!(reserved.columns < unreserved.columns);
+    assert!(
+        !step(
+            &mut leaf,
+            "\u{1b}]133;C\u{7}ok\r\n\u{1b}]133;D;0\u{7}\u{1b}]133;A\u{7}PS> "
+        ),
+        "later marks change nothing"
+    );
+    assert!(
+        !step(&mut leaf, "\u{1b}[?1049hthe editor's canvas"),
+        "entering the alternate screen keeps the room"
+    );
+    assert!(
+        leaf.session.terminal_modes().alternate_screen,
+        "the fixture really is on the alternate screen"
+    );
+    assert!(
+        !step(&mut leaf, "\u{1b}[?1049l"),
+        "leaving it keeps the room too"
+    );
+    assert_eq!(leaf.grid, reserved);
+    assert_eq!(heard, 1, "the first mark is heard once per pane lifetime");
+
+    // And the drain is where it is heard, and a heard mark is carried by a solve.
+    assert!(
+        squeezed(free_fn_body("drain_leaf_pty")).contains("letrail_began=leaf.hear_first_mark();"),
+        "every leaf's bytes pass the drain, so the drain is the fact's one owner"
+    );
+    assert!(
+        squeezed_body("Runtime", "drain_pty")
+            .contains("ifrail_began{self.resize_leaves_to_layout("),
+        "a pane that earned its rail is re-solved on the same turn"
+    );
+}
+
+/// RED (ticket 32) — **every seat-to-grid site asks the one function.**
+///
+/// Four places turn a seat rectangle into a grid — a leaf's birth, the panes on
+/// screen, the focused pane and every hidden tab's panes. Each used to call
+/// `grid_for_pixels` itself, which is how a rule about the rail could have been
+/// honoured at three of them and forgotten at the fourth. Read through
+/// `bt_source`, product files only, comments masked.
+///
+/// MUTATION: put back one raw `renderer.metrics().grid_for_pixels(...)` at any of
+/// the four sites — red.
+#[test]
+fn every_seat_to_grid_site_asks_the_one_function() {
+    let calls = found(needle!(Pattern::call("grid_for_pixels")), View::Identifiers)
+        .in_the_product(source());
+    let owners: Vec<String> = calls
+        .owners(source())
+        .into_iter()
+        .map(|(identity, count)| format!("{}×{count}", identity.name))
+        .collect();
+    assert_eq!(
+        owners,
+        vec!["terminal_grid_for×2".to_owned()],
+        "{}",
+        calls.report(source())
+    );
+    assert_eq!(calls.outside_items(source()), 0);
 }
 
 // ── the multi-line paste card (0.4.4 ticket 02) ─────────────────────────────
