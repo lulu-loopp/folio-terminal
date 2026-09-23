@@ -152,7 +152,10 @@ status bar. Developer tools are on, because the head carries a verb for them.
 
 All of that is applied in the same step that installs the four refusal surfaces,
 before anything navigates, and every call in it propagates its failure — including
-the cast to the settings interface the two autofill switches live on. A runtime
+the cast to the settings interface the two autofill switches live on. The colour
+scheme a page is told to prefer (`prefers-color-scheme`, the profile's
+`PreferredColorScheme`) is set in that same step; it is a preference the page may
+ignore, and nothing is injected into a page to force one. A runtime
 too old to answer it is a preview that does not open, not a preview that opens
 with a form-filling profile nobody asked for.
 

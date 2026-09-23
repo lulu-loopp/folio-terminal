@@ -12,12 +12,13 @@
 //! them to one set, because `bt-app` names `WebHost` with no `cfg` and no
 //! compiler on one machine can check more than one of them.
 
+use std::cell::Cell;
 use std::path::Path;
 
 use super::{
     NativeWindow, PageVisual, RehostCompensation, RehostOutcome, RehostSide, RehostStep, WebChord,
-    WebDpiOwnership, WebEvent, WebInstallReport, WebMouseEvent, WebNavigationVerdict,
-    WebRequestVerdict,
+    WebColorScheme, WebDpiOwnership, WebEvent, WebInstallReport, WebMouseEvent,
+    WebNavigationVerdict, WebRequestVerdict,
 };
 use crate::Compositor;
 
@@ -50,6 +51,9 @@ pub struct WebHost {
         reason = "the macOS arm wakes the loop when a delegate answers"
     )]
     wake: Box<dyn Fn()>,
+    /// The colour scheme the seat said its pages prefer — kept, like the other two arms keep
+    /// it, so that the seat's own record of what it said reads the same on every machine.
+    color_scheme: Cell<Option<WebColorScheme>>,
 }
 
 impl WebHost {
@@ -65,7 +69,21 @@ impl WebHost {
             gate,
             request_gate,
             wake,
+            color_scheme: Cell::new(None),
         }
+    }
+
+    /// Which colour scheme this seat's pages prefer. Remembered and told to nobody: there is no
+    /// page here to prefer anything.
+    pub fn set_color_scheme(&self, scheme: WebColorScheme) -> Result<(), String> {
+        self.color_scheme.set(Some(scheme));
+        Ok(())
+    }
+
+    /// The scheme this host was last told, `None` before it was told one.
+    #[must_use]
+    pub fn color_scheme(&self) -> Option<WebColorScheme> {
+        self.color_scheme.get()
     }
 
     /// Everything the engine has said since the last drain. Nothing, ever —

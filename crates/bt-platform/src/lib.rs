@@ -1027,6 +1027,69 @@ mod web_security_tests {
             .collect()
     }
 
+    /// The whitespace-free text of `source` from `open` up to the first `close` after it.
+    fn between<'a>(source: &'a str, open: &str, close: &str) -> &'a str {
+        let at = source
+            .find(open)
+            .unwrap_or_else(|| panic!("`{open}` is in webview.rs"));
+        let body = &source[at + open.len()..];
+        &body[..body
+            .find(close)
+            .unwrap_or_else(|| panic!("`{close}` follows `{open}`"))]
+    }
+
+    /// RED (0.4.4 ticket 09) — **the colour scheme a page prefers is said in the same step as the
+    /// engine's other settings, before anything navigates, and a failure to say it is that step's
+    /// failure.**
+    ///
+    /// `SECURITY.md` ("The web preview") promises that every engine setting is applied in the one
+    /// step that runs before the first navigation, and that every call in it propagates its
+    /// failure. The preferred colour scheme joins that step rather than arriving after the first
+    /// page is up, which would be a flash of the operating system's scheme on every seat that
+    /// opens; and its three calls — the cast to the interface that carries the profile, the
+    /// profile itself, the setter — each name themselves in the error rather than being dropped.
+    /// The order of `Configure` before any navigation is `INSTALL_SEQUENCE`'s and `bt_app`'s
+    /// `nothing_navigates_before_every_handler_is_on`; this pins that the scheme is in it.
+    ///
+    /// MUTATION: move the `apply_color_scheme` call out of `configure`, or write `let _ =` in
+    /// front of any of its three calls, and this fails.
+    #[test]
+    fn the_preferred_colour_scheme_is_said_before_the_first_navigation_and_its_failure_is_the_steps()
+     {
+        let source = source();
+        let configure = between(
+            &source,
+            "fnconfigure(&self)->Result<Vec<WebSetting>,String>{",
+            "fnattach_events(",
+        );
+        assert!(
+            configure.contains(
+                "ifletSome(scheme)=self.color_scheme.get(){apply_color_scheme(webview,scheme)?;}"
+            ),
+            "the scheme is applied inside the configure step and its failure fails it"
+        );
+        let apply = between(
+            &source,
+            "fnapply_color_scheme(webview:&ICoreWebView2,scheme:WebColorScheme)->Result<(),String>{",
+            "fnpreferred_color_scheme(",
+        );
+        for call in [
+            "failure(\"ICoreWebView2_13\",&error))?",
+            "failure(\"ICoreWebView2_13::Profile\",&error))?",
+            "failure(\"SetPreferredColorScheme\",&error))",
+        ] {
+            assert!(apply.contains(call), "`{call}` propagates: {apply}");
+        }
+        assert!(
+            !apply.contains("let_="),
+            "nothing in the step is dropped: {apply}"
+        );
+        assert!(
+            super::INSTALL_SEQUENCE.contains(&super::InstallStep::Configure),
+            "and the step is one install walks"
+        );
+    }
+
     /// The bridge is shut in both directions, and permission requests are
     /// refused before anybody is asked.
     #[test]
@@ -3306,7 +3369,7 @@ mod webview;
 
 pub use webview::{
     INSTALL_SEQUENCE, InstallRollback, InstallStep, REHOST_SEQUENCE, RehostCompensation,
-    RehostOutcome, RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord,
+    RehostOutcome, RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebColorScheme,
     WebDpiOwnership, WebEvent, WebGuards, WebHost, WebInstallReport, WebKey, WebMouseEvent,
     WebNavigationVerdict, WebRequestVerdict, WebSetting, WebSettingRule, forget_web_environment,
     install_rollback, rehost_compensation, web_mouse_buttons, webview2_runtime_version,

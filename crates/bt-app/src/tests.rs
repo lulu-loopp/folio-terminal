@@ -30666,6 +30666,40 @@ fn a_theme_flip_asks_every_markdown_page_to_lay_out_again() {
     assert!(body.contains("cache.clear();"));
 }
 
+/// RED (0.4.4 ticket 09) — **every palette change tells this window's web pages their colour
+/// scheme, the `Web pages` row goes through that same door, and a page is told at birth.**
+///
+/// `webhost::color_scheme_tests` holds the rule and the walk over a window's seats; this holds
+/// the three places the window reaches them. `adopt_new_palette` is the one function every theme
+/// flip, scheme swap and contrast floor goes through in every window (`adopt_application_change`
+/// runs it on the others), so a page told from there cannot be left behind by any of them.
+///
+/// MUTATION: delete the `tell_web_pages_their_color_scheme` call from `adopt_new_palette`, or
+/// open a seat without `web_color_scheme_in_force`, and this goes red.
+#[test]
+fn a_theme_flip_tells_every_web_page_its_colour_scheme() {
+    let adopt = method_body("Runtime", "adopt_new_palette");
+    assert!(
+        adopt.contains("self.tell_web_pages_their_color_scheme();"),
+        "a palette change reaches the pages: {adopt}"
+    );
+    let row = method_body("Runtime", "apply_web_color_scheme");
+    assert!(
+        row.contains("self.adopt_new_palette()?;"),
+        "the row takes the palette's door: {row}"
+    );
+    let open = method_body("Runtime", "open_web_page_on");
+    assert!(
+        open.contains("self.web_color_scheme_in_force(),"),
+        "a seat is told before its engine is asked for: {open}"
+    );
+    let tell = method_body("Runtime", "tell_web_pages_their_color_scheme");
+    assert!(
+        tell.contains("tell_every_seat_its_color_scheme(self.window.web.values_mut(), scheme)"),
+        "every seat of the window, every tab: {tell}"
+    );
+}
+
 /// **What a picture copies is `![alt](src)`** (§7.1.3k ④), and a selection
 /// passes over it whole.
 ///

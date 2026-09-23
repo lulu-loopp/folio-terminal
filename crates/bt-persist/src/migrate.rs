@@ -73,6 +73,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (34, migrate_settings_v34_to_v35),
     (35, migrate_settings_v35_to_v36),
     (36, migrate_settings_v36_to_v37),
+    (37, migrate_settings_v37_to_v38),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -847,6 +848,20 @@ fn migrate_settings_v36_to_v37(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(37));
         object.insert("multiline_paste_ask".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v37 -> v38: which colour scheme a web pane asks its page for, defaulted to **Folio's own theme**
+/// (owner's ruling 2026-09-21, 0.4.4 ticket 09).
+///
+/// [`migrate_settings_v7_to_v8`]'s one-key shape. `FollowTheme` is the ruling itself: no earlier
+/// build told a page anything, and the owner ruled that a page follows the window it is in. No
+/// sibling is read or rewritten.
+fn migrate_settings_v37_to_v38(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(38));
+        object.insert("web_color_scheme".to_owned(), Value::from("FollowTheme"));
     }
     value
 }
@@ -2840,6 +2855,74 @@ mod tests {
         let absent: crate::SettingsV1 =
             serde_json::from_value(written).expect("this key has a default");
         assert!(absent.multiline_paste_ask);
+    }
+
+    /// RED (0.4.4 ticket 09) — **the v37 -> v38 step adds the web pane's colour-scheme key, on
+    /// Folio's own theme, and leaves every sibling exactly as it found it.**
+    ///
+    /// One key on its own day, like every rung since v7. A step that rewrote a neighbour would be
+    /// answering a question on the reader's behalf the ruling never asked — `theme_mode` above all,
+    /// which this key reads and must never write — and a step that forgot the version line would
+    /// leave the ladder on this rung forever.
+    ///
+    /// MUTATION: write `"Light"` in `migrate_settings_v37_to_v38` — the first assertion goes red;
+    /// drop its `schema_version` line — the second does.
+    #[test]
+    fn migrate_settings_v37_to_v38_adds_one_key_and_leaves_every_sibling_alone() {
+        let before = json!({
+            "schema_version": 37,
+            "theme_mode": "Dark",
+            "minimum_contrast": "Ratio3",
+            "multiline_paste_ask": false,
+            "search_engine": "Bing"
+        });
+        let migrated = migrate_value(before.clone(), 37, 38, SETTINGS_MIGRATIONS).unwrap();
+        assert_eq!(
+            migrated["web_color_scheme"],
+            json!("FollowTheme"),
+            "the owner ruled that a page follows Folio's theme"
+        );
+        assert_eq!(migrated["schema_version"], json!(38));
+        let (before, after) = (
+            before.as_object().expect("an object"),
+            migrated.as_object().expect("an object"),
+        );
+        assert_eq!(after.len(), before.len() + 1, "exactly one key is added");
+        for (key, value) in before {
+            if key != "schema_version" {
+                assert_eq!(&after[key], value, "`{key}` was rewritten by the step");
+            }
+        }
+
+        // And the spelling the step writes is the enum's own: a whole v37 document, walked up
+        // the rung, reads back as `FollowTheme` — while a v38 document that omits the line means
+        // the same thing.
+        let mut whole = serde_json::to_value(crate::SettingsV1::default()).expect("serialises");
+        let object = whole
+            .as_object_mut()
+            .expect("a settings document is an object");
+        object.remove("web_color_scheme");
+        object.insert("schema_version".to_owned(), json!(37));
+        let walked = migrate_value(whole, 37, 38, SETTINGS_MIGRATIONS).unwrap();
+        let read: crate::SettingsV1 =
+            serde_json::from_value(walked).expect("the migrated document deserialises");
+        assert_eq!(read.web_color_scheme, crate::WebColorSchemeV1::FollowTheme);
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            web_color_scheme: crate::WebColorSchemeV1::Dark,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        assert_eq!(written["web_color_scheme"], json!("Dark"));
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("web_color_scheme");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert_eq!(
+            absent.web_color_scheme,
+            crate::WebColorSchemeV1::FollowTheme
+        );
     }
 
     #[test]

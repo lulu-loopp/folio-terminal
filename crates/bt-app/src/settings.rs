@@ -35,7 +35,7 @@
 
 use bt_persist::{
     BackgroundFitV1, LanguageV1, LaunchOpensV1, MinimumContrastV1, SearchEngineV1,
-    SplitDirectionV1, ThemeModeV1,
+    SplitDirectionV1, ThemeModeV1, WebColorSchemeV1,
 };
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
@@ -1316,6 +1316,24 @@ pub const MINIMUM_CONTRAST_OPTIONS: [MinimumContrastV1; 4] = [
 /// through the i18n table ([`Text::OptionOff`]), the other three are quantities and do not.
 /// A contrast ratio is written `4.5:1` in every language this dialog speaks.
 const MINIMUM_CONTRAST_LABELS: [&str; MINIMUM_CONTRAST_OPTIONS.len()] = ["", "2:1", "3:1", "4.5:1"];
+
+/// What the `Web pages` picker offers (0.4.4 ticket 09) — the shipped answer first, then the two
+/// that pin one, in the theme row's own order.
+pub const WEB_COLOR_SCHEME_OPTIONS: [WebColorSchemeV1; 3] = [
+    WebColorSchemeV1::FollowTheme,
+    WebColorSchemeV1::Light,
+    WebColorSchemeV1::Dark,
+];
+
+/// The words those three wear: the theme row's own `Light` and `Dark`, so one pair of words means
+/// one pair of things across the page.
+fn web_color_scheme_label(scheme: WebColorSchemeV1) -> &'static str {
+    match scheme {
+        WebColorSchemeV1::FollowTheme => Text::OptionFollowTheme.text(),
+        WebColorSchemeV1::Light => Text::OptionLight.text(),
+        WebColorSchemeV1::Dark => Text::OptionDark.text(),
+    }
+}
 
 /// What the profile editor's `Starting directory` picker offers (§7.1.6c-6b).
 ///
@@ -3333,6 +3351,14 @@ pub enum SettingsRow {
     /// where they are: this is a repair applied *to* a scheme, so it reads after the row that
     /// picks one, not before it.
     MinimumContrast,
+    /// **Which colour scheme a web pane asks its page for** (0.4.4 ticket 09, owner's ruling
+    /// 2026-09-21: 「加设置项 跟随主题/总是浅色/总是深色」) — a picker with three items.
+    ///
+    /// Under `Appearance ▸ Advanced`, directly under `Minimum contrast`: both are about how the
+    /// window's light or dark reaches content that is not the window's own — a program's colours
+    /// there, a site's style here — and a reader who has not gone looking for either is served by
+    /// the shipped answer, which follows the theme.
+    WebPages,
     /// Mock-up 2464-2474, the Startup group's only row — and the first picker in
     /// this dialog whose items carry a mark (7645-7648).
     ///
@@ -3676,6 +3702,7 @@ impl SettingsRow {
             | Self::Sidebar
             | Self::SplitDirection
             | Self::MinimumContrast
+            | Self::WebPages
             | Self::TerminalFont
             | Self::TerminalCjkFont
             | Self::FontSize
@@ -3892,6 +3919,7 @@ impl SettingsRow {
             Self::SearchEngine => Text::RowSearchEngine.text(),
             Self::LaunchOpens => Text::RowLaunchOpens.text(),
             Self::MinimumContrast => Text::RowMinimumContrast.text(),
+            Self::WebPages => Text::RowWebPages.text(),
             // Mock-up 2467.
             Self::DefaultProfile => Text::RowDefaultProfile.text(),
             Self::Language => Text::RowLanguage.text(),
@@ -4110,6 +4138,7 @@ impl SettingsRow {
             Self::SearchEngine => Text::DescSearchEngine.text(),
             Self::LaunchOpens => Text::DescLaunchOpens.text(),
             Self::MinimumContrast => Text::DescMinimumContrast.text(),
+            Self::WebPages => Text::DescWebPages.text(),
             // Mock-up 2468, word for word. It is also the *scope* of the setting
             // and the reason `profiles::index_of_id` does not read it: a tab and
             // a launch are the two things it answers for, and a pane coming back
@@ -4336,7 +4365,9 @@ impl SettingsRow {
             // Which way an untold split cuts.
             | Self::SplitDirection
             // The one row that overrides a colour a program named.
-            | Self::MinimumContrast => true,
+            | Self::MinimumContrast
+            // And what a site is asked for, which the shipped answer already makes right.
+            | Self::WebPages => true,
             Self::Theme
             | Self::LightScheme
             | Self::DarkScheme
@@ -4568,6 +4599,7 @@ impl SettingsRow {
             Self::SearchEngine => SEARCH_ENGINE_OPTIONS.len(),
             Self::LaunchOpens => LAUNCH_OPENS_OPTIONS.len(),
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS.len(),
+            Self::WebPages => WEB_COLOR_SCHEME_OPTIONS.len(),
             Self::Language => LANGUAGE_OPTIONS.len(),
             // The picker is built from the same list the `˅` menu is built from
             // (mock-up 7645: "the default-profile picker is built from the same
@@ -4708,6 +4740,10 @@ impl SettingsRow {
                     MINIMUM_CONTRAST_LABELS[index]
                 }
             }),
+            Self::WebPages => WEB_COLOR_SCHEME_OPTIONS
+                .get(index)
+                .copied()
+                .map(web_color_scheme_label),
             Self::Language => LANGUAGE_OPTIONS.get(index).copied().map(language_label),
             Self::DefaultProfile => (index < profiles::count()).then(|| profiles::title(index)),
             Self::BackgroundImage => IMAGE_SOURCE_OPTIONS
@@ -5178,6 +5214,9 @@ impl SettingsRow {
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS
                 .iter()
                 .position(|it| *it == values.minimum_contrast),
+            Self::WebPages => WEB_COLOR_SCHEME_OPTIONS
+                .iter()
+                .position(|it| *it == values.web_color_scheme),
             Self::Language => LANGUAGE_OPTIONS
                 .iter()
                 .position(|it| *it == values.language),
@@ -5598,6 +5637,9 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::AlwaysOnTop);
     rows.push(SettingsRow::SplitDirection);
     rows.push(SettingsRow::MinimumContrast);
+    // **Directly under it** (0.4.4 ticket 09): the row above says how the window's light or dark
+    // reaches a program's colours, this one how it reaches a site's.
+    rows.push(SettingsRow::WebPages);
     // ── the other three pages, none of which has an advanced row ──
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
@@ -6180,6 +6222,8 @@ pub struct SettingsValues {
     pub launch_opens: LaunchOpensV1,
     /// The floor a cell's ink is held to against its own paper (DESIGN §2.6).
     pub minimum_contrast: MinimumContrastV1,
+    /// Which colour scheme a web pane asks its page for (0.4.4 ticket 09).
+    pub web_color_scheme: WebColorSchemeV1,
     /// Which language the window writes in — **the stored mode**, not the
     /// resolved language.
     ///
@@ -6383,6 +6427,7 @@ impl SettingsValues {
             search_engine: SearchEngineV1::DuckDuckGo,
             launch_opens: LaunchOpensV1::NewWindow,
             minimum_contrast: MinimumContrastV1::Off,
+            web_color_scheme: WebColorSchemeV1::FollowTheme,
             language: LanguageV1::System,
             default_profile: profiles::fallback_profile(),
             terminal_font: 0,
@@ -9597,6 +9642,18 @@ pub fn launch_opens_requested(target: SettingsTarget) -> Option<LaunchOpensV1> {
     match target {
         SettingsTarget::Choice(SettingsRow::LaunchOpens, index) => {
             LAUNCH_OPENS_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The colour scheme a press on the `Web pages` picker asks for, if it asks at all (0.4.4 ticket
+/// 09).
+#[must_use]
+pub fn web_color_scheme_requested(target: SettingsTarget) -> Option<WebColorSchemeV1> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::WebPages, index) => {
+            WEB_COLOR_SCHEME_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -19671,9 +19728,13 @@ mod tests {
                 // the dialog that overrides a colour a program named — which is
                 // the argument for it being under a disclosure rather than beside
                 // the scheme pair it repairs.
-                SettingsRow::MinimumContrast
+                SettingsRow::MinimumContrast,
+                // 0.4.4 ticket 09: directly under it — how the window's light or dark
+                // reaches a site's style, as the row above says how it reaches a program's
+                // colours.
+                SettingsRow::WebPages
             ],
-            "the group the 2026-08-18 ruling leaves standing, plus the contrast floor"
+            "the group the 2026-08-18 ruling leaves standing, plus the contrast floor and the              web pages' scheme"
         );
         // **`Sidebar` came back out** (user ruling 2026-08-18). It is an
         // everyday row again and it is back where it was born — directly under
@@ -26457,6 +26518,7 @@ mod tests {
                 SettingsRow::AlwaysOnTop,
                 SettingsRow::SplitDirection,
                 SettingsRow::MinimumContrast,
+                SettingsRow::WebPages,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
                 SettingsRow::RepairRowBreaks,
@@ -26532,6 +26594,7 @@ mod tests {
                 SettingsRow::AlwaysOnTop,
                 SettingsRow::SplitDirection,
                 SettingsRow::MinimumContrast,
+                SettingsRow::WebPages,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
                 SettingsRow::RepairRowBreaks,

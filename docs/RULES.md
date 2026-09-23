@@ -769,6 +769,11 @@ Entries: §7.7 through §7.16, the W-series (the web seat's shape, the host and 
 input, a page as a preview buffer, a local file as a page, the card, naming by
 pane, the site's own icon, the floor, the hole); §7.14 (both of them); §13.29
 *`WKWebView` host*. §7.35 carries the teardown rule and is folded in row 43.
+2026-09-23 *a web pane asks its page for Folio's light or dark* (0.4.4 ticket 09):
+the page is told `prefers-color-scheme` — WebView2's profile `PreferredColorScheme`,
+WKWebView's own `appearance` — from Settings ▸ Appearance ▸ *Web pages* (`Theme`
+by default, or `Light` / `Dark`), in the install step before the first navigation and
+again on every theme or setting change; nothing else about a page is changed.
 
 ### 50. The video engine — `not yet folded`
 Entries: §7.23 *video has a face: the first frame comes from the platform decoder,
@@ -864,13 +869,21 @@ used to answer two ways:
 - **Every head title is 11** (2026-09-22). The pane head's 11.5
   (`SEAT_TITLE_FONT_LOGICAL_PX`) is a deviation to 11, the float and glance heads'
   `HEAD_TITLE_FONT_LOGICAL_PX`; 11.5 is not on the type ladder.
+- **A site's icon that would vanish into its ground stands on a plate** (2026-09-21,
+  colour 2026-09-23). Where a site icon's luminance (measured once, when it is
+  learned) and the ground it is drawn on are under 3:1 — WCAG 2.1 SC 1.4.11,
+  `marks::SITE_ICON_CONTRAST_MINIMUM` — it is drawn on a circle of its own box, no
+  border, no shadow, in `--panel` (`ChromePalette::title_bar`): "the theme's
+  card-surface tone (the token one step off the head's), the same token in both
+  themes; never pure white". The ground is whatever the frame laid under that box.
 **From.** trailing entry 2026-09-22 *The current UI gets its written
 specification*; `docs/UI-UX.md` §二 (accent is attention, not position), §六 (the
 divider drag); §7.28 *the small tags floating over the text wear one outfit: one
 face, one hairline, one legible ink*; §7.18 *the icon system: one verb table, one
 slot table, one optical gate*; §7.18 *motion tokens: three steps, one travel
 distance, two curves, and a register that forbids a fourth* (two entries share
-the number).
+the number); 2026-09-23 *a web pane asks its page for Folio's light or dark, and a
+site's icon without contrast stands on a plate*.
 **Overrides.** The two redesign proposals of 2026-09-22 were declined; nothing of
 them is a rule. The motion entry's "two curves" predates `GRAB_EASE`; the code's
 three are the rule.

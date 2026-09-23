@@ -49,6 +49,10 @@ impl Runtime<'_> {
         // behind on a theme flip, which is the whole reason the brush's own
         // hot-swap was written here in §7.1.6c-4b.
         install_page_ground_color(&self.window.compositor);
+        // **And what every page in it is told to prefer** (0.4.4 ticket 09): a page's
+        // `prefers-color-scheme` follows the same ground, so a theme flip that left it behind
+        // would be a light site in a dark window — the picture the ruling of 2026-09-21 was about.
+        self.tell_web_pages_their_color_scheme();
         self.sync_math_layout_key();
         // The one thing a rail's key cannot see. A palette is not a fact about a
         // pane, so [`cmdrail::RailKey`] does not carry one — which means a rail

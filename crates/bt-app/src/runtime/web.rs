@@ -832,6 +832,9 @@ impl Runtime<'_> {
             // right: a page opened on the second display lays itself out before
             // anything else happens to it.
             self.window.renderer.metrics().scale_factor,
+            // **And the colour scheme its pages prefer, at birth** (0.4.4 ticket 09), for the
+            // scale's reason: the engine is told it before its first page lays out.
+            self.web_color_scheme_in_force(),
             Box::new(move || {
                 let _ = proxy.send_event(AppEvent::WebPageSpoke);
             }),
@@ -896,6 +899,34 @@ impl Runtime<'_> {
             Err(error) => eprintln!("BT_WEB {error}"),
         }
         Ok(())
+    }
+
+    /// **The colour scheme a page in this window prefers, right now** — the `Web pages` row read
+    /// against the ground in force (0.4.4 ticket 09).
+    ///
+    /// The ground and not the theme's name, at the one threshold the whole product takes its
+    /// light-or-dark decision at, so a page and the window it stands in answer the question the
+    /// same way — `dwm_dark_mode_owed` asks exactly this of the same colour.
+    pub(crate) fn web_color_scheme_in_force(&self) -> bt_platform::WebColorScheme {
+        webhost::web_color_scheme(
+            self.app.settings_store.loaded().web_color_scheme,
+            !bt_render::background_is_light(bt_render::background_rgb()),
+        )
+    }
+
+    /// **Tell every page in this window which colour scheme it prefers** (0.4.4 ticket 09).
+    ///
+    /// Asked by [`Self::adopt_new_palette`], which every window runs for every palette change and
+    /// for the `Web pages` row, so no door that moves the answer can leave a page behind. A seat
+    /// already holding the answer is not told again — see
+    /// [`webhost::tell_every_seat_its_color_scheme`].
+    pub(crate) fn tell_web_pages_their_color_scheme(&mut self) {
+        let scheme = self.web_color_scheme_in_force();
+        let (_, failure) =
+            webhost::tell_every_seat_its_color_scheme(self.window.web.values_mut(), scheme);
+        if let Some(error) = failure {
+            eprintln!("BT_WEB {error}");
+        }
     }
 
     /// **Every page a restored tab was on, put back on the engine** (`plan.md`
