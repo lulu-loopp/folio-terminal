@@ -333,13 +333,15 @@ impl LocalFileUrl {
     }
 
     /// **Whether this URL names something inside the folder `minted` sits in** —
-    /// the whole of a local seat's reach.
+    /// the read access a Mac load grants a local page.
     ///
-    /// The folder and the folders under it, because that is what a document is:
-    /// a report and its `images/` directory are one thing a person opened, and a
-    /// rule that admitted only the exact file would show them a report with no
-    /// pictures in it. The comparison is against the folder **plus its
-    /// separator**, so `D:\tmp\page` does not admit `D:\tmp\pageant\x.png`.
+    /// The folder and the folders under it, which is what Safari lets a
+    /// `file://` page read (measured on Safari 26.6.2 for ticket 0.4.4-13) and
+    /// what `loadFileURL:allowingReadAccessToURL:` is handed. It is the
+    /// engine's bound and not a rule of this file's: [`resource_request`] no
+    /// longer asks it, and `the_two_spellings_of_the_resource_rule_agree`
+    /// models the Mac load with it. The comparison is against the folder
+    /// **plus its separator**, so `D:\tmp\page` does not admit `D:\tmp\pageant\x.png`.
     #[must_use]
     pub fn is_inside_the_folder_of(&self, minted: &Self) -> bool {
         let minted = minted.path.as_os_str().as_encoded_bytes();
@@ -702,17 +704,22 @@ pub fn navigation_starting(candidate: &str, mint: &Mint) -> Decision {
 /// `<iframe src="file:///C:/Users/…">` and the engine would fetch it, because
 /// the only rule in this file ran on the address bar's question.
 ///
-/// # A seat is opened on one thing, and that is what it may read
+/// # A local page is a page a browser opened from the disk
 ///
-/// The mint says which. A seat opened on a local file may read **that file's
-/// own folder and the folders under it**, and nothing else on the disk: not a
-/// sibling folder, not another drive, and not a share — the product's UNC
-/// refusal (DESIGN §7.1.3) reaches this door in the same words it reaches the
-/// others. It may not reach the network either: a local page is a document
-/// somebody opened out of the files column, and a stylesheet it pulls from a
-/// server is that document telling somebody it was opened. A browsing seat is
-/// the mirror image — the network is what it is for, and the disk is what it
-/// may not touch.
+/// The mint says what the seat was opened on. A seat opened on a local file
+/// answers as a browser answers a `file://` page (owner's rulings of
+/// 2026-09-21 and 2026-09-23, ticket 0.4.4-13): it **reaches the network**,
+/// because a report that pulls its stylesheet, its chart library or its font
+/// from a server is a report that renders, and every `file:` request it
+/// makes on this machine is **handed to the engine**, which answers it with
+/// its own browser rule. That rule is the whole of the local reach, and Folio
+/// adds nothing to it: Chromium loads every local file the markup names and
+/// fails a page script's `fetch` or `XMLHttpRequest` of one; Safari does the
+/// same inside the page's folder (the Mac load's read access) — all measured.
+/// A share is still refused here — it is another machine, and the product's
+/// UNC refusal (DESIGN §7.1.3) reaches this door in the same words it reaches
+/// the others. A browsing seat may touch no `file:` at all, and the host's own
+/// blank page fetches nothing.
 ///
 /// # The three schemes that are neither
 ///
@@ -772,26 +779,21 @@ pub fn resource_request(candidate: &str, mint: &Mint) -> Decision {
     }
     if scheme == DISK {
         return match mint {
-            Mint::File(minted)
-                if LocalFileUrl::parse(trimmed)
-                    .is_some_and(|candidate| candidate.is_inside_the_folder_of(minted)) =>
-            {
-                Decision::Navigate(trimmed.to_owned())
-            }
             // A `file:` URL that names a host is a share, and it is refused
-            // under the name the rest of the product refuses shares by — even
-            // on a seat that has no local file at all, where the answer would
-            // otherwise be the blander `FileScheme`.
+            // under the name the rest of the product refuses shares by — on
+            // every seat.
             _ if names_a_file_host(trimmed) => Decision::Refuse(Refusal::NetworkPath),
-            _ => Decision::Refuse(Refusal::FileScheme),
+            // The engine's own rule decides the rest (owner, 2026-09-23).
+            Mint::File(_) => Decision::Navigate(trimmed.to_owned()),
+            Mint::Nothing | Mint::Blank => Decision::Refuse(Refusal::FileScheme),
         };
     }
     if NETWORK.contains(&scheme) {
         return match mint {
-            // Nothing minted is an ordinary browsing seat, and its page's own
-            // subresources are the whole of what it is for.
-            Mint::Nothing => Decision::Navigate(trimmed.to_owned()),
-            Mint::Blank | Mint::File(_) => Decision::Refuse(Refusal::NotMinted),
+            // A browsing seat's subresources are the whole of what it is for,
+            // and a local page reaches the network as it would in a browser.
+            Mint::Nothing | Mint::File(_) => Decision::Navigate(trimmed.to_owned()),
+            Mint::Blank => Decision::Refuse(Refusal::NotMinted),
         };
     }
     Decision::Refuse(match classify_scheme(scheme) {
@@ -830,11 +832,10 @@ pub const DISK: &str = "file";
 ///
 /// `ws` and `wss` are here because the sentence this table is read for is about
 /// reaching a server and not about how: **a seat that may not fetch may not open
-/// a socket, and a seat that may, may.** A previewed local document that can say
-/// `new WebSocket("wss://…")` is the document telling somebody it was opened,
-/// word for word the thing the third door exists to refuse, and the compiled
-/// patterns are the whole of the enforcement on macOS — so a scheme missing from
-/// this table is a scheme nothing gates there. The other direction is the same
+/// a socket, and a seat that may, may.** Since ticket 0.4.4-13 the one seat that
+/// may not is the host's own blank page; the compiled patterns are the whole of
+/// the enforcement on macOS, so a scheme missing from this table is a scheme
+/// nothing gates there. The other direction is the same
 /// table's doing and is why they are not a separate list: a browsing seat's
 /// hot-module reload is a `ws://localhost:5173/` socket, and it stays open
 /// because the seat's `http://localhost:5173/` page stays open.
@@ -872,13 +873,13 @@ pub struct ContentRule {
 /// # What the patterns can and cannot say, and who holds the rest
 ///
 /// A pattern speaks about an **address**, so it can say *this seat reaches no
-/// server* and *this seat reaches no disk* — the two sentences the mint turns
-/// on. It cannot say *this file is inside that folder*, which is the local
-/// seat's other half, and nothing here tries: that half is carried by
+/// server*, *this seat reaches no disk* and *this seat reaches no share*. It
+/// cannot say *this file is inside that folder*, and nothing here tries: how
+/// much of the disk a local page reaches is Safari's grant, carried by
 /// `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with the minted file's
 /// own folder, which X-2 measured enforcing it with no rule list at all. The
-/// pair is the enforcement, and the test asserts the **pair** against
-/// [`resource_request`] rather than this list alone.
+/// test holds the patterns to [`resource_request`] and names the grant as the
+/// one place the Mac load refuses more.
 #[must_use]
 pub fn content_rule_list(mint: &Mint) -> Vec<ContentRule> {
     // **One rule per scheme, and no alternation in any of them.**
@@ -906,9 +907,14 @@ pub fn content_rule_list(mint: &Mint) -> Vec<ContentRule> {
         Mint::Nothing => vec![disk],
         // The host's own empty page fetches nothing at all.
         Mint::Blank => network.chain(std::iter::once(disk)).collect(),
-        // A local document reads its own folder — which the load's read access
-        // is what grants — and reaches no server.
-        Mint::File(_) => network.collect(),
+        // A local page reaches the network, and the engine answers its `file:`
+        // requests by its own rule inside the load's read access — Safari's
+        // grant. What this seat refuses that no engine would is a share, which
+        // is [`names_a_file_host`] said as a pattern — and that one rule is
+        // also what keeps the list from being empty.
+        Mint::File(_) => vec![ContentRule {
+            url_filter: format!("^{DISK}:{A_FILE_HOST}"),
+        }],
     }
 }
 
@@ -923,7 +929,8 @@ pub fn content_rule_list(mint: &Mint) -> Vec<ContentRule> {
 /// Never empty. A mint whose list were empty would be a JSON document
 /// `WKContentRuleListStore` refuses to compile, and a seat whose compilation
 /// failed is a seat with no third door at all — so the browsing seat carries
-/// its `file:` refusal rather than an empty list.
+/// its `file:` refusal and the local seat its share refusal rather than an
+/// empty list.
 #[must_use]
 pub fn content_rules(mint: &Mint) -> String {
     let mut json = String::from("[");
@@ -951,6 +958,12 @@ pub fn content_rules(mint: &Mint) -> String {
 fn is_an_empty_document(candidate: &str) -> bool {
     candidate.eq_ignore_ascii_case(BLANK_PAGE) || candidate.eq_ignore_ascii_case("about:srcdoc")
 }
+
+/// **[`names_a_file_host`] in the content-blocker dialect**: after `file:`,
+/// two slashes and then anything that is not the third. Measured on macOS
+/// 26.6.2: WebKit compiles `[^/]`, and a rule written with it blocks exactly
+/// the addresses whose next character is not a slash.
+pub const A_FILE_HOST: &str = "//[^/]";
 
 /// Whether a `file:` URL carries an authority — `file://server/share/x`.
 ///
@@ -1281,102 +1294,163 @@ mod resource_gate_tests {
         Mint::file(Path::new(r"D:\tmp\page\report.html")).expect("a local path mints")
     }
 
-    /// RED — **a picture in a previewed page cannot come from outside the page's
-    /// own folder** (R1-10, and the whole of why this door exists).
+    /// RED (0.4.4-13) — **a local page may fetch from the network.**
     ///
-    /// The review's reproduction, as strings: a local `.html` under one
-    /// temporary folder naming an image under a second one. Before this door
-    /// existed the engine fetched it, because `NavigationStarting` is asked
-    /// about the document and about nothing the document contains.
+    /// A previewed `.html` that pulls Tailwind from a CDN, Chart.js from
+    /// jsDelivr or a font from Google was a page with no styles, no chart and
+    /// the wrong font, and readers met that as a broken preview rather than as
+    /// a protection (adversarial review 2026-09-21, the owner's rulings). A
+    /// `file://` page in Edge, Chrome and Safari reaches every one of them —
+    /// measured for this ticket — so the local seat does too, over every scheme
+    /// [`NETWORK`] names.
     ///
-    /// The share is spelled here and is **not** the stand-in the runtime probe
-    /// uses: a test that actually ran would be a machine reaching for somebody
-    /// else's server, so the reachable case a probe can run is the second
-    /// folder, and the share is held here where it is only ever text.
-    ///
-    /// RED GATE: answer `Decision::Navigate` for every `file:` candidate —
-    /// which is what a seat with no resource door does — and every assertion
-    /// below fails.
+    /// MUTATION: answer `Refuse(NotMinted)` for `Mint::File(_)` in
+    /// `resource_request`'s `NETWORK` arm, as it did before.
     #[test]
-    fn a_previewed_page_may_not_pull_a_file_from_outside_its_own_folder() {
-        for outside in [
-            // The stand-in the runtime probe uses: a real path this machine has,
-            // in a folder the page was not opened in.
-            "file:///D:/tmp/other/secret.png",
-            // One directory up, which is the same sentence said with a shorter
-            // path.
-            "file:///D:/tmp/secret.png",
-            // Another drive.
-            "file:///C:/Windows/win.ini",
-            // The share, refused by the name every other door in this product
-            // refuses shares by.
-            "file://attacker/share/x.png",
-            // The same walk written with escapes, so that the rule is about
-            // paths and not about the text of a prefix.
-            "file:///D:/tmp/page/%2E%2E/other/secret.png",
-            // And the folder next door whose name begins with this one's.
-            "file:///D:/tmp/pageant/secret.png",
-        ] {
-            assert!(
-                matches!(
-                    resource_request(outside, &a_report()),
-                    Decision::Refuse(Refusal::FileScheme | Refusal::NetworkPath)
-                ),
-                "a page in D:\\tmp\\page reached {outside}"
-            );
-        }
-    }
-
-    /// RED — **and it may still read the folder it was opened in.**
-    ///
-    /// The other half of the same rule, because a door that refused everything
-    /// would pass the test above and show a report with no pictures in it.
-    #[test]
-    fn a_previewed_page_reads_its_own_folder_and_the_folders_under_it() {
-        for inside in [
-            "file:///D:/tmp/page/report.html",
-            "file:///D:/tmp/page/images/figure-1.png",
-            "file:///D:/tmp/page/style.css",
-            // A name with a space and a name with characters outside ASCII, both
-            // as the engine percent-encodes them.
-            "file:///D:/tmp/page/my%20notes.css",
-            "file:///D:/tmp/page/%E5%9B%BE.png",
-            // The document's own fragment and query ride along.
-            "file:///D:/tmp/page/report.html#ch3",
-        ] {
-            assert!(
-                matches!(resource_request(inside, &a_report()), Decision::Navigate(_)),
-                "the page could not read {inside}, which is beside it"
-            );
-        }
-    }
-
-    /// RED — **a local page reaches no server** (R1-10's second half).
-    ///
-    /// A stylesheet or a script pulled from a host is the previewed document
-    /// telling somebody it was opened, which is the one thing a file a person
-    /// chose out of their own disk must not be able to do.
-    #[test]
-    fn a_previewed_local_page_reaches_no_server() {
+    fn a_local_page_may_fetch_from_the_network() {
         for outward in [
-            "https://cdn.example.com/style.css",
+            "https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js",
+            "https://fonts.googleapis.com/css2?family=Inter",
             "http://127.0.0.1:9/beacon.gif",
+            "ws://localhost:5173/",
+            "wss://example.com/live",
         ] {
             assert_eq!(
                 resource_request(outward, &a_report()),
-                Decision::Refuse(Refusal::NotMinted),
+                Decision::Navigate(outward.to_owned()),
                 "{outward}"
             );
         }
     }
 
-    /// RED — **and a browsing seat reaches no disk.**
+    /// RED (0.4.4-13) — **a local page still may not reach a share.**
     ///
-    /// The mirror image, and the reason the rule is one function: a page from a
-    /// server naming `file:///C:/Users/…` is the same defect read the other way
-    /// round.
+    /// A share is another machine, and the product refuses one by the same name
+    /// at every door (DESIGN §7.1.3). The rulings opened the local seat to the
+    /// network and handed its `file:` requests to the engine; they did not make
+    /// a `file:` URL with a host into either.
+    ///
+    /// MUTATION: move the `names_a_file_host` arm below the `Mint::File(_)` arm
+    /// in `resource_request`.
     #[test]
-    fn a_browsing_seat_reaches_no_file_at_all() {
+    fn a_local_page_still_may_not_reach_a_share() {
+        for share in [
+            "file://server/share/x.css",
+            "file://server/share/x.png",
+            "file://localhost/D:/tmp/page/report.html",
+        ] {
+            assert_eq!(
+                resource_request(share, &a_report()),
+                Decision::Refuse(Refusal::NetworkPath),
+                "{share}"
+            );
+        }
+    }
+
+    /// RED (0.4.4-13) — **what a local page's markup names on this machine is
+    /// handed to the engine, wherever it lives.**
+    ///
+    /// The owner's ruling of 2026-09-23: "relative subresources (images,
+    /// scripts, styles) load … No Folio-specific list." Measured for this
+    /// ticket on Edge 153 and Chrome 152, the engines WebView2 is: a relative
+    /// `<img>`, a `../` `<script>`, a relative stylesheet, a picture in an
+    /// unrelated folder named by an absolute `file:` URL, and a relative frame
+    /// all load. The engine resolved each relative reference before it asked,
+    /// which is why the candidates are absolute. (Safari draws the line at the
+    /// page's folder; on a Mac that is the load's read access, and
+    /// `the_two_spellings_of_the_resource_rule_agree` says so.)
+    ///
+    /// MUTATION: restore the `is_inside_the_folder_of` guard on the
+    /// `Mint::File` arm of `resource_request`'s `DISK` branch.
+    #[test]
+    fn a_local_page_loads_its_relative_image_script_and_style() {
+        for resolved in [
+            "file:///D:/tmp/page/rel.png",
+            "file:///D:/tmp/page/deep/down.png",
+            "file:///D:/tmp/up.js",
+            "file:///D:/tmp/page/rel.css",
+            "file:///D:/tmp/page/%E5%9B%BE.woff2",
+            "file:///D:/tmp/page/frame.html",
+            "file:///C:/elsewhere/far.png",
+            "file:///D:/tmp/page/report.html#ch3",
+        ] {
+            assert_eq!(
+                resource_request(resolved, &a_report()),
+                Decision::Navigate(resolved.to_owned()),
+                "{resolved}"
+            );
+        }
+    }
+
+    /// RED (0.4.4-13) — **a local page's script read of a local file is passed
+    /// to the engine, which refuses it as a browser does.**
+    ///
+    /// The owner's ruling of 2026-09-23: the refusal of a page script's `fetch`
+    /// or `XMLHttpRequest` of a local file is the engine's, not this door's.
+    /// Measured: Edge, Chrome, Safari and WKWebView all fail
+    /// `fetch('./data.json')` from a `file://` page on their own, and an empty
+    /// 403 minted here turned WebView2's network error into a response the page
+    /// could read the status of. So nothing here tells a script's read from a
+    /// picture's: the door answers the address, and the address is a local
+    /// file on a local seat.
+    ///
+    /// MUTATION: answer `Refuse(FileScheme)` for `Mint::File(_)` whenever the
+    /// candidate is outside the minted file's folder.
+    #[test]
+    fn a_local_pages_script_read_of_a_local_file_is_passed_to_the_engine() {
+        for read in [
+            "file:///D:/tmp/page/data.json",
+            "file:///D:/tmp/other/notes.json",
+            "file:///C:/elsewhere/notes.txt",
+        ] {
+            assert_eq!(
+                resource_request(read, &a_report()),
+                Decision::Navigate(read.to_owned()),
+                "{read}"
+            );
+        }
+    }
+
+    /// PIN (0.4.4-13) — **the host's own blank page still fetches nothing.**
+    ///
+    /// Out of the ticket's scope and pinned against drift: the seat between two
+    /// documents reaches no server and no disk.
+    ///
+    /// MUTATION: answer `Navigate` for `Mint::Blank` in the `NETWORK` arm.
+    #[test]
+    fn the_blank_seat_still_fetches_nothing() {
+        for outward in [
+            "https://cdn.example.com/style.css",
+            "http://127.0.0.1:9/beacon.gif",
+            "ws://localhost:5173/",
+            "wss://example.com/live",
+        ] {
+            assert_eq!(
+                resource_request(outward, &Mint::Blank),
+                Decision::Refuse(Refusal::NotMinted),
+                "{outward}"
+            );
+        }
+        assert_eq!(
+            resource_request("file:///D:/tmp/page/rel.png", &Mint::Blank),
+            Decision::Refuse(Refusal::FileScheme),
+        );
+        assert_eq!(
+            resource_request("file://server/share/x.png", &Mint::Blank),
+            Decision::Refuse(Refusal::NetworkPath),
+        );
+    }
+
+    /// PIN (0.4.4-13) — **a browsing seat still touches no file.**
+    ///
+    /// The mirror image, unchanged by the rulings: a page from a server naming
+    /// `file:///C:/…` is refused (A3), and its own subresources are the whole
+    /// of what it is for.
+    ///
+    /// MUTATION: let the `Mint::File(_)` arm of the `DISK` branch match any
+    /// mint.
+    #[test]
+    fn a_browsing_seat_still_touches_no_file() {
         assert_eq!(
             resource_request("file:///C:/Windows/win.ini", &Mint::Nothing),
             Decision::Refuse(Refusal::FileScheme),
@@ -1426,11 +1500,13 @@ mod resource_gate_tests {
             ("about:history", Refusal::BrowserInternalScheme),
             ("", Refusal::Empty),
         ] {
-            assert_eq!(
-                resource_request(candidate, &Mint::Nothing),
-                Decision::Refuse(refusal),
-                "{candidate}"
-            );
+            for mint in [Mint::Nothing, a_report()] {
+                assert_eq!(
+                    resource_request(candidate, &mint),
+                    Decision::Refuse(refusal),
+                    "{candidate}"
+                );
+            }
         }
     }
 }
@@ -1455,12 +1531,12 @@ mod content_rule_tests {
 
     /// **The emitted pattern, read rather than re-derived.**
     ///
-    /// The whole dialect this module writes: `^`, an optional parenthesised
-    /// alternation of scheme names, and then the separator the scheme is
-    /// followed by. Anything else is a pattern somebody added without teaching
-    /// this reader about it, and the panic says so rather than answering
-    /// `false` — a filter nobody can evaluate must not read as a filter that
-    /// blocks nothing.
+    /// The whole dialect this module writes: `^`, a scheme name, the separator
+    /// the scheme is followed by, and optionally [`A_FILE_HOST`]'s closing
+    /// class — one character that is not a slash. Anything else is a pattern
+    /// somebody added without teaching this reader about it, and the panic says
+    /// so rather than answering `false` — a filter nobody can evaluate must not
+    /// read as a filter that blocks nothing.
     fn blocks(filter: &str, candidate: &str) -> bool {
         let body = filter
             .strip_prefix('^')
@@ -1468,23 +1544,36 @@ mod content_rule_tests {
         let cut = body
             .find(':')
             .unwrap_or_else(|| panic!("`{filter}` names no scheme"));
-        let (scheme, separator) = body.split_at(cut);
+        let (scheme, rest) = body.split_at(cut);
+        let (separator, not_a_slash_next) = match rest.strip_suffix("[^/]") {
+            Some(separator) => (separator, true),
+            None => (rest, false),
+        };
         assert!(
             scheme
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && separator.chars().all(|c| c == ':' || c == '/'),
             "`{filter}` carries a pattern this reader does not understand"
         );
         // A content blocker's `url-filter` is case-insensitive unless the rule
         // says otherwise, and none of these does.
         let head = format!("{scheme}{separator}");
-        candidate.len() >= head.len() && candidate[..head.len()].eq_ignore_ascii_case(&head)
+        let starts =
+            candidate.len() >= head.len() && candidate[..head.len()].eq_ignore_ascii_case(&head);
+        starts
+            && (!not_a_slash_next
+                || candidate[head.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c != '/'))
     }
 
-    /// The other half of the local seat's enforcement:
-    /// `-[WKWebView loadFileURL:allowingReadAccessToURL:]`, which admits the
-    /// minted file's own folder and refuses every other path on the disk. X-2
-    /// measured it doing exactly this with no rule list in the room.
+    /// The Mac load's read access:
+    /// `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with the minted
+    /// file's own folder, which is Safari's grant to a `file://` page and
+    /// refuses every other path on the disk. X-2 measured it doing exactly this
+    /// with no rule list in the room.
     fn outside_the_read_access(mint: &Mint, candidate: &str) -> bool {
         match mint {
             // The scheme is asked of the splitter rather than sliced off the
@@ -1503,79 +1592,88 @@ mod content_rule_tests {
     }
 
     /// RED — **the compiled rules and the spoken rule refuse the same things**,
-    /// case by case, over X-2's own fixture set.
+    /// case by case, and the Mac load refuses more in exactly one place:
+    /// Safari's folder.
     ///
-    /// Each row is a line of the probe report's table
-    /// (`docs/plans/port/probe-x2-wkwebview-policy-2026-09-12.md`): the
-    /// cross-origin picture, stylesheet, script and `fetch`; the frame; the
-    /// `file:` subresource of a browsing page; the local seat's own folder, the
-    /// sibling folder it may not read, and the server it may not reach; the
-    /// share; and the three schemes that are a document's own bytes rather than
-    /// a fetch.
+    /// Each row is a line of X-2's table
+    /// (`docs/plans/port/probe-x2-wkwebview-policy-2026-09-12.md`) or of ticket
+    /// 0.4.4-13's measurement. Three sentences are held over every row: the
+    /// patterns refuse exactly what [`resource_request`] refuses; the Mac pair
+    /// (patterns plus the load's read access) refuses everything
+    /// [`resource_request`] refuses; and the pair refuses something
+    /// [`resource_request`] admits only on the rows marked as Safari's grant —
+    /// a local page naming a file outside its folder, which Chromium loads and
+    /// Safari does not (measured, Safari 26.6.2).
     ///
-    /// What is compared is the **pair** — the patterns plus the load's read
-    /// access — because that pair is what stands on the machine. Comparing the
-    /// patterns alone would demand that a rule list say a thing the pattern
-    /// language cannot say.
-    ///
-    /// RED GATE: drop the `file:` rule from [`Mint::Nothing`]'s list, or the
-    /// network rule from a mint that has one, and the row that rule was written
-    /// for names itself.
+    /// MUTATION: drop the `file:` rule from [`Mint::Nothing`]'s list, the share
+    /// rule from the local seat's, or the network rule from [`Mint::Blank`]'s,
+    /// and the row that rule was written for names itself.
     #[test]
     fn the_two_spellings_of_the_resource_rule_agree() {
-        let fixtures: [(&str, Mint); 26] = [
+        let fixtures: [(&str, Mint, bool); 30] = [
             // A browsing seat: its own origins are its business.
-            ("http://127.0.0.1:9002/img.png", Mint::Nothing),
-            ("http://127.0.0.1:9002/style.css", Mint::Nothing),
-            ("http://127.0.0.1:9002/third.js", Mint::Nothing),
-            ("http://127.0.0.1:9002/fetched.txt", Mint::Nothing),
-            ("http://127.0.0.1:9002/frame.html", Mint::Nothing),
-            ("https://example.com/a.png", Mint::Nothing),
+            ("http://127.0.0.1:9002/img.png", Mint::Nothing, false),
+            ("http://127.0.0.1:9002/style.css", Mint::Nothing, false),
+            ("http://127.0.0.1:9002/third.js", Mint::Nothing, false),
+            ("http://127.0.0.1:9002/fetched.txt", Mint::Nothing, false),
+            ("http://127.0.0.1:9002/frame.html", Mint::Nothing, false),
+            ("https://example.com/a.png", Mint::Nothing, false),
             // …including the socket its dev server reloads it over (audit 3
             // A-2). A browsing seat reaches a server, and `ws` is one of the
             // ways.
-            ("ws://localhost:5173/", Mint::Nothing),
-            ("wss://example.com/socket", Mint::Nothing),
+            ("ws://localhost:5173/", Mint::Nothing, false),
+            ("wss://example.com/socket", Mint::Nothing, false),
             // …and the disk is what it may not touch.
-            ("file:///etc/hosts", Mint::Nothing),
-            ("file:///D:/seat/open/inside.png", Mint::Nothing),
-            ("file://server/share/x.png", Mint::Nothing),
+            ("file:///etc/hosts", Mint::Nothing, false),
+            ("file:///D:/seat/open/inside.png", Mint::Nothing, false),
+            ("file://server/share/x.png", Mint::Nothing, false),
             // The document's own bytes, on every seat.
-            ("data:text/html,%3Cb%3Ehi%3C/b%3E", Mint::Nothing),
-            ("blob:http://127.0.0.1:9002/9d1", Mint::Nothing),
-            ("about:blank", Mint::Nothing),
-            ("data:text/html,%3Cb%3Ehi%3C/b%3E", a_report()),
-            // The local seat: its own folder, and the folders under it.
-            ("file:///D:/seat/open/inside.png", a_report()),
-            ("file:///D:/seat/open/images/plate.png", a_report()),
-            ("file:///D:/seat/open/report.html#ch3", a_report()),
-            // …and nothing else on the disk, and no server at all.
-            ("file:///D:/seat/outside/secret.png", a_report()),
-            ("file:///D:/seat/outside/secret.html", a_report()),
-            ("http://127.0.0.1:9002/img.png", a_report()),
-            ("https://example.com/a.png", a_report()),
-            // …by either of the two ways of reaching one (audit 3 A-2).
-            ("ws://attacker.tld/", a_report()),
-            ("wss://attacker.tld/", a_report()),
+            ("data:text/html,%3Cb%3Ehi%3C/b%3E", Mint::Nothing, false),
+            ("blob:http://127.0.0.1:9002/9d1", Mint::Nothing, false),
+            ("about:blank", Mint::Nothing, false),
+            ("data:text/html,%3Cb%3Ehi%3C/b%3E", a_report(), false),
+            // The local seat: its own folder and the folders under it, handed
+            // to the engine.
+            ("file:///D:/seat/open/inside.png", a_report(), false),
+            ("file:///D:/seat/open/images/plate.png", a_report(), false),
+            ("file:///D:/seat/open/report.html#ch3", a_report(), false),
+            ("file:///D:/seat/open/data.json", a_report(), false),
+            // …outside it, which Chromium loads and Safari's grant refuses.
+            ("file:///D:/seat/outside/secret.png", a_report(), true),
+            ("file:///D:/seat/outside/secret.html", a_report(), true),
+            ("file:///D:/seat/up.js", a_report(), true),
+            // …a share, refused by both spellings.
+            ("file://server/share/x.png", a_report(), false),
+            ("FILE://server/share/x.png", a_report(), false),
+            // …and the network, by every way of reaching it (0.4.4-13).
+            ("http://127.0.0.1:9002/img.png", a_report(), false),
+            ("https://example.com/a.png", a_report(), false),
+            ("wss://example.com/", a_report(), false),
             // The host's own empty page fetches nothing.
-            ("http://127.0.0.1:9002/img.png", Mint::Blank),
-            ("wss://attacker.tld/", Mint::Blank),
+            ("http://127.0.0.1:9002/img.png", Mint::Blank, false),
+            ("wss://attacker.tld/", Mint::Blank, false),
+            ("file:///D:/seat/open/inside.png", Mint::Blank, false),
         ];
-        for (candidate, mint) in fixtures {
-            let rules = content_rule_list(&mint);
-            let by_pattern = rules.iter().any(|rule| blocks(&rule.url_filter, candidate));
+        for (candidate, mint, safari_reads_less) in fixtures {
+            let by_pattern = content_rule_list(&mint)
+                .iter()
+                .any(|rule| blocks(&rule.url_filter, candidate));
             let by_read_access = outside_the_read_access(&mint, candidate);
             let spoken = matches!(resource_request(candidate, &mint), Decision::Refuse(_));
+            let on_the_mac = by_pattern || by_read_access;
             assert_eq!(
-                by_pattern || by_read_access,
-                spoken,
-                "{candidate} on {mint:?}: the compiled rules say {}, the rule says {}",
-                if by_pattern || by_read_access {
-                    "refuse"
-                } else {
-                    "allow"
-                },
-                if spoken { "refuse" } else { "allow" },
+                by_pattern, spoken,
+                "{candidate} on {mint:?}: the patterns and the rule disagree"
+            );
+            assert!(
+                !spoken || on_the_mac,
+                "{candidate} on {mint:?}: the Mac load admits what the rule refuses"
+            );
+            assert_eq!(
+                on_the_mac && !spoken,
+                safari_reads_less,
+                "{candidate} on {mint:?}: the Mac load and the rule differ where Safari's \
+                 grant does not explain it"
             );
         }
     }
@@ -1583,7 +1681,7 @@ mod content_rule_tests {
     /// RED — **the patterns are made out of the tables the rule reads**, so a
     /// scheme added to one arrives in both spellings or in neither.
     ///
-    /// RED GATE: write `^https?://` out by hand and add a third scheme to
+    /// MUTATION: write `^https?://` out by hand and add a third scheme to
     /// [`NETWORK`]; this fails while the test above still passes, because no
     /// fixture names the third one yet.
     #[test]
@@ -1592,10 +1690,18 @@ mod content_rule_tests {
             .iter()
             .map(|scheme| format!("^{scheme}://"))
             .chain(std::iter::once(format!("^{DISK}:")))
+            .chain(std::iter::once(format!("^{DISK}:{A_FILE_HOST}")))
             .collect();
         assert_eq!(
             out_of_a_table,
-            ["^http://", "^https://", "^ws://", "^wss://", "^file:"]
+            [
+                "^http://",
+                "^https://",
+                "^ws://",
+                "^wss://",
+                "^file:",
+                "^file://[^/]"
+            ]
         );
         for mint in [Mint::Nothing, Mint::Blank, a_report()] {
             for rule in content_rule_list(&mint) {
@@ -1621,22 +1727,42 @@ mod content_rule_tests {
         }
     }
 
+    /// RED — **the share pattern says what [`names_a_file_host`] says**, over
+    /// the spellings a share and a local path come in.
+    ///
+    /// MUTATION: write [`A_FILE_HOST`] as `//` and the local rows fail.
+    #[test]
+    fn the_share_pattern_is_the_share_rule() {
+        let pattern = format!("^{DISK}:{A_FILE_HOST}");
+        for candidate in [
+            "file://server/share/x.png",
+            "file://localhost/D:/x.png",
+            "FILE://Server/x",
+            "file:///D:/seat/open/inside.png",
+            "file:///Users/somebody/x.html",
+            "file:///",
+        ] {
+            assert_eq!(
+                blocks(&pattern, candidate),
+                names_a_file_host(candidate),
+                "{candidate}"
+            );
+        }
+    }
+
     /// RED — **a seat that may not fetch may not open a socket, and a seat that
     /// may, may** (audit 3 A-2).
     ///
     /// The rule as a property of the mint rather than as a list of fixtures: for
     /// every mint there is, whatever the seat's answer about `http` and `https`
     /// is, it is also its answer about `ws` and `wss` — in **both** directions.
-    /// A dev server's page is reloaded over a socket, so a browsing seat that
-    /// kept `http` and lost `ws` would be a preview that never reloads; a local
-    /// document that lost `http` and kept `ws` is the leak this was written for.
     /// Asked of both spellings at once, because the compiled patterns are the
     /// whole of the enforcement on macOS and the answer that is not compiled is
     /// the answer nothing gives.
     ///
-    /// RED GATE: take `ws` and `wss` back out of [`NETWORK`] and every local and
-    /// blank row fails on the patterns; give the socket schemes a rule of their
-    /// own that fires on every mint and the browsing rows fail.
+    /// MUTATION: take `ws` and `wss` back out of [`NETWORK`] and every blank row
+    /// fails on the patterns; give the socket schemes a rule of their own that
+    /// fires on every mint and the browsing and local rows fail.
     #[test]
     fn a_seat_that_may_not_fetch_may_not_open_a_socket() {
         for mint in [Mint::Nothing, Mint::Blank, a_report()] {
@@ -1669,6 +1795,10 @@ mod content_rule_tests {
         ));
         assert!(matches!(
             resource_request("wss://example.com/live", &a_report()),
+            Decision::Navigate(_)
+        ));
+        assert!(matches!(
+            resource_request("wss://example.com/live", &Mint::Blank),
             Decision::Refuse(Refusal::NotMinted)
         ));
     }
@@ -1679,9 +1809,14 @@ mod content_rule_tests {
     /// `WKContentRuleListStore` refuses an empty list, and a seat whose
     /// compilation failed has no third door at all — so "the browsing seat has
     /// nothing to block" would be a browsing seat with no gate on its
-    /// subresources whatsoever.
+    /// subresources whatsoever. Since 0.4.4-13 the local seat's one rule is the
+    /// share refusal the product already makes, and that rule is what keeps its
+    /// list from being empty (the ticket's blocking criterion B2). Measured on
+    /// macOS 26.6.2: the list compiles, and the local page loads as it does
+    /// with no list.
     ///
-    /// RED GATE: answer `"[]"` for [`Mint::Nothing`].
+    /// MUTATION: answer `"[]"` for [`Mint::Nothing`], or an empty list for a
+    /// `Mint::File`.
     #[test]
     fn every_mint_compiles_to_a_rule_list_with_something_in_it() {
         assert_eq!(
@@ -1690,12 +1825,7 @@ mod content_rule_tests {
         );
         assert_eq!(
             content_rules(&a_report()),
-            concat!(
-                r#"[{"trigger":{"url-filter":"^http://"},"action":{"type":"block"}},"#,
-                r#"{"trigger":{"url-filter":"^https://"},"action":{"type":"block"}},"#,
-                r#"{"trigger":{"url-filter":"^ws://"},"action":{"type":"block"}},"#,
-                r#"{"trigger":{"url-filter":"^wss://"},"action":{"type":"block"}}]"#
-            )
+            r#"[{"trigger":{"url-filter":"^file://[^/]"},"action":{"type":"block"}}]"#
         );
         assert_eq!(
             content_rules(&Mint::Blank),
@@ -1736,7 +1866,7 @@ mod content_rule_tests {
     /// neither the address the engine committed nor any candidate the folder
     /// rule was asked about, and a local page on a Mac refused itself.
     ///
-    /// RED GATE: put the third slash back into the literal and the second row
+    /// MUTATION: put the third slash back into the literal and the second row
     /// fails; take it out of the `push` and the first does.
     #[test]
     fn a_minted_file_url_has_one_root_however_the_path_spelled_it() {
@@ -1752,7 +1882,7 @@ mod content_rule_tests {
             posix.target(),
             Some("file:///Users/somebody/seat/open/report.html")
         );
-        // And the two doors that compare one against the other agree with it,
+        // And the door that compares one against the other agrees with it,
         // which is the whole of what the slash count costs.
         assert_eq!(
             navigation_starting("file:///Users/somebody/seat/open/report.html", &posix),
@@ -1761,10 +1891,6 @@ mod content_rule_tests {
         assert!(matches!(
             resource_request("file:///Users/somebody/seat/open/inside.png", &posix),
             Decision::Navigate(_)
-        ));
-        assert!(matches!(
-            resource_request("file:///Users/somebody/seat/outside/secret.png", &posix),
-            Decision::Refuse(_)
         ));
     }
 }
@@ -1926,23 +2052,15 @@ mod file_url_tests {
                 Decision::Refuse(expected),
                 "the gate admitted {refused}"
             );
-            assert!(
-                matches!(
-                    resource_request(refused, &minted),
-                    Decision::Refuse(Refusal::FileScheme | Refusal::NetworkPath | Refusal::Empty)
-                ),
-                "the document read {refused}"
-            );
+            // The resource door no longer holds this table (owner, 2026-09-23,
+            // ticket 0.4.4-13): a local page's `file:` requests are the
+            // engine's to answer, and only a share is refused here.
         }
 
         // ⑨ **Double encoding is one decode, and one decode is what the disk
         // sees.** `%252e` is the two-character *name* `%2e` — the disk resolves
         // no traversal out of it and neither does this — so it names a child of
         // the folder it was written in and can never leave it.
-        assert!(matches!(
-            resource_request("file:///D:/tmp/%252e%252e/other/secret.png", &minted),
-            Decision::Refuse(_)
-        ));
         assert_eq!(
             LocalFileUrl::parse("file:///D:/tmp/page/%252e%252e/x.png")
                 .expect("a name, not a traversal")

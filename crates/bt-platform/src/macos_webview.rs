@@ -34,9 +34,11 @@
 //! through [`WebHost::set_request_rules`], which is a door on every arm and does
 //! nothing on the one whose engine asks per request.
 //!
-//! The local seat's other half — *this folder and no other* — is not a pattern
-//! at all. It is `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with the
-//! minted file's own folder, which X-2 measured enforcing it with no rule list
+//! Which of the disk a local page may read by markup is not a pattern at all.
+//! It is `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with the minted
+//! file's own folder — the grant Safari itself gives a `file://` page, measured
+//! on Safari 26.6.2 for ticket 0.4.4-13 (the page's folder and below load; `../`
+//! and another folder do not) — which X-2 measured enforcing with no rule list
 //! in the room and no callback fired for the refusal.
 //!
 //! # What this arm does not promise, stated rather than implied
@@ -275,9 +277,9 @@ impl Shared {
     }
 
     /// **Point the page at an address** — and, for a local file, at the one
-    /// folder it may read.
+    /// folder it may read, which is the folder Safari grants a `file://` page.
     ///
-    /// This is where the local seat's folder rule actually stands.
+    /// This is where the local seat's folder bound actually stands.
     /// `loadFileURL:allowingReadAccessToURL:` is the whole of it: X-2 measured a
     /// picture and a frame naming a sibling folder refused by this call with no
     /// rule list in the room, and no callback fired for either — which is why

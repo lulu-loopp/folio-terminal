@@ -156,20 +156,13 @@ mod mac {
     /// rather than something it computes. That the JSON really is the same
     /// sentence `resource_request` answers is pinned where both live —
     /// `bt_app::webnav::content_rule_tests`.
-    const FILE_SEAT_RULES: &str = concat!(
-        r#"[{"trigger":{"url-filter":"^http://"},"action":{"type":"block"}},"#,
-        r#"{"trigger":{"url-filter":"^https://"},"action":{"type":"block"}},"#,
-        r#"{"trigger":{"url-filter":"^ws://"},"action":{"type":"block"}},"#,
-        r#"{"trigger":{"url-filter":"^wss://"},"action":{"type":"block"}}]"#
-    );
-
-    /// Whether a candidate is inside the folder the seat was minted on — the
-    /// sentence `webnav::resource_request`'s `Mint::File` arm answers, written
-    /// for this platform's paths.
-    fn inside(folder: &str, candidate: &str) -> bool {
-        let body = candidate.split(['?', '#']).next().unwrap_or(candidate);
-        body.starts_with(folder)
-    }
+    ///
+    /// Since ticket 0.4.4-13 a local seat reaches the network, and its one rule
+    /// is the share refusal: a `file:` URL with a host. Which of the disk it
+    /// may read is the load's read access (the seat's folder, Safari's own
+    /// grant), and rows ② and ③ below are that grant at work.
+    const FILE_SEAT_RULES: &str =
+        r#"[{"trigger":{"url-filter":"^file://[^/]"},"action":{"type":"block"}}]"#;
 
     // ── the window ─────────────────────────────────────────────────────────
 
@@ -964,7 +957,6 @@ function click(id) { document.getElementById(id).click(); }
         // is reached only by a navigation somebody allowed, so a proof of it
         // needs a second address inside the same folder to allow.
         let gate_folder = format!("{folder}/");
-        let request_folder = gate_folder.clone();
         let mut host = WebHost::new(
             Box::new(move |candidate: &str| {
                 let body = candidate.split(['?', '#']).next().unwrap_or(candidate);
@@ -976,8 +968,14 @@ function click(id) { document.getElementById(id).click(); }
                     WebNavigationVerdict::Cancel
                 }
             }),
-            Box::new(move |candidate: &str| {
-                if candidate.starts_with("file:") && inside(&request_folder, candidate) {
+            // `webnav::resource_request` on a `Mint::File` seat: a local file
+            // and the network pass to the engine; a share does not.
+            Box::new(|candidate: &str| {
+                let local = candidate.starts_with("file:///");
+                let network = ["http:", "https:", "ws:", "wss:"]
+                    .iter()
+                    .any(|scheme| candidate.starts_with(scheme));
+                if local || network {
                     WebRequestVerdict::Allow
                 } else {
                     WebRequestVerdict::Refuse
