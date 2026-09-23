@@ -15,4 +15,5 @@ mod i18n;
 mod palette;
 mod profiles;
 mod quake;
+mod search;
 mod tooltips;
