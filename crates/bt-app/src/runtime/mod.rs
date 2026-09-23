@@ -12,3 +12,4 @@ mod diagnostics;
 mod i18n;
 mod profiles;
 mod quake;
+mod tooltips;
