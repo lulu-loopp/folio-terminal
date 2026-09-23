@@ -50009,34 +50009,40 @@ impl SpikeRecording {
 /// recording, where two commands ran before any Enter.
 #[test]
 fn a_recorded_powershell_block_runs_once_on_one_enter() {
-    macro_rules! recording {
-        ($name:literal) => {
-            SpikeRecording {
-                bytes: include_bytes!(concat!("../tests/fixtures/multiline-paste/", $name, ".bin")),
-                phases: include_str!(concat!(
-                    "../tests/fixtures/multiline-paste/",
-                    $name,
-                    ".phases"
-                )),
-            }
-        };
-    }
     let text = "'one' + 'RAN'\r\n'two' + 'RAN'\r\n'three' + 'RAN'";
     let shells = [
         (
             "5.1 + PSReadLine 2.0.0",
-            recording!("ps51-psrl200-A"),
-            recording!("ps51-psrl200-today"),
+            SpikeRecording {
+                bytes: include_bytes!("../tests/fixtures/multiline-paste/ps51-psrl200-A.bin"),
+                phases: include_str!("../tests/fixtures/multiline-paste/ps51-psrl200-A.phases"),
+            },
+            SpikeRecording {
+                bytes: include_bytes!("../tests/fixtures/multiline-paste/ps51-psrl200-today.bin"),
+                phases: include_str!("../tests/fixtures/multiline-paste/ps51-psrl200-today.phases"),
+            },
         ),
         (
             "5.1 + PSReadLine 2.4.6",
-            recording!("ps51-psrl246-A"),
-            recording!("ps51-psrl246-today"),
+            SpikeRecording {
+                bytes: include_bytes!("../tests/fixtures/multiline-paste/ps51-psrl246-A.bin"),
+                phases: include_str!("../tests/fixtures/multiline-paste/ps51-psrl246-A.phases"),
+            },
+            SpikeRecording {
+                bytes: include_bytes!("../tests/fixtures/multiline-paste/ps51-psrl246-today.bin"),
+                phases: include_str!("../tests/fixtures/multiline-paste/ps51-psrl246-today.phases"),
+            },
         ),
         (
             "pwsh 7.6.6 + PSReadLine 2.4.5",
-            recording!("pwsh7-A"),
-            recording!("pwsh7-today"),
+            SpikeRecording {
+                bytes: include_bytes!("../tests/fixtures/multiline-paste/pwsh7-A.bin"),
+                phases: include_str!("../tests/fixtures/multiline-paste/pwsh7-A.phases"),
+            },
+            SpikeRecording {
+                bytes: include_bytes!("../tests/fixtures/multiline-paste/pwsh7-today.bin"),
+                phases: include_str!("../tests/fixtures/multiline-paste/pwsh7-today.phases"),
+            },
         ),
     ];
     for (shell, clipboard_road, todays_road) in shells {
