@@ -164,9 +164,12 @@ impl Runtime<'_> {
             match part {
                 // `reread_profiles`' comparison: a table identical to the one in
                 // force is no news, and a different one is put in force by the
-                // same function a hand edit's is.
+                // same function a hand edit's is. The table in force is asked
+                // before the store, because an export carries it as `to_file`
+                // writes it, which a file on disk may spell differently and mean
+                // the same.
                 Ok(file) => {
-                    if self.app.profiles_store.store(file) {
+                    if file != profiles::to_file() && self.app.profiles_store.store(file) {
                         for fault in self.take_profile_table()? {
                             faults.push(ImportFault {
                                 what: persist::PROFILES_FILE_NAME.to_owned(),

@@ -13244,6 +13244,7 @@ pub fn build(
                     (matches!(placed.row.control(), SettingsControl::Link)
                         && !placed.row.opens_a_dialog())
                     .then_some(MENU_ACTION_MARK_AWAY),
+                    matches!(placed.row.control(), SettingsControl::Link),
                     hover == Some(SettingsTarget::Link(placed.row)),
                     scale,
                     palette,
@@ -15153,6 +15154,7 @@ fn push_stated_value(
     rect: [f32; 4],
     value: &str,
     mark: Option<&str>,
+    door: bool,
     lit: bool,
     scale: f32,
     palette: bt_render::ChromePalette,
@@ -15177,9 +15179,12 @@ fn push_stated_value(
         text: ellipsized(value, text_right - rect[0], font_size_px, measure),
         rect: [rect[0], rect[1], text_right, rect[3]],
         font_size_px,
+        // A door is drawn in the ink of something to press, with or without
+        // the `↗` beside it — `Export…` and `Import…` open a dialog of the
+        // system's own and wear no mark (0.4.4 ticket 05); a fact is muted.
         color: if lit {
             palette.accent
-        } else if mark.is_some() {
+        } else if door {
             palette.dialog_title_text
         } else {
             palette.dialog_muted_text
