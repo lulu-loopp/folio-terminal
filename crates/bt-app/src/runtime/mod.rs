@@ -11,6 +11,7 @@
 mod clipboard;
 mod diagnostics;
 mod dpi;
+mod first_run;
 mod frame;
 mod i18n;
 mod palette;
