@@ -15,7 +15,7 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 - **Platform:** every deviation is in code shared by the Windows and macOS builds, so every row applies to **both**.
 - **Rulings of 2026-09-22 folded in:** the icon-to-label gap is 8 everywhere (G1–G3); every head title is 11 (T1). The terminal pane's resting radius (0) and the two boolean controls (combo in Settings, switch on the first-run card) are rules as they stand and produce no rows.
 
-**Totals: 43 deviations, touching 81 constants.** A 7 · B 11 · C 13 · D 12.
+**Totals: 42 deviations, touching 80 constants.** A 6 · B 11 · C 13 · D 12.
 
 ---
 
@@ -28,7 +28,6 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 | 6 | T4 | List-row labels: settings nav | `settings.rs::NAV_ITEM_FONT_LOGICAL_PX` | 12.5 | 13 | Primary text: menu items, tree rows, tabs, buttons and combos are all 13. The palette's row is fixed by ticket 20. |
 | 7 | T3 | Settings row titles | `settings.rs::ROW_TITLE_FONT_LOGICAL_PX` | 13.5 | 13 | Primary text. The settings title sits half a point above its own combo text. The palette's field is fixed by ticket 20. |
 | 9 | T2 | Settings dialog title | `settings.rs::HEADER_TITLE_FONT_LOGICAL_PX` | 16 | 15 | Dialog title (`first_run.rs::TITLE_FONT_LOGICAL_PX`, `restore.rs::TITLE_FONT_LOGICAL_PX`). |
-| 10 | H4 | First-run option rows | `first_run.rs::ROW_HEIGHT_LOGICAL_PX` | 42 | 38.5 | The settings single-line row is `ROW_PADDING_Y_LOGICAL_PX` 11 × 2 + `ROW_TITLE_LINE_LOGICAL_PX` 16.5. The same options sit airier in first-run than in Settings. |
 | 11 | H1 | Settings combo drop-down rows | `settings.rs::ITEM_HEIGHT_LOGICAL_PX` | 27.5 | 29.5 | Menu row (`profiles.rs::ITEM_HEIGHT_LOGICAL_PX`). Every other menu uses it. |
 
 ## Class B: visible side by side, or on a rare surface

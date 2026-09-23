@@ -931,9 +931,12 @@ const TITLE_LINE_LOGICAL_PX: f32 = 21.0;
 /// with it.
 const HEADER_MARGIN_BOTTOM_LOGICAL_PX: f32 = 18.0;
 
-/// **One 13px line, vertically centred in 42** (v4 §2). The extra height per row
-/// is what "looser rhythm" buys once the second line is gone.
-const ROW_HEIGHT_LOGICAL_PX: f32 = 42.0;
+/// The settings single-line row (`UI-SPEC.md` H4;
+/// `settings.rs::ROW_PADDING_Y_LOGICAL_PX` 11 × 2 +
+/// `settings.rs::ROW_TITLE_LINE_LOGICAL_PX` 16.5, both private there), not
+/// v4 §2's own "one 13px line, vertically centred in 42". The same options
+/// used to sit airier here than in Settings.
+const ROW_HEIGHT_LOGICAL_PX: f32 = 38.5;
 const ROW_FONT_LOGICAL_PX: f32 = 13.0;
 /// How far the row's band runs past the content column on each side.
 ///
@@ -1980,6 +1983,23 @@ pub fn settings_line_width(surface_width: f32, scale: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::settings;
+
+    /// RED (ticket 21) — **the first-run card's option rows are as tall as a
+    /// Settings single-line row, not airier.**
+    ///
+    /// `UI-SPEC.md` H4: `settings.rs::ROW_PADDING_Y_LOGICAL_PX` 11 × 2 +
+    /// `settings.rs::ROW_TITLE_LINE_LOGICAL_PX` 16.5 (both private there) is
+    /// 38.5, where the row used to sit at 42.
+    ///
+    /// MUTATION: revert `ROW_HEIGHT_LOGICAL_PX` to a literal and this goes red.
+    #[test]
+    fn ui_spec_first_run_class_a_values_follow_the_rule() {
+        assert_eq!(
+            ROW_HEIGHT_LOGICAL_PX, 38.5,
+            "UI-SPEC.md H4, settings.rs::ROW_PADDING_Y_LOGICAL_PX + \
+             settings.rs::ROW_TITLE_LINE_LOGICAL_PX"
+        );
+    }
 
     /// A machine with everything: Windows 11 with the package beside the
     /// executable, all three agents on the path, none of them configured yet.

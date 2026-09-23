@@ -24,6 +24,8 @@ All notable changes to Folio are recorded here. The format follows
 - The command palette's field and rows are the same text size as the rest of
   the window.
 
+- The first-run card's option rows are the same height as a Settings row.
+
 ### Fixed
 
 - Touch input — a touch screen, or a remote-desktop tool that sends touch —
