@@ -205,11 +205,12 @@ const SEPARATOR_ALPHA_ON_DARK: f32 = 0.06;
 const SEPARATOR_ALPHA_ON_LIGHT: f32 = 0.055;
 
 // ── `.menu-label` (mock-up lines 1026-1029) ─────────────────────────────────
-const SECTION_LABEL_FONT_LOGICAL_PX: f32 = 10.5;
-/// The 10.5px line box, measured in the mock-up's own renderer (Inter at
-/// `line-height: normal`) — 12.5px, the same ladder its 11px group label climbs
-/// at 13px and its 13px row at 15.5px.
-const SECTION_LABEL_LINE_LOGICAL_PX: f32 = 12.5;
+/// The section-label scale (`UI-SPEC.md` T7; `settings.rs::GROUP_LABEL_FONT_LOGICAL_PX`,
+/// `theme.rs::RAIL_LABEL_FONT_LOGICAL_PX`), not the mock-up's own 10.5px.
+const SECTION_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
+/// The section-label scale's line box (`UI-SPEC.md` T7;
+/// `settings.rs::GROUP_LABEL_LINE_LOGICAL_PX`), not the mock-up's own 12.5px.
+const SECTION_LABEL_LINE_LOGICAL_PX: f32 = 13.0;
 /// `letter-spacing: .05em` at `font-weight: 600` — the settings dialog's
 /// `.group-label` craft, which is the same heading in a different surface.
 const SECTION_LABEL_TRACKING_EM: f32 = 0.05;
@@ -13582,6 +13583,23 @@ mod tests {
 
     use super::*;
 
+    /// RED (ticket 22) — **the section labels inside every menu `profiles.rs`
+    /// builds are on the section-label scale, not their own smaller, more
+    /// widely spaced one.**
+    ///
+    /// `UI-SPEC.md` T7: these used to sit at 10.5 on a 12.5 line, off the
+    /// scale Settings and the rail use (11 on 13).
+    ///
+    /// MUTATION: revert `SECTION_LABEL_FONT_LOGICAL_PX` or
+    /// `SECTION_LABEL_LINE_LOGICAL_PX` to a literal, or
+    /// `SECTION_LABEL_TRACKING_EM` off 0.05, and this goes red.
+    #[test]
+    fn ui_spec_menus_class_a_values_follow_the_rule() {
+        assert_eq!(SECTION_LABEL_FONT_LOGICAL_PX, 11.0, "UI-SPEC.md T7");
+        assert_eq!(SECTION_LABEL_LINE_LOGICAL_PX, 13.0, "UI-SPEC.md T7");
+        assert_eq!(SECTION_LABEL_TRACKING_EM, 0.05, "UI-SPEC.md T7");
+    }
+
     /// The one layer a popup with nothing inside it draws.
     fn one_layer(layers: Vec<OverlayLayer>) -> OverlayLayer {
         let [layer]: [OverlayLayer; 1] = layers
@@ -17949,19 +17967,21 @@ mod tests {
             "--border-soft rgba(0,0,0,.055)"
         );
         assert_eq!(
-            SECTION_LABEL_FONT_LOGICAL_PX, 10.5,
-            ".menu-label font-size 10.5px"
+            SECTION_LABEL_FONT_LOGICAL_PX, 11.0,
+            "UI-SPEC.md T7, not the mock-up's own .menu-label font-size 10.5px"
         );
         assert_eq!(
             SECTION_LABEL_TRACKING_EM, 0.05,
             ".menu-label letter-spacing .05em"
         );
-        // 3 + 12.5 + 5: the 10.5px line box the mock-up's own renderer produces,
-        // inside `padding: 3px 10px 5px`.
+        // `padding: 3px 10px 5px`, unchanged by the rule.
         assert_eq!(SECTION_LABEL_PADDING_TOP_LOGICAL_PX, 3.0);
         assert_eq!(SECTION_LABEL_PADDING_X_LOGICAL_PX, 10.0);
         assert_eq!(SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX, 5.0);
-        assert_eq!(SECTION_LABEL_LINE_LOGICAL_PX, 12.5);
+        assert_eq!(
+            SECTION_LABEL_LINE_LOGICAL_PX, 13.0,
+            "UI-SPEC.md T7, not the mock-up's own 12.5"
+        );
         assert_eq!(
             RECENT_ITEM_MAX_WIDTH_LOGICAL_PX, 260.0,
             ".recent-item max-width 260px"

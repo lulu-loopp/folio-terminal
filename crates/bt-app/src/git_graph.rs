@@ -322,10 +322,11 @@ pub const GRAPH_PADDING_BOTTOM_LOGICAL_PX: f32 = 14.0;
 pub const GRAPH_ROW_GAP_LOGICAL_PX: f32 = 9.0;
 pub const GRAPH_ROW_PADDING_X_LOGICAL_PX: f32 = 8.0;
 pub const GRAPH_ROW_RADIUS_LOGICAL_PX: f32 = 7.0;
-/// `.ggv-head { padding:10px 6px; font-size:14px }` (G80) — **at 13.5**, which
-/// is R20: the mock-up gave the same fact two sizes half a pixel apart in two
-/// places, and one of them had to go. The panel's masthead is the one this
-/// product had already built, so the graph's head is the one that moved.
+/// `.ggv-head { padding:10px 6px; font-size:14px }` (G80) — **at 13**
+/// (`crate::git_panel::GIT_HEAD_FONT_LOGICAL_PX`, `UI-SPEC.md` T3), which is
+/// R20: the mock-up gave the same fact two sizes apart in two places, and one
+/// of them had to go. The panel's masthead is the one this product had already
+/// built, so the graph's head is the one that moved.
 pub const GRAPH_HEAD_PADDING_X_LOGICAL_PX: f32 = 6.0;
 pub const GRAPH_HEAD_PADDING_Y_LOGICAL_PX: f32 = 10.0;
 /// `.gref` (G84): the ref pill worn on a commit row.
@@ -353,11 +354,9 @@ pub const GRAPH_FILE_INDENT_LOGICAL_PX: f32 = 56.0;
 
 /// The body prose, at the row text's own size less a step.
 ///
-/// **12 and not the row's 12.5**: a commit's body is the same *kind* of writing
-/// the subject is and wears the same ink, so it cannot be a step quieter without
-/// reading as a caption; a hair smaller is what says "this is the continuation
-/// and that was the headline".
-pub const GRAPH_BODY_FONT_LOGICAL_PX: f32 = 12.0;
+/// Primary text (`UI-SPEC.md` T4) — the same size every menu item, tree row,
+/// tab, button and combo uses, including the row this block continues.
+pub const GRAPH_BODY_FONT_LOGICAL_PX: f32 = 13.0;
 /// The leading prose is set on — [`crate::tooltip`]'s own `font * 1.4`, which is
 /// the line box every multi-line piece of chrome text in this product is shaped
 /// into. A third number invented here would be a guess at what Segoe reports.
@@ -5121,6 +5120,19 @@ fn alpha(thousandths: i32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (ticket 18) — **the graph's commit body is primary text, not a
+    /// half-point-smaller caption.**
+    ///
+    /// `UI-SPEC.md` T4: the graph body used to sit at 12 rather than the 13
+    /// every menu item, tree row, tab, button and combo uses.
+    ///
+    /// MUTATION: revert `GRAPH_BODY_FONT_LOGICAL_PX` to a literal and this
+    /// goes red.
+    #[test]
+    fn ui_spec_git_class_a_values_follow_the_rule() {
+        assert_eq!(GRAPH_BODY_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T4");
+    }
 
     /// A commit with the parents it names and nothing else that matters here.
     fn commit(hash: &str, parents: &[&str]) -> GitCommit {

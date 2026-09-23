@@ -678,6 +678,49 @@ pub fn may_read_unasked(path: &Path, namer: PathNamer<'_>) -> bool {
     is_local_absolute_path(path)
 }
 
+/// **Whether `path` is a share on another machine** — `\\server\share\…`, the one shape the owner's
+/// ruling of 2026-09-21 hands to the system on `Ctrl`+click (「UNC 与任意协议链接 Ctrl+点击交给系统」).
+///
+/// It answers from the spelling alone, like [`may_read_unasked`], and for the same reason: it is
+/// asked on the window thread about a path nobody has asked a disk about, and it must stay that
+/// way — a share is never asked about, on a hover, a press or the modifier going down.
+///
+/// Narrower than "not readable unasked", and each exclusion is a shape that is not another
+/// machine's file:
+///
+/// * `Prefix::DeviceNS` — `\\.\pipe\…`, `\\.\COM1` — is not a filesystem at all.
+/// * `Prefix::Verbatim*` — `\\?\C:\…`, `\\?\UNC\server\share\…` — is a second spelling that skips
+///   the normaliser every reader in this window is written against; nothing here produces one.
+/// * `\\wsl.localhost\<distro>\…` and its older alias `\\wsl$\<distro>\…` are a distribution this
+///   machine hosts ([`is_wsl_distribution_share`]). Where the pane is not standing in it, it is a
+///   stranger's spelling of one, and it stays what [`may_read_unasked`] makes it.
+#[cfg(windows)]
+#[must_use]
+pub fn is_a_share_on_another_machine(path: &Path) -> bool {
+    if path.as_os_str().to_string_lossy().contains('\0') {
+        return false;
+    }
+    matches!(
+        path.components().next(),
+        Some(std::path::Component::Prefix(prefix))
+            if matches!(
+                prefix.kind(),
+                std::path::Prefix::UNC(server, _)
+                    if !server.eq_ignore_ascii_case(WSL_DISTRIBUTION_SHARE_HOST)
+                        && !server.eq_ignore_ascii_case("wsl$")
+            )
+    )
+}
+
+/// The same question where no spelling of a path names another machine: a share a Mac reaches is
+/// a mount point with a local name of its own, and no `file:` URI carries a host here
+/// (`bt_platform::file_uri_to_path_on`).
+#[cfg(not(windows))]
+#[must_use]
+pub fn is_a_share_on_another_machine(_path: &Path) -> bool {
+    false
+}
+
 /// [`may_read_unasked`] asked again of what the last component is a **link to**.
 ///
 /// The lexical answer is about a spelling and a symbolic link is a spelling that means another
@@ -8527,6 +8570,41 @@ mod locality_tests {
             may_read_unasked(hosts, PathNamer::ThisWindow),
             "a share this window minted is one it may read back",
         );
+    }
+
+    /// RED (ticket 14) — **a share on another machine is `\\server\share`, and nothing else that
+    /// opens with two backslashes.**
+    ///
+    /// `Ctrl`+click hands this shape to the system (owner ruling 2026-09-21), so the predicate is
+    /// the whole width of that ruling: a device path, a verbatim spelling and a WSL distribution's
+    /// share are not another machine's files and must not be handed over as if they were.
+    ///
+    /// MUTATION: answer `!may_read_unasked(path, PathNamer::ThisWindow)` instead, and the device,
+    /// verbatim and `wsl$` rows go red.
+    #[test]
+    fn a_share_on_another_machine_is_a_server_and_a_share_and_nothing_else() {
+        for share in [
+            r"\\server\share\notes.md",
+            r"\\nas.local\photos\2026\a.jpg",
+            r"\\SERVER\share",
+        ] {
+            assert!(is_a_share_on_another_machine(Path::new(share)), "{share}");
+        }
+        for not_one in [
+            r"\\.\pipe\folio-probe",
+            r"\\.\COM1",
+            r"\\?\C:\Users\alice\notes.md",
+            r"\\?\UNC\server\share\notes.md",
+            r"\\wsl.localhost\Debian\etc\hosts",
+            r"\\wsl$\Ubuntu\etc\hosts",
+            r"C:\Users\alice\notes.md",
+            r"C:notes.md",
+        ] {
+            assert!(
+                !is_a_share_on_another_machine(Path::new(not_one)),
+                "not another machine's share: {not_one}"
+            );
+        }
     }
 }
 

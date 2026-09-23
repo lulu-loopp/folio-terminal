@@ -125,9 +125,11 @@ const HEADER_PADDING_LEFT_LOGICAL_PX: f32 = 22.0;
 /// 12 rather than 22 so the *icon* inside the 30px button ends 22 from the
 /// dialog's edge — the mock-up says so in as many words.
 const HEADER_PADDING_RIGHT_LOGICAL_PX: f32 = 12.0;
+/// The dialog title (`UI-SPEC.md` T2; `first_run.rs::TITLE_FONT_LOGICAL_PX`,
+/// `restore.rs::TITLE_FONT_LOGICAL_PX`), not the mock-up's own
 /// `.settings header h1 { font-size: 16px; font-weight: 600 }`. Weight is not
 /// expressible through a chrome label and is noted as a deviation.
-const HEADER_TITLE_FONT_LOGICAL_PX: f32 = 16.0;
+const HEADER_TITLE_FONT_LOGICAL_PX: f32 = 15.0;
 
 // ── `.dlg-close` ───────────────────────────────────────────────────────────
 /// `width: 30px; height: 30px`. Deliberately not the caption run's 46x40: the
@@ -178,7 +180,9 @@ const GROUP_LABEL_TRACKING_EM: f32 = 0.05;
 const ROW_PADDING_Y_LOGICAL_PX: f32 = 11.0;
 const ROW_PADDING_X_LOGICAL_PX: f32 = 2.0;
 const ROW_GAP_LOGICAL_PX: f32 = 16.0;
-const ROW_TITLE_FONT_LOGICAL_PX: f32 = 13.5;
+/// Primary text (`UI-SPEC.md` T3) — the title used to sit half a point above
+/// its own combo text.
+const ROW_TITLE_FONT_LOGICAL_PX: f32 = 13.0;
 /// The 13.5px line box, measured in the mock-up.
 const ROW_TITLE_LINE_LOGICAL_PX: f32 = 16.5;
 const ROW_DESC_FONT_LOGICAL_PX: f32 = 12.0;
@@ -434,12 +438,16 @@ const COMBO_FONT_LOGICAL_PX: f32 = 13.0;
 // measuring moved *into* the geometry (`widest_option`), because every button on
 // the page is now sized from its own options and not just the open one — so the
 // size and the words it measures never leave this file together.
-/// `.combo .chev { font-size: 8.5px }`.
+/// The vector `⌄` mark's box (`UI-SPEC.md` I1) — every other drop-down
+/// opener's ([`crate::icons::MarkSlot::CompactHead`], which
+/// `DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX` below and
+/// `seats::PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX` already draw at) — not the
+/// mock-up's own solid `▼` text glyph at `.combo .chev { font-size: 8.5px }`.
 ///
-/// The chevron's own column is reserved at this same number: `▼` at 8.5px inks
-/// 7.33px wide in the mock-up, so its em box is the tightest bound that cannot
-/// cut the glyph, and a bound is all the value's own rectangle needs.
-const COMBO_CHEVRON_FONT_LOGICAL_PX: f32 = 8.5;
+/// The chevron's own column is reserved at this same number: it is square, so
+/// one number bounds both the mark and the column.
+const COMBO_CHEVRON_BOX_LOGICAL_PX: f32 =
+    crate::icons::MarkSlot::CompactHead.house_box_logical_px();
 // ── `.slider` (§7.1.6c-4b, widened 2026-08-18) ────────────────────────────
 // The dialog's second control form, and the first added since it was built.
 //
@@ -487,9 +495,6 @@ const SLIDER_THUMB_HOVER_SCALE: f32 = 1.15;
 
 /// `.combo > button { gap: 10px }` — between the value and the chevron.
 const COMBO_GAP_LOGICAL_PX: f32 = 10.0;
-/// The mock-up's chevron is the character, not the `#i-chev` symbol: a solid
-/// down-pointing triangle set as text beside the value.
-const COMBO_CHEVRON: &str = "\u{25bc}";
 /// What `text-overflow: ellipsis` puts at the cut — the single character, not
 /// three periods, because that is the glyph the property is named after and the
 /// one the face draws at a width three periods do not have.
@@ -504,7 +509,10 @@ const MENU_PADDING_LOGICAL_PX: f32 = 4.0;
 const MENU_OFFSET_LOGICAL_PX: f32 = 4.0;
 /// The mock-up's own flip test: `menu.bottom > clip.bottom - 8`.
 const MENU_CLEARANCE_LOGICAL_PX: f32 = 8.0;
-const ITEM_HEIGHT_LOGICAL_PX: f32 = 27.5;
+/// The menu row (`UI-SPEC.md` H1; `profiles.rs::ITEM_HEIGHT_LOGICAL_PX`,
+/// private there) — every other menu uses it, and this combo's drop-down used
+/// to be the one that didn't.
+const ITEM_HEIGHT_LOGICAL_PX: f32 = 29.5;
 /// **How many items a picker shows before it starts scrolling** (user ruling
 /// 2026-08-17).
 ///
@@ -512,7 +520,7 @@ const ITEM_HEIGHT_LOGICAL_PX: f32 = 27.5;
 /// the Terminal font picker holds whatever this machine has installed — thirty
 /// or forty faces on an ordinary desk — and a popup as tall as that list is a
 /// popup taller than the dialog it hangs off, flipped up into the caption bar
-/// and cut by the window's own edge. Eight rows of 27.5 is 220px, which is
+/// and cut by the window's own edge. Eight rows of 29.5 is 236px, which is
 /// shorter than the shortest window this dialog opens in has room for below a
 /// row in the middle of a page, so the cap is what makes the direction rule
 /// below hold rather than a second guard on top of it.
@@ -549,7 +557,7 @@ const MENU_SEPARATOR_INSET_LOGICAL_PX: f32 = 6.0;
 /// What a hairline costs the list: the rule and the air on both sides of it.
 ///
 /// **The cap does not grow for it.** [`MENU_MAX_VISIBLE_ITEMS`] is eight ITEMS
-/// and stays eight items — `max-height: calc(8 * 27.5px + 2 * 4px + 2 * 1px)`
+/// and stays eight items — `max-height: calc(8 * 29.5px + 2 * 4px + 2 * 1px)`
 /// counts no rules either — so a hairline inside the visible run costs a
 /// fraction of the ninth item's room and nothing else.
 const MENU_SEPARATOR_BAND_LOGICAL_PX: f32 =
@@ -557,7 +565,7 @@ const MENU_SEPARATOR_BAND_LOGICAL_PX: f32 =
 /// `.combo-item .ci-act { width: 18px; height: 18px }` — one of the two verbs a
 /// row that is a FILE reveals under the pointer.
 ///
-/// Eighteen and not `.pf-act`'s 26: a combo item is 27.5 tall, and a 26px hit
+/// Eighteen and not `.pf-act`'s 26: a combo item is 29.5 tall, and a 26px hit
 /// box inside it would be a button wearing the row.
 const MENU_ACT_SIDE_LOGICAL_PX: f32 = 18.0;
 /// `.ci-acts { gap: 1px }`, the profile row's own gap between two verbs.
@@ -651,9 +659,9 @@ const NAV_ITEM_RADIUS_LOGICAL_PX: f32 = 6.0;
 /// `.combo > button`'s own left padding, so the rail's words and the page's
 /// pickers start their text the same distance inside their boxes.
 const NAV_ITEM_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
-/// Between `.group-label`'s 11 and `.row .title`'s 13.5: a rail is read at a
-/// glance like a heading and chosen from like a row.
-const NAV_ITEM_FONT_LOGICAL_PX: f32 = 12.5;
+/// Primary text (`UI-SPEC.md` T4) — the same size every menu item, tree row,
+/// tab, button and combo uses.
+const NAV_ITEM_FONT_LOGICAL_PX: f32 = 13.0;
 /// How strongly a hovered word that is *not* the page shows the ground the
 /// selected word wears at full strength — the pointer's question, half as loud
 /// as the answer.
@@ -12065,7 +12073,7 @@ fn combo_width(
         + px(COMBO_PADDING_LEFT_LOGICAL_PX)
         + px(COMBO_PADDING_RIGHT_LOGICAL_PX)
         + px(COMBO_GAP_LOGICAL_PX)
-        + px(COMBO_CHEVRON_FONT_LOGICAL_PX)
+        + px(COMBO_CHEVRON_BOX_LOGICAL_PX)
         // **And the mark column on a marked row, reserved whether this
         // particular value has a mark or not** — the popup's own rule one
         // surface out (`the run of verbs is reserved in the width, revealed or
@@ -15075,7 +15083,7 @@ fn push_stated_value(
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) {
     let px = |logical: f32| logical * scale;
-    let mark_span = px(COMBO_CHEVRON_FONT_LOGICAL_PX);
+    let mark_span = px(COMBO_CHEVRON_BOX_LOGICAL_PX);
     let text_right = if mark.is_some() {
         rect[2] - mark_span - px(COMBO_GAP_LOGICAL_PX)
     } else {
@@ -15174,7 +15182,7 @@ fn push_combo(
         },
         1.0,
     ));
-    let chevron_column = px(COMBO_CHEVRON_FONT_LOGICAL_PX + COMBO_GAP_LOGICAL_PX);
+    let chevron_column = px(COMBO_CHEVRON_BOX_LOGICAL_PX + COMBO_GAP_LOGICAL_PX);
     // `.combo > button` is a fixed 118px beside a value that is whatever the
     // chosen option is called, and the two do not negotiate: the button's width is
     // the design's, so it is the *text* that gives way. Cropping it mid-glyph is
@@ -15222,24 +15230,23 @@ fn push_combo(
         tabular_numerals: false,
         clip: None,
     });
-    stack.labels.push(ChromeLabel {
-        mono: false,
-        text: COMBO_CHEVRON.to_owned(),
-        rect: [
-            rect[0],
-            rect[1],
-            rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX),
-            rect[3],
+    // The vector `⌄` mark every other drop-down opener wears (`UI-SPEC.md`
+    // I1), not the mock-up's own solid `▼` text glyph — the combo's own ink,
+    // since this chevron (unlike a hover-revealed control's) is always
+    // visible.
+    let chevron_box = px(COMBO_CHEVRON_BOX_LOGICAL_PX).round().max(1.0);
+    let chevron_right = rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX);
+    let chevron_top = ((rect[1] + rect[3] - chevron_box) / 2.0).round();
+    stack.sprites.push(ChromeSprite::new(
+        ChromeMark::Chevron { turned_degrees: 0 },
+        [
+            chevron_right - chevron_box,
+            chevron_top,
+            chevron_right,
+            chevron_top + chevron_box,
         ],
-        font_size_px: px(COMBO_CHEVRON_FONT_LOGICAL_PX),
-        color: palette.dialog_muted_text,
-        align_right: true,
-        align_center: false,
-        letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::Regular,
-        tabular_numerals: false,
-        clip: None,
-    });
+        palette.dialog_muted_text,
+    ));
 }
 
 /// The dialog's other control: a track, the part of it that is filled, a thumb
@@ -15414,6 +15421,48 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (ticket 17) — **every Settings combo wears the same `⌄` every
+    /// other drop-down opener wears, the dialog title and the combo
+    /// drop-down rows are on the primary scale, and the row titles and nav
+    /// items are 13.**
+    ///
+    /// `UI-SPEC.md` I1/T2/H1/T3/T4: the combo used to draw a solid `▼` text
+    /// glyph at 8.5; the title sat at 16 against `first_run.rs::TITLE_FONT_LOGICAL_PX`
+    /// (15, private there); the drop-down rows sat at 27.5 against
+    /// `profiles.rs::ITEM_HEIGHT_LOGICAL_PX` (29.5, private there); the row
+    /// title and nav item sat at 13.5 and 12.5.
+    ///
+    /// MUTATION: revert `HEADER_TITLE_FONT_LOGICAL_PX`, `ITEM_HEIGHT_LOGICAL_PX`,
+    /// `ROW_TITLE_FONT_LOGICAL_PX` or `NAV_ITEM_FONT_LOGICAL_PX` to a literal,
+    /// or make `push_combo` draw a text run again, and this goes red.
+    #[test]
+    fn ui_spec_settings_class_a_values_follow_the_rule() {
+        assert_eq!(
+            HEADER_TITLE_FONT_LOGICAL_PX, 15.0,
+            "UI-SPEC.md T2, first_run.rs::TITLE_FONT_LOGICAL_PX"
+        );
+        assert_eq!(
+            ITEM_HEIGHT_LOGICAL_PX, 29.5,
+            "UI-SPEC.md H1, profiles.rs::ITEM_HEIGHT_LOGICAL_PX"
+        );
+        assert_eq!(ROW_TITLE_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T3");
+        assert_eq!(NAV_ITEM_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T4");
+
+        let placed = open(1.0, false);
+        let combo = combo_of(&placed, SettingsRow::Theme);
+        let sprites = sprites_of(&placed, None, &values());
+        let labels = labels_of(&placed, None, &values());
+        assert!(
+            labels.iter().all(|label| !label.text.contains('\u{25bc}')),
+            "UI-SPEC.md I1: no combo draws the solid ▼ text glyph"
+        );
+        assert!(
+            sprites.iter().any(|sprite| within(sprite.rect, combo)
+                && matches!(sprite.mark, ChromeMark::Chevron { turned_degrees: 0 })),
+            "UI-SPEC.md I1: the combo draws the vector ⌄ mark instead"
+        );
+    }
 
     #[test]
     fn psreadline_page_open_is_an_edge_even_without_a_closed_layout() {
@@ -17062,7 +17111,7 @@ mod tests {
             + COMBO_PADDING_LEFT_LOGICAL_PX
             + COMBO_PADDING_RIGHT_LOGICAL_PX
             + COMBO_GAP_LOGICAL_PX
-            + COMBO_CHEVRON_FONT_LOGICAL_PX;
+            + COMBO_CHEVRON_BOX_LOGICAL_PX;
 
         let split = combo_of(&placed, SettingsRow::SplitDirection);
         let widest = SettingsRow::SplitDirection
@@ -20381,15 +20430,21 @@ mod tests {
             ),
         );
         let sprites = sprites_of(&open_at_heading, None, &values());
+        // **Turned, not merely present**: since ticket 17 (`UI-SPEC.md` I1)
+        // every closed combo on the page also wears a `Chevron { turned_degrees:
+        // 0 }` — the vector mark replacing the old `▼` text glyph, always at
+        // rest, never turned. A resting combo chevron is not a second
+        // disclosure; only a *turned* one is, so the count that matters is
+        // turned chevrons, not chevrons.
         let turned: Vec<ChromeMark> = sprites
             .iter()
             .map(|sprite| sprite.mark)
-            .filter(|mark| matches!(mark, ChromeMark::Chevron { .. }))
+            .filter(|mark| matches!(mark, ChromeMark::Chevron { turned_degrees } if *turned_degrees != 0))
             .collect();
         assert_eq!(
             turned,
             vec![ChromeMark::chevron(1.0)],
-            "one chevron, fully over — and no second kind of disclosure"
+            "one chevron turned fully over — and no second kind of disclosure"
         );
         assert!(
             !sprites
@@ -20666,12 +20721,12 @@ mod tests {
             let menu = placed.menu.expect("the menu is open");
             near(118.0 * scale, width(menu), "the menu");
             near(
-                (2.0 + 8.0 + THEME_OPTIONS.len() as f32 * 27.5) * scale,
+                (2.0 + 8.0 + THEME_OPTIONS.len() as f32 * ITEM_HEIGHT_LOGICAL_PX) * scale,
                 height(menu),
                 "the menu",
             );
             for item in &placed.items {
-                near(27.5 * scale, height(*item), "a menu item");
+                near(ITEM_HEIGHT_LOGICAL_PX * scale, height(*item), "a menu item");
             }
             assert_eq!(placed.items.len(), THEME_OPTIONS.len());
         }
@@ -21254,7 +21309,7 @@ mod tests {
             combo[2]
                 - 1.0
                 - COMBO_PADDING_RIGHT_LOGICAL_PX
-                - COMBO_CHEVRON_FONT_LOGICAL_PX
+                - COMBO_CHEVRON_BOX_LOGICAL_PX
                 - COMBO_GAP_LOGICAL_PX,
             combo[3],
         ]
@@ -21524,6 +21579,12 @@ mod tests {
                 // because what it names is a window the reader has to be able to
                 // picture. The row's own line underneath carries the rest.
                 SettingsRow::LaunchOpens,
+                // The light-scheme picker (since ticket 17, `UI-SPEC.md` I1
+                // grew the chevron column from 8.5 to 13, narrowing every
+                // button's value box by 4.5px): `Solarized Light`, the longest
+                // of the built-in light catalogue's own names, no longer fits
+                // 118px where it used to clear it by a hair.
+                SettingsRow::LightScheme,
                 // Two of the summoned terminal's own (§7.54e ⑤): its first
                 // profile item is the sentence "whatever the default profile
                 // is", and the third rung of `What comes back` names two things
@@ -21535,11 +21596,11 @@ mod tests {
                 SettingsRow::QuakeRestore,
                 SettingsRow::SplitDirection,
             ],
-            "the long profile title, the launch row's second answer, the \
-             summoned terminal's two and `Auto (longer edge)` are the \
-             values this build's own tables can produce that cannot fit the \
-             118px button, and every other row's option is one short word that \
-             must be left alone"
+            "the long profile title, the launch row's second answer, \
+             `Solarized Light`, the summoned terminal's two and \
+             `Auto (longer edge)` are the values this build's own tables can \
+             produce that cannot fit the 118px button, and every other row's \
+             option is one short word that must be left alone"
         );
     }
 
@@ -23270,15 +23331,32 @@ mod tests {
     /// [`MENU_MAX_VISIBLE_ITEMS`] scrolls and the items past the body's edge
     /// draw nothing at all — a claim stated as "these marks, in this order"
     /// would be a claim about how many profiles this build happens to ship.
+    ///
+    /// **The topmost sprite at that box, not the first one found** — `build`
+    /// returns `[scrim, content, popup]`, in painter's order, so `content`'s
+    /// sprites (since ticket 17, `UI-SPEC.md` I1: every closed combo's own
+    /// `⌄`) can share screen space with an open popup sitting over them. A
+    /// forward search would report whichever of the two happened to be pushed
+    /// first, which is not what a reader sees; searching from the end reports
+    /// the sprite actually drawn last, which is the one on top.
     fn item_marks(placed: &SettingsLayout, values: &SettingsValues) -> Vec<(usize, ChromeMark)> {
         let sprites = sprites_of(placed, None, values);
         placed
             .items
             .iter()
             .enumerate()
+            // **Shown, not merely past the enumeration** — an item beyond
+            // `MENU_MAX_VISIBLE_ITEMS`' scroll cap is never drawn by this
+            // popup at all, so its rect is not a claim about what this list
+            // put there; without this guard it is only a claim about
+            // whatever the *page underneath* happens to have at that point
+            // (since ticket 17, `UI-SPEC.md` I1, that is a closed combo's own
+            // `⌄` often enough to be found).
+            .filter(|(_, item)| placed.shows_item(**item))
             .filter_map(|(index, item)| {
                 sprites
                     .iter()
+                    .rev()
                     .find(|sprite| within(sprite.rect, *item))
                     .map(|sprite| (index, sprite.mark))
             })
@@ -23298,6 +23376,12 @@ mod tests {
     }
 
     /// Every mark drawn inside one row's closed button.
+    ///
+    /// Since ticket 17 (`UI-SPEC.md` I1) this is at least two: the leading
+    /// `.ticon`-column mark a marked row's chosen option wears, struck first,
+    /// and the combo's own trailing `⌄` (`ChromeMark::Chevron { turned_degrees:
+    /// 0 }`), struck last — every combo wears the second whether or not the row
+    /// is marked. Callers that mean "the option's own mark" want `drawn[0]`.
     fn button_marks(
         placed: &SettingsLayout,
         row: SettingsRow,
@@ -23385,10 +23469,15 @@ mod tests {
             };
             let drawn = button_marks(&general_page, SettingsRow::DefaultProfile, &general);
             assert_eq!(
-                drawn.iter().map(|sprite| sprite.mark).collect::<Vec<_>>(),
-                vec![profiles::mark(chosen)],
+                drawn[0].mark,
+                profiles::mark(chosen),
                 "the Default profile button wears the mark of the profile it \
-                 says it will start"
+                 says it will start, first in its own box"
+            );
+            assert_eq!(
+                drawn[1].mark,
+                ChromeMark::Chevron { turned_degrees: 0 },
+                "and every combo's own ⌄ stands after it (UI-SPEC.md I1)"
             );
             // The `˅` menu's own box for this mark, struck in the `.ticon`
             // column — the same two numbers the open item is given.
@@ -23401,11 +23490,8 @@ mod tests {
                 ..values()
             };
             assert_eq!(
-                button_marks(&quake_page, SettingsRow::QuakeProfile, &summoned)
-                    .iter()
-                    .map(|sprite| sprite.mark)
-                    .collect::<Vec<_>>(),
-                vec![profiles::mark(chosen)],
+                button_marks(&quake_page, SettingsRow::QuakeProfile, &summoned)[0].mark,
+                profiles::mark(chosen),
                 "and so does the summoned terminal's"
             );
         }
@@ -23417,7 +23503,7 @@ mod tests {
         for mark in (0..profiles::count()).map(profiles::mark) {
             let [_, box_height] = option_mark_box_logical_px(mark);
             assert!(
-                box_height <= ITEM_HEIGHT_LOGICAL_PX && box_height <= COMBO_HEIGHT_LOGICAL_PX,
+                box_height <= ITEM_HEIGHT_LOGICAL_PX.min(COMBO_HEIGHT_LOGICAL_PX),
                 "{mark:?} at {box_height} does not fit the row it stands in"
             );
         }
@@ -23487,9 +23573,14 @@ mod tests {
             None,
             "the closed control borrows nothing either"
         );
-        assert!(
-            button_marks(&placed, SettingsRow::QuakeProfile, &deferring).is_empty(),
-            "and draws nothing in the column"
+        assert_eq!(
+            button_marks(&placed, SettingsRow::QuakeProfile, &deferring)
+                .iter()
+                .map(|sprite| sprite.mark)
+                .collect::<Vec<_>>(),
+            vec![ChromeMark::Chevron { turned_degrees: 0 }],
+            "and draws no profile mark in the column — only every combo's own \
+             ⌄ (UI-SPEC.md I1), which stands regardless of the row's value"
         );
         let box_of = combo_value_box(
             SettingsRow::QuakeProfile,
@@ -23709,30 +23800,29 @@ mod tests {
     /// measured.** A popup is `max(its button, its own chrome + the widest
     /// label)`, and the button is [`page_combo_width`]: the widest answer on the
     /// *page*, shared so a column of controls keeps one left edge. Those two
-    /// chromes are 9.5 logical px apart and the gap does not move with the words:
+    /// chromes are 5 logical px apart and the gap does not move with the words:
     ///
     /// ```text
-    ///   button   2·border + 12 + 10 + 10 + 8.5            = 42.5   + label
-    ///   popup    2·border + 2·4 + 2·10 + 14 (tick) + 8     = 52.0   + label
+    ///   button   2·border + 12 + 10 + 10 + COMBO_CHEVRON_BOX_LOGICAL_PX (13) = 47.0   + label
+    ///   popup    2·border + 2·4 + 2·10 + 14 (tick) + 8                       = 52.0   + label
     /// ```
     ///
-    /// So a popup clears its own button by 9.5 px — *unless some row on its page
+    /// So a popup clears its own button by 5 px — *unless some row on its page
     /// is marked*, which puts `OPTION_ICON_COLUMN + ITEM_GAP` (22) into the
-    /// button and leaves the popup 12.5 px under the floor for every label width
-    /// there is. `Theme` stood here and is exactly that case: `Split direction`
-    /// is on Appearance and is marked, so at 1× Theme's popup sat on its 185px
-    /// button while `Default profile`'s was text-sized at 194 — a difference of
-    /// 9, which is the 9.5 px chrome gap and nothing to do with the mark column.
-    /// No value of `widest` could have fixed it, because both sides of that
-    /// comparison grow with the label at the same rate.
+    /// button and puts the popup under the floor for every label width there is
+    /// (`Theme` stood here: `Split direction` is on Appearance and is marked, so
+    /// at 1× Theme's popup sat on its button while `Default profile`'s, unmarked,
+    /// was text-sized and wider by roughly the 5px chrome gap). No value of
+    /// `widest` could have fixed it, because both sides of that comparison grow
+    /// with the label at the same rate.
     ///
     /// `Scrollback` is on **Terminal**, none of whose rows is marked
     /// ([`SettingsRow::options_are_marked`] is false for every one of them, on
-    /// either platform's reading of the page), so at 1× its button is 163 and
-    /// its popup 172 — over the floor by the structural 9.5, at every scale,
-    /// whatever `widest` is. The two `popup_width > combo` assertions below hold
-    /// that: the day a marked row lands on the Terminal page, this pin says so
-    /// instead of quietly measuring two floors against each other.
+    /// either platform's reading of the page), so its popup clears its button by
+    /// the same structural 5, at every scale, whatever `widest` is. The two
+    /// `popup_width > combo` assertions below hold that: the day a marked row
+    /// lands on the Terminal page, this pin says so instead of quietly measuring
+    /// two floors against each other.
     #[test]
     fn the_marked_picker_reserves_its_icon_column_on_top_of_the_widest_label() {
         for scale in [1.0_f32, 1.5, 2.0] {

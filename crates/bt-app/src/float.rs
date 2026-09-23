@@ -596,8 +596,9 @@ pub const FLOAT_DOCK_PADDING_X_LOGICAL_PX: f32 = 6.0;
 pub const FLOAT_DOCK_GLYPH_LOGICAL_PX: f32 = 13.0;
 /// `.float-win .fly-head button { gap: 4px }`.
 pub const FLOAT_DOCK_GAP_LOGICAL_PX: f32 = 4.0;
-/// The button's own box: `3px` of padding above and below its `13px` glyph.
-pub const FLOAT_DOCK_HEIGHT_LOGICAL_PX: f32 = 19.0;
+/// The tool box in a head (`UI-SPEC.md` H3; `seats::PREVIEW_TOOL_BOX_LOGICAL_PX`),
+/// not the mock-up's own `3px` of padding above and below its `13px` glyph.
+pub const FLOAT_DOCK_HEIGHT_LOGICAL_PX: f32 = crate::seats::PREVIEW_TOOL_BOX_LOGICAL_PX;
 /// `.float-win .fly-head button { font-size: 10px }`.
 pub const FLOAT_DOCK_FONT_LOGICAL_PX: f32 = 10.0;
 /// `.float-win .fly-head button { border-radius: 5px }`, shared by the `×`.
@@ -2431,6 +2432,23 @@ mod tests {
 
     fn frame(left: f32, top: f32, width: f32, height: f32) -> [f32; 4] {
         [left, top, left + width, top + height]
+    }
+
+    /// RED (ticket 19) — **the float's dock stands in the tool box every other
+    /// head control uses, not a 19-pt box of its own.**
+    ///
+    /// `UI-SPEC.md` H3: `seats::PREVIEW_TOOL_BOX_LOGICAL_PX` is the tool box in
+    /// a head (22).
+    ///
+    /// MUTATION: revert `FLOAT_DOCK_HEIGHT_LOGICAL_PX` to a literal and this
+    /// goes red.
+    #[test]
+    fn ui_spec_pane_head_class_a_values_follow_the_rule() {
+        assert_eq!(
+            FLOAT_DOCK_HEIGHT_LOGICAL_PX,
+            crate::seats::PREVIEW_TOOL_BOX_LOGICAL_PX,
+            "UI-SPEC.md H3"
+        );
     }
 
     /// What a foot would print, if there were one.
