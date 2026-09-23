@@ -19,6 +19,7 @@ mod frame;
 mod i18n;
 mod keyboard;
 mod math;
+mod mouse;
 mod palette;
 mod peek;
 mod profiles;
