@@ -1,0 +1,2 @@
+# ConPTY CR/LF and escape sequences are data, never checkout line endings.
+*.bin binary

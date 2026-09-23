@@ -4,8 +4,12 @@
 use super::*;
 use crate::i18n::Text;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::{
+    collections::BTreeSet,
     fs, io,
+    sync::{Condvar, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -331,7 +335,7 @@ impl Marks {
 /// holds no marks and has no decision to keep: `None` says "read [`Marks::default`],
 /// write nothing", and the root is still absent when the run ends. Writers — install,
 /// enable, the Settings row — keep using [`lock`], which creates the root it guards.
-pub fn lock_existing(data: &Path, asker: Asker) -> io::Result<Option<fs::File>> {
+pub fn lock_existing(data: &Path, asker: Asker) -> io::Result<Option<MarksLock>> {
     if !data.is_dir() {
         return Ok(None);
     }
@@ -356,24 +360,28 @@ pub fn recorded_profile_is_usable(path: &Path) -> bool {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
 }
 
-/// **How long one of Folio's own writers waits for its turn at the record.**
+/// **How long one of Folio's own writers waits for a holder in another process.**
 ///
-/// Not a timeout on an operation: a bound on the *queue*, and the only thing it
-/// is measured against is what this program holds the record across. The
-/// longest of those is the PSReadLine module write — nine files, 429 KB — then
-/// a `$PROFILE` read, its dated copy and an atomic write, then the record's own
-/// kilobyte of JSON. That is ordinary small-file I/O: tens of milliseconds, a
-/// couple of hundred with a scanner in the way. Two seconds is an order of
-/// magnitude above the worst of them, which is what makes running out a
-/// diagnosis rather than a delay — a wait this long is no longer one of ours
-/// being slow, it is another process holding the file, and that is the case
+/// Not a timeout on an operation, and since 2026-09-23 not a bound on our own
+/// queue either: a writer of this process waits behind another writer of this
+/// process in [`OURS`] with no deadline at all, because the only way that wait
+/// ends is the writer ahead of it finishing — an edge, not a clock. Two
+/// seconds on a CI runner fsyncing beside four thousand other tests was not
+/// enough for our own writer's I/O, and a reader's busy laptop is the same
+/// machine.
+///
+/// What this bounds is the wait *after* that queue, on the OS lock itself. By
+/// then no writer of this process can be holding the file — every one of them
+/// holds [`OURS`] first — so a holder is another process by construction, and
+/// two seconds is long enough for a Folio that is finishing a write and short
+/// enough that running out is a diagnosis rather than a delay: the case
 /// [`Fate::Refused`] was written for.
 pub const OUR_TURN: Duration = Duration::from_secs(2);
 
-/// How often a waiting writer looks again — the same twenty milliseconds the
-/// profile probe waits on its own child with, and for the same reason: this is
-/// an edge somebody pressed, not a clock run, so it owes nothing to the frame
-/// budget and is over before the next one.
+/// How often a writer waiting on another process's lock looks again — the same
+/// twenty milliseconds the profile probe waits on its own child with, and for
+/// the same reason: this is an edge somebody pressed, not a clock run, so it
+/// owes nothing to the frame budget and is over before the next one.
 const LOOK_AGAIN: Duration = Duration::from_millis(20);
 
 /// **Who is asking for the record, and therefore what a busy lock means.**
@@ -388,13 +396,15 @@ const LOOK_AGAIN: Duration = Duration::from_millis(20);
 /// of them Folio's, and the loser of that meeting said *"lock acquisition failed
 /// because the operation would block"* in the corner of a window whose every row
 /// had in fact been written. Contention between two of our own writers is not a
-/// failure; it is a queue, and a queue is something to stand in.
+/// failure; it is a queue, and a queue is something to stand in — to the end,
+/// because what is ahead in it is our own finite I/O (2026-09-23).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Asker {
     /// A writer inside this running Folio — the first-run card, a Settings row,
     /// the strip's `Add to $PROFILE`, the startup migration, the enable and
-    /// removal workers. It waits its turn, up to [`OUR_TURN`], and only a wait
-    /// that runs out is reported.
+    /// removal workers. It waits behind Folio's own writers with no deadline,
+    /// then up to [`OUR_TURN`] for a holder in another process, and only that
+    /// second wait running out is reported.
     InApp,
     /// A command-line door in another process — `--uninstall-cleanup`,
     /// `--remove-shell-integration`, `uninstall.cmd`. It refuses at once and
@@ -413,26 +423,117 @@ impl Asker {
     }
 }
 
+/// **This process's writers of the record, one data root at a time.**
+///
+/// The half of the lock that knows who is ours without asking anybody: every
+/// asker in this process takes its data root's place here before it touches the
+/// OS lock, and gives it back only after the OS lock is gone. So while a root
+/// is in [`Queue::held`], the writer ahead is one of ours; and once a writer is
+/// through, anything still holding the file is another process. No pid is read
+/// and the OS is not asked who holds what — it is known by construction.
+static OURS: Mutex<Queue> = Mutex::new(Queue {
+    held: BTreeSet::new(),
+    #[cfg(test)]
+    waiting: BTreeMap::new(),
+});
+
+/// Rung whenever a root leaves [`OURS`]; every waiter looks at its own root.
+static NEXT: Condvar = Condvar::new();
+
+struct Queue {
+    held: BTreeSet<PathBuf>,
+    /// Tests only: who is standing in the queue for a root, and since when.
+    #[cfg(test)]
+    waiting: BTreeMap<PathBuf, Vec<Instant>>,
+}
+
+/// Nothing panics while [`OURS`] is locked, so there is no poison to honour.
+fn ours() -> MutexGuard<'static, Queue> {
+    OURS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A root's place in [`OURS`], given back on drop.
+struct OurTurn(PathBuf);
+
+impl OurTurn {
+    /// `InApp` stands in the queue until the root is free, however long our
+    /// own writer ahead takes; `Door` refuses at once in the OS lock's own
+    /// words, so a door's transcript cannot tell which half was busy.
+    fn take(root: PathBuf, asker: Asker) -> io::Result<Self> {
+        let mut queue = ours();
+        if queue.held.contains(&root) {
+            if asker == Asker::Door {
+                return Err(io::Error::other(fs::TryLockError::WouldBlock));
+            }
+            #[cfg(test)]
+            let joined = Instant::now();
+            #[cfg(test)]
+            queue.waiting.entry(root.clone()).or_default().push(joined);
+            while queue.held.contains(&root) {
+                queue = NEXT.wait(queue).unwrap_or_else(PoisonError::into_inner);
+            }
+            #[cfg(test)]
+            if let Some(waiting) = queue.waiting.get_mut(&root)
+                && let Some(mine) = waiting.iter().position(|at| *at == joined)
+            {
+                waiting.remove(mine);
+            }
+        }
+        queue.held.insert(root.clone());
+        Ok(Self(root))
+    }
+}
+
+impl Drop for OurTurn {
+    fn drop(&mut self) {
+        ours().held.remove(&self.0);
+        NEXT.notify_all();
+    }
+}
+
+/// **The record's lock: the OS lock on `integration-marks.lock`, and this
+/// process's turn at it.** Held for as long as the value lives.
+///
+/// Field order is the release order: the file (and with it the OS lock) is
+/// closed first and the turn given back second, so the next writer of ours
+/// never finds the file still held by the one ahead of it.
+pub struct MarksLock {
+    _file: fs::File,
+    _turn: OurTurn,
+}
+
 /// Hold across read/modify/write AND the corresponding profile operation.
 /// OS lock is released on drop/crash; the empty lock file is not a mark.
 ///
 /// `asker` chooses between waiting and refusing; see [`Asker`]. A refusal is the
 /// same `io::Error` it always was, in the same words, so the doors' transcripts
 /// are byte-for-byte what they were.
-pub fn lock(data: &Path, asker: Asker) -> io::Result<fs::File> {
+pub fn lock(data: &Path, asker: Asker) -> io::Result<MarksLock> {
     fs::create_dir_all(data)?;
     let path = data.join("integration-marks.lock");
     super::refuse_profile_path(&path)?;
+    let root = fs::canonicalize(data)?;
+    let patience = asker.patience();
+    #[cfg(test)]
+    let patience = queue_watch::patience_for(&root).unwrap_or(patience);
+    let turn = OurTurn::take(root, asker)?;
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(path)?;
-    let deadline = Instant::now() + asker.patience();
+    // Anyone still holding the file now is another process: ours all stand in
+    // `OURS`, and this writer is through it.
+    let deadline = Instant::now() + patience;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => {
+                return Ok(MarksLock {
+                    _file: file,
+                    _turn: turn,
+                });
+            }
             // A door's patience is zero, so `now` is already past its deadline
             // and it leaves by the arm below with the error it always gave.
             Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
@@ -440,6 +541,37 @@ pub fn lock(data: &Path, asker: Asker) -> io::Result<fs::File> {
             }
             Err(error) => return Err(io::Error::other(error)),
         }
+    }
+}
+
+/// Tests only: what the queue in [`OURS`] looks like from outside, and a
+/// shorter patience for one data root so a test can outlast it quickly.
+#[cfg(test)]
+pub(crate) mod queue_watch {
+    use super::*;
+
+    static PATIENCE: Mutex<BTreeMap<PathBuf, Duration>> = Mutex::new(BTreeMap::new());
+
+    /// Every [`Asker`] asking about `data` waits this long instead of its own.
+    pub(crate) fn set_patience(data: &Path, patience: Duration) {
+        PATIENCE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(fs::canonicalize(data).unwrap(), patience);
+    }
+
+    pub(super) fn patience_for(root: &Path) -> Option<Duration> {
+        PATIENCE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(root)
+            .copied()
+    }
+
+    /// When each writer now standing in `data`'s queue joined it.
+    pub(crate) fn waiting(data: &Path) -> Vec<Instant> {
+        let root = fs::canonicalize(data).unwrap();
+        ours().waiting.get(&root).cloned().unwrap_or_default()
     }
 }
 

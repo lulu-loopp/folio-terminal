@@ -133,6 +133,7 @@ mod search;
 mod seats;
 mod seed;
 mod settings;
+mod settings_bundle;
 mod settling;
 mod shell_integration;
 mod shell_literal;
@@ -181,7 +182,10 @@ use bt_persist::{
 use bt_doc::Bias;
 #[cfg(test)]
 use bt_persist::WindowStateV1;
-use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtyError, PtySession, PtySize};
+use bt_pty::{
+    OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PSREADLINE_PASTE_INPUT, PtyError, PtySession,
+    PtySize,
+};
 use bt_render::{
     ChromePalette, CursorStyle, DEVICE_REBUILD_ATTEMPTS, DeviceLossPilot, Flight, FrameSource,
     FrameTrigger, GpuContext, GridSize, ImeCursorArea, LatestFrameSlot, LostDevice,
@@ -880,15 +884,10 @@ struct PasteTarget {
 enum PasteRoad {
     /// Today's bytes, now: [`paste_text`], bracketed if the program asked for it.
     AsTyped,
-    /// **A PowerShell prompt the shell opened in order** — the road ticket 03 builds, where the
-    /// block lands on PSReadLine's input line and nothing runs (the 2026-09-23 spike: C1 passes on
-    /// 5.1 with PSReadLine 2.0.0 and 2.4.6 and on pwsh 7).
-    ///
-    /// **Until 03 lands this is delivered exactly as [`Self::AsTyped`]**, which is today's
-    /// behaviour for that pane: the owner ruled that PowerShell is never shown the card
-    /// (2026-09-22, ruling 2), and a pane the road will serve is not a pane to put a question to
-    /// in the meantime. It is a road of its own already so that the two tickets share one
-    /// predicate rather than each writing half of one.
+    /// **A PowerShell prompt the shell opened in order, behind ConPTY** — the block lands whole
+    /// on PSReadLine's input line and nothing runs until the reader's one Enter (owner's ruling
+    /// 2026-09-22, ruling 2; 0.4.4 ticket 03). Never shown the card. The bytes are
+    /// [`powershell_input_line`]'s.
     InputLine,
     /// The card: nothing is sent until the reader answers. Carries the count the card shows, so
     /// the text is scanned once.
@@ -913,19 +912,31 @@ struct PasteFacts {
     /// name or the window title. `false` for a nested program, a closed region and a pane whose
     /// integration never spoke, which is where ticket 03 hands the pane back to the card.
     powershell_prompt_open: bool,
+    /// **The pane's keys reach the shell through ConPTY** — this build is the Windows one. The
+    /// input-line road is a Ctrl+V key record or win32-input-mode Shift+Enter records, and both
+    /// are ConPTY's translations: measured there, and meaningless to a PSReadLine on a Unix pty
+    /// (whose default bindings are Emacs's, with no `Paste` on Ctrl+V). A PowerShell elsewhere
+    /// is a program without bracketed paste, and gets the card.
+    through_conpty: bool,
     /// `settings.json`'s `multiline_paste_ask` — the one row the owner ruled (2026-09-22).
     ask: bool,
 }
 
 impl PasteFacts {
-    /// The facts as the pane holds them now.
-    fn of(leaf: &LeafSession, clipboard_text: bool, ask: bool) -> Self {
+    /// The facts as the pane holds them now, on `host`.
+    fn of(
+        leaf: &LeafSession,
+        clipboard_text: bool,
+        ask: bool,
+        host: bt_platform::HostPlatform,
+    ) -> Self {
         Self {
             clipboard_text,
             bracketed: leaf.session.bracketed_paste_mode(),
             powershell_prompt_open: leaf.paste_recipient.encoder.grammar
                 == shell_literal::ShellGrammar::PowerShell
                 && leaf.session.shell_prompt_opened_in_order(),
+            through_conpty: host == bt_platform::HostPlatform::Windows,
             ask,
         }
     }
@@ -944,13 +955,35 @@ fn paste_road(text: &str, facts: PasteFacts) -> PasteRoad {
     if lines <= 1 {
         return PasteRoad::AsTyped;
     }
-    if facts.powershell_prompt_open {
+    if facts.powershell_prompt_open && facts.through_conpty {
         return PasteRoad::InputLine;
     }
     if facts.ask {
         PasteRoad::Ask { lines }
     } else {
         PasteRoad::AsTyped
+    }
+}
+
+/// **What a multi-line paste into a PowerShell prompt writes** (0.4.4 ticket 03) — one write,
+/// whichever of the spike's two proven roads the text needs.
+///
+/// * **C1, the clipboard road** — the one byte [`PSREADLINE_PASTE_INPUT`] (Ctrl+V), and
+///   PSReadLine reads the clipboard itself and inserts the block without accepting it. Taken
+///   when [`input::psreadline_pastes_it_unchanged`]: what lands is then what Folio's cleanup
+///   would have sent. Only [`paste_road`] sends a paste here, and it does so only for the
+///   clipboard's own text, so the shell re-reads the very text Folio read — never a path Folio
+///   spelled or a picture it saved. **A known limit, accepted** (2026-09-23 spike, A4): a third
+///   program that rewrites the clipboard in the ~20 ms between this write and the shell's read
+///   gets its text pasted instead; Folio does not read the clipboard a second time to check.
+/// * **C2, Folio's own bytes** — [`input::input_line_bytes`]: today's sanitized text with every
+///   break as a Shift+Enter record. Taken for text Folio has to change (a control character it
+///   drops, a lone `\r` PSReadLine would delete), because C1 would bypass that cleanup.
+fn powershell_input_line(text: &str) -> std::borrow::Cow<'static, [u8]> {
+    if input::psreadline_pastes_it_unchanged(text) {
+        std::borrow::Cow::Borrowed(PSREADLINE_PASTE_INPUT)
+    } else {
+        std::borrow::Cow::Owned(input::input_line_bytes(text))
     }
 }
 
@@ -979,8 +1012,18 @@ struct PendingPaste {
 enum StagedPaste {
     /// Write this now.
     Send(String),
+    /// Write these bytes now, exactly: a PowerShell prompt's input line ([`powershell_input_line`]).
+    InputLine(std::borrow::Cow<'static, [u8]>),
     /// Held on the leaf; the card is up and nothing was sent.
     Held,
+}
+
+/// **What the one writer writes** — text it spells for the pane the way a paste always was
+/// ([`paste_text`]), or bytes a road already spelled ([`StagedPaste::InputLine`]).
+#[derive(Clone, Copy, Debug)]
+enum PasteBody<'a> {
+    Text(&'a str),
+    InputLine(&'a [u8]),
 }
 
 /// **Decide, and hold the paste if the answer is "ask"** — `Runtime::deliver_paste`'s decision,
@@ -995,14 +1038,15 @@ fn stage_paste(
     text: String,
     clipboard_text: bool,
     ask: bool,
+    host: bt_platform::HostPlatform,
     context: &'static str,
 ) -> StagedPaste {
     let Some(leaf) = tab.sessions.get(&target.seat) else {
         return StagedPaste::Send(text);
     };
-    match paste_road(&text, PasteFacts::of(leaf, clipboard_text, ask)) {
-        // Ticket 03 gives `InputLine` its own bytes. Until then that pane keeps today's road.
-        PasteRoad::AsTyped | PasteRoad::InputLine => StagedPaste::Send(text),
+    match paste_road(&text, PasteFacts::of(leaf, clipboard_text, ask, host)) {
+        PasteRoad::AsTyped => StagedPaste::Send(text),
+        PasteRoad::InputLine => StagedPaste::InputLine(powershell_input_line(&text)),
         PasteRoad::Ask { lines } => {
             for leaf in tab.sessions.values_mut() {
                 leaf.pending_paste = None;
@@ -11158,6 +11202,30 @@ struct LeafSession {
     /// at prompt-shaped lines; what covers those panes is the window-focus
     /// trigger, the kernel's own change notifications and the masthead's button.
     last_finished_command: Option<bt_term::CommandMarkId>,
+    /// **This pane has a command rail, and has had one since its shell's first
+    /// mark** (owner, 2026-09-23: decoration never covers text).
+    ///
+    /// The terminal grid leaves room for the rail's resting band whenever this
+    /// is true ([`cmdrail::terminal_grid_for`]), so the answer has to be one that
+    /// does not move under the pane, or every change of it is a resize — a
+    /// reflow of the shell, or of the TUI in front of it. So it is not the
+    /// rail's per-frame stack: it turns true at the first `OSC 133` mark the
+    /// ledger records, which is the first prompt of an integrated shell and the
+    /// one moment the screen is nearly empty, and it stays true for the rest of
+    /// the leaf's life. **Including on the alternate screen**, where
+    /// [`cmdrail::host_rect`] hides the rail: the room stays, so opening and
+    /// closing `vim` never resizes anything; and including after a `clear` has
+    /// retired every mark. At most one grid change per pane lifetime, then.
+    ///
+    /// A shell that never sends a mark — `cmd.exe` without its prompt, a program
+    /// run bare, a WSL shell without the init file — never sets it and keeps the
+    /// grid it always had. A pane is born `false`: the ledger is not restored,
+    /// so a revived pane earns its rail at its first prompt like any other.
+    ///
+    /// One owner: [`LeafSession::hear_first_mark`], asked in [`drain_leaf_pty`]
+    /// where every leaf's bytes pass. It travels with the struct, so a pane torn
+    /// out into its own tab keeps it.
+    has_rail: bool,
     /// How much this shell has said, counted by [`output_revision`].
     ///
     /// Kept here rather than read off the session because the question is
@@ -12732,6 +12800,12 @@ struct WindowRuntime {
     /// contract is one gesture in flight, and a wallpaper request coalesced into
     /// a pending folder request would answer the wrong row.
     image_picker: bt_platform::ImagePicker,
+    /// The system's save dialog behind the About page's `Export…` (0.4.4 ticket
+    /// 05). Its own bridge, for [`Self::image_picker`]'s reason: one gesture in
+    /// flight per bridge, and the answer is a place to write, not a file to read.
+    /// `None` when it could not be installed, which is not a reason for the
+    /// window not to open.
+    save_picker: Option<bt_platform::SaveFilePicker>,
     /// Whether a picture chooser is out. A `bool` and not a
     /// [`FolderPick`]-shaped enum, because there is exactly one row that opens
     /// this one and the answer has nowhere else to go.
@@ -18161,6 +18235,27 @@ impl TabState {
 const TITLE_ACTIVITY_SEPARATOR: &str = " - ";
 
 impl LeafSession {
+    /// **Turn [`Self::has_rail`] on at the ledger's first mark**, and answer
+    /// whether this call was the one that did — true at most once per leaf.
+    ///
+    /// Asked of the ledger and not of the bytes: a mark the ledger refused (an
+    /// alternate-screen `OSC 133`, §3.2's isolated namespace) is a mark no rail
+    /// will ever draw, so it reserves nothing either.
+    fn hear_first_mark(&mut self) -> bool {
+        if self.has_rail || self.session.command_marks().is_empty() {
+            return false;
+        }
+        self.has_rail = true;
+        true
+    }
+
+    /// The grid this pane is given for the rectangle `body` — the seat's pixels
+    /// and whether this pane has a rail, through the one function that turns a
+    /// seat into a grid ([`cmdrail::terminal_grid_for`]).
+    fn grid_for(&self, metrics: &bt_render::CellMetrics, body: SeatViewport) -> GridSize {
+        cmdrail::terminal_grid_for(metrics, body, self.has_rail)
+    }
+
     /// The title this pane's program **announced**, as opposed to one it merely
     /// repeated back.
     ///
@@ -35993,6 +36088,8 @@ enum FilePick {
     BackgroundImage,
     /// The profile editor's `Browse…`: this profile's own shell (§7.1.6c-6b).
     ProfileProgram,
+    /// The About page's `Import…` (0.4.4 ticket 05): an exported settings file.
+    SettingsImport,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36349,7 +36446,9 @@ fn create_leaf_session(
     // neighbour that read the file for itself would be a second place for the answer to live.
     line_wrapping: bool,
 ) -> Result<LeafSession> {
-    let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
+    // **Born without a rail**: a shell that has not started has sent no mark, and
+    // [`LeafSession::has_rail`] is turned on only by one (owner, 2026-09-23).
+    let grid = cmdrail::terminal_grid_for(&renderer.metrics(), body, false);
     // **The machine is asked before anything is composed for it** (review row
     // R4-1). `startable_profile` carries the whole rule and its argument; what is
     // decided here is which profile everything below is about, because the
@@ -36662,6 +36761,8 @@ fn create_leaf_session(
         pending_pty_resize: None,
         pending_psreadline_resize_reanchor: false,
         last_finished_command: None,
+        // Its shell has not said anything yet, let alone marked a prompt.
+        has_rail: false,
         output_revision: 0,
         last_seen_revision: 0,
         last_presented_frame: None,
@@ -38049,6 +38150,10 @@ struct DrainOutcome {
     /// The shell reported a different working directory, which is **durable**
     /// state: it is the `cwd` of this leaf in `session.json`.
     moved: bool,
+    /// **A pane heard its first shell-integration mark this turn**, so it now
+    /// has a rail and its grid owes the rail room (`LeafSession::has_rail`).
+    /// True at most once per pane lifetime.
+    rail_began: bool,
     /// **Where the shells that just finished a command are standing** (R31's
     /// third invalidation moment, A).
     ///
@@ -38082,6 +38187,7 @@ impl DrainOutcome {
         self.arrived_off_focus |= other.arrived_off_focus;
         self.renamed |= other.renamed;
         self.moved |= other.moved;
+        self.rail_began |= other.rail_began;
         self.command_ends.extend(other.command_ends);
         self.notifications.extend(other.notifications);
     }
@@ -38347,6 +38453,10 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         if ended {
             leaf.last_finished_command = finished;
         }
+        // **And the first mark is heard here too**, for the same reason: it is
+        // what gives this pane a rail, and a pane behind another tab earns one at
+        // its first prompt exactly as the pane on screen does.
+        let rail_began = leaf.hear_first_mark();
         let name_after = leaf.name_evidence();
         Ok(DrainOutcome {
             // Taken here because this is the one place every leaf of every tab
@@ -38390,6 +38500,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
             arrived_off_focus: false,
             renamed: name_after != name_before,
             moved: name_after.1 != name_before.1,
+            rail_began,
         })
     })();
     hang_watch::at(outcome_parent);
@@ -38697,6 +38808,7 @@ struct NewWindowParts {
     math_context_menu: bt_platform::MathContextMenu,
     folder_picker: bt_platform::FolderPicker,
     image_picker: bt_platform::ImagePicker,
+    save_picker: Option<bt_platform::SaveFilePicker>,
     ime_system_caret: bt_platform::ImeSystemCaret,
     rail: seats::RailState,
     seat_viewport: LogicalRect,
@@ -38761,6 +38873,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         math_context_menu,
         folder_picker,
         image_picker,
+        save_picker,
         ime_system_caret,
         rail,
         seat_viewport,
@@ -38836,6 +38949,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         folder_pick: None,
         image_picker,
         image_pick_pending: None,
+        save_picker,
         background_picture: None,
         background_decode: BackgroundDecodeMailbox::default(),
         clipboard_picture: ClipboardPictureMailbox::default(),
@@ -39865,6 +39979,12 @@ impl Runtime<'_> {
         let image_picker = bt_platform::ImagePicker::new(native)
             .map_err(|error| anyhow!(error))
             .context("install deferred picture chooser")?;
+        // **Reported, not propagated** (`the_m1_startup_path_has_no_fatal_platform_call_off_windows`):
+        // the export's dialog is not a reason for a window not to open. A window
+        // without one says so when `Export…` is pressed.
+        let save_picker = bt_platform::SaveFilePicker::new(native)
+            .inspect_err(|error| eprintln!("recoverable save dialog install failure: {error}"))
+            .ok();
         // Asked of DWM once, before anything reads the Acrylic row, by writing
         // the attribute's own default: a Windows that has never heard of
         // `DWMWA_SYSTEMBACKDROP_TYPE` refuses it, and one that has is unchanged.
@@ -40323,6 +40443,7 @@ impl Runtime<'_> {
             math_context_menu,
             folder_picker,
             image_picker,
+            save_picker,
             ime_system_caret,
             rail,
             seat_viewport,
@@ -40589,7 +40710,11 @@ impl Runtime<'_> {
             // Short of the reserved scroll lane, which is the mock-up's own
             // arrangement seen from the other side: `.term` carries an 18px right
             // padding and the flash is a background on a block inside it, so the
-            // band has never reached under the rail.
+            // band has never reached under the rail. The text half of that
+            // arrangement is enforced now (2026-09-23): a pane with a rail is
+            // given a grid whose last column ends left of the rail's resting band
+            // (`cmdrail::terminal_grid_for`). The band itself is unchanged — it is
+            // a row's background, not text, and runs to the lane as it always did.
             body[2] - bt_render::TERMINAL_SCROLL_LANE_LOGICAL_PX * scale,
             bottom.min(body[3]),
         ];
@@ -41969,6 +42094,12 @@ impl Runtime<'_> {
                 Some(settings::LinkDestination::File(path)) => {
                     self.open_local_path(path);
                 }
+                // The configuration doors (0.4.4 ticket 05): two dialogs, whose
+                // answers are collected on a later turn, and the storage folder
+                // handed to the reveal door.
+                Some(settings::LinkDestination::Configuration(door)) => {
+                    self.open_configuration_door(door);
+                }
                 None => {}
             },
             _ => {}
@@ -42217,7 +42348,12 @@ impl Runtime<'_> {
             | Row::AboutPlatform
             | Row::AboutReleaseNotes
             | Row::AboutIssues
-            | Row::AboutLicences => {}
+            | Row::AboutLicences
+            // And the three configuration doors (0.4.4 ticket 05), which hold
+            // no value either: they carry every other row's.
+            | Row::ExportSettings
+            | Row::ImportSettings
+            | Row::SettingsFolder => {}
         }
         Ok(())
     }
@@ -62299,10 +62435,35 @@ fn paste_text<T>(
     write: impl FnOnce(&[u8]) -> Result<T>,
 ) -> Result<T> {
     let bytes = input::paste_bytes(text, session.bracketed_paste_mode());
+    paste_spelled(session, projection, &bytes, write)
+}
+
+/// **A paste whose bytes are already spelled**, with everything else a paste owes: the
+/// selection goes, the view returns to the bottom, and the bytes go out in one write
+/// ([`paste_text`]'s tail, and the whole of a PowerShell input-line paste — 0.4.4 ticket 03).
+fn paste_spelled<T>(
+    session: &mut DualPlaneSession,
+    projection: &mut ViewportProjection,
+    bytes: &[u8],
+    write: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
     session.set_view_selection(None);
     projection.set_selection(None);
     projection.scroll_to_bottom();
-    write(&bytes)
+    write(bytes)
+}
+
+/// [`paste_text`] or [`paste_spelled`], as the body says.
+fn paste_body<T>(
+    session: &mut DualPlaneSession,
+    projection: &mut ViewportProjection,
+    body: PasteBody<'_>,
+    write: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
+    match body {
+        PasteBody::Text(text) => paste_text(session, projection, text, write),
+        PasteBody::InputLine(bytes) => paste_spelled(session, projection, bytes, write),
+    }
 }
 
 /// **Which shape a recalled command's arrival takes** (DESIGN.md §7.55 ⑨).
@@ -73453,7 +73614,9 @@ mod clipboard_path_tests {
         );
         let deliver = method_body("Runtime", "deliver_paste");
         assert!(
-            deliver.contains("StagedPaste::Send(text) => self.send_paste(target, &text, context)"),
+            deliver.contains(
+                "StagedPaste::Send(text) => self.send_paste(target, PasteBody::Text(&text), context)"
+            ) && deliver.contains("self.send_paste(target, PasteBody::InputLine(&bytes), context)"),
             "the paste no longer answers with what its writer did:\n{deliver}"
         );
         // The three callers that must not change: a keystroke, the row menu and

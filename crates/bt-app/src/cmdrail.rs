@@ -1040,6 +1040,79 @@ pub fn merge(commands: &[CommandLine], matches: &[MatchLine]) -> Stack {
     }
 }
 
+/// **Where the resting rail stands across a pane's width** — the one place its
+/// horizontal arithmetic is written.
+///
+/// Every number in it is a function of the pane's right edge and the scale and of
+/// nothing the ledger says, which is what lets two readers ask it: [`lay_out`],
+/// which hangs the ticks off it, and [`terminal_grid_for`], which keeps the
+/// terminal's text out from under it. Two copies of this sum would be two places
+/// for the rail and the grid to stop agreeing about where the rail is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RestingBand {
+    /// The resting band's left edge — [`Rail::bounds`]' `x0`.
+    left: f32,
+    /// A resting tick's right edge, inboard of the scroll lane and its gap.
+    tick_right: f32,
+    /// The band's right edge — the tick's, plus the band's own padding.
+    right: f32,
+}
+
+fn resting_band(body_right: f32, scale: f32) -> RestingBand {
+    let px = |logical: f32| logical * scale;
+    let tick_right = (body_right
+        - px(TERMINAL_SCROLL_LANE_LOGICAL_PX + RAIL_LANE_GAP_LOGICAL_PX)
+        - px(RAIL_PADDING_X_LOGICAL_PX))
+    .round();
+    let right = tick_right + px(RAIL_PADDING_X_LOGICAL_PX);
+    RestingBand {
+        left: right - px(TICK_LENGTH_LOGICAL_PX + RAIL_PADDING_X_LOGICAL_PX * 2.0),
+        tick_right,
+        right,
+    }
+}
+
+/// **The grid a terminal pane is given — the one place a seat rectangle becomes
+/// a grid** (owner, 2026-09-23: decoration never covers text).
+///
+/// A pane with no rail gets exactly [`bt_render::CellMetrics::grid_for_pixels`]
+/// of its rectangle, as it always has. A pane that has a rail gets the columns
+/// that end left of the rail's **resting** band ([`Rail::bounds`]): the text
+/// starts where it always started, `padding_px` in from the left, and the last
+/// column stops short of the band, so no tick — the rose one included — is drawn
+/// over a glyph. The grid's own right padding is part of what the band stands
+/// in, so only the band's width beyond that padding is taken out.
+///
+/// **The resting band and not the hot one** (owner, 2026-09-23). The crest's
+/// twenty-seven pixels exist only while the pointer is on the rail, when the
+/// reader's eyes are on the rail too; reserving them would cost every pane two
+/// more columns for a moment that covers the last column briefly and on request.
+///
+/// **`has_rail` is the leaf's standing fact and never this frame's stack.** A
+/// width that followed the stack would resize the shell each time a mark
+/// arrived and each time a program entered or left the alternate screen (where
+/// [`host_rect`] hides the rail); see `LeafSession::has_rail` for the fact and
+/// its one owner.
+///
+/// The pixel size the child is told stays the seat's — see the call sites —
+/// because it has never been the text area: the symmetric padding was already
+/// in it.
+#[must_use]
+pub fn terminal_grid_for(
+    metrics: &bt_render::CellMetrics,
+    body: bt_render::SeatViewport,
+    has_rail: bool,
+) -> bt_render::GridSize {
+    if !has_rail {
+        return metrics.grid_for_pixels(body.width, body.height);
+    }
+    let right = body.x.saturating_add(body.width) as f32;
+    let reserve = right - resting_band(right, metrics.scale_factor as f32).left;
+    let beyond_padding = (reserve - metrics.padding_px).max(0.0);
+    let width = (body.width as f32 - beyond_padding).floor().max(0.0) as u32;
+    metrics.grid_for_pixels(width, body.height)
+}
+
 /// Place the ticks for `stack` inside a pane body, in physical pixels, with
 /// bucket `expanded` — if there is one, and if it holds more than one entry —
 /// unfolded into its members.
@@ -1161,10 +1234,8 @@ pub fn lay_out(body: [f32; 4], stack: &Stack, scale: f32, expanded: Option<usize
     // tick, which is what makes a rail of three ticks and a rail of thirty read as
     // the same instrument at different densities.
     let top = ((body[1] + body[3]) / 2.0 - extent / 2.0).round();
-    let right = (body[2]
-        - px(TERMINAL_SCROLL_LANE_LOGICAL_PX + RAIL_LANE_GAP_LOGICAL_PX)
-        - px(RAIL_PADDING_X_LOGICAL_PX))
-    .round();
+    let resting = resting_band(body[2], scale);
+    let right = resting.tick_right;
     for (index, tick) in ticks.iter_mut().enumerate() {
         let tick_top = (top + index as f32 * (thickness + gap)).round();
         // `.cmdtick.sub { margin-right: 4px }` — the opened group's own column,
@@ -1187,7 +1258,7 @@ pub fn lay_out(body: [f32; 4], stack: &Stack, scale: f32, expanded: Option<usize
     // pads the flex box, and at the resting width its ticks are — see
     // [`Rail::bounds`] and [`Rail::hot_bounds`] for what those two widths are a
     // decision about.
-    let band_right = right + px(RAIL_PADDING_X_LOGICAL_PX);
+    let band_right = resting.right;
     let band_top = ticks[0].rect[1] - px(RAIL_PADDING_Y_LOGICAL_PX);
     let band_bottom = last[3] + px(RAIL_PADDING_Y_LOGICAL_PX);
     // The four pixels an unfolded member steps out by are held open at every
@@ -1200,12 +1271,7 @@ pub fn lay_out(body: [f32; 4], stack: &Stack, scale: f32, expanded: Option<usize
         0.0
     };
     Rail {
-        bounds: [
-            band_right - px(TICK_LENGTH_LOGICAL_PX + RAIL_PADDING_X_LOGICAL_PX * 2.0),
-            band_top,
-            band_right,
-            band_bottom,
-        ],
+        bounds: [resting.left, band_top, band_right, band_bottom],
         hot_bounds: [
             band_right
                 - px(TICK_CREST_LENGTH_LOGICAL_PX + step_out + RAIL_PADDING_X_LOGICAL_PX * 2.0),

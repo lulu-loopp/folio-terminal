@@ -220,6 +220,15 @@ Folio itself and run nothing.
   read a report before you attach it to anything.
 - `%TEMP%\bt-app-panic.log` is appended to by the panic hook.
 
+## The settings export
+
+**Settings > About > Export…** writes one file holding `settings.json`,
+`profiles.json`, `keybindings.json` and your colour schemes. A profile's command
+line and its environment rows are in it as you wrote them — if one holds a token,
+so does the export. It is a plain JSON file with nothing hidden in it; read it
+before you share it. **Import…** reads only the file you choose, and each part
+goes through the checks the same file gets when it is edited by hand.
+
 ## Environment variables
 
 Folio reads no environment variable of its own unless you set one. Several

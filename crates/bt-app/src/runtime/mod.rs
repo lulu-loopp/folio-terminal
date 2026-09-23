@@ -10,6 +10,7 @@
 
 mod attention;
 mod clipboard;
+mod configuration;
 mod diagnostics;
 mod dpi;
 mod files;

@@ -358,7 +358,7 @@ this list that blocks on something outside the process is a defect.
 | # | call | where | disposition |
 |---|---|---|---|
 | 1 | `ShellExecuteW` / `NSWorkspace::openURL:` — synchronous, no timeout; the measured ~1.4 s Ctrl+click stall | `bt-platform::handoff::{windows_handoff,macos_handoff}::hand_over`, reached from `Runtime::open_local_path`, `reveal_in_explorer`, `open_local_path_verified`, `reveal_verified`, `open_preview_link`, `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings` | **done** — *a hand-off to the system runs on its own lane, and the window that receives it may take the front* (`DESIGN.md`, 2026-09-22) |
-| 2 | the marks lock: `try_lock` then `sleep` up to `OUR_TURN` = 2 s, then a dated `$PROFILE` copy, an atomic write and two marks writes | `Runtime::add_to_profile`, `spend_powershell_intent` → `profile_runtime::install_recorded` | **0.4.4** — storage lane; the enable and removal halves are already on workers, the install half is not |
+| 2 | the marks lock: a wait with no deadline behind our own writer, then `try_lock` and `sleep` up to `OUR_TURN` = 2 s for a holder in another process (`DESIGN.md`, 2026-09-23), then a dated `$PROFILE` copy, an atomic write and two marks writes | `Runtime::add_to_profile`, `spend_powershell_intent` → `profile_runtime::install_recorded` | **0.4.4** — storage lane; the enable and removal halves are already on workers, the install half is not |
 | 3 | `psreadline::apply_recorded` — nine files, ~429 KB, under the same lock | `Runtime::apply_psreadline` | **0.4.4** — storage lane; named by the 2026-09-21 history entry |
 | 4 | `psreadline::installed_copy` — a recursive walk of the module directory | `Runtime::refresh_psreadline_installed` | **0.4.4** — observation lane |
 | 5 | `bt_platform::monospace_font_families()` — the machine's whole font collection, enumerated inline; the traced cause of the frozen gear | `settings::monospace_family_files` ← `apply_stored_terminal_font` | **0.4.4** — observation lane; the CJK slot beside it already publishes nothing and re-applies on `FontsScanned` |
@@ -566,6 +566,16 @@ ladder would be wrong.
 | `settings.json`, `profiles.json`, `keybindings.json`, `pins` — `bt-app::persist::SettingsStore`, `SettingsV1`, `SETTINGS_MIGRATIONS`, `ProfilesStore`, `PinsStore` | the person using Folio | durable preferences | yes, with forward-only migrations | **two disciplines, and that is the evidence drift is cheap**: `advance_storage_watch` re-reads `profiles.json` and the pins live (`reread_profiles`, `reread_pins`, behind the shared watch quiet window), while `settings.json` is applied in process at its own door and is not re-read from disk during a run |
 | CLI flags — `bt-app::cli::parse`, `CliRequest` | whoever launches this run, including Explorer and another Folio | per-launch placement and the six doors of §2.1 | no | none; consumed once |
 | `BT_*` environment variables — `docs/BT-ENVIRONMENT.md` | someone diagnosing this build | diagnostics only | no | read where used |
+
+**The export is not a fourth entrance.** `Settings > About > Export…` writes
+`settings.json`, `profiles.json`, `keybindings.json` and the reader's scheme files
+as one JSON document (`bt_persist::export`, `folio_export` version 1), and
+`Import…` hands each part to the door that document takes when it is edited by
+hand — `bt_app::settings_bundle` names the doors, `Runtime::import_settings_from`
+walks them: schemes through `parse_scheme` into the folder, profiles through
+`take_profile_table`, shortcuts through `Shortcuts::apply_overrides`, and settings
+through the file's own migrations and then each row's own apply function, never
+through a re-read.
 
 The `BT_*` catalogue is held complete by `bt_app::diagnostics::bt_environment_doc_tests`,
 which scans every non-binary, non-integration-test `.rs` file under `crates/`

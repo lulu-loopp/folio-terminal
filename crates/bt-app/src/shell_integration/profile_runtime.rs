@@ -754,12 +754,18 @@ mod tests {
     /// first. A holder that outlasts the queue is the case this pin is really
     /// about, and it is the case tested here: the wait runs out, nothing is
     /// written, and the refusal says exactly what it always said.
+    ///
+    /// Since 2026-09-23 a holder that went through [`lock`] is ours by
+    /// construction and is waited for without a deadline, so the stranger
+    /// here is a raw OS lock on a second handle to the lock file, which never
+    /// stands in this process's queue. On both platforms a file lock held
+    /// through another handle is exactly what another process looks like.
     #[test]
     fn shell_integration_record_lock_refuses_overlap_and_releases_on_drop() {
         let root = super::super::tests::temp_dir("marks-lock");
         let profile = root.join("profile.ps1");
         fs::write(&profile, LEGACY_LINE).unwrap();
-        let held = lock(&root, Asker::Door).unwrap();
+        let held = foreign_holder(&root);
         let started = std::time::Instant::now();
         let refusal = install_recorded(
             &profile,
@@ -808,16 +814,16 @@ mod tests {
     /// both writers are let go while the record is held, so both are queued
     /// behind it and then behind each other.
     ///
-    /// MUTATIONS: give [`Asker::InApp`] a patience of zero and both writers race
-    /// the holder and lose; drop either writer's mark from the record and the
-    /// uninstall door has nothing to find.
+    /// MUTATIONS: make this process's queue refuse an `InApp` writer the way it
+    /// refuses a door and both writers lose to the holder; drop either
+    /// writer's mark from the record and the uninstall door has nothing to find.
     #[test]
     fn shell_integration_two_of_our_own_writers_queue_and_both_finish() {
         let root = super::super::tests::temp_dir("marks-queue");
         let profile = root.join("profile.ps1");
         fs::write(&profile, LEGACY_LINE).unwrap();
         let script = script_at(&root);
-        let held = lock(&root, Asker::Door).unwrap();
+        let held = lock(&root, Asker::InApp).unwrap();
         let (install, enable) = std::thread::scope(|scope| {
             let installer = scope.spawn(|| {
                 install_recorded(
@@ -829,9 +835,14 @@ mod tests {
                 )
             });
             let enabler = scope.spawn(|| enable_record(&root));
-            // Long enough that both writers are certainly in the queue, and a
-            // small fraction of the turn they are allowed to wait.
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            // Both writers are standing in the queue behind the holder (or
+            // one has already left it, which the assertions below will name).
+            while queue_watch::waiting(&root).len() < 2
+                && !installer.is_finished()
+                && !enabler.is_finished()
+            {
+                std::thread::yield_now();
+            }
             drop(held);
             (installer.join().unwrap(), enabler.join().unwrap())
         });
@@ -922,6 +933,108 @@ mod tests {
         assert!(
             written.starts_with("# mine\r\n") && written.contains(MANAGED_LINE),
             "{written:?}"
+        );
+    }
+
+    /// A holder of the record that is not this process's: a raw OS lock taken
+    /// through a second handle to the lock file, which never stands in
+    /// [`profile_marks`]'s queue.
+    fn foreign_holder(root: &Path) -> fs::File {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("integration-marks.lock"))
+            .unwrap();
+        file.try_lock().unwrap();
+        file
+    }
+
+    /// RED (34) — **one of Folio's own writers waits behind another of ours for
+    /// as long as that one takes, past any deadline.**
+    ///
+    /// Two CI runs on 2026-09-23 failed with `enable = Err("WouldBlock")`: the
+    /// enable worker stood behind the installer, both of them Folio's, and the
+    /// installer's fsync'd writes on a runner busy with four thousand other
+    /// tests outlasted the two seconds [`OUR_TURN`] then gave every wait. The
+    /// product rule is that two of our own writers both finish, and a reader's
+    /// slow disk is the same machine as that runner. So the holder here is one
+    /// of ours, taken through the product's own [`lock`], and it lets go only
+    /// once the waiting [`enable_record`] has been standing in the queue for
+    /// ten times its patience — observed, not slept on — and is still there.
+    /// A waiter with a deadline has left long before that; one that stands
+    /// for as long as ours takes has not. (Ten, not one: a deadline that has
+    /// just passed and a waiter that has not yet woken to notice it look the
+    /// same from outside.) The patience for this data root is cut to 50 ms so
+    /// the test is quick; the product's own is untouched.
+    ///
+    /// MUTATION: give the wait in `OurTurn::take` a deadline of the asker's
+    /// patience (`NEXT.wait_timeout`, then `WouldBlock`) and the waiter leaves
+    /// before the holder does.
+    #[test]
+    fn our_own_writer_waits_behind_a_slow_holder_of_ours_past_any_deadline() {
+        let root = super::super::tests::temp_dir("marks-slow-ours");
+        let patience = std::time::Duration::from_millis(50);
+        queue_watch::set_patience(&root, patience);
+        let held = lock(&root, Asker::InApp).unwrap();
+        let enable = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| enable_record(&root));
+            // Until the waiter has been in the queue for ten of its patiences,
+            // or has left it.
+            loop {
+                if waiter.is_finished() {
+                    break;
+                }
+                if queue_watch::waiting(&root)
+                    .first()
+                    .is_some_and(|joined| joined.elapsed() > patience * 10)
+                {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            assert!(
+                !waiter.is_finished(),
+                "the writer left the queue while ours was still ahead of it"
+            );
+            drop(held);
+            waiter.join().unwrap()
+        });
+        enable.expect("our own writer waited its turn and wrote");
+        assert!(!Marks::read(&root).unwrap().is_off());
+    }
+
+    /// PIN (34) — **a door still refuses at once, in the same words, when the
+    /// holder is one of this process's own writers.**
+    ///
+    /// The queue without a deadline is for Folio's own writers; a door is a
+    /// script with an exit code to read, and nothing about 2026-09-23 changes
+    /// that. The door is asked while one of ours holds the record, and it
+    /// must neither join the queue nor wait: it answers with the refusal the
+    /// doors' transcripts have always carried, while the holder still holds.
+    ///
+    /// MUTATION: let a `Door` stand in `OurTurn::take`'s queue like `InApp`
+    /// and it is seen waiting there.
+    #[test]
+    fn a_door_still_refuses_at_once() {
+        let root = super::super::tests::temp_dir("marks-door-ours");
+        let held = lock(&root, Asker::InApp).unwrap();
+        let door = std::thread::scope(|scope| {
+            let door = scope.spawn(|| lock(&root, Asker::Door).map(drop));
+            while !door.is_finished() && queue_watch::waiting(&root).is_empty() {
+                std::thread::yield_now();
+            }
+            let queued = !queue_watch::waiting(&root).is_empty();
+            drop(held);
+            let door = door.join().unwrap();
+            assert!(!queued, "the door stood in our queue");
+            door
+        });
+        let refusal = door.expect_err("a door refuses while ours holds the record");
+        assert!(
+            refusal.to_string().contains("would block"),
+            "the refusal lost its words: {refusal}"
         );
     }
 

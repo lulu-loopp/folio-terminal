@@ -62,6 +62,9 @@ Entries: §3.1; §7.53a *a resize transaction is opened by a reflow and can only
 closed by one*; the M1.7 and M1.8 plan documents. Owner: `ResizePlan`,
 `DualPlaneSession::resize_at`, and roughly ten free functions in `main.rs`.
 The rule is spread across four places and that is itself the finding.
+Also: trailing entry 2026-09-23 *Decoration never covers text* — a pane's first
+shell-integration mark causes at most one extra grid change in its lifetime (the
+rail's reserve); the alternate screen and later marks cause none.
 
 ### 3. PTY and ConPTY — `not yet folded`
 Entries: §1.3 *the thread and resource model*; the `bt-pty` crate doc. Owner:
@@ -79,9 +82,12 @@ named** — never a path this build assembles — keeps a dated `.bak-<YYYYMMDD>
 beside it, and records the write in `integration-marks.json` so that
 `profile_runtime::begin_removal`, `--remove-shell-integration` and
 `--uninstall-cleanup` can undo exactly what Folio wrote. Every writer of that
-record takes the advisory lock with an explicit asker: `Asker::InApp` waits its
-turn up to `OUR_TURN` and reports only a wait that ran out; `Asker::Door`
-refuses at once with the same error. `cmd.exe` carries `A` and `D` through its
+record takes the advisory lock with an explicit asker: `Asker::InApp` waits
+behind Folio's own writers with no deadline, and up to `OUR_TURN` for a holder
+in another process, reporting only that second wait running out; `Asker::Door`
+refuses at once with the same error. Which holder is ours is known by
+construction — every writer in this process stands in `profile_marks`'s
+in-process queue before it takes the OS lock — never by asking the OS. `cmd.exe` carries `A` and `D` through its
 prompt string; `B` is still refused where there is no `C`.
 **From.** §7.6 *terminal notifications* (the single scanner seam, no vendor
 patch); §7.57 *`cmd.exe` finally has a scale on its command rail*; §7.1.6j (the
@@ -89,9 +95,14 @@ opt-in `$PROFILE` offer, the backup, "ask the shell for `$PROFILE`, never spell
 it"); `docs/shell-integration.md`, which states it is the authority for the
 protocol; trailing entry 2026-09-21 *Folio's own writers wait their turn for the
 marks record*; trailing entry 2026-09-21 *a removal that found nothing says
-nothing in the window*.
+nothing in the window*; trailing entry 2026-09-23 *a writer of Folio's waits
+behind another of Folio's writers for as long as that one takes; the two-second
+bound is only for a holder in another process*.
 **Overrides.** The 2026-09-21 lock entry replaces a bare `try_lock` whose busy
-case surfaced as a red toast. There is no §7.1.5c; the marks rules live in the
+case surfaced as a red toast. The 2026-09-23 entry replaces that entry's
+"`Asker::InApp` … waits its turn up to `OUR_TURN`" for a holder in this process,
+which gave a false `WouldBlock` whenever our own writer's I/O outlasted two
+seconds on a slow disk. There is no §7.1.5c; the marks rules live in the
 sections above.
 
 ### 5. The printed-path chain — `folded`
@@ -241,9 +252,17 @@ paste by `stage_paste` from `Runtime::deliver_paste`, where all four paste doors
 converge: the card is raised when the `multiline_paste_ask` setting is on, the
 payload was the clipboard's own text, the pane has not set `?2004`, and
 `input::pasted_line_count` is more than one (a single trailing separator does not
-count). A pane whose paste grammar is PowerShell at a prompt the shell opened in
-order takes PowerShell's own road instead (0.4.4 ticket 03) and is never shown
-the card; until that road lands it gets today's bytes. The card, centred on the
+count). **PowerShell asks nothing** (ruling 2026-09-22; `DESIGN.md` trailing
+entry 2026-09-23 *A multi-line paste into PowerShell lands whole on the input
+line and runs on one Enter*, 0.4.4 ticket 03): a pane whose paste grammar is
+PowerShell at a prompt the shell opened in order, on Windows, is never shown the
+card, whatever the setting; the block lands on PSReadLine's input line and runs
+on one Enter. One write: the byte `0x16` (`bt_pty::PSREADLINE_PASTE_INPUT`, and
+PSReadLine pastes the clipboard itself) when `input::psreadline_pastes_it_unchanged`,
+otherwise Folio's cleaned bytes with each break a Shift+Enter record
+(`input::input_line_bytes`). Only the clipboard's own text takes it; a paste the
+clipboard is rewritten under within ~20 ms is an accepted limit. A PowerShell
+pane missing any fact (no marks, a program running, macOS) gets the card. The card, centred on the
 window, says `N lines → <shell>`; `Enter` = *Run line by line* (today's bytes),
 `Tab` = *Join into one line* (`input::join_lines`: one space per run of breaks,
 no `\r`, no invented separator), `Esc` or `×` = nothing sent, clipboard
@@ -548,12 +567,18 @@ question is a *synchronous gate the reader's own gesture opened* — not a
 notification — and its ruled surface is a small **modal card centred on the
 window**, in the first-run card's and the dialogs' family, not anchored to the
 pane it is about (the pane association is the focus border and the card's own
-`→ <shell>`).
+`→ <shell>`). And a second datum (2026-09-23, ticket 03): where the program can
+take the block without running it — PowerShell at an open prompt — the same
+gesture raises **no surface at all**; a question is put only where no road
+lands the block unexecuted.
 
 ### 31. Settings and migrations — `not yet folded`
 Entries: the M2 schema document §2; the `migrate.rs` module doc; §7.19 *the words
 on the settings page are written for the reader: a copy standard, a forbidden-word
-table, and a punctuation gate* (the second §7.19).
+table, and a punctuation gate* (the second §7.19); 2026-09-23 *settings travel as
+one exported file* — the bundle's own shape version is `folio_export` 1
+(`bt_persist::FOLIO_EXPORT_VERSION`), separate from each part's `schema_version`,
+and a part is read by `migrate::parse_document`, the chain its own file is read by.
 
 ### 32. Profiles — `not yet folded`
 Entries: §7.1.6c-6 *profiles as data*; §7.1.6c-6d *`profiles.json` is followed
@@ -584,6 +609,31 @@ already, before a fourth entrance exists.
 failure policy); §7.2 *the command-line front door* and the `cli.rs` module doc;
 `docs/BT-ENVIRONMENT.md`, held complete in both directions by
 `bt_app::diagnostics::bt_environment_doc_tests`; §7.1.6c-6 and §7.1.6c-6d.
+**The export is not a fourth entrance** — it is the configuration files carried
+by hand (owner rulings 2026-09-22: "Export / Import, no WebDAV … import validates through the
+same doors as a hand edit and reports faults per row", and
+2026-09-23: "ONE JSON file bundling settings + profiles + keybindings + schemes,
+with a schema version — readable and diffable"). `Settings > About > Export…`
+writes what is in force as one pretty-printed JSON document in a fixed key order
+(`bt_persist::export`, `folio_export` 1; each part keeps its own
+`schema_version`). `Import…` enters each part by that document's own door:
+*schemes* through `parse_scheme`, each bad one named by its file and the rest
+written into the `schemes` folder, which is then re-read in process
+(`reread_schemes`); *profiles* through the store's compare and
+`take_profile_table`, the half of `reread_profiles` a changed file takes;
+*keybindings* through this build's defaults and `Shortcuts::apply_overrides`,
+each refused line named; *settings* through `parse_document` — an older part
+migrated, a future part refused whole — and then **each changed value through the
+function a press on its row calls, never by writing `settings.json` and waiting**,
+with the store's writes held so the batch lands as one write. A part the file does
+not carry is left alone. Three keys are receipts about this machine and are not
+imported (`first_run_card`, `powershell_install_pending`,
+`cards_gesture_hint_offer`); `Focus mode` and `Offer PowerShell integration` are
+imported by pressing the row's own item, their only door; a row this platform
+does not have is stored and named. No confirmation before an import — it is the
+reader's deliberate gesture — and no network: syncing the file or the folder is a
+folder-sync tool's job. `Settings folder` opens the data directory through the
+reveal door on the OS hand-off lane.
 **Overrides.** §7.1.6c-6d reverses §7.1.6c-6 on watching `profiles.json`.
 **Open.** 0.5's outward interface is a fourth entrance and declares its row in
 `docs/ARCHITECTURE.md` §9 before it accepts its first flag.
@@ -634,6 +684,9 @@ occupancy entry replaces row-level checks with `install_checked`.
 the window thread**, deliberately, because each already reads and writes those
 files synchronously there. Moving them onto workers is named as a 0.4.4 ticket
 and **no ticket id has been issued**. See `docs/ARCHITECTURE.md` §5.3 rows 2–4.
+Since 2026-09-23 such a press waits behind one of our own workers' I/O for as
+long as that I/O takes, instead of failing after two seconds; that wait is
+bounded by our own finite writes and is paid off by the same move.
 **Ruled and not yet built.** Owner's verbal ruling of 2026-09-21, written down on
 2026-09-22 (multi-line paste design note, "Owner rulings" 6): **option A — Folio
 replaces its own older copy of the module on upgrade.** No ticket in the 0.4.4
@@ -877,14 +930,20 @@ used to answer two ways:
   (`marks::SITE_ICON_PLATE`), never pure white (2026-09-23). A pale icon on the light
   theme gains little from it (1.07:1), and that is accepted. The ground is whatever the
   frame laid under that box.
+- **Decoration never covers text** (2026-09-23). The terminal grid reserves the
+  command rail's width when the pane has a rail: the resting band (tick plus its
+  padding, inboard of the scroll lane), not the hover crest. A pane has a rail from
+  its shell's first mark for the rest of its life, alternate screen included; one
+  function, `cmdrail::terminal_grid_for`, turns every seat into a grid.
 **From.** trailing entry 2026-09-22 *The current UI gets its written
 specification*; `docs/UI-UX.md` §二 (accent is attention, not position), §六 (the
 divider drag); §7.28 *the small tags floating over the text wear one outfit: one
 face, one hairline, one legible ink*; §7.18 *the icon system: one verb table, one
 slot table, one optical gate*; §7.18 *motion tokens: three steps, one travel
 distance, two curves, and a register that forbids a fourth* (two entries share
-the number); 2026-09-23 *a web pane asks its page for Folio's light or dark, and a
-site's icon without contrast stands on a plate*.
+the number); trailing entry 2026-09-23 *Decoration never covers text*; 2026-09-23 *a
+web pane asks its page for Folio's light or dark, and a site's icon without contrast
+stands on a plate*.
 **Overrides.** The two redesign proposals of 2026-09-22 were declined; nothing of
 them is a rule. The motion entry's "two curves" predates `GRAB_EASE`; the code's
 three are the rule.

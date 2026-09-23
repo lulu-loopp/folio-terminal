@@ -653,6 +653,7 @@ impl Runtime<'_> {
                 profiles::set_program_path(index, &path);
                 self.store_profiles()?;
             }
+            FilePick::SettingsImport => self.import_settings_from(&path)?,
         }
         Ok(())
     }

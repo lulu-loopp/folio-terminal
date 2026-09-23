@@ -8,6 +8,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- Settings can be exported to one file and imported on another machine:
+  **Settings > About** has Export…, Import… and the settings folder.
 - Sliding a finger over a pane now scrolls it, with the system's own flick.
   A one-finger slide no longer selects text.
 - Pasting several lines into a shell that would run them one by one now asks
@@ -19,6 +21,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- A multi-line paste into PowerShell now waits on the input line for Enter.
 - A shortcut can now use Ctrl with a letter; the row notes that the key no
   longer reaches the shell.
 - Ctrl+click on a network-share path or on a mailto:, vscode: or other link now
@@ -55,6 +58,11 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- On a slow disk, turning on PowerShell integration from the welcome card
+  could report a lock error although everything was written; it no longer
+  does.
+- The command marks down a pane's right edge no longer cover the last column of
+  text.
 - The Cards setting named the wrong shortcut on macOS and after a rebind.
 - In the Markdown preview, a selection dragged across the paragraph or table
   you are editing highlights it too, instead of skipping it.

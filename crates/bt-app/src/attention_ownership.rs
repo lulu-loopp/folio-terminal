@@ -261,7 +261,7 @@ pub(crate) fn record(
     data: &Path,
     root: &Path,
     family: &str,
-) -> Result<std::fs::File, &'static str> {
+) -> Result<profile_marks::MarksLock, &'static str> {
     if !root.is_absolute() {
         return Err(crate::i18n::Text::AgentHooksRootUnstable.text());
     }

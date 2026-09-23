@@ -1487,54 +1487,61 @@ where
     };
 
     // Every refusal below this line has the bytes in hand, so every one of them
-    // keeps them. One closure rather than five call sites, so a reason added
-    // later cannot be the one that forgets.
-    let refuse = |reason: FallbackReason| -> (T, ReadReport) {
-        (
+    // keeps them. One call rather than five sites, so a reason added later
+    // cannot be the one that forgets.
+    match parse_document::<T>(&bytes, current_version, migrations) {
+        Ok(value) => (value, ReadReport::Loaded),
+        Err(reason) => (
             T::default(),
             ReadReport::FellBackToDefaults {
                 kept: keep_rejected(path, &bytes),
                 reason,
             },
-        )
-    };
+        ),
+    }
+}
 
-    let envelope: VersionEnvelope = match serde_json::from_slice(&bytes) {
-        Ok(env) => env,
-        Err(e) => return refuse(FallbackReason::ParseError(e.to_string())),
-    };
+/// **The one reading of a document's bytes** — the half of
+/// [`read_with_fallback`] that has nothing to do with a disk.
+///
+/// Split out so that a document which arrives some other way than off its own
+/// path — a part of an exported bundle (`crate::export`) — is read by exactly
+/// the chain a hand-edited file is: the version envelope first, a future version
+/// refused whole and never partly parsed, an older one walked forward through
+/// `migrations`, and the typed parse last. A second reader for the same document
+/// would be a second place for the rules to drift apart.
+pub(crate) fn parse_document<T>(
+    bytes: &[u8],
+    current_version: u32,
+    migrations: &[(u32, MigrationStep)],
+) -> Result<T, FallbackReason>
+where
+    T: DeserializeOwned,
+{
+    let envelope: VersionEnvelope =
+        serde_json::from_slice(bytes).map_err(|e| FallbackReason::ParseError(e.to_string()))?;
 
     if envelope.schema_version > current_version {
-        return refuse(FallbackReason::FutureSchemaVersion {
+        return Err(FallbackReason::FutureSchemaVersion {
             found: envelope.schema_version,
             current: current_version,
         });
     }
 
     if envelope.schema_version < current_version {
-        let value: Value = match serde_json::from_slice(&bytes) {
-            Ok(v) => v,
-            Err(e) => return refuse(FallbackReason::ParseError(e.to_string())),
-        };
-        let migrated =
-            match migrate_value(value, envelope.schema_version, current_version, migrations) {
-                Ok(v) => v,
-                Err(found) => return refuse(FallbackReason::NoMigrationPath { found }),
-            };
-        return match serde_json::from_value::<T>(migrated) {
-            Ok(v) => (v, ReadReport::Loaded),
-            Err(e) => refuse(FallbackReason::ParseError(e.to_string())),
-        };
+        let value: Value =
+            serde_json::from_slice(bytes).map_err(|e| FallbackReason::ParseError(e.to_string()))?;
+        let migrated = migrate_value(value, envelope.schema_version, current_version, migrations)
+            .map_err(|found| FallbackReason::NoMigrationPath { found })?;
+        return serde_json::from_value::<T>(migrated)
+            .map_err(|e| FallbackReason::ParseError(e.to_string()));
     }
 
-    match serde_json::from_slice::<T>(&bytes) {
-        Ok(v) => (v, ReadReport::Loaded),
-        Err(e) => refuse(FallbackReason::ParseError(e.to_string())),
-    }
+    serde_json::from_slice::<T>(bytes).map_err(|e| FallbackReason::ParseError(e.to_string()))
 }
 
 /// Why [`read_bounded`] answered with nothing.
-enum BoundedRead {
+pub(crate) enum BoundedRead {
     NotFound,
     Io(String),
     TooLarge { bytes: u64 },
@@ -1549,7 +1556,7 @@ enum BoundedRead {
 /// the second bound is the one that is actually true of the bytes in hand. A
 /// file that grew past the ceiling in that window reads as oversized, which is
 /// the answer a `stat` a moment later would have given.
-fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedRead> {
+pub(crate) fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedRead> {
     use std::io::Read;
 
     let metadata = match std::fs::metadata(path) {

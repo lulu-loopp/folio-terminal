@@ -854,6 +854,7 @@ impl Runtime<'_> {
         let mut active_changed_off_focus = false;
         let mut chrome_changed = false;
         let mut moved = false;
+        let mut rail_began = false;
         let mut command_ends: Vec<PathBuf> = Vec::new();
         let mut raised: Vec<AttentionDelivery> = Vec::new();
         // **The two window-wide bits of [`seat_holds_the_keyboard`], read once**
@@ -1038,6 +1039,7 @@ impl Runtime<'_> {
             }
             chrome_changed |= outcome.renamed;
             moved |= outcome.moved;
+            rail_began |= outcome.rail_began;
             if collect_speakers && outcome.arrived {
                 spoke.push(index);
             }
@@ -1102,6 +1104,17 @@ impl Runtime<'_> {
         // window is one to two seconds, so a burst of `cd`s still writes once.
         if moved {
             self.mark_session_dirty(Instant::now());
+        }
+        // **A pane that has just earned its rail makes room for it** (owner,
+        // 2026-09-23: decoration never covers text). Once per pane lifetime —
+        // `LeafSession::has_rail` never turns back — so this is at most one
+        // extra grid change per pane, at its first prompt, when the screen is
+        // nearly empty. Carried by the solve every other geometry change takes,
+        // which re-derives every leaf's grid and changes only the one whose
+        // answer moved: the pane on screen reflows now and tells its child at
+        // the quiet boundary, a pane behind another tab does both there.
+        if rail_began {
+            self.resize_leaves_to_layout(now, "reserve the command rail's room")?;
         }
         // **R31's third invalidation moment, A: a command finished.** A shell
         // standing inside a repository this tab is showing has just done

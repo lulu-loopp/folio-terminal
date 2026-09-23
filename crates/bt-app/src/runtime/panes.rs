@@ -3174,15 +3174,12 @@ impl Runtime<'_> {
         // gesture is aimed at is the last one this turn touches.
         for target in plan.iter().copied().filter(|target| !target.focused) {
             let (seat, body) = (target.seat, target.body);
-            let next_grid = self
-                .window
-                .renderer
-                .metrics()
-                .grid_for_pixels(body.width, body.height);
+            let metrics = self.window.renderer.metrics();
             let physical = PhysicalSize::new(body.width, body.height);
             let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
                 continue;
             };
+            let next_grid = leaf.grid_for(&metrics, body);
             schedule_leaf_grid_change(
                 leaf,
                 next_grid,
@@ -3209,11 +3206,12 @@ impl Runtime<'_> {
             return Ok(None);
         };
         let body = target.body;
-        let next_grid = self
-            .window
-            .renderer
-            .metrics()
-            .grid_for_pixels(body.width, body.height);
+        // A tab with no shell has no mark and so no rail; its grid is only ever
+        // traced, and [`Self::schedule_grid_change`] carries it nowhere (§7.1.6h).
+        let has_rail = self.window.tabs[active]
+            .focused()
+            .is_some_and(|leaf| leaf.has_rail);
+        let next_grid = cmdrail::terminal_grid_for(&self.window.renderer.metrics(), body, has_rail);
         self.schedule_grid_change(
             next_grid,
             PhysicalSize::new(body.width, body.height),
@@ -3283,18 +3281,17 @@ impl Runtime<'_> {
             let (layout, overflow) = solve_tree(&tab.seats, viewport, &metrics, policy);
             // Read while the renderer is still only borrowed, because the tab it
             // is about is borrowed mutably the moment its layout lands on it.
+            let cell_metrics = self.window.renderer.metrics();
             let sized: Vec<(SeatId, GridSize, PhysicalSize<u32>)> =
                 leaf_resize_plan(&tab.seats, &layout, tab.focused_leaf, scale)
                     .into_iter()
-                    .map(|target| {
-                        (
+                    .filter_map(|target| {
+                        let leaf = tab.sessions.get(&target.seat)?;
+                        Some((
                             target.seat,
-                            self.window
-                                .renderer
-                                .metrics()
-                                .grid_for_pixels(target.body.width, target.body.height),
+                            leaf.grid_for(&cell_metrics, target.body),
                             PhysicalSize::new(target.body.width, target.body.height),
-                        )
+                        ))
                     })
                     .collect();
             let tab = &mut self.window.tabs[index];
