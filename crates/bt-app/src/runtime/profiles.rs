@@ -563,6 +563,28 @@ impl Runtime<'_> {
             }
             persist::ProfilesNews::Changed => self.app.profiles_file_broken = false,
         }
+        // One card per refused entry, `report_skipped_schemes`' shape: a file
+        // with two bad rows is two things to fix. They are the same sentences
+        // startup prints, because it is the same reader reading the same file.
+        for fault in self.take_profile_table()? {
+            let sentence = i18n::profile_entry_fault(&fault);
+            eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                sentence,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// **Put the table the store now holds in force**, and answer the entries it
+    /// could not honour — the half of [`Self::reread_profiles`] that follows a
+    /// document which changed, and the half an import's `profiles` part goes
+    /// through (0.4.4 ticket 05), so a table arriving in an exported file and a
+    /// table arriving by a hand edit are put in force by one function.
+    pub(crate) fn take_profile_table(&mut self) -> Result<Vec<profiles::ProfileFault>> {
         // Taken by id *before* the table moves, because after it has moved
         // there is nothing left to ask: an index means whatever the new table
         // says it means.
@@ -604,20 +626,7 @@ impl Runtime<'_> {
             self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         self.window.settings.keep_focus_reachable(content);
         self.adopt_profile_table()?;
-        // One card per refused entry, `report_skipped_schemes`' shape: a file
-        // with two bad rows is two things to fix. They are the same sentences
-        // startup prints, because it is the same reader reading the same file.
-        for fault in faults {
-            let sentence = i18n::profile_entry_fault(&fault);
-            eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
-            self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                None,
-                sentence,
-            )?;
-        }
-        Ok(())
+        Ok(faults)
     }
 
     /// **The column this menu hangs inside and the places it would offer** — or

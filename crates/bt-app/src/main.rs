@@ -133,6 +133,7 @@ mod search;
 mod seats;
 mod seed;
 mod settings;
+mod settings_bundle;
 mod settling;
 mod shell_integration;
 mod shell_literal;
@@ -12524,6 +12525,10 @@ struct WindowRuntime {
     /// contract is one gesture in flight, and a wallpaper request coalesced into
     /// a pending folder request would answer the wrong row.
     image_picker: bt_platform::ImagePicker,
+    /// The system's save dialog behind the About page's `Export…` (0.4.4 ticket
+    /// 05). Its own bridge, for [`Self::image_picker`]'s reason: one gesture in
+    /// flight per bridge, and the answer is a place to write, not a file to read.
+    save_picker: bt_platform::SaveFilePicker,
     /// Whether a picture chooser is out. A `bool` and not a
     /// [`FolderPick`]-shaped enum, because there is exactly one row that opens
     /// this one and the answer has nowhere else to go.
@@ -35781,6 +35786,8 @@ enum FilePick {
     BackgroundImage,
     /// The profile editor's `Browse…`: this profile's own shell (§7.1.6c-6b).
     ProfileProgram,
+    /// The About page's `Import…` (0.4.4 ticket 05): an exported settings file.
+    SettingsImport,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38483,6 +38490,7 @@ struct NewWindowParts {
     math_context_menu: bt_platform::MathContextMenu,
     folder_picker: bt_platform::FolderPicker,
     image_picker: bt_platform::ImagePicker,
+    save_picker: bt_platform::SaveFilePicker,
     ime_system_caret: bt_platform::ImeSystemCaret,
     rail: seats::RailState,
     seat_viewport: LogicalRect,
@@ -38547,6 +38555,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         math_context_menu,
         folder_picker,
         image_picker,
+        save_picker,
         ime_system_caret,
         rail,
         seat_viewport,
@@ -38622,6 +38631,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         folder_pick: None,
         image_picker,
         image_pick_pending: None,
+        save_picker,
         background_picture: None,
         background_decode: BackgroundDecodeMailbox::default(),
         clipboard_picture: ClipboardPictureMailbox::default(),
@@ -39650,6 +39660,9 @@ impl Runtime<'_> {
         let image_picker = bt_platform::ImagePicker::new(native)
             .map_err(|error| anyhow!(error))
             .context("install deferred picture chooser")?;
+        let save_picker = bt_platform::SaveFilePicker::new(native)
+            .map_err(|error| anyhow!(error))
+            .context("install deferred save dialog")?;
         // Asked of DWM once, before anything reads the Acrylic row, by writing
         // the attribute's own default: a Windows that has never heard of
         // `DWMWA_SYSTEMBACKDROP_TYPE` refuses it, and one that has is unchanged.
@@ -40108,6 +40121,7 @@ impl Runtime<'_> {
             math_context_menu,
             folder_picker,
             image_picker,
+            save_picker,
             ime_system_caret,
             rail,
             seat_viewport,
@@ -41543,25 +41557,7 @@ impl Runtime<'_> {
             self.apply_turn_end_notification(enabled);
         }
         if let Some(enabled) = settings::powershell_integration_offer_requested(target) {
-            self.apply_powershell_integration_offer(enabled)?;
-            if !enabled
-                && !self
-                    .app
-                    .settings_store
-                    .loaded()
-                    .powershell_integration_offer
-            {
-                shell_integration::begin_removal();
-            }
-            if enabled
-                && self
-                    .app
-                    .settings_store
-                    .loaded()
-                    .powershell_integration_offer
-            {
-                shell_integration::begin_enable();
-            }
+            self.press_powershell_integration_offer(enabled)?;
         }
         // The machine fact travels with the press: what the switch's `On` reaches
         // is `explorer_menu::place_when_on`'s answer about this Windows and this
@@ -41745,6 +41741,12 @@ impl Runtime<'_> {
                 // quietly did nothing.
                 Some(settings::LinkDestination::File(path)) => {
                     self.open_local_path(path);
+                }
+                // The configuration doors (0.4.4 ticket 05): two dialogs, whose
+                // answers are collected on a later turn, and the storage folder
+                // handed to the reveal door.
+                Some(settings::LinkDestination::Configuration(door)) => {
+                    self.open_configuration_door(door);
                 }
                 None => {}
             },
@@ -41990,7 +41992,12 @@ impl Runtime<'_> {
             | Row::AboutPlatform
             | Row::AboutReleaseNotes
             | Row::AboutIssues
-            | Row::AboutLicences => {}
+            | Row::AboutLicences
+            // And the three configuration doors (0.4.4 ticket 05), which hold
+            // no value either: they carry every other row's.
+            | Row::ExportSettings
+            | Row::ImportSettings
+            | Row::SettingsFolder => {}
         }
         Ok(())
     }

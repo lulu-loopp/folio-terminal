@@ -483,6 +483,28 @@ pub enum Text {
     DescAboutIssues,
     RowAboutLicences,
     DescAboutLicences,
+    /// **The three configuration doors on the About page** (0.4.4 ticket 05):
+    /// one file out, one file in, and the folder they come from. Two verbs end
+    /// in `…` because each opens the system's own dialog first.
+    RowExportSettings,
+    DescExportSettings,
+    ExportVerb,
+    RowImportSettings,
+    DescImportSettings,
+    ImportVerb,
+    RowSettingsFolder,
+    DescSettingsFolder,
+    /// The titles of the cards an export and an import raise — a state is one
+    /// word (owner, 2026-09-20). The body is the file, or the rows by name.
+    SettingsExported,
+    SettingsExportFailed,
+    SettingsImported,
+    SettingsImportFailed,
+    /// What an export or an import left out, named one by one in the card's body.
+    SettingsSkipped,
+    /// Rows the file carries that this platform has no row for: kept in the
+    /// file for the machine they belong to, and named rather than dropped.
+    SettingsNotOnThisMachine,
 
     RowTheme,
     RowCursor,
@@ -2984,6 +3006,48 @@ impl Text {
                 "The open-source components Folio is made of, and their licences.",
                 "Folio 使用的开源组件及其许可证。",
             ),
+            // zh: pending opus46
+            Self::RowExportSettings => pick(lang, "Export settings", "Export settings"),
+            // zh: pending opus46
+            Self::DescExportSettings => pick(
+                lang,
+                "Settings, profiles, shortcuts and colour schemes, in one file.",
+                "Settings, profiles, shortcuts and colour schemes, in one file.",
+            ),
+            // zh: pending opus46
+            Self::ExportVerb => pick(lang, "Export…", "Export…"),
+            // zh: pending opus46
+            Self::RowImportSettings => pick(lang, "Import settings", "Import settings"),
+            // zh: pending opus46
+            Self::DescImportSettings => pick(
+                lang,
+                "Applies an exported file at once.",
+                "Applies an exported file at once.",
+            ),
+            // zh: pending opus46
+            Self::ImportVerb => pick(lang, "Import…", "Import…"),
+            // zh: pending opus46
+            Self::RowSettingsFolder => pick(lang, "Settings folder", "Settings folder"),
+            // zh: pending opus46
+            Self::DescSettingsFolder => pick(
+                lang,
+                "Where these files are kept.",
+                "Where these files are kept.",
+            ),
+            // zh: pending opus46
+            Self::SettingsExported => pick(lang, "Exported", "Exported"),
+            // zh: pending opus46
+            Self::SettingsExportFailed => pick(lang, "Not exported", "Not exported"),
+            // zh: pending opus46
+            Self::SettingsImported => pick(lang, "Imported", "Imported"),
+            // zh: pending opus46
+            Self::SettingsImportFailed => pick(lang, "Not imported", "Not imported"),
+            // zh: pending opus46
+            Self::SettingsSkipped => pick(lang, "Skipped", "Skipped"),
+            // zh: pending opus46
+            Self::SettingsNotOnThisMachine => {
+                pick(lang, "Not on this machine", "Not on this machine")
+            }
 
             Self::RowTheme => pick(lang, "Theme", "主题"),
             Self::RowCursor => pick(lang, "Cursor", "光标"),
@@ -5321,7 +5385,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 744] = [
+    pub const ALL: [Self; 758] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5399,6 +5463,20 @@ impl Text {
         Self::DescAboutIssues,
         Self::RowAboutLicences,
         Self::DescAboutLicences,
+        Self::RowExportSettings,
+        Self::DescExportSettings,
+        Self::ExportVerb,
+        Self::RowImportSettings,
+        Self::DescImportSettings,
+        Self::ImportVerb,
+        Self::RowSettingsFolder,
+        Self::DescSettingsFolder,
+        Self::SettingsExported,
+        Self::SettingsExportFailed,
+        Self::SettingsImported,
+        Self::SettingsImportFailed,
+        Self::SettingsSkipped,
+        Self::SettingsNotOnThisMachine,
         Self::RowTheme,
         Self::RowCursor,
         Self::RowFormulas,
@@ -6217,7 +6295,38 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 28] = [
+        // The configuration doors and their cards (0.4.4 ticket 05), on both
+        // platforms: the rows and the cards are the same on each.
+        (Self::RowExportSettings, HostPlatform::Windows),
+        (Self::RowExportSettings, HostPlatform::MacOs),
+        (Self::DescExportSettings, HostPlatform::Windows),
+        (Self::DescExportSettings, HostPlatform::MacOs),
+        (Self::ExportVerb, HostPlatform::Windows),
+        (Self::ExportVerb, HostPlatform::MacOs),
+        (Self::RowImportSettings, HostPlatform::Windows),
+        (Self::RowImportSettings, HostPlatform::MacOs),
+        (Self::DescImportSettings, HostPlatform::Windows),
+        (Self::DescImportSettings, HostPlatform::MacOs),
+        (Self::ImportVerb, HostPlatform::Windows),
+        (Self::ImportVerb, HostPlatform::MacOs),
+        (Self::RowSettingsFolder, HostPlatform::Windows),
+        (Self::RowSettingsFolder, HostPlatform::MacOs),
+        (Self::DescSettingsFolder, HostPlatform::Windows),
+        (Self::DescSettingsFolder, HostPlatform::MacOs),
+        (Self::SettingsExported, HostPlatform::Windows),
+        (Self::SettingsExported, HostPlatform::MacOs),
+        (Self::SettingsExportFailed, HostPlatform::Windows),
+        (Self::SettingsExportFailed, HostPlatform::MacOs),
+        (Self::SettingsImported, HostPlatform::Windows),
+        (Self::SettingsImported, HostPlatform::MacOs),
+        (Self::SettingsImportFailed, HostPlatform::Windows),
+        (Self::SettingsImportFailed, HostPlatform::MacOs),
+        (Self::SettingsSkipped, HostPlatform::Windows),
+        (Self::SettingsSkipped, HostPlatform::MacOs),
+        (Self::SettingsNotOnThisMachine, HostPlatform::Windows),
+        (Self::SettingsNotOnThisMachine, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

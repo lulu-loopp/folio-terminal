@@ -162,6 +162,9 @@ impl Runtime<'_> {
         let image_picker = bt_platform::ImagePicker::new(native)
             .map_err(|error| anyhow!(error))
             .context("install deferred picture chooser")?;
+        let save_picker = bt_platform::SaveFilePicker::new(native)
+            .map_err(|error| anyhow!(error))
+            .context("install deferred save dialog")?;
         // **Spike Q5 item 3, paid at last.** `WM_NCCALCSIZE` has just made this
         // window's client area its whole outer rectangle, so what winit built is
         // the size asked for plus a native frame margin this window does not
@@ -474,6 +477,7 @@ impl Runtime<'_> {
             math_context_menu,
             folder_picker,
             image_picker,
+            save_picker,
             ime_system_caret,
             rail,
             seat_viewport,

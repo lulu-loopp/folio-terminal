@@ -8,6 +8,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- Settings can be exported to one file and imported on another machine:
+  **Settings > About** has Export…, Import… and the settings folder.
 - Sliding a finger over a pane now scrolls it, with the system's own flick.
   A one-finger slide no longer selects text.
 

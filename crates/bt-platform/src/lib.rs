@@ -3432,12 +3432,12 @@ mod windows_impl {
                 ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA, Common::COMDLG_FILTERSPEC, DefSubclassProc,
                 FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
                 FOF_WANTNUKEWARNING, FOLDERID_Documents, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
-                FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem,
-                ITaskbarList3, KF_FLAG_DONT_VERIFY, RemoveWindowSubclass, SHAppBarMessage,
-                SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify, SHCreateItemFromParsingName,
-                SHFILEOPSTRUCTW, SHFileOperationW, SHGetKnownFolderPath, SIGDN_FILESYSPATH,
-                SetWindowSubclass, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL,
-                TBPF_PAUSED, TaskbarList,
+                FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
+                IFileOpenDialog, IFileSaveDialog, IShellItem, ITaskbarList3, KF_FLAG_DONT_VERIFY,
+                RemoveWindowSubclass, SHAppBarMessage, SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
+                SHChangeNotify, SHCreateItemFromParsingName, SHFILEOPSTRUCTW, SHFileOperationW,
+                SHGetKnownFolderPath, SIGDN_FILESYSPATH, SetWindowSubclass, TBPF_ERROR,
+                TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED, TaskbarList,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DefWindowProcW, DestroyCaret,
@@ -3510,9 +3510,11 @@ mod windows_impl {
     const DEFERRED_MATH_MENU_MESSAGE: u32 = WM_APP + 0x4b7;
     const DEFERRED_FOLDER_PICKER_MESSAGE: u32 = WM_APP + 0x4b8;
     const DEFERRED_IMAGE_PICKER_MESSAGE: u32 = WM_APP + 0x4b9;
+    const DEFERRED_SAVE_FILE_PICKER_MESSAGE: u32 = WM_APP + 0x4ba;
     const MATH_MENU_SUBCLASS_ID: usize = 0x4254_4d4d;
     const FOLDER_PICKER_SUBCLASS_ID: usize = 0x4254_4650;
     const IMAGE_PICKER_SUBCLASS_ID: usize = 0x4254_4950;
+    const SAVE_FILE_PICKER_SUBCLASS_ID: usize = 0x4254_5350;
     const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
     const TOUCH_SUBCLASS_ID: usize = 0x4254_5443;
     const TASKBAR_SUBCLASS_ID: usize = 0x4254_5442;
@@ -6930,6 +6932,223 @@ mod windows_impl {
         LRESULT(0)
     }
 
+    type SaveFilePickerState = DeferredState<(Vec<u16>, Vec<u16>), Result<Option<PathBuf>, String>>;
+
+    /// **The system's own save dialog** — `IFileSaveDialog`, on
+    /// [`FolderPicker`]'s deferred footing and for its reason word for word
+    /// (0.4.4 ticket 05: `Settings ▸ Export…`).
+    ///
+    /// `IFileDialog::Show` is modal and runs a nested message loop, so a press
+    /// only *posts*: the dialog opens from the subclass after the winit callback
+    /// has returned, and the chosen path waits here for the next turn of the loop
+    /// to collect it. Its own bridge rather than a mode of [`ImagePicker`],
+    /// because the deferral's contract is one gesture in flight per bridge, and
+    /// an open dialog and a save dialog are two gestures one page can make one
+    /// after the other.
+    pub struct SaveFilePicker {
+        hwnd: HWND,
+        state: Arc<SaveFilePickerState>,
+    }
+
+    impl SaveFilePicker {
+        pub fn new(window: NativeWindow) -> Result<Self, String> {
+            let hwnd = window.as_hwnd();
+            let state = Arc::new(SaveFilePickerState::new());
+            // SAFETY: installation and removal occur on the HWND's event-loop thread. The Arc
+            // keeps dwRefData live for the full installed interval; the callback takes its own
+            // temporary strong reference before entering the nested dialog loop.
+            let installed = unsafe {
+                SetWindowSubclass(
+                    hwnd,
+                    Some(save_file_picker_subclass),
+                    SAVE_FILE_PICKER_SUBCLASS_ID,
+                    Arc::as_ptr(&state) as usize,
+                )
+            };
+            if !installed.as_bool() {
+                return Err(format!(
+                    "SetWindowSubclass(save dialog) failed: {}",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            Ok(Self { hwnd, state })
+        }
+
+        /// Queue the dialog once, opening in `start` if that names a folder and
+        /// offering `name` — whose extension is also the one type the dialog
+        /// filters on and appends.
+        ///
+        /// A second request while one is posted, showing or waiting to be
+        /// collected returns `Ok(false)`, as every deferred door here does.
+        pub fn request(&self, start: Option<&Path>, name: &str) -> Result<bool, String> {
+            let start = start
+                .map(|start| {
+                    let mut units = start.as_os_str().encode_wide().collect::<Vec<_>>();
+                    units.push(0);
+                    units
+                })
+                .unwrap_or_default();
+            if !self.state.begin_request((start, wide_null(name))) {
+                return Ok(false);
+            }
+            // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
+            // and never dispatches the subclass synchronously on this callback stack.
+            if let Err(error) = unsafe {
+                PostMessageW(
+                    Some(self.hwnd),
+                    DEFERRED_SAVE_FILE_PICKER_MESSAGE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            } {
+                self.state.cancel_request();
+                return Err(format!("PostMessageW(save dialog) failed: {error}"));
+            }
+            Ok(true)
+        }
+
+        /// The chosen path, `None` for a cancelled dialog, or the reason the
+        /// dialog could not be shown — once, and only once the dialog is shut.
+        pub fn take_result(&self) -> Option<Result<Option<PathBuf>, String>> {
+            self.state.take_result()
+        }
+    }
+
+    impl Drop for SaveFilePicker {
+        fn drop(&mut self) {
+            // SAFETY: this object is dropped on the same event-loop thread that installed the
+            // subclass. A callback already inside the dialog owns a temporary Arc, so nested
+            // CloseRequested teardown cannot invalidate its state.
+            let _ = unsafe {
+                RemoveWindowSubclass(
+                    self.hwnd,
+                    Some(save_file_picker_subclass),
+                    SAVE_FILE_PICKER_SUBCLASS_ID,
+                )
+            };
+        }
+    }
+
+    unsafe extern "system" fn save_file_picker_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        reference_data: usize,
+    ) -> LRESULT {
+        if message != DEFERRED_SAVE_FILE_PICKER_MESSAGE {
+            // SAFETY: forwarding untouched messages is the required subclass contract.
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        let state_pointer = reference_data as *const SaveFilePickerState;
+        if state_pointer.is_null() {
+            return LRESULT(0);
+        }
+        // SAFETY: the installed SaveFilePicker owns one Arc at callback entry. Incrementing
+        // before constructing the temporary Arc keeps state alive even if a nested
+        // CloseRequested drops the Runtime while the dialog is open.
+        unsafe { Arc::increment_strong_count(state_pointer) };
+        // SAFETY: the increment immediately above created the strong reference consumed here.
+        let state = unsafe { Arc::from_raw(state_pointer) };
+        if let Some((start, name)) = state.begin_showing() {
+            state.complete(show_save_picker(hwnd, &start, &name));
+        }
+        LRESULT(0)
+    }
+
+    /// The extension a suggested file name ends in, without its dot — the one
+    /// type [`show_save_picker`] filters on and appends.
+    fn save_extension(name: &[u16]) -> Option<String> {
+        let name = String::from_utf16_lossy(name.strip_suffix(&[0]).unwrap_or(name));
+        let (_, extension) = name.rsplit_once('.')?;
+        (!extension.is_empty()).then(|| extension.to_owned())
+    }
+
+    /// Show `IFileSaveDialog` and report what came back — [`show_shell_picker`]'s
+    /// twin for the one dialog that names a file which is not there yet.
+    ///
+    /// The dialog's own defaults are kept, including its question before
+    /// replacing a file that exists: that is the system's sentence in the
+    /// system's dialog, not a check this product adds.
+    fn show_save_picker(
+        hwnd: HWND,
+        start: &[u16],
+        name: &[u16],
+    ) -> Result<Option<PathBuf>, String> {
+        // SAFETY: as `show_shell_picker` — the window's own GUI thread, reached only from the
+        // posted-message subclass after winit's initiating callback has returned; the apartment
+        // is balanced here and every COM object is released at the end of its scope.
+        unsafe {
+            let apartment = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            if apartment == RPC_E_CHANGED_MODE {
+                return Err("the event-loop thread is not a single-threaded apartment".to_owned());
+            }
+            let balance = apartment.is_ok();
+            let result = (|| {
+                let dialog: IFileSaveDialog =
+                    CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|error| format!("CoCreateInstance(FileSaveDialog): {error}"))?;
+                let options = dialog
+                    .GetOptions()
+                    .map_err(|error| format!("IFileDialog::GetOptions: {error}"))?;
+                dialog
+                    .SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
+                    .map_err(|error| format!("IFileDialog::SetOptions: {error}"))?;
+                // The type the name already carries, so the file written is the
+                // file offered. A failure here leaves an unfiltered dialog, which
+                // still saves a file.
+                let filter_name: Vec<u16>;
+                let filter_spec: Vec<u16>;
+                let extension: Vec<u16>;
+                if let Some(ext) = save_extension(name) {
+                    filter_name = wide_null(&ext.to_ascii_uppercase());
+                    filter_spec = wide_null(&format!("*.{ext}"));
+                    extension = wide_null(&ext);
+                    let filters = [COMDLG_FILTERSPEC {
+                        pszName: PCWSTR(filter_name.as_ptr()),
+                        pszSpec: PCWSTR(filter_spec.as_ptr()),
+                    }];
+                    let _ = dialog.SetFileTypes(&filters);
+                    let _ = dialog.SetDefaultExtension(PCWSTR(extension.as_ptr()));
+                }
+                if name.len() > 1 {
+                    let _ = dialog.SetFileName(PCWSTR(name.as_ptr()));
+                }
+                if start.len() > 1
+                    && let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(
+                        PCWSTR(start.as_ptr()),
+                        None,
+                    )
+                {
+                    let _ = dialog.SetFolder(&folder);
+                }
+                if let Err(error) = dialog.Show(Some(hwnd)) {
+                    return if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
+                        Ok(None)
+                    } else {
+                        Err(format!("IFileDialog::Show: {error}"))
+                    };
+                }
+                let item = dialog
+                    .GetResult()
+                    .map_err(|error| format!("IFileSaveDialog::GetResult: {error}"))?;
+                let chosen = item
+                    .GetDisplayName(SIGDN_FILESYSPATH)
+                    .map_err(|error| format!("IShellItem::GetDisplayName: {error}"))?;
+                let path = chosen.to_string();
+                // The shell allocated it; the shell's allocator frees it.
+                CoTaskMemFree(Some(chosen.0.cast()));
+                path.map(|path| Some(PathBuf::from(path)))
+                    .map_err(|error| format!("the chosen file's name is not UTF-16: {error}"))
+            })();
+            if balance {
+                CoUninitialize();
+            }
+            result
+        }
+    }
+
     /// Put this window above (or back among) the others — `HWND_TOPMOST` /
     /// `HWND_NOTOPMOST`.
     ///
@@ -7115,6 +7334,9 @@ mod windows_impl {
         /// every launcher shipped as one, and what may be started is the
         /// operating system's answer rather than this dialog's.
         Program,
+        /// An exported settings file (0.4.4 ticket 05: `Settings ▸ Import…`),
+        /// filtered to `*.json` — the one type an export is written as.
+        SettingsFile,
     }
 
     /// Show `IFileOpenDialog` and report what came back.
@@ -7175,7 +7397,7 @@ mod windows_impl {
                     // profile's shell and would grey the row the next time the
                     // dialog was opened, with nothing on screen to connect the
                     // two.
-                    ShellPickKind::Image | ShellPickKind::Program => {
+                    ShellPickKind::Image | ShellPickKind::Program | ShellPickKind::SettingsFile => {
                         options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST
                     }
                 };
@@ -7192,6 +7414,14 @@ mod windows_impl {
                 if kind == ShellPickKind::Image {
                     filter_name = wide_null("Images");
                     filter_spec = wide_null(&crate::image_file_filter_spec());
+                    let filters = [COMDLG_FILTERSPEC {
+                        pszName: PCWSTR(filter_name.as_ptr()),
+                        pszSpec: PCWSTR(filter_spec.as_ptr()),
+                    }];
+                    let _ = dialog.SetFileTypes(&filters);
+                } else if kind == ShellPickKind::SettingsFile {
+                    filter_name = wide_null("JSON");
+                    filter_spec = wide_null("*.json");
                     let filters = [COMDLG_FILTERSPEC {
                         pszName: PCWSTR(filter_name.as_ptr()),
                         pszSpec: PCWSTR(filter_spec.as_ptr()),
@@ -7232,6 +7462,7 @@ mod windows_impl {
                     ShellPickKind::Folder => "folder",
                     ShellPickKind::Image => "picture",
                     ShellPickKind::Program => "program",
+                    ShellPickKind::SettingsFile => "settings file",
                 };
                 path.map(|path| Some(PathBuf::from(path)))
                     .map_err(|error| format!("the chosen {noun}'s name is not UTF-16: {error}"))
@@ -9257,10 +9488,10 @@ mod windows_impl {
     mod tests {
         use super::{
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
-            ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM, TouchToTheSystem, compositor_failure,
-            let_the_system_translate_touch, newest_live_owner, pan_gesture_configuration,
-            primary_language_id, retry_open_clipboard, the_system_s_gesture_is_answered_here,
-            touch_goes_to_the_system, wide_null,
+            SaveFilePickerState, ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM, TouchToTheSystem,
+            compositor_failure, let_the_system_translate_touch, newest_live_owner,
+            pan_gesture_configuration, primary_language_id, retry_open_clipboard,
+            the_system_s_gesture_is_answered_here, touch_goes_to_the_system, wide_null,
         };
         use crate::handoff::{validate_local_image_path, validate_openable_path};
         use crate::{NativeWindow, PanStep, PanTrack};
@@ -9779,6 +10010,61 @@ mod windows_impl {
                 Some(Vec::new()),
                 "and the folder request is still sitting where it was left"
             );
+        }
+
+        /// RED (0.4.4 ticket 05) — **the save dialog is posted, shown once with the
+        /// folder and name it was asked for, and collected once; a cancel is
+        /// `Ok(None)`.**
+        ///
+        /// The folder chooser's contract on the save door: `IFileDialog::Show`
+        /// runs a nested loop, so the press only posts and the answer waits for the
+        /// next turn. A second export press while one is up is coalesced rather
+        /// than stacking a second dialog, and a cancelled dialog is not a path —
+        /// an export that wrote somewhere after a Cancel would be a file nobody
+        /// chose.
+        ///
+        /// MUTATION: let `begin_request` succeed from `Posted` and the coalescing
+        /// assertion goes red; read the name at show time and the arguments do.
+        #[test]
+        fn the_save_dialog_is_posted_then_collected_and_a_cancel_is_no_path() {
+            let state = SaveFilePickerState::new();
+            let start: Vec<u16> = "C:\\exports\0".encode_utf16().collect();
+            let name = wide_null("folio-settings.json");
+            assert!(state.begin_request((start.clone(), name.clone())));
+            assert!(
+                !state.begin_request((Vec::new(), Vec::new())),
+                "a second ask while one is queued is coalesced, not stacked"
+            );
+            assert_eq!(
+                state.take_result(),
+                None,
+                "nothing is collected before it is shown"
+            );
+            assert_eq!(state.begin_showing(), Some((start, name)));
+            assert_eq!(state.begin_showing(), None, "and it is shown exactly once");
+            state.complete(Ok(Some(PathBuf::from(r"C:\exports\folio-settings.json"))));
+            assert_eq!(
+                state.take_result(),
+                Some(Ok(Some(PathBuf::from(r"C:\exports\folio-settings.json"))))
+            );
+            assert_eq!(state.take_result(), None, "and collected exactly once");
+
+            assert!(state.begin_request((Vec::new(), wide_null("folio-settings.json"))));
+            assert!(state.begin_showing().is_some());
+            state.complete(Ok(None));
+            assert_eq!(state.take_result(), Some(Ok(None)), "a cancel is no path");
+        }
+
+        /// PIN — the type a save dialog filters on is the suggested name's own
+        /// extension, and a name with none leaves the dialog unfiltered.
+        #[test]
+        fn the_save_dialog_filters_on_the_suggested_names_extension() {
+            assert_eq!(
+                super::save_extension(&wide_null("folio-settings.json")).as_deref(),
+                Some("json")
+            );
+            assert_eq!(super::save_extension(&wide_null("notes")), None);
+            assert_eq!(super::save_extension(&wide_null("trailing.")), None);
         }
 
         /// PIN — a NUL-terminated wide copy is what the shell reads, and it is
@@ -11287,21 +11573,21 @@ pub fn dock_badge_label(progress: TaskbarProgress) -> Option<String> {
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
-    ImeSystemCaret, MathContextMenu, Notifier, SystemSettingsWatch, Taskbar, adopt_parent_console,
-    announce_explorer_menu_change, apartments_left, cancel_composition, cjk_font_families,
-    client_area_animation_enabled, clipboard_text, cloaked_from_attribute, current_thread_priority,
-    current_user_registry_string, current_user_registry_subkeys, detach_console,
-    directory_folds_case, documents_directory, dpi_at, exposed_from_probe, exposure_probe_points,
-    file_product_version, flash_window, get_dpi_for_window, get_window_rect, get_work_area,
-    hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
-    install_window_class_background, is_window_cloaked, is_window_minimized, leave_process,
-    let_the_system_translate_touch, message_box, monitor_id_at, monospace_font_families,
-    os_ui_language, pointer_position, pointer_position_in_window, read_context_menu, recycle,
-    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
-    request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
-    spawn_at_priority, spawn_at_priority_with_stack, stand_window_at, std_error_is_console,
-    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    ImeSystemCaret, MathContextMenu, Notifier, SaveFilePicker, SystemSettingsWatch, Taskbar,
+    adopt_parent_console, announce_explorer_menu_change, apartments_left, cancel_composition,
+    cjk_font_families, client_area_animation_enabled, clipboard_text, cloaked_from_attribute,
+    current_thread_priority, current_user_registry_string, current_user_registry_subkeys,
+    detach_console, directory_folds_case, documents_directory, dpi_at, exposed_from_probe,
+    exposure_probe_points, file_product_version, flash_window, get_dpi_for_window, get_window_rect,
+    get_work_area, hide_every_window_of_this_process, install_console_ctrl_handler,
+    install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
+    leave_process, let_the_system_translate_touch, message_box, monitor_id_at,
+    monospace_font_families, os_ui_language, pointer_position, pointer_position_in_window,
+    read_context_menu, recycle, redirect_std_streams_to_file, register_clipboard_owner,
+    remove_context_menu, request_window_close, set_clipboard_text, set_current_thread_priority,
+    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
+    silence_std_streams, spawn_at_priority, spawn_at_priority_with_stack, stand_window_at,
+    std_error_is_console, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
     taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
     top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
     window_is_exposed, work_area_at, write_std_error, write_to_console,
@@ -11351,7 +11637,7 @@ pub use portable_impl::Compositor;
 /// product rather than about a dialog, the macOS arm reads the portable
 /// module's copy, and a second definition would be two spellings of one choice.
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub use portable_impl::{FolderPicker, ImagePicker, MathContextMenu, message_box};
+pub use portable_impl::{FolderPicker, ImagePicker, MathContextMenu, SaveFilePicker, message_box};
 
 /// **The watch doors, on a platform whose filesystem does not speak** (M2-1).
 ///
@@ -11866,7 +12152,7 @@ mod compositor_arms_tests {
 mod macos_dialogs;
 
 #[cfg(target_os = "macos")]
-pub use macos_dialogs::{FolderPicker, ImagePicker, MathContextMenu, message_box};
+pub use macos_dialogs::{FolderPicker, ImagePicker, MathContextMenu, SaveFilePicker, message_box};
 
 /// **The directory watch, over FSEvents** (M2-1).
 ///
@@ -13421,6 +13707,7 @@ mod deferred_service_tests {
             ("MathContextMenu", "new", "the formula menu"),
             ("FolderPicker", "new", "the folder chooser"),
             ("ImagePicker", "new", "the picture chooser"),
+            ("SaveFilePicker", "new", "the save dialog"),
             (
                 "SystemSettingsWatch",
                 "install",
@@ -13448,6 +13735,7 @@ mod deferred_service_tests {
             ("MathContextMenu", "request"),
             ("FolderPicker", "request"),
             ("ImagePicker", "request"),
+            ("SaveFilePicker", "request"),
             ("Compositor", "attach_web_visual"),
             ("Compositor", "place_web_visual"),
         ] {
@@ -14151,6 +14439,7 @@ mod macos_dialog_backend_tests {
             "\npub struct MathContextMenu {",
             "\npub struct FolderPicker {",
             "\npub struct ImagePicker {",
+            "\npub struct SaveFilePicker {",
             "\npub fn message_box(",
         ] {
             let attributes = attributes_above(PORTABLE, definition);
@@ -14373,8 +14662,8 @@ mod macos_dialog_backend_tests {
         let dressing = item(MACOS, "\nfn dress(");
         assert_eq!(
             dressing.matches("setAllowedContentTypes(").count(),
-            1,
-            "exactly one of the three rows is filtered, and it is the picture one"
+            2,
+            "two of the four rows are filtered — the picture one, and the settings file one              (0.4.4 ticket 05), which offers the one type an export is written as"
         );
         assert!(
             dressing.contains("setTreatsFilePackagesAsDirectories(false)"),
