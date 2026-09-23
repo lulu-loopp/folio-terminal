@@ -35084,6 +35084,11 @@ fn a_selection_reaching_another_block_is_a_layout_change_and_not_a_parse_change(
         within, across,
         "① the selection reached the second paragraph, so it is drawn as source"
     );
+    assert_ne!(
+        across,
+        key(ranges[2].start + 3, ranges[2].start + 3),
+        "① and it is not the caret's block alone: the first paragraph stays source",
+    );
     assert_eq!(within.parse, across.parse, "and nothing is parsed again");
     assert_eq!(
         within,

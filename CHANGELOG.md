@@ -21,6 +21,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- In a Markdown preview you are editing, every block a selection touches shows
+  its Markdown, as in Obsidian; a table the selection only passes through stays
+  rendered. The blocks change when you let go of the mouse, not while you drag.
 - A local HTML page in the preview can load its stylesheets, scripts and fonts
   from the web.
 - A multi-line paste into PowerShell now waits on the input line for Enter.

@@ -694,16 +694,22 @@ mod tests {
     fn a_drag_in_flight_changes_no_face_until_the_release() {
         let mut page = Page::read();
         page.press(Pressed::byte(12, Grain::Character, false));
-        page.release(false);
+        page.drag_to(35);
+        page.release(true);
+        assert_eq!(page.source_blocks(), vec![1, 2], "a span of two blocks");
         page.press(Pressed::byte(3, Grain::Character, false));
+        assert!(
+            page.selected().is_empty(),
+            "the press let go of the selection"
+        );
         assert_eq!(
             page.source_blocks(),
-            vec![1],
-            "the press into the heading changes nothing yet",
+            vec![1, 2],
+            "and of nothing else: the press into the heading changes no face",
         );
         for reach in [5, 14, 20, 30, 38] {
             page.drag_to(reach);
-            assert_eq!(page.source_blocks(), vec![1], "mid-drag at {reach}");
+            assert_eq!(page.source_blocks(), vec![1, 2], "mid-drag at {reach}");
         }
         page.release(true);
         assert_eq!(
@@ -734,8 +740,9 @@ mod tests {
         page.drag_to(35);
         page.release(true);
         assert_eq!(page.source_blocks(), vec![1, 2], "a span of two blocks");
-        page.press(Pressed::byte(30, Grain::Character, false));
-        assert_eq!(page.caret.caret, 30, "answered where it stands");
+        // Into the first of the two, which is not the block the caret is in.
+        page.press(Pressed::byte(14, Grain::Character, false));
+        assert_eq!(page.caret.caret, 14, "answered where it stands");
         assert!(
             page.selected().is_empty(),
             "and the selection is let go at once"
@@ -748,7 +755,7 @@ mod tests {
         page.release(false);
         assert_eq!(
             page.source_blocks(),
-            vec![2],
+            vec![1],
             "the selection is gone, so the caret's one block is left",
         );
     }
