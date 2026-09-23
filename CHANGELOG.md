@@ -55,6 +55,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- On a slow disk, turning on PowerShell integration from the welcome card
+  could report a lock error although everything was written; it no longer
+  does.
 - The command marks down a pane's right edge no longer cover the last column of
   text.
 - The Cards setting named the wrong shortcut on macOS and after a rebind.

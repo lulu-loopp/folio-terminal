@@ -82,9 +82,12 @@ named** — never a path this build assembles — keeps a dated `.bak-<YYYYMMDD>
 beside it, and records the write in `integration-marks.json` so that
 `profile_runtime::begin_removal`, `--remove-shell-integration` and
 `--uninstall-cleanup` can undo exactly what Folio wrote. Every writer of that
-record takes the advisory lock with an explicit asker: `Asker::InApp` waits its
-turn up to `OUR_TURN` and reports only a wait that ran out; `Asker::Door`
-refuses at once with the same error. `cmd.exe` carries `A` and `D` through its
+record takes the advisory lock with an explicit asker: `Asker::InApp` waits
+behind Folio's own writers with no deadline, and up to `OUR_TURN` for a holder
+in another process, reporting only that second wait running out; `Asker::Door`
+refuses at once with the same error. Which holder is ours is known by
+construction — every writer in this process stands in `profile_marks`'s
+in-process queue before it takes the OS lock — never by asking the OS. `cmd.exe` carries `A` and `D` through its
 prompt string; `B` is still refused where there is no `C`.
 **From.** §7.6 *terminal notifications* (the single scanner seam, no vendor
 patch); §7.57 *`cmd.exe` finally has a scale on its command rail*; §7.1.6j (the
@@ -92,9 +95,14 @@ opt-in `$PROFILE` offer, the backup, "ask the shell for `$PROFILE`, never spell
 it"); `docs/shell-integration.md`, which states it is the authority for the
 protocol; trailing entry 2026-09-21 *Folio's own writers wait their turn for the
 marks record*; trailing entry 2026-09-21 *a removal that found nothing says
-nothing in the window*.
+nothing in the window*; trailing entry 2026-09-23 *a writer of Folio's waits
+behind another of Folio's writers for as long as that one takes; the two-second
+bound is only for a holder in another process*.
 **Overrides.** The 2026-09-21 lock entry replaces a bare `try_lock` whose busy
-case surfaced as a red toast. There is no §7.1.5c; the marks rules live in the
+case surfaced as a red toast. The 2026-09-23 entry replaces that entry's
+"`Asker::InApp` … waits its turn up to `OUR_TURN`" for a holder in this process,
+which gave a false `WouldBlock` whenever our own writer's I/O outlasted two
+seconds on a slow disk. There is no §7.1.5c; the marks rules live in the
 sections above.
 
 ### 5. The printed-path chain — `folded`
@@ -676,6 +684,9 @@ occupancy entry replaces row-level checks with `install_checked`.
 the window thread**, deliberately, because each already reads and writes those
 files synchronously there. Moving them onto workers is named as a 0.4.4 ticket
 and **no ticket id has been issued**. See `docs/ARCHITECTURE.md` §5.3 rows 2–4.
+Since 2026-09-23 such a press waits behind one of our own workers' I/O for as
+long as that I/O takes, instead of failing after two seconds; that wait is
+bounded by our own finite writes and is paid off by the same move.
 **Ruled and not yet built.** Owner's verbal ruling of 2026-09-21, written down on
 2026-09-22 (multi-line paste design note, "Owner rulings" 6): **option A — Folio
 replaces its own older copy of the module on upgrade.** No ticket in the 0.4.4
