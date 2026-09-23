@@ -69,6 +69,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- The folder at the bottom of the glance card now lights up under the
+  pointer, like every other line you can click.
 - The open-in-browser arrow on a web pane showing an `http` or `https` page
   now opens that page in your browser; it used to do nothing.
 - While a divider is dragged, the pane under the pointer keeps the rounded

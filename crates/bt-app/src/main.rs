@@ -33085,6 +33085,11 @@ struct FilePeek {
     /// the notice measured by the frame that drew them, and a press tested
     /// against a second derivation would land where the address is not.
     foot: Option<[f32; 4]>,
+    /// **Whether the frame last drawn lit that address under the pointer** —
+    /// the painter's receipt ([`file_peek::over_foot`]), written beside
+    /// [`Self::foot`] and read by a pointer move to know whether the hand
+    /// crossed the address's edge and a frame is owed.
+    foot_lit: bool,
     /// **How far this card's column of pages can be wound**, in physical pixels
     /// — `None` for every card whose body is not one (user ruling 2026-08-26).
     ///
