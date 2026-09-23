@@ -56,12 +56,12 @@ pub const GIT_VIEW_PADDING_BOTTOM_LOGICAL_PX: f32 = 10.0;
 /// `.git-view.empty { font-size: 11.5px }` — the one empty state, centred (R17).
 pub const GIT_EMPTY_FONT_LOGICAL_PX: f32 = 11.5;
 
+/// Primary text (`UI-SPEC.md` T3), not the mock-up's own
 /// `.git-branch { padding: 10px 2px 6px; font-size: 13.5px; font-weight: 600 }`.
-///
-/// 13.5 is the largest text on the page and it is the branch name, which is the
-/// masthead's whole point: *the one fact you always need* (mock-up 1593). R20
-/// settled it against the full graph's 14px — one fact, one size.
-pub const GIT_HEAD_FONT_LOGICAL_PX: f32 = 13.5;
+/// It is still the largest text on the page and it is the branch name, which
+/// is the masthead's whole point: *the one fact you always need* (mock-up
+/// 1593).
+pub const GIT_HEAD_FONT_LOGICAL_PX: f32 = 13.0;
 pub const GIT_HEAD_PADDING_TOP_LOGICAL_PX: f32 = 10.0;
 pub const GIT_HEAD_PADDING_BOTTOM_LOGICAL_PX: f32 = 6.0;
 /// The masthead's own left/right inset, inside `.git-view`'s ten.
@@ -71,11 +71,11 @@ pub const GIT_HEAD_GAP_LOGICAL_PX: f32 = 8.0;
 /// The branch mark's box (R4) — [`crate::icons::MarkSlot::Toolbar`]'s own,
 /// which is what a panel head is.
 ///
-/// Fourteen and not the head's own 13.5: a mark is measured across its box and a
-/// letter across its cap height, so a mark cut to the type size always reads
-/// small beside it. Half a pixel is what closes that on this ladder — and the
-/// slot arrived at the same fourteen from the other end, which is why this is
-/// now the slot's number rather than a second one that agrees with it today.
+/// Fourteen and not the head's own 13 (`UI-SPEC.md` T3): a mark is measured
+/// across its box and a letter across its cap height, so a mark cut to the
+/// type size always reads small beside it — and the slot arrived at the same
+/// fourteen from the other end, which is why this is the slot's number rather
+/// than a second one that agrees with it today.
 pub fn git_head_mark_logical_px(mark: crate::marks::ChromeMark) -> f32 {
     crate::icons::MarkSlot::Toolbar.mark_box_logical_px(mark)[0]
 }
@@ -105,18 +105,23 @@ pub const GIT_PILL_EDGE_LOGICAL_PX: f32 = 1.0;
 /// The pill's own height: `1px + line + 1px` at 10.5px, which lands on 16.
 pub const GIT_PILL_HEIGHT_LOGICAL_PX: f32 = 16.0;
 
+/// The section-label scale (`UI-SPEC.md` T7; `settings.rs::GROUP_LABEL_FONT_LOGICAL_PX`,
+/// private there), not the mock-up's own
 /// `.glabel { padding: 14px 2px 5px; font-size: 9.5px; letter-spacing: .09em }`.
+/// These were the smallest, most widely spaced text in the window.
 ///
 /// The 14px top inset is the *group gap*: the design pulls the sections apart
 /// with the heading's own padding rather than with a margin between cards, so a
 /// heading and the card under it are one object with air above them.
-pub const GIT_LABEL_FONT_LOGICAL_PX: f32 = 9.5;
-pub const GIT_LABEL_TRACKING_EM: f32 = 0.09;
+pub const GIT_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
+/// `UI-SPEC.md` T7; `settings.rs::GROUP_LABEL_TRACKING_EM`, private there.
+pub const GIT_LABEL_TRACKING_EM: f32 = 0.05;
 pub const GIT_LABEL_PADDING_TOP_LOGICAL_PX: f32 = 14.0;
 pub const GIT_LABEL_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
 pub const GIT_LABEL_PADDING_X_LOGICAL_PX: f32 = 2.0;
-/// How tall the heading's own text sits: 9.5px at the browser's normal leading.
-pub const GIT_LABEL_LINE_LOGICAL_PX: f32 = 12.0;
+/// The section-label scale (`UI-SPEC.md` T7; `settings.rs::GROUP_LABEL_LINE_LOGICAL_PX`,
+/// private there) — how tall the heading's own text sits.
+pub const GIT_LABEL_LINE_LOGICAL_PX: f32 = 13.0;
 
 /// `.gsec { background: var(--panel); border-radius: 9px; padding: 4px }`.
 ///
@@ -128,11 +133,10 @@ pub const GIT_SECTION_PADDING_LOGICAL_PX: f32 = 4.0;
 
 /// `.grow`/`.gcommit` — 27 logical pixels, and the same 27 for both.
 ///
-/// The commit row declares it (`height: 27px`) because the mini graph's SVG is
-/// 27 tall and the line has to meet the line in the row below it. The change row
-/// arrives at it: `5px + 17px badge + 5px`. That they agree is not a
-/// coincidence to be relied on but a fact to be stated once, here.
-pub const GIT_ROW_HEIGHT_LOGICAL_PX: f32 = 27.0;
+/// The files-column row (`UI-SPEC.md` H2; `seats.rs::FILES_ROW_HEIGHT_LOGICAL_PX`)
+/// — the row height used to change when switching `Files` ↔ `Git`. The mock-up
+/// declared it `height: 27px` because the mini graph's SVG was 27 tall.
+pub const GIT_ROW_HEIGHT_LOGICAL_PX: f32 = crate::seats::FILES_ROW_HEIGHT_LOGICAL_PX;
 /// `.grow { border-radius: 6px }`.
 pub const GIT_ROW_RADIUS_LOGICAL_PX: f32 = 6.0;
 /// `.grow { gap: 8px }`.
@@ -149,8 +153,9 @@ pub const GIT_COMMIT_PADDING_LEFT_LOGICAL_PX: f32 = 3.0;
 /// agreeing with the graph the first time either moved.
 pub const GIT_COMMIT_FILE_INDENT_LOGICAL_PX: f32 =
     GIT_COMMIT_PADDING_LEFT_LOGICAL_PX + GIT_GRAPH_WIDTH_LOGICAL_PX;
-/// `.grow bdi`, `.gmsg` — the page's body size.
-pub const GIT_ROW_FONT_LOGICAL_PX: f32 = 12.5;
+/// Primary text (`UI-SPEC.md` T4), not the mock-up's own `.grow bdi`, `.gmsg`
+/// body size.
+pub const GIT_ROW_FONT_LOGICAL_PX: f32 = 13.0;
 
 /// `.gst { width: 17px; height: 17px; border-radius: 5px; font: 600 10px mono }`
 /// — one status letter's badge (R11).
@@ -4421,6 +4426,43 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     const ROOT: &str = r"D:\repo";
+
+    /// RED (ticket 18) — **the Git page's row height, head and row type, and
+    /// section labels are the rest of the window's, not their own smaller,
+    /// more widely spaced scale.**
+    ///
+    /// `UI-SPEC.md` H2/T3/T4/T7: the row height used to change when switching
+    /// `Files` ↔ `Git` (H2, against `seats::FILES_ROW_HEIGHT_LOGICAL_PX`); the
+    /// head and row fonts were half a point off primary text (T3/T4, both 13);
+    /// the section labels were the smallest, most widely spaced text in the
+    /// window (T7, against `settings.rs::GROUP_LABEL_*`, private there).
+    ///
+    /// MUTATION: revert any of `GIT_ROW_HEIGHT_LOGICAL_PX`,
+    /// `GIT_HEAD_FONT_LOGICAL_PX`, `GIT_ROW_FONT_LOGICAL_PX`,
+    /// `GIT_LABEL_FONT_LOGICAL_PX`, `GIT_LABEL_TRACKING_EM` or
+    /// `GIT_LABEL_LINE_LOGICAL_PX` to a literal and this goes red.
+    #[test]
+    fn ui_spec_git_class_a_values_follow_the_rule() {
+        assert_eq!(
+            GIT_ROW_HEIGHT_LOGICAL_PX,
+            crate::seats::FILES_ROW_HEIGHT_LOGICAL_PX,
+            "UI-SPEC.md H2"
+        );
+        assert_eq!(GIT_HEAD_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T3");
+        assert_eq!(GIT_ROW_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T4");
+        assert_eq!(
+            GIT_LABEL_FONT_LOGICAL_PX, 11.0,
+            "UI-SPEC.md T7, settings.rs::GROUP_LABEL_FONT_LOGICAL_PX"
+        );
+        assert_eq!(
+            GIT_LABEL_TRACKING_EM, 0.05,
+            "UI-SPEC.md T7, settings.rs::GROUP_LABEL_TRACKING_EM"
+        );
+        assert_eq!(
+            GIT_LABEL_LINE_LOGICAL_PX, 13.0,
+            "UI-SPEC.md T7, settings.rs::GROUP_LABEL_LINE_LOGICAL_PX"
+        );
+    }
 
     /// A measurer that costs one unit per character.
     ///

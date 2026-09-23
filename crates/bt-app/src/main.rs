@@ -3257,7 +3257,11 @@ fn resolve_document_pictures(
         };
         let picture = match resolved {
             preview::LinkAction::Web(url) => MarkdownPicture::Remote(url),
-            preview::LinkAction::Nowhere => MarkdownPicture::Nowhere,
+            // A picture addressed by a scheme this window has no reader for is nothing to draw:
+            // a source is fetched, never handed over.
+            preview::LinkAction::Nowhere | preview::LinkAction::Scheme(_) => {
+                MarkdownPicture::Nowhere
+            }
             // **A source this window will not go looking at** (route E of the untrusted-path
             // audit, 2026-09-08). `![](\\attacker\share\x.png)` inside a document rendered on a
             // hover used to reach `ask` — which is `request_peek_pixels` — and the picture was
@@ -9799,6 +9803,43 @@ fn files_key_within(root: &str, folder: &Path) -> Option<String> {
     Some(tail.components().fold(String::new(), |key, component| {
         files::child_key(&key, &component.as_os_str().to_string_lossy())
     }))
+}
+
+/// **Where a locate lands in the files column** (user ruling 2026-08-25; the
+/// file arm, 2026-09-20).
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FilesLocate {
+    /// The folder is inside the tree `seat` is rooted at: keep that root, open
+    /// the way down, and select `select` — the folder's own node, or the file's
+    /// row inside it.
+    Inside { seat: SeatId, select: String },
+    /// It is not — or there is no column: a column is rooted at the folder
+    /// (the existing one re-rooted, or one seated), and `select` is the file's
+    /// row in it when a file was named.
+    Root { select: Option<String> },
+}
+
+/// [`FilesLocate`] for standing a column on `folder` and selecting `file` in
+/// it, given the tab's column and the root it stands on (`None` for a tab with
+/// no column).
+///
+/// The one decision [`Runtime::locate_folder_in_files_column`] makes, out of
+/// the runtime so the three arms can be asked of it: inside the tree, outside
+/// it, and no tree at all. **The root is only ever replaced, never restored**:
+/// nothing here or in the verb remembers the root it replaced (owner,
+/// 2026-09-23 — the column does not switch back).
+fn files_locate(column: Option<(SeatId, &str)>, folder: &Path, file: Option<&str>) -> FilesLocate {
+    let inside =
+        column.and_then(|(seat, root)| files_key_within(root, folder).map(|key| (seat, key)));
+    match inside {
+        Some((seat, key)) => FilesLocate::Inside {
+            seat,
+            select: file.map_or_else(|| key.clone(), |name| files::child_key(&key, name)),
+        },
+        None => FilesLocate::Root {
+            select: file.map(|name| files::child_key("", name)),
+        },
+    }
 }
 
 /// Every folder that has to be open for one node id to be a drawn row — **the
@@ -22161,8 +22202,8 @@ fn rename_key(
 ///
 /// Derived from [`hyperlink_activation`] rather than written beside it, so the
 /// sentence cannot drift from the destination: a URI whose `Ctrl` answer is
-/// neither of these two — a web address, a network path that previews either
-/// way, a scheme this window refuses — says nothing at all.
+/// neither of these two — a path this window may not read that is not a share,
+/// an address this window refuses — says nothing at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlClickHint {
     /// `file:` at a readable file, or a web address — `Ctrl` hands it to this machine's handler.
@@ -22178,9 +22219,12 @@ impl ControlClickHint {
         verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
     ) -> Option<Self> {
         match hyperlink_activation(true, true, uri, namer, verdict) {
-            HyperlinkActivation::External(_) | HyperlinkActivation::Browser => {
-                Some(Self::DefaultApp)
-            }
+            // A share and a URI of any scheme joined this clause with ticket 14: what `Ctrl`
+            // reaches is the machine's registered handler for them too.
+            HyperlinkActivation::External(_)
+            | HyperlinkActivation::Browser(_)
+            | HyperlinkActivation::Share(_)
+            | HyperlinkActivation::Scheme(_) => Some(Self::DefaultApp),
             HyperlinkActivation::Reveal(_) => Some(Self::Explorer),
             HyperlinkActivation::None
             | HyperlinkActivation::Page(_)
@@ -24553,7 +24597,28 @@ enum HyperlinkActivation {
     /// a target whose only destination is outside this window.
     None,
     /// A web address, handed to whatever this desk browses with.
-    Browser,
+    ///
+    /// It carries the address since ticket 14 (2026-09-23), when a link inside a previewed
+    /// document started reading this same type: the terminal's press has the printed hit to spend
+    /// it from, and a document's has only the arm.
+    Browser(String),
+    /// **A share on another machine, handed to the system** — its registered handler for a file,
+    /// Explorer for a folder (owner ruling 2026-09-21: 「UNC 与任意协议链接 Ctrl+点击交给系统」).
+    ///
+    /// `Ctrl`'s half of the share row, and apart from [`Self::External`] because it carries
+    /// nothing a worker said: a share is never asked about — not on a hover, not on the press —
+    /// so there is no ledger answer to hand the verified door. It leaves through the files
+    /// column's door instead ([`bt_platform::Handoff::Open`]), on the OS hand-off lane, which is
+    /// the one place a cold `\\server` may take as long as it takes; that door reads
+    /// `names_a_program`, so a share meets the same program list a local file does.
+    Share(PathBuf),
+    /// **A URI of any other scheme, handed to whatever this machine has registered for it** —
+    /// `mailto:`, `vscode:`, `ssh:`, `obsidian:` (owner ruling 2026-09-21).
+    ///
+    /// No list of schemes stands in front of it: the modifier is the reader's consent
+    /// (「修饰键就是用户的同意」), and what the machine has no handler for, the machine refuses —
+    /// said under the address in the words a refused address has always had.
+    Scheme(String),
     /// A web address, opened the way this window opens every other page — the
     /// preview seat's own engine, on this tab (§7.1.5g ①).
     ///
@@ -24606,6 +24671,107 @@ enum HyperlinkActivation {
     /// A target this window will not hand to the shell. The hover line says so
     /// and nothing else happens.
     Blocked,
+}
+
+/// **Which row of §7.1.5g's table a reference falls in**, read off its own text before any
+/// modifier is (ticket 14, owner ruling 2026-09-23).
+///
+/// Two surfaces point at things — a reference printed in the terminal and a link written in a
+/// previewed document — and the ruling is that they follow one rule: 「click stays in the window,
+/// Ctrl+click hands over」. So each surface says *what* its string names, in its own grammar
+/// ([`terminal_reference_row`], [`preview_reference_row`]), and [`reference_activation`] is the
+/// one function that says what a press on that spends. No surface reads the modifier on its own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ReferenceRow {
+    /// `http`/`https` — the row [`web_address_activation`] reads.
+    Web(String),
+    /// A path this window may read unasked, and what is known about it.
+    Local {
+        path: PathBuf,
+        at: Option<bt_transcript::paths::PrintedPathLocation>,
+        known: LocalKnown,
+    },
+    /// **A path this window may not read unasked** — a share, a device path, a verbatim spelling,
+    /// a distribution nobody here is standing in. Never asked about.
+    Unasked(PathBuf, Option<bt_transcript::paths::PrintedPathLocation>),
+    /// A URI of any scheme this table has no row of its own for.
+    Scheme(String),
+    /// Something spelled as a request that names nothing this machine can name — a `file:` URI
+    /// with no path here, a target with no scheme at all. `Ctrl` is told so.
+    Unnamed,
+    /// Nothing to act on and nothing to refuse — an in-document anchor, an empty target.
+    Nothing,
+}
+
+/// What this window knows about a local path at the moment of the press.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalKnown {
+    /// Nobody has asked the disk yet (audit 3 C-2): not a link yet.
+    Unanswered,
+    /// The disk said nothing is there.
+    Gone,
+    /// The disk said it is a folder.
+    Folder,
+    /// The disk said it is a file — or a document named it, which is the same answer: a
+    /// document's targets are never asked about (route E), and the seat and the handler each say
+    /// what they find.
+    File,
+}
+
+/// **What a press on a reference in `row` spends** — the table, once, for both surfaces.
+///
+/// A refusal is an answer to a request, so it is spoken only when one was made: a plain click on
+/// a `mailto:` is the selection's and says nothing.
+fn reference_activation(intent: ClickIntent, row: ReferenceRow) -> HyperlinkActivation {
+    match row {
+        // **The row is read where it lives** ([`web_address_activation`], §7.1.5g ⑦).
+        ReferenceRow::Web(uri) => match web_address_activation(intent, &uri) {
+            WebAddressActivation::None => HyperlinkActivation::None,
+            WebAddressActivation::Page => HyperlinkActivation::Page(uri),
+            WebAddressActivation::Browser => HyperlinkActivation::Browser(uri),
+            WebAddressActivation::Blocked => HyperlinkActivation::Blocked,
+        },
+        ReferenceRow::Local { path, at, known } => match (known, intent) {
+            // **Nobody has asked the disk about this name yet, so it is not a link yet** (audit 3
+            // C-2). Not a refusal and not an answer — the one state a ledger has that a syscall
+            // does not.
+            (LocalKnown::Unanswered, _) => HyperlinkActivation::None,
+            // **A name the disk says is not there is never handed to a file manager** (closure
+            // re-review B-1'). Both halves answer the preview seat, which is where this window
+            // already says "not found".
+            (LocalKnown::Gone, _) => HyperlinkActivation::Preview(path, at),
+            // The files column, pointed at it (user ruling 2026-08-21); under `Ctrl`, Explorer.
+            (LocalKnown::Folder, ClickIntent::Here) => HyperlinkActivation::FilesColumn(path),
+            (LocalKnown::Folder, ClickIntent::System) => HyperlinkActivation::Reveal(path),
+            // The seat, and under `Ctrl` the machine's own handler (owner ruling 2026-09-21).
+            (LocalKnown::File, ClickIntent::Here) => HyperlinkActivation::Preview(path, at),
+            (LocalKnown::File, ClickIntent::System) => HyperlinkActivation::External(path),
+        },
+        ReferenceRow::Unasked(path, at) => match intent {
+            // **The plain half is the card §7.1.3 already has** — it says why nothing is shown,
+            // and it reads nothing to say it.
+            ClickIntent::Here => HyperlinkActivation::Preview(path, at),
+            // **`Ctrl` on a share hands it to the system** (owner ruling 2026-09-21). It was the
+            // card under either modifier for as long as `ShellExecuteW` ran on the window thread,
+            // because handing over a cold `\\server` would have stalled the window for the round
+            // trip; the hand-off lane (2026-09-22) is what made this arm possible.
+            ClickIntent::System if bt_transcript::paths::is_a_share_on_another_machine(&path) => {
+                HyperlinkActivation::Share(path)
+            }
+            // A device path, a verbatim spelling, a stranger's distribution: not another
+            // machine's file, and not the ruling's. They keep the card they had.
+            ClickIntent::System => HyperlinkActivation::Preview(path, at),
+        },
+        ReferenceRow::Scheme(uri) => match intent {
+            ClickIntent::Here => HyperlinkActivation::None,
+            ClickIntent::System => HyperlinkActivation::Scheme(uri),
+        },
+        ReferenceRow::Unnamed => match intent {
+            ClickIntent::Here => HyperlinkActivation::None,
+            ClickIntent::System => HyperlinkActivation::Blocked,
+        },
+        ReferenceRow::Nothing => HyperlinkActivation::None,
+    }
 }
 
 /// **The `http(s)` row of §7.1.5g's table, standing on its own** (user ruling
@@ -24701,78 +24867,46 @@ fn web_address_activation(intent: ClickIntent, uri: &str) -> WebAddressActivatio
     }
 }
 
-/// **What a press on a link inside a document this window drew spends**
-/// (§7.1.5g ⑦, user ruling 2026-08-29).
+/// **What a press on a link inside a document this window drew spends** (§7.1.5g ⑦, user ruling
+/// 2026-08-29; owner ruling 2026-09-23).
 ///
-/// The preview's own half of the one clicking rule. It is a *composition* and
-/// deliberately not a table: [`preview::link_action`] says which of three kinds
-/// of thing the author's string names — a file, a web address, nothing — and the
-/// web arm is then read out of [`web_address_activation`], which is the same
-/// function the terminal's `http(s)` row is. Nothing here reads `control` on its
-/// own.
+/// The preview's own half of the one clicking rule, and since 2026-09-23 **not a half at all**:
+/// 「Links inside previewed documents follow the same rule as terminal references: click stays in
+/// the window, Ctrl+click hands over.」 [`preview::link_action`] says what the author's string
+/// names — a file, a web address, a path this window may not read, another scheme, nothing — and
+/// [`reference_activation`] says what a press on it spends, which is the same function the
+/// terminal's rows are read from. Nothing here reads `control` on its own.
 ///
-/// Five arms and no unreachable one, which is why this is its own type rather
-/// than [`HyperlinkActivation`] borrowed: the file arm never asks the disk
-/// whether it is a folder and never leaves for Explorer, so `Reveal`,
-/// `FilesColumn` and `External` are things this surface cannot produce and must
-/// not be able to grow.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum PreviewLinkActivation {
-    /// Nothing this window will act on: a bare `#fragment`, a scheme with no arm
-    /// (`mailto:`), a relative link in a document that has no folder — or the
-    /// plain half of an address whose own text does not parse.
-    None,
-    /// **The file this link names, on the preview seat** — the 2026-08-13 ruling,
-    /// and the one arm the modifier does not touch.
-    ///
-    /// 「指到文件=预览它」 is what a link, a files row and the file menu's first
-    /// item all say, and `Ctrl` is not offered a second answer here because
-    /// there is no second answer to offer: this arm is *already* 「在这扇窗里发生
-    /// 的那个目的地」, and what the reader is pointing at is a document being read
-    /// beside the one they are reading.
-    Preview(PathBuf),
-    /// A web address, opened on this window's own seat (§7.1.5g ⑥) — the plain
-    /// press.
-    Page(String),
-    /// The same address, handed to this machine's browser — `Ctrl`.
-    Browser(String),
-    /// A request `Ctrl` made that this window refuses, to be said out loud.
-    Blocked(String),
+/// The answer is [`HyperlinkActivation`] itself, not a type of the preview's own. The type that
+/// stood here had five arms and argued that the file arm "never leaves for Explorer", which was
+/// the 2026-08-13 ruling (「指到文件=预览它」 under either modifier); the 2026-09-23 ruling gives
+/// the file arm `Ctrl`'s half too, and a second type would be a second spelling of the table.
+fn preview_link_activation(control: bool, target: &str, document: &Path) -> HyperlinkActivation {
+    reference_activation(
+        ClickIntent::of(control),
+        preview_reference_row(target, document),
+    )
 }
 
-/// Read the preview's link row: [`PreviewLinkActivation`]'s one reader.
+/// **The row a document's link falls in** — [`preview::link_action`]'s answer, said in the
+/// table's words.
 ///
-/// One expression and not two agreeing ones, which is 7.1.5f's rule and the
-/// reason the pointing finger over a preview link is drawn from this and from
-/// nothing else ([`preview_link_answers_a_press`]): a hand that promises a press
-/// the release then declines is this window lying about what it can do.
-fn preview_link_activation(control: bool, target: &str, document: &Path) -> PreviewLinkActivation {
+/// A resolved file is [`LocalKnown::File`] because a document's targets are never asked about
+/// (route E of the untrusted-path audit): the seat says what it finds on a plain press, and the
+/// machine's handler on `Ctrl`. A target that names nothing — an anchor, an empty string, a
+/// relative link in a document with no folder — is [`ReferenceRow::Nothing`] under both
+/// modifiers: there is no request in it to refuse.
+fn preview_reference_row(target: &str, document: &Path) -> ReferenceRow {
     match preview::link_action(target, document) {
-        preview::LinkAction::Preview(path) => PreviewLinkActivation::Preview(path),
-        // **The terminal's own row, not a second reading of it.** This is the
-        // whole of §7.1.5g ⑦: the arm that stood here read
-        // `LinkAction::Browse(url) => shell_execute`, a verb minted on
-        // 2026-08-13 that never took `control` as an argument, and by the time
-        // `ClickIntent` settled the gesture the other way round nobody came back
-        // to it. The note ⑥ left behind is what this line obeys — 「按同一张表
-        // 改,不要在那边另写一个 `if control`」 — and obeying it means calling the
-        // row rather than restating it.
-        preview::LinkAction::Web(url) => {
-            match web_address_activation(ClickIntent::of(control), &url) {
-                WebAddressActivation::None => PreviewLinkActivation::None,
-                WebAddressActivation::Page => PreviewLinkActivation::Page(url),
-                WebAddressActivation::Browser => PreviewLinkActivation::Browser(url),
-                WebAddressActivation::Blocked => PreviewLinkActivation::Blocked(url),
-            }
-        }
-        // **A target this window may not read is not a link** (route E of the untrusted-path
-        // audit, 2026-09-08). The same answer `Nowhere` gets, and for a reason a reader can feel:
-        // the row wears no finger, and a press on it does nothing — because what it names is a
-        // share, a device, or a distribution nobody in this window is standing in, and this window
-        // does not go there off a document somebody else wrote.
-        preview::LinkAction::Refused(_) | preview::LinkAction::Nowhere => {
-            PreviewLinkActivation::None
-        }
+        preview::LinkAction::Preview(path) => ReferenceRow::Local {
+            path,
+            at: None,
+            known: LocalKnown::File,
+        },
+        preview::LinkAction::Web(url) => ReferenceRow::Web(url),
+        preview::LinkAction::Refused(path) => ReferenceRow::Unasked(path, None),
+        preview::LinkAction::Scheme(uri) => ReferenceRow::Scheme(uri),
+        preview::LinkAction::Nowhere => ReferenceRow::Nothing,
     }
 }
 
@@ -24784,7 +24918,7 @@ fn preview_link_activation(control: bool, target: &str, document: &Path) -> Prev
 /// document; the finger says "and *this* press, with the keys held the way they
 /// are held right now, is one that goes somewhere".
 fn preview_link_answers_a_press(control: bool, target: &str, document: &Path) -> bool {
-    preview_link_activation(control, target, document) != PreviewLinkActivation::None
+    preview_link_activation(control, target, document) != HyperlinkActivation::None
 }
 
 /// Which door a click on a hyperlink goes through (§7.1.5g).
@@ -24867,6 +25001,19 @@ fn preview_link_answers_a_press(control: bool, target: &str, document: &Path) ->
 /// that was already reached. A **mapped drive** is not one of those and never
 /// was: a drive letter standing for a NAS is where the reader keeps their work,
 /// and this window reads one exactly as `main` does (owner ruling 2026-09-21).
+///
+/// **And `Ctrl` on a share hands it over without asking** (ticket 14, owner ruling 2026-09-21:
+/// 「UNC 与任意协议链接 Ctrl+点击交给系统、悬停不碰 UNC、普通点击不变」). The paragraph above
+/// still holds for every question this table asks — a share is never probed — and it used to be
+/// followed by "a share is one answer under either modifier", because `ShellExecuteW` ran on this
+/// thread and handing it a cold `\\server` stalled the window for the round trip. Hand-offs run on
+/// their own lane since 2026-09-22, so `Ctrl`'s half of the share row is
+/// [`HyperlinkActivation::Share`] and the plain half is still the card. A URI of any scheme but
+/// `http`, `https` and `file` is [`HyperlinkActivation::Scheme`] under `Ctrl` and nothing plainly,
+/// where it used to be refused.
+///
+/// The rows themselves are [`reference_activation`]'s, which a link inside a previewed document
+/// reads too (owner ruling 2026-09-23); this function is the terminal's grammar in front of them.
 fn hyperlink_activation(
     control: bool,
     click_no_drag: bool,
@@ -24877,116 +25024,64 @@ fn hyperlink_activation(
     if !click_no_drag {
         return HyperlinkActivation::None;
     }
-    let intent = ClickIntent::of(control);
-    // A refusal is an answer to a request, so it is spoken only when one was
-    // made: a plain click on a `mailto:` is the selection's and says nothing.
-    let refused = match intent {
-        ClickIntent::Here => HyperlinkActivation::None,
-        ClickIntent::System => HyperlinkActivation::Blocked,
-    };
+    reference_activation(
+        ClickIntent::of(control),
+        terminal_reference_row(uri, namer, verdict),
+    )
+}
+
+/// **The row a reference printed in the terminal falls in** — the terminal's grammar for
+/// [`reference_activation`], which is the table.
+fn terminal_reference_row(
+    uri: &str,
+    namer: bt_transcript::paths::PathNamer<'_>,
+    verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
+) -> ReferenceRow {
     let Some((scheme, _)) = uri.split_once(':') else {
-        return refused;
+        return ReferenceRow::Unnamed;
     };
     if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
-        // **The row is read where it lives** ([`web_address_activation`],
-        // §7.1.5g ⑦). It was written out in full here until a link inside a
-        // preview turned out to be asking the same question, and a second
-        // spelling of one row is how the preview came to answer this gesture
-        // backwards in the first place.
-        return match web_address_activation(intent, uri) {
-            WebAddressActivation::None => HyperlinkActivation::None,
-            WebAddressActivation::Page => HyperlinkActivation::Page(uri.to_owned()),
-            WebAddressActivation::Browser => HyperlinkActivation::Browser,
-            WebAddressActivation::Blocked => HyperlinkActivation::Blocked,
+        return ReferenceRow::Web(uri.to_owned());
+    }
+    if !scheme.eq_ignore_ascii_case("file") {
+        // **Any other scheme is the machine's to answer** (owner ruling 2026-09-21). What is
+        // not spelled as a scheme at all — a drive letter, a word with a space in it — is not a
+        // URI, and a path never leaves as one: it would skip the program list the path doors
+        // read.
+        return match preview::handover_scheme(uri) {
+            Some(_) => ReferenceRow::Scheme(uri.to_owned()),
+            None => ReferenceRow::Unnamed,
         };
     }
-    if scheme.eq_ignore_ascii_case("file") {
-        // A `file:` URI this machine cannot name a path from is not something to
-        // pass on to the shell instead — the shell would parse it a second way,
-        // and a second parser is a second answer.
-        let Some(path) = bt_platform::file_uri_to_path(uri) else {
-            return refused;
-        };
-        // Where in the file the reference pointed, if it pointed anywhere
-        // (§7.1.5j). It is read off the target's fragment, which is why the line
-        // above — and `reveal_arguments`, and `open_local_path` — go on naming the
-        // same file they always did: every one of them decodes through something
-        // that cuts a fragment before it looks at a name.
-        let at = bt_transcript::paths::PrintedPathLocation::from_uri(uri);
-        // A share is one answer under either modifier, and it is the card §7.1.3
-        // already has. `Ctrl` does not buy a way past it: `ShellExecuteW` is
-        // synchronous on this thread, so handing a cold `\\server` to the shell
-        // would stall the window for exactly the network round trip the arm above
-        // refuses to make.
-        //
-        // **And the question is the pane's** (route D of the untrusted-path audit, 2026-09-08).
-        // The prefix test that stood here admitted a device path, a verbatim path and every
-        // distribution's share, whichever pane the link was printed in — so `file://./pipe/name`
-        // and `file://wsl.localhost/Stopped/x` both walked past it into a filesystem call on the
-        // thread that paints. The predicate below refuses all three with no syscall at all, and it
-        // refuses a distribution's share unless *this* pane is the one standing in that
-        // distribution, which is the only way this window ever mints one.
-        if !bt_transcript::paths::may_read_unasked(&path, namer) {
-            return HyperlinkActivation::Preview(path, at);
-        }
-        // **Nobody has asked the disk about this name yet, so it is not a link yet** (audit 3
-        // C-2). Not a refusal and not an answer — the one state a ledger has that a syscall does
-        // not, and the state every bare printed path passes through before its underline appears.
-        // The question is put by the same gesture that reached this table; the answer brings a
-        // frame with it.
-        let Some(verdict) = verdict(&path) else {
-            return HyperlinkActivation::None;
-        };
-        // **A name the disk says is not there is never handed to a file manager** (closure
-        // re-review B-1'). `reveal_arguments`' own doc gave the third reason it asked the disk:
-        // "a path that is not there leaves Explorer to fall back to a folder nobody named, which
-        // reads as this window having opened the wrong thing rather than as a refusal" — and on
-        // macOS `activateFileViewerSelectingURLs` posts nothing at all, so the gesture is silent.
-        // Taking that `metadata` off the window thread left the question unasked; it is asked
-        // here, of the ledger, so no arm below can forget it. Both halves answer the preview
-        // seat, which is where this window already says "not found".
-        if !verdict.exists {
-            return HyperlinkActivation::Preview(path, at);
-        }
+    // A `file:` URI this machine cannot name a path from is not something to
+    // pass on to the shell instead — the shell would parse it a second way,
+    // and a second parser is a second answer.
+    let Some(path) = bt_platform::file_uri_to_path(uri) else {
+        return ReferenceRow::Unnamed;
+    };
+    // Where in the file the reference pointed, if it pointed anywhere
+    // (§7.1.5j). It is read off the target's fragment, which is why the line
+    // above — and `reveal_arguments`, and `open_local_path` — go on naming the
+    // same file they always did: every one of them decodes through something
+    // that cuts a fragment before it looks at a name.
+    let at = bt_transcript::paths::PrintedPathLocation::from_uri(uri);
+    // **The question is the pane's** (route D of the untrusted-path audit, 2026-09-08). The
+    // predicate refuses a device path, a verbatim path and a distribution this pane is not
+    // standing in with no syscall at all — and a share, which is never asked about: not on the
+    // hover, not on the press, not when the modifier goes down. What `Ctrl` does with one is the
+    // table's ([`ReferenceRow::Unasked`]).
+    if !bt_transcript::paths::may_read_unasked(&path, namer) {
+        return ReferenceRow::Unasked(path, at);
+    }
+    let known = match verdict(&path) {
+        None => LocalKnown::Unanswered,
+        Some(verdict) if !verdict.exists => LocalKnown::Gone,
         // The folder question first: a directory may be named `site.html`, and
         // Explorer's arm was settled before the page arm existed.
-        if verdict.directory {
-            return match intent {
-                // The files column, pointed at it (user ruling 2026-08-21). A
-                // folder is the one row that leaves this half empty and yet has
-                // somewhere inside the window to go: this window shows folders
-                // for a living. The dotted rest under every prompt's own cwd is
-                // what forced the question — a mark that says "there is a link
-                // here" over something that answered nothing was the window
-                // half-lying, which is 7.1.5f's complaint reaching the row it had
-                // not yet reached.
-                ClickIntent::Here => HyperlinkActivation::FilesColumn(path),
-                ClickIntent::System => HyperlinkActivation::Reveal(path),
-            };
-        }
-        return match intent {
-            // **The page arm is gone, and its own words say why** (user ruling
-            // 2026-08-23). It read: "this window can only show its *source*, and
-            // a link to a page is a reference to the page. So the plain half
-            // stays empty until W2 fills it" — and §7.1.5j ⑦(e) said the same
-            // thing forwards, that the arm is what changes when W2 lands. W2 has
-            // landed: `open_preview_at` sends a page down the engine's lane, so
-            // a plain click on a link to a page now opens the page, which is
-            // what was asked for.
-            ClickIntent::Here => HyperlinkActivation::Preview(path, at),
-            // **And `Ctrl` hands it to the machine's own handler** (owner ruling 2026-09-21).
-            // 平点 = the destination inside this window; Ctrl+click = 交给系统, and for a file
-            // that means the program this desk opens that kind of file with. One sentence with
-            // no exception in it: the modifier is the reader's own consent, and this is the
-            // gesture he spends all day.
-            //
-            // The lines above are not a second opinion about that. They are the ledger standing
-            // where a `metadata` used to stand on this thread, so the answer costs nothing and a
-            // name this window cannot reach without stalling is said out loud instead.
-            ClickIntent::System => HyperlinkActivation::External(path),
-        };
-    }
-    refused
+        Some(verdict) if verdict.directory => LocalKnown::Folder,
+        Some(_) => LocalKnown::File,
+    };
+    ReferenceRow::Local { path, at, known }
 }
 
 /// **The card a reference printed in the terminal raises when a hand rests on
@@ -25059,6 +25154,42 @@ fn answered_once<Subject: Eq + Copy, Answer: Clone>(
     answer
 }
 
+/// **The request [`Runtime::open_unverified_reference`] puts on the OS hand-off lane** — the files
+/// column's door, which reads `names_a_program` (ticket 14).
+///
+/// A free function so the road from the table's arm to the door can be driven through the real
+/// lane in a test: a share handed over must meet the program list a local file meets.
+fn unverified_reference_handoff(path: &Path) -> bt_platform::Handoff {
+    bt_platform::Handoff::Open(path.to_path_buf())
+}
+
+/// **What a refused unverified reference says, and where** — the printed reference's own words,
+/// and the files notice for a program, as for a local file under `Ctrl`.
+const UNVERIFIED_REFERENCE_REFUSAL: handoff_lane::Refusal = handoff_lane::Refusal {
+    stderr: Some((
+        "recoverable reference open failure",
+        "open a printed reference with its default handler",
+    )),
+    program_notice: true,
+};
+
+/// **The name a gesture puts in front of a pane's worker for a link target** — or nothing, which
+/// is the answer for everything this window may not read unasked (audit 3 C-2; ticket 14).
+///
+/// The one lexical gate every door that asks goes through — the pointer move, the press, the
+/// modifier going down and the frame under a still pointer — so that "a share is never asked
+/// about" is one function's answer and not four callers' agreement. It costs no syscall: a
+/// `file:` URI decoded, and [`bt_transcript::paths::may_read_unasked`] asked of the spelling.
+/// Since `Ctrl` hands a share over (owner ruling 2026-09-21), this is the sentence that keeps the
+/// other half of that ruling true: 「悬停不碰 UNC」.
+fn link_target_to_ask_about(
+    uri: &str,
+    namer: bt_transcript::paths::PathNamer<'_>,
+) -> Option<PathBuf> {
+    let path = bt_platform::file_uri_to_path(uri)?;
+    bt_transcript::paths::may_read_unasked(&path, namer).then_some(path)
+}
+
 /// **What a pane's ledger has to say to a hand-off** (audit 3 C-2; owner rulings 2026-09-21).
 ///
 /// A free function so the road from a real file to a real door argument can be driven in a test
@@ -25122,7 +25253,7 @@ fn facts_of_a_file_the_user_chose(path: &Path) -> (bool, Option<u64>) {
 /// * [`HyperlinkActivation::FilesColumn`] — this window's own answer for a
 ///   folder, so the card is the one that shows a folder.
 /// * everything else — **no card**, and each for the reason its own arm gives.
-///   `Browser` and `Blocked` are `Ctrl`'s answers and can never be reached with
+///   `Browser`, `Share`, `Scheme` and `Blocked` are `Ctrl`'s answers and can never be reached with
 ///   `control: false`; they are listed so that a future arm cannot be added
 ///   without someone deciding what a hand resting on it should see. `None` is
 ///   the plain half of a row with no destination inside this window at all — a
@@ -25147,7 +25278,9 @@ fn reference_card(
         HyperlinkActivation::Preview(path, _) => Some(ReferenceCard::File(path)),
         HyperlinkActivation::FilesColumn(path) => Some(ReferenceCard::Folder(path)),
         HyperlinkActivation::None
-        | HyperlinkActivation::Browser
+        | HyperlinkActivation::Browser(_)
+        | HyperlinkActivation::Share(_)
+        | HyperlinkActivation::Scheme(_)
         | HyperlinkActivation::Page(_)
         | HyperlinkActivation::External(_)
         | HyperlinkActivation::Reveal(_)
@@ -32556,6 +32689,14 @@ struct FilePeek {
     /// second derivation that note is about — a handle tested where it is not
     /// drawn.
     head: Option<[f32; 4]>,
+    /// **The foot's folder address, as a press target** — the strip left of the
+    /// standing fact, or `None` for a card with no folder to name (user ruling
+    /// 2026-09-20; [`file_peek::foot_address_box`]).
+    ///
+    /// Written beside [`Self::head`] and for its reason: the address is cut and
+    /// the notice measured by the frame that drew them, and a press tested
+    /// against a second derivation would land where the address is not.
+    foot: Option<[f32; 4]>,
     /// **How far this card's column of pages can be wound**, in physical pixels
     /// — `None` for every card whose body is not one (user ruling 2026-08-26).
     ///
@@ -32631,6 +32772,60 @@ struct FilePeekSubject {
     /// **What the card is placed against** — the row, or the card that row is
     /// inside (user ruling 2026-09-07; [`file_peek::PeekAnchor`]).
     anchor: file_peek::PeekAnchor,
+}
+
+impl FilePeekSubject {
+    /// **The card's foot: the folder that holds the file** (user ruling 2026-09-20).
+    ///
+    /// Asked of the path alone. Which host raised the card — a files row, a Git
+    /// row, a reference a program printed — is not an argument, because the
+    /// ruling is one line for every surface: 「文件列与终端引用两处同一行不分两种写法」.
+    fn foot_address_on(&self, platform: bt_platform::HostPlatform, home: Option<&Path>) -> String {
+        file_peek::peek_foot_address(self.path.as_deref(), platform, home)
+    }
+}
+
+/// **What a press on the glance card's folder address asks for** (user ruling
+/// 2026-09-20).
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PeekFootPress {
+    /// Stand the files column on `folder` and select `file` in it — the locate
+    /// verb every "show this in the files column" in this window already means.
+    Locate { folder: PathBuf, file: String },
+    /// Show the file selected in Explorer or Finder, through the door a files
+    /// row's own menu takes ([`Runtime::reveal_in_explorer`]).
+    Reveal(PathBuf),
+    /// The same for a name a program printed, through the door that reference's
+    /// own `Ctrl`+click takes ([`Runtime::reveal_verified`]) — carrying the
+    /// pane's ledger, never asking a disk.
+    RevealVerified(SeatId, PathBuf),
+}
+
+/// [`PeekFootPress`] for a press on the foot of a card about `file`, raised over
+/// `host`, with the hand-over modifier held or not.
+///
+/// **The plain click stays in the window and the modifier hands it over** — the
+/// standing gesture rule ([`ClickIntent`]), and the ruling's own two halves: 「点击
+/// = 在 Folio 文件列里定位…并选中文件，Ctrl+点击 = 在系统资源管理器/访达里打开并选中」.
+/// The reveal goes through the door the *surface* already uses for its own
+/// `Ctrl`+click, so a terminal reference is handed over off its ledger exactly
+/// as it is when the reference itself is clicked.
+///
+/// `None` for a path with no folder above it or no name, which no card over a
+/// file on a disk has.
+fn peek_foot_press(host: RowHost, file: &Path, hand_over: bool) -> Option<PeekFootPress> {
+    match ClickIntent::of(hand_over) {
+        ClickIntent::Here => Some(PeekFootPress::Locate {
+            folder: file.parent()?.to_path_buf(),
+            file: file.file_name()?.to_string_lossy().into_owned(),
+        }),
+        ClickIntent::System => Some(match host {
+            RowHost::Terminal(seat) => PeekFootPress::RevealVerified(seat, file.to_path_buf()),
+            RowHost::Column(_) | RowHost::Float(_) | RowHost::Git(_) => {
+                PeekFootPress::Reveal(file.to_path_buf())
+            }
+        }),
+    }
 }
 
 impl TabState {
@@ -34830,8 +35025,9 @@ enum Fading {
 /// inside a window that has been torn off. Keyed by the surface, because that is
 /// what a *box* is — what it says changes, where it is does not.
 ///
-/// The glance card is deliberately absent: its lead is a fixed sentence and it
-/// has no receipt to trade places with (`file_peek::peek_foot_text`).
+/// The glance card is deliberately absent: its lead is its file's folder
+/// (`file_peek::peek_foot_address`), and a press on it takes the card down, so
+/// there is no strip left standing to carry a receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FootSaying {
     /// A docked files column's `.files-foot`.
@@ -46462,6 +46658,42 @@ impl Runtime<'_> {
         )
     }
 
+    /// **Hand a path nobody asked a disk about to the system's handler** — a share on another
+    /// machine under `Ctrl` (ticket 14, owner ruling 2026-09-21), and a file a previewed document
+    /// names under `Ctrl` (owner ruling 2026-09-23).
+    ///
+    /// The files column's door ([`bt_platform::Handoff::Open`]) and not the verified one: nothing
+    /// here has a ledger answer, because a share is never asked about and a document's targets are
+    /// never probed. The door reads `names_a_program`, so either meets the program list a printed
+    /// local file meets, refused in the same words; on Windows it asks no disk, and on the OS
+    /// hand-off lane a cold `\\server` holds nothing but that lane.
+    fn open_unverified_reference(&mut self, path: &Path) -> handoff_lane::HandoffId {
+        self.hand_off(
+            unverified_reference_handoff(path),
+            UNVERIFIED_REFERENCE_REFUSAL,
+        )
+    }
+
+    /// **Hand a URI of any scheme to whatever this machine has registered for it** — `mailto:`,
+    /// `vscode:`, `ssh:` (ticket 14, owner ruling 2026-09-21).
+    ///
+    /// Not through [`Self::hand_url_to_the_browser`]: that door is `webnav::address_bar`, which
+    /// admits the web and nothing else, and the ruling is that `Ctrl` on any scheme is the
+    /// reader's consent. What the machine has no handler for, it refuses, and the lane brings the
+    /// refusal back to the surface that asked.
+    fn hand_uri_to_the_system(&mut self, uri: &str) -> handoff_lane::HandoffId {
+        self.hand_off(
+            bt_platform::Handoff::Address(uri.to_owned()),
+            handoff_lane::Refusal {
+                stderr: Some((
+                    "recoverable link hand-off failure",
+                    "hand a link to its registered handler",
+                )),
+                program_notice: false,
+            },
+        )
+    }
+
     fn reveal_verified(
         &mut self,
         path: &Path,
@@ -46788,16 +47020,12 @@ impl Runtime<'_> {
     /// map lookup ([`bt_term::DualPlaneSession::ask_about_link_target`]), which is what lets every
     /// door call it unconditionally.
     fn ask_the_worker_about_a_link_target(&mut self, seat: SeatId, uri: &str) {
-        let Some(path) = bt_platform::file_uri_to_path(uri) else {
+        let namespace = self.seat_path_namespace(seat);
+        let Some(path) =
+            link_target_to_ask_about(uri, bt_transcript::paths::PathNamer::Pane(&namespace))
+        else {
             return;
         };
-        let namespace = self.seat_path_namespace(seat);
-        if !bt_transcript::paths::may_read_unasked(
-            &path,
-            bt_transcript::paths::PathNamer::Pane(&namespace),
-        ) {
-            return;
-        }
         if let Some(leaf) = self.sessions.get_mut(&seat) {
             leaf.session.ask_about_link_target(path);
         }
@@ -46811,16 +47039,12 @@ impl Runtime<'_> {
     /// skip is a verdict, because a held "yes" is exactly the thing a press has to re-check now
     /// that no reveal stats its target.
     fn re_ask_the_worker_about_a_link_target(&mut self, seat: SeatId, uri: &str) {
-        let Some(path) = bt_platform::file_uri_to_path(uri) else {
+        let namespace = self.seat_path_namespace(seat);
+        let Some(path) =
+            link_target_to_ask_about(uri, bt_transcript::paths::PathNamer::Pane(&namespace))
+        else {
             return;
         };
-        let namespace = self.seat_path_namespace(seat);
-        if !bt_transcript::paths::may_read_unasked(
-            &path,
-            bt_transcript::paths::PathNamer::Pane(&namespace),
-        ) {
-            return;
-        }
         if let Some(leaf) = self.sessions.get_mut(&seat) {
             leaf.session.re_ask_about_link_target(path);
         }
@@ -51454,21 +51678,29 @@ mod files_locate_door_tests {
         let hard = ["self.show_folder", "_in_files_column("].concat();
         let soft = ["locate_folder", "_in_files_column"].concat();
         let calls = found(needle!(Pattern::text(hard.as_str())), View::Raw);
+        // One call since 2026-09-23 (ticket 12): the soft verb's two outer arms —
+        // no column, and a folder outside the tree — became one arm of
+        // `files_locate`'s answer, `FilesLocate::Root`, and the call went with them.
         assert_eq!(
             calls.len(),
-            2,
-            "the hard verb is called from two places — the soft verb's two arms \
+            1,
+            "the hard verb is called from one place — the soft verb's `Root` arm \
              — and here it is called from {}:\n{}",
             calls.len(),
             calls.report(source())
         );
+        let body = method_body("Runtime", soft.as_str());
         assert_eq!(
-            method_body("Runtime", soft.as_str())
-                .matches(hard.as_str())
-                .count(),
-            2,
-            "and both of them are inside the verb that asks whether the folder \
-             is inside the tree first"
+            body.matches(hard.as_str()).count(),
+            1,
+            "and it is inside the verb that asks whether the folder is inside the tree first"
+        );
+        let asked = body
+            .find("files_locate(")
+            .expect("the soft verb asks the range question");
+        assert!(
+            asked < body.find(hard.as_str()).expect("the hard verb is called"),
+            "the range is asked before the column is re-rooted"
         );
     }
 }
@@ -74009,6 +74241,19 @@ mod printed_path_provenance_tests {
             1,
             "the press, and only the press, skips a held verdict"
         );
+        // **And both ask through the one lexical gate** (ticket 14): a share is never asked about
+        // on any of the four gestures, and that is `link_target_to_ask_about`'s answer rather than
+        // two callers agreeing.
+        let gate = ["link_target_to_ask_", "about("].concat();
+        for name in [
+            "ask_the_worker_about_a_link_target",
+            "re_ask_the_worker_about_a_link_target",
+        ] {
+            assert!(
+                method_body("Runtime", name).contains(gate.as_str()),
+                "`{name}` asks through `{gate})`"
+            );
+        }
     }
 
     /// RED (closure re-review B-1') — **a name the ledger says is not there is never revealed.**
@@ -74347,7 +74592,7 @@ mod printed_path_provenance_tests {
     /// **The list is the test.** An eighth door that asks a filesystem about a printed path is the
     /// defect this ticket repaired, and the sweep below is what catches one added without a line
     /// added here.
-    const HOVER_DOORS: [&str; 7] = [
+    const HOVER_DOORS: [&str; 9] = [
         "peek_target",
         "terminal_reference_at",
         "pointer_reference_at",
@@ -74355,6 +74600,10 @@ mod printed_path_provenance_tests {
         "activate_hyperlink_hover_if_due",
         "activate_hyperlink",
         "file_peek_card_layers",
+        // The glance card's foot (ticket 12): its address is the path's parent and its press
+        // hands a reference over off the ledger, so neither asks a disk (acceptance A3).
+        "file_peek_foot_grasp",
+        "press_file_peek_foot",
     ];
 
     /// The filesystem calls none of them may make. Assembled at run time so this pin cannot match
@@ -74447,6 +74696,9 @@ mod printed_path_provenance_tests {
     fn the_routing_table_asks_a_filesystem_nothing() {
         for name in [
             "hyperlink_activation",
+            "terminal_reference_row",
+            "reference_activation",
+            "link_target_to_ask_about",
             "reference_card",
             "terminal_link_answers_a_press",
         ] {
@@ -74470,11 +74722,14 @@ mod printed_path_provenance_tests {
     /// `bt_platform::names_a_program`'s — on the door, not on the caller.
     #[test]
     fn a_printed_reference_reaches_the_handler_only_under_the_modifier_and_a_local_verdict() {
-        let table = free_fn_body("hyperlink_activation");
+        // The table is `reference_activation` since ticket 14, shared with a previewed document's
+        // links; the ledger's two questions are asked in the terminal's grammar in front of it.
+        let table = free_fn_body("reference_activation");
+        let grammar = free_fn_body("terminal_reference_row");
         let arm = [
-            "ClickIntent",
+            "(LocalKnown::File, ClickIntent",
             "::",
-            "System => HyperlinkActivation",
+            "System) => HyperlinkActivation",
             "::",
             "External(",
         ]
@@ -74484,9 +74739,9 @@ mod printed_path_provenance_tests {
             "the modifier is the only half that hands a file to the machine"
         );
         let plain = [
-            "ClickIntent",
+            "(LocalKnown::File, ClickIntent",
             "::",
-            "Here => HyperlinkActivation",
+            "Here) => HyperlinkActivation",
             "::",
             "Preview(",
         ]
@@ -74497,7 +74752,7 @@ mod printed_path_provenance_tests {
         );
         for gate in ["verdict.exists", "verdict.directory"] {
             assert!(
-                table.contains(gate),
+                grammar.contains(gate),
                 "{gate} decides before any arm is produced, and it is a ledger read"
             );
         }

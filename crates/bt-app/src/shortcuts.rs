@@ -15,19 +15,27 @@
 //! the same rule `settings.json`'s `default_profile` already follows for profiles.
 //!
 //! **One rule, both doors.** A chord may be refused for three reasons — it is in the AltGr
-//! forbidden zone, it is a bare `Ctrl+letter` the shell owns, or another row already claims it —
-//! and [`chord_verdict`] is the single place all three are decided. The recorder in the settings
+//! forbidden zone, it is a desktop-wide row's key with no modifier on it, or another row already
+//! claims it — and [`chord_verdict`] is the single place all three are decided. The recorder in the settings
 //! dialog asks it while the user is still holding the keys down, and `apply_overrides` asks it of
 //! every line of a hand-edited file. A file that could consent to `Ctrl+Alt+P` on behalf of a
 //! German keyboard would be a second answer to a question with one.
 //!
 //! **The third refusal has a way out and the other two have none** (user ruling 2026-08-26). AltGr
-//! and the shell's alphabet are facts about a keyboard; a chord another row claims is a fact about
+//! and the desktop-wide key are facts about a keyboard; a chord another row claims is a fact about
 //! this table, and a table is a thing the person in front of it is allowed to change. So the
 //! recorder's refusal names the holder *and* offers to take the chord off it
 //! ([`ChordVerdict::swap_offer`], [`Shortcuts::take_chord_from`]) — an offer only the recorder can
 //! make, because only there is somebody still holding the keys to accept it. At the file's door the
 //! same conflict is still a plain refusal.
+//!
+//! **A bare `Ctrl+letter` is not refused** (owner ruling 2026-09-22, 0.4.4 ticket 04). It was a
+//! refusal from the 2026-08-17 audit to 2026-09-22: the shell's control-code alphabet, kept from
+//! the reader so the program in the pane would always get it. The reader who records one has
+//! chosen to give that key to Folio, and what follows a deliberate gesture is theirs to decide. So
+//! both doors take it, and the row says one word instead — `shell`, meaning the key no longer
+//! reaches the program in the pane ([`takes_a_shell_control_key`]). The word is on every row whose
+//! chord is one, default or recorded (owner ruling 2026-09-23). The defaults hold no new one.
 //!
 //! **A file is a set of sentences about the rows it names, not a sequence of edits.** A row the
 //! file mentions holds nothing until its own line says so, which is why `apply_overrides` reads in
@@ -1744,6 +1752,13 @@ const NOTE_JOIN: &str = " · ";
 const NOTE_ONE_PER_MEMBER: Text = Text::ShortcutNoteOnePerMember;
 const NOTE_NONE_ASSIGNED: Text = Text::ShortcutNoteNoneAssigned;
 const NOTE_SOME_UNASSIGNED: Text = Text::ShortcutNoteSomeUnassigned;
+/// What a row whose chord the shell's alphabet spells says about it: the key no
+/// longer reaches the program in the pane (owner ruling 2026-09-22).
+///
+/// One word, and a note rather than a refusal or a warning: the reader chose
+/// the key, and the line under the title is where this page already says when a
+/// row answers.
+const NOTE_SHELL: Text = Text::ShortcutNoteShell;
 
 /// What the editor prints where the caps would be on a row with no chord.
 ///
@@ -1758,15 +1773,10 @@ pub fn unbound_cap() -> &'static str {
 /// Why the audit listed the `Alt`+arrow families and never took them.
 const NOTE_RESERVED_ALT_ARROW: Text = Text::ShortcutReservedAltArrow;
 
-/// The three refusals, in the words the recorder shows.
+/// The two refusals a row earns on its own, in the words the recorder shows.
 #[must_use]
 pub(crate) fn hint_altgr_zone() -> &'static str {
     Text::ShortcutHintAltGrZone.text()
-}
-
-#[must_use]
-pub(crate) fn hint_shell_control_letter() -> &'static str {
-    Text::ShortcutHintShellControlLetter.text()
 }
 
 #[must_use]
@@ -2029,7 +2039,7 @@ impl Shortcuts {
                         });
                         continue;
                     };
-                    // Only the three row-local disciplines can answer here: a
+                    // Only the two row-local disciplines can answer here: a
                     // conflict is a fact about the table the file describes, and
                     // that table does not exist yet. The row's own action is
                     // known, though — the id was matched two statements up —
@@ -2298,7 +2308,7 @@ impl Shortcuts {
                 out.push(ShortcutRow {
                     ids: vec![head.id],
                     title: head.title.text(),
-                    note: head.note(),
+                    note: noting_the_shell(head.note(), std::slice::from_ref(&head)),
                     caps: head.chord.as_ref().map(chord_caps).unwrap_or_default(),
                     recordable: true,
                     reserved: false,
@@ -2315,7 +2325,7 @@ impl Shortcuts {
             out.push(ShortcutRow {
                 ids: members.iter().map(|row| row.id).collect(),
                 title: family.text(),
-                note: family_note(head, members),
+                note: noting_the_shell(family_note(head, members), members),
                 caps: fold_caps(members),
                 // **A family is shown whole and recorded one slot at a time**,
                 // and the recorder takes one chord — so until it learns to ask
@@ -2478,6 +2488,30 @@ fn family_note(head: &Binding, members: &[&Binding]) -> Option<Cow<'static, str>
     }
 }
 
+/// A line's note with `shell` joined on when any row it stands for holds a
+/// chord the shell's alphabet spells (owner ruling 2026-09-23: every such row,
+/// default or recorded).
+///
+/// Joined after what the line already says and never in place of it: where a
+/// row is in force is still true, and the word adds what that key no longer
+/// does there.
+fn noting_the_shell(
+    note: Option<Cow<'static, str>>,
+    members: &[&Binding],
+) -> Option<Cow<'static, str>> {
+    let takes_one = members
+        .iter()
+        .any(|row| row.chord.as_ref().is_some_and(takes_a_shell_control_key));
+    if !takes_one {
+        return note;
+    }
+    let shell = NOTE_SHELL.text();
+    Some(match note {
+        None => Cow::Borrowed(shell),
+        Some(note) => Cow::Owned(format!("{note}{NOTE_JOIN}{shell}")),
+    })
+}
+
 /// The caps a folded line wears.
 ///
 /// A run of members that share their modifiers and differ only by a
@@ -2548,9 +2582,11 @@ pub(crate) enum ChordVerdict {
     /// Nothing stands in its way.
     Free,
     /// Discipline ②: Windows reports AltGr as `Ctrl+Alt`.
+    ///
+    /// Discipline ① — a bare `Ctrl+letter` — has not been a refusal since the
+    /// owner's 2026-09-22 ruling; such a row carries a note instead
+    /// ([`takes_a_shell_control_key`]).
     AltGrZone,
-    /// Discipline ①: a bare `Ctrl+letter` is the shell's control-code alphabet.
-    ShellControlLetter,
     /// **Discipline ③: a key claimed from the whole desktop needs a modifier**
     /// (R2-14).
     ///
@@ -2592,7 +2628,6 @@ impl ChordVerdict {
         match self {
             Self::Free => Cow::Borrowed(""),
             Self::AltGrZone => Cow::Borrowed(hint_altgr_zone()),
-            Self::ShellControlLetter => Cow::Borrowed(hint_shell_control_letter()),
             Self::GlobalNeedsModifier => Cow::Borrowed(hint_global_needs_modifier()),
             Self::AlreadyUsed { title, .. } => {
                 Cow::Owned(crate::i18n::shortcut_already_used(title.text()))
@@ -2633,8 +2668,8 @@ impl ChordVerdict {
 /// **The one place a chord is judged**, read by the recorder while the keys are
 /// still down and by [`Shortcuts::apply_overrides`] at the file's door.
 ///
-/// The three refusals are the audit's own two disciplines plus the flat table's
-/// oldest promise, and the third is deliberately asked with
+/// The three refusals are the two row-local disciplines ([`chord_discipline`])
+/// plus the flat table's oldest promise, and the third is deliberately asked with
 /// [`Binding::conflicts_with`] — the same predicate the red gate
 /// `the_table_holds_exactly_the_ruled_rows_and_no_chord_is_claimed_twice` runs
 /// on, because a panel that judged conflicts by a second rule would let a user
@@ -2681,16 +2716,19 @@ pub(crate) fn chord_verdict(rows: &[Binding], id: &str, chord: &Chord) -> ChordV
         })
 }
 
-/// **The three refusals that need no other row to answer them** — the audit's own
-/// disciplines, asked of a chord and the row that wants it.
+/// **The two refusals that need no other row to answer them**, asked of a chord
+/// and the row that wants it.
 ///
 /// Lifted out of [`chord_verdict`] the day [`Shortcuts::apply_overrides`] needed
 /// to ask them *before* it had a table to ask the conflict question of. They can
 /// be answered that early precisely because they are not about any *other* row:
-/// `Ctrl+Alt` is what a German keyboard sends for `@`, `Ctrl+letter` is the
-/// shell's control-code alphabet, and whether Windows or this window answers a
-/// row's key is a property of the row itself. None of the three changes with what
-/// the rest of the table happens to hold.
+/// `Ctrl+Alt` is what a German keyboard sends for `@`, and whether Windows or
+/// this window answers a row's key is a property of the row itself. Neither
+/// changes with what the rest of the table happens to hold.
+///
+/// **A bare `Ctrl+letter` was the third until 2026-09-22**, when the owner ruled
+/// that the reader may give the shell's alphabet to Folio: it is free here, and
+/// the row says `shell` ([`takes_a_shell_control_key`]).
 #[must_use]
 fn chord_discipline(action: Action, chord: &Chord) -> ChordVerdict {
     let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
@@ -2698,10 +2736,10 @@ fn chord_discipline(action: Action, chord: &Chord) -> ChordVerdict {
         return ChordVerdict::AltGrZone;
     }
     // **The one discipline that is about the row and not only about the keyboard**
-    // (R2-14). It is asked here beside the other two because it shares their
+    // (R2-14). It is asked here beside the AltGr zone because it shares its
     // property — it needs no other row to answer — and because
     // `apply_overrides` has to be able to ask it before there is a table, which
-    // is the whole reason these three live in one function.
+    // is the whole reason these two live in one function.
     if action.is_claimed_from_windows()
         && !chord.modifiers.intersects(
             ModifiersState::CONTROL
@@ -2711,14 +2749,23 @@ fn chord_discipline(action: Action, chord: &Chord) -> ChordVerdict {
     {
         return ChordVerdict::GlobalNeedsModifier;
     }
-    if chord.modifiers == ModifiersState::CONTROL
+    ChordVerdict::Free
+}
+
+/// **Whether this chord is one the shell's control-code alphabet spells** — a
+/// bare `Ctrl` and one ASCII letter, the press a terminal encodes as `0x01` to
+/// `0x1a`.
+///
+/// A property of the chord alone, on every row and in every scope (owner ruling
+/// 2026-09-23): a row holding one takes that key from the program in the pane
+/// wherever the row is in force, so the Shortcuts page says `shell` on it
+/// ([`Shortcuts::editor_rows`]). It refuses nothing (owner ruling 2026-09-22).
+#[must_use]
+pub(crate) fn takes_a_shell_control_key(chord: &Chord) -> bool {
+    chord.modifiers == ModifiersState::CONTROL
         && matches!(&chord.key, ChordKey::Character(text)
             if text.chars().count() == 1
                 && text.chars().all(|glyph| glyph.is_ascii_alphabetic()))
-    {
-        return ChordVerdict::ShellControlLetter;
-    }
-    ChordVerdict::Free
 }
 
 impl Binding {
@@ -4406,18 +4453,14 @@ mod tests {
         );
     }
 
-    /// PIN (S64, 2026-08-17) — **the three refusals, decided in one place and
+    /// PIN (S64, 2026-08-17; rewritten for 0.4.4 ticket 04) — **AltGr and a row
+    /// that already has the chord are refused, decided in one place and
     /// therefore the same at both doors.**
     ///
-    /// `Ctrl+Alt` because Windows reports AltGr as exactly that pair; a bare
-    /// `Ctrl+letter` because it is the shell's control-code alphabet; and a
-    /// chord another row already answers to, judged by the very predicate the
-    /// table's own red gate runs on.
-    ///
-    /// **The `Ctrl+F` exception is not inherited**, and that is asserted rather
-    /// than assumed: the ruling that let `Ctrl+F` through was about one chord,
-    /// one surface and three reasons, and a recorder that read it as a policy
-    /// would have quietly handed the shell's alphabet to anybody who asked.
+    /// `Ctrl+Alt` because Windows reports AltGr as exactly that pair; and a chord
+    /// another row already answers to, judged by the very predicate the table's
+    /// own red gate runs on. The half that refused a bare `Ctrl+letter` is
+    /// `a_bare_ctrl_letter_is_free_and_the_row_says_shell` now.
     ///
     /// MUTATIONS:
     /// (1) drop the `Ctrl+Alt` arm — a German keyboard can bind its own `@`;
@@ -4429,7 +4472,7 @@ mod tests {
     ///     chord off by matching a translated title, which is the one lookup
     ///     that changes answer with the language the window started in.
     #[test]
-    fn a_chord_is_refused_for_altgr_for_the_shells_alphabet_and_for_a_row_that_has_it() {
+    fn a_chord_is_refused_for_altgr_and_for_a_row_that_has_it() {
         let table = Shortcuts::defaults();
         let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
         for modifiers in [ctrl_alt, ctrl_alt.union(ModifiersState::SHIFT)] {
@@ -4439,20 +4482,6 @@ mod tests {
                 "Windows reports AltGr as Ctrl+Alt"
             );
         }
-        for letter in 'a'..='z' {
-            let chord = Chord::new(CTRL, ChordKey::Character(Cow::Owned(letter.to_string())));
-            assert_eq!(
-                table.verdict_for("new-tab", &chord),
-                ChordVerdict::ShellControlLetter,
-                "Ctrl+{letter} belongs to the terminal"
-            );
-        }
-        assert_eq!(
-            table.verdict_for("open-search", &Chord::new(CTRL, super::character("f"))),
-            ChordVerdict::ShellControlLetter,
-            "the ruling that let Ctrl+F through was about that chord, not about \
-             the family - the recorder refuses to re-derive it"
-        );
         assert_eq!(
             table.verdict_for("new-tab", &Chord::new(CTRL_SHIFT, super::character("w"))),
             ChordVerdict::AlreadyUsed {
@@ -4481,6 +4510,280 @@ mod tests {
             table.verdict_for("new-tab", &Chord::new(CTRL_SHIFT, super::character("j"))),
             ChordVerdict::Free,
             "a chord nobody claims is free"
+        );
+    }
+
+    /// RED (0.4.4 ticket 04) — **a bare `Ctrl`+letter is a chord a reader may
+    /// record, and the row that holds one says `shell`.**
+    ///
+    /// Owner ruling 2026-09-22: the recorder and the file door stop refusing the
+    /// shell's `Ctrl` alphabet; the reader chose the key, and what follows a
+    /// deliberate gesture is theirs. What a letter can still meet is the one
+    /// refusal that has a way out — a row that already holds that chord where
+    /// `new-tab` is in force (the defaults' `Ctrl+F`, `Ctrl+L`, `Ctrl+S`,
+    /// `Ctrl+Z`, `Ctrl+Y`) — and that verdict names the holder so the recorder
+    /// can offer the swap. Every other letter is free.
+    ///
+    /// MUTATION: put the `Ctrl`+letter early return back into
+    /// `chord_discipline` (any refusal) — every letter on `new-tab` is refused
+    /// and the first loop goes red.
+    #[test]
+    fn a_bare_ctrl_letter_is_free_and_the_row_says_shell() {
+        let table = Shortcuts::defaults();
+        for letter in 'a'..='z' {
+            let chord = Chord::new(CTRL, ChordKey::Character(Cow::Owned(letter.to_string())));
+            let holder = table
+                .rows
+                .iter()
+                .find(|row| row.id != "new-tab" && row.chord.as_ref() == Some(&chord));
+            let verdict = table.verdict_for("new-tab", &chord);
+            match holder {
+                None => assert_eq!(verdict, ChordVerdict::Free, "Ctrl+{letter} is free"),
+                Some(row) => assert_eq!(
+                    verdict,
+                    ChordVerdict::AlreadyUsed {
+                        holder: row.id,
+                        title: row.title,
+                    },
+                    "Ctrl+{letter} is {}'s, and the recorder offers to take it",
+                    row.id
+                ),
+            }
+        }
+        // The chord a row already holds is its own, whatever the alphabet.
+        assert_eq!(
+            table.verdict_for("open-search", &Chord::new(CTRL, super::character("f"))),
+            ChordVerdict::Free
+        );
+
+        let mut table = table;
+        table.set("new-tab", Some(Chord::new(CTRL, super::character("n"))));
+        let rows = table.editor_rows();
+        let new_tab = rows
+            .iter()
+            .find(|row| row.ids == ["new-tab"])
+            .expect("new-tab is on the page");
+        assert_eq!(
+            new_tab.note.as_deref(),
+            Some(Text::ShortcutNoteShell.text())
+        );
+    }
+
+    /// RED (0.4.4 ticket 04) — **the file door keeps a hand-written or recorded
+    /// `Ctrl`+letter line, read from a real `keybindings.json`.**
+    ///
+    /// The file is the second door of the one rule (module doc), so it follows
+    /// the recorder: a line `{ "action": "new-tab", "chord": "Ctrl+N" }` is a
+    /// departure the reader made, not an `OverrideFault`. It runs the real
+    /// reader (`bt_persist::read_keybindings`) over a file on disk, then the
+    /// real `apply_overrides`, then dispatch — `Ctrl+N` on a terminal opens a
+    /// tab and so never reaches the encoder as `0x0E`.
+    ///
+    /// MUTATION: put the `Ctrl`+letter early return back into
+    /// `chord_discipline` — the line comes back as a fault and the row falls
+    /// back to `Ctrl+Shift+N`.
+    #[test]
+    fn the_file_door_keeps_a_recorded_ctrl_letter() {
+        let dir = std::env::temp_dir().join(format!(
+            "bt-app-shortcuts-ctrl-letter-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a scratch folder");
+        let path = dir.join("keybindings.json");
+        std::fs::write(
+            &path,
+            br#"{ "schema_version": 1, "bindings": [ { "action": "new-tab", "chord": "Ctrl+N" } ] }"#,
+        )
+        .expect("the file is written");
+        let (file, _) = bt_persist::read_keybindings(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        let overrides: Vec<Override> = file
+            .bindings
+            .into_iter()
+            .map(|entry| Override {
+                id: entry.action,
+                chord: entry.chord,
+            })
+            .collect();
+        assert_eq!(overrides.len(), 1, "the file was read: {overrides:?}");
+
+        let mut table = Shortcuts::defaults();
+        let faults = table.apply_overrides(&overrides);
+        assert!(faults.is_empty(), "no line is refused: {faults:?}");
+        let ctrl_n = Chord::new(CTRL, super::character("n"));
+        assert_eq!(
+            table
+                .rows
+                .iter()
+                .find(|row| row.id == "new-tab")
+                .and_then(|row| row.chord.clone()),
+            Some(ctrl_n)
+        );
+        let n = Key::Character("n".into());
+        assert_eq!(
+            table.lookup(&n, &n, CTRL, ON_A_TERMINAL),
+            Some(Action::NewTab),
+            "the table takes the press before the encoder would send 0x0E"
+        );
+        assert_eq!(
+            table.overrides(),
+            vec![Override {
+                id: "new-tab".to_owned(),
+                chord: Some("Ctrl+n".to_owned()),
+            }],
+            "and the line is written back in the file's own spelling"
+        );
+    }
+
+    /// RED (0.4.4 ticket 04) — **the recorder takes a `Ctrl`+letter on the first
+    /// complete chord.**
+    ///
+    /// The press goes through the real classifier (`classify_recording`, fed
+    /// `key_without_modifiers` as the runtime feeds it) and the real judge; a
+    /// `Free` verdict is what `Runtime::record_settings_key` turns into a
+    /// candidate with no refusal, which the Settings panel commits on arrival
+    /// (`settings::tests::a_recorded_chord_is_taken_where_it_is_pressed`).
+    ///
+    /// MUTATION: put the `Ctrl`+letter early return back into
+    /// `chord_discipline` — the verdict is a refusal and the box stays open.
+    #[test]
+    fn the_recorder_binds_a_ctrl_letter_on_the_first_complete_chord() {
+        let table = Shortcuts::defaults();
+        let RecordedKey::Chord(chord) = classify_recording(&Key::Character("n".into()), CTRL)
+        else {
+            panic!("Ctrl+N is a chord to the recorder");
+        };
+        assert_eq!(chord, Chord::new(CTRL, super::character("n")));
+        assert_eq!(table.verdict_for("new-tab", &chord), ChordVerdict::Free);
+        assert_eq!(format_chord(&chord), "Ctrl+n");
+    }
+
+    /// RED (0.4.4 ticket 04) — **every row on a shell control key says `shell`,
+    /// default or custom alike.**
+    ///
+    /// Owner ruling 2026-09-23: the word is a property of the chord — a bare
+    /// `Ctrl` and one letter — on every row and in every scope. So the defaults'
+    /// own `Ctrl+F`, `Ctrl+L`, `Ctrl+S`, `Ctrl+Z` and `Ctrl+Y` rows wear it, a
+    /// recorded `Ctrl+N` wears it, and a `Ctrl+Shift+N` does not. The word is
+    /// joined after the scope, which stays true.
+    ///
+    /// MUTATION: have `noting_the_shell` return the note unchanged — every
+    /// assertion that expects the word goes red.
+    #[test]
+    fn every_row_on_a_shell_control_key_says_shell_default_or_custom() {
+        let shell = Text::ShortcutNoteShell.text();
+        let says_shell = |table: &Shortcuts, id: &str| {
+            let rows = table.editor_rows();
+            let row = rows
+                .iter()
+                .find(|row| row.ids.contains(&id))
+                .unwrap_or_else(|| panic!("{id} is on the page"));
+            row.note
+                .as_deref()
+                .is_some_and(|note| note == shell || note.ends_with(&format!("{NOTE_JOIN}{shell}")))
+        };
+        let defaults = Shortcuts::defaults_for(bt_platform::HostPlatform::Windows);
+        let on_the_alphabet: Vec<&str> = defaults
+            .rows
+            .iter()
+            .filter(|row| row.surfaced)
+            .filter(|row| row.chord.as_ref().is_some_and(takes_a_shell_control_key))
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(
+            on_the_alphabet,
+            [
+                "save-preview",
+                "undo-preview",
+                "redo-preview",
+                "open-search",
+                "web-address"
+            ],
+            "the Windows defaults on the shell's alphabet"
+        );
+        for id in &on_the_alphabet {
+            assert!(says_shell(&defaults, id), "{id} says shell");
+        }
+        let search = defaults
+            .editor_rows()
+            .into_iter()
+            .find(|row| row.ids == ["save-preview"])
+            .expect("save-preview is on the page");
+        assert_eq!(
+            search.note.as_deref(),
+            Some(format!("{}{NOTE_JOIN}{shell}", Text::ShortcutScopePreview.text()).as_str()),
+            "the scope stays, and the word follows it"
+        );
+        for row in defaults.editor_rows() {
+            if row.ids.iter().all(|id| !on_the_alphabet.contains(id)) {
+                assert!(
+                    !row.note.as_deref().is_some_and(|note| note.contains(shell)),
+                    "{:?} holds no shell key and says nothing about one",
+                    row.ids
+                );
+            }
+        }
+
+        // The Mac defaults wear Command, so none of their rows says it.
+        let mac = Shortcuts::defaults_for(bt_platform::HostPlatform::MacOs);
+        for id in &on_the_alphabet {
+            assert!(!says_shell(&mac, id), "{id} is Cmd on a Mac");
+        }
+
+        let mut custom = defaults.clone();
+        custom.set("new-tab", Some(Chord::new(CTRL, super::character("n"))));
+        assert!(says_shell(&custom, "new-tab"), "a recorded Ctrl+N says it");
+        custom.set(
+            "new-tab",
+            Some(Chord::new(CTRL_SHIFT, super::character("n"))),
+        );
+        assert!(!says_shell(&custom, "new-tab"), "Ctrl+Shift+N does not");
+        custom.set("new-tab", Some(Chord::new(CTRL, super::character(","))));
+        assert!(!says_shell(&custom, "new-tab"), "Ctrl+, is not a letter");
+    }
+
+    /// PIN (0.4.4 ticket 04) — **the AltGr zone and the desktop key's modifier
+    /// rule still refuse, at the recorder and at the file door.**
+    ///
+    /// The ruling that freed the shell's alphabet kept these two by name. Pinned
+    /// here so widening the change cannot quietly take them with it.
+    ///
+    /// MUTATION: return `Free` from `chord_discipline` unconditionally — every
+    /// assertion goes red.
+    #[test]
+    fn altgr_and_the_desktop_key_rule_still_refuse() {
+        let mut table = Shortcuts::defaults();
+        let ctrl_alt_p = Chord::new(CTRL.union(ModifiersState::ALT), super::character("p"));
+        let bare_k = Chord::new(ModifiersState::empty(), super::character("k"));
+        assert_eq!(
+            table.verdict_for("new-tab", &ctrl_alt_p),
+            ChordVerdict::AltGrZone
+        );
+        assert_eq!(
+            table.verdict_for(SUMMON_QUAKE_ID, &bare_k),
+            ChordVerdict::GlobalNeedsModifier
+        );
+        // A Ctrl+letter on the summon is not a bare key: it wears Ctrl.
+        assert_eq!(
+            table.verdict_for(SUMMON_QUAKE_ID, &Chord::new(CTRL, super::character("k"))),
+            ChordVerdict::Free
+        );
+        let faults = table.apply_overrides(&[
+            Override {
+                id: "new-tab".to_owned(),
+                chord: Some("Ctrl+Alt+P".to_owned()),
+            },
+            Override {
+                id: SUMMON_QUAKE_ID.to_owned(),
+                chord: Some("K".to_owned()),
+            },
+        ]);
+        assert_eq!(
+            faults
+                .iter()
+                .map(|fault| fault.reason.as_str())
+                .collect::<Vec<_>>(),
+            [hint_altgr_zone(), hint_global_needs_modifier()]
         );
     }
 
@@ -4760,9 +5063,10 @@ mod tests {
     /// PIN — **a line a build cannot honour is one row degrading, never the
     /// file being thrown away** (§5.4 逐叶降级, applied to a table).
     ///
-    /// An id from a newer build, a chord this grammar cannot read, a chord in
-    /// the forbidden zone and a bare control letter each cost their own row and
-    /// nothing else — the good lines around them still land.
+    /// An id from a newer build, a chord this grammar cannot read and a chord in
+    /// the forbidden zone each cost their own row and nothing else — the good
+    /// lines around them still land. **A bare control letter is a good line
+    /// since 0.4.4 ticket 04** (owner ruling 2026-09-22), so it lands too.
     #[test]
     fn a_line_this_build_cannot_honour_costs_its_own_row_and_no_other() {
         let mut table = Shortcuts::defaults();
@@ -4788,26 +5092,27 @@ mod tests {
                 chord: Some("Ctrl+Shift+Y".to_owned()),
             },
         ]);
-        assert_eq!(faults.len(), 4, "{faults:?}");
+        assert_eq!(faults.len(), 3, "{faults:?}");
         assert_eq!(
             faults
                 .iter()
                 .map(|fault| fault.id.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "summon-teleporter",
-                "new-tab",
-                "close-pane",
-                "reopen-closed"
-            ]
+            ["summon-teleporter", "new-tab", "close-pane"]
         );
         assert_eq!(
             table.overrides(),
-            vec![Override {
-                id: "git-page".to_owned(),
-                chord: Some("Ctrl+Shift+y".to_owned()),
-            }],
-            "the one good line still landed"
+            vec![
+                Override {
+                    id: "reopen-closed".to_owned(),
+                    chord: Some("Ctrl+q".to_owned()),
+                },
+                Override {
+                    id: "git-page".to_owned(),
+                    chord: Some("Ctrl+Shift+y".to_owned()),
+                },
+            ],
+            "the good lines still landed"
         );
     }
 
@@ -4963,8 +5268,15 @@ mod tests {
         assert_eq!(search.caps, vec!["Ctrl", "F"]);
         assert_eq!(
             search.note.as_deref(),
-            Some(Text::ShortcutScopeSearchHost.text()),
-            "and it wears the scope tag its row carries — which since 2026-08-22              is the one that covers both of the capsule's hosts"
+            Some(
+                format!(
+                    "{}{NOTE_JOIN}{}",
+                    Text::ShortcutScopeSearchHost.text(),
+                    Text::ShortcutNoteShell.text()
+                )
+                .as_str()
+            ),
+            "and it wears the scope tag its row carries — which since 2026-08-22              is the one that covers both of the capsule's hosts — and, since its              chord is a bare Ctrl+letter, the shell note (0.4.4 ticket 04)"
         );
 
         // **And the palette is a line again** (DESIGN.md §7.55). It was off
@@ -5274,7 +5586,8 @@ mod tests {
             ),
             "and one slot cannot quietly take another's"
         );
-        // And the two standing disciplines reach these rows too.
+        // And the standing discipline reaches these rows too; a bare
+        // Ctrl+letter is free here as on every row (0.4.4 ticket 04).
         assert_eq!(
             table.verdict_for(
                 "summon-pip-3",
@@ -5284,7 +5597,7 @@ mod tests {
         );
         assert_eq!(
             table.verdict_for("summon-pip-3", &Chord::new(CTRL, super::character("k"))),
-            ChordVerdict::ShellControlLetter
+            ChordVerdict::Free
         );
 
         assert!(table.is_overridden("summon-pip-2"));

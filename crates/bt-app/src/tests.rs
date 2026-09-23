@@ -10063,7 +10063,7 @@ fn hyperlink_activation_requires_a_click_without_drag() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::Browser
+        HyperlinkActivation::Browser("https://example.test/path".to_owned())
     );
     assert_eq!(
         hyperlink_activation(
@@ -10073,7 +10073,7 @@ fn hyperlink_activation_requires_a_click_without_drag() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::Browser
+        HyperlinkActivation::Browser("HTTP://localhost:3000".to_owned())
     );
     // **A drag never activates anything**, whatever the scheme and whatever
     // the modifier — asked of every arm rather than of the web one, because
@@ -10192,7 +10192,7 @@ fn hyperlink_activation_requires_a_click_without_drag() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::Browser,
+        HyperlinkActivation::Browser("https://example.test/path".to_owned()),
         "the browser is still what `Ctrl` — and only `Ctrl` — reaches"
     );
 }
@@ -10259,7 +10259,7 @@ fn a_web_address_printed_in_the_terminal_opens_in_this_window() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
-            HyperlinkActivation::Browser,
+            HyperlinkActivation::Browser(uri.to_owned()),
             "and Ctrl still hands {uri:?} to the system"
         );
         // The finger is the same reading as the verb, so it lights plainly
@@ -10299,9 +10299,9 @@ fn a_web_address_printed_in_the_terminal_opens_in_this_window() {
             "the one door admits what the arm carries: {uri:?}"
         );
     }
-    // A drag is still only a selection, and a scheme with no arm is still
-    // silent plainly and blocked under `Ctrl` — this row moved, the table
-    // did not.
+    // A drag is still only a selection, and a scheme with no arm of its own is
+    // still silent plainly — and under `Ctrl` handed to the machine since
+    // ticket 14 (owner ruling 2026-09-21), where it used to be blocked.
     assert_eq!(
         hyperlink_activation(
             false,
@@ -10330,7 +10330,7 @@ fn a_web_address_printed_in_the_terminal_opens_in_this_window() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::Blocked
+        HyperlinkActivation::Scheme("mailto:person@example.test".to_owned())
     );
     // An address this window would refuse is refused under both modifiers,
     // and refusing it plainly is not the same as opening it: `Blocked` is
@@ -10417,7 +10417,7 @@ fn the_browser_door_refuses_the_userinfo_shape_the_address_field_refuses() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories,
         ),
-        HyperlinkActivation::Browser
+        HyperlinkActivation::Browser("https://example.test/a@b".to_owned())
     );
 }
 
@@ -10480,16 +10480,14 @@ fn a_title_and_a_hover_address_carry_no_format_characters() {
 ///
 /// So the row is asserted here exactly as it is asserted for the terminal
 /// one screen up, and about the same strings: **the two surfaces are given
-/// the same addresses and must answer the same way**. What is *not* asserted
-/// the same way is the file arm, and deliberately — a link naming a file
-/// keeps the 2026-08-13 answer under both modifiers, because that arm is
-/// already 「在这扇窗里发生的那个目的地」 and `Ctrl` has nothing to change it
-/// to.
+/// the same addresses and must answer the same way**. Since ticket 14 (owner
+/// ruling 2026-09-23) that is true of the file arm too — 「click stays in the
+/// window, Ctrl+click hands over」 — and of every other scheme.
 ///
-/// MUTATION: put the old arm back — `LinkAction::Web(url) =>
-/// PreviewLinkActivation::Browser(url)`, the 2026-08-13 verb that never read
-/// the modifier — and every plain row below goes red while every `Ctrl` row
-/// stays green, which is the shape of the debt exactly.
+/// MUTATION: put the old arm back — `LinkAction::Web(url) =>` the browser
+/// under both modifiers, the 2026-08-13 verb that never read the modifier —
+/// and every plain row below goes red while every `Ctrl` row stays green,
+/// which is the shape of the debt exactly.
 #[test]
 fn a_link_inside_a_preview_reads_the_same_table_as_a_link_in_the_terminal() {
     let document = Path::new(r"D:\repo\docs\DESIGN.md");
@@ -10501,12 +10499,12 @@ fn a_link_inside_a_preview_reads_the_same_table_as_a_link_in_the_terminal() {
     ] {
         assert_eq!(
             preview_link_activation(false, uri, document),
-            PreviewLinkActivation::Page(uri.to_owned()),
+            HyperlinkActivation::Page(uri.to_owned()),
             "a plain click on {uri:?} in a document opens it in this window"
         );
         assert_eq!(
             preview_link_activation(true, uri, document),
-            PreviewLinkActivation::Browser(uri.to_owned()),
+            HyperlinkActivation::Browser(uri.to_owned()),
             "and Ctrl hands {uri:?} to the system"
         );
         // **The two surfaces, one answer.** Asserted as a pairing rather
@@ -10536,7 +10534,7 @@ fn a_link_inside_a_preview_reads_the_same_table_as_a_link_in_the_terminal() {
         // `webnav::address_bar` first, so this arm may only carry addresses
         // that door admits — otherwise a document and the address field
         // would give two answers about one string (§7.1.5g ⑤).
-        let PreviewLinkActivation::Page(url) = preview_link_activation(false, uri, document) else {
+        let HyperlinkActivation::Page(url) = preview_link_activation(false, uri, document) else {
             panic!("{uri} is a page");
         };
         assert!(
@@ -10544,39 +10542,55 @@ fn a_link_inside_a_preview_reads_the_same_table_as_a_link_in_the_terminal() {
             "the one door admits what the arm carries: {uri:?}"
         );
     }
-    // **The file arm is untouched by the modifier** — 2026-08-13's ruling,
-    // and the reason it is not a hole in 「Ctrl = 交出去」: this arm is
-    // already the destination inside the window, and a relative target is
-    // still resolved against the document's own folder.
+    // **The file arm reads the modifier too** (owner ruling 2026-09-23). A
+    // plain press is still 2026-08-13's answer — the seat, with a relative
+    // target resolved against the document's own folder — and `Ctrl` hands
+    // the same file to the machine, as it does from the terminal.
     for target in [
         "./notes.md",
         r"..\assets\a.png",
         "file:///C:/notes/a%20b.md",
     ] {
+        let HyperlinkActivation::Preview(named, None) =
+            preview_link_activation(false, target, document)
+        else {
+            panic!("{target:?} previews plainly");
+        };
+        assert_eq!(
+            preview_link_activation(true, target, document),
+            HyperlinkActivation::External(named),
+            "and Ctrl hands the same file, {target:?}, to the system"
+        );
         for control in [false, true] {
-            assert!(
-                matches!(
-                    preview_link_activation(control, target, document),
-                    PreviewLinkActivation::Preview(_)
-                ),
-                "{target:?} previews with control={control}"
-            );
             assert!(preview_link_answers_a_press(control, target, document));
         }
     }
+    // Any other scheme: nothing plainly, the machine's handler under `Ctrl`
+    // (ticket 14). An anchor and an empty target name nothing and ask for
+    // nothing, under either modifier.
     assert_eq!(
-        preview_link_activation(false, "./notes.md", document),
-        PreviewLinkActivation::Preview(PathBuf::from(r"D:\repo\docs\notes.md")),
+        preview_link_activation(false, "mailto:person@example.test", document),
+        HyperlinkActivation::None
     );
-    // A scheme with no arm is silent on both halves *here*, because the
-    // preview refuses it before the row is reached: `link_action` answers
-    // `Nowhere` for every scheme but `http(s)` and `file:`, and a request
-    // this window never considered is not one it declined.
-    for target in ["mailto:person@example.test", "#section", "   "] {
+    assert_eq!(
+        preview_link_activation(true, "mailto:person@example.test", document),
+        HyperlinkActivation::Scheme("mailto:person@example.test".to_owned())
+    );
+    assert!(!preview_link_answers_a_press(
+        false,
+        "mailto:person@example.test",
+        document
+    ));
+    assert!(preview_link_answers_a_press(
+        true,
+        "mailto:person@example.test",
+        document
+    ));
+    for target in ["#section", "   "] {
         for control in [false, true] {
             assert_eq!(
                 preview_link_activation(control, target, document),
-                PreviewLinkActivation::None,
+                HyperlinkActivation::None,
                 "{target:?} does nothing with control={control}"
             );
             assert!(
@@ -10590,11 +10604,11 @@ fn a_link_inside_a_preview_reads_the_same_table_as_a_link_in_the_terminal() {
     // terminal's own reading of that row.
     assert_eq!(
         preview_link_activation(false, "http://", document),
-        PreviewLinkActivation::None
+        HyperlinkActivation::None
     );
     assert_eq!(
         preview_link_activation(true, "http://", document),
-        PreviewLinkActivation::Blocked("http://".to_owned())
+        HyperlinkActivation::Blocked
     );
     assert!(!preview_link_answers_a_press(false, "http://", document));
     assert!(preview_link_answers_a_press(true, "http://", document));
@@ -10607,7 +10621,7 @@ fn a_link_inside_a_preview_reads_the_same_table_as_a_link_in_the_terminal() {
     let phishing = "https://claude.ai@evil.test/code";
     assert_eq!(
         preview_link_activation(false, phishing, document),
-        PreviewLinkActivation::Page(phishing.to_owned())
+        HyperlinkActivation::Page(phishing.to_owned())
     );
     assert!(matches!(
         webnav::address_bar(phishing),
@@ -10687,7 +10701,8 @@ fn a_plain_click_stays_in_this_window_and_ctrl_hands_it_to_the_system() {
 ///    card instead of in Explorer;
 /// ③ let the share be probed — swap the `may_read_unasked` gate for `true` — and the
 ///    UNC cells go red, which is the event loop being handed a cold network
-///    round trip;
+///    round trip (the plain half is the card and `Ctrl`'s is the system, since
+///    ticket 14 — neither asks);
 /// ④ let the plain half answer `Browser`/`Reveal`/`External` and a stray
 ///    click on a printed line starts a program;
 /// ⑤ send the folder's plain half back to `None` — the shape it had until
@@ -10715,7 +10730,7 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
             bt_transcript::paths::PathNamer::ThisWindow,
             &no_directories
         ),
-        HyperlinkActivation::Browser,
+        HyperlinkActivation::Browser("https://example.test/path".to_owned()),
         "a web address under `Ctrl` is the machine's browser"
     );
     assert_eq!(
@@ -10824,7 +10839,18 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
         HyperlinkActivation::FilesColumn(PathBuf::from(r"C:\repo\docs")),
         "and a plain click opens no Explorer window: it points this window's own column at it"
     );
-    for control in [false, true] {
+    // **A share: the card plainly, the system under `Ctrl`** (ticket 14, owner ruling
+    // 2026-09-21). Neither half probes it — the ledger closure panics if asked.
+    for (control, expected) in [
+        (
+            false,
+            HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\notes.md"), None),
+        ),
+        (
+            true,
+            HyperlinkActivation::Share(PathBuf::from(r"\\server\share\notes.md")),
+        ),
+    ] {
         assert_eq!(
             hyperlink_activation(
                 control,
@@ -10833,8 +10859,8 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|_| { panic!("a share must not be probed: §7.1.3 does not read one unasked") }
             ),
-            HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\notes.md"), None),
-            "a share meets the network card under either modifier, without a round trip"
+            expected,
+            "a share is answered without a round trip, Ctrl {control}"
         );
     }
     // **The one share that is not one** (user ruling 2026-09-07, §7.30). A WSL distribution's
@@ -10881,8 +10907,8 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &no_directories
             ),
-            HyperlinkActivation::Blocked,
-            "an unknown scheme is inert, and says so when asked: {uri:?}"
+            HyperlinkActivation::Scheme(uri.to_owned()),
+            "any other scheme is the machine's under `Ctrl` (ticket 14): {uri:?}"
         );
         assert_eq!(
             hyperlink_activation(
@@ -10896,6 +10922,364 @@ fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
             "and says nothing at all when it was not: {uri:?}"
         );
     }
+}
+
+/// RED (ticket 14) — **`Ctrl` on a share hands it to the system, and a plain click keeps the
+/// card.**
+///
+/// Owner ruling 2026-09-21: 「UNC 与任意协议链接 Ctrl+点击交给系统、悬停不碰 UNC、普通点击不变」.
+/// A share was the card §7.1.3 draws under either modifier for as long as `ShellExecuteW` ran on
+/// the window thread — handing over a cold `\\server` would have stalled the window for the round
+/// trip. Hand-offs run on their own lane since 2026-09-22, so `Ctrl`'s half is the system's; the
+/// plain half is unchanged, and neither half asks the ledger anything (the closure panics).
+///
+/// Red on the base: `Ctrl` answers `Preview(\\server\share\a.md, None)`.
+///
+/// MUTATION: delete the `ClickIntent::System if is_a_share_on_another_machine(..)` arm of
+/// `reference_activation` and the `Ctrl` row comes back `Preview`.
+#[test]
+fn ctrl_on_a_share_hands_it_to_the_system_and_a_plain_click_keeps_the_card() {
+    let share = PathBuf::from(r"\\server\share\a.md");
+    let windows = bt_transcript::paths::PrintedPathNamespace::Windows;
+    for namer in [
+        bt_transcript::paths::PathNamer::ThisWindow,
+        bt_transcript::paths::PathNamer::Pane(&windows),
+    ] {
+        let unasked: &dyn Fn(&Path) -> Option<bt_term::PathVerdict> =
+            &|_| panic!("a share is never asked about");
+        assert_eq!(
+            hyperlink_activation(true, true, "file://server/share/a.md", namer, unasked),
+            HyperlinkActivation::Share(share.clone()),
+            "Ctrl hands the share to the system"
+        );
+        assert_eq!(
+            hyperlink_activation(false, true, "file://server/share/a.md", namer, unasked),
+            HyperlinkActivation::Preview(share.clone(), None),
+            "and a plain click keeps the card it always raised"
+        );
+        // The line under the address says what `Ctrl` does, read off the same table.
+        assert_eq!(
+            ControlClickHint::of("file://server/share/a.md", namer, unasked),
+            Some(ControlClickHint::DefaultApp)
+        );
+        // A folder on a share is the same row: nothing asks whether it is one, and the system
+        // opens a folder in Explorer.
+        assert_eq!(
+            hyperlink_activation(true, true, "file://nas/photos/", namer, unasked),
+            HyperlinkActivation::Share(PathBuf::from(r"\\nas\photos\")),
+        );
+    }
+}
+
+/// PIN (ticket 14) — **a share is never asked about: not on the hover, not on the press, not when
+/// the modifier goes down.**
+///
+/// The other half of the 2026-09-21 ruling — 「悬停不碰 UNC」 — and the reason `Ctrl` on a share
+/// could be allowed at all: the hand-off lane takes the round trip, and nothing else may. The real
+/// producer runs here: an `OSC 8` share link fed through a real session, its target read back off
+/// the real frame, and every door that asks a pane's worker — the pointer move, the press's
+/// re-check, the modifier and the still-pointer frame — goes through
+/// [`link_target_to_ask_about`], which answers `None`, so the worker's queue stays empty. A local
+/// link in the same frame is asked about, which is what shows the seam is live.
+///
+/// Green on the base too (a share was refused by the same gate there); it pins that handing a
+/// share over did not open a question about one.
+///
+/// MUTATION: let `link_target_to_ask_about` answer `Some(path)` without the `may_read_unasked`
+/// gate, and the queue holds the share.
+#[test]
+fn a_share_is_never_asked_about() {
+    let mut session = bt_term::DualPlaneSession::new(
+        std::num::NonZeroU32::new(40).unwrap(),
+        std::num::NonZeroU32::new(2).unwrap(),
+    );
+    session
+        .feed(b"\x1b]8;;file://server/share/a.md\x1b\\share\x1b]8;;\x1b\\ \x1b]8;;file:///C:/work/notes.md\x1b\\local\x1b]8;;\x1b\\")
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    let share = frame
+        .hyperlink_at(0, 1)
+        .expect("the share link is on the frame");
+    let local = frame.hyperlink_at(0, 7).expect("and the local one");
+    assert_eq!(share.uri, "file://server/share/a.md");
+
+    let windows = bt_transcript::paths::PrintedPathNamespace::Windows;
+    let namer = bt_transcript::paths::PathNamer::Pane(&windows);
+    // Hover, press, modifier-down and the still-pointer frame: four gestures, one gate.
+    for door in ["hover", "press", "modifier", "frame"] {
+        if let Some(path) = link_target_to_ask_about(&share.uri, namer) {
+            panic!(
+                "the {door} door would ask a worker about {}",
+                path.display()
+            );
+        }
+    }
+    assert!(
+        session.take_decoration_worker_task().is_none(),
+        "nothing about the share is queued"
+    );
+    // Both halves of the table answer without reading the ledger.
+    let asked = std::cell::Cell::new(0);
+    for control in [false, true] {
+        let _ = hyperlink_activation(control, true, &share.uri, namer, &|_| {
+            asked.set(asked.get() + 1);
+            None
+        });
+    }
+    assert_eq!(
+        asked.get(),
+        0,
+        "the table never reads a verdict for a share"
+    );
+
+    // The contrast: a local name goes through the same gate and is asked about.
+    let local_path = link_target_to_ask_about(&local.uri, namer)
+        .expect("a local link is one this window asks a worker about");
+    session.ask_about_link_target(local_path.clone());
+    let mut queued = Vec::new();
+    while let Some(task) = session.take_decoration_worker_task() {
+        if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
+            queued.push(path);
+        }
+    }
+    assert_eq!(queued, vec![local_path]);
+}
+
+/// RED (ticket 14) — **`Ctrl` on a link of any other scheme hands the URI to the system; a plain
+/// click does nothing.**
+///
+/// Owner ruling 2026-09-21: 「任意协议链接 Ctrl+点击交给系统」, and 2026-09-21 again: 「修饰键就是
+/// 用户的同意」. No list of schemes stands in front of the arm — what the machine has no handler
+/// for, the machine refuses. A single letter before a colon is a drive, not a scheme, and stays
+/// refused: a path never leaves as a URI, because that would skip the program list.
+///
+/// Red on the base: every `Ctrl` row below answers `Blocked`.
+///
+/// MUTATION: send `ReferenceRow::Scheme` under `ClickIntent::System` to `Blocked` again and the
+/// `Ctrl` rows go red.
+#[test]
+fn ctrl_on_any_scheme_hands_the_uri_to_the_system() {
+    for uri in [
+        "mailto:x@example.com",
+        "vscode://file/C:/work/notes.md:12",
+        "ssh://h",
+        "obsidian://open?vault=notes&file=today",
+        "ms-settings:display",
+    ] {
+        let namer = bt_transcript::paths::PathNamer::ThisWindow;
+        assert_eq!(
+            hyperlink_activation(true, true, uri, namer, &no_directories),
+            HyperlinkActivation::Scheme(uri.to_owned()),
+            "Ctrl hands {uri:?} to the system"
+        );
+        assert_eq!(
+            hyperlink_activation(false, true, uri, namer, &no_directories),
+            HyperlinkActivation::None,
+            "a plain click on {uri:?} does nothing"
+        );
+        assert!(terminal_link_answers_a_press(
+            true,
+            Some(uri),
+            namer,
+            &no_directories
+        ));
+        assert!(!terminal_link_answers_a_press(
+            false,
+            Some(uri),
+            namer,
+            &no_directories
+        ));
+    }
+    // A drive letter is a path, and a path never leaves as a URI.
+    for not_a_scheme in [r"C:\work\run.cmd", "C:/work/run.cmd", "no scheme here"] {
+        assert_eq!(
+            hyperlink_activation(
+                true,
+                true,
+                not_a_scheme,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &no_directories
+            ),
+            HyperlinkActivation::Blocked,
+            "{not_a_scheme:?} is not a URI"
+        );
+    }
+}
+
+/// PIN (ticket 14) — **a device path and a verbatim spelling stay refused under `Ctrl`**, so
+/// handing shares over cannot widen past the ruling.
+///
+/// `file://./pipe/x` and a `\\?\UNC\…` spelled into a `file:` URI name no file on another
+/// machine; `bt_platform::file_uri_to_path` names no path from either, and `Ctrl` is told so.
+/// Another WSL distribution's share keeps the card under both modifiers.
+///
+/// MUTATION: route every `ReferenceRow::Unasked` path to `Share` under `Ctrl` (drop the
+/// `is_a_share_on_another_machine` guard) and the distribution row goes red.
+#[test]
+fn device_and_verbatim_spellings_stay_refused_under_ctrl() {
+    for uri in [
+        "file://./pipe/x",
+        "file:////./pipe/x",
+        "file://%3F/UNC/server/share/a.md",
+        "file:////%3F/UNC/server/share/a.md",
+    ] {
+        assert_eq!(
+            hyperlink_activation(
+                true,
+                true,
+                uri,
+                bt_transcript::paths::PathNamer::ThisWindow,
+                &|_| panic!("a device or verbatim spelling is never asked about")
+            ),
+            HyperlinkActivation::Blocked,
+            "{uri:?} stays refused under Ctrl"
+        );
+    }
+    let windows = bt_transcript::paths::PrintedPathNamespace::Windows;
+    let debian = PathBuf::from(r"\\wsl.localhost\Debian\etc\hosts");
+    for control in [false, true] {
+        assert_eq!(
+            hyperlink_activation(
+                control,
+                true,
+                "file://wsl.localhost/Debian/etc/hosts",
+                bt_transcript::paths::PathNamer::Pane(&windows),
+                &|_| panic!("a distribution this pane is not in is never asked about")
+            ),
+            HyperlinkActivation::Preview(debian.clone(), None),
+            "another distribution's share is not another machine's: the card, Ctrl {control}"
+        );
+    }
+}
+
+/// RED (ticket 14) — **a share handed over meets the same program list a local file meets.**
+///
+/// The share arm leaves through the files column's door (`Handoff::Open`), which reads
+/// `bt_platform::names_a_program` — so `\\server\share\run.cmd` under `Ctrl` is refused in the
+/// words a local `.cmd` is refused in, and the reader is told in the same notice. Driven through
+/// the real OS hand-off lane: the table's arm, the Runtime's request, the lane's thread, the door.
+/// The door refuses a program before it calls the system, so nothing is launched and no network
+/// is touched.
+///
+/// Red on the base: the arm is `Preview` and there is no hand-off to make.
+///
+/// MUTATION: build the share's request as an address in `unverified_reference_handoff`
+/// (`Handoff::Address`, `shell_execute` — the door without the list) and the request below is not
+/// `Open`.
+#[test]
+fn a_share_handed_over_meets_the_same_program_list() {
+    let HyperlinkActivation::Share(path) = hyperlink_activation(
+        true,
+        true,
+        "file://server/share/run.cmd",
+        bt_transcript::paths::PathNamer::ThisWindow,
+        &|_| panic!("a share is never asked about"),
+    ) else {
+        panic!("Ctrl on a share is the share arm");
+    };
+    let request = unverified_reference_handoff(&path);
+    let bt_platform::Handoff::Open(handed) = &request else {
+        panic!("a share must leave through the door that reads the program list: {request:?}");
+    };
+    assert_eq!(handed, &path);
+
+    let mut lane = handoff_lane::HandoffLane::spawn(|| {}).expect("the lane starts");
+    let id = lane.submit(bt_platform::NativeWindow::stand_in(0), request);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let answer = loop {
+        if let Some(answer) = lane.answers().into_iter().find(|answer| answer.id == id) {
+            break answer;
+        }
+        assert!(Instant::now() < deadline, "the lane answered");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let reason = answer.outcome.expect_err("a program on a share is refused");
+    assert_eq!(reason, bt_platform::PROGRAM_REFUSED, "the door's own words");
+    assert_eq!(
+        UNVERIFIED_REFERENCE_REFUSAL.words(&reason).notice,
+        Some(files_program_refused_notice()),
+        "and the reader is told, as for a local program"
+    );
+}
+
+/// RED (ticket 14) — **a link in a previewed document answers the same row as a terminal
+/// reference, under both modifiers.**
+///
+/// Owner ruling 2026-09-23: "Links inside previewed documents follow the same rule as terminal
+/// references: click stays in the window, Ctrl+click hands over." So a `mailto:`, a share, an
+/// `https:` address and a relative file link are each given to both surfaces in their own
+/// spelling, and the two answers must be equal. The relative link names a real file, verified by
+/// the real worker function for the terminal's ledger, so no hand-made verdict stands in.
+///
+/// Red on the base: a document's `mailto:` answered nothing under `Ctrl`, its share nothing under
+/// either modifier, and its file the seat under `Ctrl`.
+///
+/// MUTATION: map `preview::LinkAction::Refused(_)` to `ReferenceRow::Nothing` in
+/// `preview_reference_row` — the base's answer — and the share rows go red.
+#[test]
+fn a_document_link_answers_the_same_row_as_a_terminal_reference() {
+    let directory = std::env::temp_dir().join("folio-t14-document-links");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a scratch folder");
+    let document = directory.join("README.md");
+    let notes = directory.join("notes.md");
+    std::fs::write(&document, b"# x").expect("a document");
+    std::fs::write(&notes, b"x").expect("a file it links to");
+    let verdict = bt_term::verify_path(&notes);
+    assert!(verdict.exists && !verdict.directory);
+    let ledger = |path: &Path| (path == notes.as_path()).then(|| verdict.clone());
+
+    let notes_uri = bt_transcript::paths::local_path_to_file_uri(&notes);
+    for (document_target, terminal_uri) in [
+        ("mailto:x@example.com", "mailto:x@example.com".to_owned()),
+        (
+            r"\\server\share\a.md",
+            "file://server/share/a.md".to_owned(),
+        ),
+        (
+            "file://server/share/a.md",
+            "file://server/share/a.md".to_owned(),
+        ),
+        (
+            "https://example.test/a",
+            "https://example.test/a".to_owned(),
+        ),
+        ("./notes.md", notes_uri),
+    ] {
+        for control in [false, true] {
+            assert_eq!(
+                preview_link_activation(control, document_target, &document),
+                hyperlink_activation(
+                    control,
+                    true,
+                    &terminal_uri,
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &ledger
+                ),
+                "{document_target:?} in a document and {terminal_uri:?} in the terminal, \
+                 Ctrl {control}"
+            );
+            assert_eq!(
+                preview_link_answers_a_press(control, document_target, &document),
+                terminal_link_answers_a_press(
+                    control,
+                    Some(&terminal_uri),
+                    bt_transcript::paths::PathNamer::ThisWindow,
+                    &ledger
+                ),
+                "and the finger says the same: {document_target:?}, Ctrl {control}"
+            );
+        }
+    }
+    // An in-document anchor keeps its answer: nothing, under either modifier.
+    for control in [false, true] {
+        assert_eq!(
+            preview_link_activation(control, "#usage", &document),
+            HyperlinkActivation::None
+        );
+    }
+    let _ = std::fs::remove_dir_all(&directory);
 }
 
 /// RED — **a distribution's share is the pane's to name, and only its own pane's** (route D of
@@ -11097,7 +11481,18 @@ fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does
         HyperlinkActivation::Reveal(PathBuf::from(r"C:\sites\archive.html")),
         "a folder is Explorer's however it is named"
     );
-    for control in [false, true] {
+    // A plain click on a page on a share meets the network card it always met, and `Ctrl`
+    // hands it to the system (ticket 14) — neither with a round trip.
+    for (control, expected) in [
+        (
+            false,
+            HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\index.html"), None),
+        ),
+        (
+            true,
+            HyperlinkActivation::Share(PathBuf::from(r"\\server\share\index.html")),
+        ),
+    ] {
         assert_eq!(
             hyperlink_activation(
                 control,
@@ -11106,8 +11501,8 @@ fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does
                 bt_transcript::paths::PathNamer::ThisWindow,
                 &|_| { panic!("a share must not be probed: §7.1.3 does not read one unasked") }
             ),
-            HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\index.html"), None),
-            "a share meets the network card it always met, without a round trip"
+            expected,
+            "a share is answered without a round trip, Ctrl {control}"
         );
     }
     assert_eq!(
@@ -11269,22 +11664,24 @@ fn local_image_click_routes_preview_external_and_no_effect() {
     );
 }
 
-/// PIN — **nothing but a web address is ever handed to the shell as a URI.**
+/// PIN — **a malformed address, a target with no scheme and a `file:` URI naming nothing here
+/// are never handed to the shell as a URI.**
 ///
 /// The `file:` row left this list on 2026-08-20 and did not join the shell's
 /// *as a URI*: it became a path this window decides about itself — the
 /// preview seat, Explorer, or the path bridge that refuses programs — so what
 /// leaves is always the decoded path and never the URI text a program
 /// printed. A URI reaching the shell would be parsed a second time by a
-/// second parser; a path has already been read once, here. What stayed is
-/// everything the WebView ruling already refuses (DESIGN.md §7.1.1's
-/// "external protocol 一律禁用"), plus the malformed web addresses that would
-/// otherwise reach that second parser.
+/// second parser; a path has already been read once, here.
+///
+/// Ticket 14 took `mailto:` and `custom://` off this list (owner ruling 2026-09-21:
+/// 「任意协议链接 Ctrl+点击交给系统」) — see `ctrl_on_any_scheme_hands_the_uri_to_the_system`.
+/// What stays is what is not a well-formed request at all: an `http(s)` address
+/// `webnav::address_bar` refuses, text with no scheme, and a `file:` URI this machine names no
+/// path from, which would otherwise reach that second parser.
 #[test]
 fn only_a_well_formed_web_address_is_ever_handed_to_the_shell() {
     for uri in [
-        "mailto:person@example.test",
-        "custom://payload",
         "https://example.test/\nspoof",
         "http://",
         "https:example.test",
@@ -35639,7 +36036,7 @@ fn the_read_only_fact_hangs_on_the_path_foots_right_hand() {
             lead: r"C:\w\huge.txt",
             flash: None,
             notice: preview::preview_truncated_notice(),
-            cut_left: true,
+            cut: seats::LeadCut::Front,
             font_px: 10.0,
             gap_px: gap,
         },
@@ -35793,7 +36190,7 @@ fn a_long_path_is_cut_and_the_phrase_beside_it_is_not() {
             lead: long,
             flash: None,
             notice: preview::preview_truncated_notice(),
-            cut_left: true,
+            cut: seats::LeadCut::Front,
             font_px: 10.0,
             gap_px: gap,
         },
@@ -35823,7 +36220,7 @@ fn a_long_path_is_cut_and_the_phrase_beside_it_is_not() {
             lead: long,
             flash: None,
             notice: "",
-            cut_left: true,
+            cut: seats::LeadCut::Front,
             font_px: 10.0,
             gap_px: gap,
         },
@@ -35865,7 +36262,7 @@ fn a_flashing_foot_gives_the_whole_strip_to_the_word_it_is_flashing() {
                 lead: r"C:\w\huge.txt",
                 flash: Some(flash),
                 notice: preview::preview_truncated_notice(),
-                cut_left: true,
+                cut: seats::LeadCut::Front,
                 font_px: 10.0,
                 gap_px: 12.0,
             },
@@ -48580,6 +48977,257 @@ fn unchanged_main_menu_inputs_are_silent_before_appkit() {
         !stale_language.matches(&shortcuts, focus),
         "a language revision rebuilds the menu",
     );
+}
+
+/// A card's subject for `path`, raised over `host` — the two hosts differ in
+/// exactly the field that says where the path came from.
+fn glance_subject(path: &Path, host: RowHost) -> FilePeekSubject {
+    FilePeekSubject {
+        path: Some(path.to_path_buf()),
+        printed_in: match host {
+            RowHost::Terminal(seat) => Some(seat),
+            RowHost::Column(_) | RowHost::Float(_) | RowHost::Git(_) => None,
+        },
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        ftype: preview::PreviewFtype::Markdown,
+        refused: false,
+        dirty: false,
+        anchor: file_peek::PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
+    }
+}
+
+/// A real folder with a real file in it, for the glance-foot tests: the path
+/// the card holds is a path on this disk, not a spelling made up for the test.
+fn glance_fixture(name: &str) -> (PathBuf, PathBuf) {
+    let folder =
+        std::env::temp_dir().join(format!("folio-glance-foot-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(folder.join("notes")).expect("the fixture folder is made");
+    let file = folder.join("notes").join("plan.md");
+    std::fs::write(&file, "# plan\n").expect("the fixture file is written");
+    (folder, file)
+}
+
+/// RED (ticket 12, user ruling 2026-09-20) — **the glance card's foot is one
+/// writing for a files row and a terminal reference: the same file gives the
+/// same folder.**
+///
+/// The ruling says it in so many words: 「文件列与终端引用两处同一行不分两种写法」. The
+/// two hosts differ in where the path came from — a program printed one, the
+/// user's own tree listed the other — and that difference decides how the card
+/// reads its facts (audit 3 C-2). It must decide nothing about the foot: the
+/// foot is the path's parent, and a path has one parent.
+///
+/// MUTATION: have `FilePeekSubject::foot_address_on` print the file's own path
+/// when `printed_in` is set — the two feet part, and the equality goes red.
+#[test]
+fn the_foot_is_one_writing_for_rows_and_references() {
+    let (folder, file) = glance_fixture("one-writing");
+    let platform = bt_platform::host_platform();
+    let row = glance_subject(&file, RowHost::Column(SeatId(1))).foot_address_on(platform, None);
+    let reference =
+        glance_subject(&file, RowHost::Terminal(SeatId(2))).foot_address_on(platform, None);
+    assert_eq!(
+        row, reference,
+        "one file, one foot, whichever surface raised the card"
+    );
+    assert_eq!(
+        row,
+        folder.join("notes").display().to_string(),
+        "and the foot is the folder that holds the file"
+    );
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// RED (ticket 12, user ruling 2026-09-20) — **a plain click on the foot finds
+/// the file in the files column and selects it, by the locate verb's three
+/// arms.**
+///
+/// The press is decided by [`peek_foot_press`] and landed by [`files_locate`] —
+/// the decision [`Runtime::locate_folder_in_files_column`] makes, the verb every
+/// "show this in the files column" in this window already means (rule 9: the
+/// existing verb, not a second one). Its range rule is the 2026-08-25 ruling
+/// 「打开文件不许重根文件树」: a folder inside the column's tree keeps the root and
+/// selects the file's row under it; a folder outside it re-roots the column at
+/// the folder and selects the file's row there; a tab with no column gets one
+/// rooted at the folder, with the file's row selected.
+///
+/// MUTATION: route the plain click to the reveal door (answer
+/// `PeekFootPress::Reveal` for `ClickIntent::Here` in `peek_foot_press`) — the
+/// first assertion goes red.
+#[test]
+fn a_click_on_the_foot_selects_the_file_in_the_files_column() {
+    let (folder, file) = glance_fixture("locate");
+    for host in [RowHost::Column(SeatId(1)), RowHost::Terminal(SeatId(2))] {
+        let Some(PeekFootPress::Locate {
+            folder: at,
+            file: name,
+        }) = peek_foot_press(host, &file, false)
+        else {
+            panic!("a plain click on {host:?}'s foot must stay in the window and locate");
+        };
+        assert_eq!(at, folder.join("notes"));
+        assert_eq!(name, "plan.md");
+
+        // ① Inside the tree the column already shows: the root stays, and the
+        //    file's row under the way down is the one selected.
+        let root = folder.display().to_string();
+        assert_eq!(
+            files_locate(Some((SeatId(7), &root)), &at, Some(&name)),
+            FilesLocate::Inside {
+                seat: SeatId(7),
+                select: "/notes/plan.md".to_owned(),
+            }
+        );
+        // ② Outside it: the column is rooted at the folder, and the file's row
+        //    — a child of the new root — is selected.
+        let elsewhere = std::env::temp_dir()
+            .join("folio-glance-foot-elsewhere")
+            .display()
+            .to_string();
+        assert_eq!(
+            files_locate(Some((SeatId(7), &elsewhere)), &at, Some(&name)),
+            FilesLocate::Root {
+                select: Some("/plan.md".to_owned()),
+            }
+        );
+        // ③ No column at all: one is opened there, the same answer.
+        assert_eq!(
+            files_locate(None, &at, Some(&name)),
+            FilesLocate::Root {
+                select: Some("/plan.md".to_owned()),
+            }
+        );
+    }
+    // And the folder-only callers are the verb they always were.
+    let root = folder.display().to_string();
+    assert_eq!(
+        files_locate(Some((SeatId(7), &root)), &folder.join("notes"), None),
+        FilesLocate::Inside {
+            seat: SeatId(7),
+            select: "/notes".to_owned(),
+        }
+    );
+    assert_eq!(
+        files_locate(None, &folder, None),
+        FilesLocate::Root { select: None }
+    );
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// RED (ticket 12, owner ruling 2026-09-23) — **the files column stays where the
+/// foot took it when the card goes.**
+///
+/// The 2026-09-20 note said 「不在当前根下就让文件列临时切过去」, and "temporarily"
+/// could be read as "switch back when the card goes". The owner settled it: "The
+/// files column does not switch back after the glance-foot click; it is
+/// navigation, not a peek." So the press takes the card down and then locates,
+/// and nothing on the card's way down touches the column: the card holds no
+/// root to restore, and the door that ends its life names no files-column verb.
+///
+/// MUTATION: have `hide_file_peek` re-root the column at a remembered root (a
+/// `reroot_files_column` or `show_folder_in_files_column` call) — the second
+/// loop goes red.
+#[test]
+fn the_column_stays_where_the_foot_took_it_when_the_card_goes() {
+    let press = method_body("Runtime", "press_file_peek_foot");
+    let down = press
+        .find("self.hide_file_peek();")
+        .expect("the foot's press takes the card down");
+    let locate = press
+        .find("self.locate_folder_in_files_column(&folder, Some(&file))")
+        .expect("and locates through the existing verb");
+    assert!(
+        down < locate,
+        "the card goes before the column moves, so it is never placed against a row that moved"
+    );
+    for verb in [
+        "reroot_files_column",
+        "show_folder_in_files_column",
+        "seat_a_files_column",
+        ".root =",
+    ] {
+        assert!(
+            !press.contains(verb),
+            "the foot moves the column only through the locate verb — found `{verb}`"
+        );
+    }
+    for verb in [
+        "reroot_files_column",
+        "show_folder_in_files_column",
+        "locate_folder_in_files_column",
+        ".root =",
+    ] {
+        assert!(
+            !method_body("Runtime", "hide_file_peek").contains(verb),
+            "taking the card down moves the files column (`{verb}`): it would switch back"
+        );
+    }
+}
+
+/// RED (ticket 12, user ruling 2026-09-20) — **`Ctrl` (`⌘`) and a click on the
+/// foot reveals the file, selected, through the door the card's surface already
+/// uses for its own hand-over.**
+///
+/// A files row, a Git row and a folder card's row reveal through
+/// [`Runtime::reveal_in_explorer`], the door a row's own menu takes; a reference
+/// a program printed reveals through [`Runtime::reveal_verified`], with the
+/// pane's ledger — exactly as the reference itself does under `Ctrl`, so the
+/// card does not become a way round audit 3 C-2's rule. The file is revealed,
+/// not its folder: Explorer and Finder open the folder with the file selected.
+///
+/// MUTATION: answer `Reveal` for a terminal host (the files door) — the second
+/// assertion goes red; drop the reveal call from `press_file_peek_foot` — the
+/// body pin does.
+#[test]
+fn a_ctrl_click_on_the_foot_reveals_the_file() {
+    let (folder, file) = glance_fixture("reveal");
+    for host in [
+        RowHost::Column(SeatId(1)),
+        RowHost::Float(3),
+        RowHost::Git(SeatId(4)),
+    ] {
+        assert_eq!(
+            peek_foot_press(host, &file, true),
+            Some(PeekFootPress::Reveal(file.clone())),
+            "{host:?}"
+        );
+    }
+    assert_eq!(
+        peek_foot_press(RowHost::Terminal(SeatId(2)), &file, true),
+        Some(PeekFootPress::RevealVerified(SeatId(2), file.clone())),
+        "a printed reference is handed over off its ledger"
+    );
+    let press = method_body("Runtime", "press_file_peek_foot");
+    for door in [
+        "self.reveal_in_explorer(&path);",
+        "let facts = self.verified_target(seat, &path);",
+        "self.reveal_verified(&path, facts);",
+        "input::pointer_chord_held(self.window.modifiers_held)",
+    ] {
+        assert!(
+            press.contains(door),
+            "the foot's press reaches `{door}` rather than a door of its own"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// RED (ticket 20) — **the command palette's field and rows are primary
+/// text, not half a point above and below it.**
+///
+/// `UI-SPEC.md` T3/T4: the field used to sit at 13.5 and the rows at 12.5,
+/// where every menu item, tree row, tab, button and combo is 13.
+/// `palette.rs` has no test module of its own, so this lives here.
+///
+/// MUTATION: revert `palette::FIELD_FONT_LOGICAL_PX` or
+/// `palette::ROW_FONT_LOGICAL_PX` to a literal and this goes red.
+#[test]
+fn ui_spec_palette_class_a_values_follow_the_rule() {
+    assert_eq!(crate::palette::FIELD_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T3");
+    assert_eq!(crate::palette::ROW_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T4");
 }
 
 // ── the multi-line paste card (0.4.4 ticket 02) ─────────────────────────────

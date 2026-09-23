@@ -253,6 +253,9 @@ pub(crate) enum OnRefused {
     HyperlinkBlocked(bt_viewport::HyperlinkHit),
     /// The settings dialog's card under `Install fonts…`, holding the door's words.
     FontsToast,
+    /// The notice a refused address raises on the preview surface a link was pressed on — a
+    /// document's link to a scheme the machine has no handler for (ticket 14).
+    PreviewAddressRefused(crate::PreviewSurface, String),
 }
 
 /// **What a refusal says and where**, fixed per surface when the press is made.
