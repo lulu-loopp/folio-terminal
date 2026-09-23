@@ -2,10 +2,10 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    Drag, DropLanding, LeafSession, PasteAnswer, PasteOffer, PasteTarget, PreparedClipboardPaste,
-    Runtime, StagedPaste, UserInputKind, copy_selection, hang_watch, i18n,
-    input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_offer_is_kept,
-    paste_target_is_live, paste_text, pending_paste_in, prepare_clipboard_paste,
+    Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteOffer, PasteTarget,
+    PreparedClipboardPaste, Runtime, StagedPaste, UserInputKind, copy_selection, hang_watch, i18n,
+    input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_body,
+    paste_offer_is_kept, paste_target_is_live, pending_paste_in, prepare_clipboard_paste,
     prepare_dropped_paste, profile_banner_name, recoverable_clipboard_write, restore, seats,
     stage_paste, take_pending_paste, text_field, toast, write_selection_text,
     write_terminal_clipboard_text,
@@ -413,9 +413,13 @@ impl Runtime<'_> {
             text,
             prepared.clipboard_text,
             ask,
+            bt_platform::host_platform(),
             context,
         ) {
-            StagedPaste::Send(text) => self.send_paste(target, &text, context),
+            StagedPaste::Send(text) => self.send_paste(target, PasteBody::Text(&text), context),
+            StagedPaste::InputLine(bytes) => {
+                self.send_paste(target, PasteBody::InputLine(&bytes), context)
+            }
             StagedPaste::Held => {
                 self.window.paste_card_hover = None;
                 if self.refresh_overlay() {
@@ -427,7 +431,8 @@ impl Runtime<'_> {
     }
 
     /// **The one writer every paste ends in** — today's tail of [`Self::deliver_paste`], and the
-    /// road the paste card's answer takes too (0.4.4 ticket 02).
+    /// road the paste card's answer takes too (0.4.4 ticket 02), and a PowerShell prompt's
+    /// input-line bytes (ticket 03). Whatever the body, it is one write.
     ///
     /// **The address is asked again here**, because the card's answer lands on a later turn:
     /// a tab no longer on top, a seat gone or a shell restarted since the paste was held all send
@@ -436,7 +441,7 @@ impl Runtime<'_> {
     fn send_paste(
         &mut self,
         target: PasteTarget,
-        text: &str,
+        body: PasteBody<'_>,
         context: &'static str,
     ) -> Result<bool> {
         let Some(active) = self.live_paste_target(target) else {
@@ -458,7 +463,7 @@ impl Runtime<'_> {
         // the strength of it. Everything below this line is unchanged — the
         // bookkeeping a paste owes is owed for the gesture rather than for the
         // ring's mood — and only what this function *answers* now depends on it.
-        let landed = paste_text(session, projection, text, |bytes| {
+        let landed = paste_body(session, projection, body, |bytes| {
             offer_pty_input(pty.as_ref(), bytes, context)
         })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
@@ -512,7 +517,7 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         if let Some(text) = paste_answer_text(&pending, answer) {
-            self.send_paste(pending.target, &text, pending.context)?;
+            self.send_paste(pending.target, PasteBody::Text(&text), pending.context)?;
         }
         Ok(())
     }

@@ -866,6 +866,76 @@ pub(crate) fn join_lines(text: &str) -> String {
     joined
 }
 
+/// **Shift+Enter, down and up, as two win32-input-mode key records** (`CSI Vk;Sc;Uc;Kd;Cs;Rc _`:
+/// `VK_RETURN` 13, scan code 28, character `\r`, key down then up, `SHIFT_PRESSED` 0x10, one
+/// repeat) — PSReadLine's `AddLine`, which puts a line break into the edit buffer and runs
+/// nothing (0.4.4 ticket 03, the spike's arm B).
+///
+/// ConPTY announces win32-input-mode (`?9001h`) at the head of every session and parses a record
+/// written inside an otherwise plain-VT stream without Folio adopting the mode; the 2026-09-23
+/// spike measured it on Folio's ConPTY and on the inbox one, and nothing leaked as text.
+const SHIFT_ENTER_RECORDS: &[u8] = b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_";
+
+/// **Would PSReadLine's own paste put on the input line exactly what [`sanitize_paste`] would
+/// send?** (0.4.4 ticket 03) — which is the whole of whether a paste into a PowerShell prompt
+/// may take the clipboard road (`bt_pty::PSREADLINE_PASTE_INPUT`).
+///
+/// On that road the shell reads the clipboard itself and Folio's cleanup never runs. PSReadLine's
+/// `Paste` (the same body in 2.0.0, 2.4.5 and master: `KillYank.cs`) removes every `\r` and turns
+/// every tab into four spaces, and inserts everything else as it is. So the two agree exactly
+/// when the text holds **no control character but a tab, a `\n`, or a `\r` directly before a
+/// `\n`**: a `\r\n` is one break on both roads. Anything else — a character `sanitize_paste`
+/// drops (an escape, a bracketed-paste terminator, a bell) or a lone `\r`, which Folio sends as a
+/// break and PSReadLine would delete, gluing two lines together — is text Folio has to change,
+/// and it goes by [`input_line_bytes`] instead, which carries Folio's own bytes.
+///
+/// A tab is not in that list, on purpose: sent as a byte it is the Tab key and PSReadLine
+/// *completes* something, while its own paste inserts four spaces — the clipboard road is the
+/// better of the two for it, not a change Folio has to make.
+///
+/// One pass, no allocation.
+pub(crate) fn psreadline_pastes_it_unchanged(text: &str) -> bool {
+    let mut bytes = text.bytes().peekable();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'\t' | b'\n' => {}
+            b'\r' if bytes.peek() == Some(&b'\n') => {}
+            // `char::is_control` is Cc: C0, DEL and C1. The C1 controls are two bytes in UTF-8,
+            // `0xC2 0x80..=0x9F`, and no other character's encoding contains that pair.
+            0xC2 if bytes
+                .peek()
+                .is_some_and(|next| (0x80..=0x9F).contains(next)) =>
+            {
+                return false;
+            }
+            byte if byte < 0x20 || byte == 0x7F => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// **A block for a PowerShell prompt, carried as Folio's own bytes** (0.4.4 ticket 03, the
+/// spike's C2): exactly what [`sanitize_paste`] sends, with every line break — each `\r` it
+/// produced — written as [`SHIFT_ENTER_RECORDS`] instead of an Enter.
+///
+/// The road for a paste [`psreadline_pastes_it_unchanged`] says Folio has to change, so it still
+/// lands whole on the input line and runs nothing until the reader's Enter. Everything else is
+/// today's bytes, a tab included (it is the Tab key there, as it always was).
+pub(crate) fn input_line_bytes(text: &str) -> Vec<u8> {
+    let sanitized = sanitize_paste(text);
+    let breaks = sanitized.iter().filter(|&&byte| byte == b'\r').count();
+    let mut bytes = Vec::with_capacity(sanitized.len() + breaks * (SHIFT_ENTER_RECORDS.len() - 1));
+    for byte in sanitized {
+        if byte == b'\r' {
+            bytes.extend_from_slice(SHIFT_ENTER_RECORDS);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    bytes
+}
+
 fn sanitize_paste(text: &str) -> Vec<u8> {
     // Remove the complete terminator before generic control filtering. Merely removing ESC would
     // leave a misleading printable "[201~" fragment and weakens later policy changes.
@@ -1221,6 +1291,65 @@ mod tests {
             paste_bytes("safe\x1b[201~tail\0\u{0007}", false),
             b"safetail"
         );
+    }
+
+    /// RED (0.4.4 ticket 03) — **the line-break record is Shift+Enter, down and up, and nothing
+    /// else changes.**
+    ///
+    /// The bytes are the spike's arm B, byte for byte — the only encoding measured to land a
+    /// break on PSReadLine's input line without running it — and the text between the breaks is
+    /// `sanitize_paste`'s, so a paste that goes this way loses exactly what today's road loses.
+    ///
+    /// MUTATION: write `KeyDown 0` in the first record of `SHIFT_ENTER_RECORDS`, or push the `\r`
+    /// as well as the records in `input_line_bytes`.
+    #[test]
+    fn the_line_break_record_is_shift_enter_and_nothing_else() {
+        assert_eq!(
+            input_line_bytes("a\r\nb\nc"),
+            b"a\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_b\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_c"
+        );
+        // What `sanitize_paste` drops is dropped here too, and a tab stays the byte it always was.
+        assert_eq!(
+            input_line_bytes("x\x1b[201~\x07\ty\rz"),
+            b"x\ty\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_z"
+        );
+        // Without a break it is today's bytes.
+        assert_eq!(input_line_bytes("dir\tx"), paste_bytes("dir\tx", false));
+    }
+
+    /// RED (0.4.4 ticket 03) — **the clipboard road is taken only when PSReadLine's own paste
+    /// would land what Folio's cleanup would have sent.**
+    ///
+    /// PSReadLine's `Paste` deletes every `\r` and inserts everything else as it is. So `\r\n` and
+    /// `\n` agree with `sanitize_paste`, and a tab is its own case (four spaces there, the Tab key
+    /// here — the clipboard road is the better one). A lone `\r` does not agree: Folio sends it
+    /// as a break and PSReadLine would glue the two lines together. Neither does a control
+    /// character, which `sanitize_paste` drops and PSReadLine would insert.
+    ///
+    /// MUTATION: accept any `\r` in `psreadline_pastes_it_unchanged` — `"a\rb"` goes green.
+    #[test]
+    fn only_text_folio_would_not_change_takes_the_clipboard_road() {
+        for unchanged in [
+            "a",
+            "a\r\nb\r\nc",
+            "a\nb\n",
+            "if ($x) {\n\t'yes'\n}",
+            "中文\r\n路径",
+            "",
+        ] {
+            assert!(psreadline_pastes_it_unchanged(unchanged), "{unchanged:?}");
+        }
+        for changed in [
+            "a\rb",
+            "a\r",
+            "a\x1b[201~\nb",
+            "a\x07\nb",
+            "a\u{85}\nb",
+            "a\x7f\nb",
+            "a\0\nb",
+        ] {
+            assert!(!psreadline_pastes_it_unchanged(changed), "{changed:?}");
+        }
     }
 
     /// RED (0.4.4 ticket 02) — **a paste is as many lines as the reader sees, and the newline a
