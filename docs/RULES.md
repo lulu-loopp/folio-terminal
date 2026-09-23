@@ -356,6 +356,22 @@ not table rows (the search field's `Shift+Enter`) and may not hold a table chord
 `docs/features.md` names verbs, not keys, and points at `docs/shortcuts.md`. The
 row stays `not yet folded` (the rung order is still unwritten).
 
+Rulings added 2026-09-22 and 2026-09-23 (owner, keybinding-panel design note,
+rulings 1 and 2; 0.4.4 ticket 04): **a bare `Ctrl`+letter is recordable, at the
+recorder and in `keybindings.json`; the row says `shell` instead of being
+refused.** The note is on every row whose chord is a bare `Ctrl` and one ASCII
+letter, default or recorded, in any scope (2026-09-23;
+`shortcuts::takes_a_shell_control_key`, read by `Shortcuts::editor_rows`). The
+AltGr zone and "a desktop-wide key needs a modifier" stay refusals. **The default
+table does not change**: no two-key-first re-derivation, and a reader who wants
+`Ctrl+N` records it once. This supersedes, for recordings, discipline ① of the
+2026-08-17 audit. Held by `shortcuts::tests::a_bare_ctrl_letter_is_free_and_the_row_says_shell`,
+`the_file_door_keeps_a_recorded_ctrl_letter` and
+`every_row_on_a_shell_control_key_says_shell_default_or_custom`. Still `not yet
+folded`: folding this row (the rung order of `Runtime::keyboard_input`, where the
+terminal's copy and paste answer before the table) is design-note T5, not this
+ticket.
+
 ### 28. Mouse routing — `not yet folded`
 Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; §7.60
 *`T-WHEEL-TRACE`: the wheel has no road in a recording, so an aiming question
