@@ -9,6 +9,7 @@
 //! imports, where the two names cannot collide.
 
 mod diagnostics;
+mod dpi;
 mod i18n;
 mod profiles;
 mod quake;
