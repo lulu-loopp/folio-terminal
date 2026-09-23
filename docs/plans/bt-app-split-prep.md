@@ -975,3 +975,100 @@ Compile-time guards outside the reader taxonomy, which the tripwire does not
 see and which P0 gives rows of their own: the anonymous exhaustive `Runtime`
 destructuring const in `main.rs`, `animation.rs`'s `is_send` checks, and the
 anonymous assertions in `seats.rs`, `settings.rs` and `peek_strip.rs`.
+
+---
+
+## Appendix C — 2026-09-22: Step 2a landed, and the end measurement (§7.1, §7.2, §7.5)
+
+Branch `prep/move-2a` from `main` at `b031cfd2`; one commit per topic, each
+compiling and passing its gate on its own, then one narrowing commit
+(§6.5 step 5), then one import commit. The per-topic record, with every
+`pub(crate)` count, `use` line and rustfmt re-wrap by name, is kept outside
+the tree, in the coordinator's trace (`move-2a-report-2026-09-22.md`).
+
+**What moved.** 25 of the 28 topics — **1,195 methods** — into
+`src/runtime/*.rs`; `runtime/mod.rs` declares 25 modules and imports nothing.
+`main.rs` went from 133,794 lines / 6,732,197 bytes to **74,203 / 3,689,978**.
+The two `impl Runtime<'_>` blocks keep **198** methods: the **112**
+unassigned ones (not moved in 2a, by the brief) and three topics that could
+not be a pure move:
+
+| Topic | Methods | Why it stayed |
+| --- | ---: | --- |
+| `launch` | 4 | `shell_integration::tests::shell_integration_startup_and_removal_doors_are_above_window_work` reads `include_str!("main.rs")` for `shell_integration::begin_startup_migration();`, which `Runtime::create` calls. |
+| `settings` | 31 | `focus_mode_door_tests::only_the_chord_and_the_settings_row_write_the_bit` compares the `self.set_focus_mode(` lines in **universe order** against a fixed-order list; `runtime/settings.rs` reads after `main.rs`, so the two doors come back reversed. |
+| `focus` | 51 | `focus_mode_door_tests::the_cards_offer_is_spent_in_one_place_and_given_back_in_one`, the same shape over `settings.cards_gesture_hint_offer =`. Moving settings and focus together fixes this one and still breaks the other. |
+
+Each is a reader the move turns red, which by §6.0 is the reader's defect,
+not the move's: a file-bound `include_str!` positive, and two sets compared
+as ordered lists. They need rows of their own before those topics can move.
+
+**Manifest corrections applied** (item-level rule over the theme regex):
+`apply_quake_profile` → quake; `drag_preview_text`, `release_preview_text`,
+`press_preview_text` → preview; `spend_preview_press`,
+`preview_press_keeps_the_caret_seat`, `drop_preview_selection` (newer than
+the 2026-09-21 manifest) added under preview.
+
+### §7.1 — the inventory, regenerated
+
+`scripts/dev/bt-app-graph.py` and `scripts/dev/bt-app-split-freshness.py` on
+the same tree (the branch head), the second with the new `--out` redirected to
+`target/inventory-2a` so nothing was written into `docs/plans/`. Both of the
+generator's working-tree assertions held. The regenerated manifest has **198**
+rows — the residue — of which the theme regex leaves **112 unassigned**, the
+same number as before the move. Census: **250** reader rows, all `existing`;
+impacts 197 "no 2a subject move identified", 38 "fixture/manifest input
+retained", 7 "retained subject: no 2a move", 4 "retained source file read
+dynamically", 2 "recursive enumeration: coverage retained", 2 "enumeration:
+audit recursion and original scope". Parsed `#[test]` attributes: 4,244 before
+and after. No `include_str!`/`#[path]`/`file!()`/`module_path!` moved (the
+mover's refusal never fired), and no platform `cfg` moved.
+
+### §7.2 — list state
+
+MIGRATION-DEBT: **280 rows before, 280 after, 0 added, 0 removed** — the
+second half (P20) has not run, so the list is not empty; 2a moved none of its
+subjects' rows. The allowlist is `bt_source::FileScoped`, **three** entries,
+unchanged. The tripwire is green. `FILES_THAT_MAY_NAME_A_PLATFORM` still has
+15 entries and both platform readers are green.
+
+### §7.5 — the declaration
+
+For the 25 topics that moved, 2a is a pure move:
+
+* `cargo test -p bt-app --bin folio -- --list` at the head is **identical** to
+  `b031cfd2`'s — 4,243 names, same order and multiplicity — and
+  `--list --ignored` is identical (10). The whole bin suite passes (4,233 + 10
+  ignored); `cargo test --workspace --exclude bt-pty --exclude bt-render` and
+  `cargo clippy -p bt-app --all-targets -- -D warnings` pass.
+* Every guard's verdict is unchanged, and the one guard edited — the two
+  register gates' scope in `arrival_wiring_tests`, flipped in the first move
+  commit to `[exact("crate"), tree("crate::runtime")]` with its executable
+  reminder deleted, as the brief requires — keeps its mutation: a `.settling`
+  reader planted in `runtime/quake.rs` turns the settling gate red, naming the
+  planted method. That is the only `#[cfg(test)]` text changed outside the
+  moved items. (Two crate-root imports that only `tests.rs` still reads gained
+  `#[cfg(test)]`; that is a `use` declaration, not test text.)
+* The allowlist did not grow and the debt list did not change.
+* §7.4, each on its own terms:
+  **bodies** — 1,195 / 1,195 byte-identical to the pre-move blob
+  (`bt-app-move-topic.py --check` per topic against its parent);
+  **declarations** — verbatim apart from the visibility prefix, except **102**
+  that rustfmt re-wrapped after the prefix pushed them past 100 columns, each
+  named in its topic's commit;
+  **imports and visibility** — each topic file imports only crate-root
+  bindings, so no name can resolve differently from the root; 14 trait imports
+  came from rustc's E0599 suggestion, always the candidate the root itself
+  imports; 9 imports rustc reported unused were removed (7 root imports whose
+  last user moved, 2 over-imports in topic files); visibility ends at 251
+  `pub(crate)`, 635 `pub(in crate::runtime)`, 309 private, with 145 kept
+  `pub(crate)` above the manifest column because a witnessed caller is still
+  in `main.rs`;
+  **inherited attributes** — `main.rs` carries one inner attribute,
+  `#![windows_subsystem = "windows"]`, which is crate-level and reaches every
+  module alike; no moved item depended on an outer attribute of its old
+  position;
+  **relative inputs** — none moved.
+
+The declaration does not cover `launch`, `settings` and `focus`, which did
+not move.

@@ -348,7 +348,7 @@ def reference_maps(oldfiles,newfiles,new):
     return rows
 
 def main():
-    global ARGS
+    global ARGS, OUT
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--base',default='ee771130'); ap.add_argument('--commit',default='dc99be53')
     # The run's own date names its artefacts; pass it so a re-run reproduces them.
@@ -356,7 +356,10 @@ def main():
     # The revision-5 locator map is tied to one base; ask for it explicitly.
     ap.add_argument('--references',action='store_true')
     ap.add_argument('--report',default=None,help='the document carrying the GENERATED 2A SUMMARY block')
+    # prep §7.1(3): a read-only regeneration writes nothing into docs/plans/.
+    ap.add_argument('--out',default=str(OUT),help='the directory the TSV/JSON artefacts go to')
     ARGS=ap.parse_args()
+    OUT=Path(ARGS.out)
     DATE=ARGS.date
     oldfiles=snapshot(ARGS.base); newfiles=snapshot(ARGS.commit)
     old=analyse(oldfiles); new=analyse(newfiles)
