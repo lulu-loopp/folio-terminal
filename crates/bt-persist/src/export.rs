@@ -8,7 +8,7 @@
 //! {
 //!   "folio_export": 1,
 //!   "exported_by": "Folio 0.4.4 (abc1234)",
-//!   "settings": { "schema_version": 36, … },
+//!   "settings": { "schema_version": 37, … },
 //!   "profiles": { "schema_version": 1, … },
 //!   "keybindings": { "schema_version": 1, … },
 //!   "schemes": { "Nord (custom).json": { "name": "Nord (custom)", … } }
@@ -252,6 +252,9 @@ mod tests {
             git_panel: false,
             terminal_font_size: 15,
             dark_scheme: "Sea (custom)".to_owned(),
+            // v37's key (ticket 02), away from its default so the round trip
+            // has to carry it.
+            multiline_paste_ask: false,
             ..SettingsV1::default()
         };
         let profiles = ProfilesV1::default();
@@ -383,6 +386,7 @@ mod tests {
         let object = old.as_object_mut().unwrap();
         object.insert("schema_version".to_owned(), Value::from(35));
         object.remove("repair_row_breaks");
+        object.remove("multiline_paste_ask");
         let bytes = serde_json::to_vec(&serde_json::json!({
             "folio_export": 1,
             "settings": old,
@@ -395,6 +399,10 @@ mod tests {
             .expect("and a v35 part is readable");
         assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
         assert!(settings.repair_row_breaks, "v36 carries the repair forward");
+        assert!(
+            settings.multiline_paste_ask,
+            "and v37 the question before a multi-line paste"
+        );
         assert!(!settings.git_panel, "and the reader's own values survive");
         assert_eq!(
             read.profiles, None,

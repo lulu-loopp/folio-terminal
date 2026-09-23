@@ -451,6 +451,9 @@ impl Runtime<'_> {
             SettingChange::OptionSendsAlt(enabled) => {
                 self.apply_option_sends_alt(enabled)?;
             }
+            SettingChange::MultilinePaste(enabled) => {
+                self.apply_multiline_paste_ask(enabled);
+            }
             // Read where they are used, so the store is their door: the answer
             // the PSReadLine card was given, the open Advanced groups, the
             // gesture hint's receipt, the summoned terminal's profile — stored

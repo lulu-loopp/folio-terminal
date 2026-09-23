@@ -3504,6 +3504,15 @@ pub enum SettingsRow {
     /// rows that say what a pane does rather than with the one row whose answer
     /// is visible outside this window.
     CopyOnSelect,
+    /// **Whether a paste of several lines into a shell that would run them one by one asks
+    /// first** — the one row the owner ruled for the multi-line paste card (2026-09-22: "One row,
+    /// 'ask before pasting several lines', on by default").
+    ///
+    /// **Under [`Self::CopyOnSelect`]**: that row says what a pane does with lines the reader
+    /// drags across, and this says what it does with lines the reader pastes in. Both are the
+    /// pane's own behaviour, and the row below them is the page's one row whose answer shows up
+    /// outside this window.
+    MultilinePaste,
     /// **Whether a program may put a message on the desktop** — the Terminal
     /// page's third row (§7.6, Windows landing slice 3, 2026-08-20).
     ///
@@ -3716,6 +3725,7 @@ impl SettingsRow {
             | Self::Scrollback
             | Self::LineWrapping
             | Self::CopyOnSelect
+            | Self::MultilinePaste
             | Self::Notifications => SettingsCategory::Terminal,
             // **The rows about the program running in the pane** (user ruling
             // 2026-08-25). `Notifications` deliberately stayed on `Terminal`: it
@@ -3882,6 +3892,7 @@ impl SettingsRow {
             Self::Scrollback => Text::RowScrollback.text(),
             Self::LineWrapping => Text::RowLineWrapping.text(),
             Self::CopyOnSelect => Text::RowCopyOnSelect.text(),
+            Self::MultilinePaste => Text::RowMultilinePaste.text(),
             Self::Notifications => Text::RowNotifications.text(),
             Self::TurnEndNotifications => Text::RowTurnEndNotifications.text(),
             Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
@@ -4027,6 +4038,7 @@ impl SettingsRow {
             }
             Self::Scrollback => Text::DescScrollback.text(),
             Self::CopyOnSelect => Text::DescCopyOnSelect.text(),
+            Self::MultilinePaste => Text::DescMultilinePaste.text(),
             Self::Notifications => Text::DescNotifications.text(),
             Self::TurnEndNotifications => Text::DescTurnEndNotifications.text(),
             // **The one row on this page whose line is a function of something
@@ -4437,6 +4449,7 @@ impl SettingsRow {
             | Self::Scrollback
             | Self::LineWrapping
             | Self::CopyOnSelect
+            | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
             // The everyday half of the editor, in the order somebody decides a
@@ -4561,6 +4574,7 @@ impl SettingsRow {
             | Self::OptionSendsAlt
             | Self::PsReadLine
             | Self::CopyOnSelect
+            | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
             | Self::PowerShellOffer
@@ -4659,6 +4673,7 @@ impl SettingsRow {
             | Self::OptionSendsAlt
             | Self::PsReadLine
             | Self::CopyOnSelect
+            | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
             | Self::PowerShellOffer
@@ -5125,6 +5140,9 @@ impl SettingsRow {
             Self::CopyOnSelect => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.copy_on_select),
+            Self::MultilinePaste => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.multiline_paste_ask),
             Self::Notifications => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.terminal_notifications),
@@ -5733,6 +5751,9 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // behaviour, and the row below is the only one on this page whose answer is
     // visible outside this window.
     rows.push(SettingsRow::CopyOnSelect);
+    // **Directly under it** (0.4.4 ticket 02): the row above is what a pane does with lines
+    // dragged across it, this one what it does with several lines pasted into it.
+    rows.push(SettingsRow::MultilinePaste);
     // **Last on its page**, the judgement `Explorer context menu` is filed under
     // in General: the two rows above say what a pane keeps and what one shell is
     // patched with, and this is the only row here whose answer shows up outside
@@ -6134,6 +6155,9 @@ pub struct SettingsValues {
     /// Whether letting go of a drag-selection writes it to the clipboard
     /// (gesture audit 2026-08-26, 丙4).
     pub copy_on_select: bool,
+    /// Whether a paste of several lines into a shell that would run them one by one asks first
+    /// (0.4.4 ticket 02).
+    pub multiline_paste_ask: bool,
     /// Whether a program may put a message on the desktop (§7.6).
     pub terminal_notifications: bool,
     /// Whether the end of a turn may reach the desktop — a taskbar flash on a
@@ -6406,6 +6430,7 @@ impl SettingsValues {
             scrollback_lines: bt_persist::DEFAULT_SCROLLBACK_LINES,
             line_wrapping: true,
             copy_on_select: true,
+            multiline_paste_ask: true,
             terminal_notifications: true,
             turn_end_notification: true,
             powershell_integration_offer: true,
@@ -9844,6 +9869,17 @@ pub fn quake_profile_requested(target: SettingsTarget) -> Option<Option<usize>> 
 pub fn copy_on_select_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::CopyOnSelect, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether a paste of several lines asks first, as a press on its picker (0.4.4 ticket 02).
+#[must_use]
+pub fn multiline_paste_ask_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::MultilinePaste, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -24489,6 +24525,7 @@ mod tests {
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
+                SettingsRow::MultilinePaste,
                 SettingsRow::Notifications
             ],
             "the mock-up's order for this page, with the two PowerShell rows \n             together at the top: the row that reports a fact about the machine, \n             the row that offers what this one is missing, then the pane's two \n             axes — what it keeps of what has gone past, and what it does with a \n             line wider than itself — and last the only row on this page whose \n             answer shows up outside this window"
@@ -24582,6 +24619,7 @@ mod tests {
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
+                SettingsRow::MultilinePaste,
                 SettingsRow::Notifications
             ],
             "the mock-up's order for this page"
@@ -26541,6 +26579,7 @@ mod tests {
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
+                SettingsRow::MultilinePaste,
                 SettingsRow::Notifications,
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,
@@ -26615,6 +26654,7 @@ mod tests {
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
+                SettingsRow::MultilinePaste,
                 SettingsRow::Notifications,
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,

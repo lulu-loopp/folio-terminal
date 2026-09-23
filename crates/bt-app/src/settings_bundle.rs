@@ -113,6 +113,7 @@ pub(crate) enum SettingChange {
     QuakeRestore(QuakeRestoreV1),
     LaunchOpens(LaunchOpensV1),
     OptionSendsAlt(bool),
+    MultilinePaste(bool),
 }
 
 impl SettingChange {
@@ -160,6 +161,7 @@ impl SettingChange {
             Self::QuakeRestore(_) => SettingsRow::QuakeRestore,
             Self::LaunchOpens(_) => SettingsRow::LaunchOpens,
             Self::OptionSendsAlt(_) => SettingsRow::OptionSendsAlt,
+            Self::MultilinePaste(_) => SettingsRow::MultilinePaste,
             // The three with no row: an answer the PSReadLine card was given,
             // which pages' Advanced groups are open, and whether the cards'
             // gesture hint has been shown. Each is read where it is used.
@@ -225,6 +227,7 @@ impl SettingChange {
             Self::QuakeRestore(value) => settings.quake_restore = value,
             Self::LaunchOpens(value) => settings.launch_opens = value,
             Self::OptionSendsAlt(value) => settings.option_sends_alt = value,
+            Self::MultilinePaste(value) => settings.multiline_paste_ask = value,
         }
     }
 }
@@ -303,6 +306,7 @@ pub(crate) fn plan_settings(
         powershell_install_pending: _,
         launch_opens,
         option_sends_alt,
+        multiline_paste_ask,
     } = imported.clone();
     let mut changes = Vec::new();
     let mut offer = |differs: bool, change: SettingChange| {
@@ -482,6 +486,10 @@ pub(crate) fn plan_settings(
         current.option_sends_alt != option_sends_alt,
         SettingChange::OptionSendsAlt(option_sends_alt),
     );
+    offer(
+        current.multiline_paste_ask != multiline_paste_ask,
+        SettingChange::MultilinePaste(multiline_paste_ask),
+    );
     let (apply, elsewhere) = changes.into_iter().partition(|change| {
         change
             .row()
@@ -646,6 +654,7 @@ mod tests {
             quake_restore: QuakeRestoreV1::Nothing,
             launch_opens: LaunchOpensV1::TabInLastWindow,
             option_sends_alt: !base.option_sends_alt,
+            multiline_paste_ask: !base.multiline_paste_ask,
             ..base
         }
     }
@@ -729,6 +738,7 @@ mod tests {
         let settings = SettingsV1 {
             git_panel: false,
             dark_scheme: "Deep (custom)".to_owned(),
+            multiline_paste_ask: false,
             ..SettingsV1::default()
         };
         let profiles = ProfilesV1::default();
