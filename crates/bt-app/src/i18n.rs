@@ -3906,8 +3906,7 @@ impl Text {
                 "One chord for each; some are not set yet",
                 "每一个各有一组键；有些还没设",
             ),
-            // zh: pending opus46
-            Self::ShortcutNoteShell => pick(lang, "shell", "shell"),
+            Self::ShortcutNoteShell => pick(lang, "shell", "终端键"),
             Self::ShortcutUnbound => pick(lang, "Not set", "未设置"),
             Self::ShortcutReservedMoveFocus => {
                 pick(lang, "Move the focus between panes", "在窗格之间移动焦点")
@@ -6228,13 +6227,9 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 3] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 1] = [
         // The Mac folder in the dark scheme row (0.4.4 ticket 07).
         (Self::DescDarkScheme, HostPlatform::MacOs),
-        // The `shell` note on a Shortcuts row (0.4.4 ticket 04), on both
-        // platforms: a bare Ctrl+letter is recordable on either.
-        (Self::ShortcutNoteShell, HostPlatform::Windows),
-        (Self::ShortcutNoteShell, HostPlatform::MacOs),
     ];
 }
 
