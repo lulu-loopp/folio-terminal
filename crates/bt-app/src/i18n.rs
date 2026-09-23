@@ -5042,24 +5042,17 @@ impl Text {
                 "Copies selected text to the clipboard when you release the mouse button.",
                 "松开鼠标后将选中的文字复制到剪贴板。",
             ),
-            // CHINESE PENDING (2026-09-23) — English stands in both columns until opus46 writes
-            // the row and the sentence below it (0.4.4 ticket 02).
-            Self::RowMultilinePaste => pick(
-                lang,
-                "Ask before pasting several lines",
-                "Ask before pasting several lines",
-            ),
+            Self::RowMultilinePaste => {
+                pick(lang, "Ask before pasting several lines", "多行粘贴前询问")
+            }
             Self::DescMultilinePaste => pick(
                 lang,
                 "Asks before a paste runs as several commands. Off, it is sent as is.",
-                "Asks before a paste runs as several commands. Off, it is sent as is.",
+                "粘贴内容会逐行执行时先询问。关闭时原样发送。",
             ),
-            // CHINESE PENDING (2026-09-23) — the card's three strings, English in both columns.
-            Self::PasteCardTitle => {
-                pick(lang, "{lines} lines → {shell}", "{lines} lines → {shell}")
-            }
-            Self::PasteCardRun => pick(lang, "Run line by line", "Run line by line"),
-            Self::PasteCardJoin => pick(lang, "Join into one line", "Join into one line"),
+            Self::PasteCardTitle => pick(lang, "{lines} lines → {shell}", "{lines} 行 → {shell}"),
+            Self::PasteCardRun => pick(lang, "Run line by line", "逐行运行"),
+            Self::PasteCardJoin => pick(lang, "Join into one line", "合为一行"),
             Self::ShortcutRecord => pick(lang, "Record", "录制"),
             // 「按键…」and not 「录制中…」: the ellipsis already says a clock is
             // running, and what the reader has to supply is the press.
@@ -6258,19 +6251,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 10] = [
-        // 0.4.4 ticket 02 (2026-09-23): the multi-line paste card and its settings row.
-        (Self::RowMultilinePaste, HostPlatform::Windows),
-        (Self::RowMultilinePaste, HostPlatform::MacOs),
-        (Self::DescMultilinePaste, HostPlatform::Windows),
-        (Self::DescMultilinePaste, HostPlatform::MacOs),
-        (Self::PasteCardTitle, HostPlatform::Windows),
-        (Self::PasteCardTitle, HostPlatform::MacOs),
-        (Self::PasteCardRun, HostPlatform::Windows),
-        (Self::PasteCardRun, HostPlatform::MacOs),
-        (Self::PasteCardJoin, HostPlatform::Windows),
-        (Self::PasteCardJoin, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
