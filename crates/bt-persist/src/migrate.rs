@@ -72,6 +72,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (33, migrate_settings_v33_to_v34),
     (34, migrate_settings_v34_to_v35),
     (35, migrate_settings_v35_to_v36),
+    (36, migrate_settings_v36_to_v37),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -833,6 +834,19 @@ fn migrate_settings_v35_to_v36(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(36));
         object.insert("repair_row_breaks".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v36 -> v37: the multi-line paste question, defaulted **on** (owner's ruling 2026-09-22).
+///
+/// [`migrate_settings_v7_to_v8`]'s one-key shape. `true` is the ruling itself rather than a
+/// behaviour carried forward: the question is new, and the owner ruled that it is asked unless a
+/// reader turns it off. No sibling is read or rewritten.
+fn migrate_settings_v36_to_v37(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(37));
+        object.insert("multiline_paste_ask".to_owned(), Value::from(true));
     }
     value
 }
@@ -2775,6 +2789,57 @@ mod tests {
         let absent: crate::SettingsV1 =
             serde_json::from_value(written).expect("this key has a default");
         assert!(absent.repair_row_breaks);
+    }
+
+    /// RED (0.4.4 ticket 02) — **the v36 -> v37 step adds the paste question's key, on, and
+    /// leaves every sibling exactly as it found it.**
+    ///
+    /// The step is one key on its own day. A step that rewrote a neighbour would be answering a
+    /// question on the reader's behalf that the ruling never asked, and a step that forgot the
+    /// version line would leave the ladder on this rung forever.
+    ///
+    /// MUTATION: write `false` in `migrate_settings_v36_to_v37` — the first assertion goes red;
+    /// drop its `schema_version` line — the second does.
+    #[test]
+    fn migrate_settings_v36_to_v37_adds_one_key_and_leaves_every_sibling_alone() {
+        let before = json!({
+            "schema_version": 36,
+            "copy_on_select": false,
+            "repair_row_breaks": false,
+            "terminal_cjk_font_family": "Microsoft YaHei",
+            "option_sends_alt": true
+        });
+        let migrated = migrate_value(before.clone(), 36, 37, SETTINGS_MIGRATIONS).unwrap();
+        assert_eq!(
+            migrated["multiline_paste_ask"],
+            json!(true),
+            "the owner ruled the question on by default"
+        );
+        assert_eq!(migrated["schema_version"], json!(37));
+        let (before, after) = (
+            before.as_object().expect("an object"),
+            migrated.as_object().expect("an object"),
+        );
+        assert_eq!(after.len(), before.len() + 1, "exactly one key is added");
+        for (key, value) in before {
+            if key != "schema_version" {
+                assert_eq!(&after[key], value, "`{key}` was rewritten by the step");
+            }
+        }
+
+        // And a v37 document that omits the line means the same thing.
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            multiline_paste_ask: false,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("multiline_paste_ask");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert!(absent.multiline_paste_ask);
     }
 
     #[test]

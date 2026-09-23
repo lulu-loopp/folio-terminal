@@ -161,6 +161,7 @@ impl Runtime<'_> {
             ImeOwner::Modal if self.window.dirty_gate.is_open() => "dirty_gate",
             ImeOwner::Modal if self.window.first_run.is_open() => "first_run",
             ImeOwner::Modal if self.window.psreadline_invite.is_open() => "psreadline_invite",
+            ImeOwner::Modal if self.paste_card_seat().is_some() => "paste_card",
             ImeOwner::Modal if self.window.settings.is_open() => "settings",
             ImeOwner::Modal => match popup_takes_the_key(self.popups_up()) {
                 Some(Popup::Profile) => "profile_popup",

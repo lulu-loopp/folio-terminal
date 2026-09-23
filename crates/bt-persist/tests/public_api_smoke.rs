@@ -67,6 +67,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         turn_end_notification: false,
         cards_gesture_hint_offer: false,
         copy_on_select: false,
+        multiline_paste_ask: false,
         update_check: false,
         quake_height: 65,
         quake_width: 45,
