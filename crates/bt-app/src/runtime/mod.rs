@@ -8,6 +8,7 @@
 //! `use crate::settings;` is `error[E0255]`. A topic file writes its own
 //! imports, where the two names cannot collide.
 
+mod diagnostics;
 mod i18n;
 mod profiles;
 mod quake;
