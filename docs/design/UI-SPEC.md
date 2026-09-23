@@ -81,7 +81,7 @@ There is no single step. The rules are per role, and each role's value is the on
 | Overlay to window edge | **8** anchored, **24** centred | 8: `profiles.rs::MENU_EDGE_MARGIN_LOGICAL_PX`, `theme.rs::FLOAT_WINDOW_VIEWPORT_MARGIN_LOGICAL_PX`, `file_peek.rs::PEEK_VIEWPORT_MARGIN_LOGICAL_PX`, `toast.rs::TOAST_ANCHOR_INSET_LOGICAL_PX`. 24: `palette.rs::PALETTE_EDGE_MARGIN_LOGICAL_PX`, `websheet.rs::MARGIN_LOGICAL_PX` |
 | Float layer to window corner | **16** | `toast.rs::TOAST_WINDOW_INSET_LOGICAL_PX`, `keyhint.rs::KEY_HINT_WINDOW_INSET_LOGICAL_PX` |
 | Space above an uppercase section label in a dialog or panel | **10** | `settings.rs::GROUP_LABEL_MARGIN_TOP_LOGICAL_PX`. Menus (3, `profiles.rs::SECTION_LABEL_PADDING_TOP_LOGICAL_PX`) and the rail (4, `theme.rs::RAIL_LABEL_PADDING_TOP_LOGICAL_PX`) are tighter containers by kind. |
-| Button padding | **14 × 6** | `first_run.rs::BUTTON_PADDING_X_LOGICAL_PX` / `BUTTON_PADDING_Y_LOGICAL_PX`, `restore.rs::BUTTON_PADDING_X_LOGICAL_PX` / `BUTTON_PADDING_Y_LOGICAL_PX` |
+| Button padding | **14 × 6** | `settings.rs::BUTTON_PADDING_X_LOGICAL_PX` (the About page's door buttons), `first_run.rs::BUTTON_PADDING_X_LOGICAL_PX` / `BUTTON_PADDING_Y_LOGICAL_PX`, `restore.rs::BUTTON_PADDING_X_LOGICAL_PX` / `BUTTON_PADDING_Y_LOGICAL_PX` |
 | Between dialog buttons | **8** | `first_run.rs::BUTTON_GAP_LOGICAL_PX`, `restore.rs::ACTIONS_GAP_LOGICAL_PX` |
 
 The icon-to-label gap is for a mark at a slot size (§8) beside its text. The gap inside a card whose mark is a hero mark (30 pt; the 22-pt app-mark tile) is the card's own stack gap and is not this rule.

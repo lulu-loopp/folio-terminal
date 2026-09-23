@@ -808,6 +808,9 @@ const PROFILE_BADGE_TRACKING_EM: f32 = 0.05;
 const PROFILE_HIDDEN_MARK_OPACITY: f32 = 0.35;
 const BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
 const BUTTON_FONT_LOGICAL_PX: f32 = 13.0;
+/// `.btn { padding: 6px 14px }` — each side of a button's words (`UI-SPEC.md`
+/// §10.3, the number `first_run.rs` and `restore.rs` size their buttons from).
+const BUTTON_PADDING_X_LOGICAL_PX: f32 = 14.0;
 
 // ── the profile editor (§7.1.6c-6b) ─────────────────────────────────────────
 //
@@ -5392,6 +5395,15 @@ impl SettingsRow {
     #[must_use]
     pub const fn opens_a_dialog(self) -> bool {
         matches!(self, Self::ExportSettings | Self::ImportSettings)
+    }
+
+    /// **Whether this row's button wears the `↗`**: a door whose press is
+    /// answered outside this window. The control form and not the destination
+    /// — resolving *where* a row goes touches the disk, and the width solve and
+    /// the draw ask this on every frame.
+    #[must_use]
+    pub fn leaves_the_window(self) -> bool {
+        matches!(self.control(), SettingsControl::Link) && !self.opens_a_dialog()
     }
 }
 
@@ -10915,6 +10927,15 @@ pub fn layout_for_menus(
     // folded ones included, so opening the advanced group never moves the
     // buttons above it. See `page_combo_width`.
     let button = metrics.page_button(content_of, category, row_span, measure);
+    // **One width for every door button on the page**, flush with the column's
+    // right edge — see `door_button_width`.
+    let door = door_button_width(
+        &content_of.category_rows(category),
+        metrics.scale,
+        metrics.border,
+        button,
+        measure,
+    );
     // **The reveal, in this page's own pixels** (animation block, second slice).
     //
     // The bands the disclosure holds are placed exactly where an open group puts
@@ -11064,8 +11085,15 @@ pub fn layout_for_menus(
                 let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
                 cursor += height;
                 let combo_top = top + (metrics.row_content_height_for(lines) - combo_height) / 2.0;
+                // A door is a button, not the column: its box is what is drawn,
+                // pressed and ringed, so all three are one rectangle.
+                let control_width = if matches!(row.control(), SettingsControl::Link) {
+                    door
+                } else {
+                    button
+                };
                 let combo = [
-                    row_right - button,
+                    row_right - control_width,
                     combo_top,
                     row_right,
                     combo_top + combo_height,
@@ -11074,8 +11102,12 @@ pub fn layout_for_menus(
                 // apart — and `min-width: 0`, which is why the control's own cap
                 // (`COMBO_MAX_ROW_SHARE`) is what keeps this column off zero. The
                 // sentence that does not fit what is left **wraps into it** and is
-                // never allowed to run under the button: see `build`.
-                let text_column_right = combo[0] - px(ROW_GAP_LOGICAL_PX);
+                // never allowed to run under the button: see `build`. Measured
+                // from the page's column and not from this row's own control,
+                // because the sentence's lines were counted against the column
+                // (`desc_lines` above) and a door narrower than it must not
+                // hand its sentence room the height was not solved for.
+                let text_column_right = row_right - button - px(ROW_GAP_LOGICAL_PX);
                 let title = [
                     row_left,
                     top,
@@ -12288,6 +12320,43 @@ fn page_combo_width(
         .fold(COMBO_MIN_WIDTH_LOGICAL_PX * scale, f32::max)
 }
 
+/// **How wide every door button on a page is** (owner question 2026-09-23:
+/// "shouldn't the boxes be the same size?" — yes).
+///
+/// One `.btn` chassis for every [`SettingsControl::Link`] row on the page,
+/// `Open ↗` and `Export…` alike: the widest verb the page's doors say, with the
+/// button's padding each side and, on a door that leaves the window, the `↗`
+/// column beside it, floored at the picker's 118. A door that opens a dialog of
+/// the system's own wears no mark but takes the same width, so the column of
+/// buttons is read as one column. Capped at the page's control column
+/// (`column`), which is solved from these same verbs and is never narrower
+/// than any control on it is meant to be.
+fn door_button_width(
+    rows: &[SettingsRow],
+    scale: f32,
+    border: f32,
+    column: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> f32 {
+    let px = |value: f32| value * scale;
+    rows.iter()
+        .filter(|row| matches!(row.control(), SettingsControl::Link))
+        .map(|row| {
+            let verb = measure(
+                row.stated_value().unwrap_or_default(),
+                px(BUTTON_FONT_LOGICAL_PX),
+            );
+            let mark = if row.leaves_the_window() {
+                px(COMBO_GAP_LOGICAL_PX + COMBO_CHEVRON_BOX_LOGICAL_PX)
+            } else {
+                0.0
+            };
+            (2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + verb + mark).ceil()
+        })
+        .fold(px(COMBO_MIN_WIDTH_LOGICAL_PX), f32::max)
+        .min(column)
+}
+
 /// What a rail of this many words costs, pills and the gaps between them.
 fn nav_stack_height(items: usize, scale: f32) -> f32 {
     if items == 0 {
@@ -13320,26 +13389,32 @@ pub fn build(
             // The table draws itself below, with its ghosts; the row's own box
             // is the area it occupies and carries no face of its own.
             SettingsControl::EnvTable => {}
-            // **A fact, and a fact with a door on it** (T-SETTINGS-ABOUT). No
-            // border and no ground: a box would say "press me" on the two rows
-            // where nothing happens, and the three where something does say it
-            // with the `↗` instead — the mark this dialog already wears
-            // wherever an address leaves the window.
-            SettingsControl::Text | SettingsControl::Link => {
+            // **A fact** (T-SETTINGS-ABOUT). No border and no ground: a box
+            // would say "press me" on a row where nothing happens.
+            SettingsControl::Text => {
                 push_stated_value(
                     &mut content_stack,
                     placed.combo,
                     placed.row.stated_value().unwrap_or_default(),
-                    // **The control form and not the destination.** Whether
-                    // this row leaves the window is a fact about the row;
-                    // resolving *where* it goes touches the disk, and a draw
-                    // that asked it would ask on every hover.
-                    (matches!(placed.row.control(), SettingsControl::Link)
-                        && !placed.row.opens_a_dialog())
-                    .then_some(MENU_ACTION_MARK_AWAY),
-                    matches!(placed.row.control(), SettingsControl::Link),
+                    scale,
+                    palette,
+                    measure,
+                );
+            }
+            // **A door is a button** (owner question 2026-09-23): the `.btn`
+            // chassis every other verb in this dialog stands in, one width for
+            // every door on the page (`door_button_width`). The `↗` inside it
+            // marks the doors that leave the window; `Export…` and `Import…`
+            // open a dialog of the system's own and wear the `…` instead.
+            SettingsControl::Link => {
+                push_door_button(
+                    &mut content_stack,
+                    placed.combo,
+                    placed.row.stated_value().unwrap_or_default(),
+                    placed.row.leaves_the_window(),
                     hover == Some(SettingsTarget::Link(placed.row)),
                     scale,
+                    border,
                     palette,
                     measure,
                 );
@@ -15139,23 +15214,17 @@ pub(crate) fn push_cap(
     });
 }
 
-/// `.btn` (mock-up 2000-2008): a bordered, rounded box with a word centred in
-/// it, at the picker's own height so a row's right-hand control is one object
-/// wherever it appears.
-#[allow(clippy::too_many_arguments)]
-fn push_button(
+/// `.btn`'s box without its words: the hairline edge, and inside it the
+/// dialog's surface, or its hover ground under the pointer.
+fn push_button_face(
     quads: &mut Vec<OverlayQuad>,
-    labels: &mut Vec<ChromeLabel>,
     rect: [f32; 4],
-    text: &str,
     hovered: bool,
     scale: f32,
     border: f32,
     palette: bt_render::ChromePalette,
-    measure: &mut dyn FnMut(&str, f32) -> f32,
 ) {
-    let px = |value: f32| value * scale;
-    let radius = px(BUTTON_RADIUS_LOGICAL_PX);
+    let radius = BUTTON_RADIUS_LOGICAL_PX * scale;
     quads.extend(rounded_overlay_fill(
         rect,
         radius,
@@ -15177,7 +15246,25 @@ fn push_button(
         },
         1.0,
     ));
-    let font_size_px = px(BUTTON_FONT_LOGICAL_PX);
+}
+
+/// `.btn` (mock-up 2000-2008): a bordered, rounded box with a word centred in
+/// it, at the picker's own height so a row's right-hand control is one object
+/// wherever it appears.
+#[allow(clippy::too_many_arguments)]
+fn push_button(
+    quads: &mut Vec<OverlayQuad>,
+    labels: &mut Vec<ChromeLabel>,
+    rect: [f32; 4],
+    text: &str,
+    hovered: bool,
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    push_button_face(quads, rect, hovered, scale, border, palette);
+    let font_size_px = BUTTON_FONT_LOGICAL_PX * scale;
     labels.push(ChromeLabel {
         mono: false,
         text: ellipsized(text, rect[2] - rect[0], font_size_px, measure),
@@ -15222,45 +15309,21 @@ fn focus_ring(rect: [f32; 4], scale: f32, accent: [u8; 3]) -> Vec<OverlayQuad> {
     )
 }
 
-/// **The closed control** — its face, the value in force, and on a marked row
-/// the mark that value wears (user report 2026-09-13, DESIGN §7.1.6c-9‴).
-///
-/// `icon_advance` is the row's reserved `.ticon` column and is spent whether
-/// `mark` is `Some` or not; `mark` is what this particular value carries, which
-/// on the summoned terminal's row is nothing at all for its first item. The two
-/// are separate arguments for exactly that reason — see
-/// [`SettingsRow::value_mark`] and [`option_icon_advance`].
 /// **A row's answer when the answer is not a choice** (T-SETTINGS-ABOUT).
 ///
 /// Drawn in the box a picker would have stood in, right-aligned, so the About
-/// page's answers end on the column every other page's buttons end on — which
+/// page's facts end on the column every other page's buttons end on — which
 /// is [`page_combo_width`]'s own ruling read one step further: a reader
-/// comparing pages is comparing one column.
-///
-/// `mark` is the `↗` on a row that leaves the window, and it is given the width
-/// a picker reserves for its chevron so that the two land on the same x. The
-/// ink follows the same three-way rule the rest of the dialog uses: a stated
-/// fact is muted, a door is titled, and a door under the pointer is accented.
-#[allow(clippy::too_many_arguments)]
+/// comparing pages is comparing one column. Muted: a fact is read, not pressed.
 fn push_stated_value(
     stack: &mut OverlayLayer,
     rect: [f32; 4],
     value: &str,
-    mark: Option<&str>,
-    door: bool,
-    lit: bool,
     scale: f32,
     palette: bt_render::ChromePalette,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) {
-    let px = |logical: f32| logical * scale;
-    let mark_span = px(COMBO_CHEVRON_BOX_LOGICAL_PX);
-    let text_right = if mark.is_some() {
-        rect[2] - mark_span - px(COMBO_GAP_LOGICAL_PX)
-    } else {
-        rect[2]
-    };
-    let font_size_px = px(COMBO_FONT_LOGICAL_PX);
+    let font_size_px = COMBO_FONT_LOGICAL_PX * scale;
     stack.labels.push(ChromeLabel {
         mono: false,
         // **Ellipsised on the same terms every picker's value is** — this
@@ -15269,19 +15332,10 @@ fn push_stated_value(
         // every other, so what this can reach is a window too narrow to hold
         // the version at all, and a string running out under the sentence
         // beside it would be worse than one that says it was cut.
-        text: ellipsized(value, text_right - rect[0], font_size_px, measure),
-        rect: [rect[0], rect[1], text_right, rect[3]],
+        text: ellipsized(value, rect[2] - rect[0], font_size_px, measure),
+        rect,
         font_size_px,
-        // A door is drawn in the ink of something to press, with or without
-        // the `↗` beside it — `Export…` and `Import…` open a dialog of the
-        // system's own and wear no mark (0.4.4 ticket 05); a fact is muted.
-        color: if lit {
-            palette.accent
-        } else if door {
-            palette.dialog_title_text
-        } else {
-            palette.dialog_muted_text
-        },
+        color: palette.dialog_muted_text,
         align_right: true,
         align_center: false,
         letter_spacing_em: 0.0,
@@ -15289,24 +15343,75 @@ fn push_stated_value(
         tabular_numerals: false,
         clip: None,
     });
-    let Some(mark) = mark else {
-        return;
+}
+
+/// **A door on the About page** (owner question 2026-09-23): the `.btn`
+/// chassis ([`push_button_face`]), its verb, and on a door that leaves the
+/// window the `↗` beside it.
+///
+/// The verb and its mark are centred in the box as one run, the way a `.btn`
+/// centres its words. The mark takes the column [`door_button_width`] reserved
+/// for it (`COMBO_GAP`, then the chevron's square), so the width solved and the
+/// width spent are one arithmetic. The ink is a button's: title ink at rest,
+/// the hover ground under the pointer.
+#[allow(clippy::too_many_arguments)]
+fn push_door_button(
+    stack: &mut OverlayLayer,
+    rect: [f32; 4],
+    verb: &str,
+    leaves_the_window: bool,
+    hovered: bool,
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    let px = |logical: f32| logical * scale;
+    push_button_face(&mut stack.quads, rect, hovered, scale, border, palette);
+    let font_size_px = px(BUTTON_FONT_LOGICAL_PX);
+    let inner_left = rect[0] + border + px(BUTTON_PADDING_X_LOGICAL_PX);
+    let inner_right = rect[2] - border - px(BUTTON_PADDING_X_LOGICAL_PX);
+    let mark_column = if leaves_the_window {
+        px(COMBO_GAP_LOGICAL_PX + COMBO_CHEVRON_BOX_LOGICAL_PX)
+    } else {
+        0.0
     };
+    let text = ellipsized(
+        verb,
+        inner_right - inner_left - mark_column,
+        font_size_px,
+        measure,
+    );
+    let run = measure(&text, font_size_px) + mark_column;
+    let text_left = inner_left + ((inner_right - inner_left) - run).max(0.0) / 2.0;
+    let text_right = text_left + run - mark_column;
     stack.labels.push(ChromeLabel {
         mono: false,
-        text: mark.to_owned(),
+        text,
+        rect: [text_left, rect[1], text_right, rect[3]],
+        font_size_px,
+        color: palette.dialog_title_text,
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
+    if !leaves_the_window {
+        return;
+    }
+    stack.labels.push(ChromeLabel {
+        mono: false,
+        text: MENU_ACTION_MARK_AWAY.to_owned(),
         rect: [
             text_right + px(COMBO_GAP_LOGICAL_PX),
             rect[1],
-            rect[2],
+            text_right + mark_column,
             rect[3],
         ],
         font_size_px: px(MENU_ACTION_MARK_FONT_LOGICAL_PX),
-        color: if lit {
-            palette.accent
-        } else {
-            palette.menu_item_hint_text
-        },
+        color: palette.menu_item_hint_text,
         align_right: false,
         align_center: true,
         letter_spacing_em: 0.0,
@@ -15316,6 +15421,14 @@ fn push_stated_value(
     });
 }
 
+/// **The closed control** — its face, the value in force, and on a marked row
+/// the mark that value wears (user report 2026-09-13, DESIGN §7.1.6c-9‴).
+///
+/// `icon_advance` is the row's reserved `.ticon` column and is spent whether
+/// `mark` is `Some` or not; `mark` is what this particular value carries, which
+/// on the summoned terminal's row is nothing at all for its first item. The two
+/// are separate arguments for exactly that reason — see
+/// [`SettingsRow::value_mark`] and [`option_icon_advance`].
 #[allow(clippy::too_many_arguments)]
 fn push_combo(
     stack: &mut OverlayLayer,
@@ -16440,6 +16553,180 @@ mod tests {
                 "{row:?} offers a picker onto something that is not a choice"
             );
         }
+    }
+
+    /// PIN (owner question 2026-09-23, "shouldn't the boxes be the same size?")
+    /// — **every button on the About page is one chassis at one width.**
+    ///
+    /// `Open ↗` and `Export…` / `Import…` are all doors, so all of them stand in
+    /// the `.btn` box at the page's one door width, at the button's own height,
+    /// flush with the control column's right edge. The widest verb sets the
+    /// width, and the pin is taken at three readings of the face — the flat test
+    /// advance at two scales, and an advance wide enough that the verbs, not the
+    /// 118 floor, decide — so "the same" cannot mean "all at the floor".
+    ///
+    /// The draw is held to the same box: the chassis' edge spans exactly the
+    /// placed rectangle, every verb is printed whole inside it, and the `↗` is
+    /// on the three doors that leave the window and on neither dialog verb.
+    ///
+    /// MUTATIONS:
+    /// (1) size a door by its own verb instead of the page's widest — `Open`
+    ///     and `Export…` come apart and this goes red;
+    /// (2) place a door at the page's column width — the wide-face reading
+    ///     leaves the door width and this goes red on the floor assertion;
+    /// (3) draw a door without `push_button_face` — the edge assertion fails.
+    #[test]
+    fn every_about_page_button_reports_the_same_width() {
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let shortcuts = shortcut_lines();
+        let palette = chrome_palette();
+        let width = |rect: [f32; 4]| rect[2] - rect[0];
+        for (scale, advance) in [
+            (1.0, TEST_ADVANCE_PER_EM),
+            (1.5, TEST_ADVANCE_PER_EM),
+            (1.0, 1.5),
+        ] {
+            let mut face = |text: &str, font_size_px: f32| {
+                text.chars().count() as f32 * font_size_px * advance
+            };
+            let placed = layout_for_menu(
+                SURFACE.0 * scale,
+                SURFACE.1 * scale,
+                scale,
+                None,
+                None,
+                content(&rows, &shortcuts),
+                SettingsCategory::About,
+                UNSCROLLED,
+                MENU_UNSCROLLED,
+                &mut face,
+            )
+            .expect("the settings dialog fits");
+            let doors: Vec<RowLayout> = placed
+                .rows
+                .iter()
+                .filter(|entry| matches!(entry.row.control(), SettingsControl::Link))
+                .copied()
+                .collect();
+            assert_eq!(doors.len(), 6, "the About page's six doors");
+            let column_right = combo_of(&placed, SettingsRow::AboutVersion)[2];
+            let door_width = width(doors[0].combo);
+            let widest_need = doors
+                .iter()
+                .map(|door| {
+                    let verb = face(
+                        door.row.stated_value().unwrap_or_default(),
+                        BUTTON_FONT_LOGICAL_PX * scale,
+                    );
+                    let mark = if door.row.leaves_the_window() {
+                        (COMBO_GAP_LOGICAL_PX + COMBO_CHEVRON_BOX_LOGICAL_PX) * scale
+                    } else {
+                        0.0
+                    };
+                    verb + mark + 2.0 * BUTTON_PADDING_X_LOGICAL_PX * scale
+                })
+                .fold(0.0_f32, f32::max);
+            assert!(
+                door_width >= widest_need,
+                "scale {scale}, advance {advance}: {door_width} cannot hold the widest verb \
+                 ({widest_need})"
+            );
+            assert!(
+                door_width >= COMBO_MIN_WIDTH_LOGICAL_PX * scale,
+                "scale {scale}: a door is never narrower than the picker's floor"
+            );
+            if advance > TEST_ADVANCE_PER_EM {
+                assert!(
+                    door_width > COMBO_MIN_WIDTH_LOGICAL_PX * scale,
+                    "the wide face is meant to put the verbs, not the floor, in charge"
+                );
+            }
+            for door in &doors {
+                assert_eq!(
+                    width(door.combo),
+                    door_width,
+                    "scale {scale}, advance {advance}: {:?} is not the width of {:?}",
+                    door.row,
+                    doors[0].row
+                );
+                assert!(
+                    (door.combo[3] - door.combo[1] - BUTTON_HEIGHT_LOGICAL_PX * scale).abs() < 1e-3,
+                    "{:?} is a button and stands at the button's height",
+                    door.row
+                );
+                assert_eq!(
+                    door.combo[2], column_right,
+                    "{:?} ends on the column every control on the page ends on",
+                    door.row
+                );
+            }
+        }
+
+        // The draw, at the face the test build measures with.
+        let placed = open_page(
+            1.0,
+            None,
+            TabLayoutMode::Horizontal,
+            SettingsCategory::About,
+            0.0,
+        );
+        let quads = quads_of(&placed, None, &values());
+        let labels = labels_of(&placed, None, &values());
+        for row in [
+            SettingsRow::AboutReleaseNotes,
+            SettingsRow::AboutIssues,
+            SettingsRow::AboutLicences,
+            SettingsRow::ExportSettings,
+            SettingsRow::ImportSettings,
+            SettingsRow::SettingsFolder,
+        ] {
+            let combo = combo_of(&placed, row);
+            let inside = |rect: [f32; 4]| {
+                rect[0] >= combo[0] - 1e-3
+                    && rect[2] <= combo[2] + 1e-3
+                    && rect[1] >= combo[1] - 1e-3
+                    && rect[3] <= combo[3] + 1e-3
+            };
+            let edge: Vec<[f32; 4]> = quads
+                .iter()
+                .filter(|quad| quad.color == palette.menu_border && inside(quad.rect))
+                .map(|quad| quad.rect)
+                .collect();
+            let left = edge
+                .iter()
+                .map(|rect| rect[0])
+                .fold(f32::INFINITY, f32::min);
+            let right = edge
+                .iter()
+                .map(|rect| rect[2])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                (left - combo[0]).abs() < 0.5 && (right - combo[2]).abs() < 0.5,
+                "{row:?}'s chassis spans {left}..{right}, its box {}..{}",
+                combo[0],
+                combo[2]
+            );
+            let verb = row.stated_value().unwrap_or_default();
+            assert!(
+                labels
+                    .iter()
+                    .any(|label| label.text == verb && inside(label.rect)),
+                "{row:?} prints `{verb}` whole inside its button"
+            );
+            assert_eq!(
+                labels
+                    .iter()
+                    .any(|label| label.text == MENU_ACTION_MARK_AWAY && inside(label.rect)),
+                row.leaves_the_window(),
+                "{row:?}: the `↗` is on a door that leaves the window and on no other"
+            );
+        }
+        assert!(
+            !SettingsRow::ExportSettings.leaves_the_window()
+                && !SettingsRow::ImportSettings.leaves_the_window(),
+            "the two dialog verbs stay inside Folio and wear the `…` instead"
+        );
+        assert!(Text::ExportVerb.text().ends_with('…') && Text::ImportVerb.text().ends_with('…'));
     }
 
     /// PIN (owner ruling 2026-09-15) — **the licences row falls back to *this
