@@ -209,8 +209,10 @@ const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 /// that box stood on the terminal's own ground beside the band, where nothing
 /// else could be pressed and a generous box cost nothing. These stand inside the
 /// block, on its floor, in a right inset cut to hold exactly them; the run they
-/// now belong to is the window's run of head controls, and its box is 19.
-pub const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 19.0;
+/// now belong to is the window's run of head controls, and its box is theirs
+/// (`UI-SPEC.md` H3, 2026-09-23: the run's tool box moved from 19 to 22, and
+/// this reuse moves with it).
+pub const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 22.0;
 /// `.math-tools { gap: 2px }` (mock-up 2117).
 const MATH_TOOL_GAP_LOGICAL_PX: f32 = 2.0;
 /// `.math-tools button { border-radius: 5px }` (mock-up 2129) — the pill a

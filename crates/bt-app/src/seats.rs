@@ -36785,8 +36785,22 @@ mod tests {",
     ///
     /// Red gate: write `11.0` into the constant instead of the sum and this
     /// still passes — until the scroll lane moves, which is the day the rail and
-    /// the ghost would part company; change the box to 19 (the head run's size)
-    /// and both dimension assertions go.
+    /// the ghost would part company; change the box away from 22 and the two
+    /// dimension assertions below go.
+    ///
+    /// **The ghost's 22 and the head run's own 22 (`UI-SPEC.md` H3, since
+    /// 2026-09-23) are no longer provably different numbers, and that is a
+    /// coincidence and not a merger.** The ghost's own `.pane-ghost { width:
+    /// 22px; height: 22px }` predates the head run entirely and is asserted a
+    /// few lines up as the literal `22.0` — never as
+    /// `PANE_HEAD_TRIGGER_BOX_LOGICAL_PX`'s value — so there is still no wire
+    /// from one constant to the other for a `assert_ne!` to have been guarding
+    /// against; it only ever caught the two literals disagreeing by accident.
+    /// Now that the head run's own box has grown to 22 too, the same equality
+    /// stops being distinguishable from "the ghost started wearing the head's
+    /// box", so the comparison is retired rather than fixed to read `assert_eq!`
+    /// — asserting equality would itself be the tautology this test's own
+    /// opening paragraph warns against.
     #[test]
     fn the_corner_ghost_stands_in_the_command_rails_own_lane() {
         assert_eq!(PANE_GHOST_TOP_LOGICAL_PX, 10.0);
@@ -36797,10 +36811,6 @@ mod tests {",
         );
         assert_eq!(PANE_GHOST_BOX_LOGICAL_PX, 22.0);
         assert_eq!(PANE_GHOST_RADIUS_LOGICAL_PX, 6.0);
-        assert_ne!(
-            PANE_GHOST_BOX_LOGICAL_PX, PANE_HEAD_TRIGGER_BOX_LOGICAL_PX,
-            "the ghost is not a member of the head's run and does not wear its box"
-        );
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = [100.0_f32, 40.0, 700.0, 500.0];
