@@ -4370,8 +4370,7 @@ impl Text {
             Self::DescOptionSendsAlt => pick(
                 lang,
                 "On, Option is Alt to terminal programs. Off, it types accents as in other apps.",
-                // zh: pending opus46
-                "On, Option is Alt to terminal programs. Off, it types accents as in other apps.",
+                "「开」时 Option 是终端程序的 Alt。「关」时像其他应用一样输入重音字符。",
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
@@ -6338,13 +6337,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 2] = [
-        // The Option key row's two-line sentence (owner ruling 2026-09-23). The
-        // row is drawn only on a Mac, but the entry is one `pick` and both
-        // columns are walked.
-        (Self::DescOptionSendsAlt, HostPlatform::Windows),
-        (Self::DescOptionSendsAlt, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
