@@ -22,6 +22,7 @@ mod keyboard;
 mod math;
 mod mouse;
 mod palette;
+mod panes;
 mod peek;
 mod profiles;
 mod quake;
