@@ -19,4 +19,5 @@ mod palette;
 mod profiles;
 mod quake;
 mod search;
+mod terminal;
 mod tooltips;
