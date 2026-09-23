@@ -34,6 +34,8 @@ pub(crate) struct Harness {
     pub width: f32,
     pub scale: f32,
     pub offsets: Vec<f32>,
+    /// What the last [`Self::rebuild`]'s realize pass said it measured.
+    pub realized: usize,
     cache: preview_wrap::WindowCache,
     intrinsic: MarkdownIntrinsicCache,
     measure: Cpu,
@@ -53,6 +55,7 @@ impl Default for Harness {
             width: 800.0,
             scale: 1.0,
             offsets: Vec::new(),
+            realized: 0,
             cache: preview_wrap::WindowCache::default(),
             intrinsic: MarkdownIntrinsicCache::default(),
             measure: Cpu::default(),
@@ -138,7 +141,7 @@ impl Harness {
         let math = DocumentMath::default();
         let pictures = DocumentPictures::default();
         let palette = bt_render::chrome_palette();
-        Realize {
+        self.realized = Realize {
             blocks: &blocks,
             source: source.as_deref(),
             art: PageArt {
@@ -292,6 +295,38 @@ fn viewport_open_bounds_prose_and_intrinsics() {
         assert!(work("wrap recipes") <= band + 1);
         assert!(work("realized blocks") < 80);
     }
+}
+
+/// RED (preview report 2026-09-23, C1) — **a realize pass reports the blocks
+/// it measured, and a caret crossing into another block measures two.**
+///
+/// The count is the `realized=` of `BT_PREVIEW_TRACE`'s `reflow` line, which
+/// is the number that says whether a table flipping to its source cost the
+/// window two blocks' work or the page's. Held against the test-only counter
+/// the pass already kept, so the two cannot come to disagree; and the flip on
+/// a settled page is the two blocks whose face changed — the one the caret
+/// left and the one it entered — and nothing else.
+///
+/// MUTATION: return `0` from `Realize::ensure` (or stop counting in it) and the
+/// trace reports a flip that measured nothing.
+#[test]
+fn a_realize_pass_reports_the_blocks_it_measured() {
+    let text = fixture(40);
+    let mut h = Harness::default();
+    let (_, ranges) = preview::parse_markdown_ranged(&text);
+    reset();
+    h.rebuild(text.clone(), None, Some(ranges[1].start));
+    assert_eq!(h.realized, work("realized blocks"), "a cold open");
+    assert!(h.realized > 2);
+    // The window's no-parse arm hands the geometry pass the edits since the
+    // key being replaced, which for a caret move is none at all.
+    reset();
+    h.rebuild(text, Some(&[]), Some(ranges[3].start));
+    assert_eq!(h.realized, work("realized blocks"), "a flip");
+    assert_eq!(
+        h.realized, 2,
+        "the block the caret left and the block it entered, and no other",
+    );
 }
 
 /// Mutation: let parse-key equality bypass viewport realization, or visit all blocks.

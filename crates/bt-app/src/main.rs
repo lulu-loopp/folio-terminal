@@ -6027,6 +6027,15 @@ struct MarkdownCaretPaint {
     /// source block's range by the painter, so a selection that began in another
     /// block draws the part of itself that is in this one.
     selection: std::ops::Range<usize>,
+    /// **What the source block bands, in the file's own bytes**
+    /// ([`preview_live::source_band`], 2026-09-23) — [`Self::selection`] when
+    /// the caret has one, and otherwise the rendered selection mapped back to
+    /// the file, so a selection dragged across the source block from the
+    /// rendered paragraphs either side of it bands it too.
+    ///
+    /// A field of its own rather than a rewrite of [`Self::selection`]: that is
+    /// the caret's, and the caret is not what a rendered selection moved.
+    band: std::ops::Range<usize>,
     caret_width: f32,
     /// **The letters an input method is still composing**, standing where they
     /// will land (§7.1.3q) — `None` on every frame nothing is being composed
@@ -7248,14 +7257,16 @@ fn push_markdown_source_block(
     if let Some(caret) = caret {
         // The selection is the file's and this block is a window onto it: what
         // began in the paragraph above draws the part of itself that is here,
-        // and what began after it draws nothing.
+        // and what began after it draws nothing. Which selection that is —
+        // the caret's, or a rendered one crossing this block — is
+        // [`MarkdownCaretPaint::band`]'s to say.
         let starts = preview_edit::line_starts(&source.text);
         let cut = |offset: usize| {
             offset
                 .saturating_sub(source.range.start)
                 .min(source.text.len())
         };
-        let selection = cut(caret.selection.start)..cut(caret.selection.end);
+        let selection = cut(caret.band.start)..cut(caret.band.end);
         for (row, from, to) in preview_edit_bands(
             &source.text,
             &starts,
@@ -23693,6 +23704,13 @@ struct PreviewTextDrag {
     /// come up where there is no byte to ask for: a drag that ran off the bottom
     /// of the pane, which is how the last line of a document is selected, would
     /// otherwise let go and collapse to where it began.
+    ///
+    /// **And it is where the source block's band ends while the hand is in
+    /// flight** (2026-09-23, [`preview_live::source_band`]): no piece stands in
+    /// that block, so this is the only record of a hand standing inside it.
+    /// Kept for every gesture for that reason — a drag begun on a link records
+    /// no press and still crosses the source block — while the release reads it
+    /// only for a press it spends.
     reached: Option<usize>,
 }
 

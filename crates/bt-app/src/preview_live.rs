@@ -62,7 +62,10 @@
 
 use std::ops::Range;
 
+use crate::preview::MarkdownBlock;
 use crate::preview_edit;
+use crate::preview_provenance::{self, BlockOrigins};
+use crate::preview_select;
 
 /// **Where the caret is standing, in the document's own terms.**
 ///
@@ -208,6 +211,62 @@ pub fn place_in_block(
     let column =
         preview_edit::column_of(preview_edit::line_text(text, &starts, line), local - start);
     Some((line, column))
+}
+
+/// **What the source block bands, in the file's own bytes** (2026-09-23;
+/// `docs/DESIGN.md`'s entry of that date).
+///
+/// A rendered page has two selection models (research §10 Q3): the caret's,
+/// which is a range of the file, and the rendered pieces' (`md_select`), which
+/// is two places on the page. The block drawn as source pushes no pieces, so
+/// the pieces' band has nothing to be drawn on there — a selection dragged
+/// across it drew the paragraphs either side and left the source block as the
+/// one unbanded island in it. This is the one range the source block's painter
+/// cuts instead, and it is chosen in this order:
+///
+/// * **the caret's own selection, when it has one** — on a page with a caret
+///   selection it is the only selection there is;
+/// * otherwise **the pieces' selection, mapped back to file bytes** through
+///   [`preview_provenance::file_offset_of`], the inverse of the mapping the
+///   caret's band is drawn through in the other direction;
+/// * and **while a drag is in flight, stretched to `reached`**, the last byte
+///   of the file the hand reached: a piece place cannot name a byte inside the
+///   source block (there are no pieces there), so a hand standing in it would
+///   otherwise stop the band at the block's edge.
+///
+/// Painting only. Which block is source, what is selected and what a copy
+/// takes are all unchanged: the pieces go on drawing every rendered block and
+/// this draws the one block they cannot, so the two halves meet at its edges.
+///
+/// An empty range when neither model has anything selected — the caret's own
+/// collapsed range, which bands nothing.
+#[must_use]
+pub fn source_band(
+    caret: Range<usize>,
+    pieces: Option<&preview_select::Selection>,
+    reached: Option<usize>,
+    blocks: &[MarkdownBlock],
+    ranges: &[Range<usize>],
+    maps: &[BlockOrigins],
+) -> Range<usize> {
+    if !caret.is_empty() {
+        return caret;
+    }
+    let Some(selection) = pieces else {
+        return caret;
+    };
+    let (start, end) = selection.range_in(blocks);
+    let (Some(from), Some(to)) = (
+        preview_provenance::file_offset_of(&start, blocks, ranges, maps),
+        preview_provenance::file_offset_of(&end, blocks, ranges, maps),
+    ) else {
+        return caret;
+    };
+    let (from, to) = (from.min(to), from.max(to));
+    match reached {
+        Some(reached) => from.min(reached)..to.max(reached),
+        None => from..to,
+    }
 }
 
 /// **The source block as something a caret can be walked through** (T5,
@@ -1491,5 +1550,212 @@ mod tests {
         // else to be.
         assert_eq!(rows.row_of(9), Some((1, 30.0)));
         assert_eq!(rows.row_of(10), None, "past the block is not the block's");
+    }
+
+    /// A page with a link in its first paragraph, a table, and two more
+    /// paragraphs — the shape of the report (`docs/ARCHITECTURE.md` §12.3 and
+    /// its appendix table), made up.
+    const BAND_PAGE: &str = "Intro with a [link](https://example.com/) in it.\n\n\
+        | name | value |\n|------|-------|\n| one  | 1     |\n\n\
+        Middle **words** here.\n\nLast line.\n";
+
+    type Page = (Vec<MarkdownBlock>, Vec<Range<usize>>, Vec<BlockOrigins>);
+
+    fn band_page() -> Page {
+        let page = crate::preview::parse_markdown_mapped(BAND_PAGE);
+        assert!(
+            matches!(page.0[1], MarkdownBlock::Table { .. }),
+            "the second block is the table: {:?}",
+            page.0
+        );
+        page
+    }
+
+    /// Where block `index`'s own text ends in the file — the last byte its
+    /// source block could band.
+    fn text_end(ranges: &[Range<usize>], index: usize) -> usize {
+        ranges[index].start + block_source(BAND_PAGE, &ranges[index]).len()
+    }
+
+    /// The last place in block `index`, which is where the nearest piece to a
+    /// hand standing just under that block is.
+    fn block_end(blocks: &[MarkdownBlock], index: usize) -> preview_select::Place {
+        let last = preview_select::pieces(blocks)
+            .into_iter()
+            .rfind(|piece| piece.at.block == index)
+            .expect("the block has text");
+        preview_select::Place {
+            offset: last.text.len(),
+            ..last.at
+        }
+    }
+
+    fn drag(
+        anchor: preview_select::Place,
+        head: preview_select::Place,
+    ) -> preview_select::Selection {
+        preview_select::Selection {
+            anchor,
+            head,
+            grain: preview_select::Grain::Character,
+        }
+    }
+
+    /// RED (preview report 2026-09-23, A ①) — **a rendered selection dragged
+    /// across the source block bands the source block too.**
+    ///
+    /// The drag began in the paragraph above and is standing in the paragraph
+    /// below; the caret is still where an earlier gesture left it, collapsed,
+    /// so the block it stands in is drawn as source and has no pieces for the
+    /// rendered band to be drawn on. The painter used to cut the caret's own
+    /// range, which is empty, and the source block was the one unbanded island
+    /// in the middle of the band (screenshot 004703). Asked for both faces the
+    /// source block can wear: the table (monospace) and the paragraph (prose).
+    ///
+    /// MUTATION: return `caret` whenever it is empty in `source_band` — the old
+    /// painter's only source — and neither block is banded.
+    #[test]
+    fn a_rendered_selection_across_the_source_block_bands_it() {
+        let (blocks, ranges, maps) = band_page();
+        let across = drag(preview_select::Place::new(0, 0, 2), block_end(&blocks, 3));
+        for seat in [1, 2] {
+            let caret = ranges[seat].start + 1;
+            let band = source_band(caret..caret, Some(&across), None, &blocks, &ranges, &maps);
+            assert!(
+                band.start <= ranges[seat].start && band.end >= text_end(&ranges, seat),
+                "block {seat}, drawn as source, is banded whole: {band:?} against {:?}",
+                ranges[seat],
+            );
+        }
+    }
+
+    /// RED (preview report 2026-09-23, A ②) — **a drag whose release never
+    /// came still bands the source block to where the hand had got to.**
+    ///
+    /// A screenshot tool that takes the focus mid-drag leaves the drag in
+    /// flight (the 2026-09-21 entry: `Focused(false)` does not end it), and the
+    /// hand was standing inside the table. No piece stands there, so the
+    /// rendered selection's head is the nearest one — the end of the paragraph
+    /// above — and the only record of the byte the hand reached is the drag's
+    /// own `reached`. The band runs to it and no further, and stays there for
+    /// as long as the drag is left standing, because nothing in it moves.
+    ///
+    /// MUTATION: ignore `reached` in `source_band` and the band stops short of
+    /// the table, before the row the hand is on.
+    #[test]
+    fn a_drag_left_in_flight_bands_the_source_block_to_the_byte_it_reached() {
+        let (blocks, ranges, maps) = band_page();
+        let caret = ranges[1].start;
+        let reached = ranges[1].start + BAND_PAGE[ranges[1].clone()].find("one").unwrap();
+        let standing = drag(preview_select::Place::new(0, 0, 2), block_end(&blocks, 0));
+        let band = source_band(
+            caret..caret,
+            Some(&standing),
+            Some(reached),
+            &blocks,
+            &ranges,
+            &maps,
+        );
+        assert_eq!(band.end, reached, "the band ends where the hand stood");
+        assert!(band.start < ranges[0].end, "and begins where the drag did");
+        assert_eq!(
+            band,
+            source_band(
+                caret..caret,
+                Some(&standing),
+                Some(reached),
+                &blocks,
+                &ranges,
+                &maps,
+            ),
+            "the same drag, left standing, draws the same band",
+        );
+    }
+
+    /// RED (preview report 2026-09-23, A ③) — **Select All on a page with a
+    /// caret in it bands the source block with every other block.**
+    ///
+    /// The menu's Select All sets the rendered selection and leaves the caret
+    /// alone, so the caret's range is empty and the block it stands in was the
+    /// one block of a fully selected page with no band on it.
+    ///
+    /// MUTATION: return `caret` whenever it is empty and the source block is
+    /// the one block left unbanded, whichever block it is.
+    #[test]
+    fn select_all_bands_the_source_block_whichever_block_it_is() {
+        let (blocks, ranges, maps) = band_page();
+        let all = preview_select::select_all(&preview_select::pieces(&blocks))
+            .expect("the page has text");
+        for seat in 0..blocks.len() {
+            let caret = ranges[seat].start;
+            let band = source_band(caret..caret, Some(&all), None, &blocks, &ranges, &maps);
+            assert!(
+                band.start <= ranges[seat].start && band.end >= text_end(&ranges, seat),
+                "block {seat} is banded whole: {band:?} against {:?}",
+                ranges[seat],
+            );
+        }
+    }
+
+    /// RED (preview report 2026-09-23, A ④) — **a drag that began on a link
+    /// bands the source block from the link to the byte the hand reached.**
+    ///
+    /// A press on a link records no press to spend (the 2026-09-21 entry: it
+    /// draws a rendered selection and does not enter the page), so a caret
+    /// already standing in the table keeps it as source while the drag crosses
+    /// it. The band starts at the link's first letter — a byte of the file the
+    /// page draws — and ends at the byte the hand reached inside the table.
+    ///
+    /// MUTATION: drop `reached` from `source_band` and the band ends at the
+    /// paragraph above, short of the table the hand is in.
+    #[test]
+    fn a_drag_begun_on_a_link_bands_the_source_block_from_the_link() {
+        let (blocks, ranges, maps) = band_page();
+        let link = preview_select::pieces(&blocks)
+            .into_iter()
+            .find(|piece| piece.at.block == 0 && piece.text.contains("link"))
+            .expect("the first paragraph has the link's words");
+        let on_link = preview_select::Place {
+            offset: link.text.find("link").unwrap(),
+            ..link.at
+        };
+        let caret = ranges[1].start + 2;
+        let reached = text_end(&ranges, 1) - 1;
+        let band = source_band(
+            caret..caret,
+            Some(&drag(on_link, block_end(&blocks, 0))),
+            Some(reached),
+            &blocks,
+            &ranges,
+            &maps,
+        );
+        assert_eq!(
+            band,
+            BAND_PAGE.find("link").unwrap()..reached,
+            "from the link's first letter to the byte the hand reached",
+        );
+    }
+
+    /// **The caret's own selection is the band whenever it has one** — on a
+    /// page with a caret selection it is the only selection there is (research
+    /// §10 Q3), and a rendered one standing beside it is not consulted.
+    ///
+    /// MUTATION: prefer the rendered selection in `source_band` and a caret
+    /// selection made with Shift+arrows is banded where the last drag was.
+    #[test]
+    fn a_carets_own_selection_is_the_band_whenever_it_has_one() {
+        let (blocks, ranges, maps) = band_page();
+        let all = preview_select::select_all(&preview_select::pieces(&blocks))
+            .expect("the page has text");
+        let caret = ranges[2].start + 1..ranges[2].start + 5;
+        assert_eq!(
+            source_band(caret.clone(), Some(&all), Some(3), &blocks, &ranges, &maps),
+            caret,
+        );
+        assert_eq!(
+            source_band(4..4, None, Some(3), &blocks, &ranges, &maps),
+            4..4,
+            "and with nothing selected in either model nothing is banded",
+        );
     }
 }
