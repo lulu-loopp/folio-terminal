@@ -4362,10 +4362,16 @@ impl Text {
             // the row does to the key rather than what the key sends, because
             // the sentence under it is about the key and not about a press.
             Self::RowOptionSendsAlt => pick(lang, "Option key sends Alt", "Option 键当作 Alt"),
+            //
+            // **Two lines, like every other sentence on the page** (owner
+            // ruling 2026-09-23, which ends the 2026-09-13/14 exemption): the
+            // two states and who each one is for — terminal programs, or the
+            // accents every other Mac app types — and nothing past the budget.
             Self::DescOptionSendsAlt => pick(
                 lang,
-                "Off: Option types the accented characters macOS gives it, as in other apps. On: Option is the Alt key terminal programs expect, so Option with a letter is an Alt chord to the shell.",
-                "关闭时，Option 和在其他应用里一样，打出 macOS 给它的重音字符。打开时，Option 就是终端程序要的 Alt 键，Option 加上字母就是送到 shell 的 Alt 组合键。",
+                "On, Option is Alt to terminal programs. Off, it types accents as in other apps.",
+                // zh: pending opus46
+                "On, Option is Alt to terminal programs. Off, it types accents as in other apps.",
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
@@ -6332,7 +6338,13 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 2] = [
+        // The Option key row's two-line sentence (owner ruling 2026-09-23). The
+        // row is drawn only on a Mac, but the entry is one `pick` and both
+        // columns are walked.
+        (Self::DescOptionSendsAlt, HostPlatform::Windows),
+        (Self::DescOptionSendsAlt, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

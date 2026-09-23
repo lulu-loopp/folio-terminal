@@ -200,48 +200,46 @@ const ROW_DESC_MARGIN_TOP_LOGICAL_PX: f32 = 1.0;
 /// row grows to hold it; a row whose sentence fits on one line, or that has no
 /// sentence at all, is exactly as tall as it was.
 ///
-/// **The tolerance is the longest ruled exception, measured** (owner ruling
-/// 2026-09-14, which replaces 08-25's flat three). Six, and the six is not a
-/// number anybody chose: it is what the longest sentence on
-/// `tests::OWNER_RULED_EXCEPTIONS` takes in the column that row is actually
-/// drawn in, and `the_ruled_exception_is_drawn_whole_in_the_column_it_stands_in`
-/// re-measures it rather than trusting this line.
+/// **Four: the line the floor pins report, plus the one they report it on**
+/// (owner ruling 2026-09-23, which replaces 2026-09-14's six).
 ///
-/// **Because a sentence the owner ruled byte-exact cannot be cut.** `Option key
-/// sends Alt` is the one entry on that list: the two-line rewrite was taken off
-/// the page and the long sentence put back, the budget ruled off it rather than
-/// it off the budget. A layout that then prints `…` after it has un-done the
-/// ruling — so the tolerance follows the wrap, and the wrap does not follow the
-/// tolerance.
+/// The tolerance is the larger of two numbers, and
+/// `the_row_line_tolerance_is_what_the_pins_and_the_ruled_exceptions_need`
+/// computes both rather than trusting this line:
 ///
-/// **Where the six comes from.** The row is on General, whose pickers stand at
-/// [`COMBO_MAX_ROW_SHARE`], so its sentence is set in the narrowest column this
-/// dialog can draw — 502 − 251 − 16 = 235. At 235 the Chinese takes four lines
-/// (147 columns of a CJK face is 882px of ink, and 882 ÷ 235 = 3.75, so four is
-/// its floor as well as its wrap) and the English takes six (181 characters is
-/// 1086px, and 1086 ÷ 235 = 4.62, which no four lines can hold). Six is the
-/// larger, so six is the tolerance. At the 118px picker floor — the *widest*
-/// column any page has — both take three, which is why no length pin ever saw
-/// this and why the built Mac was the first thing to report it.
+/// - **What the floor pins need to see.** `no_settings_sentence_needs_a_fourth_line`
+///   and its Mac twin count the lines [`wrapped_description`] returns, and that
+///   wrapper stops at this cap. A cap of three would hand them three for a
+///   sentence that wants eight and they would pass it; a fourth line has to be
+///   drawable for a fourth line to be reported. So the floor is
+///   `SETTINGS_DESCRIPTION_FLOOR_MAX_LINES + 1`, and the compiler holds that
+///   relation beside the constant.
+/// - **What the longest owner-ruled exception takes** in the column its row is
+///   really drawn in, because a sentence ruled byte-exact cannot be cut. Between
+///   2026-09-14 and 2026-09-23 that was `Option key sends Alt`'s long sentence,
+///   six lines of General's 235px column, and this constant was six. The owner
+///   then gave that row a two-line sentence and ended its exemption, so the list
+///   `tests::OWNER_RULED_EXCEPTIONS` is empty — its normal state — and asks for
+///   nothing.
 ///
 /// **It is still not the rule the copy is written to.** A sentence past
 /// `SETTINGS_DESCRIPTION_FLOOR_MAX_LINES` is a **copy** fault, not a geometry
 /// one, and `no_settings_sentence_needs_a_fourth_line` is the pin that reports
-/// that fault in the test run rather than in a screenshot. That pin did not move
-/// with this constant: it holds every sentence that is *not* a ruled exception
-/// to three lines of the floor column, which is what it has always meant.
+/// that fault in the test run rather than in a screenshot.
 ///
-/// What this number does for every other row is let a page whose pickers have
-/// outgrown their words grow the row instead of cutting the sentence. That is
+/// What this number does for every row is let a page whose pickers have
+/// outgrown their words — a font family list, a scheme folder, a profile table,
+/// all read off the machine — grow the row by one line before the `…`. That is
 /// the same trade 2026-08-25 made when it replaced the fixed row height — the
 /// reader is given the fact rather than the ellipsis — and nothing here relaxes
 /// what the copy is allowed to be.
-const ROW_DESC_MAX_LINES: usize = 6;
+const ROW_DESC_MAX_LINES: usize = 4;
 
 // ── the description column's copy budget (owner ruling 2026-09-13) ─────────
 //
-// [`ROW_DESC_MAX_LINES`] above is what the *layout* tolerates — as many lines as
-// the longest sentence the owner has ruled whole, and then an `…`. The constants
+// [`ROW_DESC_MAX_LINES`] above is what the *layout* tolerates — one line past
+// what the floor pins allow (or the longest sentence the owner has ruled whole,
+// if one is ever longer), and then an `…`. The constants
 // below are what the *copy* is written to, and they
 // are a tighter line for a different reason: a settings row is scanned, not
 // read, and a sentence that needs three lines is a sentence that has stopped
@@ -271,10 +269,11 @@ const SETTINGS_DESCRIPTION_MAX_LINES: usize = 2;
 /// Written down here because [`ROW_DESC_MAX_LINES`] stopped being able to say it
 /// (owner ruling 2026-09-14). Until that ruling the two numbers were the same
 /// one, so those pins could detect a fourth line by looking for the `…` the wrap
-/// put on the third; the layout's tolerance is now the longest *ruled* sentence
-/// instead, so an `…` reports a line far past the one the copy is refused and
+/// put on the third; the layout's tolerance then became the longest *ruled*
+/// sentence, so an `…` reported a line far past the one the copy is refused and
 /// the pins would have quietly stopped reporting the fault they are named after.
-/// They count lines against this instead.
+/// They count lines against this instead — and since 2026-09-23 the tolerance
+/// is this plus one, the least that lets them count.
 ///
 /// Three and not two, and the gap is deliberate: this is measured at the 118px
 /// picker floor — the widest column any page can have — where a page whose
@@ -299,7 +298,8 @@ const _: () = assert!(
 
 // And the pins' line sits between the two, for the same reason and by the same
 // means: the copy is written to two, an unruled sentence is reported at four,
-// and the layout draws whatever a ruled one needs.
+// and the layout has to be able to draw that fourth line for the pins to count
+// it.
 #[cfg(test)]
 const _: () = assert!(
     SETTINGS_DESCRIPTION_MAX_LINES < SETTINGS_DESCRIPTION_FLOOR_MAX_LINES
@@ -17811,11 +17811,12 @@ mod tests {
     /// **Counted rather than read off the `…`** (owner ruling 2026-09-14). Until
     /// that ruling three was also what [`ROW_DESC_MAX_LINES`] tolerated, so a
     /// fourth line arrived here as an ellipsis on the third and the walk looked
-    /// for one. The layout's tolerance is now the longest *ruled* sentence — see
-    /// the constant — so an `…` reports a line far past the one this pin is
-    /// about. A pin that kept looking for it would have gone on passing while
-    /// saying nothing, which is the one way a length gate fails without anybody
-    /// noticing.
+    /// for one. The layout's tolerance is no longer tied to this line — see the
+    /// constant — so an `…` may report a line past the one this pin is about. A
+    /// pin that kept looking for it would have gone on passing while saying
+    /// nothing, which is the one way a length gate fails without anybody
+    /// noticing. What the pin *does* need from the constant is one line more
+    /// than it allows, or the wrap could never hand it a fourth to count.
     ///
     /// Every page and every row this build can draw, at the dialog's own width
     /// and **the design's own control column** — the 118px floor a picker takes
@@ -18231,37 +18232,26 @@ mod tests {
     /// long. The gates skip exactly what is on it, in both languages and on both
     /// platform columns, and nothing else.
     ///
-    /// **`DescOptionSendsAlt` is on it because the owner put the sentence
-    /// back.** The rewrite this ticket made of it — `On, Option is a terminal's
-    /// Alt key. Off, Option types accents.` — fitted the budget by dropping the
-    /// two halves that are the row's whole reason for existing: *which* programs
-    /// want Option to be Alt, and that the characters it types otherwise are the
-    /// ones every other Mac app types. A reader whose `⌥a` has just done the
-    /// wrong thing is the reader this row was written for, and neither half is
-    /// spare to them. The owner restored the longer sentence and ruled the
-    /// budget off it rather than the sentence off the page.
+    /// **Empty is its normal state** (owner ruling 2026-09-23). The one entry it
+    /// has held — `DescOptionSendsAlt`, from 2026-09-13 to 2026-09-23 — came off
+    /// when the owner gave `Option key sends Alt` a two-line sentence and ended
+    /// its exemption. The mechanism stays so that the next exemption, if one is
+    /// ever ruled, is an entry written here and not a sentence that happens to be
+    /// long.
     ///
-    /// It still obeys the *layout*: `no_settings_sentence_needs_a_fourth_line`
+    /// An entry still obeys the *layout*: `no_settings_sentence_needs_a_fourth_line`
     /// and `no_sentence_a_mac_reads_needs_a_fourth_line` measure it like every
-    /// other line, and it fits their three. What it is excused from is the
-    /// tighter copy rule, and only that.
-    ///
-    /// **Their three is the 118px floor column, and the page it is drawn on is
-    /// narrower** (owner ruling 2026-09-14). `Option key sends Alt` is a General
-    /// row, and General's pickers stand at [`COMBO_MAX_ROW_SHARE`] — so the
-    /// column this sentence is really set in is the narrowest this dialog can
-    /// draw, and there it takes four lines in Chinese and six in English. A
-    /// sentence ruled byte-exact cannot then be cut, so
-    /// [`ROW_DESC_MAX_LINES`] is that six: the tolerance is the longest entry on
-    /// this list, measured, and
-    /// [`the_ruled_exception_is_drawn_whole_in_the_column_it_stands_in`] is where
-    /// it is measured.
+    /// other line. What it is excused from is the tighter copy rule, and only
+    /// that — and because a sentence ruled byte-exact cannot then be cut,
+    /// [`ROW_DESC_MAX_LINES`] must hold the longest entry whole in the column its
+    /// row is really drawn in, which
+    /// [`the_row_line_tolerance_is_what_the_pins_and_the_ruled_exceptions_need`]
+    /// measures.
     ///
     /// [`the_description_budget_is_the_column_this_dialog_draws`] holds the
     /// other half of the bargain: an entry here that no longer *needs* the
     /// exemption is an exemption to delete, and it says so by name.
-    const OWNER_RULED_EXCEPTIONS: [(SettingsRow, Text); 1] =
-        [(SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt)];
+    const OWNER_RULED_EXCEPTIONS: [(SettingsRow, Text); 0] = [];
 
     /// Whether this sentence is one of them — asked of the string rather than of
     /// the entry, because the page walk has a row and its words and no map back
@@ -18472,37 +18462,41 @@ mod tests {
         }
     }
 
-    /// RED (owner ruling 2026-09-14) — **the sentence the budget was ruled off
-    /// is drawn whole in the column it actually stands in.**
+    /// RED (owner rulings 2026-09-14 and 2026-09-23) — **the layout's line
+    /// tolerance is the least that lets the floor pins count, or the longest
+    /// ruled exception, whichever is larger — and a ruled exception is drawn
+    /// whole in the column it actually stands in.**
     ///
     /// An exemption from the *copy* rule that the *layout* then cuts is not an
-    /// exemption, and that is what the built Mac showed: `Option key sends Alt`
-    /// is a General row, General's pickers stand at [`COMBO_MAX_ROW_SHARE`], and
-    /// the sentence the owner had put back whole came out of the window as three
-    /// lines and an `…`. **Byte-exact means byte-exact**: neither cutting it nor
-    /// rewriting it is on the table, so [`ROW_DESC_MAX_LINES`] is whatever this
-    /// sentence needs, and this is where that number is decided.
+    /// exemption, and that is what the built Mac showed on 2026-09-14: `Option
+    /// key sends Alt` is a General row, General's pickers stand at
+    /// [`COMBO_MAX_ROW_SHARE`], and the sentence the owner had put back whole
+    /// came out of the window as three lines and an `…`. **Byte-exact means
+    /// byte-exact**, so for every entry on [`OWNER_RULED_EXCEPTIONS`] neither
+    /// cutting it nor rewriting it is on the table and [`ROW_DESC_MAX_LINES`]
+    /// has to hold it.
+    ///
+    /// **The other half of the number is the floor pins'.**
+    /// `no_settings_sentence_needs_a_fourth_line` and its Mac twin count what
+    /// [`wrapped_description`] returns, and that wrapper stops at the cap — so
+    /// the cap has to be at least one line past
+    /// [`SETTINGS_DESCRIPTION_FLOOR_MAX_LINES`] or those pins could never see the
+    /// line they are named after. Since 2026-09-23 the list is empty, its normal
+    /// state, and this half is the whole answer: four.
     ///
     /// **The tolerance is computed here and only checked against the constant.**
-    /// The walk wraps every entry on [`OWNER_RULED_EXCEPTIONS`], in both
-    /// languages and both platform columns, with [`crate::tooltip::wrap`] — the
-    /// *uncapped* wrapper, because [`wrapped_description`] cannot report a count
-    /// above the cap it is being asked about — and asserts that
-    /// [`ROW_DESC_MAX_LINES`] is exactly the largest of them. Too small and the
-    /// ruled sentence is cut; too large and the dialog carries room for a line
-    /// nothing asks for. Shorten one of these sentences, or widen the column,
-    /// and this names the number to put back.
+    /// The walk starts from the pins' line and wraps every entry on the list, in
+    /// both languages and both platform columns, with [`crate::tooltip::wrap`] —
+    /// the *uncapped* wrapper, because [`wrapped_description`] cannot report a
+    /// count above the cap it is being asked about — and asserts that
+    /// [`ROW_DESC_MAX_LINES`] is exactly the largest of them. Too small and a
+    /// ruled sentence is cut, or a pin goes blind; too large and the dialog
+    /// carries room for a line nothing asks for.
     ///
-    /// **The column is the narrowest this dialog can draw**, which for this row
-    /// is not a worst case but the case: 502 − 251 − 16 = 235, and
-    /// [`the_description_budget_is_the_column_this_dialog_draws`] is where that
-    /// arithmetic and the dialog's own are held together. In it the Chinese
-    /// sentence is 147 columns of a CJK face — 882px of ink at
-    /// [`ROW_DESC_FONT_LOGICAL_PX`], and 882 ÷ 235 = 3.75, so four lines is its
-    /// floor and its wrap — and the English is 181 characters at [`measure`]'s
-    /// half em, 1086px, so 1086 ÷ 235 = 4.62 puts five out of reach before the
-    /// wrapper's own break points make it six. Six is the larger, so six is the
-    /// tolerance.
+    /// **The column is the one the row's page draws**, which for a General or
+    /// Summoned terminal row is the narrowest this dialog can draw: 502 − 251 −
+    /// 16 = 235, and [`the_description_budget_is_the_column_this_dialog_draws`]
+    /// is where that arithmetic and the dialog's own are held together.
     ///
     /// **Why the height is asserted through [`StackMetrics`] and not off a
     /// shaped page.** This row is drawn only where `Capability::OptionKey` is,
@@ -18516,10 +18510,12 @@ mod tests {
     /// [`a_rows_sentence_wraps_inside_its_own_column_and_never_runs_under_the_control`]'s,
     /// on a page this process can shape.
     ///
-    /// MUTATION: put [`ROW_DESC_MAX_LINES`] back to three, or to four, and the
-    /// first assertion names the `…` and the language it cut.
+    /// MUTATION: put [`ROW_DESC_MAX_LINES`] to three, or to five, and the last
+    /// assertion names the number to put back. Put a sentence on the list that
+    /// wants more lines than the constant and the first assertion names the `…`
+    /// and the language it cut.
     #[test]
-    fn the_ruled_exception_is_drawn_whole_in_the_column_it_stands_in() {
+    fn the_row_line_tolerance_is_what_the_pins_and_the_ruled_exceptions_need() {
         use crate::i18n::Lang;
         use bt_platform::HostPlatform::{MacOs, Windows};
         fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
@@ -18548,8 +18544,10 @@ mod tests {
         let editing = editing_content(&rows, &[], editor_subject(true));
         let dialog_pages = pages(held, editing);
 
-        // What the tolerance has to be, found rather than assumed.
-        let mut needed = 0_usize;
+        // What the tolerance has to be, found rather than assumed — starting from
+        // the least the floor pins can count with, which is the whole answer
+        // while the list is empty.
+        let mut needed = SETTINGS_DESCRIPTION_FLOOR_MAX_LINES + 1;
         for (row, entry) in OWNER_RULED_EXCEPTIONS {
             let page = &dialog_pages
                 .iter()
@@ -18665,22 +18663,12 @@ mod tests {
         }
 
         // ⑤ **And the tolerance is that number and no other.** Under it a
-        // sentence the owner ruled byte-exact is cut; over it the dialog carries
-        // room for a line nothing on the list asks for.
+        // sentence the owner ruled byte-exact is cut, or a floor pin cannot see
+        // the line it reports; over it the dialog carries room for a line
+        // nothing asks for.
         assert_eq!(
             ROW_DESC_MAX_LINES, needed,
-            "the tolerance is the longest ruled exception, measured: the list \
-             wants {needed} lines of its own columns and the constant says \
-             {ROW_DESC_MAX_LINES}"
-        );
-        // And the exemption is still buying something. A list whose longest
-        // entry fits the line every other sentence is held to is a list that has
-        // stopped needing the tolerance, and the tolerance should come back down
-        // with it.
-        assert!(
-            needed > SETTINGS_DESCRIPTION_FLOOR_MAX_LINES,
-            "every ruled exception now fits {SETTINGS_DESCRIPTION_FLOOR_MAX_LINES} \
-             lines of its own column — the tolerance is not earning its place"
+            "the tolerance is one line past the floor pins'              {SETTINGS_DESCRIPTION_FLOOR_MAX_LINES}, or the longest ruled              exception if that is longer: {needed} is needed and the constant              says {ROW_DESC_MAX_LINES}"
         );
     }
 
@@ -18705,15 +18693,15 @@ mod tests {
     /// the fixture walk alone is not the whole set and which two sentences are
     /// deliberately outside it.
     ///
-    /// **Except what [`OWNER_RULED_EXCEPTIONS`] names**, which is one sentence
-    /// and is skipped by the string it says rather than by its row — a row draws
-    /// several sentences and only one of them was ruled on. The list's own note
-    /// carries the ruling; the budget test refuses to let an entry sit on it
-    /// after it stops needing to.
+    /// **Except what [`OWNER_RULED_EXCEPTIONS`] names**, which is nothing since
+    /// 2026-09-23 and is skipped by the string it says rather than by its row —
+    /// a row draws several sentences and a ruling is about one of them. The
+    /// list's own note carries the rule; the budget test refuses to let an entry
+    /// sit on it after it stops needing to.
     ///
     /// MUTATION: put the pre-2026-09-13 `DescLaunchOpens`, `DescSidebar` or
-    /// `DescQuakeRestore` back and this names the row and the line count. (Not
-    /// `DescOptionSendsAlt`: its old sentence is the one standing, by ruling.)
+    /// `DescQuakeRestore` back, or the pre-2026-09-23 `DescOptionSendsAlt`, and
+    /// this names the row and the line count.
     #[test]
     fn no_settings_sentence_needs_a_third_line() {
         use crate::i18n::Lang;
@@ -18736,7 +18724,7 @@ mod tests {
         //
         // The page's own wrapper, so this gate and the glass break the sentence
         // the same way. It is capped at `ROW_DESC_MAX_LINES`, so a sentence that
-        // wanted eight lines is reported as six — which is why the offending
+        // wanted eight lines is reported as four — which is why the offending
         // sentence is printed beside the count rather than only the number.
         let count = |row: SettingsRow, sentence: &str| {
             let page = &dialog_pages
@@ -19002,9 +18990,9 @@ mod tests {
     /// entries share is skipped rather than guessed at.
     ///
     /// [`OWNER_RULED_EXCEPTIONS`] is skipped here as well as in the English
-    /// walk, and it has to be: the ruling excused the *entry* from the budget,
-    /// so a Chinese column held to two lines would be stage 2 being asked to
-    /// cut a sentence the owner had just put back.
+    /// walk, and it has to be: a ruling excuses the *entry* from the budget, so
+    /// a Chinese column held to two lines would be stage 2 being asked to cut a
+    /// sentence the owner had put back. (The list is empty since 2026-09-23.)
     ///
     /// Run it with `cargo test -p bt-app -- --ignored
     /// no_chinese_settings_sentence_needs_a_third_line_either` to see the list
@@ -26740,8 +26728,8 @@ mod tests {
                 );
                 // Counted rather than read off the `…`, for the reason
                 // `no_settings_sentence_needs_a_fourth_line` gives at length:
-                // since 2026-09-14 the layout tolerates a line more than this
-                // row's copy is allowed, so an ellipsis is no longer what a
+                // the layout tolerates a line more than this row's copy is
+                // allowed, so an ellipsis is no longer what a
                 // fourth line looks like.
                 assert!(
                     lines.len() <= SETTINGS_DESCRIPTION_FLOOR_MAX_LINES,
@@ -31193,8 +31181,9 @@ mod tests {
     ///
     /// **Three is now [`SETTINGS_DESCRIPTION_FLOOR_MAX_LINES`] and no longer
     /// [`ROW_DESC_MAX_LINES`]** (owner ruling 2026-09-14): the layout's
-    /// tolerance moved to four for one ruled settings sentence, and reading the
-    /// note's cap off it would have let this note grow a line nobody ruled on.
+    /// tolerance moved for one ruled settings sentence, and is one line past the
+    /// floor pins' since 2026-09-23; reading the note's cap off it would let this
+    /// note grow a line nobody ruled on.
     #[test]
     fn the_agent_note_fits_the_column_it_stands_in() {
         use crate::i18n::{Lang, Text};
