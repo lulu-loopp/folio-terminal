@@ -1,10 +1,137 @@
-# Structural debt
+# Architecture debt ledger
 
-This ledger is separate from the defect ledgers because it is **ordered by
-consequence for the next twelve months, not by severity**. Nothing here is a
-bug. Each row is a shape that makes the next hundred tickets more expensive,
-and the cost it charges is the one the project owner named: *what must be read
-to finish one ticket must not grow with the number of features.*
+**The rule (2026-09-23).** This is the one ledger of architecture debt. Every row
+is assigned to a ticket and a version, and **the ledger reads zero before 0.5
+starts**: 0.4.5 is typing stability, per-pane zoom and what fits beside them;
+0.4.6 is the updater and architecture closure. A row that cannot be cleared by
+0.4.6 says why and where it goes (`deferred →` below). Two obligations follow:
+
+- **Every ticket's *Architecture impact* section cites the rows it repays,
+  moves or adds**, by ID. A ticket that repays a row sets its status to
+  `repaid on <sha>` in the same commit; a ticket that finds new debt adds a row
+  here rather than a sentence in its report.
+- **A row leaves only by being repaid, or by a dated ruling that it is not
+  debt.** Rows are never renumbered; a repaid row stays, with its sha.
+
+The file began as the 2026-09-21 structure review's debt list (D-1…D-18, kept
+below with their IDs and text). On 2026-09-23 it gained the ledger columns and
+every debt the repository already recorded elsewhere (D-19…D-63). It is
+**ordered by consequence, not by severity** — nothing here is a bug; each row is
+a shape that makes the next hundred tickets more expensive, and the cost it
+charges is the one the project named: *what must be read to finish one ticket
+must not grow with the number of features.*
+
+**Ledger columns.** *Source* — where the debt was first recorded. *Ticket* — the
+ticket that repays it (a number from the 0.4.4/0.4.5 ticket set, a preparation
+step such as P14, or `none yet`). *Version* — 0.4.5 · 0.4.6 ·
+`deferred → <where>` with the reason. *Status* — `open` · `in ticket` ·
+`repaid on <sha>`; a note after a dash records a part already repaid inside an
+open row. The versions are proposals until the release plan adopts them.
+
+**Not on this ledger.** Defects (the adversarial-review ledgers, and the
+incidental list below); UI constants
+(`docs/design/UI-DEVIATIONS.md`, which tickets 16–31 take to zero on their own
+track); rows 15–19 of `docs/ARCHITECTURE.md` §5.3, which are *ruled to stay*;
+and the probes in `scripts/ci/ignored-tests.txt`, which are ignored by policy —
+they answer "what does this machine do" — not by debt.
+
+## By version
+
+| version | rows | open | repaid |
+|---|---:|---:|---:|
+| 0.4.5 | 21 | 21 | 0 |
+| 0.4.6 | 33 | 33 | 0 |
+| deferred (reason on the row) | 8 | 8 | 0 |
+| already repaid | 1 | 0 | 1 |
+| **total** | **63** | **62** | **1** |
+
+Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
+(`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
+lane contract (D-2, D-33); ticket 34 (`fbfab1ff`) — the marks-lock wait behind
+our own writer (D-2, D-34) and the `profile_runtime` CI failures (D-58, repaid
+whole); ticket 14 (`5d4c7aff`) — the printed-path chain's hand-off hop kept
+current in §7.1 (D-6); ticket 05 (`5f433943`) — §9's paragraph that export is
+not a fourth entrance (D-9). Ticket 32 (`4ba5df7e`) repaid no row and added none.
+
+## The ledger
+
+"§" alone means a section of `docs/ARCHITECTURE.md`. "Split prep" is
+`docs/plans/bt-app-split-prep.md`. "Survey Part 4" is the 2026-09-21 process and
+thread survey's list of twenty-two facts with more than one owner, which
+§4.2 sorts into five classes; the fact-to-class assignment in D-51…D-55 is this
+ledger's.
+
+| ID | what | source | ticket | version | status |
+|---|---|---|---|---|---|
+| D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | deferred → 0.5 (attention and session identity), 0.6 (backend) — it *is* the 0.5/0.6 work; its 0.4.6 first step is D-57 | open |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3` |
+| D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
+| D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.5 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
+| D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded |
+| D-6 | cross-crate chains are visible nowhere | K-10 · C-4 | through D-48…D-50 | 0.4.6 | open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff` |
+| D-7 | source-reading guards are the architecture document; their rules owe prose | K-14 · C-4 | with D-28 | 0.4.6 | open |
+| D-8 | the asking/telling family has no taxonomy | K-3 · C-4 | none yet | 0.4.6 — the owner rules the table first | open |
+| D-9 | configuration entrances: the fourth row | K-4 · C-4 | none yet | deferred → 0.5's outward-interface design — the fourth entrance does not exist until then | open — §9 table written; export ruled not an entrance on `5f433943` |
+| D-10 | diagnostics have plumbing but no event model | K-5 · C-4 | none yet | 0.4.6 — the operation vocabulary; its event carrier waits for a subscriber | open |
+| D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | none yet | 0.4.6, with D-32 | open |
+| D-12 | `bt-platform` is a drawer | K-11 | none yet | deferred → 0.5 — one move at a time, and the `bt-app` move ends with D-32 in 0.4.6 | open |
+| D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | 0.4.5 | open |
+| D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | none yet | 0.4.6 | open |
+| D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27 | deferred → the composition-layer design (0.5) — nothing to repay before that layer exists | open (recorded debt) |
+| D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | none yet | 0.4.6 | open — rule stated |
+| D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | deferred → 0.5, with D-1's document owner | open |
+| D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | none yet | 0.4.5 — D-29…D-32 need a true census | open |
+| D-19 | MIGRATION-DEBT class P0 — the documentation generators (3 rows) | `docs/plans/MIGRATION-DEBT.tsv`; split prep §6 | P0 | 0.4.5 | open |
+| D-20 | MIGRATION-DEBT class P10 — the portable-core walk (1 row) | same | P10 | 0.4.5 | open |
+| D-21 | MIGRATION-DEBT class P12 — `bt-platform`'s walkers and the `stand_in` guard (5 rows) | same | P12 | 0.4.5 | open |
+| D-22 | MIGRATION-DEBT class P13 — the remaining source-text walks (3 rows) | same | P13 | 0.4.5 | open |
+| D-23 | MIGRATION-DEBT class P14 — named-body pins (192 rows) | same | P14 | 0.4.6 | open |
+| D-24 | MIGRATION-DEBT class P16 — ledger keys naming a file (63 rows), and the ten text `#[cfg(test)]` splits | same | P16 | 0.4.6 | open |
+| D-25 | MIGRATION-DEBT class P17 — cross-crate and script readers (13 rows) | same | P17 | 0.4.5 | open |
+| D-26 | the ~110 `[..].concat()` needle halves written whole | split prep §6 | P18 | 0.4.6 | open |
+| D-27 | the CI dependency-direction guard, and `bt-term → bt-math` recorded | split prep §8.4–§8.5 | P19 | 0.4.5 | open |
+| D-28 | MIGRATION-DEBT to zero and deleted; the allowlist final | split prep §7.2 | P20 | 0.4.6 | open |
+| D-29 | the unmoved topic `launch` (4 methods) | split prep Appendix C | none yet | 0.4.5 | open |
+| D-30 | the unmoved topic `settings` (31 methods) | split prep Appendix C | none yet | 0.4.5 | open |
+| D-31 | the unmoved topic `focus` (51 methods) | split prep Appendix C | none yet | 0.4.5 | open |
+| D-32 | the unassigned `Runtime` methods still in `main.rs` (112 at the move, 115 today) | split prep §7.1, Appendix C | none yet | 0.4.6 | open |
+| D-33 | the lane contract as one shape, wrapping the existing lanes | §5.4 step 1, §5.1 | none yet | 0.4.5 — the presentation lane (D-41) is its second client | open — first instance, `handoff_lane`, on `2657e5e3` |
+| D-34 | §5.3 row 2 — the marks lock's install half on the window thread | §5.3 | none yet | 0.4.6 | open — the wait behind our own writer repaid on `fbfab1ff` |
+| D-35 | §5.3 row 3 — `psreadline::apply_recorded`, nine files under the lock | §5.3 | none yet | 0.4.6 | open |
+| D-36 | §5.3 row 4 — `psreadline::installed_copy`'s recursive walk | §5.3 | none yet | 0.4.6 | open |
+| D-37 | §5.3 row 5 — the machine's whole font collection enumerated inline | §5.3 | none yet | 0.4.5 — the traced frozen gear | open |
+| D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | none yet | 0.4.5 — a per-keystroke cost | open |
+| D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | 0.4.6 | open |
+| D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | 0.4.6 | open |
+| D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | 0.4.5 — presenting off the input thread is the typing-stability work | open |
+| D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | 0.4.6, after D-41 | open |
+| D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open |
+| D-44 | §5.3 row 12 — the synchronous `ResizePseudoConsole` round trip | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — as D-43 | open |
+| D-45 | §5.3 row 13 — `sample_window_place` resampled at three sites for one instant | §5.3 | none yet | 0.4.5 — one site is `drain_pty` | open |
+| D-46 | §5.3 row 14 — `Window::set_title` at five sites with no throttle | §5.3 | none yet | 0.4.5 — one site is `drain_pty` | open |
+| D-47 | §5.3 row 20 — renames, the preserving save and store writes on the window thread | §5.3 | none yet | 0.4.6 | open |
+| D-48 | §7.2 chain stub — attention ingress | §7.2 | none yet | 0.4.6, with D-57 | open |
+| D-49 | §7.2 chain stub — resize | §7.2 | none yet | 0.4.6 | open |
+| D-50 | §7.2 chain stub — paste convergence | §7.2 | none yet | 0.4.5 — tickets 02 and 03 have just walked it | open |
+| D-51 | §4.2 class — observations of external state (survey facts 1, 5, 6, 7, 12) | §4.2; survey Part 4 | none yet | 0.4.6 | open |
+| D-52 | §4.2 class — asynchronous publication and competing operations (facts 4, 10, 13, 19, 22) | §4.2; survey Part 4 | none yet | 0.4.6, with D-3 | open |
+| D-53 | §4.2 class — durability and external transactions (facts 8, 9, 11) | §4.2; survey Part 4 | none yet | 0.4.6, with D-34 and D-47 | open |
+| D-54 | §4.2 class — identity, admission and lifecycle (facts 2, 3, 14, 20) | §4.2; survey Part 4 | none yet | 0.4.6 | open |
+| D-55 | §4.2 class — projections, delivery and loss (facts 15, 16, 17, 18, 21) | §4.2; survey Part 4 | none yet | 0.4.6 | open |
+| D-56 | §11 emergency termination — a journal and a defined recoverable revision | §11 | none yet | 0.4.6 | open |
+| D-57 | §12.1 — `bt-workbench` is born | §12.1 | none yet | 0.4.6 | open |
+| D-58 | `profile_runtime`'s two tests failing `WouldBlock` on a slow CI disk | `docs/DESIGN.md`, 2026-09-23 | 34 | — | repaid on `fbfab1ff` |
+| D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open |
+| D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | 0.4.6 | open |
+| D-61 | a Mac-only red test in `webnav` | ticket 13's report | none yet | 0.4.5 | open |
+| D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | none yet | 0.4.5 | open |
+| D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | none yet | 0.4.6 | open |
+
+---
+
+# The rows
+
+## How the original rows read
 
 Two independent structural reviews were made on 2026-09-21 — a **depth review**
 (findings C-1…C-4) and a **breadth review** (findings K-1…K-14). A finding both
@@ -17,8 +144,10 @@ coordinator.
 history-only knowledge · crosses too many places · must-read set grows with
 features. *Evidence* — anchors only, never line numbers. *If left* — the
 twelve-month consequence. *Smallest change* — the least structural thing that
-removes the class, not the instance. *Version* — before the move · with the
-move · 0.4.4 · 0.5 · 0.6. *Status* — open · partly discharged · decided.
+removes the class, not the instance. *Version* — as ruled on 2026-09-21 (before
+the move · with the move · 0.4.4 · 0.5 · 0.6). *Status* — as of 2026-09-21
+(open · partly discharged · decided). **The ledger table above supersedes both
+fields**; each row's *Ledger* line repeats its current entry.
 
 ---
 
@@ -67,6 +196,8 @@ reconnect; delayed input delivered to a replacement shell; *seen* treated as
 state moved into the authoritative backend.
 
 **Status.** open. Direction stated in `docs/ARCHITECTURE.md` §4.1.
+
+**Ledger.** source: structure review C-1 · K-1 · ticket: none yet · version: deferred → 0.5 (attention and session identity), 0.6 (backend) — it *is* the 0.5/0.6 work; its 0.4.6 first step is D-57 · status: open.
 
 ---
 
@@ -118,6 +249,8 @@ first cut must not be advertised as eliminating every window-thread stall**.
 **Status.** open. Lanes, the exception list and the migration order are in
 `docs/ARCHITECTURE.md` §5.
 
+**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`.
+
 ---
 
 ## D-3 — Ten one-shot probes are one lane in ten costumes
@@ -149,6 +282,8 @@ worker, no. The PSReadLine debt named by the 2026-09-21 history entry is the
 natural first passenger either way.
 
 **Version.** 0.4.4. **Status.** open.
+
+**Ledger.** source: K-9 · C-2 · ticket: none yet · version: 0.4.6 · status: open.
 
 ---
 
@@ -198,6 +333,8 @@ above. Both are acceptable exits; the coordinator picks one.
 
 **Status.** open.
 
+**Ledger.** source: C-3 · K-8 · ticket: none yet · version: 0.4.5 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement · status: open.
+
 ---
 
 ## D-5 — The rules existed only as history
@@ -226,6 +363,8 @@ number of agents.
 eighteen of fifty-three rows are folded; thirty-five are marked `not yet folded`
 with their addresses listed. The remaining work is folding, one subsystem at a
 time, by the ticket that needs it.
+
+**Ledger.** source: K-2 · C-4 · ticket: the ticket that depends on each row · version: 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket · status: open — 19 folded.
 
 ---
 
@@ -264,6 +403,8 @@ four crates of policy.
 **Status.** **partly discharged.** The printed-path chain is written hop by hop;
 attention ingress, resize and paste convergence are named as stubs to fill.
 
+**Ledger.** source: K-10 · C-4 · ticket: through D-48…D-50 · version: 0.4.6 · status: open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff`.
+
 ---
 
 ## D-7 — Source-reading guards are the de-facto architecture document, and two disagree
@@ -289,6 +430,8 @@ enforce are stated in prose** — in `docs/RULES.md` or
 
 **Version.** With the move. **Status.** decided (it is the preparation plan); the
 prose half is open.
+
+**Ledger.** source: K-14 · C-4 · ticket: with D-28 · version: 0.4.6 · status: open.
 
 ---
 
@@ -323,6 +466,8 @@ is ruled by the project owner**, who rules UI.
 **Status.** open. The inventory and the two fixed points are in
 `docs/ARCHITECTURE.md` §8.
 
+**Ledger.** source: K-3 · C-4 · ticket: none yet · version: 0.4.6 — the owner rules the table first · status: open.
+
 ---
 
 ## D-9 — The three configuration entrances have no map, and 0.5 adds a fourth
@@ -350,6 +495,8 @@ depth review is explicit that a ladder would be inappropriate.
 `docs/ARCHITECTURE.md` §9; the fourth row is written when the outward interface
 is designed.
 
+**Ledger.** source: K-4 · C-4 · ticket: none yet · version: deferred → 0.5's outward-interface design — the fourth entrance does not exist until then · status: open — §9 table written; export ruled not an entrance on `5f433943`.
+
 ---
 
 ## D-10 — Diagnostics have plumbing but no event model
@@ -376,6 +523,8 @@ coordinator's call.
 
 **Version.** 0.5. **Status.** open; the ruled shape is in
 `docs/ARCHITECTURE.md` §10.
+
+**Ledger.** source: K-5 · C-4 · ticket: none yet · version: 0.4.6 — the operation vocabulary; its event carrier waits for a subscriber · status: open.
 
 ---
 
@@ -407,6 +556,8 @@ in the tree.
 **Version.** With the move. **Status.** decided (the move and its preparation);
 the census is open.
 
+**Ledger.** source: K-7 · C-4 · ticket: none yet · version: 0.4.6, with D-32 · status: open.
+
 ---
 
 ## D-12 — `bt-platform` is a drawer whose magnet is stable and whose growth is elsewhere
@@ -435,6 +586,8 @@ owner — its lanes and process-wide static are read by five crates, and splitti
 them would be a second copy of a fact.
 
 **Status.** open.
+
+**Ledger.** source: K-11 · ticket: none yet · version: deferred → 0.5 — one move at a time, and the `bt-app` move ends with D-32 in 0.4.6 · status: open.
 
 ---
 
@@ -466,6 +619,8 @@ alternatives; choice deferred.
 
 **Version.** 0.4.4. **Status.** open, with the choice already scoped.
 
+**Ledger.** source: K-12 · C-4 · split prep P21 · ticket: P21 · version: 0.4.5 · status: open.
+
 ---
 
 ## D-14 — `bt-term → bt-platform` is broader than its manifest says
@@ -492,6 +647,8 @@ stays the single answer, consumed by both `bt-term::verify_path` and
 **Version.** 0.5 — both halves change product code, which a preparation ticket
 forbids. **Status.** open.
 
+**Ledger.** source: C-4 · K-11 · ticket: none yet · version: 0.4.6 · status: open.
+
 ---
 
 ## D-15 — `bt-term → bt-math` is real coupling
@@ -511,6 +668,8 @@ nothing.
 **This row exists so that the edge is recorded rather than rediscovered.**
 
 **Version.** 0.5 at the earliest. **Status.** decided — recorded as debt.
+
+**Ledger.** source: C-4 · K-11 · ticket: recorded by D-27 · version: deferred → the composition-layer design (0.5) — nothing to repay before that layer exists · status: open (recorded debt).
 
 ---
 
@@ -540,6 +699,8 @@ manifest.
 stated in `docs/ARCHITECTURE.md` §6 and `docs/RULES.md` row 52; the enumeration
 lane and the thumbnail thread's band are open.
 
+**Ledger.** source: K-13 · ticket: none yet · version: 0.4.6 · status: open — rule stated.
+
 ---
 
 ## D-17 — The preview's selections have no revisioned mapping to the document
@@ -563,6 +724,8 @@ both faces consume it. Do **not** unify the three selection representations.
 
 **Version.** 0.5, with the document owner of D-1. **Status.** open.
 
+**Ledger.** source: C-4 · ticket: none yet · version: deferred → 0.5, with D-1's document owner · status: open.
+
 ---
 
 ## Decisions on the reviews' disagreements
@@ -578,19 +741,20 @@ The nine points where the two reviews differed are decided in `docs/ARCHITECTURE
 - **The preparation.** Every source reader asks the crate rather than a file:
   item identity, declared universes, mutation as acceptance, "a green suite is
   not acceptance". Proceeds exactly as written. See
-  `docs/plans/bt-app-split-prep.md`.
+  `docs/plans/bt-app-split-prep.md`. What remains of it is in the ledger as
+  D-19…D-32.
 - **The dependency direction guard.** A script over the workspace metadata
   reading normal and build dependencies including target-specific tables, with an
   exception set compared against the merge base so it can only shrink, and stale
   exceptions rejected; paired with a per-target scan because the metadata cannot
   see that an edge exists only for a binary target. Second half of the
-  preparation.
+  preparation; in the ledger as D-27.
 - **`bt-workbench` may be born now.** A crate holding the attention state
   machine, the semantic notification decisions, and the commands and events an
   outward interface is offered. It does **not** wait for the runtime move. Its
   boundary table, the three 0.6 decisions it forces, and the rule that external
   clients send domain commands rather than runtime methods are in
-  `docs/ARCHITECTURE.md` §12.
+  `docs/ARCHITECTURE.md` §12. Its birth is in the ledger as D-57.
 
 ---
 
@@ -638,3 +802,197 @@ finding is not lost.
 ## D-18 — the inventory's subject extraction reads a query's argument as a file-bound subject (2026-09-22)
 
 `scripts/dev/bt-app-split-freshness.py`'s census extracts a reader's subjects lexically, so a migrated body pin such as `method_body("Runtime", "apply_psreadline")` is counted as if the test still read `apply_psreadline` out of a file, and the row's impact reads *subject moves: retarget atomically* although the reading follows the item. This is §2.6's "a reader's own needle is not an occurrence" one level up, in subject extraction rather than search exclusion, and it will misclassify every migrated pin that names a `Runtime` method. The generator also bound a subject by bare name until 2026-09-22 (`add_to_profile`, `graph_filter_branches` — each declared twice); it now refuses a name whose declarations disagree about the move. Owed: subject extraction that tells a `bt-source` query argument from a file reading's needle, or a census that asks `bt-source` for the reader's subjects instead of scanning text.
+
+**Ledger.** source: split prep, 2026-09-22 · ticket: none yet · version: 0.4.5 — D-29…D-32 need a true census · status: open.
+
+---
+
+## D-19…D-63 — the rows added on 2026-09-23
+
+One line each: what it is, its anchor by name, and why the proposed version.
+Ticket, version and status are in the ledger table.
+
+### The split's second half — MIGRATION-DEBT, by class (280 rows)
+
+`docs/plans/MIGRATION-DEBT.tsv` lists every source reader that still names a
+file; it only shrinks, and `scripts/ci/check-migration-debt.ps1` holds that.
+Every 0.4.4 ticket reported it at 280 → 280. The classes are the preparation
+plan's own batching (split prep §6, the ticket table); the counts are the
+file's `ticket` column.
+
+- **D-19 · P0 (3 rows).** The three Python documentation generators — a
+  directory walk and named files, named files out of git blobs, named modules;
+  anchors `scripts/dev/bt-app-graph.py`, `scripts/dev/bt-app-split-freshness.py`.
+  0.4.5, because D-29…D-32 regenerate the inventory through them.
+- **D-20 · P10 (1 row).** The portable-core directory walk and its Rust twin;
+  anchor `scripts/check-portable-core.ps1`, the agreement test
+  `the_gate_and_its_script_walk_the_same_files`. 0.4.5: small.
+- **D-21 · P12 (5 rows).** `bt-platform`'s three directory walkers and the
+  `stand_in` guard, one ticket because they share a file. 0.4.5: CI-only work
+  that can run beside the typing lane.
+- **D-22 · P13 (3 rows).** The remaining source-text walks — one directory walk,
+  two `include_str!`. 0.4.5.
+- **D-23 · P14 (192 rows).** Named-body pins: 153 `include_str!`, 37 fixture
+  or manifest reads, 2 runtime reads — 49 call sites, 13 helpers, 16 module
+  batches in the plan's count. 0.4.6: the largest class, mechanical, batched by
+  module.
+- **D-24 · P16 (63 rows).** `file_reads_doors.txt` keys that name a file, plus
+  the ten text `#[cfg(test)]` splits in seven files, each decided into a named
+  scope. 0.4.6.
+- **D-25 · P17 (13 rows).** Cross-crate and script readers — five
+  `include_str!`, four runtime reads, four script reads of named files;
+  anchors the two `bt-term` integration-test readers,
+  `uninstall_tests`' hand-supplied file list, `context_menu` and `msix`. 0.4.5:
+  `uninstall_tests` reads a module graph rather than a list before settings
+  moves.
+- **D-26 · P18 (not on the list).** The ~110 `[..].concat()` needle halves,
+  written whole now that `bt-source`'s provenance prevents self-match. A
+  readability change with no coverage consequence; 0.4.6.
+- **D-27 · P19.** The CI dependency-direction guard of split prep §8.4 over
+  `cargo metadata` plus a per-target scan, with the exception set compared
+  against the merge base; and the line recording `bt-term → bt-math` (D-15).
+  0.4.5: cheap, independent of `bt-source`, and it keeps D-13's repair from
+  drifting back.
+- **D-28 · P20.** MIGRATION-DEBT at zero and deleted; `bt_source::FileScoped`
+  final at four entries or fewer, each with a reason; the tripwire
+  (`crates/bt-source/tests/tripwire.rs`) green. 0.4.6: it is the class sum.
+
+### The relocation's residue
+
+Step 2a moved 25 of 28 topics (1,195 methods) into `crates/bt-app/src/runtime/`.
+Each unmoved topic is held by a reader the move turns red — by split prep §6.0
+the reader's defect, not the move's. **0.4.5 for all three**: each is one
+reader fix plus a pure move, and moving them before the typing-stability work
+edits `main.rs` saves that work a rebase.
+
+- **D-29 · `launch` (4: `create`, `reseed_editor_env`, `apply_launch_opens`,
+  `arrival_fits`).** Blocked by
+  `shell_integration::tests::shell_integration_startup_and_removal_doors_are_above_window_work`,
+  which reads `include_str!("main.rs")` for `shell_integration::begin_startup_migration();`
+  — a positive bound to a file. Fix: a positive that follows `Runtime::create`.
+- **D-30 · `settings` (31).** Blocked by
+  `focus_mode_door_tests::only_the_chord_and_the_settings_row_write_the_bit`,
+  which compares the `self.set_focus_mode(` sites in universe order against a
+  fixed-order list — two sets compared as sequences. Moving it also orphans
+  the root's `KeyEventExtModifierSupplement` import and its three-line
+  rationale comment, which need a new home.
+- **D-31 · `focus` (51).** Blocked by
+  `focus_mode_door_tests::the_cards_offer_is_spent_in_one_place_and_given_back_in_one`,
+  the same ordered-list shape over `settings.cards_gesture_hint_offer =`.
+  Moving settings and focus together fixes this one and breaks D-30's, so both
+  readers become multiset comparisons first.
+- **D-32 · the unassigned methods.** 112 `Runtime` methods the theme regex
+  assigns to no topic stayed in `main.rs`'s two `impl Runtime<'_>` blocks
+  (listed in the move's record); three more have been added there since
+  (`apply_web_color_scheme`, `hand_uri_to_the_system`,
+  `open_unverified_reference`), so the blocks hold 201 methods today: 115
+  unassigned plus the 86 of D-29…D-31. Owed: an item-level destination for
+  each, drafted against D-11's census rather than name clusters, then the move.
+  0.4.6, after D-18 and D-11.
+
+### `docs/ARCHITECTURE.md` — lanes (§5)
+
+- **D-33 · §5.4 step 1.** One lane contract — request identity, resource
+  ordering, capacity, completion, abandonment, wake obligation — and the
+  unwritten rule for which of the three return mechanisms of §5.1 a lane uses.
+  `bt-app::handoff_lane` (ticket 10) is its first instance; the other lanes are
+  wrapped, not rederived. 0.4.5, because the presentation lane (D-41) needs it.
+- **D-34…D-47 · the open §5.3 exceptions.** Each is one row of §5.3's table,
+  anchored there by call site; §5.4 steps 2–5 are these rows in order. Rows 2,
+  3, 4, 7, 8 and 20 are the storage and observation lanes' first passengers and
+  go to 0.4.6 with D-3 and D-53. Rows 5, 6, 9, 13 and 14 cost a keystroke or a
+  frame on the typing path (`apply_stored_terminal_font`, `Runtime::turn`'s
+  search refresh, `Runtime::present_seats_and_commit`, `drain_pty`) and go to
+  0.4.5. Row 10 follows row 9 into 0.4.6. Rows 11 and 12 wait for the session
+  owner (D-1): moving PTY birth or resize without it loses the ordering
+  `flush_pending_pty_resize` represents.
+
+### `docs/ARCHITECTURE.md` — chains (§7.2)
+
+- **D-48 · attention ingress.** Three lanes into `AttentionLedger::apply`
+  (the escape sequence through `AdapterEvent`, the pipe through
+  `attention_wire`, the `folio attention` verb) and out through
+  `deliver_attention`, `settle_attention`, `answer_attention`,
+  `raise_attention`. 0.4.6, written with D-57, which moves its core.
+- **D-49 · resize.** `ResizePlan`, `DualPlaneSession::resize_at`, the reflow,
+  `PtySession::resize`, and the free functions in `main.rs` that sequence them;
+  the order `flush_pending_pty_resize` represents is the contract. 0.4.6.
+- **D-50 · paste convergence.** `Runtime::prepare_clipboard_paste`,
+  `paste_text`, `bt-term`'s `input::paste_bytes`, and the clipboard read on
+  the window thread. 0.4.5: tickets 02 and 03 changed `deliver_paste` and the
+  hops are fresh.
+
+### `docs/ARCHITECTURE.md` — ownership (§4)
+
+§4.1's three-owner split is D-1; §4.3's `Deref` trap is D-11's census. §4.2
+rules that the survey's twenty-two multi-owner facts are five problems with
+one rule each; none of the five rules is yet a shared shape in the code.
+Collapsing a class means its facts follow its one rule through one contract,
+with each fact's differing policy kept. All five are 0.4.6.
+
+- **D-51 · observations of external state** — facts 1 (the printed-path
+  verdict ledger), 5 (`profiles::title`'s cache, keyed on one of its two
+  inputs), 6 (PSReadLine's three copies), 7 (settings, profiles and pins as
+  read), 12 (`shell_integration::PROFILE_ANSWERS`, never re-asked).
+- **D-52 · asynchronous publication and competing operations** — facts 4
+  (`schemes::CATALOGUE` and `REVISION`), 10 (Explorer registration's three
+  copies), 13 (the font slots, two writers), 19 (`profile_runtime::REMOVAL`,
+  one slot, two writers, no latch), 22 (the generation check re-derived three
+  times: `window.background_decode`, `window.clipboard_picture`, the web host).
+- **D-53 · durability and external transactions** — facts 8 (the session
+  snapshot's three copies), 9 (the marks record), 11 (the update check's
+  memory, file and claim).
+- **D-54 · identity, admission and lifecycle** — facts 2
+  (`launch_wire::ADMITTING`, one turn old), 3 (`hang_watch`'s opinion consumed
+  by `launch_wire::admit`), 14 (`LeafWake::rebind`, the repair to copy), 20
+  (the WebView2 generations).
+- **D-55 · projections, delivery and loss** — facts 15 (video frames), 16
+  (`file_reads::LEDGER`), 17 (`attention_wire::INBOX`), 18 (`trace_sink`'s
+  queue), 21 (`PresentGate`): each publication declares its kind.
+
+### `docs/ARCHITECTURE.md` — failure roads (§11) and 0.5 (§12)
+
+- **D-56 · emergency termination.** `install_panic_log_hook` has no safe access
+  to dirty buffers. Owed: a journal kept before the failure, independent of the
+  owner's locks, and a stated recoverable revision with the bounded tail that
+  may be lost. D-4 is the controlled-failure half. 0.4.6: the journal is new
+  storage and belongs with the storage lane.
+- **D-57 · `bt-workbench` born.** The attention state machine, the semantic
+  notification decisions and the outward commands and events, as §12.1's
+  table; `AttentionLedger::apply` moves first, `attention_wire::WAIT_TTL`'s
+  dependency reverses. 0.4.6: it may be born now and is D-1's first step.
+
+### Tests
+
+- **D-58 · `profile_runtime` under a slow disk.** Two tests
+  (`shell_integration_first_run_done_tells_the_window_nothing`,
+  `shell_integration_two_of_our_own_writers_queue_and_both_finish`) failed
+  `WouldBlock` on CI because our own waiter gave up after `OUR_TURN`. Ticket 34
+  made a wait behind our own writer a queue; repaid on `fbfab1ff`.
+- **D-59 · the two atlas soaks.** `tests::a_long_chinese_session_never_runs_the_atlas_out_of_room`
+  and `tests::a_session_long_enough_to_wear_the_packer_out_gets_its_text_back`
+  in `bt-render` are regression gates, not probes, and are ignored only because
+  CI's software adapter dies before the packer is under pressure. Deferred:
+  they come off the list when a runner with a real adapter exists, and nothing
+  a ticket can do to the code changes that.
+- **D-60 · macOS network tests.** `macos_http`'s
+  `the_releases_list_comes_back_as_json` and
+  `a_body_longer_than_the_cap_is_an_error` reach the network and failed with
+  "The request timed out" in an unrelated run. Owed: a local server, or a
+  reason recorded on the ignored list. 0.4.6.
+
+The other entries of `scripts/ci/ignored-tests.txt` are probes, one writer and
+two privilege-bound fixtures, each with its reason there; they are not debt.
+
+### macOS
+
+- **D-61 · `webnav::tests::a_local_file_is_shown_and_typed_as_a_path_and_loaded_as_a_uri`**
+  is red on a Mac: `file_url_of_local_path` receives a `D:\…` path there and
+  answers `None`. The test states a Windows fact on every platform. 0.4.5: small.
+- **D-62 · `bt-render` clippy on macOS.** `CJK_FALLBACK_FAMILIES`,
+  `CJK_FALLBACK_FONT_FILES` and `CHROME_SANS_FONT_FILES` are never used there,
+  so `cargo clippy -p bt-app` stops in `bt-render`. 0.4.5: small.
+- **D-63 · the macOS CI job's reach.** `core-macos` checks `bt-app`, `bt-term`
+  and `bt-render` but tests none of them, and runs clippy on `bt-platform`
+  only — which is why D-61 and D-62 were found by a person. 0.4.6, after D-61
+  and D-62 make widening it green.
