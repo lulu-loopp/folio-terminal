@@ -143,7 +143,7 @@ impl Runtime<'_> {
         .context("install self-drawn Win32 window frame")?;
         // A second window answers a finger the way the first one does — see
         // that constructor's note.
-        let_the_system_translate_touch(native);
+        let parked_pans = let_the_system_translate_touch(native, &app.event_proxy);
         // **This window's own chrome, read where it was measured** (M3-3;
         // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
         // where the platform is asked what it still draws in this bar, and the
@@ -461,6 +461,7 @@ impl Runtime<'_> {
         );
         let mut window = new_window_runtime(NewWindowParts {
             ime_report,
+            parked_pans,
             favicons: Rc::clone(&app.favicons),
             renderer,
             tabs,

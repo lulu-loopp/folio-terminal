@@ -3110,6 +3110,13 @@ pub mod hang;
 /// difference should be readable on one screen.
 pub mod mem;
 
+/// **The system's pan gesture, as travel the wheel road can spend** (0.4.4
+/// ticket 11). Platform-free arithmetic over the positions Windows reports;
+/// the Windows touch door ([`let_the_system_translate_touch`]) is its only
+/// feeder, and a trackpad elsewhere already speaks the wheel.
+pub mod touch_pan;
+pub use touch_pan::{PanStep, PanTrack};
+
 /// **Everything this product gives to the machine** — the shell, the browser,
 /// Explorer, and the helper programs it starts to ask a question.
 ///
@@ -3413,9 +3420,13 @@ mod windows_impl {
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
                 KeyboardAndMouse::{GetCapture, GetKeyboardLayout, SetFocus, VkKeyScanW},
-                // One call, and it undoes one winit makes — see
+                // One call that undoes one winit makes, and the four that answer
+                // the system's pan gesture — see
                 // [`let_the_system_translate_touch`].
-                Touch::UnregisterTouchWindow,
+                Touch::{
+                    CloseGestureInfoHandle, GESTURECONFIG, GESTUREINFO, GID_PAN, GetGestureInfo,
+                    HGESTUREINFO, SetGestureConfig, UnregisterTouchWindow,
+                },
             },
             Shell::{
                 ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA, Common::COMDLG_FILTERSPEC, DefSubclassProc,
@@ -3431,29 +3442,30 @@ mod windows_impl {
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DefWindowProcW, DestroyCaret,
                 DestroyMenu, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GA_ROOT,
-                GCLP_HBRBACKGROUND, GetAncestor, GetClientRect, GetCursorPos, GetSystemMetrics,
-                GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
-                HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic,
-                IsZoomed, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO,
-                MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, RegisterWindowMessageW, SM_CXFRAME,
-                SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
-                SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-                SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
+                GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GetAncestor, GetClientRect, GetCursorPos,
+                GetSystemMetrics, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
+                HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST,
+                HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND,
+                MF_STRING, MINMAXINFO, MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW,
+                RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN,
+                SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos,
+                SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
                 TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DPICHANGED,
-                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_NCDESTROY,
-                WM_NCHITTEST, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_SETTINGCHANGE,
-                WM_THEMECHANGED, WM_TOUCH, WM_WINDOWPOSCHANGING, WindowFromPoint,
+                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE, WM_GETMINMAXINFO, WM_NCCALCSIZE,
+                WM_NCDESTROY, WM_NCHITTEST, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
+                WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH, WM_WINDOWPOSCHANGING, WindowFromPoint,
             },
         },
     };
 
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
-        INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PendingWindowPos, PlatformChrome,
-        TaskbarProgress, TaskbarProgressState, ThreadPriority, VisualLayer, WheelScrollAmount,
-        WindowRect, composition_visual_offset, custom_frame_hit_test, hold_pending_pos_to,
-        logical_px_for_dpi, window_skirt,
+        INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PanStep, PanTrack, PendingWindowPos,
+        PlatformChrome, TaskbarProgress, TaskbarProgressState, ThreadPriority, VisualLayer,
+        WheelScrollAmount, WindowRect, composition_visual_offset, custom_frame_hit_test,
+        hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -5193,15 +5205,20 @@ mod windows_impl {
     /// `WindowEvent::Touch` and answered with `ProcResult::Value(0)`, so the
     /// default handling that would have made a mouse out of them never runs
     /// (`winit::platform_impl::windows::event_loop::public_window_callback`).
-    /// Every other message a touch raises — `WM_GESTURE`, `WM_GESTURENOTIFY`,
+    /// Every other message a touch raises — `WM_GESTURENOTIFY`,
     /// `WM_POINTERENTER`, `WM_POINTERLEAVE`,
-    /// `WM_TABLET_QUERYSYSTEMGESTURESTATUS` — falls through winit's own default
-    /// arm to `DefWindowProc` already, and a window that answers nothing to the
-    /// last of those *receives every system gesture*, press-and-hold included,
-    /// which is the documented default
+    /// `WM_TABLET_QUERYSYSTEMGESTURESTATUS`, and `WM_GESTURE` for every gesture
+    /// but a pan — falls through winit's own default arm to `DefWindowProc`
+    /// already, and a window that answers nothing to the
+    /// `WM_TABLET_QUERYSYSTEMGESTURESTATUS` *receives every system gesture*,
+    /// press-and-hold included, which is the documented default
     /// (<https://learn.microsoft.com/en-us/windows/win32/tablet/wm-tablet-querysystemgesturestatus-message>).
     /// Naming one of them here would be a second statement of a route that is
-    /// already right.
+    /// already right. **The one exception is a `WM_GESTURE` whose gesture is
+    /// `GID_PAN`** (0.4.4 ticket 11): it is answered, not handed over — see
+    /// [`the_system_s_gesture_is_answered_here`] — and it is a different
+    /// question from this list's, because the system has already recognised
+    /// it; this list is the raw input the system has still to recognise.
     ///
     /// **All of the pointer input or none of it.** `WM_POINTERDOWN`'s own
     /// remarks are explicit that *"if an application selectively consumes some
@@ -5222,6 +5239,65 @@ mod windows_impl {
         TOUCH_GOES_TO_THE_SYSTEM.contains(&message)
     }
 
+    /// **The pan configuration this window asks the system for** (0.4.4
+    /// ticket 11), as the `GESTURECONFIG` `SetGestureConfig` takes.
+    ///
+    /// The `GC_PAN*` numbers are the ones `SetGestureConfig`'s own table gives
+    /// (<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setgestureconfig>)
+    /// — spelled here rather than imported because the `windows` crate files
+    /// them under `Win32_System_SystemServices`, a whole namespace compiled
+    /// for five integers.
+    ///
+    /// **What each bit is for.** `GC_PAN` is *"all pan gestures"* and must be
+    /// wanted before either single-finger bit can be (*"You must set the want
+    /// bits for GC_PAN before you can set them for
+    /// GC_PAN_WITH_SINGLE_FINGER_HORIZONTALLY or
+    /// GC_PAN_WITH_SINGLE_FINGER_VERTICALLY"*,
+    /// <https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-gestureconfig>).
+    /// The two single-finger bits are the point of the ticket: without them a
+    /// one-finger slide over a window with no scroll bar is not a pan to the
+    /// system, and its fallback is the mouse drag the owner saw select text on
+    /// next86. The gutter keeps a vertical slide vertical until the finger
+    /// clearly leaves it, and inertia is the system's own flick — both are the
+    /// system's feel, asked for by name because *"You should explicitly set all
+    /// the flags that you want enabled or disabled when controlling
+    /// single-finger panning"* (the `SetGestureConfig` page again). Nothing is
+    /// blocked, and no other gesture is configured: zoom, rotate, two-finger
+    /// tap and press-and-tap keep the system's defaults and its answers.
+    fn pan_gesture_configuration() -> GESTURECONFIG {
+        const GC_PAN: u32 = 0x01;
+        const GC_PAN_WITH_SINGLE_FINGER_VERTICALLY: u32 = 0x02;
+        const GC_PAN_WITH_SINGLE_FINGER_HORIZONTALLY: u32 = 0x04;
+        const GC_PAN_WITH_GUTTER: u32 = 0x08;
+        const GC_PAN_WITH_INERTIA: u32 = 0x10;
+        GESTURECONFIG {
+            dwID: GID_PAN,
+            dwWant: GC_PAN
+                | GC_PAN_WITH_SINGLE_FINGER_VERTICALLY
+                | GC_PAN_WITH_SINGLE_FINGER_HORIZONTALLY
+                | GC_PAN_WITH_GUTTER
+                | GC_PAN_WITH_INERTIA,
+            dwBlock: 0,
+        }
+    }
+
+    /// **Whether this recognised gesture is answered here rather than handed
+    /// to `DefWindowProc`** — `GID_PAN`, and nothing else.
+    ///
+    /// A pan is the one gesture whose default answer is wrong for this window:
+    /// the default handler turns it into `WM_VSCROLL` / `WM_HSCROLL`
+    /// (*"The pan gesture maps to using the scroll wheel"* — legacy support,
+    /// <https://learn.microsoft.com/en-us/windows/win32/wintouch/windows-touch-gestures-overview>),
+    /// which is a scroll-bar message, and this window has no scroll bar and
+    /// winit reads neither. Every other id keeps its default: `GID_BEGIN` and
+    /// `GID_END` above all, because *"Application behavior is undefined when
+    /// the GID_BEGIN and GID_END messages are consumed by a third-party
+    /// application"* (same page); zoom's default is `Ctrl`+wheel, which this
+    /// window already answers; and the rest are the system's to keep.
+    fn the_system_s_gesture_is_answered_here(id: u32) -> bool {
+        id == GID_PAN.0
+    }
+
     /// Everything the touch subclass reads, in one stable allocation the
     /// subclass owns and frees — see [`let_the_system_translate_touch`].
     struct TouchToTheSystem {
@@ -5234,9 +5310,29 @@ mod windows_impl {
         /// for `TaskbarState`'s reason: both sides are the window's own thread,
         /// and an atomic here would be a claim about sharing that is not true.
         reported: Cell<bool>,
+        /// **Where an answered pan goes** (0.4.4 ticket 11): one call per
+        /// `WM_GESTURE` that moved or opened a pan. It runs inside the
+        /// window's message dispatch, so it may park the step and wake the
+        /// loop and nothing else (`docs/ARCHITECTURE.md` §5.1, way (2)).
+        panned: Box<dyn Fn(PanStep)>,
+        /// The pan this window is in the middle of — the system's last
+        /// position and nothing more. See [`PanTrack`].
+        pan: Cell<PanTrack>,
     }
 
     impl TouchToTheSystem {
+        /// A `GID_PAN` message, read. The step it makes, if it makes one, goes
+        /// to [`Self::panned`]; a message that neither opens nor moves a pan
+        /// says nothing.
+        fn pan_moved(&self, begins: bool, ends: bool, screen: (i32, i32), client: (i32, i32)) {
+            let mut pan = self.pan.get();
+            let step = pan.step(begins, ends, screen, client);
+            self.pan.set(pan);
+            if let Some(step) = step {
+                (self.panned)(step);
+            }
+        }
+
         /// A touch message arrived on this window. The first one says so and
         /// every one after it says nothing — a finger that is drawing a line
         /// raises these by the hundred.
@@ -5309,6 +5405,32 @@ mod windows_impl {
     /// `WM_MOUSEWHEEL` and the rest, which winit reads and this program has
     /// answered since its first window.
     ///
+    /// # The one gesture it answers (0.4.4 ticket 11)
+    ///
+    /// A pan's default answer is a scroll-bar message, and this window has no
+    /// scroll bar — so on next86 a two-finger slide did nothing, and a
+    /// one-finger slide, which the system did not treat as a pan here, fell
+    /// back to a mouse drag and selected text. Two more statements, and
+    /// neither recognises anything:
+    ///
+    /// 3. **The window asks for single-finger pan with the system's gutter and
+    ///    inertia** ([`pan_gesture_configuration`]), once, here — *"If you
+    ///    don't expect to change the gesture configuration, call
+    ///    `SetGestureConfig` at window creation time"*
+    ///    (<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setgestureconfig>),
+    ///    and the setting holds *"for the lifetime of the Window"*. So
+    ///    `WM_GESTURENOTIFY`, the dynamic alternative, still goes to
+    ///    `DefWindowProc` untouched.
+    /// 4. **The subclass answers `WM_GESTURE` when its gesture is `GID_PAN`**
+    ///    by handing the pan's travel to `panned` ([`PanTrack`]: this position
+    ///    minus the last one) and closing the gesture handle, as a handled
+    ///    `WM_GESTURE` must. Every other gesture id — `GID_BEGIN` and `GID_END`
+    ///    included — goes on to winit's procedure and from its default arm to
+    ///    `DefWindowProc`, which closes the handle itself.
+    ///
+    /// `panned` is called inside message dispatch on the window's thread, so it
+    /// parks the step and wakes the loop and does nothing else.
+    ///
     /// # What could be verified by reading, and what could not
     ///
     /// Read and held by tests: the four ids, that nothing else is taken away
@@ -5328,11 +5450,14 @@ mod windows_impl {
     pub fn let_the_system_translate_touch(
         window: NativeWindow,
         report: Box<dyn Fn()>,
+        panned: Box<dyn Fn(PanStep)>,
     ) -> Result<(), String> {
         let hwnd = window.as_hwnd();
         let state = Box::into_raw(Box::new(TouchToTheSystem {
             report,
             reported: Cell::new(false),
+            panned,
+            pan: Cell::new(PanTrack::default()),
         }));
         // SAFETY: `state` is a live allocation handed to the subclass as its
         // reference data, and the subclass reclaims it at `WM_NCDESTROY` —
@@ -5357,7 +5482,19 @@ mod windows_impl {
         // SAFETY: as above. A window that was never registered for touch
         // refuses, which is the answer this call wanted anyway.
         let _ = unsafe { UnregisterTouchWindow(hwnd) };
-        Ok(())
+        // SAFETY: one configuration for this thread's own window, read by the
+        // call and not kept. A refusal leaves the subclass installed — taps and
+        // presses still reach the system — and is said, because a window whose
+        // one-finger slide still selects is a report somebody will make.
+        unsafe {
+            SetGestureConfig(
+                hwnd,
+                0,
+                &[pan_gesture_configuration()],
+                std::mem::size_of::<GESTURECONFIG>() as u32,
+            )
+        }
+        .map_err(|error| format!("SetGestureConfig(single-finger pan) failed: {error}"))
     }
 
     /// [`let_the_system_translate_touch`]'s half that runs on the messages.
@@ -5386,6 +5523,18 @@ mod windows_impl {
             drop(unsafe { Box::from_raw(reference_data as *mut TouchToTheSystem) });
             return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
         }
+        if message == WM_GESTURE {
+            // SAFETY: as below — live until `WM_NCDESTROY`, this thread's.
+            let state = unsafe { &*(reference_data as *const TouchToTheSystem) };
+            // SAFETY: `lParam` of a `WM_GESTURE` is the gesture handle, valid
+            // until it is closed — here, or by `DefWindowProc` down the chain.
+            if unsafe { answer_the_pan(hwnd, state, HGESTUREINFO(lparam.0 as *mut c_void)) } {
+                // *"If an application processes this message, it should
+                // return 0."*
+                return LRESULT(0);
+            }
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
         if !touch_goes_to_the_system(message) {
             return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
         }
@@ -5398,6 +5547,57 @@ mod windows_impl {
         // never sees the message, so the system translates it instead of
         // delivering it to a program that reads nothing.
         unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+
+    /// **A recognised gesture, answered if it is a pan** — `true` when it was,
+    /// and the handle is then closed; `false` when it is the system's, and the
+    /// handle is left for `DefWindowProc` to close.
+    ///
+    /// The protocol is the one `WM_GESTURE`'s page states
+    /// (<https://learn.microsoft.com/en-us/windows/win32/wintouch/wm-gesture>):
+    /// `GetGestureInfo` reads the handle, a handled message closes it with
+    /// `CloseGestureInfoHandle` (*"should close the gesture input handle for
+    /// messages that you do handle"*), and an unhandled one *"must call
+    /// DefWindowProc. Not doing so will cause the application to leak memory"*
+    /// — so the handle is closed on exactly one of the two paths. A handle
+    /// `GetGestureInfo` cannot read is not answered: the system gets it back.
+    ///
+    /// `ptsLocation` is *"the current position of the pan"* in *"physical
+    /// screen coordinates"*; the client point is the same position through
+    /// `ScreenToClient`, which is the currency of `WM_MOUSEMOVE`.
+    ///
+    /// # Safety
+    ///
+    /// `handle` is the `lParam` of a `WM_GESTURE` delivered to `hwnd` on this
+    /// thread and not yet closed.
+    unsafe fn answer_the_pan(hwnd: HWND, state: &TouchToTheSystem, handle: HGESTUREINFO) -> bool {
+        let mut info = GESTUREINFO {
+            cbSize: std::mem::size_of::<GESTUREINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: the caller's handle, and a structure sized as the call asks.
+        if unsafe { GetGestureInfo(handle, &mut info) }.is_err()
+            || !the_system_s_gesture_is_answered_here(info.dwID)
+        {
+            return false;
+        }
+        let screen = (i32::from(info.ptsLocation.x), i32::from(info.ptsLocation.y));
+        let mut client = POINT {
+            x: screen.0,
+            y: screen.1,
+        };
+        // SAFETY: this thread's own window and a point on the stack. A refusal
+        // leaves the screen point, which moves by the same travel.
+        let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client) };
+        state.pan_moved(
+            info.dwFlags & GF_BEGIN != 0,
+            info.dwFlags & GF_END != 0,
+            screen,
+            (client.x, client.y),
+        );
+        // SAFETY: handled, so closed here and nowhere else.
+        let _ = unsafe { CloseGestureInfoHandle(handle) };
+        true
     }
 
     /// Everything the taskbar subclass reads, kept in one stable allocation the
@@ -9058,12 +9258,14 @@ mod windows_impl {
         use super::{
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
             ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM, TouchToTheSystem, compositor_failure,
-            let_the_system_translate_touch, newest_live_owner, primary_language_id,
-            retry_open_clipboard, touch_goes_to_the_system, wide_null,
+            let_the_system_translate_touch, newest_live_owner, pan_gesture_configuration,
+            primary_language_id, retry_open_clipboard, the_system_s_gesture_is_answered_here,
+            touch_goes_to_the_system, wide_null,
         };
-        use crate::NativeWindow;
         use crate::handoff::{validate_local_image_path, validate_openable_path};
+        use crate::{NativeWindow, PanStep, PanTrack};
         use std::cell::Cell;
+        use std::cell::RefCell;
         use std::path::{Path, PathBuf};
         use std::rc::Rc;
 
@@ -9141,6 +9343,7 @@ mod windows_impl {
                 let_the_system_translate_touch(
                     NativeWindow::stand_in(11),
                     Box::new(move || said.set(said.get() + 1)),
+                    Box::new(|_| {}),
                 )
             }
             .expect_err(
@@ -9175,6 +9378,8 @@ mod windows_impl {
                 TouchToTheSystem {
                     report: Box::new(move || said.set(said.get() + 1)),
                     reported: Cell::new(false),
+                    panned: Box::new(|_| {}),
+                    pan: Cell::new(PanTrack::default()),
                 }
             };
             let first = window(&said);
@@ -9189,6 +9394,121 @@ mod windows_impl {
                 said.get(),
                 2,
                 "a second window is a second road and says its own line"
+            );
+        }
+
+        /// RED (0.4.4 ticket 11) — **a pan gesture is answered, and every other
+        /// gesture goes to the system.**
+        ///
+        /// The ids are written as the numbers `WM_GESTURE`'s own table gives
+        /// (<https://learn.microsoft.com/en-us/windows/win32/wintouch/wm-gesture>),
+        /// not as the constants, so a rename upstream cannot make this agree
+        /// with itself. A pan's default answer is a scroll-bar message this
+        /// window cannot read, so it is the one answered; `GID_BEGIN` and
+        /// `GID_END` must reach `DefWindowProc` (*"Application behavior is
+        /// undefined when the GID_BEGIN and GID_END messages are consumed"*);
+        /// zoom, rotate, two-finger tap and press-and-tap keep the system's
+        /// answers because nothing here has a better one.
+        ///
+        /// MUTATION: answer every id (`true`) and the second half goes red at
+        /// `GID_BEGIN`; answer none and the first half does.
+        #[test]
+        fn a_pan_gesture_is_answered_and_every_other_gesture_goes_to_the_system() {
+            assert!(
+                the_system_s_gesture_is_answered_here(4),
+                "GID_PAN (4) is answered here: its default answer is WM_VSCROLL, which a window \
+                 with no scroll bar cannot read"
+            );
+            for (id, name) in [
+                (1_u32, "GID_BEGIN"),
+                (2, "GID_END"),
+                (3, "GID_ZOOM"),
+                (5, "GID_ROTATE"),
+                (6, "GID_TWOFINGERTAP"),
+                (7, "GID_PRESSANDTAP"),
+            ] {
+                assert!(
+                    !the_system_s_gesture_is_answered_here(id),
+                    "{name} ({id}) goes to DefWindowProc, which also closes its handle"
+                );
+            }
+        }
+
+        /// RED (0.4.4 ticket 11) — **the gesture configuration enables
+        /// single-finger pan, with the system's gutter and inertia, and blocks
+        /// nothing.**
+        ///
+        /// As data, with the numbers `SetGestureConfig`'s table gives. On
+        /// next86 a one-finger slide selected text because the system did not
+        /// treat it as a pan on this window; the two single-finger bits are
+        /// what changes that, `GC_PAN` has to be wanted before they can be,
+        /// and gutter and inertia are the system's own feel, named because the
+        /// documentation asks for every single-finger flag to be set
+        /// explicitly. A block bit would be this program refusing a gesture
+        /// the system offered, which nothing here asks for.
+        ///
+        /// MUTATION: drop `GC_PAN_WITH_SINGLE_FINGER_VERTICALLY` from `dwWant`
+        /// and this reads 0x1D — and a one-finger slide selects again.
+        #[test]
+        fn the_gesture_configuration_enables_single_finger_pan() {
+            let config = pan_gesture_configuration();
+            assert_eq!(
+                config.dwID.0, 4,
+                "the configuration is GID_PAN's and no other gesture's"
+            );
+            assert_eq!(
+                config.dwWant,
+                0x01 | 0x02 | 0x04 | 0x08 | 0x10,
+                "GC_PAN | single finger vertically | single finger horizontally | gutter | inertia"
+            );
+            assert_eq!(config.dwBlock, 0, "nothing the system offers is refused");
+        }
+
+        /// RED (0.4.4 ticket 11) — **one answered pan message hands on at most
+        /// one step, and a still one hands on nothing.**
+        ///
+        /// The budget of the door (ticket 11, A3): the callback parks one value
+        /// and wakes the loop once, so a `WM_GESTURE` that is called through
+        /// twice is two wakes, and one that did not move is a wake for nothing.
+        /// Driven through the window state's own `pan_moved` — the half of the
+        /// subclass after `GetGestureInfo` — with a synthetic pan.
+        ///
+        /// MUTATION: call `panned` for every message, moved or not, and the
+        /// still message and the end each hand on a zero step: five, not three.
+        #[test]
+        fn every_answered_pan_message_hands_on_at_most_one_step() {
+            let steps = Rc::new(RefCell::new(Vec::new()));
+            let window = {
+                let steps = Rc::clone(&steps);
+                TouchToTheSystem {
+                    report: Box::new(|| {}),
+                    reported: Cell::new(false),
+                    panned: Box::new(move |step| steps.borrow_mut().push(step)),
+                    pan: Cell::new(PanTrack::default()),
+                }
+            };
+            window.pan_moved(true, false, (500, 400), (20, 30));
+            window.pan_moved(false, false, (500, 420), (20, 50));
+            window.pan_moved(false, false, (500, 420), (20, 50));
+            window.pan_moved(false, false, (500, 390), (20, 20));
+            window.pan_moved(false, true, (500, 390), (20, 20));
+            assert_eq!(
+                *steps.borrow(),
+                vec![
+                    PanStep {
+                        began_at: Some((20, 30)),
+                        travel: (0, 0)
+                    },
+                    PanStep {
+                        began_at: None,
+                        travel: (0, 20)
+                    },
+                    PanStep {
+                        began_at: None,
+                        travel: (0, -30)
+                    },
+                ],
+                "the opening point, then one step per message that moved"
             );
         }
 
