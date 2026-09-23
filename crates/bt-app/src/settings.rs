@@ -520,7 +520,7 @@ const ITEM_HEIGHT_LOGICAL_PX: f32 = 29.5;
 /// the Terminal font picker holds whatever this machine has installed — thirty
 /// or forty faces on an ordinary desk — and a popup as tall as that list is a
 /// popup taller than the dialog it hangs off, flipped up into the caption bar
-/// and cut by the window's own edge. Eight rows of 27.5 is 220px, which is
+/// and cut by the window's own edge. Eight rows of 29.5 is 236px, which is
 /// shorter than the shortest window this dialog opens in has room for below a
 /// row in the middle of a page, so the cap is what makes the direction rule
 /// below hold rather than a second guard on top of it.
@@ -557,7 +557,7 @@ const MENU_SEPARATOR_INSET_LOGICAL_PX: f32 = 6.0;
 /// What a hairline costs the list: the rule and the air on both sides of it.
 ///
 /// **The cap does not grow for it.** [`MENU_MAX_VISIBLE_ITEMS`] is eight ITEMS
-/// and stays eight items — `max-height: calc(8 * 27.5px + 2 * 4px + 2 * 1px)`
+/// and stays eight items — `max-height: calc(8 * 29.5px + 2 * 4px + 2 * 1px)`
 /// counts no rules either — so a hairline inside the visible run costs a
 /// fraction of the ninth item's room and nothing else.
 const MENU_SEPARATOR_BAND_LOGICAL_PX: f32 =
@@ -565,7 +565,7 @@ const MENU_SEPARATOR_BAND_LOGICAL_PX: f32 =
 /// `.combo-item .ci-act { width: 18px; height: 18px }` — one of the two verbs a
 /// row that is a FILE reveals under the pointer.
 ///
-/// Eighteen and not `.pf-act`'s 26: a combo item is 27.5 tall, and a 26px hit
+/// Eighteen and not `.pf-act`'s 26: a combo item is 29.5 tall, and a 26px hit
 /// box inside it would be a button wearing the row.
 const MENU_ACT_SIDE_LOGICAL_PX: f32 = 18.0;
 /// `.ci-acts { gap: 1px }`, the profile row's own gap between two verbs.
@@ -20173,15 +20173,21 @@ mod tests {
             ),
         );
         let sprites = sprites_of(&open_at_heading, None, &values());
+        // **Turned, not merely present**: since ticket 17 (`UI-SPEC.md` I1)
+        // every closed combo on the page also wears a `Chevron { turned_degrees:
+        // 0 }` — the vector mark replacing the old `▼` text glyph, always at
+        // rest, never turned. A resting combo chevron is not a second
+        // disclosure; only a *turned* one is, so the count that matters is
+        // turned chevrons, not chevrons.
         let turned: Vec<ChromeMark> = sprites
             .iter()
             .map(|sprite| sprite.mark)
-            .filter(|mark| matches!(mark, ChromeMark::Chevron { .. }))
+            .filter(|mark| matches!(mark, ChromeMark::Chevron { turned_degrees } if *turned_degrees != 0))
             .collect();
         assert_eq!(
             turned,
             vec![ChromeMark::chevron(1.0)],
-            "one chevron, fully over — and no second kind of disclosure"
+            "one chevron turned fully over — and no second kind of disclosure"
         );
         assert!(
             !sprites
@@ -20458,12 +20464,12 @@ mod tests {
             let menu = placed.menu.expect("the menu is open");
             near(118.0 * scale, width(menu), "the menu");
             near(
-                (2.0 + 8.0 + THEME_OPTIONS.len() as f32 * 27.5) * scale,
+                (2.0 + 8.0 + THEME_OPTIONS.len() as f32 * ITEM_HEIGHT_LOGICAL_PX) * scale,
                 height(menu),
                 "the menu",
             );
             for item in &placed.items {
-                near(27.5 * scale, height(*item), "a menu item");
+                near(ITEM_HEIGHT_LOGICAL_PX * scale, height(*item), "a menu item");
             }
             assert_eq!(placed.items.len(), THEME_OPTIONS.len());
         }
@@ -21316,6 +21322,12 @@ mod tests {
                 // because what it names is a window the reader has to be able to
                 // picture. The row's own line underneath carries the rest.
                 SettingsRow::LaunchOpens,
+                // The light-scheme picker (since ticket 17, `UI-SPEC.md` I1
+                // grew the chevron column from 8.5 to 13, narrowing every
+                // button's value box by 4.5px): `Solarized Light`, the longest
+                // of the built-in light catalogue's own names, no longer fits
+                // 118px where it used to clear it by a hair.
+                SettingsRow::LightScheme,
                 // Two of the summoned terminal's own (§7.54e ⑤): its first
                 // profile item is the sentence "whatever the default profile
                 // is", and the third rung of `What comes back` names two things
@@ -21327,11 +21339,11 @@ mod tests {
                 SettingsRow::QuakeRestore,
                 SettingsRow::SplitDirection,
             ],
-            "the long profile title, the launch row's second answer, the \
-             summoned terminal's two and `Auto (longer edge)` are the \
-             values this build's own tables can produce that cannot fit the \
-             118px button, and every other row's option is one short word that \
-             must be left alone"
+            "the long profile title, the launch row's second answer, \
+             `Solarized Light`, the summoned terminal's two and \
+             `Auto (longer edge)` are the values this build's own tables can \
+             produce that cannot fit the 118px button, and every other row's \
+             option is one short word that must be left alone"
         );
     }
 
@@ -23062,15 +23074,32 @@ mod tests {
     /// [`MENU_MAX_VISIBLE_ITEMS`] scrolls and the items past the body's edge
     /// draw nothing at all — a claim stated as "these marks, in this order"
     /// would be a claim about how many profiles this build happens to ship.
+    ///
+    /// **The topmost sprite at that box, not the first one found** — `build`
+    /// returns `[scrim, content, popup]`, in painter's order, so `content`'s
+    /// sprites (since ticket 17, `UI-SPEC.md` I1: every closed combo's own
+    /// `⌄`) can share screen space with an open popup sitting over them. A
+    /// forward search would report whichever of the two happened to be pushed
+    /// first, which is not what a reader sees; searching from the end reports
+    /// the sprite actually drawn last, which is the one on top.
     fn item_marks(placed: &SettingsLayout, values: &SettingsValues) -> Vec<(usize, ChromeMark)> {
         let sprites = sprites_of(placed, None, values);
         placed
             .items
             .iter()
             .enumerate()
+            // **Shown, not merely past the enumeration** — an item beyond
+            // `MENU_MAX_VISIBLE_ITEMS`' scroll cap is never drawn by this
+            // popup at all, so its rect is not a claim about what this list
+            // put there; without this guard it is only a claim about
+            // whatever the *page underneath* happens to have at that point
+            // (since ticket 17, `UI-SPEC.md` I1, that is a closed combo's own
+            // `⌄` often enough to be found).
+            .filter(|(_, item)| placed.shows_item(**item))
             .filter_map(|(index, item)| {
                 sprites
                     .iter()
+                    .rev()
                     .find(|sprite| within(sprite.rect, *item))
                     .map(|sprite| (index, sprite.mark))
             })
@@ -23090,6 +23119,12 @@ mod tests {
     }
 
     /// Every mark drawn inside one row's closed button.
+    ///
+    /// Since ticket 17 (`UI-SPEC.md` I1) this is at least two: the leading
+    /// `.ticon`-column mark a marked row's chosen option wears, struck first,
+    /// and the combo's own trailing `⌄` (`ChromeMark::Chevron { turned_degrees:
+    /// 0 }`), struck last — every combo wears the second whether or not the row
+    /// is marked. Callers that mean "the option's own mark" want `drawn[0]`.
     fn button_marks(
         placed: &SettingsLayout,
         row: SettingsRow,
@@ -23177,10 +23212,15 @@ mod tests {
             };
             let drawn = button_marks(&general_page, SettingsRow::DefaultProfile, &general);
             assert_eq!(
-                drawn.iter().map(|sprite| sprite.mark).collect::<Vec<_>>(),
-                vec![profiles::mark(chosen)],
+                drawn[0].mark,
+                profiles::mark(chosen),
                 "the Default profile button wears the mark of the profile it \
-                 says it will start"
+                 says it will start, first in its own box"
+            );
+            assert_eq!(
+                drawn[1].mark,
+                ChromeMark::Chevron { turned_degrees: 0 },
+                "and every combo's own ⌄ stands after it (UI-SPEC.md I1)"
             );
             // The `˅` menu's own box for this mark, struck in the `.ticon`
             // column — the same two numbers the open item is given.
@@ -23193,11 +23233,8 @@ mod tests {
                 ..values()
             };
             assert_eq!(
-                button_marks(&quake_page, SettingsRow::QuakeProfile, &summoned)
-                    .iter()
-                    .map(|sprite| sprite.mark)
-                    .collect::<Vec<_>>(),
-                vec![profiles::mark(chosen)],
+                button_marks(&quake_page, SettingsRow::QuakeProfile, &summoned)[0].mark,
+                profiles::mark(chosen),
                 "and so does the summoned terminal's"
             );
         }
@@ -23279,9 +23316,14 @@ mod tests {
             None,
             "the closed control borrows nothing either"
         );
-        assert!(
-            button_marks(&placed, SettingsRow::QuakeProfile, &deferring).is_empty(),
-            "and draws nothing in the column"
+        assert_eq!(
+            button_marks(&placed, SettingsRow::QuakeProfile, &deferring)
+                .iter()
+                .map(|sprite| sprite.mark)
+                .collect::<Vec<_>>(),
+            vec![ChromeMark::Chevron { turned_degrees: 0 }],
+            "and draws no profile mark in the column — only every combo's own \
+             ⌄ (UI-SPEC.md I1), which stands regardless of the row's value"
         );
         let box_of = combo_value_box(
             SettingsRow::QuakeProfile,
