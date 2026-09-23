@@ -4,9 +4,9 @@ The long version of the front page. [`README.md`](../README.md) is the short
 one; [`install.md`](install.md) is how to get Folio onto a machine and what the
 first run looks like.
 
-The keys named below are the Windows ones. [Shortcuts](shortcuts.md) has both
-columns: on a Mac an application verb wears **Command** where Windows wears
-**Ctrl**, which is what leaves **Control** to the terminal on both.
+This page names what Folio does and leaves the keys to one table:
+[Shortcuts](shortcuts.md) lists every key in its Windows and its macOS spelling,
+and the Shortcuts page in Settings changes any of them.
 
 ## LaTeX rendering in the terminal
 
@@ -73,8 +73,8 @@ The agent that is waiting for you is marked on its tab, so there is nothing to g
   whether Folio may send notifications — answer it once, and a refusal is
   reported on the Agent page rather than swallowed.
 - One request interrupts at most once, and the dot clears when you answer in that
-  pane or the program withdraws the request. `Ctrl+Shift+A` jumps to the longest
-  wait.
+  pane or the program withdraws the request. **Jump to the longest waiting
+  pane** has a key of its own.
 - Claude Code, Codex and GitHub Copilot CLI each have a switch on the Agent page
   in Settings that writes one notification hook into that tool's own configuration
   file and takes it back out again. Nothing is installed by default.
@@ -148,7 +148,7 @@ were reading it in.
   `Backspace` do what they do anywhere else. What you select is what you copy,
   and a copy out of a document you are editing brings the marks with it, so what
   you paste back is what was there.
-- `Ctrl+S` writes the file, `Ctrl+Z` takes back the last change and `Ctrl+Y`
+- **Save** writes the file, **Undo** takes back the last change and **Redo**
   puts it again. A run of typing comes back in one press rather than a letter at
   a time, and the unsaved dot goes out when you undo back to your last save.
 - A save changes the part you edited and leaves the rest of the file identical,
@@ -171,7 +171,7 @@ were reading it in.
 - Right-clicking the empty space in a files column opens the menu of the folder
   the column is standing in, so a folder with nothing in it can still be given
   its first file.
-- `Ctrl+Shift+P` finds a file under the folder the column is standing in, and
+- The command palette finds a file under the folder the column is standing in, and
   `Enter` opens it in the preview pane, ready to be typed into.
 
 ## Panes, tabs and windows that move
@@ -199,19 +199,19 @@ be seen at once.
        Mac — and the wheel scroll the picture inside a card a row at a time.">
 </picture>
 
-- `Alt+Shift+-` splits a pane across, `Alt+Shift+=` splits it down. A tab or a
+- A pane splits across or down, each with a key. A tab or a
   single pane can be dragged out into a window of its own, and the panes it did
   not touch keep their widths.
 - A pane dropped on the join between two tabs becomes a tab *between* them: a
   gap opens where it will land. Dropped on a tab itself it joins that tab's
   layout. The horizontal strip, the vertical rail and the card column all read
   the join the same way.
-- `Ctrl+Shift+Z` turns the tab strip into a column of cards, one per tab, each
+- **Cards** turns the tab strip into a column of cards, one per tab, each
   drawing that tab's own panes in the layout they have.
-- `Ctrl+Shift+G` turns the files column into a Git panel: branch, working tree,
+- **Show Git** turns the files column into a Git panel: branch, working tree,
   staged and unstaged files, the commit graph, and a selected file's diff in the
   preview.
-- `Ctrl+Shift+↑` and `Ctrl+Shift+↓` step between commands in the scrollback, and
+- **Previous command** and **Next command** step between commands in the scrollback, and
   a command that failed is marked as having failed.
 - The folder button over the files column lists the folders your shells are
   standing in, then the last five folders you pointed a column at, each marked
@@ -270,7 +270,7 @@ One box answers five questions at once, and `Enter` goes straight there.
        is highlighted, and the letters that matched are marked in each row.">
 </picture>
 
-- `Ctrl+Shift+P` raises a box over the top of the window with five sections that
+- The command palette is a box over the top of the window with five sections that
   never mix: what Folio can do, the panes and tabs this window has open, the
   commands it has run, the files under the folder its column is standing in, and
   the settings.

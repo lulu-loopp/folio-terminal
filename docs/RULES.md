@@ -345,6 +345,17 @@ table held by `scripts/check-shortcuts-table.ps1`. **The rung order of
 `Runtime::keyboard_input` is today the specification** and it is written nowhere
 — that is finding, not rule.
 
+Ruling added 2026-09-22 (owner, keybinding-panel design note, ruling 4; 0.4.4
+ticket 06): **a shipped string never spells a chord of the shortcut table by
+hand.** A sentence that names a table chord composes it from the one effective
+table at the draw (`Shortcuts::accelerator`, in the table's own dialect) — the
+`Cards` row's is `i18n::focus_mode_row_in`. Held by
+`i18n::tests::no_shipped_string_spells_a_chord_the_table_does_not_produce`, which
+scans every `Text` × `Lang` × `HostPlatform`; its allowlist names keys that are
+not table rows (the search field's `Shift+Enter`) and may not hold a table chord.
+`docs/features.md` names verbs, not keys, and points at `docs/shortcuts.md`. The
+row stays `not yet folded` (the rung order is still unwritten).
+
 ### 28. Mouse routing — `not yet folded`
 Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; §7.60
 *`T-WHEEL-TRACE`: the wheel has no road in a recording, so an aiming question

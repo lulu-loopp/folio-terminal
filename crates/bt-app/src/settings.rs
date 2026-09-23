@@ -4060,13 +4060,19 @@ impl SettingsRow {
             // **Not a constant**, on the row above's footing: the sentence names
             // the version the releases page named, and a row that only said "a
             // newer version is out" would send the reader to the page to find
-            // out which one. See `update::row_description`, which is also where
-            // the `&'static str` a `String` becomes is argued for.
+            // out which one. See `update::row_description`, and `i18n::intern`
+            // for where the `&'static str` a `String` becomes is argued for.
             Self::UpdateCheck => crate::update::row_description(),
             // Mock-up 2361.
             Self::TabLayout => Text::DescTabLayout.text(),
-            // Mock-up 4155.
-            Self::FocusMode => Text::DescFocusMode.text(),
+            // Mock-up 4155. **Not a constant** since 0.4.4 ticket 06: the
+            // sentence names the chord the shortcut table holds, which differs
+            // by platform and moves when the reader records another one. Interned
+            // for `update::row_description`'s reason (see `i18n::intern`).
+            Self::FocusMode => crate::i18n::intern(crate::i18n::focus_mode_row_in(
+                crate::i18n::current(),
+                values.focus_mode_chord.as_deref(),
+            )),
             // `DescBlockMaxHeight`'s constraint again: a `&'static str` that does
             // not read its own value, so it says what the number buys rather
             // than what this reader picked. The one fact a picker of pixels
@@ -6006,6 +6012,15 @@ pub struct SettingsValues {
     /// row, so what the picker ticks is what `settings.json` says, and every
     /// window is wearing it already.
     pub focus_card_height: u32,
+    /// **The chord the shortcut table holds for `focus-mode` right now**, in its
+    /// own caps spelling — `Shortcuts::accelerator(Action::ToggleFocusMode)` of
+    /// the one effective table, read on every draw (0.4.4 ticket 06). `None` when
+    /// the reader has unbound it.
+    ///
+    /// Handed in, on `agent_config_refusals`' footing: the `Cards` row names this
+    /// chord, and a sentence that spelled it by hand named `Ctrl+Shift+Z` on a Mac
+    /// (where the table holds `Shift+Cmd+E`) and went on naming it after a rebind.
+    pub focus_mode_chord: Option<String>,
     pub display_formulas: bool,
     pub inline_formulas: bool,
     /// Whether the detector puts back the row separators a coding agent's own
@@ -6295,6 +6310,10 @@ impl SettingsValues {
             tab_layout: TabLayoutMode::Horizontal,
             focus_mode: false,
             focus_card_height: bt_persist::DEFAULT_FOCUS_CARD_HEIGHT,
+            // The table this machine ships, read through the same door the
+            // runtime reads the effective one through.
+            focus_mode_chord: crate::shortcuts::Shortcuts::defaults()
+                .accelerator(crate::shortcuts::Action::ToggleFocusMode),
             sidebar: RailMode::Expanded,
             display_formulas: true,
             inline_formulas: true,
@@ -18290,6 +18309,100 @@ mod tests {
                     }
                     Lang::Chinese => wrapped_description(
                         said,
+                        column,
+                        ROW_DESC_FONT_LOGICAL_PX,
+                        &mut measure_in_a_cjk_face,
+                    ),
+                };
+                assert!(
+                    lines.len() <= SETTINGS_DESCRIPTION_MAX_LINES,
+                    "{platform:?} ({lang:?}) needs {} lines: {lines:#?}",
+                    lines.len()
+                );
+            }
+        }
+    }
+
+    /// RED (0.4.4 ticket 06) — **the `Cards` row names the chord the table it is
+    /// handed holds — the shipped one in either dialect, and the reader's own
+    /// after a rebind — and says it in two lines.**
+    ///
+    /// The row used to return `Text::DescFocusMode` as it stood, and that text
+    /// spelled `Ctrl+Shift+Z` in both languages on every machine: wrong on a
+    /// Mac, where the table holds `Shift+Cmd+E`, and wrong everywhere after a
+    /// rebind. The runtime hands the row `Shortcuts::accelerator` of its one
+    /// effective table every time it draws, which is what this does with a real
+    /// table — so a chord recorded on the Shortcuts page shows on the Cards row
+    /// the next time the dialog paints, without reopening it.
+    ///
+    /// Both dialects and both languages are held to the budget
+    /// [`no_settings_sentence_needs_a_third_line`] holds the host's English to,
+    /// in the column the Appearance page draws — the Mac chord is the longer one
+    /// and no walk of a Windows build's own dialog measures it.
+    ///
+    /// MUTATION: return `Text::DescFocusMode.text()` from the row again — the
+    /// row names no chord and the first assertion goes red.
+    #[test]
+    fn the_cards_row_names_the_chord_its_table_holds() {
+        use crate::i18n::Lang;
+        use crate::shortcuts::{Action, Shortcuts, parse_chord};
+        use bt_platform::HostPlatform;
+        fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
+            bt_unicode::graphemes(text)
+                .map(|cluster| bt_unicode::cluster_width(cluster) as f32)
+                .sum::<f32>()
+                * font_size_px
+                * TEST_ADVANCE_PER_EM
+        }
+        let mut table = Shortcuts::defaults();
+        let shipped = table.accelerator(Action::ToggleFocusMode);
+        let drawn = |table: &Shortcuts| {
+            SettingsRow::FocusMode.description(&SettingsValues {
+                focus_mode_chord: table.accelerator(Action::ToggleFocusMode),
+                ..values()
+            })
+        };
+        let shipped = shipped.expect("focus-mode ships bound");
+        assert!(
+            drawn(&table).contains(&shipped),
+            "the row names the table's {shipped:?}: {:?}",
+            drawn(&table)
+        );
+        table.set("focus-mode", parse_chord("Ctrl+Shift+F9"));
+        let after = drawn(&table);
+        assert!(
+            after.contains("F9") && !after.contains(&shipped),
+            "a rebind shows on the next draw: {after:?}"
+        );
+
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let dialog_pages = pages(held, editing);
+        let row = SettingsRow::FocusMode;
+        let page = &dialog_pages
+            .iter()
+            .find(|(category, _)| *category == row.category())
+            .expect("the Cards row is on a page")
+            .1;
+        assert!(page.contains(&row), "the walk reached the row it measures");
+        let column = if row.stacked() {
+            span
+        } else {
+            page_description_column(page, span)
+        };
+        for platform in [HostPlatform::Windows, HostPlatform::MacOs] {
+            let chord = Shortcuts::defaults_for(platform).accelerator(Action::ToggleFocusMode);
+            for lang in Lang::ALL {
+                let said = crate::i18n::focus_mode_row_in(lang, chord.as_deref());
+                let lines = match lang {
+                    Lang::English => {
+                        wrapped_description(&said, column, ROW_DESC_FONT_LOGICAL_PX, &mut measure)
+                    }
+                    Lang::Chinese => wrapped_description(
+                        &said,
                         column,
                         ROW_DESC_FONT_LOGICAL_PX,
                         &mut measure_in_a_cjk_face,

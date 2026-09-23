@@ -643,37 +643,8 @@ pub fn row_description_in(lang: crate::i18n::Lang) -> &'static str {
     let state = known();
     match newer_than(state.latest_tag.as_deref(), crate::version::VERSION) {
         None => crate::i18n::Text::DescUpdateCheck.in_lang(lang),
-        Some(tag) => intern(crate::i18n::update_row_available_in(lang, tag)),
+        Some(tag) => crate::i18n::intern(crate::i18n::update_row_available_in(lang, tag)),
     }
-}
-
-/// **A composed sentence that has to outlive the frame that composed it.**
-///
-/// `SettingsRow::description` answers `&'static str` — every row in the dialog
-/// hands its answer straight to a `ChromeLabel`, and the whole table costs zero
-/// allocations because of it. `psreadline::row_description` meets the same
-/// signature with a `OnceLock` per language, which is sound there because its
-/// probe is a one-shot; it is **not** sound here, because a process can be told
-/// about `0.1.1` by the file it read at startup and about `0.1.2` by the check
-/// that finished a second later, and a `OnceLock` would go on drawing the first
-/// one under a mark lit for the second.
-///
-/// So the sentences are interned instead, and the pool is bounded by the thing
-/// that generates them: one entry per language per distinct version this process
-/// is told about, which is two languages and at most two versions — the one on
-/// disk at startup and the one a single check can replace it with. It does not
-/// grow with frames, with dialog opens, or with time.
-fn intern(text: String) -> &'static str {
-    static POOL: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
-    let mut pool = POOL
-        .lock()
-        .expect("the sentence pool is not held across a panic");
-    if let Some(held) = pool.iter().find(|held| **held == text) {
-        return held;
-    }
-    let held: &'static str = Box::leak(text.into_boxed_str());
-    pool.push(held);
-    held
 }
 
 /// Start the one check this process makes.
