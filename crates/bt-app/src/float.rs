@@ -570,12 +570,12 @@ pub fn float_geometry(
 
 /// `.float-win .fly-head .files-ico { width: 13px }`, and the foot's mark too.
 pub const FLOAT_HEAD_MARK_LOGICAL_PX: f32 = 13.0;
-/// `.float-win .fly-head { gap: 6px }`.
-pub const FLOAT_HEAD_GAP_LOGICAL_PX: f32 = 6.0;
-/// `.float-win .fly-head { padding: 0 5px 0 10px }` — the left half.
-pub const FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX: f32 = 10.0;
-/// The right half of the same declaration.
-pub const FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX: f32 = 5.0;
+/// UI-SPEC.md G1: the float head uses the shared 8-point icon-to-label gap.
+pub const FLOAT_HEAD_GAP_LOGICAL_PX: f32 = 8.0;
+/// UI-SPEC.md S5: the float head shares the pane head leading inset, 12.
+pub const FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
+/// UI-SPEC.md S5: the float head shares the pane head trailing inset, 6.
+pub const FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX: f32 = 6.0;
 /// `.float-win .fly-head { font-size: 11px }` — the file-name head's shared
 /// face (`docs/DESIGN.md` §7.37), which this header has always been the standard
 /// for and which the hover card now joins.
@@ -2432,6 +2432,40 @@ mod tests {
 
     fn frame(left: f32, top: f32, width: f32, height: f32) -> [f32; 4] {
         [left, top, left + width, top + height]
+    }
+
+    /// RED (26) — **Pane and files chrome follows the shared UI values.**
+    ///
+    /// The baseline uses separate gaps, heights, captions and control values.
+    /// UI-SPEC.md gives each role one rule; collect every mismatch so BASE
+    /// reports each changed value, including private cross-module numeric rules.
+    /// MUTATION: restore FLOAT_HEAD_GAP_LOGICAL_PX to 6.0.
+    /// MUTATION: restore FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX to 10.0.
+    /// MUTATION: restore FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX to 5.0.
+    #[test]
+    fn ui_spec_pane_head_rest_values_follow_the_rule() {
+        let rules = [
+            (
+                FLOAT_HEAD_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G1: FLOAT_HEAD_GAP_LOGICAL_PX",
+            ),
+            (
+                FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX,
+                bt_render::SEAT_TITLE_PADDING_LOGICAL_PX,
+                "UI-SPEC.md S5: FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX",
+            ),
+            (
+                FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX,
+                bt_render::SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX,
+                "UI-SPEC.md S5: FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX",
+            ),
+        ];
+        let deviations: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, rule, _)| actual != rule)
+            .collect();
+        assert!(deviations.is_empty(), "{deviations:?}");
     }
 
     /// RED (ticket 19) — **the float's dock stands in the tool box every other

@@ -52291,3 +52291,209 @@ fn a_recorded_powershell_block_runs_once_on_one_enter() {
         assert_eq!(finished(&replay), 1, "{shell}: one command ended");
     }
 }
+
+// ── ticket 51: the find box reads a bounded slice of history per keystroke ──
+
+/// A shell-less pane whose history holds `lines` generated lines, each narrow enough never to
+/// wrap on the fixture's forty columns; `name(index)` writes line `index`. Generated, not
+/// recorded (standing rules: fixtures).
+fn pane_with_history(lines: usize, name: impl Fn(usize) -> String) -> LeafSession {
+    let mut text = String::with_capacity(lines * 24);
+    for index in 0..lines {
+        text.push_str(&name(index));
+        text.push_str("\r\n");
+    }
+    leaf_saying(&text)
+}
+
+/// The history hits of a whole-plane scan, as the set of `(line, start, end)` a hit is known by.
+fn whole_answer(
+    compiled: &bt_transcript::search::CompiledSearch,
+    leaf: &LeafSession,
+) -> std::collections::BTreeSet<(bt_viewport::SearchLine, u32, u32)> {
+    search::scan_history(compiled, leaf.session.transcript())
+        .iter()
+        .map(|hit| (hit.line, hit.start, hit.end))
+        .collect()
+}
+
+/// RED (51) — **A keystroke in the find box runs the pattern over at most one slice of history,
+/// however long the history is.**
+///
+/// The pane holds a hundred thousand generated lines, the default scrollback. Before ticket 51
+/// a changed question re-ran the pattern over every one of them on the keystroke's frame, once
+/// per character typed (`ARCHITECTURE` §5.3 row 6). Now the keystroke's road
+/// ([`SearchRefresh::Asked`]) reads one slice, each turn's ([`SearchRefresh::Walk`]) one more,
+/// and a published frame ([`SearchRefresh::Output`]) none — and the walk those slices make ends
+/// on the answer a scan from scratch gives. The real leaf, the real transcript, the real
+/// [`rescan_leaf_for_search`] that `Runtime::refresh_search` calls.
+///
+/// MUTATION: make the keystroke road call the unbounded scan (`SearchRefresh::walk_budget`
+/// answering `usize::MAX` for `Asked`) — `lines_scanned` reads the whole plane and the first
+/// assertion goes red.
+#[test]
+fn a_keystroke_in_the_find_box_reads_at_most_one_slice_of_history() {
+    let leaf = pane_with_history(100_000, |index| format!("worker {index} ok"));
+    let frozen = leaf.session.transcript().frozen().len();
+    assert!(
+        frozen > 4 * search::SEARCH_HISTORY_SLICE,
+        "the history is long enough to need a walk: {frozen} lines"
+    );
+    let compiled = search::engine(search::SearchFlags::default(), "worker 9").unwrap();
+    let seat = SeatId(1);
+
+    let asked =
+        rescan_leaf_for_search(&compiled, &leaf, seat, 1, None, SearchRefresh::Asked, false);
+    assert!(
+        asked.lines_scanned <= search::SEARCH_HISTORY_SLICE,
+        "the keystroke read {} of {frozen} lines",
+        asked.lines_scanned
+    );
+    assert!(!asked.cache.history.is_complete(), "the rest is owed");
+    assert!(!asked.unchanged);
+
+    // A frame published after the keystroke carries the answer and reads no slice of it.
+    let published = rescan_leaf_for_search(
+        &compiled,
+        &leaf,
+        seat,
+        1,
+        Some(&asked.cache),
+        SearchRefresh::Output,
+        false,
+    );
+    assert_eq!(published.lines_scanned, 0);
+    assert!(
+        published.unchanged,
+        "nothing moved, so nothing is re-installed"
+    );
+
+    // Each turn after it reads one slice, and the walk ends on the whole answer.
+    let mut cache = asked.cache;
+    let mut turns = 0;
+    while cache.walking() {
+        let walked = rescan_leaf_for_search(
+            &compiled,
+            &leaf,
+            seat,
+            1,
+            Some(&cache),
+            SearchRefresh::Walk,
+            false,
+        );
+        assert!(walked.lines_scanned <= search::SEARCH_HISTORY_SLICE);
+        assert!(!walked.unchanged, "a slice is never mistaken for nothing");
+        assert!(!walked.carried_complete);
+        cache = walked.cache;
+        turns += 1;
+    }
+    assert_eq!(turns, (frozen - 1) / search::SEARCH_HISTORY_SLICE);
+    let found: std::collections::BTreeSet<_> = cache
+        .history
+        .hits()
+        .iter()
+        .map(|hit| (hit.line, hit.start, hit.end))
+        .collect();
+    assert_eq!(found, whole_answer(&compiled, &leaf));
+    assert_eq!(cache.history.hits().len(), found.len());
+}
+
+/// RED (51) — **A new question abandons the walk of the old one.**
+///
+/// A walk for `ab` is under way when `c` is typed. The new question has its own revision, and
+/// the old answer is no answer to it: no hit of `ab` that is not a hit of `abc` may appear in
+/// anything installed after the keystroke, on the keystroke's own frame or on any turn of the new
+/// walk — the cursor of the old walk is never read again. Half the lines hold `ab` alone, so a
+/// carried hit would be caught on the first install.
+///
+/// MUTATION: continue the old cursor under the new revision (drop `cache.revision == revision`
+/// from the filter in `rescan_leaf_for_search`) — the `ab` hits the old walk found are carried
+/// into the first install, and so is its cursor.
+#[test]
+fn a_new_question_abandons_the_walk_of_the_old_one() {
+    let lines = 3 * search::SEARCH_HISTORY_SLICE;
+    let leaf = pane_with_history(lines, |index| {
+        if index % 2 == 0 {
+            format!("ab {index}")
+        } else {
+            format!("abc {index}")
+        }
+    });
+    let seat = SeatId(1);
+    let ab = search::engine(search::SearchFlags::default(), "ab").unwrap();
+    let old = rescan_leaf_for_search(&ab, &leaf, seat, 1, None, SearchRefresh::Asked, false);
+    assert!(old.cache.walking(), "the old question is mid-walk");
+
+    let abc = search::engine(search::SearchFlags::default(), "abc").unwrap();
+    let allowed = whole_answer(&abc, &leaf);
+    let mut rescan = rescan_leaf_for_search(
+        &abc,
+        &leaf,
+        seat,
+        2,
+        Some(&old.cache),
+        SearchRefresh::Asked,
+        false,
+    );
+    assert!(rescan.lines_scanned <= search::SEARCH_HISTORY_SLICE);
+    loop {
+        for hit in rescan.cache.history.hits() {
+            assert!(
+                allowed.contains(&(hit.line, hit.start, hit.end)),
+                "a hit of the old question was installed under the new one: {hit:?}"
+            );
+        }
+        if !rescan.cache.walking() {
+            break;
+        }
+        rescan = rescan_leaf_for_search(
+            &abc,
+            &leaf,
+            seat,
+            2,
+            Some(&rescan.cache),
+            SearchRefresh::Walk,
+            false,
+        );
+    }
+    assert_eq!(rescan.cache.history.hits().len(), allowed.len());
+}
+
+/// RED (51) — **A turn continues a search walk in progress under the scan's own name, and books
+/// its next turn at once while one is owed; a published frame reads no slice.**
+///
+/// The wiring the two tests above cannot reach, since `Runtime` is not built without a window:
+/// the clock stands in `turn` after the drain (so the lines the shell froze meanwhile are carried,
+/// not owed) under `Station::SearchScan`, the wake fold asks for the next turn through
+/// `search_walk_deadline`, and `publish_frame_inner`'s refresh is the carrying road.
+///
+/// MUTATION: delete the `advance_search_scan` clock from `turn` — the walk never gets past the
+/// keystroke's slice, and the first assertion goes red.
+#[test]
+fn a_turn_walks_a_search_in_progress_and_wakes_for_it() {
+    let turning = method_body("Runtime", "turn");
+    let clock = turning
+        .find("self.advance_search_scan()")
+        .expect("`turn` advances a search walk");
+    let drain = turning.find("self.drain_pty()?;").expect("`turn` drains");
+    assert!(
+        clock > drain,
+        "the walk reads after the drain has frozen what it will"
+    );
+    let station = turning[..clock]
+        .rfind("hang_watch::Station::")
+        .map(|at| &turning[at..clock]);
+    assert!(
+        station.is_some_and(|text| text.starts_with("hang_watch::Station::SearchScan")),
+        "the walk's slice is charged to the scan's own name"
+    );
+    assert!(
+        turning.contains("self.search_walk_deadline(now)"),
+        "the wake fold books the next slice's turn"
+    );
+    assert!(
+        method_body("Runtime", "publish_frame_inner")
+            .contains("self.refresh_search(SearchRefresh::Output)"),
+        "a published frame carries the answer and reads no slice"
+    );
+}

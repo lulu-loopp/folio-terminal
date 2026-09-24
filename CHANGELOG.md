@@ -18,12 +18,15 @@ All notable changes to Folio are recorded here. The format follows
   where its window is; it asks once.
 - A program that keeps changing its window title no longer slows typing;
   Folio passes the title on at most once a frame.
+- Typing in the find box stays quick in a pane with a long history; matches
+  further back fill in over the next few frames.
 - A launch with a chosen terminal font no longer waits for Folio to list every
   font on the machine.
 
 ### Changed
 
 - Command palette rows use the same corners and icon spacing as other lists.
+- Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.
 - Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.
 - Git panel and graph spacing, corners, captions, badges and icons now match the rest of the window.
 - Glance-card head spacing, drag-tag padding and spacing, and peek-tag line height now match the other floating tags.

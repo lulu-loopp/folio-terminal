@@ -2,8 +2,8 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    Runtime, SearchScanCache, frame_row_of_anchor, hang_watch, input, marks, native_window, search,
-    seats, text_field, tooltip, trace_sink,
+    Runtime, SearchRefresh, SearchScanCache, frame_row_of_anchor, hang_watch, input, marks,
+    native_window, rescan_leaf_for_search, search, seats, text_field, tooltip, trace_sink,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -157,7 +157,7 @@ impl Runtime<'_> {
         {
             let _ = bt_platform::take_keyboard_focus(native);
         }
-        self.refresh_search(true)?;
+        self.refresh_search(SearchRefresh::Asked)?;
         self.after_search_change()
     }
 
@@ -199,11 +199,12 @@ impl Runtime<'_> {
     /// One frame's worth of everything a **reader-caused** change to the search owes the window:
     /// the searched pane is repainted, and the chrome is rebuilt around the new count.
     ///
-    /// **Only ever called for a change the reader made.** The rebuilds that *output* causes go
-    /// through [`Self::refresh_search`]'s quiet path instead, and the difference is not a
-    /// preference: that path runs at the top of [`Self::publish_frame_inner`], with a frame already
-    /// being composed, so asking for another one from inside it would be the publish re-entering
-    /// itself once per line the shell prints.
+    /// **Only ever called for a change the reader made, or a walk's slice on its own turn**
+    /// ([`Self::advance_search_scan`], which has no frame in hand and whose hits nothing else would
+    /// draw). The rebuilds that *output* causes go through [`Self::refresh_search`]'s quiet path
+    /// instead, and the difference is not a preference: that path runs at the top of
+    /// [`Self::publish_frame_inner`], with a frame already being composed, so asking for another one
+    /// from inside it would be the publish re-entering itself once per line the shell prints.
     pub(crate) fn after_search_change(&mut self) -> Result<()> {
         if let Some(seat) = self.window.search.seat() {
             self.repaint_pane_change(seat)?;
@@ -240,14 +241,18 @@ impl Runtime<'_> {
 
     /// Re-scan, if anything the answer depends on has moved.
     ///
-    /// `forced` says the reader did something — typed, flipped a toggle, opened the capsule — and
-    /// suspends the "nothing changed, leave it alone" shortcut. Its other half is B58's rule about
-    /// *which* match becomes current: a rebuild the reader caused starts from where the eye is,
-    /// while one that output caused keeps the match the eye is on.
+    /// `road` says who is asking ([`SearchRefresh`]). [`SearchRefresh::Asked`] is the reader —
+    /// typed, flipped a toggle, opened the capsule — and suspends the "nothing changed, leave it
+    /// alone" shortcut. Its other half is B58's rule about *which* match becomes current: a rebuild
+    /// the reader caused starts from where the eye is, while one that output caused keeps the match
+    /// the eye is on — and a slice of a walk in progress re-decides it until the reader walks
+    /// ([`search::SearchState::keeps_current`]).
     ///
-    /// **No debounce anywhere.** A keystroke's result is on the next frame; the thing that makes
-    /// that affordable is [`SearchScanCache`]'s split by plane, not a timer.
-    pub(in crate::runtime) fn refresh_search(&mut self, forced: bool) -> Result<()> {
+    /// **No debounce anywhere.** A keystroke's result is on the next frame; the things that make
+    /// that affordable are [`SearchScanCache`]'s split by plane and, since ticket 51, the bound on
+    /// how much history one keystroke reads — the volatile planes and the newest slice land on that
+    /// frame, and the rest on the turns after it. Not a timer.
+    pub(in crate::runtime) fn refresh_search(&mut self, road: SearchRefresh) -> Result<()> {
         let Some(seat) = self.window.search.seat() else {
             self.window.search_scan = None;
             return Ok(());
@@ -290,7 +295,7 @@ impl Runtime<'_> {
                 eprintln!("BT_WEB {error}");
             }
             self.window.search_scan = None;
-            return self.settle_search_change(forced);
+            return self.settle_search_change(road);
         }
         // A pane that has gone — closed, torn into another tab, turned into a preview — ends the
         // search silently (B64/B77). There is nothing to search and nothing to draw on.
@@ -319,7 +324,7 @@ impl Runtime<'_> {
                 self.window.search_scan = None;
                 if changed {
                     self.install_search_highlights(seat);
-                    self.settle_search_change(forced)?;
+                    self.settle_search_change(road)?;
                 }
                 return Ok(());
             }
@@ -331,68 +336,47 @@ impl Runtime<'_> {
             self.window.search_scan = None;
             if changed {
                 self.install_search_highlights(seat);
-                self.settle_search_change(forced)?;
+                self.settle_search_change(road)?;
             }
             return Ok(());
         };
 
         let revision = self.window.search_revision;
         let leaf = self.sessions.get(&seat).expect("the seat was just checked");
-        let transcript = leaf.session.transcript();
-        // **The previous answer, and only while it is an answer to the same question.** Seat and
-        // revision are what "the same question" means here; the plane having moved under it is not
-        // a reason to throw it away, it is the reason it is passed in.
-        let previous = self
-            .window
-            .search_scan
-            .as_ref()
-            .filter(|cache| cache.seat == seat && cache.revision == revision);
-        let scan_started = self.app.trace_perf.then(Instant::now);
-        // **The pattern over the frozen lines, under its own name** (T-STATION-SPLIT) — see
+        // **The pattern over the transcript, under its own name** (T-STATION-SPLIT) — see
         // [`hang_watch::Station::SearchScan`]. Bracketed around the scan itself and not around
         // this function, which leaves through eight doors; there is no early return between
         // these two lines.
-        let leaving_history = hang_watch::enter(hang_watch::Station::SearchScan);
-        let history =
-            search::scan_history_after(&compiled, transcript, previous.map(|cache| &cache.history));
-        hang_watch::at(leaving_history);
-        let history_us = scan_started.map_or(0, |at| at.elapsed().as_micros());
-        // The two volatile planes, every time: fifty rows of grid and whatever has scrolled out but
-        // not frozen. Their cost is a property of the screen, so re-scanning them unconditionally
-        // is what buys "the word you are typing is findable the instant it is echoed".
-        let live: Vec<search::LiveRow> = leaf
-            .session
-            .live_rows()
-            .iter()
-            .enumerate()
-            .map(|(row, captured)| search::live_row(row as u32, &captured.cells))
-            .collect();
         let leaving_scan = hang_watch::enter(hang_watch::Station::SearchScan);
-        let volatile_hits =
-            search::scan_volatile(&compiled, transcript, &live, leaf.session.grid_generation());
+        let rescan = rescan_leaf_for_search(
+            &compiled,
+            leaf,
+            seat,
+            revision,
+            self.window.search_scan.as_ref(),
+            road,
+            self.app.trace_perf,
+        );
         hang_watch::at(leaving_scan);
-        // **What the scan cost, and how much of it was new** — one line per frame the capsule is
-        // open on a terminal. `lines_scanned` is the number this split exists to hold down: the
-        // whole plane on the frame a question changes, and the lines the shell has frozen since on
-        // every other one. A recording where it tracks `frozen_lines` while a shell prints is the
-        // incremental step having been lost.
+        // **What the scan cost, and how much of it was new** — one line per refresh the capsule is
+        // open on a terminal. `lines_scanned` is the number this split exists to hold down: at
+        // most one slice on the frame a question changes and on each turn of its walk, and the
+        // lines the shell has frozen since on every other one. A recording where it tracks
+        // `frozen_lines` while a shell prints is the incremental step having been lost; one where
+        // it passes `SEARCH_HISTORY_SLICE` on a keystroke is the bound having been lost.
         if self.app.trace_perf {
             trace_sink::stderr_line(format!(
-                "BT_PERF_TRACE search_scan lines_scanned={} frozen_lines={} history_us={history_us} history_hits={} live_rows={} volatile_hits={}",
-                history.lines_scanned,
-                history.scan.window().len,
-                history.scan.hits().len(),
-                live.len(),
-                volatile_hits.len(),
+                "BT_PERF_TRACE search_scan lines_scanned={} frozen_lines={} history_us={} history_hits={} history_complete={} live_rows={} volatile_hits={}",
+                rescan.lines_scanned,
+                rescan.cache.history.window().len,
+                rescan.history_us,
+                rescan.cache.history.hits().len(),
+                rescan.cache.history.is_complete(),
+                rescan.live_rows,
+                rescan.cache.volatile_hits.len(),
             ));
         }
-        // Nothing happened when the question, the plane's window and the volatile hits are all the
-        // ones the last scan saw. The window stands in for the history hits because it is what they
-        // are a function of: same seat, same revision, same window, same answer.
-        let unchanged = previous.is_some_and(|cache| {
-            cache.history.window() == history.scan.window() && cache.volatile_hits == volatile_hits
-        });
-        if unchanged && !forced {
+        if rescan.unchanged && road != SearchRefresh::Asked {
             return Ok(());
         }
         // Where the eye is: the viewport's own anchor when the pane has been scrolled, and nothing
@@ -402,28 +386,59 @@ impl Runtime<'_> {
             .projection
             .scroll_anchor()
             .map(|anchor| anchor.source.clone());
-        let mut hits = history.scan.hits().to_vec();
-        hits.extend(volatile_hits.iter().cloned());
+        let keep_current = self
+            .window
+            .search
+            .keeps_current(road == SearchRefresh::Asked, rescan.carried_complete);
+        let mut hits = rescan.cache.history.hits().to_vec();
+        hits.extend(rescan.cache.volatile_hits.iter().cloned());
         self.window
             .search
-            .install(hits, None, !forced, from.as_ref());
-        self.window.search_scan = Some(SearchScanCache {
-            seat,
-            revision,
-            history: history.scan,
-            volatile_hits,
-        });
+            .install(hits, None, keep_current, from.as_ref());
+        self.window.search_scan = Some(rescan.cache);
         self.install_search_highlights(seat);
-        self.settle_search_change(forced)
+        self.settle_search_change(road)
+    }
+
+    /// **The turn's clock for a walk in progress** (ticket 51, D-38): one more slice of the history
+    /// a changed question still owes, and a frame for what it found.
+    ///
+    /// Does nothing — and costs one `Option` read — unless the cache is a partial answer, which is
+    /// every turn but the few after a keystroke in a pane with a long history. The turn's wake fold
+    /// asks for an immediate turn while one is ([`Self::search_walk_deadline`]), so a walk needs no
+    /// timer and no other event to finish: each turn reads one slice, and the loop is free between
+    /// them for the next key. Everything else is [`Self::refresh_search`]'s: a closed capsule, a
+    /// pane that has gone or taken the alternate screen, and a page all end the walk there.
+    pub(in crate::runtime) fn advance_search_scan(&mut self) -> Result<()> {
+        if !self
+            .window
+            .search_scan
+            .as_ref()
+            .is_some_and(SearchScanCache::walking)
+        {
+            return Ok(());
+        }
+        self.refresh_search(SearchRefresh::Walk)
+    }
+
+    /// `now`, while a walk is in progress, so the loop turns again at once and the next slice is
+    /// read; nothing otherwise. See [`Self::advance_search_scan`].
+    pub(in crate::runtime) fn search_walk_deadline(&self, now: Instant) -> Option<Instant> {
+        self.window
+            .search_scan
+            .as_ref()
+            .is_some_and(SearchScanCache::walking)
+            .then_some(now)
     }
 
     /// Which of the two roads a finished rebuild takes back to the glass.
-    fn settle_search_change(&mut self, forced: bool) -> Result<()> {
-        if forced {
-            self.after_search_change()
-        } else {
-            self.after_quiet_search_change();
-            Ok(())
+    fn settle_search_change(&mut self, road: SearchRefresh) -> Result<()> {
+        match road {
+            SearchRefresh::Asked | SearchRefresh::Walk => self.after_search_change(),
+            SearchRefresh::Output => {
+                self.after_quiet_search_change();
+                Ok(())
+            }
         }
     }
 
@@ -634,7 +649,7 @@ impl Runtime<'_> {
         }
         if edited {
             self.window.search_revision = self.window.search_revision.wrapping_add(1);
-            self.refresh_search(true)?;
+            self.refresh_search(SearchRefresh::Asked)?;
         }
         if self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -656,7 +671,7 @@ impl Runtime<'_> {
         // *"Any press hands the caret back"* (B74) — the capsule is one control, and a toggle you
         // pressed with the mouse leaves you able to keep typing.
         self.window.search.focus();
-        self.refresh_search(true)
+        self.refresh_search(SearchRefresh::Asked)
     }
 
     /// A press on the capsule. Returns whether it landed there at all.
@@ -802,7 +817,7 @@ impl Runtime<'_> {
             Ime::Enabled | Ime::Disabled => return Ok(()),
         }
         self.window.search_revision = self.window.search_revision.wrapping_add(1);
-        self.refresh_search(true)?;
+        self.refresh_search(SearchRefresh::Asked)?;
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }

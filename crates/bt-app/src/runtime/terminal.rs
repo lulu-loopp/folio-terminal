@@ -760,9 +760,10 @@ impl Runtime<'_> {
         // and so was the cache the next scan would have carried forward: its
         // line ids name lines *inside one transcript*, and the fresh one hands
         // the same ids to different text. **This is the guarantee
-        // [`search::scan_history_after`] names**, and it is why it is discharged
+        // [`search::scan_history_slice`] names**, and it is why it is discharged
         // here rather than guessed at there — nothing about two windows of ids
-        // can tell a reader which transcript minted them. Both go.
+        // can tell a reader which transcript minted them. Both go, and a walk
+        // in progress goes with the cache (ticket 51).
         self.clear_search_highlights(seat);
         self.window.search_scan = None;
         self.settle_seat_set_change()?;

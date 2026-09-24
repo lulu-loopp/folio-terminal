@@ -52,7 +52,7 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 9 | 6 | 3 |
+| 0.4.5 | 9 | 5 | 4 |
 | 0.4.6 | 39 | 39 | 0 |
 | 0.4.7 | 13 | 13 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
@@ -83,6 +83,9 @@ measured under one frame (2.6–3.4 ms cold on the development machine). The fon
 lane now numbers its requests and answers, the request identity D-33 asks of
 every lane; it does so in its own slot, not through a shared shape, so D-33 is
 not advanced beyond that.
+added no row. Ticket 51 repaid D-38 whole (§5.3 row 6: a changed search reads
+one slice of history on the keystroke's frame and one per turn after it, on the
+window thread, no ownership moved) and that row's part of D-2; it added no row.
 
 ## The ledger
 
@@ -95,7 +98,7 @@ ledger's.
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
-| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37) |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
@@ -131,7 +134,7 @@ ledger's.
 | D-35 | §5.3 row 3 — `psreadline::apply_recorded`, nine files under the lock | §5.3 | none yet | 0.4.6 | open |
 | D-36 | §5.3 row 4 — `psreadline::installed_copy`'s recursive walk | §5.3 | none yet | 0.4.6 | open |
 | D-37 | §5.3 row 5 — the machine's whole font collection enumerated inline | §5.3 | 50 | 0.4.5 — the traced frozen gear | repaid (ticket 50) |
-| D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | none yet | 0.4.5 — a per-keystroke cost | open |
+| D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | 51 | 0.4.5 — a per-keystroke cost | repaid (ticket 51) |
 | D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | 0.4.6 | open |
 | D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | 0.4.6 | open |
 | D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | 0.4.5 — presenting off the input thread is the typing-stability work | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both |
@@ -282,7 +285,7 @@ first cut must not be advertised as eliminating every window-thread stall**.
 **Status.** open. Lanes, the exception list and the migration order are in
 `docs/ARCHITECTURE.md` §5.
 
-**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37).
+**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38).
 
 ---
 
