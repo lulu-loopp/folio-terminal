@@ -15,7 +15,8 @@ starts**: 0.4.5 is typing stability, per-pane zoom and what fits beside them;
 
 The file began as the 2026-09-21 structure review's debt list (D-1…D-18, kept
 below with their IDs and text). On 2026-09-23 it gained the ledger columns and
-every debt the repository already recorded elsewhere (D-19…D-63). It is
+every debt the repository already recorded elsewhere (D-19…D-63); on
+2026-09-24, two rows found by the 0.4.5 drafts (D-64, D-65). It is
 **ordered by consequence, not by severity** — nothing here is a bug; each row is
 a shape that makes the next hundred tickets more expensive, and the cost it
 charges is the one the project named: *what must be read to finish one ticket
@@ -39,11 +40,11 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 21 | 21 | 0 |
-| 0.4.6 | 33 | 33 | 0 |
+| 0.4.5 | 22 | 22 | 0 |
+| 0.4.6 | 34 | 34 | 0 |
 | deferred (reason on the row) | 8 | 8 | 0 |
 | already repaid | 1 | 0 | 1 |
-| **total** | **63** | **62** | **1** |
+| **total** | **65** | **64** | **1** |
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -52,6 +53,10 @@ our own writer (D-2, D-34) and the `profile_runtime` CI failures (D-58, repaid
 whole); ticket 14 (`5d4c7aff`) — the printed-path chain's hand-off hop kept
 current in §7.1 (D-6); ticket 05 (`5f433943`) — §9's paragraph that export is
 not a fourth entrance (D-9). Ticket 32 (`4ba5df7e`) repaid no row and added none.
+Ticket 39 (`66174d8a`) repaid no row and added none: the web pane's arrow now
+hands an address to the browser through the OS hand-off lane, one more caller of
+the lane §5.3 row 1 already made, not a part of any open row. As of 2026-09-24
+no part of D-64 or D-65 is repaid.
 
 ## The ledger
 
@@ -126,6 +131,8 @@ ledger's.
 | D-61 | a Mac-only red test in `webnav` | ticket 13's report | none yet | 0.4.5 | open |
 | D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | none yet | 0.4.5 | open |
 | D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | none yet | 0.4.6 | open |
+| D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open |
+| D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.6 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.6 before the 0.5 restyle, and the row closes with it | open |
 
 ---
 
@@ -799,6 +806,27 @@ finding is not lost.
   was written because of this split — and the preparation's §5 cites the wrong
   section for the heavy-operation rule, which lives in §十 rule 8.
 
+Six more were found on 2026-09-23 by the fade audit (*which surfaces show their
+content before their plate*, §4), beside D-65. **All six are fixed by ticket
+46.**
+
+- Video and GIF pictures ignore every fade: `Runtime::video_layers` builds
+  every video and animation layer at opacity 1.0, so a recording on the glance
+  card is at full strength from the card's first frame — fixed by ticket 46.
+- The docked video bar's labels never fade: `VideoSeat::bar` fades its quads
+  and sprites by hand and returns a layer at opacity 1.0, and a label carries no
+  alpha — fixed by ticket 46.
+- The files flyout travels on exit, against UI-SPEC §7's "nothing travels on
+  exit": `float::fade` with `reverse` still returns a rise — fixed by ticket 46.
+- Stale doc comments: `tooltip::hover_fade_opacity` says there is no fade out,
+  and `OverlayLayer::opacity`'s "under 2.5% of an already-invisible ink" is
+  false in linear light — fixed by ticket 46.
+- `palette::build`'s opacity parameter is dead; its one caller passes 1.0 —
+  fixed by ticket 46.
+- Opacity assigned, not multiplied: `Runtime::float_layer` assigns
+  `bar.opacity` and `dock_overlay_layers` assigns `layer.opacity`, against the
+  multiplying rule `Runtime::file_peek_layer` states — fixed by ticket 46.
+
 ## D-18 — the inventory's subject extraction reads a query's argument as a file-bound subject (2026-09-22)
 
 `scripts/dev/bt-app-split-freshness.py`'s census extracts a reader's subjects lexically, so a migrated body pin such as `method_body("Runtime", "apply_psreadline")` is counted as if the test still read `apply_psreadline` out of a file, and the row's impact reads *subject moves: retarget atomically* although the reading follows the item. This is §2.6's "a reader's own needle is not an occurrence" one level up, in subject extraction rather than search exclusion, and it will misclassify every migrated pin that names a `Runtime` method. The generator also bound a subject by bare name until 2026-09-22 (`add_to_profile`, `graph_filter_branches` — each declared twice); it now refuses a name whose declarations disagree about the move. Owed: subject extraction that tells a `bt-source` query argument from a file reading's needle, or a census that asks `bt-source` for the reader's subjects instead of scanning text.
@@ -996,3 +1024,42 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
   and `bt-render` but tests none of them, and runs clippy on `bt-platform`
   only — which is why D-61 and D-62 were found by a person. 0.4.6, after D-61
   and D-62 make widening it green.
+
+---
+
+## D-64…D-65 — the rows added on 2026-09-24
+
+- **D-64 · a web page's open holds the window thread.** A stall self-report on
+  the next89 candidate recorded two holds while a web preview opened: 4,099 ms
+  and 2,884 ms, `window_event` 3,979 and 2,703 ms with every named child under
+  130 ms, thread CPU 437 ms, +8,793 and +2,931 page faults. The time is in an
+  unnamed remainder of `window_event`: the first page's
+  `CreateCoreWebView2EnvironmentWithOptions` (charged to the gesture's station),
+  `request_controller`'s `CreateCoreWebView2CompositionController`, and the
+  `WebEffect::InstallEvents` burst inside `drive_web_page` — `attach_web_visual`,
+  `WebHost::install` with its settings calls, `SetRootVisualTarget`,
+  `stand_on_the_floor`, the first `Navigate`, `refresh_chrome`. No row of §5.3
+  covers WebView creation: §5.2 keeps the controller and its native views on the
+  window thread, but not the waiting for them. **D-64 is a new row of §5.3's
+  table**, one of D-34…D-47's kind, written there by ticket 43 with its number.
+  Owed: the phases probed as stations of the self-report, the environment
+  requested on a lane, the controller's callback not pumped inside a gesture,
+  and the install burst split across turns. 0.4.5: ticket 43 adds the probes
+  first and repays or narrows the row; a residue under the frame budget closes it.
+- **D-65 · overlay fades composited per primitive in linear light.**
+  `OverlayLayer::opacity` is folded into each primitive (`faded_quads`,
+  `faded_icons`, `faded_document_rasters`, `shape_chrome_labels_with_cjk`), and
+  the swapchain is sRGB (`configure_window_surface`) with glyphon's
+  `ColorMode::Accurate`, so blending happens in linear light. Mid-fade the plate
+  overshoots (`settings::push_float_window`'s whole-frame hairline shows through
+  the interior: `#3B3B3B` at half opacity against a final `#2A2A2A`) and the text
+  reaches its contrast before the plate and the shadow do. At rest, every
+  translucent ink over an unknown ground differs from the CSS mock: the `--border`
+  hairline over `menu_surface` reads +14 ΔL* on dark, washes and the scrim's dim
+  of text +13 to +17, light-theme hairlines and shadows fainter. No token retune
+  fixes it, because the linear alpha that reproduces CSS depends on the ground.
+  Owed, in two halves: **ticket 46 (M, 0.4.5)** — group opacity, each fading
+  surface rendered at full strength offscreen and composited once onto a
+  non-sRGB view of the swapchain, byte-identical at rest; **the L variant
+  (0.4.6)** — the whole overlay pass in encoded space (glyphon `ColorMode::Web`),
+  so the 0.5 restyle compares like with like. The row closes with the second.
