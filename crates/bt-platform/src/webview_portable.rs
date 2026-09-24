@@ -20,7 +20,7 @@ use super::{
     WebColorScheme, WebDpiOwnership, WebEvent, WebInstallReport, WebMouseEvent,
     WebNavigationVerdict, WebRequestVerdict,
 };
-use crate::Compositor;
+use crate::{Compositor, EnvironmentAnswer, WebWarmUp};
 
 /// What every door of this host answers with.
 fn no_engine(what: &str) -> String {
@@ -300,6 +300,17 @@ impl WebHost {
 /// answer, and M4-2 answered it in the macOS arm — see §4.5 of the plan and
 /// `docs/DESIGN.md` §13.29.
 pub fn forget_web_environment() {}
+
+/// **The warm-up's door** (ticket 54): nothing to warm on a platform with no
+/// engine. The answer is dropped unheard, and the page's own ask is still the
+/// one that says there is no web preview here.
+pub fn warm_web_environment(
+    folder: &Path,
+    answered: EnvironmentAnswer,
+) -> Result<WebWarmUp, String> {
+    let _ = (folder, answered);
+    Ok(WebWarmUp::NothingToWarm)
+}
 
 /// **Which engine is installed.**
 ///

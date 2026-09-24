@@ -91,6 +91,13 @@ Ticket 55 repaid D-61 and D-62 whole (the two defects the Mac build carried:
 a `webnav` test that asked a Windows question on every machine, and three
 Windows-only constants compiled where nothing read them); it added no row.
 
+Ticket 54 narrowed D-64 and repaid none of it: the environment is asked for once on
+an idle turn after startup, which takes the creation call (8.5–39 ms) out of the
+first page's gesture, but the environment starts no runtime process (a windowless
+probe: no descendant process, an empty profile folder), so §5.3 row 21's residual —
+the first controller and the pump dispatch after it — stays, and so does D-2's part
+for that row. It added no row.
+
 ## The ledger
 
 "§" alone means a section of `docs/ARCHITECTURE.md`. "Split prep" is
@@ -164,7 +171,7 @@ ledger's.
 | D-61 | a Mac-only red test in `webnav` | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | none yet | 0.4.6 | open |
-| D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open — narrowed by ticket 43: the phases are named in the stall self-report; the remaining cost is the engine's own thread-affine work (§5.3 row 21) ruled 2026-09-24: warm the engine at a quiet moment — follow-up warm-up, ticket 54 |
+| D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43, 54 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open — narrowed by ticket 43: the phases are named in the stall self-report; the remaining cost is the engine's own thread-affine work (§5.3 row 21) ruled 2026-09-24: warm the engine at a quiet moment — follow-up warm-up, ticket 54; narrowed by ticket 54: the environment call is taken at an idle turn, but the environment starts no runtime process (measured), so the first page's `request_controller` and pump dispatch remain; ruling owed |
 | D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.7 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.7 before the 0.5 restyle, and the row closes with it | open |
 | D-66 | a fading surface's translucent pixels step at the landing frame: composited on encoded bytes while it fades, blended in linear light at rest — on the light theme the tip's shadow lightens at its darkest pixel from about `#DB` to `#EE` as the fade lands | ticket 46's report (Findings); the 2026-09-23 fade audit, §7 | none yet | 0.4.7 — the L variant (all overlay translucency in encoded space, with D-65), which removes the step | open |
 | D-67 | `bt-app` fails clippy on macOS: nine app-build and five test-build unused items and ignored results | ticket 55's report | none yet | 0.4.6 — beside D-63, since widening the Mac CI job hits it | open |

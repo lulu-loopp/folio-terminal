@@ -123,7 +123,7 @@ use super::{
     WebRequestVerdict, WebSetting, install_rollback,
 };
 use crate::macos_impl::{window_for, window_thread};
-use crate::{Compositor, NativeWindow};
+use crate::{Compositor, EnvironmentAnswer, NativeWindow, WebWarmUp};
 
 // ── the panic that must not leave this file ────────────────────────────────
 
@@ -2121,6 +2121,18 @@ fn native_window_of(view: &WKWebView) -> NativeWindow {
 /// for itself — the content rule list store — is let go of by
 /// [`CloseStep::CachedEnvironment`].
 pub fn forget_web_environment() {}
+
+/// **The warm-up's door** (ticket 54): nothing to warm. WebKit ships with the
+/// system and a `WKWebView` is made on the spot for its page, so there is no
+/// process-wide environment whose start a first page pays for; the answer is
+/// dropped unheard.
+pub fn warm_web_environment(
+    folder: &Path,
+    answered: EnvironmentAnswer,
+) -> Result<WebWarmUp, String> {
+    let _ = (folder, answered);
+    Ok(WebWarmUp::NothingToWarm)
+}
 
 /// **Which engine is installed.**
 ///

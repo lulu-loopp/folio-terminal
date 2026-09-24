@@ -78,6 +78,8 @@ use windows::core::{BOOL, HSTRING, IUnknown, Interface as _, PCWSTR, PWSTR};
 
 use super::PageVisual;
 use crate::Compositor;
+#[cfg(windows)]
+use crate::{EnvironmentAnswer, EnvironmentAsk, EnvironmentSlot, WebWarmUp};
 
 // ── Reading out-parameters ─────────────────────────────────────────────────
 //
@@ -708,7 +710,13 @@ thread_local! {
     /// **One environment per process** (`plan.md` §0). Two environments over one
     /// user data folder with different options is `0x8007139F`, and two with the
     /// same options is two browser process trees for no reason.
-    static ENVIRONMENT: RefCell<Option<ICoreWebView2Environment>> = const { RefCell::new(None) };
+    ///
+    /// **And one lifecycle, with one creation call in flight at most** (ticket
+    /// 54): a page's [`WebHost::request_environment`] and the warm-up's
+    /// [`warm_web_environment`] ask the same slot, and whoever asks while a call
+    /// is in flight waits for it — see [`crate::EnvironmentSlot`].
+    static ENVIRONMENT: RefCell<EnvironmentSlot<ICoreWebView2Environment>> =
+        const { RefCell::new(EnvironmentSlot::new()) };
 }
 
 /// Drop the cached environment without closing anything.
@@ -722,7 +730,44 @@ thread_local! {
 /// (`w0p-evidence.md` §3.4).
 #[cfg(windows)]
 pub fn forget_web_environment() {
-    ENVIRONMENT.with(|cell| *cell.borrow_mut() = None);
+    ENVIRONMENT.with(|cell| cell.borrow_mut().forget());
+}
+
+/// **Ask for the process's web environment before any page does** — the
+/// warm-up's door (0.4.5 ticket 54, D-64).
+///
+/// The same creation call a page's [`WebHost::request_environment`] makes, with
+/// the same [`environment_options`], on the same (window) thread: WebView2
+/// refuses an environment used from any thread but the one that created it
+/// (`0x802A000C`, ticket 43). Made only when nobody has asked yet; otherwise
+/// nothing is done and `answered` is dropped. Returns at once — the answer
+/// arrives through `answered`, on a later turn of the message pump or before
+/// this returns, as the loader chooses. A page that asks while this call is in
+/// flight waits for it rather than making a second one.
+#[cfg(windows)]
+pub fn warm_web_environment(
+    folder: &Path,
+    answered: EnvironmentAnswer,
+) -> Result<WebWarmUp, String> {
+    let asked = ENVIRONMENT.with(|cell| cell.borrow_mut().warm(answered));
+    if matches!(asked, EnvironmentAsk::AlreadyAsked) {
+        return Ok(WebWarmUp::AlreadyAsked);
+    }
+    carry_out(folder, asked).map(|()| WebWarmUp::Asked)
+}
+
+/// **Do what the slot said**, outside its borrow: the creation call can answer
+/// before it returns, and the answer writes the slot.
+#[cfg(windows)]
+fn carry_out(folder: &Path, asked: EnvironmentAsk) -> Result<(), String> {
+    match asked {
+        EnvironmentAsk::Answer(answer) => {
+            answer(None);
+            Ok(())
+        }
+        EnvironmentAsk::Joined | EnvironmentAsk::AlreadyAsked => Ok(()),
+        EnvironmentAsk::Create(ticket) => create_environment(folder, ticket),
+    }
 }
 
 /// **The options the process-wide environment is created with: the runtime's
@@ -748,6 +793,88 @@ fn environment_options() -> ICoreWebView2EnvironmentOptions {
     // setter's `unsafe` asks.
     unsafe { options.set_scroll_bar_style(COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY) };
     options.into()
+}
+
+/// **The one `CreateCoreWebView2EnvironmentWithOptions` in this program**, for
+/// the slot's request `ticket`. Its completion answers everybody the slot has
+/// waiting on that ticket; a call refused where it stands is reported to the
+/// caller, unless its completion already answered during the call.
+#[cfg(windows)]
+fn create_environment(folder: &Path, ticket: u64) -> Result<(), String> {
+    let handler =
+        CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |result, created| {
+            let result = match (result, created) {
+                (Ok(()), Some(environment)) => Ok(environment),
+                (Ok(()), None) => Err(String::from(
+                    "the environment callback delivered no environment",
+                )),
+                (Err(error), _) => Err(failure("CreateCoreWebView2Environment", &error)),
+            };
+            let (waiting, error) =
+                ENVIRONMENT.with(|cell| cell.borrow_mut().arrived(ticket, result));
+            for answer in waiting {
+                answer(error.clone());
+            }
+            Ok(())
+        }));
+    let folder = HSTRING::from(folder.as_os_str());
+    // **One browser argument, and it is about a gesture this host already
+    // has** (user ruling 2026-08-27, route A; `docs/DESIGN.md` §7.23 ⑩).
+    //
+    // Chromium's desktop default is `document-user-activation-required`: a
+    // page may not start audible playback until somebody has interacted with
+    // *it*. Measured on this build, that is exactly what happened — the
+    // player shell came up with the engine's own controls and the recording
+    // paused on its first frame, because the press that asked for it landed
+    // on **this window's** play button and a page cannot see a press its
+    // host received. A reader who has already said "play" being asked to say
+    // it again, in a second control they did not know was there, is the
+    // gesture arriving nowhere.
+    //
+    // **What this widens, exactly.** The policy governs pages this window
+    // opens, which are local files a reader chose out of the files column
+    // and the shells this process wrote itself; there is no third party
+    // here, no ad frame and no site that arrived by itself. It is a
+    // *policy*, not a capability: nothing that could not already play can
+    // play, and the four switches that matter — no message bridge, no host
+    // objects, no default context menus, every download cancelled — are
+    // untouched, as is the navigation gate every URL still passes.
+    //
+    // Written as `AdditionalBrowserArguments` and not as a per-page setting
+    // because the runtime has no per-page spelling of it: it is a command
+    // line to the browser process, and the browser process is made once.
+    // **And it writes none** (route B slice ②, 2026-08-28; `docs/DESIGN.md`
+    // §7.44 ④). The one argument that was ever here was Chromium's
+    // `autoplay-policy` switch, set to `no-user-gesture-required` — spelled
+    // in pieces because the pin that keeps it gone reads this whole file and
+    // a sentence about a retired flag must not look like the flag — and it
+    // existed for one reason: a shell page this window wrote carried a
+    // self-starting player, and
+    // Chromium's policy would not start it because the gesture that asked
+    // for it happened on a button the page could not see. There is no shell
+    // page any more — a recording is decoded by Media Foundation and drawn
+    // on this window's own glass — so the argument has nothing left to
+    // permit, and a command line kept "in case" is a command line nobody
+    // re-reads.
+    //
+    // The overlay scrollbars (0.4.5 ticket 40) are an option on the
+    // environment, not an argument: see [`environment_options`].
+    let options = environment_options();
+    let made = unsafe {
+        CreateCoreWebView2EnvironmentWithOptions(
+            PCWSTR::null(),
+            PCWSTR(folder.as_ptr()),
+            Some(&options),
+            &handler,
+        )
+    };
+    match made {
+        Ok(()) => Ok(()),
+        Err(error) if ENVIRONMENT.with(|cell| cell.borrow_mut().refused(ticket)) => {
+            Err(failure("CreateCoreWebView2EnvironmentWithOptions", &error))
+        }
+        Err(_) => Ok(()),
+    }
 }
 
 /// The runtime's version, asked of the loader rather than of the registry.
@@ -1410,87 +1537,17 @@ impl WebHost {
     /// Ask for the process-wide environment, reporting the answer as a
     /// [`WebEvent::Environment`] for this generation.
     ///
-    /// Returns immediately either way: when the environment is already cached
-    /// the event is queued on the spot, and when it is not the loader answers
-    /// on a later turn of the message pump.
+    /// Returns immediately either way: when the environment is already here
+    /// the event is queued on the spot, when a creation call is already in
+    /// flight — the warm-up's, or another page's — this one waits for it and
+    /// is answered with it (ticket 54), and otherwise the loader answers on a
+    /// later turn of the message pump.
     pub fn request_environment(&mut self, folder: &Path, generation: u64) -> Result<(), String> {
-        if let Some(existing) = ENVIRONMENT.with(|cell| cell.borrow().clone()) {
-            self.environment = Some(existing);
-            self.shared.push(WebEvent::Environment {
-                generation,
-                error: None,
-            });
-            return Ok(());
-        }
         let shared = Rc::clone(&self.shared);
-        let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
-            move |result, created| {
-                let error = match (result, created) {
-                    (Ok(()), Some(environment)) => {
-                        ENVIRONMENT.with(|cell| *cell.borrow_mut() = Some(environment));
-                        None
-                    }
-                    (Ok(()), None) => Some(String::from(
-                        "the environment callback delivered no environment",
-                    )),
-                    (Err(error), _) => Some(failure("CreateCoreWebView2Environment", &error)),
-                };
-                shared.push(WebEvent::Environment { generation, error });
-                Ok(())
-            },
-        ));
-        let folder = HSTRING::from(folder.as_os_str());
-        // **One browser argument, and it is about a gesture this host already
-        // has** (user ruling 2026-08-27, route A; `docs/DESIGN.md` §7.23 ⑩).
-        //
-        // Chromium's desktop default is `document-user-activation-required`: a
-        // page may not start audible playback until somebody has interacted with
-        // *it*. Measured on this build, that is exactly what happened — the
-        // player shell came up with the engine's own controls and the recording
-        // paused on its first frame, because the press that asked for it landed
-        // on **this window's** play button and a page cannot see a press its
-        // host received. A reader who has already said "play" being asked to say
-        // it again, in a second control they did not know was there, is the
-        // gesture arriving nowhere.
-        //
-        // **What this widens, exactly.** The policy governs pages this window
-        // opens, which are local files a reader chose out of the files column
-        // and the shells this process wrote itself; there is no third party
-        // here, no ad frame and no site that arrived by itself. It is a
-        // *policy*, not a capability: nothing that could not already play can
-        // play, and the four switches that matter — no message bridge, no host
-        // objects, no default context menus, every download cancelled — are
-        // untouched, as is the navigation gate every URL still passes.
-        //
-        // Written as `AdditionalBrowserArguments` and not as a per-page setting
-        // because the runtime has no per-page spelling of it: it is a command
-        // line to the browser process, and the browser process is made once.
-        // **And it writes none** (route B slice ②, 2026-08-28; `docs/DESIGN.md`
-        // §7.44 ④). The one argument that was ever here was Chromium's
-        // `autoplay-policy` switch, set to `no-user-gesture-required` — spelled
-        // in pieces because the pin that keeps it gone reads this whole file and
-        // a sentence about a retired flag must not look like the flag — and it
-        // existed for one reason: a shell page this window wrote carried a
-        // self-starting player, and
-        // Chromium's policy would not start it because the gesture that asked
-        // for it happened on a button the page could not see. There is no shell
-        // page any more — a recording is decoded by Media Foundation and drawn
-        // on this window's own glass — so the argument has nothing left to
-        // permit, and a command line kept "in case" is a command line nobody
-        // re-reads.
-        //
-        // The overlay scrollbars (0.4.5 ticket 40) are an option on the
-        // environment, not an argument: see [`environment_options`].
-        let options = environment_options();
-        unsafe {
-            CreateCoreWebView2EnvironmentWithOptions(
-                PCWSTR::null(),
-                PCWSTR(folder.as_ptr()),
-                Some(&options),
-                &handler,
-            )
-        }
-        .map_err(|error| failure("CreateCoreWebView2EnvironmentWithOptions", &error))
+        let answer: EnvironmentAnswer =
+            Box::new(move |error| shared.push(WebEvent::Environment { generation, error }));
+        let asked = ENVIRONMENT.with(|cell| cell.borrow_mut().ask(answer));
+        carry_out(folder, asked)
     }
 
     /// Adopt the environment the last [`WebEvent::Environment`] reported.
@@ -1499,7 +1556,7 @@ impl WebHost {
             return Ok(environment);
         }
         let environment = ENVIRONMENT
-            .with(|cell| cell.borrow().clone())
+            .with(|cell| cell.borrow().environment())
             .ok_or_else(|| String::from("no CoreWebView2Environment is cached"))?;
         self.environment = Some(environment.clone());
         Ok(environment)
@@ -1837,7 +1894,7 @@ impl WebHost {
         };
         ENVIRONMENT.with(|cell| {
             cell.borrow()
-                .as_ref()
+                .environment()
                 .is_some_and(|process| process.as_raw() == mine.as_raw())
         })
     }
@@ -4314,7 +4371,7 @@ mod rehost_contract_tests {
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::{WebHost, forget_web_environment, webview2_runtime_version};
+pub use macos::{WebHost, forget_web_environment, warm_web_environment, webview2_runtime_version};
 
 /// **The page host, on a platform whose engine has not been written yet.**
 ///
@@ -4330,7 +4387,9 @@ pub use macos::{WebHost, forget_web_environment, webview2_runtime_version};
 mod portable;
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub use portable::{WebHost, forget_web_environment, webview2_runtime_version};
+pub use portable::{
+    WebHost, forget_web_environment, warm_web_environment, webview2_runtime_version,
+};
 
 /// **The names under the card, on both engines** (M4-3).
 #[cfg(test)]

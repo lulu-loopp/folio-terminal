@@ -116,7 +116,7 @@ keyed by that directory, held for the life of the process by
 | `OpenConsole.exe`, the ConPTY host | the DLL's `ConptyCreatePseudoConsole`; extracted at build time by `crates/bt-pty/build.rs` | Folio never spawns it and holds no handle to it |
 | the pane child — the shell or agent | `PtySession::spawn` → `CreateProcessW` with the pseudoconsole attribute | program chosen by `bt_pty::shell::resolve_default_shell` |
 | the pane's grandchildren | whatever the shell leaves running | held in an unnamed job object by `Job::holding`, so closing the pane kills them |
-| WebView2 browser, renderer, GPU, utility | the Edge runtime, from `bt_platform::webview::WebHost::request_environment` | nothing in that module blocks; that is its stated contract |
+| WebView2 browser, renderer, GPU, utility | the Edge runtime, from the one `CreateCoreWebView2EnvironmentWithOptions` (`bt_platform::webview::create_environment`), asked for by a page's `WebHost::request_environment` or, once per process on an idle turn after startup, by `bt_platform::warm_web_environment` (ticket 54) | nothing in that module blocks; that is its stated contract; at most one creation call in flight (`bt_platform::EnvironmentSlot`) |
 | `com.apple.WebKit.WebContent` | `bt_platform::macos_webview::WebHost::request_controller` | main thread only, one per seat, never pooled |
 | `folio.exe --from-explorer --cwd <folder>` | Folio's own COM server, in `explorer_menu::serve` | detached, never reaped — the one deliberately orphaned child in production |
 | `powershell.exe` — the PSReadLine probe | `psreadline::run_probe` | once per process; blocks its thread with no timeout |
@@ -416,7 +416,15 @@ this list that blocks on something outside the process is a defect.
 | 18 | `launch_wire::hand_over`, bounded by `HANDOVER_BUDGET` | `fn main`, before the loop exists | **ruled to stay** — there is no loop yet to be blocked |
 | 19 | `OutputRing::try_pop`, `InputRing::try_push` — both bounded to one lock, never split, never partly taken | `drain_leaf_pty`, `offer_pty_input` | **ruled to stay** — this is the design |
 | 20 | `fs::rename`, the preserving atomic preview save, settings/keybindings/profiles writes, diagnostic file writes | `rename_preview_file`, `rename_files_row`, `save_preview_on`, `persist.rs`'s store methods | **0.4.4** — storage lane, with document-revision preconditions and receipts rather than a generic "background job finished" toast |
-| 21 | a web page coming up: `CreateCoreWebView2CompositionController` on the first page of the process (88–269 ms synchronous, ~4,500 page faults: the engine's in-process half loading), then one engine dispatch of 70–303 ms on the message pump before the controller's callback; later pages ~3 ms and ~50 ms. `CreateCoreWebView2EnvironmentWithOptions` 10–38 ms on the first page, the install burst 2–6 ms. Measured headless on the development machine (ticket 43); the owner's next89 run held 4,099 ms | `WebSeat::step` → `WebHost::request_controller` (station `request_controller`), and the pump after it (station `message pump`); `WebSeat::start_environment` (station `request_environment`) | **open — ruled 2026-09-24: warm-up at an idle turn after startup, ticket 54 (D-64).** Not movable to a lane: WebView2 refuses an environment used from any thread but the one that created it (`0x802A000C`, measured), so the environment, the controller and the engine's callbacks all belong to the window thread with the controller (§5.2) |
+| 21 | a web page coming up: `CreateCoreWebView2CompositionController` on the first page of the process (88–269 ms synchronous, ~4,500 page faults: the engine's in-process half loading), then one engine dispatch of 70–303 ms on the message pump before the controller's callback; later pages ~3 ms and ~50 ms. `CreateCoreWebView2EnvironmentWithOptions` 10–38 ms on the first page, the install burst 2–6 ms. Measured headless on the development machine (ticket 43); the owner's next89 run held 4,099 ms | `WebSeat::step` → `WebHost::request_controller` (station `request_controller`), and the pump after it (station `message pump`); `WebSeat::start_environment` (station `request_environment`) | **open — narrowed by ticket 54**: the environment is asked for once on an idle turn after startup (`Runtime::warm_web_engine`, station `warm_web_engine`), which takes its 8.5–39 ms out of the first page's gesture; the environment starts no runtime process (measured), so the controller and the pump dispatch are still the first page's, and a new ruling is owed for them (D-64). Not movable to a lane: WebView2 refuses an environment used from any thread but the one that created it (`0x802A000C`, measured), so the environment, the controller and the engine's callbacks all belong to the window thread with the controller (§5.2) |
+
+Row 21 after ticket 54: the ruling of 2026-09-24 warmed the environment on the
+premise that it brings the runtime's processes up. A windowless probe over the
+product's options found that it does not (no descendant process for eight seconds,
+an empty profile folder, +2.2 MB in Folio's own process), so the first page's
+residual on this thread is still `request_controller` and the pump after it —
+ticket 43's 88–269 ms and 70–303 ms headless, the owner's 4,099 ms on next89 —
+above a frame, and the row is narrowed, not done.
 
 Row 5's road, stated more exactly than its cell (ticket 50): the walk was reached
 from `apply_stored_terminal_font` on the launch road — `FolioApp::create`, before
@@ -872,7 +880,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23.
 | `tabs.rs` | 71 | the tab strip: new, close, activate, rename, drag, tear out; the tab menu; tables | — | — |
 | `terminal.rs` | 34 | the terminal pane: `drain_pty`, command marks, scroll and column bars, restart, fonts, selection, the PowerShell intent | session (drain, pane birth) | rows 2 (`spend_powershell_intent`), 5 (`apply_terminal_font`), 19 |
 | `tooltips.rs` | 9 | tooltips | — | — |
-| `web.rs` | 36 | the web pane: open, sync and advance the page, apply its outcomes, dev tools, sheets, the colour scheme, handing a URL to the browser | hand-off; `folio-web-thumb` | web view native affinity (§5.2) |
+| `web.rs` | 36 | the web pane: open, sync and advance the page, apply its outcomes, dev tools, sheets, the colour scheme, handing a URL to the browser; the engine's warm-up (`warm_web_engine`, ticket 54) | hand-off; `folio-web-thumb` | web view native affinity (§5.2); row 21 |
 | `windows.rs` | 38 | windows: open, dress, show, restore, the dirty gate, the quit save, close, retire and vault a window, moves; the window's title (`want_title`, `flush_title`) | storage (`quit_save` through `SessionWriter`) | `let_the_system_translate_touch`; `Window::set_title` (§5.2, `flush_title` only); row 16 |
 
 **Still in `main.rs`** — 201 methods in the two `impl Runtime<'_>` blocks, by the

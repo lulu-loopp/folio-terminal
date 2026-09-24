@@ -3365,14 +3365,19 @@ pub mod explorer_command;
 pub mod cleanup;
 pub mod instance;
 
+mod web_environment;
 mod webview;
 
+pub use web_environment::{
+    EnvironmentAnswer, EnvironmentAsk, EnvironmentSlot, WebEnvironmentPhase, WebWarmUp,
+};
 pub use webview::{
     INSTALL_SEQUENCE, InstallRollback, InstallStep, REHOST_SEQUENCE, RehostCompensation,
     RehostOutcome, RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebColorScheme,
     WebDpiOwnership, WebEvent, WebGuards, WebHost, WebInstallReport, WebKey, WebMouseEvent,
     WebNavigationVerdict, WebRequestVerdict, WebSetting, WebSettingRule, forget_web_environment,
-    install_rollback, rehost_compensation, web_mouse_buttons, webview2_runtime_version,
+    install_rollback, rehost_compensation, warm_web_environment, web_mouse_buttons,
+    webview2_runtime_version,
 };
 
 #[cfg(windows)]
