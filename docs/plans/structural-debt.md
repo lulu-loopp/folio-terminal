@@ -52,7 +52,7 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 9 | 6 | 3 |
+| 0.4.5 | 9 | 5 | 4 |
 | 0.4.6 | 39 | 39 | 0 |
 | 0.4.7 | 13 | 13 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
@@ -75,6 +75,14 @@ one write a frame) and with it that row's part of D-2; it added no row. Ticket
 48 repaid D-45 whole (§5.3 row 13: one reading of the window's place per turn,
 taken at its head, plus one per attention delivery between turns, because no
 turn runs inside Windows' modal move/size loop) and that row's part of D-2; it
+added no row. Ticket 50 repaid D-37 whole (§5.3 row 5: the machine's font
+collection is walked only on the font lane, by a numbered request, and the face
+`settings.json` names is found by a lookup of that one family) and that row's
+part of D-2; it added no row, because the lookup it leaves on the window thread
+measured under one frame (2.6–3.4 ms cold on the development machine). The font
+lane now numbers its requests and answers, the request identity D-33 asks of
+every lane; it does so in its own slot, not through a shared shape, so D-33 is
+not advanced beyond that.
 added no row. Ticket 51 repaid D-38 whole (§5.3 row 6: a changed search reads
 one slice of history on the keystroke's frame and one per turn after it, on the
 window thread, no ownership moved) and that row's part of D-2; it added no row.
@@ -90,10 +98,10 @@ ledger's.
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
-| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 6 repaid by ticket 51 (D-38) |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
-| D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not) |
+| D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
 | D-6 | cross-crate chains are visible nowhere | K-10 · C-4 | through D-48…D-50 | 0.4.7 | open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff` |
 | D-7 | source-reading guards are the architecture document; their rules owe prose | K-14 · C-4 | with D-28 | 0.4.6 — with D-28: the guards' prose is written when the migration list reaches zero | open |
 | D-8 | the asking/telling family has no taxonomy | K-3 · C-4 | none yet | 0.4.6 — the owner rules the table first | open |
@@ -121,11 +129,11 @@ ledger's.
 | D-30 | the unmoved topic `settings` (31 methods) | split prep Appendix C | none yet | 0.4.6 | open |
 | D-31 | the unmoved topic `focus` (51 methods) | split prep Appendix C | none yet | 0.4.6 | open |
 | D-32 | the unassigned `Runtime` methods still in `main.rs` (112 at the move, 115 today) | split prep §7.1, Appendix C | none yet | 0.4.6 | open |
-| D-33 | the lane contract as one shape, wrapping the existing lanes | §5.4 step 1, §5.1 | none yet | 0.4.5 — the presentation lane (D-41) is its second client | open — first instance, `handoff_lane`, on `2657e5e3` |
+| D-33 | the lane contract as one shape, wrapping the existing lanes | §5.4 step 1, §5.1 | none yet | 0.4.5 — the presentation lane (D-41) is its second client | open — first instance, `handoff_lane`, on `2657e5e3`; the font lane (`settings::MonospaceFamilySlot`) numbers its requests since ticket 50, in its own slot and not yet through the shared shape |
 | D-34 | §5.3 row 2 — the marks lock's install half on the window thread | §5.3 | none yet | 0.4.6 | open — the wait behind our own writer repaid on `fbfab1ff` |
 | D-35 | §5.3 row 3 — `psreadline::apply_recorded`, nine files under the lock | §5.3 | none yet | 0.4.6 | open |
 | D-36 | §5.3 row 4 — `psreadline::installed_copy`'s recursive walk | §5.3 | none yet | 0.4.6 | open |
-| D-37 | §5.3 row 5 — the machine's whole font collection enumerated inline | §5.3 | none yet | 0.4.5 — the traced frozen gear | open |
+| D-37 | §5.3 row 5 — the machine's whole font collection enumerated inline | §5.3 | 50 | 0.4.5 — the traced frozen gear | repaid (ticket 50) |
 | D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | 51 | 0.4.5 — a per-keystroke cost | repaid (ticket 51) |
 | D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | 0.4.6 | open |
 | D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | 0.4.6 | open |
@@ -277,7 +285,7 @@ first cut must not be advertised as eliminating every window-thread stall**.
 **Status.** open. Lanes, the exception list and the migration order are in
 `docs/ARCHITECTURE.md` §5.
 
-**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 6 repaid by ticket 51 (D-38).
+**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38).
 
 ---
 

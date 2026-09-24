@@ -37126,18 +37126,29 @@ fn apply_stored_terminal_font(
 ) -> Result<bt_render::CellMetrics> {
     let family = settings.terminal_font_family.as_str();
     let cjk_family = settings.terminal_cjk_font_family.as_str();
-    // Only enumerated when the file actually names a family. A default install
+    // Only asked when the file actually names a family. A default install
     // never opens the system font collection at startup, which is the cost
     // `bt_render::terminal_font_system` refuses to pay and this must not
     // reintroduce.
     //
-    // **The one door in this process that is allowed to wait for the machine**,
-    // and it is this one because there is no frame yet to put a placeholder in:
-    // the face `settings.json` names has to be loaded before the first grid is
-    // measured. Every other reader of the family list — the whole of the
-    // Settings dialog — goes through `settings::monospace_families`, which
-    // cannot walk anything. See `settings::monospace_family_files`.
-    let files = settings::monospace_family_files(family);
+    // **One family, looked up by its name, and never the whole collection**
+    // (ticket 50, `ARCHITECTURE` §5.3 row 5). The face `settings.json` names has
+    // to be loaded before the first grid is measured, and there is no frame yet
+    // to put a placeholder in, so the answer is waited for here — but it is the
+    // system's answer about one family, and the walk that fills the picker runs
+    // on the font lane. See `settings::monospace_family_files`. Its own station,
+    // so a launch that stalls here says so.
+    let started = Instant::now();
+    let files = hang_watch::during(hang_watch::Station::FontLookup, || {
+        settings::monospace_family_files(family)
+    });
+    if !family.is_empty() && diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE")) {
+        trace_sink::stderr_line(format!(
+            "BT_PERF_TRACE monospace_family_files_us={} files={}",
+            started.elapsed().as_micros(),
+            files.len()
+        ));
+    }
     // CJK discovery is worker-only, including a cold stored selection. The
     // bounded startup fonts can satisfy built-in names immediately; otherwise
     // FontsScanned reapplies the stored setting to every window after adoption.
@@ -62553,6 +62564,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // list is a fact about the machine and any of them may be showing a
             // picker drawn from it.
             AppEvent::HandoffAnswered => self.answer_handoffs(),
+            //
+            // An answer older than the list on screen is dropped inside
+            // `adopt_scanned_families` (ticket 50) and reads here as "nothing
+            // changed": no window is touched and no frame is asked for.
             AppEvent::FontsScanned => {
                 if settings::adopt_scanned_families() {
                     self.for_each_window(|runtime| {

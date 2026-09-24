@@ -438,9 +438,50 @@ Entries: §2.2 *the renderer's two layers: device and window*; §7.1.3m ⑤; §7
 *whether the engine is there must be answered by a real creation attempt within a
 bounded time*.
 
-### 25. Fonts and the glyph atlas — `not yet folded`
+### 25. Fonts and the glyph atlas — `not yet folded` (the font-list half is folded, 2026-09-24)
 Entries: §13.22 *glyphs on the Metal road are measured*; §7.1.3l and §7.1.3m.
 There is no font charter; the rules are per-decision.
+
+**The font list and the stored face, folded 2026-09-24 (0.4.5 ticket 50).**
+Entries read: §7.1.6c-8 ruling four (2026-08-19), *the picker ends in
+`Install fonts…`* and the list rescans when the dialog reopens; §13.18 *the real list in the font picker*;
+§13.52 *the gear asked the machine for its fonts* (GitHub issue #3); DESIGN
+2026-09-24 *The font list is walked only on its lane*.
+
+- **The machine's font collection is walked only on the font lane**
+  (`settings::scan_monospace_families`, a `BelowNormal` thread named
+  `font-families`, started through `spawn_at_priority`), never on the window
+  thread. `bt_platform::monospace_font_families` and `cjk_font_families` have no
+  other product caller.
+- **The list rescans when the dialog opens, not while it is up** (2026-08-19):
+  `Runtime::toggle_settings_panel` calls `settings::begin_monospace_scan`. A
+  request made while a walk is out is served by one more round; one walk is out
+  at a time and one answer is held.
+- **Requests and answers are numbered.** Every request bumps
+  `ScanState::requested`; a walk serves the number standing when it starts; the
+  answer carries it. `adopt_scanned_families`, called only by the `FontsScanned`
+  arm between two frames, puts an answer on screen only if it is at least as new
+  as the one there. An older answer is dropped and asks for no frame.
+- **Only the window thread publishes**; the lane offers. Every reader of the
+  list in a frame (`monospace_families`, `family_index`) reads what was last
+  adopted and cannot walk or block. Before an answer lands the list is a seed:
+  the family in force and `DEFAULT_MONOSPACE_FAMILY` beside it, never empty.
+- **The face `settings.json` names is loaded from the first frame, found by its
+  name.** `apply_stored_terminal_font` asks `settings::monospace_family_files`,
+  which answers from the adopted list when there is one and otherwise from
+  `bt_platform::monospace_family_named` — one family asked of the system
+  collection, whose files are derived by the same function the walk uses — and
+  requests a walk so the picker follows. The looked-up family is never
+  published as the list. The primary face is not drawn in the default and
+  swapped when the walk lands: that would change every pane's grid after the
+  shells started.
+- **The CJK face works the other way, on purpose**: `cjk_family_files` never
+  looks anything up; a stored CJK family is applied again by the `FontsScanned`
+  arm once the lane's list is adopted (the CJK face changes no cell metrics).
+
+Left unfolded: the glyph atlas, the Metal-road measurement (§13.22) and the
+renderer's font database (§7.1.3l, §7.1.3m). This ticket depends on none of
+them.
 
 ### 26. IME — `not yet folded`
 Entries: §7.1.5a″ and §7.1.5a‴; §13.16 *one composition*; §7.34 *a closed window

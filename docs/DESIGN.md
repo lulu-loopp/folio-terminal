@@ -11923,6 +11923,24 @@ Coordinator ruling, 2026-09-24, on the residual the entry above left open (`docs
 
 **Pinned by** `the_pane_head_wears_the_text_size_while_it_is_not_100` and `an_untitled_pane_lays_its_text_size_left_of_its_chevron`.
 
+### 2026-09-24 — The font list is walked only on its lane, by a numbered request; the face in settings.json is found by its name
+
+0.4.5 ticket 50 (D-37, `ARCHITECTURE` §5.3 row 5). **Supersedes** the sentence of §13.52 (*the gear asked the machine for its fonts*) that begins "One caller is still allowed to wait for the machine and it is not the dialog": that caller, `apply_stored_terminal_font`, no longer walks the collection.
+
+**What was left.** §13.52 took the walk off the gear. One road still ran it on the window thread: `settings::monospace_family_files` called `bt_platform::monospace_font_families()` whenever the picker's list was still the seed. That road is `apply_stored_terminal_font`, reached from `FolioApp::create` before the first frame of every launch whose `settings.json` names a terminal font family, and from `Runtime::adopt_terminal_font` when a face changes before the list has landed.
+
+**The rule now.** The walk runs only on the font lane (`settings::scan_monospace_families`). Requests are numbered (`ScanState::requested`, bumped by every request through `settings::request_font_walk`); a walk serves the number standing when it starts, and its answer carries that number. `adopt_scanned_families`, on the window thread between two frames, adopts an answer only if it is at least as new as the one on screen (`MonospaceFamilySlot::adopt`); an older one is dropped and the `FontsScanned` arm asks for no frame. The face `settings.json` names is found by its name: `bt_platform::monospace_family_named` asks the system collection for that one family (Windows: `FindFamilyName`; macOS: a `CTFontDescriptor` carrying `kCTFontFamilyNameAttribute`, matched and checked against the name; elsewhere `None`). Its files come from the same function the walk uses for every row (`monospace_family_entry`, one on each platform arm), so the face loaded at launch is the one the picker's row would load. The looked-up family is not published as the list: the picker seeds the family in force and requests a walk, and its list arrives from the lane.
+
+**One departure from the brief.** The brief said the lookup reads "that family's regular face". It reads every monospaced face of the family, as the walk does: reading only the regular face hands the renderer one file of Consolas's four (`CONSOLA.TTF` without `CONSOLAB`, `CONSOLAI`, `CONSOLAZ`), which is measured, and would change bold and italic from what the picker's row loads. One derivation for both roads is `CONVENTIONS` §十 rule 9.
+
+**Rejected: drawing the first frame in the default face and re-applying the stored one when the walk lands.** That is the CJK slot's shape and cheaper. For the primary face it changes the cell metrics after the shells have started, so every pane's grid would change a moment after launch — a resize each shell sees, and a new trigger of grid change of the kind ticket 47 found the present gate's snapshot going stale on.
+
+**Measured** on the development machine (19 monospaced families), by `bt-platform`'s `the_lookup_by_name_answers_the_files_the_walk_does` with `--nocapture`, three runs each, cold process: the lookup of `Consolas` 2.6–3.4 ms (almost all of it opening the system collection), 70–104 µs once the collection is open; the walk 71–80 ms cold. A frame at 60 Hz is 16.7 ms. The lookup has its own stall station, `font family lookup` (`hang_watch::Station::FontLookup`), and `BT_PERF_TRACE` prints `monospace_family_files_us` at launch and `monospace_enumeration_us` for every walk. A launch on the owner's machine, with its larger font library, has not been measured.
+
+**The walk counter is per thread.** `MONOSPACE_SCANS` counted walks for the whole process; the launch road now starts a walk on the lane while it returns, so a process count would move under a test on the lane's schedule. It counts walks on the calling thread, which is the claim the pins make.
+
+**Pinned by** `launching_with_a_stored_font_family_walks_no_font_collection_on_the_window_thread`, `an_answer_older_than_the_one_on_screen_is_never_adopted` and `the_launch_face_is_looked_up_by_name_and_the_picker_list_comes_from_the_lane` (`bt-app` `settings::tests`), and `the_lookup_by_name_answers_the_files_the_walk_does` (`bt-platform`, Windows).
+
 ### 2026-09-24 — A changed search scans one slice of history on the keystroke's frame and the rest on the following turns
 0.4.5 ticket 51 (D-38, `docs/ARCHITECTURE.md` §5.3 row 6). Before this, every edit of the find box's query, every toggle and every open ran the pattern over every frozen line on the window thread before the keystroke's frame — a hundred thousand lines at the default scrollback, once per character typed.
 

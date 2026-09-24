@@ -1964,8 +1964,8 @@ fn a_rename_never_eats_the_file_that_already_has_the_name() {
 /// test and the draw, because all four reach the list through exactly these
 /// two functions.
 ///
-/// A delta and not a total, because the counter belongs to the process and
-/// this binary's other tests share it.
+/// A delta and not a total, because the counter belongs to the thread and
+/// the test harness may run another test on it first.
 ///
 /// Red gate: put the enumeration back behind `monospace_families` — the
 /// revision-keyed `MonospaceFamilySlot::get` this replaced — and the count
