@@ -1269,3 +1269,609 @@ As U-22, for macOS, after U-21, with a notarized successor on the Mac mini.
 3. **Managed copies:** only the gear dot and a row showing the manager's command (recommended), or the update card as well?
 4. **Capability:** "the running build is signed" decides whether it may update itself (a signed candidate would then update to the next public release) — agreed, or keep a build flag?
 5. **macOS double fault:** accept that a power cut inside the 90 s health window plus a new build that cannot start means reinstalling from the DMG, or add a LaunchAgent recovery hook (one more mark outside the bundle, with its cleanup row)?
+
+---
+
+## Revision 2026-09-25 (b), after the Codex review
+
+Appended; nothing above is edited. Answers
+`docs/plans/design/self-update-review-codex-2026-09-25.md` (Codex, reviewing
+`015677d1`, verdict **adopt with changes**), finding by finding. Documents only.
+Where this section and anything above disagree, this section rules. **R.6's
+ticket list and R.7's questions are superseded by (b).5 and (b).6.**
+
+Sources are named where a claim is from the code or a document. A claim from
+memory is marked *(memory)* and is an experiment `E-n` in (b).4, run before the
+ticket that depends on it.
+
+### (b).1 The findings, in order
+
+**F-1 (blocker): recovery could manufacture health and forget a failed
+rollback. Adopted.** The review is right on each count. Rev 2 §C.6 row "`Flipped`,
+no health, this process is `to_version` → write health" lets a headless helper,
+or an ordinary start that has not drawn anything, delete the rollback source.
+Row "`Failed` / `RolledBack` → remove the journal" throws away the journal that
+names the retained backups. The contract that replaces §C.5–§C.6 is (b).2:
+
+- **Only N gives evidence of health**, and N is the trial process P started with
+  a per-trial nonce. N's evidence is a **receipt file**, not a journal write.
+- **Only the transaction-lock holder writes `Committed`** (the new name for
+  `Healthy`). It may do so only with a valid receipt in hand while the journal
+  says `Trial`. After `RollbackIntent` is durable, a receipt is ignored.
+- **`Committed` is durable before any rollback material or entrance is
+  deleted.** From then on, cleanup is debt and never becomes a rollback.
+- The failure states are separated: `Abandoned` (nothing moved),
+  `RollbackIntent`, `Stuck` (rollback incomplete: journal, rollback source and
+  entrance are all kept), and `RolledBack` (old set verified by digest).
+- Rev 2's "a manual launch of the new build satisfies health" is **withdrawn**.
+  A launch without the nonce waits (F-6).
+
+**F-2 (blocker): a `!` RunOnce value is neither durable nor retried until
+repaired. Adopted.** Microsoft's Run/RunOnce page describes when a value is
+deleted, not whether Folio's transaction succeeded. `RegFlushKey`'s page
+distinguishes a change being visible from being on disk. Both are cited by
+Codex, and I agree. Changes:
+
+- The entrance is a value under **`HKCU\…\CurrentVersion\Run`**, not `RunOnce`.
+  It runs at every logon until the transaction removes it, and is removed only
+  after a terminal state is durable.
+- It is written, then `RegFlushKey`, then read back, **before** the journal
+  records `Armed`. No move happens until `Armed` is durable. If flushing or
+  reading back fails, the transaction goes to `Abandoned` and nothing has
+  changed.
+- The command is `"<H>\<txn>\rescue\folio.exe" --update-recover`, where the
+  journal's place follows from the rescue path. It is checked against the
+  documented 260-character limit before `Armed`. Too long means *Nothing
+  changed*.
+- **User scope:** an install is **Ours only if the install folder's owner is the
+  account running Folio.** That is a read-only ACL fact, not a path. So HKCU of
+  the owning account is the right scope. Other accounts never update it (class
+  `NotOurs` → releases page). They take part in admission (F-6) because the
+  admission file inherits the folder's ACL, and anyone who can run `folio.exe`
+  there can open it for reading (E-15).
+- E4 (self-ending `!` value) is dropped. E-7 replaces it: a hard reset of the VM
+  at each boundary of (b).2, with the Run value and the journal read back after
+  logon.
+
+**F-3 (blocker): the macOS lock, journal and backup are lost across the swap.
+Adopted.** Apple documents item-replacement directories as temporary, and
+`flock` locks the open file, not the path (both cited by Codex). The lock taken
+on the bundle directory stays with the old inode after the swap. Changes:
+
+- **The installation's home is a fixed sibling of the bundle,**
+  `<parent>/.<BundleName>.folio-update/` (for example
+  `/Applications/.Folio.app.folio-update/`). It sits outside both bundles that
+  get exchanged, is on the bundle's volume by construction, and is not
+  purgeable.
+- Its name comes from the bundle path, so **every data root and every account
+  finds it**: that is the installation-to-transaction locator.
+- It holds `lock`, `admission`, `journal.json`, `<txn>/stage/`, `<txn>/rescue/`
+  and `<txn>/mnt/`.
+- The item-replacement directory keeps **only** the downloaded image. After the
+  swap, the old bundle sits at `<txn>/stage/Folio.app`, in durable storage.
+- The rescue helper is a clone of the **old** bundle at `<txn>/rescue/Folio.app`
+  (`clonefile` where the filesystem supports it, `ditto` otherwise), verified
+  against the running requirement.
+- The entrance is a LaunchAgent plist,
+  `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<txn8>.plist`, with
+  `RunAtLoad` running the rescue executable with `--update-recover <home>`. It is
+  written and `F_FULLFSYNC`'d (file and directory) before the journal records
+  `Armed`. Writing the file is enough for the next login; no `launchctl` call is
+  needed.
+- The journal records both bundles' identities (the main executable's cdhash
+  and `CFBundleShortVersionString`). Recovery decides which side of the swap is
+  live by reading identities, never from the phase.
+- With the ownership rule above, "another account" is `NotOurs`.
+- The home folder is visible in `/Applications` only while a transaction is
+  open. It is removed at retirement and has a `--uninstall-cleanup` row.
+- Until this contract is green, macOS self-update stays disabled (Codex's Q5
+  answer, adopted).
+
+**F-4 (high): the Windows members are not authenticated as a set. Adopted, by
+a manifest inside the signed executable.** The counterexample holds.
+`package.ps1` signs only `folio.exe` and `folio.msix`, and `SHA256SUMS.txt` is
+unsigned, so a changed `uninstall.cmd` or an added DLL passes every check C8
+listed. This matters even under the not-a-nanny ruling (CONVENTIONS §十 hard
+requirement), because the design itself *promised* "identity decides", and the
+promise has to be true for every installed byte. The fix adds no new signed
+artifact and no new release step:
+
+- **`folio.exe` carries the manifest of its own archive** as an `RCDATA`
+  resource, `FOLIO_RELEASE_MANIFEST`, v1. It lists `product`, `version`,
+  `arch`, `archive_root`, `protocol`, `min_updater`, and `{name, sha256,
+  size}` for every member except `folio.exe` itself and `folio.msix`.
+- `build.rs` computes it at compile time. `.gitattributes` pins the tree to LF
+  on every machine, so the text members hash the same on the CI runner and on
+  the signing machine. The two ConPTY sidecars are exported by `bt-pty`'s build
+  script through `links` metadata, which `bt-pty/Cargo.toml` does not declare
+  today.
+- The manifest is signed by `folio.exe`'s own Authenticode signature. The
+  resource is read from the verified, never-executed new file with
+  `LoadLibraryExW(LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)`
+  *(memory, E-14)*.
+- `folio.msix` is authenticated by its own signature (same identity, F-5) and
+  by its manifest's `Version` against the offer.
+- Unlisted, missing or mismatched members are refused before `Prepared`.
+- `package.ps1` refuses to pack a member whose bytes differ from the manifest,
+  and `smoke.ps1` checks the packed archive against it. Drift is caught at
+  release, not on a reader's machine.
+- On macOS the bundle seal already covers every file in the bundle, so F-4 is
+  Windows-only there. `protocol` and `min_updater` travel as sealed
+  `Info.plist` keys.
+- The review's note stands: `sign.ps1::Assert-Signature` checks validity and
+  timestamp and does not check that the sidecar signer is Microsoft. The
+  manifest's hashes now carry the sidecars' identity, and the signature check
+  is additional. U-15's `mutated_asset_hash_pair_refuses_before_swap` uses the
+  review's `.cmd` counterexample.
+
+**F-5 (high): equal DNs are not continuity of the signing principal. Adopted.**
+Codex cites Microsoft's Artifact Signing certificate-management page: every
+leaf carries a subscriber identity-validation EKU, a full OID under
+`1.3.6.1.4.1.311.97.`, provided for durable pinning.
+
+- The comparison becomes: system trust and chain; a required RFC 3161
+  timestamp; the leaf's **full identity-validation OID equal to the running
+  `folio.exe`'s**; and the parsed DN equal as well. Leaf fingerprints and keys
+  are never pinned.
+- E-6 first reads a real signed release to confirm its leaf carries the OID.
+- C8's wording is corrected: certificates are valid **72 hours and renewed
+  daily**, so several releases can share one certificate. The point stands:
+  every release may be signed by a certificate other than the running build's.
+- Revocation is checked. At download time the machine is online by
+  construction, so "revocation unknown" is a refusal, retried with the next
+  press.
+- A change of identity-validation (a new subscriber identity) is a refusal.
+  That release's note tells readers to update by hand. This is the stated
+  migration.
+- The trust-root paragraph is accepted as written: "read from self" is
+  continuity from a trusted install, not proof that the first copy was genuine.
+
+**F-6 (high): there is no protocol for the O→P lock transfer or for launch
+admission. Adopted.** (b).2 defines two lock objects in the installation home.
+Both are stable across a swap and neither is a data-directory claim:
+
+- `lock`, the **transaction lock**: exclusive, held by whoever advances the
+  journal.
+- `admission`, the **admission lock**: every Folio started from this install
+  holds it **shared** for its lifetime. It is taken in `fn main` before
+  settings, sidecars or `launch_wire::hand_over`. The mover holds it
+  **exclusive** only while files move.
+- Processes started before the home existed hold no shared lock. They are found
+  by listing processes whose image lies under the install (outside the home),
+  read-only (Toolhelp / `proc_listallpids`). A live one means P releases, retries
+  for 60 s, then `Prepared` (deferred) and relaunches O with a sentence. Nothing
+  is ever ended.
+- **Handoff:** O writes `Handoff{nonce_p}` while still holding the lock, then
+  spawns P and exits. **Any** holder that later takes the lock in `Handoff`
+  performs the apply. P is simply the first to try. So a sweeper cannot win the
+  race and delete the payload: `Handoff` is never swept, only applied or (on a
+  refused admission) reverted to `Prepared`.
+- An ordinary start that finds a destructive or trial state without the nonce
+  does not continue. It starts the rescue helper with `--then-launch <argv>` and
+  exits. When the transaction is terminal, the helper launches the installed
+  `folio.exe` with the original arguments. That wait is a gesture change, Q-C.
+
+**F-7 (high): rollback has no live-child policy and no data-compatibility
+boundary. Adopted.**
+
+- **The trial writes nothing durable.** A start carrying the trial nonce defers
+  every durable write it would make: the data root, the integration marks, the
+  Explorer and toast registrations, the PSReadLine upgrade and
+  `update-check.json`. It releases them only when it reads `Committed` in the
+  journal (read-only polling on a worker).
+- `diagnostics.log` lines are exempt; they are append-only and carry no schema.
+- So a rollback leaves O's data exactly as O left it. Anything N wrote before
+  health does not exist on disk.
+- **Live child:** P keeps the process handle (pid and start time on macOS) of
+  the N it started. On `RollbackIntent`, N sees the state and quits itself. After
+  a 5 s grace, P ends **its own trial child**, which has no user work: it wrote
+  nothing and drew no text. P waits for the exit, and therefore for the claim's
+  release, before moving anything.
+- R, which is not N's parent, identifies the trial process by the pid and start
+  time in the journal and applies the same rule. No other process is ever ended.
+- **Rollback never destroys the new set before the old is restored.** Installed
+  new files move to `<txn>/rolledout/`, then backup files move back. Every step
+  is reconciled by digest against O's inventory, not by inverting the last
+  phase.
+- **I1 becomes I1′:** every file of the old inventory exists, with its recorded
+  digest, in exactly one of *install* or *backup* until `Committed` or
+  `RolledBack` is durable. Every file of the new inventory likewise exists in
+  exactly one of *staging/set*, *install* or *rolledout*.
+
+**F-8 (high): the old inventory belongs to O. Adopted, and the helper becomes
+the old build.**
+
+- O records, under the transaction lock and before `Prepared`, the old shipped
+  list, what is actually present (name, digest, size, type), the new inventory
+  from F-4's manifest, and the collision decision.
+- **P and R are a copy of O's own executable** (Windows
+  `<H>\<txn>\rescue\folio.exe`; macOS the rescue clone), not the new one. So
+  the writer and every reader of the journal body are the same version: the
+  known-good build that just ran, which needs no new sidecar.
+- The only cross-version surfaces are frozen at v1 from 0.4.6 on:
+  - the journal's **header** `{v, txn, rescue, class}`, where `class` is
+    `preparing`, `deferred`, `destructive` or `terminal`;
+  - the receipt `{v, txn, nonce, pid, version}`;
+  - the argv flags `--update-trial <txn> <nonce>`, `--update-recover` and
+    `--then-launch`;
+  - F-4's manifest.
+- The new build's `min_updater` and `protocol` are read before quitting. An
+  incompatible successor is refused while O still runs.
+- C5's "the verified new `folio.exe` twice" is replaced by this. The new
+  executable is written once, into `set/`.
+
+**F-9 (high): a recorded Gatekeeper rejection is not acceptance. Adopted.** On
+the copied bundle, `/usr/sbin/spctl --assess --type execute -vv` (part of macOS,
+not Xcode; through `quiet_command_named`, bounded) is read as follows:
+
+- **accepted** with source *Notarized Developer ID* → pass;
+- **rejected** → refusal;
+- **assessments disabled** (`spctl --status`) → proceed on code validity plus
+  the designated requirement, recorded. The person turned Gatekeeper off; this
+  is not ours to override (CONVENTIONS §十).
+
+How `spctl` behaves offline with a stapled ticket, and while disabled, is E-8
+*(memory)*. U-11's "ticket presence" is withdrawn in favour of this assessment.
+
+**F-10 (high): "no marker → Ours" needs the marker delivered and negative
+evidence. Adopted.**
+
+- Enabling now depends on U-2's manifests being **published in the taps before
+  the 0.4.6 manifest update**. `update-manifests.ps1` rewrites values only, so
+  the hooks run on the scoop or brew *update* that installs 0.4.6.
+- It also depends on U-4 (winget, via its PortableARPEntry fields: install
+  location, target path, installer type, package and source ids, as Codex
+  cites).
+- Scoop adds **its own receipt in the version folder** (`install.json` and
+  `manifest.json`, which scoop writes into every app version directory
+  *(memory, E-9)*). That is evidence in this folder written by the manager, so it
+  is not a path guess, and it covers a scoop install whose `post_install` never
+  ran.
+- A marker or receipt that fails to read, or an unsupported filesystem, is
+  `Unknown`, never `Ours`. Conflicting evidence is `Unknown`.
+- Classification is **re-run under the transaction lock at Restart**, so a long
+  `Verified → Later` wait cannot act on stale ownership.
+- The macOS xattr is kept as the candidate Codex judged reasonable. E1 is
+  extended exactly as Codex wrote: write after staple; verify; assess offline
+  before the cache warms; Finder copy, rename, `ditto`, brew upgrade and
+  reinstall, and a metadata-dropping copy.
+- If E1 shows the attribute lost on a common path, U-2 adds a second mark the
+  cask writes: a per-user registry file in Folio's data root naming the
+  canonical bundle path and file id. Per-user is enough because Ours requires
+  the bundle to be owned by the running account.
+
+**F-11 (high): the dependencies could enable a platform without its
+prerequisites. Adopted.** (b).5 gives one explicit graph, with each ticket's
+inputs and outputs. Each enabling ticket lists every input by number. The
+`clean-vm.md` §4.4 checklist has an owner ticket (U-30).
+
+**F-12 (medium): with no filename allowlist, the Windows namespace and
+expansion budget must be specified. Adopted.** U-14 carries:
+
+- a canonical filename grammar that refuses device names, trailing dot or
+  space, `:`, separator variants and names differing only by Windows
+  normalization;
+- reserved names that are never payload: `folio-install.json`, `install.json`,
+  `manifest.json`, `.folio-update`;
+- a check that the local and central ZIP names agree;
+- byte counters on the **decompressor's actual output**, checked before each
+  write, with truncation and integrity checks;
+- a name-length bound and a time bound through expansion;
+- exclusive creation under the staging directory handle, never following an
+  existing link.
+
+The 32-entry bound counts **files**; the root directory entry is allowed once
+and not counted. A layout the old parser cannot take is declared by the
+manifest's `min_updater`, and old clients route to the releases page.
+`smoke.ps1` runs the archive through the frozen v1 rules via the new exe's
+`--check-update-archive`, so a release that breaks them is caught when it is
+packed.
+
+**F-13 (medium): signature validity is capability, not eligibility. Adopted;
+C1's claim is withdrawn.** C1 said the pipeline inherently tells candidates from
+releases. That is false:
+
+- a manual `release.yml` run with the macOS signing inputs produces a
+  Developer ID signed, notarized artifact that is published nowhere;
+- `sign.ps1 -OutDir` signs non-public Windows builds.
+
+So there are now two conditions, both required:
+
+- **capability**, the signature (C1 as written);
+- **eligibility**, a compile-time flag `FOLIO_UPDATER=on`. It is read by
+  `build.rs` (`rerun-if-env-changed`, exact value) and set by
+  `build-release.yml` only for `v*` tag builds, or by an explicit dispatch input
+  for the controlled updater-test candidate. It is off by default in
+  `release.yml` and in every candidate, and is set in the macOS release build
+  invocation. `folio --version` prints it, and `smoke.ps1 -ExpectSigned` requires
+  it on.
+
+This restores rev 2's ticket-0 changes to the build and release scripts (U-8).
+Q-A keeps the owner's call visible.
+
+**F-14 (medium): one bounded journal write on the window thread is not bounded
+latency, and adds a second writer. Adopted.**
+
+- W emits a readiness event and stays runnable.
+- A storage-lane worker writes the receipt (create-new, flush file and
+  directory).
+- The journal has one writer, the lock holder.
+- A receipt that arrives after `RollbackIntent` is ignored, by rule.
+- `update_txn::decide` stays pure. The real file, lock and registry operations
+  are inventoried under their doors (U-11, U-22, U-26).
+- **U-16's baseline in R.6 was wrong.** `SessionWriter::wait_for` already bounds
+  its wait with `SESSION_SAVE_BUDGET` (3 s, `persist.rs`), and ARCHITECTURE §5.3
+  row 16 lets ordinary quit proceed on timeout. The update path requires a
+  *successful* named receipt: a timeout abandons the update, not the quit.
+  Ordinary quit's ruling is unchanged.
+
+**F-15 (medium): the package-manager hooks need an executable lifecycle.
+Adopted.**
+
+- **Scoop:** `pre_uninstall` stays guarded by `$cmd -eq 'uninstall'`. It
+  interprets `$LASTEXITCODE`:
+  - `2` (a Folio holds the data) → `throw`, which aborts the uninstall with
+    nothing removed *(memory, E-16)*. That includes the case where another copy
+    is running: it shares the data root, and the door's rule is not to act while
+    Folio runs.
+  - `1` (a removal refused) → print and continue, per the 2026-09-20 review
+    ruling that a refused mark must not keep the folder.
+- **Homebrew:** Codex could not establish that uninstall steps are skipped on
+  `brew upgrade`, and I cannot either. So the cask gets **no cleanup hook**, and
+  its marker says `uninstall_hook: false` until E-10 shows the two can be told
+  apart. On macOS that costs nothing today, because the Explorer default is a
+  Windows row.
+- The hooks are tested as installed manifests on the VM and the Mac, not as
+  rendered text.
+
+**F-16 (medium): a certificate made in a test cannot produce a trusted positive
+fixture. Adopted.**
+
+- Policy tests use pure fixtures, or a chain engine with an exclusive test root
+  (`CERT_CHAIN_ENGINE_CONFIG.hExclusiveRoot`, *memory, E-13*), which changes
+  nothing on the machine.
+- Positive production-trust tests run on the disposable VM (Windows) and the
+  Mac mini against **public release assets downloaded by tag and checked
+  against their `SHA256SUMS`**. They are never committed, because a signed
+  Folio names the owner in its certificate and the standing rules keep owner
+  names out of fixtures.
+- New cases: same-DN with a different identity OID (negative), and an expired
+  leaf with a valid timestamp (positive).
+- Power-cut acceptance runs only on disposable VMs: Hyper-V for Windows, and a
+  Virtualization-framework macOS guest on the Mac mini for macOS. The Mac mini
+  itself is never power-cut.
+
+**F-17 (medium): cleanup before `Prepared`, and resume at `Verified`, contradict
+the journal lifecycle. Adopted.**
+
+- The journal is created at **`Allocated`**, before any download, and records
+  each resource intent.
+- The image is attached with `-mountrandom <home>/<txn>/mnt`. A mount whose
+  mount point lies under the home is ours even if the attach result was never
+  recorded; `getmntinfo` lists it.
+- **Startup never deletes `Prepared`.** A deferred transaction belongs to the
+  job owner, the in-app job holding the lock. It increments `deferred_launches`
+  at each launch that does not resume, discards at 2, and **revalidates** (hash,
+  signature, manifest, classification) before any resume.
+
+**F-18 (medium): MSIX renewal could retarget another copy and could be lost
+after health. Adopted.**
+
+- Renewal leaves the transaction entirely. It becomes part of the existing
+  launch-time integration check, run on **every** start of any copy.
+- It renews only when `msix::registered()`'s `external_path` canonicalizes to
+  **this** install and the registered version is older than this build's
+  four-part package version.
+- It is serialized with the registration worker's existing operations.
+- Being re-evaluated every start makes it durable by construction. A failure is
+  integration repair, never a rollback.
+
+### (b).2 The recovery contract
+
+**Objects.**
+
+| | Windows | macOS |
+|---|---|---|
+| installation home **H** (the locator; every data root and account derives it from the install path) | `<install>\.folio-update\` | `<parent>/.<BundleName>.folio-update/` |
+| transaction lock (exclusive; the only journal writer holds it) | `H\lock`, `LockFileEx` exclusive | `H/lock`, `flock(LOCK_EX)` |
+| admission lock (shared by every running Folio from this install; exclusive by the mover) | `H\admission`, `LockFileEx` shared / exclusive | `H/admission`, `flock(LOCK_SH / LOCK_EX)` |
+| journal (header v1 frozen; body owned by the rescue build's version) | `H\journal.json` | `H/journal.json` |
+| rescue build (a copy of O; runs P and R) | `H\<txn>\rescue\folio.exe` | `H/<txn>/rescue/Folio.app` (clone) |
+| entrance that survives a power cut | `HKCU\…\Run\FolioUpdate-<txn8>`, flushed and read back | `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<txn8>.plist`, `F_FULLFSYNC` |
+| staged new set / bundle | `H\<txn>\set\` | `H/<txn>/stage/Folio.app` |
+| rollback source | `H\<txn>\backup\` (old files moved there) | `H/<txn>/stage/Folio.app` after the swap (the old bundle) |
+| receipt (written only by N) | `H\<txn>\health-<nonce>` | `H/<txn>/health-<nonce>` |
+
+**Durability.** A durable journal write is: write to a temp file, flush it,
+atomically rename, then flush the directory (NTFS `FlushFileBuffers` on a
+directory handle, *memory, E-15*; macOS `F_FULLFSYNC` on the file and the
+directory). A Windows move is `MoveFileExW(…, MOVEFILE_WRITE_THROUGH)`. The
+registry uses `RegFlushKey`. **Every destructive step is preceded by a durable
+journal state that names it, and every retirement of rollback material or of
+the entrance is preceded by a durable terminal state.**
+
+**Who may write what.** O: `Allocated`, `Prepared`, `Handoff`, `Abandoned`
+(pre-quit). The lock holder P or R: `Armed`, `Moving`/`Exchanging`, `Trial`,
+`Committed`, `RollbackIntent`, `Stuck`, `RolledBack`, `Abandoned`, and the
+revert `Handoff → Prepared`. R never writes `Trial`, because it never starts N.
+N writes **only its receipt**. **`Committed` is written only by the lock holder,
+only while the journal says `Trial`, and only on a receipt whose `txn` and
+`nonce` match.** An ordinary start of any version reads only the frozen header,
+and acts as follows:
+
+- `terminal` → delete `H\<txn>` and the journal (and the entrance if one is
+  still there), then continue;
+- `destructive`, or `Trial` without its nonce → start the rescue helper with
+  `--then-launch <argv>`, and exit;
+- `preparing` or `deferred` → continue normally. The in-app job decides.
+
+A start whose own image digest differs from the journal's old `folio.exe` while
+`class` is `preparing` or `deferred` means the folder was replaced by hand. The
+transaction is abandoned, and only `H\<txn>` is deleted.
+
+**Windows state table.** Each row says what is durable when the machine dies
+there, and what the next actor does. The next actor is the rescue helper from
+the Run entrance at logon, or any ordinary start through `--then-launch`.
+
+| # | durable state at death | on disk | next actor does |
+|---|---|---|---|
+| W1 | `Allocated` (download or extract in progress) | old install intact; partial files in `H\<txn>` | if the lock is free: delete `H\<txn>` and the journal. Old starts. |
+| W2 | `Prepared` | old install; verified `set\`, `rescue\`, inventories | nothing at start. The job owner resumes (revalidating) or discards after 2 launches. |
+| W3 | `Handoff` (O quit; P may or may not exist) | as W2 | the first lock holder performs the apply from W4. If admission is refused: → `Prepared`, relaunch O. |
+| W4 | `Handoff`, entrance written but `Armed` not durable | as W2, plus perhaps a Run value | R: the Run value is removed, → `Prepared`. **Nothing was moved:** moves wait for `Moving`, which follows `Armed`. |
+| W5 | `Armed` | as W2; Run value durable | the lock holder takes exclusive admission and runs the process check. Refused → remove entrance, → `Prepared`. Clean → `Moving`. |
+| W6 | `Moving`, any number of moves done | every old file in exactly one of install/backup, every new file in exactly one of set/install (I1′) | → `RollbackIntent` (the trial never began, so there is no receipt and no roll-forward), then row W9. |
+| W7 | `Trial{nonce, n_pid, n_start}`, no receipt | new set installed; backup complete | P alive: P waits for the receipt until the deadline. P dead: R waits while the recorded trial process lives and the deadline has not passed. Then → `RollbackIntent` (W9). |
+| W8 | `Trial` with a valid receipt | as W7 plus the receipt | the lock holder writes `Committed` (durable), **then** removes the Run value (flushed), deletes `backup\`, and marks the class `terminal`. |
+| W9 | `RollbackIntent` | any mix, I1′ | stop the trial process (quits itself; after 5 s grace, ended by its starter, or by R from the recorded pid and start time); exclusive admission; move install files with new digests to `rolledout\`; move backup files back; verify the whole old inventory by digest → `RolledBack`. Failure → `Stuck`. |
+| W10 | `Stuck{last_error}` | I1′ holds; journal, backup and Run value kept | W9 again at every logon and every start. The card says `Update incomplete.` and names the folder. |
+| W11 | `RolledBack` | old install verified | remove the Run value (flushed); relaunch the installed `folio.exe` with `--update-failed`; class `terminal`; later starts delete `H\<txn>`. |
+| W12 | `Committed`, cleanup partly done | new install; some of backup, Run value and rescue left | finish the deletions (debt, never a rollback). The rescue folder cannot delete itself while running, so the next ordinary start deletes it. |
+| W13 | `Abandoned` | old install, nothing moved | remove the entrance if present; delete `H\<txn>`; the class is `terminal`. |
+
+**macOS state table.** It uses the same states. `Moving` becomes one exchange,
+so W6 splits by identity:
+
+| # | durable state at death | on disk | next actor does |
+|---|---|---|---|
+| M1 | `Allocated` | old bundle live; partial download in the item-replacement directory; perhaps a mount under `H/<txn>/mnt` | lock free → detach any mount whose mount point is under `H`; delete `H/<txn>` and the journal. |
+| M2 | `Prepared` | old bundle live; `stage/Folio.app` (new, verified twice); `rescue/Folio.app` (clone of old) | as W2. |
+| M3 | `Handoff` | as M2 | as W3. |
+| M4 | `Armed` | as M2; the LaunchAgent plist durable | as W5 (exclusive admission on `H/admission`, the process check), then `Exchanging` with both identities. |
+| M5 | `Exchanging`, the swap not performed | the live identity is old | remove the plist, → `Prepared` (the restart was accepted and nothing changed; the job owner resumes or discards). |
+| M6 | `Exchanging`, the swap performed | the live identity is new, and `stage` holds the old | → `RollbackIntent` (no trial began), then M9. |
+| M7 | `Trial`, no receipt | new live, old in `stage` | as W7. |
+| M8 | `Trial` with a receipt | as M7 | `Committed` durable, then remove the plist, delete `stage/Folio.app` (the old bundle), then the rescue clone. On Unix the rescue may delete itself. |
+| M9 | `RollbackIntent` | new live **or** old live | stop the trial process as W9. **If the live identity is new**, `RENAME_SWAP` back. If it is already old, do not swap. Verify → `RolledBack`. Failure → `Stuck`. |
+| M10 | `Stuck` | one complete bundle live and the other in `stage` | M9 again at every login (the plist) and every start. |
+| M11 | `RolledBack` / `Abandoned` / `Committed`-with-debt | as W11–W13 | as W11–W13; the plist is removed after the terminal state is durable. |
+
+**The crash points in Codex's matrix** map onto these tables:
+
+| matrix row | Windows | macOS |
+|---|---|---|
+| allocation / partial download | W1 | M1 |
+| extraction or attach, before the record | W1 | M1 (the mount point is the record) |
+| verify, copy or flush before `Prepared` | W1 | M1 |
+| `Prepared`, Later, failed quit | W2 | M2 |
+| receipt, P spawn, lock handoff | W3 | M3 |
+| entrance registration before the first move | W4–W5 | M4 |
+| each old file moved | W6 | — |
+| each new file moved | W6 | — |
+| swap done, phase not written | W6 (by digest) | M6 (by identity) |
+| N fails before first text | W7 → W9 | M7 → M9 |
+| receipt versus rollback | W7–W8, one lock holder, receipt ignored after intent | M7–M8 |
+| each rollback step and rollback failure | W9–W10 | M9–M10 |
+| each deletion after commit | W12 | M11 |
+| MSIX repair and final retirement | outside the transaction (F-18) | — |
+
+### (b).3 What is written outside Folio's own folder (replaces R.4)
+
+| what | platform | exists | undone without UI by |
+|---|---|---|---|
+| `HKCU\…\Run\FolioUpdate-<txn8>` | Windows | from `Armed` to a durable terminal state | the lock holder; a later start (terminal class); **`--uninstall-cleanup`**: a per-copy row that removes the value if it names this copy's `H` or a path that no longer exists |
+| installation home `.<BundleName>.folio-update/` beside the bundle | macOS | from `Allocated` to retirement | the transaction; a later start; `--uninstall-cleanup`: a per-copy row that removes a home whose journal names this bundle, or whose bundle is gone |
+| LaunchAgent plist | macOS | from `Armed` to terminal | the lock holder; a later start; `--uninstall-cleanup` row |
+| downloaded image | macOS | during Prepare | the transaction; the system's temporary purge |
+| `update-check.json` v2 | both | exists today | `--purge` |
+| per-user managed-install registry (only if E1 fails) | macOS | written by the cask | the cask's uninstall; `--purge` |
+
+The rev-a rows for `RunOnce` and for the data-root journal on macOS are
+withdrawn. The Windows home `H` is inside the install folder.
+
+### (b).4 Experiments (added to E1–E5; E4 is replaced by E-7)
+
+| id | question | before |
+|---|---|---|
+| E1 (extended) | the marker xattr under signing, stapling, offline assessment, Finder copy, rename, `ditto`, brew upgrade and reinstall, and a metadata-dropping copy | U-2 |
+| E-6 | a real signed Folio leaf carries a `1.3.6.1.4.1.311.97.*` identity-validation OID | U-15 |
+| E-7 | a Run value plus `RegFlushKey`, and a journal plus directory flush, survive a Hyper-V hard reset at each W-row | U-22, U-23 |
+| E-8 | `spctl` on a copied, stapled bundle offline before the cache warms; its output while disabled; an explicit rejection | U-16 |
+| E-9 | scoop writes `install.json` and `manifest.json` into each version folder, and their shape | U-1 |
+| E-10 | whether the cask uninstall steps run on `brew upgrade` | U-2 |
+| E-11 | `clonefile` of a bundle; the rescue clone runs headless after the original is swapped | U-26 |
+| E-12 | macOS App Management permission on a same-team self-swap in `/Applications` and `~/Applications` | U-28 |
+| E-13 | an exclusive-root chain engine verifies test-signed PE files without touching the machine store | U-15 |
+| E-14 | reading `RCDATA` from a never-executed PE with `LoadLibraryExW` data-file flags | U-14 |
+| E-15 | an NTFS directory flush through `FlushFileBuffers`; the admission file's inherited ACL lets another account holding read access take a shared lock | U-11 |
+| E-16 | `throw` in scoop's `pre_uninstall` aborts the uninstall with the app intact | U-2 |
+
+### (b).5 Tickets, re-split (supersedes R.6)
+
+Every ticket is S or M and inert until its platform's enabling ticket. It is
+mergeable alone **after the 0.4.5 tag** (ruling 2026-09-25). Each brief ends at
+"committed, CI green on the branch" and carries `_standing-rules.md`. Who: Opus
+for all; Codex may take U-7, U-14 and U-15. The shape of each brief is R.6's:
+true on BASE, goal, design, tests red on BASE, docs in the same commit, and
+architecture impact (a)(b)(c)(c′)(d). (d) is **no** for every ticket: each fact
+is new, or keeps its owner with a new writer listed under (c′). The
+coordinator should still send (b).2 itself to Codex before U-10 is dispatched.
+
+| # | title | size | inputs → outputs | red on BASE (names) | architecture (a)(b)(c)(c′) |
+|---|---|---|---|---|---|
+| U-1 | install channel: marker, scoop receipt, owner-is-me, read errors → `Unknown` | M | — → `Channel`, `Evidence` | `a_well_formed_marker_makes_this_copy_managed`, `a_scoop_receipt_alone_makes_it_managed`, `an_unreadable_marker_is_unknown`, `a_folder_owned_by_another_account_is_not_ours` | (a) new fact *how this copy was installed*, owner `install_channel`; (b) `file_reads` new lane, `getxattr` and ACL owner reads in `bt_platform`; (c) none; (c′) none |
+| U-2 | scoop and cask hooks, installed and tested; published in the taps before 0.4.6's manifests (E1, E-9, E-10, E-16) | S | U-1's format → published manifests | rendered-and-installed checks on the VM and the Mac; `exit_2_aborts_and_exit_1_continues` | (c′) the manager as a new writer of the channel; reader U-1 |
+| U-3 | Explorer row pre-ticked where `uninstall_hook` | S | U-1 | `the_explorer_row_is_on_only_where_an_uninstall_hook_exists` | a new reader of U-1's fact |
+| U-4 | winget PortableARPEntry evidence | S | U-1 | `a_winget_record_naming_this_target_is_managed`, `a_record_for_another_target_changes_nothing`, `conflicting_evidence_is_unknown` | (b) a registry read (no door for registry reads; named, not invented); (c′) a new source of the channel |
+| U-5 | `try_claim` / `adopt_claim`; `is_writer_of` unchanged | M | — → claim API | `acquired_claim_is_adopted_without_a_gap`, `is_writer_of_still_remembers_a_refusal` | (c′) `adopt_claim` as a new writer of the claim table |
+| U-6 | `update-check.json` v2, one owner, precedence skip | M | — → offer state | §F Offer group | (c) repays D-53 fact 11's part; (c′) Skip as a writer |
+| U-7 | `https_download` | M | — → streaming download | §F Transport group | (b) extends the HTTP door |
+| U-8 | eligibility flag `FOLIO_UPDATER` in `build.rs`, `build-release.yml` (tag or dispatch input), `release.yml` (off), the macOS release build, `smoke.ps1`, `RELEASING.md` | S | — → `eligible()` | `a_build_without_the_flag_is_never_eligible`, `the_flag_accepts_only_its_exact_value`, the smoke case | (a) new build fact; (c) none |
+| U-9 | release manifest in `folio.exe` (`build.rs`, `bt-pty` `links` metadata), `package.ps1` refusal, `smoke.ps1` check, macOS `Info.plist` keys | M | — → manifest v1 | `package_refuses_a_member_that_differs_from_the_manifest`, `the_manifest_lists_every_member_but_the_two_signed_ones` | (a) new fact *what this release contains*, owner `build.rs`; (c) none |
+| U-10 | transaction protocol, pure: header v1, states, writer rights, `decide()` over digest- and identity-located disk, receipt v1, inventories | M | — → protocol | one test per W-row and M-row; `recovery_never_writes_committed_without_a_receipt`, `a_receipt_after_rollback_intent_is_ignored`, `stuck_keeps_journal_backup_and_entrance`, `handoff_is_applied_never_swept` | (a) new fact *the installation's transaction*, owner `update_txn`; (b) none (pure) |
+| U-11 | durable writes and the two locks: door `bt_platform::install_txn` (E-15) | M | U-10 → effects | `a_journal_write_is_renamed_only_after_its_flush` (a recording fake), `admission_shared_blocks_exclusive_across_processes` | (b) a new door; (c) none |
+| U-12 | startup: shared admission before settings, sidecars and handover; frozen-header actions; `--then-launch`; trial nonce detection | M | U-10, U-11 | `a_start_during_a_destructive_state_hands_to_the_rescue_and_exits`, `a_terminal_journal_is_retired_at_start`, `admission_is_taken_before_hand_over` | (c′) a new trigger at every start; readers: `launch_wire::hand_over` |
+| U-13 | the trial write gate over every startup writer (inventoried by grep), readiness → receipt on the storage worker | M | U-10, U-11 | `a_trial_start_writes_nothing_durable_before_committed`, `the_receipt_is_written_off_the_window_thread` | (c′) the gate as a new condition on data-root, marks and registration writers, each named |
+| U-14 | archive reader: grammar, reserved names, output-counted expansion, members against U-9's manifest (E-14) | M | U-9 | `packaged_zip_root_is_accepted`, `a_changed_cmd_member_is_refused` (the review's counterexample), `trailing_dot_space_and_device_names_are_refused`, `a_lying_uncompressed_size_is_stopped_at_the_cap` | (b) `file_reads` lane |
+| U-15 | Windows identity: identity-OID pin, DN, timestamp, revocation, capability; exclusive-root policy tests; positive tests on the VM (E-6, E-13) | M | — | `same_dn_with_a_different_identity_is_refused`, `an_expired_leaf_with_a_valid_timestamp_is_accepted` | none |
+| U-16 | macOS identity: designated requirement and the `spctl` policy (E-8) | M | — | `an_explicit_rejection_is_refused`, `disabled_assessment_proceeds_on_code_and_requirement` | (b) `quiet_command_named` (`spctl`) |
+| U-17 | macOS mount under `H/<txn>/mnt`, found from the mount table | S | U-10 | `a_mount_under_the_home_is_found_without_a_record` | (b) `quiet_command_named` (`hdiutil`) |
+| U-18 | the job, headless: offer, eligibility, capability, classification, a typed pending state until evidence, offers off | M | U-1, U-6, U-8 | §F's job tests; `no_offer_before_classification_arrives` | (a) new fact *the update job*, owned by the application |
+| U-19 | the card and the row (C9, C2) | M | U-18 | as R.6's U-14 | reads the job |
+| U-20 | Windows Prepare: `Allocated` → `Prepared`, inventories, rescue copy, deferred age rule, revalidation at Restart | M | U-7, U-10, U-11, U-14, U-15, U-18 | `mutated_asset_hash_pair_refuses_before_swap` with the `.cmd` counterexample, `a_deferred_transaction_survives_the_first_relaunch` | (b) `spawn_at_priority` `bt-update-job`; (c) D-3 if its contract has landed |
+| U-21 | quit barrier and `Handoff`: a successful receipt is required, a timeout abandons the update and not the quit; spawn P | M | U-10, U-11, U-18 | `a_session_timeout_abandons_the_update_and_still_quits`, `handoff_is_durable_before_the_spawn` | (c′) the update as a new trigger of quit; readers `launch_wire::admit` and the restore card |
+| U-22 | Windows entrance door `logon_hook` (Run, flush, read-back, length check), `--update-recover`, the cleanup row (E-7) | M | U-10, U-11 | `armed_is_never_written_before_the_entrance_is_flushed`, `a_long_path_is_refused_before_any_move`, the cleanup row | (b) a new door |
+| U-23 | Windows apply: process check, exclusive admission, moves, `Trial`, receipt → `Committed`, cleanup (E-7) | M | U-5, U-12, U-13, U-20, U-21, U-22 | W5–W8 and W12 as integration tests on real temp folders | (a) the installed file set, owner `install_flip`; (b) door `install_flip` |
+| U-24 | Windows rollback and `Stuck` | M | U-23 | W9–W11 | as U-23 |
+| U-25 | MSIX renewal at start, scoped to `external_path` | S | — | `another_copys_registration_is_never_renewed`, `renewal_is_re_evaluated_at_every_start` | (c) touches D-52 fact 10, not widened |
+| U-26 | macOS home, locator, rescue clone, LaunchAgent door, cleanup rows (E-11) | M | U-10, U-11 | `the_home_is_found_from_any_data_root`, `armed_follows_a_full_fsync_of_the_plist` | (b) a new door; write outside the bundle (b).3 |
+| U-27 | macOS Prepare | M | U-7, U-16, U-17, U-18, U-26 | M1–M2; `renamed_bundle_updates_only_itself` | as U-20 |
+| U-28 | macOS exchange, trial, commit (E-12) | M | U-5, U-12, U-13, U-21, U-27 | M4–M8 | (b) `install_flip` |
+| U-29 | macOS rollback and `Stuck` | M | U-28 | M9–M11 | as U-28 |
+| U-30 | `clean-vm.md` §4.4 checklist; Hyper-V hard-reset harness; the macOS guest on the Mac mini | S | — | the checklist exists and each W/M row has a step | docs and scripts |
+| U-31 | enable Windows | S | U-1, U-2 (published), U-3, U-4, U-8, U-9, U-19, U-23, U-24, U-25, U-30 (run green) | `the_windows_gate_is_on` | docs: `PRIVACY.md`, §7.52 successor, `RULES.md` §36, CHANGELOG |
+| U-32 | enable macOS | S | U-1, U-2 (E1 green), U-8, U-19, U-28, U-29, U-30 (run green) | `the_macos_gate_is_on` | as U-31 |
+
+**Order.** U-1 and U-5 through U-11 have no inputs. U-15, U-16 and U-25 have
+none either. U-30 has none. Everything else follows the inputs column.
+Thirty-two tickets: 9 S and 23 M.
+
+### (b).6 Open questions (supersedes R.7)
+
+Codex settled Q1 (winget: *"Read winget's own package-identified
+uninstall/portable record and match the canonical installed target"*,
+which is U-4), Q2 (*"Agree: keep the ZIP/Scoop/winget routes for 0.4.6"*), Q3
+(*"Keep only the gear dot and the General row with the manager's Copy
+command"*) and Q5 (*"Add an independently runnable LaunchAgent recovery path …
+until that full contract lands, leave macOS self-update disabled"*, which is
+F-3 and U-26–U-29). They are no longer open. What remains:
+
+- **Q-A (was Q4), capability versus eligibility.** Rev a recommended *"the
+  running build is signed" decides*. Codex: *"Keep an explicit release/test
+  eligibility flag or signed policy in addition to signature verification, with
+  deliberate opt-in for signed updater-test candidates."* I now agree with Codex
+  (F-13: signed non-public builds already exist on both platforms). U-8 is
+  written that way. Confirm, or rule that every signed build may update to the
+  next public release.
+- **Q-B (new), platform parity.** If the macOS recovery contract (U-26–U-29,
+  E-11, E-12) is not green when 0.4.6 is cut, should the updater ship on
+  Windows only (U-31 without U-32), or wait so both platforms get it together?
+  Mine: ship Windows, with macOS in the next release. Codex's review says only
+  *"leave macOS self-update disabled"* until the contract lands.
+- **Q-C (new; changes what a launch does).** A Folio started while an update is
+  in progress does not open a window until the update finishes: up to about
+  2½ minutes in the worst case (60 s admission wait, 90 s trial, then rollback).
+  After that it opens normally. Accept, or should such a launch say so in one
+  line on the console or in a toast? Mine: accept. It only happens when a person
+  starts Folio in the seconds after pressing Restart. Codex's F-6 asks that such
+  a launch *"defer/refuse startup"*, not continue.
