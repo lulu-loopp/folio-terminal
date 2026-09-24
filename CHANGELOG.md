@@ -20,6 +20,8 @@ All notable changes to Folio are recorded here. The format follows
   Folio passes the title on at most once a frame.
 - A launch with a chosen terminal font no longer waits for Folio to list every
   font on the machine.
+- A terminal font with no bold style no longer switches to another font's bold
+  for bold text.
 
 ### Changed
 

@@ -1,7 +1,7 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
 mod cjk_fonts;
-use cjk_fonts::{CjkFace, FontSystem, match_cjk_attrs, proportional_cjk_family};
+use cjk_fonts::{CjkFace, FontSystem, match_cjk_attrs, match_grid_attrs, proportional_cjk_family};
 mod contrast;
 mod glyph_census;
 pub mod glyph_probe;
@@ -15365,7 +15365,7 @@ fn shape_narrow_buffer(
     // so the shaping buffer itself must stay horizontally unbounded.
     buffer.set_size(None, Some(metrics.cell_height_px));
     buffer.set_monospace_width(None);
-    let mut attrs = match_cjk_attrs(font_system, shape_attrs(key, family)).metrics(Metrics::new(
+    let mut attrs = match_grid_attrs(font_system, shape_attrs(key, family)).metrics(Metrics::new(
         metrics.font_size_px * em_scale,
         metrics.cell_height_px,
     ));
@@ -15862,7 +15862,7 @@ fn shape_wide_buffer(
             shape_attrs(key, family).metrics(Metrics::new(em_px, metrics.cell_height_px))
         }
     };
-    let attrs = match_cjk_attrs(font_system, attrs);
+    let attrs = match_grid_attrs(font_system, attrs);
     buffer.set_text(&key.text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
     buffer
@@ -31815,6 +31815,124 @@ mod tests {
                 refits,
                 "and nothing was repaired on the way out: a re-pack on a device this \
                  broken mints an atlas every later frame would take its ink from"
+            );
+        }
+    }
+    /// Ticket 38: the family that draws a grid cell never depends on the weight
+    /// asked (step 0), and a bold request on a face with no bold cut is drawn
+    /// heavier from that face's own outline (step 2).
+    mod synthetic_bold {
+        use super::*;
+
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+        /// A checked-in test font written where `set_terminal_font` can load
+        /// it from a path, the way the picker hands it a family's files.
+        fn font_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "folio-bt-render-synthetic-bold-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("a scratch directory");
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).expect("the font file");
+            path
+        }
+
+        fn test_sans_file() -> std::path::PathBuf {
+            font_file(
+                "Test-Sans400.ttf",
+                include_bytes!("../tests/fonts/Test-Sans400.ttf"),
+            )
+        }
+
+        /// The family and face weight each glyph of a grid cell is drawn from,
+        /// shaped through the product's own road: the cache-miss shaper, over
+        /// the context's database and resolved CJK families.
+        fn drawn_faces(gpu: &mut GpuContext, text: &str, bold: bool) -> Vec<(String, u16)> {
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            let key = ShapeKey {
+                text: text.into(),
+                bold,
+                italic: false,
+            };
+            let mut trials = 0;
+            let (buffer, _, _) = shape_narrow_buffer_for_key(
+                &key,
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &gpu.terminal_cjk_families,
+                &mut trials,
+            );
+            buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter())
+                .map(|glyph| {
+                    assert_ne!(glyph.glyph_id, 0, "the cell found a glyph");
+                    let face = gpu.font_system.db().face(glyph.font_id).expect("a face");
+                    (face.families[0].0.clone(), face.weight.0)
+                })
+                .collect()
+        }
+
+        /// RED (38, step 0) — **a bold cell in a primary family with no bold
+        /// cut stays in that family.**
+        ///
+        /// The 2026-09-20 rule (`1ddd516c`) is stated for the resolved family,
+        /// and the Chinese families have kept it through `match_cjk_attrs`
+        /// since then. The primary did not: cosmic-text was asked for weight
+        /// 700, its default-monospace shortcut needs an exact weight, and its
+        /// fallback ranking then took any monospace face with a real bold — on
+        /// Windows, Consolas Bold, which the product's database always holds.
+        /// The font arrives the way a picked family does, as a file handed to
+        /// `set_terminal_font`, so the file → fontdb → `set_monospace_family` →
+        /// shaper chain is the product's own.
+        ///
+        /// MUTATION: return `match_cjk_attrs(fs, attrs)` from
+        /// `match_grid_attrs` for `Family::Monospace` too (skip the swap), and
+        /// the bold `A` is drawn in another family.
+        #[test]
+        fn a_bold_cell_in_a_primary_family_with_no_bold_cut_stays_in_that_family() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            gpu.set_terminal_font("Test Sans", &[test_sans_file()], "", &[], 16.0);
+            assert_eq!(gpu.terminal_font_family(), "Test Sans");
+            let regular = drawn_faces(&mut gpu, "A", false);
+            let bold = drawn_faces(&mut gpu, "A", true);
+            assert_eq!(regular, [("Test Sans".to_owned(), 400)]);
+            assert_eq!(
+                bold, regular,
+                "the weight asked for never changes the family, nor the face it offers"
+            );
+        }
+
+        /// PIN (38, step 0) — **a primary family that has a bold cut still
+        /// draws its own bold.** The swap hands the shaper the face the family
+        /// offers; for a family with a 700 face that is the 700 face.
+        ///
+        /// MUTATION: swap every weight to the regular face's in
+        /// `family_face_matches` and the bold `A` comes back at 400.
+        #[test]
+        fn a_primary_family_with_a_bold_cut_draws_its_own_bold() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let files = [
+                font_file(
+                    "Test-CJK400.ttf",
+                    include_bytes!("../tests/fonts/Test-CJK400.ttf"),
+                ),
+                font_file(
+                    "Test-CJK700.ttf",
+                    include_bytes!("../tests/fonts/Test-CJK700.ttf"),
+                ),
+            ];
+            gpu.set_terminal_font("Test CJK", &files, "", &[], 16.0);
+            assert_eq!(
+                drawn_faces(&mut gpu, "A", false),
+                [("Test CJK".to_owned(), 400)]
+            );
+            assert_eq!(
+                drawn_faces(&mut gpu, "A", true),
+                [("Test CJK".to_owned(), 700)]
             );
         }
     }
