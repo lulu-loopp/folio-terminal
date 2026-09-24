@@ -2595,7 +2595,7 @@ impl Runtime<'_> {
         // Not while a resize present is outstanding: that gate admits only the newly projected
         // grid, and the frame on screen is the previous one. A repaint is already owed to the
         // resize, and it carries the renderer-side overlay state with it.
-        if self.pending_resize_present.is_none()
+        if !self.resize_present_owed
             && self.window.pending_frames.pending_frame().is_none()
             && let Some(frame) = self.window.last_presented_frame.clone()
         {

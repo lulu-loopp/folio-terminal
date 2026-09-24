@@ -1721,7 +1721,7 @@ impl Runtime<'_> {
         // A tab with no shell has no grid and nothing to gate: the present it is
         // about to make is chrome and a files column, neither of which is
         // measured in cells (§7.1.6h).
-        self.pending_resize_present = self.focused().map(|leaf| leaf.grid);
+        self.owe_resize_present();
         self.mark_session_dirty(now);
         self.publish_frame(FrameTrigger {
             occurred_at: now,

@@ -13478,7 +13478,7 @@ impl Runtime<'_> {
         self.window.pending_frames.pending_frame().is_some()
             || self.window.chrome_present_pending
             || self.window.unpainted_pane_output
-            || self.pending_resize_present.is_some()
+            || self.resize_present_owed
     }
 
     pub(in crate::runtime) fn check_picture_freshness(&mut self, instant: Instant, landed: bool) {

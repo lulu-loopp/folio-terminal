@@ -6,14 +6,14 @@ use crate::{
     FrameTraces, GhostFace, HyperlinkActivation, PaneDraw, PointerTarget, PresentIntent, Runtime,
     STARTUP_PTY_POLL_INTERVAL, TabPress, a_bare_redraw_still_owes_a_present,
     advance_periodic_deadline, apply_hover_marks, attention_ledger_deadline, chrome_over,
-    chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files,
-    frame_matches_grid, git, hang_watch, hyperlink_activation, ime_outbound, mark_leaf_painted,
-    math_copy_window, native_window, present_diagnostics, present_gate, preview,
-    pty_drain_says_nothing_new, pty_frame_is_unchanged, seats, settings, settling,
-    startup_poll_delay, take_math_worker_notice, trace_sink, trace_unchanged_present, webhost,
+    chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files, git,
+    hang_watch, hyperlink_activation, ime_outbound, mark_leaf_painted, math_copy_window,
+    native_window, present_diagnostics, present_gate, preview, pty_drain_says_nothing_new,
+    pty_frame_is_unchanged, seats, settings, settling, startup_poll_delay, take_math_worker_notice,
+    trace_sink, trace_unchanged_present, webhost,
 };
 use anyhow::Context;
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{
     FrameSource, FrameTrigger, PresentOutcome, compose_preedit, frame_content_digest,
@@ -780,7 +780,7 @@ impl Runtime<'_> {
     ) -> Result<()> {
         // Not while a resize present is outstanding: that gate admits only the
         // newly projected grid, and the frame on screen is the previous one.
-        if self.pending_resize_present.is_none()
+        if !self.resize_present_owed
             && self.window.pending_frames.pending_frame().is_none()
             && let Some(frame) = self.window.last_presented_frame.clone()
         {
@@ -818,7 +818,7 @@ impl Runtime<'_> {
     /// reaches the glass. Chrome lives beside the frame, exactly as the peek
     /// flyout does, so `redraw` would otherwise find nothing queued and skip.
     pub(crate) fn present_chrome_change(&mut self) -> Result<()> {
-        if self.pending_resize_present.is_none()
+        if !self.resize_present_owed
             && self.window.pending_frames.pending_frame().is_none()
             && let Some(frame) = self.window.last_presented_frame.clone()
         {
@@ -1094,8 +1094,7 @@ impl Runtime<'_> {
                 && self.window.window.is_visible() == Some(true)
                 && !self.window.window_hidden
                 && self.window.window_exposed,
-            resize_pending: self.pending_resize_present.is_some()
-                || matches!(source, FrameSource::Resize),
+            resize_pending: self.resize_present_owed || matches!(source, FrameSource::Resize),
             skirt_pending: self.window.compositor.skirt_covers_anything(),
         }
     }
@@ -1174,16 +1173,7 @@ impl Runtime<'_> {
             // presented, chrome and all.
             let validation_parent = hang_watch::enter(hang_watch::Station::RedrawValidate);
             self.window.chrome_present_pending = false;
-            if let Some(expected) = self.pending_resize_present {
-                ensure!(
-                    frame_matches_grid(&frame, expected),
-                    "resize presentation requires the newly projected grid: expected {}x{}, got {}x{}",
-                    expected.columns,
-                    expected.rows,
-                    frame.columns,
-                    frame.grid_rows
-                );
-            }
+            self.admit_resize_present(&frame)?;
             let has_text = frame
                 .cells
                 .iter()
@@ -1468,7 +1458,7 @@ impl Runtime<'_> {
                     {
                         self.rescan_pane_references(seat);
                     }
-                    self.pending_resize_present = None;
+                    self.resize_present_owed = false;
                     hang_watch::at(commit_parent);
                 }
                 // The frame is still owed, so it goes back in the slot and the
