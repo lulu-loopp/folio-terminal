@@ -53,8 +53,8 @@ use crate::preview::PreviewSource;
 pub const GIT_VIEW_PADDING_X_LOGICAL_PX: f32 = 10.0;
 pub const GIT_VIEW_PADDING_TOP_LOGICAL_PX: f32 = 4.0;
 pub const GIT_VIEW_PADDING_BOTTOM_LOGICAL_PX: f32 = 10.0;
-/// `.git-view.empty { font-size: 11.5px }` — the one empty state, centred (R17).
-pub const GIT_EMPTY_FONT_LOGICAL_PX: f32 = 11.5;
+/// Caption text (`UI-SPEC.md` T5) — the one empty state, centred (R17).
+pub const GIT_EMPTY_FONT_LOGICAL_PX: f32 = 11.0;
 
 /// Primary text (`UI-SPEC.md` T3), not the mock-up's own
 /// `.git-branch { padding: 10px 2px 6px; font-size: 13.5px; font-weight: 600 }`.
@@ -95,14 +95,14 @@ pub fn git_head_mark_logical_px(mark: crate::marks::ChromeMark) -> f32 {
 /// reservation.
 pub const GIT_HEAD_NAME_MIN_LOGICAL_PX: f32 = 40.0;
 
-/// `.gud { font-size: 10.5px; border-radius: 9px; padding: 1px 7px }` — the
+/// Badge text and half-height corners (`UI-SPEC.md` T6/R13) — the
 /// ahead/behind pills, and the shape every pill on this page will wear (R22).
-pub const GIT_PILL_FONT_LOGICAL_PX: f32 = 10.5;
-pub const GIT_PILL_RADIUS_LOGICAL_PX: f32 = 9.0;
+pub const GIT_PILL_FONT_LOGICAL_PX: f32 = 10.0;
+pub const GIT_PILL_RADIUS_LOGICAL_PX: f32 = GIT_PILL_HEIGHT_LOGICAL_PX / 2.0;
 pub const GIT_PILL_PADDING_X_LOGICAL_PX: f32 = 7.0;
 /// `.gud { border: 1px solid var(--border) }`.
 pub const GIT_PILL_EDGE_LOGICAL_PX: f32 = 1.0;
-/// The pill's own height: `1px + line + 1px` at 10.5px, which lands on 16.
+/// The pill's own 16-pixel height; its radius is half this (`UI-SPEC.md` R13).
 pub const GIT_PILL_HEIGHT_LOGICAL_PX: f32 = 16.0;
 
 /// The section-label scale (`UI-SPEC.md` T7; `settings.rs::GROUP_LABEL_FONT_LOGICAL_PX`,
@@ -110,25 +110,26 @@ pub const GIT_PILL_HEIGHT_LOGICAL_PX: f32 = 16.0;
 /// `.glabel { padding: 14px 2px 5px; font-size: 9.5px; letter-spacing: .09em }`.
 /// These were the smallest, most widely spaced text in the window.
 ///
-/// The 14px top inset is the *group gap*: the design pulls the sections apart
+/// The 10px top inset (`UI-SPEC.md` S4) is the *group gap*: the design pulls
+/// the sections apart
 /// with the heading's own padding rather than with a margin between cards, so a
 /// heading and the card under it are one object with air above them.
 pub const GIT_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
 /// `UI-SPEC.md` T7; `settings.rs::GROUP_LABEL_TRACKING_EM`, private there.
 pub const GIT_LABEL_TRACKING_EM: f32 = 0.05;
-pub const GIT_LABEL_PADDING_TOP_LOGICAL_PX: f32 = 14.0;
+pub const GIT_LABEL_PADDING_TOP_LOGICAL_PX: f32 = 10.0;
 pub const GIT_LABEL_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
 pub const GIT_LABEL_PADDING_X_LOGICAL_PX: f32 = 2.0;
 /// The section-label scale (`UI-SPEC.md` T7; `settings.rs::GROUP_LABEL_LINE_LOGICAL_PX`,
 /// private there) — how tall the heading's own text sits.
 pub const GIT_LABEL_LINE_LOGICAL_PX: f32 = 13.0;
 
-/// `.gsec { background: var(--panel); border-radius: 9px; padding: 4px }`.
+/// Section plates use radius 8 (`UI-SPEC.md` R5), panel ground and padding 4.
 ///
 /// *Each section is a soft region card — one fill says "this is a region" (the
 /// math-block rule), which is what the flat first draft was missing* (mock-up
 /// 1605). It is the only fill on the page that is not a state.
-pub const GIT_SECTION_RADIUS_LOGICAL_PX: f32 = 9.0;
+pub const GIT_SECTION_RADIUS_LOGICAL_PX: f32 = 8.0;
 pub const GIT_SECTION_PADDING_LOGICAL_PX: f32 = 4.0;
 
 /// `.grow`/`.gcommit` — 27 logical pixels, and the same 27 for both.
@@ -141,9 +142,9 @@ pub const GIT_ROW_HEIGHT_LOGICAL_PX: f32 = crate::seats::FILES_ROW_HEIGHT_LOGICA
 pub const GIT_ROW_RADIUS_LOGICAL_PX: f32 = 6.0;
 /// `.grow { gap: 8px }`.
 pub const GIT_ROW_GAP_LOGICAL_PX: f32 = 8.0;
-/// `.grow { padding: 5px 7px }` — the horizontal half.
-pub const GIT_ROW_PADDING_X_LOGICAL_PX: f32 = 7.0;
-/// `.gcommit { padding: 0 7px 0 3px }` — the graph column gets the left edge.
+/// Selectable-row text inset (`UI-SPEC.md` S8; `profiles.rs::ITEM_PADDING_X_LOGICAL_PX`).
+pub const GIT_ROW_PADDING_X_LOGICAL_PX: f32 = 10.0;
+/// The commit graph column keeps its own left edge; the right uses the row inset.
 pub const GIT_COMMIT_PADDING_LEFT_LOGICAL_PX: f32 = 3.0;
 /// How far an expanded commit's file rows stand in from the list's edge (R15).
 ///
@@ -157,10 +158,10 @@ pub const GIT_COMMIT_FILE_INDENT_LOGICAL_PX: f32 =
 /// body size.
 pub const GIT_ROW_FONT_LOGICAL_PX: f32 = 13.0;
 
-/// `.gst { width: 17px; height: 17px; border-radius: 5px; font: 600 10px mono }`
+/// A 17-pixel badge with radius 4 (`UI-SPEC.md` R11) and 10-pixel mono text
 /// — one status letter's badge (R11).
 pub const GIT_BADGE_LOGICAL_PX: f32 = 17.0;
-pub const GIT_BADGE_RADIUS_LOGICAL_PX: f32 = 5.0;
+pub const GIT_BADGE_RADIUS_LOGICAL_PX: f32 = 4.0;
 pub const GIT_BADGE_FONT_LOGICAL_PX: f32 = 10.0;
 /// How far apart two badges sit when a file is in two groups at once.
 ///
@@ -174,8 +175,8 @@ pub const GIT_BADGE_GROUND_ALPHA: i32 = 150;
 /// `.gact { width: 18px; height: 18px; border-radius: 5px }` — a hover verb.
 pub const GIT_ACT_LOGICAL_PX: f32 = 18.0;
 pub const GIT_ACT_RADIUS_LOGICAL_PX: f32 = 5.0;
-/// `.gact svg` — the glyph inside the box, on `.pv-tool`'s ratio.
-pub const GIT_ACT_GLYPH_LOGICAL_PX: f32 = 11.0;
+/// Caption-slot glyph inside the box (`UI-SPEC.md` I2; `icons::MarkSlot`).
+pub const GIT_ACT_GLYPH_LOGICAL_PX: f32 = 10.0;
 /// The gap between two verbs on one row.
 pub const GIT_ACT_GAP_LOGICAL_PX: f32 = 2.0;
 /// **R12's middle rung.** `.pane:hover .pv-tool { opacity: .7 }` — the same
@@ -205,13 +206,13 @@ pub const GIT_GRAPH_DOT_RADIUS_LOGICAL_PX: f32 = 3.1;
 /// `.ggr line { stroke: color-mix(in srgb, var(--ink3) 55%, transparent) }`.
 pub const GIT_GRAPH_LINE_ALPHA: i32 = 550;
 
-/// `.gcommit code { font: 10.5px mono }` — the short hash, **on both surfaces**.
+/// Badge-size mono text (`UI-SPEC.md` T6) — the short hash, **on both surfaces**.
 ///
 /// R21's smaller half: the mock-up drew it at 10.5 here and at 11 in the full
 /// graph, and one size is what one fact gets. The full graph reads this constant
 /// rather than declaring its own, which is what stops the pair from drifting
 /// apart again the next time either is touched.
-pub const GIT_HASH_FONT_LOGICAL_PX: f32 = 10.5;
+pub const GIT_HASH_FONT_LOGICAL_PX: f32 = 10.0;
 /// `.gtime { font-size: 10px }`.
 pub const GIT_TIME_FONT_LOGICAL_PX: f32 = 10.0;
 
@@ -1043,7 +1044,7 @@ pub struct GitCommitRow {
     /// that opens the wrong commit's files on the day the repository gets big
     /// enough.
     pub hash: String,
-    /// git's own abbreviation, at 10.5 and **last** on the row (R21).
+    /// git's own abbreviation, at badge size (`UI-SPEC.md` T6) and **last** on the row (R21).
     pub short: String,
     pub short_width: f32,
     /// The local branches standing on this commit (R22), in git's own order.
@@ -2777,7 +2778,8 @@ const MASTHEAD_ACTS: [GitAct; 2] = [GitAct::Refresh, GitAct::OpenGraph];
 ///
 /// **Inside the row's own padding, not flush with its edge** (user report,
 /// 2026-08-16). The verbs are the last flex child of a padded row — `.grow` is
-/// `padding: 5px 7px`, `.glabel` and the masthead `2px` — so their trailing edge
+/// inset by the row rule (`UI-SPEC.md` S8), `.glabel` and the masthead by
+/// `2px` — so their trailing edge
 /// is the padding's, exactly where the row's text already stops (`push_change`
 /// clips the name at `rect[2] - pad - reserved`). Drawn from `rect[2]` itself the
 /// `+` touched the row's rounded corner and its pill overran the ground it lit.
@@ -3597,7 +3599,7 @@ fn push_branch(
 }
 
 /// The band a section header's word sits in: the *bottom* of its box, because
-/// the box's 14px of top padding is the gap between two sections and not
+/// the box's 10px of top padding (`UI-SPEC.md` S4) is the gap between sections, not
 /// leading. `(top, bottom)`, and the line box between them is what the sub-group
 /// centres its triangle against.
 fn heading_band(rect: [f32; 4], scale: f32) -> (f32, f32) {
@@ -4260,8 +4262,8 @@ pub const FILES_BADGE_FONT_LOGICAL_PX: f32 = GIT_BADGE_FONT_LOGICAL_PX;
 /// nine known glyphs. Nine logical pixels holds any of them at 10px mono with air
 /// on both sides, and two of them side by side stay one object.
 pub const FILES_BADGE_CELL_LOGICAL_PX: f32 = 9.0;
-/// The air between the name and the first letter.
-pub const FILES_BADGE_GAP_LOGICAL_PX: f32 = 6.0;
+/// The icon-to-label gap between the name and the first letter (`UI-SPEC.md` G1).
+pub const FILES_BADGE_GAP_LOGICAL_PX: f32 = 8.0;
 /// A folder's aggregate mark, across.
 ///
 /// **A dot and not a letter**, because a folder has no status: git says nothing
@@ -4424,6 +4426,80 @@ mod tests {
     use super::*;
     use crate::git::{GitAnswer, GitCommit, GitLog, parse_status};
     use std::path::{Path, PathBuf};
+
+    /// RED (25) — **Git spacing, corners, captions, badges and marks follow their UI rules.**
+    ///
+    /// These constants own the drawing metrics; each old value deviates from UI-SPEC.md.
+    /// MUTATION: restore `GIT_LABEL_PADDING_TOP_LOGICAL_PX` to `14.0`.
+    /// MUTATION: restore `GIT_SECTION_RADIUS_LOGICAL_PX` to `9.0`.
+    /// MUTATION: restore `FILES_BADGE_GAP_LOGICAL_PX` to `6.0`.
+    /// MUTATION: restore `GIT_EMPTY_FONT_LOGICAL_PX` to `11.5`.
+    /// MUTATION: restore `GIT_ACT_GLYPH_LOGICAL_PX` to `11.0`.
+    /// MUTATION: restore `GIT_HASH_FONT_LOGICAL_PX` to `10.5`.
+    /// MUTATION: restore `GIT_PILL_FONT_LOGICAL_PX` to `10.5`.
+    /// MUTATION: restore `GIT_ROW_PADDING_X_LOGICAL_PX` to `7.0`.
+    /// MUTATION: restore `GIT_PILL_RADIUS_LOGICAL_PX` to `9.0`.
+    /// MUTATION: restore `GIT_BADGE_RADIUS_LOGICAL_PX` to `5.0`.
+    #[test]
+    fn ui_spec_git_rest_values_follow_the_rule() {
+        let values = [
+            (
+                GIT_LABEL_PADDING_TOP_LOGICAL_PX,
+                10.0,
+                "UI-SPEC.md S4, settings.rs::GROUP_LABEL_MARGIN_TOP_LOGICAL_PX (private): GIT_LABEL_PADDING_TOP_LOGICAL_PX",
+            ),
+            (
+                GIT_SECTION_RADIUS_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md R5: GIT_SECTION_RADIUS_LOGICAL_PX",
+            ),
+            (
+                FILES_BADGE_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G1: FILES_BADGE_GAP_LOGICAL_PX",
+            ),
+            (
+                GIT_EMPTY_FONT_LOGICAL_PX,
+                11.0,
+                "UI-SPEC.md T5: GIT_EMPTY_FONT_LOGICAL_PX",
+            ),
+            (
+                GIT_ACT_GLYPH_LOGICAL_PX,
+                10.0,
+                "UI-SPEC.md I2, icons.rs::CAPTION_EDGE_TO_EDGE_BOX_LOGICAL_PX (private): GIT_ACT_GLYPH_LOGICAL_PX",
+            ),
+            (
+                GIT_HASH_FONT_LOGICAL_PX,
+                bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+                "UI-SPEC.md T6: GIT_HASH_FONT_LOGICAL_PX",
+            ),
+            (
+                GIT_PILL_FONT_LOGICAL_PX,
+                bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+                "UI-SPEC.md T6: GIT_PILL_FONT_LOGICAL_PX",
+            ),
+            (
+                GIT_ROW_PADDING_X_LOGICAL_PX,
+                10.0,
+                "UI-SPEC.md S8, profiles.rs::ITEM_PADDING_X_LOGICAL_PX (private): GIT_ROW_PADDING_X_LOGICAL_PX",
+            ),
+            (
+                GIT_PILL_RADIUS_LOGICAL_PX,
+                GIT_PILL_HEIGHT_LOGICAL_PX / 2.0,
+                "UI-SPEC.md R13: GIT_PILL_RADIUS_LOGICAL_PX",
+            ),
+            (
+                GIT_BADGE_RADIUS_LOGICAL_PX,
+                4.0,
+                "UI-SPEC.md R11: GIT_BADGE_RADIUS_LOGICAL_PX",
+            ),
+        ];
+        let deviations: Vec<_> = values
+            .into_iter()
+            .filter(|(actual, expected, _)| actual != expected)
+            .collect();
+        assert!(deviations.is_empty(), "{deviations:?}");
+    }
 
     const ROOT: &str = r"D:\repo";
 
