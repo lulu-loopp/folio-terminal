@@ -888,6 +888,7 @@ fn unit_range(boundaries: &[u32], range: ByteRange) -> (u32, u32) {
 /// slice at a time by [`scan_history_slice`], and what a line *freezing* owes is
 /// [`scan_history_after`]'s much smaller answer. It is the unbounded case of the one scan, not a
 /// second one (CONVENTIONS §十 rule 9).
+#[cfg(test)]
 #[must_use]
 pub fn scan_history(compiled: &CompiledSearch, transcript: &TranscriptStore) -> Vec<Hit> {
     scan_history_slice(compiled, transcript, None, usize::MAX)
@@ -1050,6 +1051,7 @@ pub const SEARCH_HISTORY_SLICE: usize = 4_096;
 /// The unbounded case of [`scan_history_slice`]: a partial `previous` handed in here is finished
 /// in this one call. Nothing on the window thread passes one; the tests that pin the carry-forward
 /// rule do.
+#[cfg(test)]
 #[must_use]
 pub fn scan_history_after(
     compiled: &CompiledSearch,
