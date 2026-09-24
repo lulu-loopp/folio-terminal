@@ -1491,7 +1491,12 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
 ///   [`begin_monospace_scan`] publishes so the button can read the family in
 ///   force from the very first frame — see there for why a seed and not an
 ///   empty list.
-/// - `offered` is where a finished walk leaves its answer.
+/// - `offered` is where a finished walk leaves its answer, **with the number of
+///   the request it answers** (ticket 50), and `answered` is the number of the
+///   answer on screen. A request is numbered when it is made
+///   ([`ScanState::requested`]); the walk reads the number it is serving when it
+///   starts. [`Self::adopt`] takes an answer only if it is at least as new as the
+///   one on screen, so a list can never be replaced by an older one.
 ///
 /// **The rule is that only the window thread publishes.** The worker fills
 /// `offered` and asks for a wake; [`adopt_scanned_families`] moves it across,
@@ -1512,8 +1517,12 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
 struct MonospaceFamilySlot {
     /// `(came from the machine, what a frame draws)`.
     published: std::sync::RwLock<(bool, &'static [bt_platform::MonospaceFamily])>,
-    /// What a finished walk is holding out to the window thread.
-    offered: std::sync::Mutex<Option<Vec<bt_platform::MonospaceFamily>>>,
+    /// What a finished walk is holding out to the window thread, and the
+    /// number of the request it answers.
+    offered: std::sync::Mutex<Option<(u64, Vec<bt_platform::MonospaceFamily>)>>,
+    /// The number of the answer on screen; `0` while the seed is. Written by
+    /// [`Self::adopt`] alone, on the window thread.
+    answered: std::sync::atomic::AtomicU64,
     scan: std::sync::Mutex<ScanState>,
 }
 
@@ -1526,10 +1535,19 @@ struct MonospaceFamilySlot {
 /// — a font may have been installed since that walk started, which is exactly
 /// the gesture `Install fonts…` invites — so it is remembered and the worker
 /// goes round once more.
+///
+/// **`requested` numbers the requests** (ticket 50; `ARCHITECTURE` §5.1's
+/// observation lane: *versioned requests … latest-result replacement only where
+/// the semantics permit*). Every ask bumps it, whether it starts a thread or
+/// rides on the one out; a walk serves the number standing when it starts, so
+/// an ask made during a walk is served by the next round with a larger number.
+/// The bounds are the ones this struct already had: one walk out, one answer
+/// held.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ScanState {
     running: bool,
     again: bool,
+    requested: u64,
 }
 
 impl MonospaceFamilySlot {
@@ -1537,9 +1555,11 @@ impl MonospaceFamilySlot {
         Self {
             published: std::sync::RwLock::new((false, &[])),
             offered: std::sync::Mutex::new(None),
+            answered: std::sync::atomic::AtomicU64::new(0),
             scan: std::sync::Mutex::new(ScanState {
                 running: false,
                 again: false,
+                requested: 0,
             }),
         }
     }
@@ -1633,45 +1653,72 @@ impl MonospaceFamilySlot {
                 // there is nothing here to load. The one press that could ask
                 // for them — choosing this row back off the seed before the walk
                 // lands — goes through [`monospace_family_files`], which sees an
-                // unscanned list and asks the machine.
+                // unscanned list and looks the one family up by name.
                 files: Vec::new(),
             }]
         };
         self.publish(bt_platform::order_monospace_families(named), false);
     }
 
-    /// Hold an answer out to the window thread. **Worker thread.**
-    fn offer(&self, families: Vec<bt_platform::MonospaceFamily>) {
+    /// Hold the answer to request `generation` out to the window thread.
+    /// **Worker thread.**
+    fn offer(&self, generation: u64, families: Vec<bt_platform::MonospaceFamily>) {
         *self
             .offered
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(families);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((generation, families));
     }
 
-    fn take_offer(&self) -> Option<Vec<bt_platform::MonospaceFamily>> {
+    fn take_offer(&self) -> Option<(u64, Vec<bt_platform::MonospaceFamily>)> {
         self.offered
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
 
-    /// Ask for a walk. `true` when this call is the one that has to start the
-    /// thread; `false` when one is already out and has been told to go round
-    /// again.
+    /// **Take the answer a walk left, if it is not older than the one on
+    /// screen. Window thread only.**
+    ///
+    /// `true` when what the picker draws moved and a frame is owed. An answer
+    /// older than the adopted one is dropped and changes nothing — not the
+    /// list, not the number, and no frame (ticket 50).
+    fn adopt(&self) -> bool {
+        let Some((generation, families)) = self.take_offer() else {
+            return false;
+        };
+        let order = std::sync::atomic::Ordering::Relaxed;
+        if generation < self.answered.load(order) {
+            return false;
+        }
+        self.answered.store(generation, order);
+        self.publish(families, true)
+    }
+
+    /// Ask for a walk, numbering the request. `true` when this call is the one
+    /// that has to start the thread; `false` when one is already out and has
+    /// been told to go round again.
     fn claim_scan(&self) -> bool {
         let mut held = self
             .scan
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.requested += 1;
         if held.running {
             held.again = true;
             return false;
         }
-        *held = ScanState {
-            running: true,
-            again: false,
-        };
+        held.running = true;
+        held.again = false;
         true
+    }
+
+    /// The number of the newest request, which is the one a walk starting now
+    /// serves. **Worker thread**, at the top of every round.
+    fn serving(&self) -> u64 {
+        self.scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .requested
     }
 
     /// A walk is done. `true` when it has to be walked once more, because a
@@ -1814,14 +1861,27 @@ fn automatic_cjk_families() -> &'static [bt_platform::CjkFamily] {
     LIST.get_or_init(|| Box::leak(with_automatic_cjk(Vec::new()).into_boxed_slice()))
 }
 
-/// **How many times this process has walked the machine's font collection.**
-///
-/// A counter rather than a trace line, because what has to be provable here is
-/// a *negative*: that opening the dialog and drawing every row of it performs
-/// none. A number a test can read before and after a call says that; a log a
-/// human reads does not. See
-/// `opening_the_dialog_walks_no_font_collection_on_the_calling_thread`.
-static MONOSPACE_SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// **How many times this thread has walked the machine's font collection.**
+    ///
+    /// A counter rather than a trace line, because what has to be provable here
+    /// is a *negative*: that opening the dialog, drawing every row of it, and
+    /// loading the face `settings.json` names at launch perform none on the
+    /// thread that asks. A number a test can read before and after a call says
+    /// that; a log a human reads does not. See
+    /// `opening_the_dialog_asks_the_machine_for_no_fonts` and
+    /// `launching_with_a_stored_font_family_walks_no_font_collection_on_the_window_thread`.
+    ///
+    /// **Per thread since ticket 50**, because the launch road now *starts* a
+    /// walk on the lane while it returns: a process-wide count would move under
+    /// a test on the lane's schedule and state nothing about the caller.
+    static MONOSPACE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Record one walk of a font collection on this thread.
+fn count_walk() {
+    MONOSPACE_SCANS.with(|walks| walks.set(walks.get() + 1));
+}
 
 /// How the worker's answer brings the event loop round — `psreadline::WAKE`'s
 /// shape, for its reason: the answer is published on a thread with no window,
@@ -1856,7 +1916,7 @@ pub fn cjk_families() -> &'static [bt_platform::CjkFamily] {
     }
 }
 
-/// How many font-collection walks this process has performed.
+/// How many font-collection walks the calling thread has performed.
 ///
 /// **A door for the pins and nothing else**, which is what the `cfg` says out
 /// loud: the product never asks this — it is the reader of a counter that exists
@@ -1869,7 +1929,7 @@ pub fn cjk_families() -> &'static [bt_platform::CjkFamily] {
 #[cfg(test)]
 #[must_use]
 pub fn monospace_scans() -> u64 {
-    MONOSPACE_SCANS.load(std::sync::atomic::Ordering::Acquire)
+    MONOSPACE_SCANS.with(std::cell::Cell::get)
 }
 
 /// Teach the scan how to bring the event loop round when its answer lands.
@@ -1918,6 +1978,17 @@ pub fn begin_monospace_scan(in_force: &str, cjk_in_force: &str) {
         };
         CJK_FAMILIES.publish(with_automatic_cjk(named), false);
     }
+    request_font_walk();
+}
+
+/// **Number a request for the machine's families and see that a walk serves
+/// it** — the lane's one entrance, for both roads that ask: the dialog opening
+/// ([`begin_monospace_scan`]) and a family named before any walk has landed
+/// ([`monospace_family_files`]).
+///
+/// Coalesced by [`MonospaceFamilySlot::claim_scan`]: one walk out at a time,
+/// and one more round for every request made while it was.
+fn request_font_walk() {
     if !MONOSPACE_FAMILIES.claim_scan() {
         return;
     }
@@ -1939,10 +2010,22 @@ pub fn begin_monospace_scan(in_force: &str, cjk_in_force: &str) {
 /// if somebody asked while this one was out.
 fn scan_monospace_families() {
     loop {
-        MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
-        MONOSPACE_FAMILIES.offer(bt_platform::monospace_font_families());
+        // The number is read before the walk, so a request made while it runs
+        // has a larger one and is served by the next round.
+        let generation = MONOSPACE_FAMILIES.serving();
+        count_walk();
+        let start = std::time::Instant::now();
+        let families = bt_platform::monospace_font_families();
+        if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty()) {
+            crate::trace_sink::stderr_line(format!(
+                "BT_PERF_TRACE monospace_enumeration_us={} families={} generation={generation}",
+                start.elapsed().as_micros(),
+                families.len()
+            ));
+        }
+        MONOSPACE_FAMILIES.offer(generation, families);
         if !CJK_FAMILIES.scanned() {
-            MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
+            count_walk();
             let start = std::time::Instant::now();
             let families = bt_platform::cjk_font_families();
             if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty()) {
@@ -1971,46 +2054,58 @@ fn scan_monospace_families() {
 /// [`MonospaceFamilySlot`]'s rule.
 ///
 /// `true` when the list a frame draws has changed and a frame is therefore
-/// owed. `false` when there was nothing waiting, and `false` when the machine
-/// answered with the families it had last time, which is every walk but the one
-/// after somebody installs a font.
+/// owed. `false` when there was nothing waiting, `false` when the answer is
+/// older than the one on screen (ticket 50: it is dropped, see
+/// [`MonospaceFamilySlot::adopt`]), and `false` when the machine answered with
+/// the families it had last time, which is every walk but the one after
+/// somebody installs a font.
 pub fn adopt_scanned_families() -> bool {
-    let monospace_changed = MONOSPACE_FAMILIES
-        .take_offer()
-        .is_some_and(|families| MONOSPACE_FAMILIES.publish(families, true));
+    let monospace_changed = MONOSPACE_FAMILIES.adopt();
     let cjk_changed = CJK_FAMILIES
         .take_offer()
         .is_some_and(|families| CJK_FAMILIES.publish(families, true));
     monospace_changed || cjk_changed
 }
 
-/// **The files one family's outlines live in** — the renderer's question, and
-/// the one caller in this process that is allowed to wait for the machine.
+/// **The files one family's outlines live in** — the renderer's question,
+/// asked before the first frame and whenever the face changes.
 ///
 /// `apply_stored_terminal_font` needs a path before it can draw a single frame
 /// in the face `settings.json` names, and there is no frame yet to put a
-/// placeholder in; a default install names no family and still walks nothing,
-/// which is the cost `bt_render::terminal_font_system` refuses to pay at launch
-/// and this must not reintroduce.
+/// placeholder in; a default install names no family and asks nothing.
 ///
-/// It walks only while the drawn list is the seed. Everything it learns is
-/// published, so a startup that paid for the walk hands the dialog a list that
-/// is already there — and a session that never names a family never walks here
-/// at all.
+/// **It never walks the collection** (ticket 50, `ARCHITECTURE` §5.3 row 5).
+/// Once the lane's list is on screen the answer is that list's row. Before
+/// then the family is looked up by its name
+/// ([`bt_platform::monospace_family_named`], one family and not the machine),
+/// the family is seeded as the picker's row in force, and a walk is requested
+/// so the picker's list follows on the lane. The looked-up family is **not**
+/// published as the list: only the lane's answer is the machine's list, and
+/// only [`adopt_scanned_families`] puts it on screen.
+///
+/// Drawing the first frame in the default face and re-applying this one when
+/// the walk lands was the cheaper shape, and the CJK slot's. It was refused for
+/// the primary face because it changes the cell metrics after the shells have
+/// started: every pane's grid would move a moment after launch, a resize each
+/// shell sees.
 #[must_use]
 pub fn monospace_family_files(name: &str) -> Vec<std::path::PathBuf> {
     if name.is_empty() {
         return Vec::new();
     }
-    if !MONOSPACE_FAMILIES.scanned() {
-        MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
-        MONOSPACE_FAMILIES.publish(bt_platform::monospace_font_families(), true);
+    if MONOSPACE_FAMILIES.scanned() {
+        return monospace_families()
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+            .map(|candidate| candidate.files.clone())
+            .unwrap_or_default();
     }
-    monospace_families()
-        .iter()
-        .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
-        .map(|candidate| candidate.files.clone())
-        .unwrap_or_default()
+    let files = bt_platform::monospace_family_named(name)
+        .map(|family| family.files)
+        .unwrap_or_default();
+    MONOSPACE_FAMILIES.seed(name);
+    request_font_walk();
+    files
 }
 
 /// Files already published by the font worker. A cold stored selection starts
@@ -16418,16 +16513,17 @@ mod tests {
         slot.seed("Cascadia Mono");
         let seeded = slot.published();
 
-        slot.offer(vec![family("Cascadia Mono"), family("Consolas")]);
+        assert!(slot.claim_scan(), "the open asks for a walk");
+        let first = slot.serving();
+        slot.offer(first, vec![family("Cascadia Mono"), family("Consolas")]);
         assert_eq!(
             slot.published().as_ptr(),
             seeded.as_ptr(),
             "an offer nobody has taken changes no frame"
         );
 
-        let answer = slot.take_offer().expect("the walk left its answer");
         assert!(
-            slot.publish(answer, true),
+            slot.adopt(),
             "the machine's list is not the seed, so a frame is owed"
         );
         assert!(slot.scanned(), "and it is the machine's from here on");
@@ -16440,12 +16536,13 @@ mod tests {
         );
 
         // The next open: another walk, the same machine.
-        slot.offer(vec![family("Cascadia Mono"), family("Consolas")]);
-        let again = slot.take_offer().expect("and its answer");
-        assert!(
-            !slot.publish(again, true),
-            "a walk that found nothing new owes no frame"
+        assert!(!slot.finish_scan(), "the first walk is done");
+        assert!(slot.claim_scan(), "and the next open starts another");
+        slot.offer(
+            slot.serving(),
+            vec![family("Cascadia Mono"), family("Consolas")],
         );
+        assert!(!slot.adopt(), "a walk that found nothing new owes no frame");
         assert_eq!(
             slot.published().as_ptr(),
             adopted.as_ptr(),
@@ -16490,6 +16587,123 @@ mod tests {
             slot.claim_scan(),
             "the next open starts a thread again, rather than waiting for one \
              that has gone"
+        );
+    }
+
+    /// RED (50) — **An answer older than the one on screen is never adopted.**
+    ///
+    /// The lane numbers every request and every answer carries the number of
+    /// the request it was walked for (`ARCHITECTURE` §5.1: versioned requests,
+    /// latest-result replacement). One walk out at a time means the numbers
+    /// normally arrive in order; the number is what makes that a checked fact
+    /// rather than a property of today's scheduling, so a list the window
+    /// thread has put on screen is never replaced by one the machine gave
+    /// before it — and the arm that adopts reads "older" as "nothing changed",
+    /// asking for no frame.
+    ///
+    /// MUTATION: drop the generation comparison in `MonospaceFamilySlot::adopt`
+    /// (the one `adopt_scanned_families` calls) and the older list is drawn.
+    #[test]
+    fn an_answer_older_than_the_one_on_screen_is_never_adopted() {
+        let slot = MonospaceFamilySlot::new();
+        assert!(slot.claim_scan(), "the first request starts a walk");
+        let g1 = slot.serving();
+        assert!(!slot.claim_scan(), "the second rides on it");
+        let g2 = slot.serving();
+        assert!(g2 > g1, "and carries a larger number: {g1} then {g2}");
+
+        slot.offer(g2, vec![family("Newer Mono"), family("Consolas")]);
+        assert!(slot.adopt(), "the newer answer is put on screen");
+        let on_screen = slot.published();
+
+        slot.offer(g1, vec![family("Older Mono"), family("Consolas")]);
+        assert!(
+            !slot.adopt(),
+            "an older answer changes nothing, so it owes no frame"
+        );
+        assert_eq!(
+            slot.published()
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Newer Mono", "Consolas"],
+            "the list on screen is still the newer answer's"
+        );
+        assert_eq!(slot.published().as_ptr(), on_screen.as_ptr());
+        assert!(
+            slot.take_offer().is_none(),
+            "and the older answer is gone, not waiting to be adopted later"
+        );
+    }
+
+    /// RED (50) — **Launching with a stored font family walks no font
+    /// collection on the window thread.**
+    ///
+    /// `apply_stored_terminal_font` runs on the event-loop thread before the
+    /// first frame of every launch whose `settings.json` names a terminal font,
+    /// and until ticket 50 it walked every family on the machine there — the
+    /// same walk GitHub issue #3 took off the gear. The answer it needs is one
+    /// family's files, and the system can give that by name. This calls the
+    /// real road with the real platform door on the test thread: the thread's
+    /// walk count does not move, and the files are the ones the lookup of that
+    /// family answers with (on Windows the default family's real files, on a
+    /// Mac none, because CoreText's families need no loading).
+    ///
+    /// MUTATION: restore the `MONOSPACE_FAMILIES.publish(
+    /// bt_platform::monospace_font_families(), true)` line (with its
+    /// `count_walk()`) in `monospace_family_files` and the count moves.
+    #[test]
+    fn launching_with_a_stored_font_family_walks_no_font_collection_on_the_window_thread() {
+        let name = bt_platform::DEFAULT_MONOSPACE_FAMILY;
+        let expected = bt_platform::monospace_family_named(name)
+            .map(|found| found.files)
+            .unwrap_or_default();
+        let before = monospace_scans();
+        let files = monospace_family_files(name);
+        assert_eq!(
+            monospace_scans(),
+            before,
+            "loading the stored face walked the font collection on the calling thread"
+        );
+        assert_eq!(files, expected, "and the files are the named family's");
+    }
+
+    /// RED (50) — **The family named at launch comes from a lookup by name,
+    /// and the list the picker draws comes from the lane.**
+    ///
+    /// Two answers, two owners. The renderer's face at launch is one family,
+    /// asked of the system by name; the picker's list is the machine's, and it
+    /// arrives only through the lane and `adopt_scanned_families`. So after the
+    /// launch road has answered, the list is still the seed — the named family
+    /// and the default beside it, with no files and not marked as the
+    /// machine's — until an answer is adopted between two frames.
+    ///
+    /// MUTATION: publish the looked-up family into `MONOSPACE_FAMILIES` as if
+    /// scanned (`publish(vec![found], true)`) and the list claims to be the
+    /// machine's.
+    #[test]
+    fn the_launch_face_is_looked_up_by_name_and_the_picker_list_comes_from_the_lane() {
+        let name = bt_platform::DEFAULT_MONOSPACE_FAMILY;
+        let looked_up = bt_platform::monospace_family_named(name);
+        let files = monospace_family_files(name);
+        assert_eq!(
+            files,
+            looked_up.map(|found| found.files).unwrap_or_default(),
+            "the launch road answers with the lookup's files"
+        );
+        assert!(
+            !MONOSPACE_FAMILIES.scanned(),
+            "the list is not the machine's until the lane's answer is adopted"
+        );
+        let list = monospace_families();
+        assert!(
+            list.iter()
+                .any(|entry| entry.name.eq_ignore_ascii_case(name)),
+            "the picker's seed holds the family in force: {list:?}"
+        );
+        assert!(
+            list.iter().all(|entry| entry.files.is_empty()),
+            "and every row of it is the seed's, with nothing to load: {list:?}"
         );
     }
 

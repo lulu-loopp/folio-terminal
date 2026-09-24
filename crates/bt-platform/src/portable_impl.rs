@@ -1214,6 +1214,17 @@ pub fn monospace_font_families() -> Vec<crate::MonospaceFamily> {
     crate::order_monospace_families(Vec::new())
 }
 
+/// **One family by name**, on a platform with no font system written (ticket
+/// 50). `None`: there is no family this arm can locate, and the renderer then
+/// draws the face it falls back to — the same one-row answer
+/// [`monospace_font_families`] gives here.
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn monospace_family_named(name: &str) -> Option<crate::MonospaceFamily> {
+    let _ = name;
+    None
+}
+
 /// No portable font-database enumeration is available on this target.
 #[cfg(not(target_os = "macos"))]
 #[must_use]

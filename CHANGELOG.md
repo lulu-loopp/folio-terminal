@@ -18,6 +18,8 @@ All notable changes to Folio are recorded here. The format follows
   where its window is; it asks once.
 - A program that keeps changing its window title no longer slows typing;
   Folio passes the title on at most once a frame.
+- A launch with a chosen terminal font no longer waits for Folio to list every
+  font on the machine.
 
 ### Changed
 

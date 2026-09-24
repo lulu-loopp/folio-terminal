@@ -3420,8 +3420,8 @@ mod windows_impl {
         },
         Graphics::DirectWrite::{
             DWRITE_FACTORY_TYPE_SHARED, DWriteCreateFactory, IDWriteFactory, IDWriteFont1,
-            IDWriteFontCollection, IDWriteFontFace, IDWriteFontFile, IDWriteLocalFontFileLoader,
-            IDWriteLocalizedStrings,
+            IDWriteFontCollection, IDWriteFontFace, IDWriteFontFamily, IDWriteFontFile,
+            IDWriteLocalFontFileLoader, IDWriteLocalizedStrings,
         },
         Graphics::Dwm::{
             DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_AUTO, DWMSBT_NONE,
@@ -8792,6 +8792,40 @@ mod windows_impl {
         super::order_monospace_families(collect_monospace_families().unwrap_or_default())
     }
 
+    /// **One family, looked up by its name** — where its outlines live, and
+    /// nothing else (ticket 50).
+    ///
+    /// The renderer's question at launch: `settings.json` names a face, and the
+    /// first grid cannot be measured until that face is loaded. Before this door
+    /// the only way to answer it was [`monospace_font_families`], which opens a
+    /// font per face of every family on the machine; this asks the same system
+    /// collection for one family by name (`FindFamilyName`, which matches any of
+    /// the family's localized names) and reads that family's files through
+    /// [`monospace_family_entry`] — the same derivation the walk makes for every
+    /// row it keeps, so the files handed over are the files the picker's row for
+    /// this family would carry (`CONVENTIONS` §十 rule 9).
+    ///
+    /// It does not decide which families belong in the picker; the walk does.
+    /// A family with no monospaced face has no files by that derivation, and
+    /// answers `None` here exactly as it is absent from the walk's list.
+    #[must_use]
+    pub fn monospace_family_named(name: &str) -> Option<super::MonospaceFamily> {
+        let factory: IDWriteFactory =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.ok()?;
+        let mut collection: Option<IDWriteFontCollection> = None;
+        // `false`, for the walk's reason: no re-scan of the font directory.
+        unsafe { factory.GetSystemFontCollection(&mut collection, false) }.ok()?;
+        let collection = collection?;
+        let mut index = 0u32;
+        let mut exists = windows::core::BOOL(0);
+        unsafe { collection.FindFamilyName(&HSTRING::from(name), &mut index, &mut exists) }.ok()?;
+        if !exists.as_bool() {
+            return None;
+        }
+        let family = unsafe { collection.GetFontFamily(index) }.ok()?;
+        monospace_family_entry(&family, &super::os_ui_language())
+    }
+
     /// Installed families with font-declared CJK coverage (or whole-block cmap
     /// evidence), localized names and loadable files. Enumerated once per process.
     #[must_use]
@@ -8930,42 +8964,54 @@ mod windows_impl {
             let Ok(family) = (unsafe { collection.GetFontFamily(index) }) else {
                 continue;
             };
-            let mut files: Vec<std::path::PathBuf> = Vec::new();
-            let mut monospaced = false;
-            for face_index in 0..unsafe { family.GetFontCount() } {
-                let Ok(font) = (unsafe { family.GetFont(face_index) }) else {
-                    continue;
-                };
-                // `IDWriteFont1` is the Windows 8 interface. A machine that
-                // cannot produce it cannot answer the question, and guessing
-                // would put proportional faces in a monospace list.
-                let Ok(font1) = font.cast::<IDWriteFont1>() else {
-                    continue;
-                };
-                if !unsafe { font1.IsMonospacedFont() }.as_bool() {
-                    continue;
-                }
-                monospaced = true;
-                let Ok(face) = (unsafe { font.CreateFontFace() }) else {
-                    continue;
-                };
-                for path in font_face_files(&face) {
-                    if !files.contains(&path) {
-                        files.push(path);
-                    }
-                }
-            }
-            if !monospaced || files.is_empty() {
-                continue;
-            }
-            let Ok(names) = (unsafe { family.GetFamilyNames() }) else {
-                continue;
-            };
-            if let Some(name) = localized_string(&names, &locale) {
-                families.push(super::MonospaceFamily { name, files });
-            }
+            families.extend(monospace_family_entry(&family, &locale));
         }
         Ok(families)
+    }
+
+    /// **One family as a picker row: its name in `locale` and the files its
+    /// monospaced faces live in** — or `None` when it has no such face with a
+    /// file a loader can name.
+    ///
+    /// The one derivation of "a family's files", shared by the walk
+    /// ([`collect_monospace_families`]) and the lookup by name
+    /// ([`monospace_family_named`]) so the two can never disagree about what a
+    /// family is made of (`CONVENTIONS` §十 rule 9).
+    fn monospace_family_entry(
+        family: &IDWriteFontFamily,
+        locale: &str,
+    ) -> Option<super::MonospaceFamily> {
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        let mut monospaced = false;
+        for face_index in 0..unsafe { family.GetFontCount() } {
+            let Ok(font) = (unsafe { family.GetFont(face_index) }) else {
+                continue;
+            };
+            // `IDWriteFont1` is the Windows 8 interface. A machine that
+            // cannot produce it cannot answer the question, and guessing
+            // would put proportional faces in a monospace list.
+            let Ok(font1) = font.cast::<IDWriteFont1>() else {
+                continue;
+            };
+            if !unsafe { font1.IsMonospacedFont() }.as_bool() {
+                continue;
+            }
+            monospaced = true;
+            let Ok(face) = (unsafe { font.CreateFontFace() }) else {
+                continue;
+            };
+            for path in font_face_files(&face) {
+                if !files.contains(&path) {
+                    files.push(path);
+                }
+            }
+        }
+        if !monospaced || files.is_empty() {
+            return None;
+        }
+        let names = unsafe { family.GetFamilyNames() }.ok()?;
+        let name = localized_string(&names, locale)?;
+        Some(super::MonospaceFamily { name, files })
     }
 
     /// The files one face's outlines live in, skipping any the local loader
@@ -11645,15 +11691,15 @@ pub use windows_impl::{
     get_work_area, hide_every_window_of_this_process, install_console_ctrl_handler,
     install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
     leave_process, let_the_system_translate_touch, message_box, monitor_id_at,
-    monospace_font_families, os_ui_language, pointer_position, pointer_position_in_window,
-    read_context_menu, recycle, redirect_std_streams_to_file, register_clipboard_owner,
-    remove_context_menu, request_window_close, set_clipboard_text, set_current_thread_priority,
-    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    silence_std_streams, spawn_at_priority, spawn_at_priority_with_stack, stand_window_at,
-    std_error_is_console, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
-    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
-    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at, write_std_error, write_to_console,
+    monospace_family_named, monospace_font_families, os_ui_language, pointer_position,
+    pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
+    register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
+    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
+    set_window_topmost, silence_std_streams, spawn_at_priority, spawn_at_priority_with_stack,
+    stand_window_at, std_error_is_console, system_backdrop_available, system_uses_light_apps,
+    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
+    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_screen_rect,
+    wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error, write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -11719,7 +11765,9 @@ pub use portable_impl::{DirChange, DirWatch};
 /// `macos_fonts` now answer them for a Mac. A third platform still meets the
 /// refusal and the one-row list.
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub use portable_impl::{cjk_font_families, monospace_font_families, recycle};
+pub use portable_impl::{
+    cjk_font_families, monospace_family_named, monospace_font_families, recycle,
+};
 
 /// **The window and the screen doors, on a platform that has neither** — the
 /// twenty-two names [`macos_impl`] answers for a Mac and this module still
@@ -12276,7 +12324,7 @@ pub use macos_files::recycle;
 mod macos_fonts;
 
 #[cfg(target_os = "macos")]
-pub use macos_fonts::{cjk_font_families, monospace_font_families};
+pub use macos_fonts::{cjk_font_families, monospace_family_named, monospace_font_families};
 
 /// **The application menu bar, over `NSMenu`** (M3-2).
 ///
@@ -15533,6 +15581,7 @@ mod macos_process_door_tests {
         for (door, macos_arm, module) in [
             ("recycle", MACOS_FILES, "macos_files"),
             ("monospace_font_families", MACOS_FONTS, "macos_fonts"),
+            ("monospace_family_named", MACOS_FONTS, "macos_fonts"),
             ("cjk_font_families", MACOS_FONTS, "macos_fonts"),
         ] {
             let attributes = attributes_above(PORTABLE, &format!("pub fn {door}("));
@@ -15550,7 +15599,8 @@ mod macos_process_door_tests {
         assert!(
             root.contains(
                 "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n\
-                 pub use portable_impl::{cjk_font_families, monospace_font_families, recycle};"
+                 pub use portable_impl::{\n    cjk_font_families, monospace_family_named, \
+                 monospace_font_families, recycle,\n};"
             ),
             "the portable re-export is the one a third platform still meets"
         );
@@ -15561,7 +15611,8 @@ mod macos_process_door_tests {
         assert!(
             root.contains(
                 "#[cfg(target_os = \"macos\")]\n\
-                 pub use macos_fonts::{cjk_font_families, monospace_font_families};"
+                 pub use macos_fonts::{cjk_font_families, monospace_family_named, \
+                 monospace_font_families};"
             ),
             "macOS takes its font list from the CoreText arm"
         );
@@ -15621,6 +15672,11 @@ mod macos_process_door_tests {
             signature(windows_arm, "cjk_font_families"),
             signature(MACOS_FONTS, "cjk_font_families"),
             "the CJK font list is two different doors"
+        );
+        assert_eq!(
+            signature(windows_arm, "monospace_family_named"),
+            signature(MACOS_FONTS, "monospace_family_named"),
+            "the lookup of one family by name is two different doors"
         );
     }
 
@@ -17252,7 +17308,66 @@ mod monospace_family_tests {
 /// on. Windows only, because there is nothing to enumerate elsewhere.
 #[cfg(all(test, windows))]
 mod monospace_enumeration_tests {
-    use super::{DEFAULT_MONOSPACE_FAMILY, cjk_font_families, monospace_font_families};
+    use super::{
+        DEFAULT_MONOSPACE_FAMILY, cjk_font_families, monospace_family_named,
+        monospace_font_families,
+    };
+
+    /// RED (50) — **the lookup by name answers with the files the walk
+    /// answers for the same family, in a fraction of the walk's time.**
+    ///
+    /// Launch asks for one family's files before the first grid can be
+    /// measured; until ticket 50 it walked the whole collection to answer.
+    /// The lookup and the walk share `monospace_family_entry`, so what the
+    /// renderer loads at launch is what the picker's row would have handed it.
+    /// This holds the two to each other on the machine's real collection, for
+    /// the default family and for every family the walk lists, and prints both
+    /// times (`--nocapture`) — the measurement Design step 6 asks for.
+    ///
+    /// MUTATION: make the lookup read only the family's first face
+    /// (`GetFirstMatchingFont`) and the files differ for any family with a
+    /// separate bold file; make it answer `None` and the first assertion names
+    /// the default.
+    #[test]
+    fn the_lookup_by_name_answers_the_files_the_walk_does() {
+        // The lookup first, so it pays for the system collection the way a
+        // launch does; the walk after it finds the collection already open.
+        let started = std::time::Instant::now();
+        let looked_up = monospace_family_named(DEFAULT_MONOSPACE_FAMILY);
+        let lookup_us = started.elapsed().as_micros();
+        let started = std::time::Instant::now();
+        let walked = monospace_font_families();
+        let walk_us = started.elapsed().as_micros();
+        println!(
+            "BT_PERF_TRACE monospace_enumeration_us={walk_us} families={} \
+             monospace_family_named_us={lookup_us} family={DEFAULT_MONOSPACE_FAMILY}",
+            walked.len()
+        );
+        let looked_up = looked_up.expect("the default family is on every Windows");
+        let row = walked
+            .iter()
+            .find(|family| family.name.eq_ignore_ascii_case(DEFAULT_MONOSPACE_FAMILY))
+            .expect("and it is a row of the walk");
+        assert_eq!(looked_up, *row, "one family, two roads, one answer");
+        let mut slowest = 0;
+        for family in walked.iter().filter(|family| !family.files.is_empty()) {
+            let started = std::time::Instant::now();
+            let found = monospace_family_named(&family.name);
+            slowest = slowest.max(started.elapsed().as_micros());
+            assert_eq!(
+                found.as_ref(),
+                Some(family),
+                "the walk lists {} and the lookup by that name disagrees",
+                family.name
+            );
+        }
+        println!("BT_PERF_TRACE monospace_family_named_slowest_us={slowest}");
+        assert_eq!(
+            monospace_family_named("No Family Is Called This 50"),
+            None,
+            "a name the machine does not have is no family"
+        );
+    }
 
     /// PIN — a real Windows answers with families that can actually be loaded.
     ///
