@@ -18,7 +18,7 @@ The file began as the 2026-09-21 structure review's debt list (D-1…D-18, kept
 below with their IDs and text). On 2026-09-23 it gained the ledger columns and
 every debt the repository already recorded elsewhere (D-19…D-63); on
 2026-09-24, two rows found by the 0.4.5 drafts (D-64, D-65) and one artefact
-ticket 46 introduced (D-66). It is
+ticket 46 introduced (D-66), and one Mac defect ticket 55 found (D-67). It is
 **ordered by consequence, not by severity** — nothing here is a bug; each row is
 a shape that makes the next hundred tickets more expensive, and the cost it
 charges is the one the project named: *what must be read to finish one ticket
@@ -53,12 +53,12 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 9 | 5 | 4 |
-| 0.4.6 | 39 | 39 | 0 |
+| 0.4.5 | 9 | 3 | 6 |
+| 0.4.6 | 40 | 40 | 0 |
 | 0.4.7 | 14 | 14 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
 | already repaid | 1 | 0 | 1 |
-| **total** | **66** | **62** | **4** |
+| **total** | **67** | **60** | **7** |
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -87,6 +87,9 @@ not advanced beyond that.
 added no row. Ticket 51 repaid D-38 whole (§5.3 row 6: a changed search reads
 one slice of history on the keystroke's frame and one per turn after it, on the
 window thread, no ownership moved) and that row's part of D-2; it added no row.
+Ticket 55 repaid D-61 and D-62 whole (the two defects the Mac build carried:
+a `webnav` test that asked a Windows question on every machine, and three
+Windows-only constants compiled where nothing read them); it added no row.
 
 ## The ledger
 
@@ -158,12 +161,13 @@ ledger's.
 | D-58 | `profile_runtime`'s two tests failing `WouldBlock` on a slow CI disk | `docs/DESIGN.md`, 2026-09-23 | 34 | — | repaid on `fbfab1ff` |
 | D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open — ticket 37 added a CI-runnable mixed-size stress (`mixed_size_seats_share_the_atlas_and_get_their_text_back`, WARP, texture ceiling 512) and no ignore; the soaks were not extended |
 | D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | 0.4.6 | open |
-| D-61 | a Mac-only red test in `webnav` | ticket 13's report | none yet | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | open |
-| D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | none yet | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | open |
+| D-61 | a Mac-only red test in `webnav` | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
+| D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | none yet | 0.4.6 | open |
 | D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open — narrowed by ticket 43: the phases are named in the stall self-report; the remaining cost is the engine's own thread-affine work (§5.3 row 21) ruled 2026-09-24: warm the engine at a quiet moment — follow-up warm-up, ticket 54 |
 | D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.7 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.7 before the 0.5 restyle, and the row closes with it | open |
 | D-66 | a fading surface's translucent pixels step at the landing frame: composited on encoded bytes while it fades, blended in linear light at rest — on the light theme the tip's shadow lightens at its darkest pixel from about `#DB` to `#EE` as the fade lands | ticket 46's report (Findings); the 2026-09-23 fade audit, §7 | none yet | 0.4.7 — the L variant (all overlay translucency in encoded space, with D-65), which removes the step | open |
+| D-67 | `bt-app` fails clippy on macOS: nine app-build and five test-build unused items and ignored results | ticket 55's report | none yet | 0.4.6 — beside D-63, since widening the Mac CI job hits it | open |
 
 ---
 
@@ -1055,9 +1059,30 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
 - **D-61 · `webnav::tests::a_local_file_is_shown_and_typed_as_a_path_and_loaded_as_a_uri`**
   is red on a Mac: `file_url_of_local_path` receives a `D:\…` path there and
   answers `None`. The test states a Windows fact on every platform. 0.4.5: small.
+  **Repaid by ticket 55:** showing a `file:` URL as a path stays a string
+  question on every machine, but taking a typed path back is a question about
+  this machine (`Path::is_absolute`), so the test now walks both spellings —
+  `D:\…` and `/Users/…` — and requires the one this machine calls absolute to
+  come back as its URL and the other to be refused.
 - **D-62 · `bt-render` clippy on macOS.** `CJK_FALLBACK_FAMILIES`,
   `CJK_FALLBACK_FONT_FILES` and `CHROME_SANS_FONT_FILES` are never used there,
   so `cargo clippy -p bt-app` stops in `bt-render`. 0.4.5: small.
+  **Repaid by ticket 55:** all three move under `#[cfg(target_os = "windows")]`,
+  the `cfg` every one of their readers (`FolioFallback`, the Windows
+  `terminal_font_system` and `load_chrome_sans_family`, and the Windows-gated
+  tests) already carries. A Mac should not read them: it has its own
+  `MACOS_CJK_FALLBACK_FAMILIES` and `MACOS_CHROME_SANS_FAMILIES` and names no
+  font files.
+  The row undercounted: clippy stopped at the library, and behind it the test
+  target carried fifteen more dead-code warnings on a Mac: test helpers and
+  fixtures, three of them `#[cfg(test)]` items of the library itself, whose
+  only readers are `#[cfg(target_os = "windows")]` tests (`shape_chrome_labels`, `GpuContext::lose_the_device_on_purpose`,
+  `ByteLru::is_empty`, `HanStream`, `ChineseFourK`, `stress_label`, the
+  `a_lost_device` module's `FORMAT`, `ink_pixels`,
+  `a_sentence_this_window_keeps` and `one_frame`, and four more). Ticket 55
+  gives each the same `cfg` as its readers, as `chinese_four_k_frame` already
+  had it, so `cargo clippy -p bt-render --all-targets -- -D warnings` is clean
+  on a Mac.
 - **D-63 · the macOS CI job's reach.** `core-macos` checks `bt-app`, `bt-term`
   and `bt-render` but tests none of them, and runs clippy on `bt-platform`
   only — which is why D-61 and D-62 were found by a person. 0.4.6, after D-61
@@ -1065,7 +1090,7 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
 
 ---
 
-## D-64…D-66 — the rows added on 2026-09-24
+## D-64…D-67 — the rows added on 2026-09-24
 
 - **D-64 · a web page's open holds the window thread.** A stall self-report on
   the next89 candidate recorded two holds while a web preview opened: 4,099 ms
@@ -1128,3 +1153,18 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
   rest, a visible lightening as the fade lands. Owed: the L variant — the whole
   overlay pass in encoded space — after which the fade and the rest are one
   arithmetic. 0.4.6, by the coordinator's ruling on ticket 46.
+- **D-67 · `bt-app` clippy on macOS.** Found by ticket 55: once D-62 let
+  `cargo clippy -p bt-app --all-targets -- -D warnings` get past `bt-render` on
+  a Mac, `bt-app` stopped on errors of its own. The bin `folio` build has nine:
+  `attention_copilot.rs` (associated functions `parse` and `leading_number`
+  never used), `explorer_menu.rs` (variants `Absent`, `Current`, `Elsewhere`
+  never constructed; function `classify` never used), `psreadline.rs`
+  (`PROBE_COMMAND`, `parse_probe_output` never used), `shell_integration.rs`
+  (`PROFILE_COMMAND`, `parse_profile_answer` never used), and two ignored
+  `#[must_use]` results — `bt_platform::hide_every_window_of_this_process` in
+  `main.rs` and `bt_platform::hotkey::allow_foreground_for` in
+  `launch_wire.rs`. The bin `folio` test build has five, among them
+  `psreadline.rs`'s `PROBE_COMMAND` and `shell_integration/profile_marks.rs`'s
+  `apply` never used. The shape is D-62's: items whose only readers are
+  Windows-gated, and seams whose answer only Windows reads. 0.4.6, beside D-63,
+  since widening the Mac CI job hits it.

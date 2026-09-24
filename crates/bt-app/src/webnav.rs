@@ -525,6 +525,11 @@ pub fn local_path_form(url: &str) -> Option<String> {
 /// `None` for everything that is not a local path, which is every real address:
 /// `http://…` carries a scheme this refuses to touch, and a bare `example.com`
 /// is not absolute.
+///
+/// **Absolute is asked of this machine**, and that is the one question in this
+/// file that is not about the string alone: a path typed here is a file only if
+/// it names one here, so `D:\x` is taken on Windows and not on a Mac, and
+/// `/Users/x` the other way round (ticket 55 pins both).
 #[must_use]
 pub fn file_url_of_local_path(input: &str) -> Option<String> {
     let trimmed = input.trim();
@@ -2308,6 +2313,17 @@ mod tests {
     /// back, and the string the engine is handed is the `file:` URL it always
     /// was. A real address is untouched at every step of that.
     ///
+    /// **Showing is a question about the string; typing is a question about
+    /// this machine** (ticket 55, D-61). [`local_path_form`] reads either
+    /// root on either machine, because a session file travels. What
+    /// [`file_url_of_local_path`] takes back is what a person typed here, and
+    /// that is a file only if this machine calls it absolute: `D:\…` is a path
+    /// on Windows and a four-character scheme on a Mac, `/Users/…` a path on a
+    /// Mac and a drive-less fragment on Windows. This test used to hand the door
+    /// a drive path on every machine, so it was red on every Mac. It now walks
+    /// both spellings on whichever machine runs it: the one this machine calls
+    /// absolute must come back as its URL, and the other must not be taken.
+    ///
     /// MUTATIONS:
     /// ① show the URL instead of the path — the first assertion goes red, which
     ///    is the screenshot the ruling was filed with;
@@ -2315,7 +2331,9 @@ mod tests {
     ///    address is minted into a `file:` URL and the page goes nowhere;
     /// ③ take a bare path at `address_bar` instead of minting at the door — the
     ///    refusal assertion goes green for the wrong reason and `D:` becomes a
-    ///    scheme this product recognises.
+    ///    scheme this product recognises;
+    /// ④ drop the `is_absolute` test from `file_url_of_local_path` — the other
+    ///    machine's spelling is taken, and red on both machines.
     #[test]
     fn a_local_file_is_shown_and_typed_as_a_path_and_loaded_as_a_uri() {
         let uri = "file:///D:/Developer/notes%20and%20more.html#ch3";
@@ -2331,16 +2349,48 @@ mod tests {
             "a drive letter splits as an unknown scheme, so the conversion has \
              to happen before the door"
         );
-        // …and the conversion puts it back where it came from.
-        assert_eq!(
-            file_url_of_local_path(r"D:\Developer\notes and more.html").as_deref(),
-            Some("file:///D:/Developer/notes%20and%20more.html"),
-            "what the field hands over is the URL the files column would mint"
+        // …and the conversion puts it back where it came from — for the
+        // spelling this machine calls a path, and for no other.
+        let spellings = [
+            (
+                "file:///D:/Developer/notes%20and%20more.html",
+                r"D:\Developer\notes and more.html",
+            ),
+            (
+                "file:///Users/somebody/notes%20and%20more.html",
+                "/Users/somebody/notes and more.html",
+            ),
+        ];
+        assert!(
+            spellings
+                .iter()
+                .any(|(_, shown)| Path::new(shown).is_absolute()),
+            "one of the two spellings is a path on every machine this ships on"
         );
-        assert!(matches!(
-            address_bar(&file_url_of_local_path(r"D:\Developer\notes.html").expect("a mint")),
-            Decision::Refuse(_) | Decision::Navigate(_)
-        ));
+        for (url, shown) in spellings {
+            assert_eq!(
+                local_path_form(url).as_deref(),
+                Some(shown),
+                "the row shows {url} as a path on any machine"
+            );
+            let taken_back = file_url_of_local_path(shown);
+            if Path::new(shown).is_absolute() {
+                assert_eq!(
+                    taken_back.as_deref(),
+                    Some(url),
+                    "what the field hands over is the URL the files column would mint"
+                );
+                assert!(matches!(
+                    address_bar(&taken_back.expect("a mint")),
+                    Decision::Refuse(_) | Decision::Navigate(_)
+                ));
+            } else {
+                assert_eq!(
+                    taken_back, None,
+                    "{shown} names no file on this machine, so the field does not mint one"
+                );
+            }
+        }
         // ② A real address is not a path and is left alone in both directions.
         for real in [
             "http://example.com/a",
@@ -2352,7 +2402,7 @@ mod tests {
         }
         // A share is refused as a path exactly as `Mint::file` refuses it, and a
         // `file:` URL this product did not write is shown as it arrived.
-        assert_eq!(file_url_of_local_path(r"\\server\share\x.html"), None);
+        assert_eq!(file_url_of_local_path(r"\server\share\x.html"), None);
         assert_eq!(local_path_form("file://server/share/x.html"), None);
         assert_eq!(file_url_of_local_path(r"..\x.html"), None);
     }
