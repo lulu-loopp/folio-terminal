@@ -933,7 +933,14 @@ impl Runtime<'_> {
                     // anything, so the record it stores is the size the block will draw at.
                     SessionMathTask::Frozen(task) => {
                         let result = if task.span.kind == bt_detect::BlockKind::Table {
-                            self.table_raster(&task.span.render_source)
+                            // Measured at the asking pane's own size (ticket 37).
+                            let font_size_px = target_index
+                                .and_then(|index| self.window.tabs[index].sessions.get(&leaf.seat))
+                                .map_or_else(
+                                    || self.window.renderer.base_metrics().font_size_px,
+                                    |asking| asking.metrics.font_size_px,
+                                );
+                            self.table_raster(&task.span.render_source, font_size_px)
                         } else {
                             result
                         };
@@ -947,7 +954,14 @@ impl Runtime<'_> {
                     }
                     SessionMathTask::Live(task) => {
                         let result = if task.span.kind == bt_detect::BlockKind::Table {
-                            self.table_raster(&task.span.render_source)
+                            // Measured at the asking pane's own size (ticket 37).
+                            let font_size_px = target_index
+                                .and_then(|index| self.window.tabs[index].sessions.get(&leaf.seat))
+                                .map_or_else(
+                                    || self.window.renderer.base_metrics().font_size_px,
+                                    |asking| asking.metrics.font_size_px,
+                                );
+                            self.table_raster(&task.span.render_source, font_size_px)
                         } else {
                             result
                         };
@@ -1342,7 +1356,7 @@ impl Runtime<'_> {
         // The pane's *body*, not its seat: a pane with a head draws its grid
         // below that head, and a pointer measured from the seat's corner would
         // be off by the head's height on every pane that wears one.
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         if position.x < f64::from(body.x)
             || position.y < f64::from(body.y)
@@ -1380,11 +1394,12 @@ impl Runtime<'_> {
     /// pointer was in cannot.
     pub(in crate::runtime) fn math_hit(&self) -> Option<(SeatId, MathHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
+        let metrics = self.pane_frame_metrics(seat)?;
         self.window
             .renderer
-            .math_hit_test(body, frame, position.x, position.y)
+            .math_hit_test(metrics, body, frame, position.x, position.y)
             .map(|hit| (seat, hit))
     }
 
@@ -1584,14 +1599,22 @@ impl Runtime<'_> {
     /// own pane may be the next one in the map.
     pub(in crate::runtime) fn math_tool_placement<'a>(
         &self,
-        frame_for: impl Fn(SeatId) -> Option<(bt_render::SeatViewport, &'a ViewportFrame)>,
+        frame_for: impl Fn(
+            SeatId,
+        ) -> Option<(
+            bt_render::SeatViewport,
+            &'a ViewportFrame,
+            bt_render::CellMetrics,
+        )>,
     ) -> Option<bt_render::MathToolBoxes> {
         let hovered = self.window.math_hover_anchor.as_ref()?;
         let (body, mut boxes) = self.sessions.keys().find_map(|seat| {
-            let (body, frame) = frame_for(*seat)?;
+            let (body, frame, metrics) = frame_for(*seat)?;
             Some((
                 body,
-                self.window.renderer.math_tool_boxes(body, frame, hovered)?,
+                self.window
+                    .renderer
+                    .math_tool_boxes(metrics, body, frame, hovered)?,
             ))
         })?;
         let (dx, dy) = (body.x as f32, body.y as f32);
@@ -1739,7 +1762,7 @@ impl Runtime<'_> {
             return Vec::new();
         }
         let boxes = follow.placed(now, motion);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let state = formula_tools::FormulaToolState {
             hovered: follow.hovered(),
             pressed: self
@@ -1764,15 +1787,24 @@ impl Runtime<'_> {
     /// Sample diagnostics from the handed frame, before its ride receipt is consumed.
     pub(in crate::runtime) fn math_band_trace_for_present<'a>(
         &self,
-        frame_for: impl Fn(SeatId) -> Option<(bt_render::SeatViewport, &'a ViewportFrame)>,
+        frame_for: impl Fn(
+            SeatId,
+        ) -> Option<(
+            bt_render::SeatViewport,
+            &'a ViewportFrame,
+            bt_render::CellMetrics,
+        )>,
     ) -> Option<(SeatId, bt_render::MathBandTrace, bool)> {
         if !self.app.trace_perf {
             return None;
         }
         let named = self.window.math_hover_anchor.as_ref()?;
         self.sessions.keys().find_map(|seat| {
-            let (body, frame) = frame_for(*seat)?;
-            let mut trace = self.window.renderer.math_band_trace(body, frame, named)?;
+            let (body, frame, metrics) = frame_for(*seat)?;
+            let mut trace = self
+                .window
+                .renderer
+                .math_band_trace(metrics, body, frame, named)?;
             let in_flight = self
                 .window
                 .math_toggle
@@ -2415,7 +2447,13 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn formula_toggle_layers<'a>(
         &self,
         now: Instant,
-        frame_for: impl Fn(SeatId) -> Option<(bt_render::SeatViewport, &'a ViewportFrame)>,
+        frame_for: impl Fn(
+            SeatId,
+        ) -> Option<(
+            bt_render::SeatViewport,
+            &'a ViewportFrame,
+            bt_render::CellMetrics,
+        )>,
     ) -> Vec<marks::OverlayLayer> {
         let Some(flight) = self.window.math_toggle.as_ref() else {
             return Vec::new();
@@ -2428,13 +2466,13 @@ impl Runtime<'_> {
         if self.live_paste_target(target).is_none() {
             return Vec::new();
         }
-        let Some((body, frame)) = frame_for(target.seat) else {
+        let Some((body, frame, metrics)) = frame_for(target.seat) else {
             return Vec::new();
         };
-        let Some(mut face) = self
-            .window
-            .renderer
-            .math_band_face(body, frame, flight.anchor())
+        let Some(mut face) =
+            self.window
+                .renderer
+                .math_band_face(metrics, body, frame, flight.anchor())
         else {
             return Vec::new();
         };
@@ -2458,7 +2496,8 @@ impl Runtime<'_> {
             &face,
             flight.source_rows(),
             bt_render::foreground_rgb(),
-            self.window.renderer.metrics().font_size_px,
+            // The source overlay is set in its pane's own face (ticket 37).
+            metrics.font_size_px,
         );
         if labels.is_empty() {
             return Vec::new();
@@ -2546,7 +2585,7 @@ impl Runtime<'_> {
     /// per leaf out of that leaf's columns. A tab with no shell has no leaves and
     /// therefore no bands to re-key, which is the no-op §7.1.6h asks for.
     pub(in crate::runtime) fn sync_math_layout_key(&mut self) {
-        let dpi_milli = self.window.renderer.metrics().dpi_milli();
+        let dpi_milli = self.window.renderer.dpi_milli();
         // The window's own count, not a constant. It was `1` for as long as
         // nothing could change the face; the Terminal font row can, and a frozen
         // revision here would leave every typeset band rastered for the previous
@@ -2559,7 +2598,9 @@ impl Runtime<'_> {
                 leaf.session.set_layout_key(window_layout_key(
                     nonzero_u32(leaf.grid.columns.get()),
                     dpi_milli,
-                    self.window.renderer.metrics().font_size_subpixels(),
+                    // **The size is each pane's own too** (ticket 37): the face this leaf was
+                    // last applied at, so a pane at 150 % keys its bands at its own em.
+                    leaf.metrics.font_size_subpixels(),
                     font_rev,
                     line_wrapping,
                 ));

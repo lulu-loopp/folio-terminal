@@ -247,9 +247,13 @@ impl Runtime<'_> {
             self.window.ime_outbound.draw.set(None);
             return;
         };
+        // The focused pane's frame, at that pane's own metrics (ticket 37).
+        let Some(metrics) = self.focused().map(|leaf| leaf.metrics) else {
+            return;
+        };
         let area = window_ime_cursor_area(
             self.window.renderer.seat_viewport(),
-            self.window.renderer.ime_cursor_area(frame),
+            self.window.renderer.ime_cursor_area(metrics, frame),
         );
         let reason = draw_reason(
             ime_owner(self.keyboard_owner()) == ImeOwner::Shell,

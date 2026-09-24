@@ -147,6 +147,7 @@ mod storage_watch;
 mod table_block;
 mod termscroll;
 mod text_field;
+mod text_scale;
 mod toast;
 mod tooltip;
 mod trace;
@@ -175,6 +176,7 @@ use bt_persist::{
     SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabV1,
     TermLeafV1, ThemeModeV1, WindowBoundsV1,
 };
+use text_scale::{TextScale, TextStep};
 // Step 2a moved these two names' last non-test users into `runtime/` (the
 // `peek` and `windows` topics), which import them themselves; the root keeps
 // them for `tests.rs`, which reads them through `use super::*`.
@@ -11471,6 +11473,24 @@ struct LeafSession {
     /// nothing can present.
     attention_capability: String,
     projection: ViewportProjection,
+    /// **This pane's requested text size** — the rung on [`text_scale::LADDER`] (ticket 37).
+    ///
+    /// The fact itself, and its only home: the terminal view of this leaf, beside the projection
+    /// it sizes. Never a map on the window or the tab, never on the renderer, never in
+    /// `TermLeafV1`, `TabV1`, `SessionV1`, a seed or `settings.json` — a relaunch, a startup
+    /// restore and *Reopen closed* bring every pane back at 100 %. Written by one mutation door,
+    /// `Runtime::step_pane_text_scale`; handed to construction by `create_leaf_session`'s
+    /// caller; carried by the move of this `LeafSession` (tear-out, merge, a transfer to another
+    /// window). Read by the derivation ([`pane_cell_metrics`]) and by the pane head's indicator.
+    text_scale: TextScale,
+    /// **The metrics this pane's session and projection were last applied at** — derived from
+    /// [`Self::text_scale`], the Settings size and the window's display scale by
+    /// [`pane_cell_metrics`], and written only by [`apply_leaf_metrics`] and the constructor.
+    ///
+    /// A derived value, not a second owner of the size: every writer re-derives it from the rung.
+    /// It is what the pane's grid is solved from ([`Self::grid_for`]) and what its next picture is
+    /// drawn at ([`bt_render::SeatFrame::metrics`]).
+    metrics: bt_render::CellMetrics,
     /// **The last moment this pane's scroll bar had a reason to be up** — a
     /// wheel, a keyboard page, a jump, or a pointer in its lane (P2-9 slice 1).
     ///
@@ -11572,6 +11592,14 @@ struct LeafSession {
     /// over the right-hand pane be answered by the right-hand pane's cells
     /// instead of by whichever pane happens to hold the keyboard.
     last_presented_frame: Option<ViewportFrame>,
+    /// **The metrics [`Self::last_presented_frame`] was drawn at** — an observation, paired with
+    /// that frame and written in the same breath as it (`Runtime::redraw`'s commit).
+    ///
+    /// Every pointer question about this pane reads these and never [`Self::metrics`]: after a
+    /// size change whose picture has not reached the glass yet — a skipped or failed present —
+    /// the rows the pointer is over are the last presented frame's, and combining that frame's
+    /// row map with a newly requested cell width would put the pointer in a cell nobody can see.
+    presented_metrics: bt_render::CellMetrics,
     /// Every image reference [`Self::last_presented_frame`] draws, as the cells that draw it.
     ///
     /// Beside the frame it was scanned from, and per leaf for the same reason the frame is: the
@@ -12971,7 +12999,12 @@ struct WindowRuntime {
     /// The stamp is what makes the entry answerable: a table laid out at 12.5px in a dark palette
     /// is not the picture to draw after the reader has changed either, and a cached picture with
     /// no record of what it was cached for could only ever be right by luck.
-    table_paints: HashMap<String, TablePaint>,
+    ///
+    /// **Keyed by the size as well since ticket 37** ([`bt_render::TableBlockKey`]): a table is
+    /// set in its pane's own text, so one source in a pane at 80 % and in a pane at 150 % is two
+    /// pictures, and a map keyed by the source alone would hand both panes whichever was laid out
+    /// last. The key carries the face size and the font environment; the stamp keeps the inks.
+    table_paints: HashMap<bt_render::TableBlockKey, TablePaint>,
     /// How wide the "no preview" card's button caption is drawn.
     ///
     /// Measured into the runtime where the picture is built, for the reason
@@ -13742,6 +13775,12 @@ struct WindowRuntime {
     pixel_wheel_remainder: f64,
     /// Wheel detents awaiting a mouse-protocol report; per-notch, no system-lines multiplier.
     notch_wheel_remainder: f64,
+    /// The pane the three forwarding remainders above were turned over (ticket 37): they are
+    /// fractions of that pane's row, and start again from nothing over another pane.
+    forward_wheel_target: Option<LeafId>,
+    /// **The text-size rung's carry** (ticket 37) — see [`TextSizeAim`]. A gesture's remainder,
+    /// not a size: the pane's rung lives on the pane.
+    text_size_aim: Option<TextSizeAim>,
     /// Fractional subpixels awaiting consumption by the LOCAL scroll routes only. Forwarding
     /// routes keep their own line-quantized accumulators above; the two never pour into each
     /// other, so switching routes cannot dump parked residue as a sudden jump.
@@ -18632,8 +18671,12 @@ impl LeafSession {
     /// The grid this pane is given for the rectangle `body` — the seat's pixels
     /// and whether this pane has a rail, through the one function that turns a
     /// seat into a grid ([`cmdrail::terminal_grid_for`]).
-    fn grid_for(&self, metrics: &bt_render::CellMetrics, body: SeatViewport) -> GridSize {
-        cmdrail::terminal_grid_for(metrics, body, self.has_rail)
+    ///
+    /// **At this pane's own metrics** (ticket 37) — [`Self::metrics`], derived from its rung —
+    /// and never the window's: two panes of one window at two sizes are two grids for two equal
+    /// rectangles.
+    fn grid_for(&self, body: SeatViewport) -> GridSize {
+        cmdrail::terminal_grid_for(&self.metrics, body, self.has_rail)
     }
 
     /// The title this pane's program **announced**, as opposed to one it merely
@@ -24241,6 +24284,91 @@ impl CardAim {
             carried: total.less_notches(steps),
         });
         steps
+    }
+}
+
+/// **The text-size rung's carry** (ticket 37): what one hand has turned over one terminal pane
+/// with the size gesture's modifier and not yet spent, in the driver's own currency.
+///
+/// [`CardAim`]'s arithmetic, for the same reason it is `CardAim`'s: the currencies are not
+/// addable, and keeping the driver's own units is what makes [`WheelBurst::less_notches`] exact
+/// — six 20-pixel reports are one step, and no float residue is ever left behind. It is dropped
+/// on everything that makes it a promise about something else:
+///
+/// * **A change of direction.** Half a detent up does not pay for the way down.
+/// * **A change of pane.** The fraction was turned over one pane.
+/// * **A change of modifier or of route.** `Runtime::mouse_wheel` takes the carry out of the
+///   window at the top of every notch and puts it back only when this rung spends the notch, so a
+///   notch that went anywhere else — no modifier, another modifier, a surface above the panes —
+///   leaves nothing behind.
+/// * **The end of the ladder.** A notch past the last rung is spent — it steps nowhere — and the
+///   carry is cleared, so `+1, −1` at the top of the ladder steps down once, exactly as it would
+///   one rung below the top.
+///
+/// Only the vertical component is read ([`wheel_zoom_notches`]), after [`upright_wheel`]; a
+/// report that has none falls through to the routes it had. Reports merged into one burst before
+/// the flush are summed first, as every wheel route here sums them ([`WheelBurst::plus`]), so a
+/// reversal inside one burst nets. A touch pan with the modifier held enters as pixels and takes
+/// the same carry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TextSizeAim {
+    /// The pane this fraction was turned over.
+    at: LeafId,
+    /// What has been turned and not yet spent, in the driver's own currency.
+    carried: WheelBurst,
+}
+
+impl TextSizeAim {
+    /// This notch plus whatever `carry` holds for the same pane in the same direction, **in
+    /// whole rungs**; the remainder is left in `slot`. `carry` is what the window held before the
+    /// notch arrived, taken out by the caller.
+    fn spend(
+        carry: Option<Self>,
+        slot: &mut Option<Self>,
+        at: LeafId,
+        delta: MouseScrollDelta,
+    ) -> i32 {
+        let arriving = wheel_zoom_notches(delta);
+        let total = carry
+            .filter(|aim| {
+                aim.at == at && (wheel_zoom_notches(aim.carried.delta()) > 0.0) == (arriving > 0.0)
+            })
+            .and_then(|aim| aim.carried.plus(delta))
+            .unwrap_or_else(|| WheelBurst::of(delta));
+        let steps = wheel_zoom_notches(total.delta()).trunc() as i32;
+        *slot = Some(Self {
+            at,
+            carried: total.less_notches(steps),
+        });
+        steps
+    }
+
+    /// **One notch of the text-size gesture over the pane at `at`, whose rung is `rung`** — the
+    /// whole decision the wheel's text-size rung makes, as the step to take and how many times.
+    ///
+    /// [`Self::spend`], plus the ends of the ladder: when the rungs this notch spent reach or
+    /// pass the end in their direction, the carry is cleared, so a notch past the end is spent on
+    /// nothing and the next notch the other way starts from a whole detent. `(_, 0)` is a
+    /// fraction carried and nothing to do yet.
+    fn notch(
+        carry: Option<Self>,
+        slot: &mut Option<Self>,
+        at: LeafId,
+        delta: MouseScrollDelta,
+        rung: TextScale,
+    ) -> (TextStep, u32) {
+        let steps = Self::spend(carry, slot, at, delta);
+        let step = if steps > 0 {
+            TextStep::Larger
+        } else {
+            TextStep::Smaller
+        };
+        let count = steps.unsigned_abs();
+        let after = (0..count).fold(rung, |scale, _| scale.stepped(step));
+        if count != 0 && after.stepped(step) == after {
+            *slot = None;
+        }
+        (step, count)
     }
 }
 
@@ -36788,9 +36916,9 @@ impl SplitSeed {
 /// One rendered table's picture and what it was laid out for.
 struct TablePaint {
     paint: bt_render::TableBlockPaint,
-    /// The terminal's font size in physical pixels, as bits, and the three inks the shared painter
-    /// reads. A change to any of them is a picture that has to be laid out again.
-    stamp: (u32, [u8; 3], [u8; 3], [u8; 3]),
+    /// The three inks the shared painter reads. A change to any of them is a picture that has to
+    /// be laid out again; the size it was laid out at is in the key (ticket 37).
+    stamp: ([u8; 3], [u8; 3], [u8; 3]),
 }
 
 /// `settings.json`'s height cap, as the layout options carry it.
@@ -37004,7 +37132,7 @@ fn startable_profile(requested: &str, programs: &profiles::ProfilePrograms) -> S
 /// them into a struct would move the argument list rather than shorten it.
 #[allow(clippy::too_many_arguments)]
 fn create_leaf_session(
-    renderer: &WindowRenderer,
+    view: LeafView,
     body: bt_render::SeatViewport,
     // **Who this pane is, for the two things a child is told about it.** One of them is a name a
     // person reads in `env` and nothing routes by; the other is a capability minted here and held
@@ -37037,7 +37165,11 @@ fn create_leaf_session(
 ) -> Result<LeafSession> {
     // **Born without a rail**: a shell that has not started has sent no mark, and
     // [`LeafSession::has_rail`] is turned on only by one (owner, 2026-09-23).
-    let grid = cmdrail::terminal_grid_for(&renderer.metrics(), body, false);
+    let LeafView {
+        text_scale,
+        metrics,
+    } = view;
+    let grid = cmdrail::terminal_grid_for(&metrics, body, false);
     // **The machine is asked before anything is composed for it** (review row
     // R4-1). `startable_profile` carries the whole rule and its argument; what is
     // decided here is which profile everything below is about, because the
@@ -37225,11 +37357,11 @@ fn create_leaf_session(
         rows,
         DEFAULT_STAGING_QUOTA,
         scrollback,
-        renderer.metrics().cell_height_subpixels(),
+        metrics.cell_height_subpixels(),
     );
-    session.set_cell_width_subpixels(cell_width_subpixels(renderer.metrics()));
-    session.set_ascii_baseline_subpixels(renderer.metrics().ascii_baseline_subpixels());
-    session.set_font_size_subpixels(renderer.metrics().font_size_subpixels());
+    session.set_cell_width_subpixels(cell_width_subpixels(metrics));
+    session.set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+    session.set_font_size_subpixels(metrics.font_size_subpixels());
     session.set_math_layout_options(MathLayoutOptions {
         detect_image_paths: true,
         block_max_height_px: block_max_height_px(formulas.max_height),
@@ -37243,8 +37375,8 @@ fn create_leaf_session(
     session.set_table_bands(formulas.tables);
     session.set_layout_key(window_layout_key(
         columns,
-        renderer.metrics().dpi_milli(),
-        renderer.metrics().font_size_subpixels(),
+        metrics.dpi_milli(),
+        metrics.font_size_subpixels(),
         1,
         line_wrapping,
     ));
@@ -37343,6 +37475,8 @@ fn create_leaf_session(
         // floor to be aimed past.
         card_skip: seed.card_skip,
         projection,
+        text_scale,
+        metrics,
         thumb_awake: Instant::now(),
         column_awake: Instant::now(),
         grid,
@@ -37355,12 +37489,148 @@ fn create_leaf_session(
         output_revision: 0,
         last_seen_revision: 0,
         last_presented_frame: None,
+        presented_metrics: metrics,
         frame_image_references: FrameImageReferences::default(),
         // Nobody has asked the machine where this shell's `$PROFILE` is yet.
         integration_offer: None,
         // Nothing has been pasted into a shell that has just started.
         pending_paste: None,
     })
+}
+
+/// **A terminal pane's metrics for a test**, measured once per (scale, size) per process by the
+/// production measuring service ([`bt_render::CellMetrics::measure_at`]) against the preview
+/// font system every headless test already measures with. Fixtures that need a leaf's
+/// [`LeafSession::metrics`] take them from here rather than inventing numbers.
+#[cfg(test)]
+fn fixture_cell_metrics(scale_factor: f64, font_size_logical_px: f32) -> bt_render::CellMetrics {
+    type Measured = Vec<((u64, u32), bt_render::CellMetrics)>;
+    static MEASURED: std::sync::Mutex<Measured> = std::sync::Mutex::new(Vec::new());
+    let key = (scale_factor.to_bits(), font_size_logical_px.to_bits());
+    let mut held = MEASURED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, metrics)) = held.iter().find(|(at, _)| *at == key) {
+        return *metrics;
+    }
+    let metrics = bt_render::CellMetrics::measure_at(
+        &mut bt_render::preview_measure_font_system(),
+        scale_factor,
+        font_size_logical_px,
+    )
+    .expect("the preview font system measures a monospace cell");
+    held.push((key, metrics));
+    metrics
+}
+
+/// **What a new terminal view is born with** (ticket 37): its rung and the metrics derived from
+/// it in the window it is born in, both handed to [`create_leaf_session`] so the first PTY grid is
+/// this view's own — never the window's, and never spawned at one size and repaired to another.
+#[derive(Clone, Copy, Debug)]
+struct LeafView {
+    text_scale: TextScale,
+    metrics: bt_render::CellMetrics,
+}
+
+impl LeafView {
+    /// The view `text_scale` asks for, measured for `renderer`'s window.
+    fn at(gpu: &mut GpuContext, renderer: &WindowRenderer, text_scale: TextScale) -> Result<Self> {
+        Ok(Self {
+            text_scale,
+            metrics: pane_cell_metrics(gpu, renderer, text_scale)?,
+        })
+    }
+}
+
+/// **The one derivation of a pane's metrics** (ticket 37): the pane's rung, the Settings size the
+/// device was last given ([`GpuContext::terminal_font_size_logical_px`], already
+/// `settings::drawable_font_size`'s 10–24) and the window's display scale, through
+/// [`TextScale::effective_logical_px`] and the one measuring service.
+///
+/// Nothing stores its product: a Settings change, a display change and a size step each call this
+/// again, so the order they arrive in cannot matter.
+fn pane_cell_metrics(
+    gpu: &mut GpuContext,
+    renderer: &WindowRenderer,
+    text_scale: TextScale,
+) -> Result<bt_render::CellMetrics> {
+    let effective = text_scale.effective_logical_px(gpu.terminal_font_size_logical_px());
+    renderer
+        .pane_cell_metrics(gpu, effective)
+        .context("measure a terminal pane at its text size")
+}
+
+/// **The one mutation door's core** (ticket 37): move one leaf's rung and apply what it now
+/// derives to.
+///
+/// `derive` is [`pane_cell_metrics`] bound to the leaf's window, so the derivation stays the one
+/// derivation; a test hands it the same measuring service at a chosen base and scale. Answers
+/// whether the pane's metrics moved — `false` both when the step went nowhere (the end of the
+/// ladder) and when it went to a rung the clamp draws at the same size, and in both cases nothing
+/// else has been touched. The rung itself moves even then: the indicator shows the requested
+/// rung, and a pane at the floor of a base-10 face still says it is at 50 %.
+fn step_leaf_text_scale(
+    leaf: &mut LeafSession,
+    step: TextStep,
+    count: u32,
+    derive: impl FnOnce(TextScale) -> Result<bt_render::CellMetrics>,
+) -> Result<bool> {
+    let requested = (0..count).fold(leaf.text_scale, |scale, _| scale.stepped(step));
+    let metrics = derive(requested)?;
+    leaf.text_scale = requested;
+    Ok(apply_leaf_metrics(leaf, metrics))
+}
+
+/// **Every terminal leaf of `tabs`, re-derived from its own rung and re-applied** (ticket 37) —
+/// the walk behind `Runtime::apply_every_leaf_metrics`. `derive` is [`pane_cell_metrics`] bound
+/// to the window the tabs stand in.
+fn apply_tabs_leaf_metrics(
+    tabs: &mut [TabState],
+    mut derive: impl FnMut(TextScale) -> Result<bt_render::CellMetrics>,
+) -> Result<()> {
+    for tab in tabs {
+        for (_, leaf) in tab.leaves_mut() {
+            let metrics = derive(leaf.text_scale)?;
+            apply_leaf_metrics(leaf, metrics);
+        }
+    }
+    Ok(())
+}
+
+/// **The one apply operation** (ticket 37): put freshly derived metrics on one leaf.
+///
+/// Every road that changes what a pane is drawn at comes through here — a size step, a Settings
+/// change, a display change and a transfer to another window — so the things that carry the
+/// metrics move together: the leaf's own record ([`LeafSession::metrics`]), the session's cell
+/// height, width and baseline, its face size (which re-keys its math through `set_layout_key`),
+/// and the projection, refreshed so a wheel or a scroll read after this sees the new rows. All of
+/// it happens **even when the integer grid is unchanged**: a larger face on the same grid is a new
+/// picture, and the frame it projects carries the new face size in its `layout_key`. The grid
+/// itself is the caller's to re-derive afterwards, through the existing resize transaction
+/// (`schedule_leaf_grid_change` → `release_due_leaf_resize` → `commit_leaf_resize`).
+///
+/// Answers whether anything moved. When the metrics are the ones the leaf already has — a step
+/// the clamp swallowed — it touches nothing and answers `false`, so no reflow, no PTY and no
+/// present follow.
+///
+/// Writers of the rung: `Runtime::step_pane_text_scale` (the door) and construction. Readers:
+/// [`pane_cell_metrics`] and the pane head's indicator. Clearers: none — a view that ends takes
+/// its rung with it.
+fn apply_leaf_metrics(leaf: &mut LeafSession, metrics: bt_render::CellMetrics) -> bool {
+    if leaf.metrics == metrics {
+        return false;
+    }
+    leaf.metrics = metrics;
+    leaf.session
+        .set_cell_height_subpixels(metrics.cell_height_subpixels());
+    leaf.session
+        .set_cell_width_subpixels(cell_width_subpixels(metrics));
+    leaf.session
+        .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+    leaf.session
+        .set_font_size_subpixels(metrics.font_size_subpixels());
+    leaf.session.refresh_projection(&mut leaf.projection);
+    true
 }
 
 /// Stand a tab up: its tree, and **one shell per Terminal leaf of that tree**.
@@ -37395,6 +37665,9 @@ fn create_leaf_session(
 fn create_tab_state(
     id: TabId,
     seats: seats::Seats,
+    // What each of this tab's terminal views is born with: 100 %, measured for this window
+    // (ticket 37) — see the loop below.
+    born: LeafView,
     renderer: &WindowRenderer,
     render_physical: PhysicalSize<u32>,
     // The window this tab's shells are born in — see [`create_leaf_session`].
@@ -37439,8 +37712,8 @@ fn create_tab_state(
     // Captured before `seats` moves into the tab: the seat the tab's identity
     // shell draws into is the key its session is filed under.
     let terminal_seat_id = seats.identity();
-    let scale = renderer.metrics().scale_factor as f32;
-    let metrics = seats::seat_metrics(renderer.metrics().dpi_milli().get());
+    let scale = renderer.scale_factor() as f32;
+    let metrics = seats::seat_metrics(renderer.dpi_milli().get());
     let mut sessions = BTreeMap::new();
     for seat in seats.terminals() {
         // **Each seat's own rectangle, and never a bar's** (user report
@@ -37464,8 +37737,11 @@ fn create_tab_state(
         // This is mock-up 7575 — `bootFresh()` opening its first tab from
         // `defaultProfile()` — and it is the half of "新 tab，和启动" that the `+`
         // does not cover.
+        // **Every rebuilt view starts at 100 %** (ticket 37): a tab built here is a new tab, a
+        // restored one or a reopened one, and none of those carries a text size — it was never
+        // written down.
         let leaf = create_leaf_session(
-            renderer,
+            born,
             body,
             LeafId { tab: id, seat },
             wake,
@@ -39637,6 +39913,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         line_wheel_remainder: 0.0,
         pixel_wheel_remainder: 0.0,
         notch_wheel_remainder: 0.0,
+        forward_wheel_target: None,
+        text_size_aim: None,
         local_wheel_subpixel_remainder: 0.0,
         local_wheel_column_remainder: 0.0,
         hyperlink_hover: HyperlinkHover::default(),
@@ -40666,10 +40944,7 @@ impl Runtime<'_> {
         // cell. The hot path (`apply_terminal_font`) re-solves all of that; this
         // one has nothing to re-solve yet.
         apply_stored_terminal_font(&mut gpu, &mut renderer, settings_store.loaded())?;
-        ensure_metrics_match_authoritative_scale(
-            renderer.metrics().scale_factor,
-            startup_scale_factor,
-        )?;
+        ensure_metrics_match_authoritative_scale(renderer.scale_factor(), startup_scale_factor)?;
         trace_surface_size_clamp(
             trace_startup || trace_resize,
             "BT_STARTUP",
@@ -40775,6 +41050,7 @@ impl Runtime<'_> {
             let (tab, conpty_source) = create_tab_state(
                 tab_ids.mint(),
                 seats,
+                LeafView::at(&mut gpu, &renderer, TextScale::ACTUAL)?,
                 &renderer,
                 render_physical,
                 wake,
@@ -41247,10 +41523,7 @@ impl Runtime<'_> {
     /// milliseconds.
     fn drawn_resizing_card(&self, now: Instant) -> Option<(f32, f32)> {
         let cards = self.resizing_cards_frame(now)?;
-        seats::resizing_card_inset(
-            self.window.renderer.metrics().scale_factor as f32,
-            cards.inset,
-        )
+        seats::resizing_card_inset(self.window.renderer.scale_factor() as f32, cards.inset)
     }
 
     // ────────────────────────── the command marks rail ──────────────────────────
@@ -41294,10 +41567,11 @@ impl Runtime<'_> {
         let body = self.command_rail_body(flash.seat)?;
         let frame = self.pane_frame(flash.seat)?;
         let row = frame_row_of_anchor(frame, anchor)?;
-        let metrics = self.window.renderer.metrics();
-        let top = body[1]
-            + metrics.padding_px
-            + row.top_subpixels as f32 / bt_viewport::SUBPIXELS_PER_PX as f32;
+        // Padding only, and padding is window chrome: it is the same at every text size, so it
+        // is read through the window's named base interface (ticket 37).
+        let padding_px = self.window.renderer.base_metrics().padding_px;
+        let top =
+            body[1] + padding_px + row.top_subpixels as f32 / bt_viewport::SUBPIXELS_PER_PX as f32;
         let bottom = top + row.height_subpixels as f32 / bt_viewport::SUBPIXELS_PER_PX as f32;
         // Clipped to the body, because a row half scrolled past the top of the
         // viewport must flash the half that is there and never a strip of the pane
@@ -41471,7 +41745,7 @@ impl Runtime<'_> {
         // of which named the dialog to the reader of a slow-hold line.
         let trace_start = self.app.trace_perf.then(Instant::now);
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // Content is read from its owners. Geometry is computed only when one
         // of these inputs changes; hover, focus and redraw are readers of it.
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
@@ -41978,7 +42252,7 @@ impl Runtime<'_> {
         travel: Option<Travel>,
         now: Instant,
     ) -> Vec<marks::OverlayLayer> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let motion = self.app.motion;
         self.window
             .passages
@@ -42070,7 +42344,7 @@ impl Runtime<'_> {
             tree: self.seats.tree().clone(),
             cargo,
             viewport: self.window.seat_viewport,
-            scale_ppm: seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get()),
+            scale_ppm: seats::scale_ppm(self.window.renderer.dpi_milli().get()),
         })
     }
 
@@ -42206,7 +42480,7 @@ impl Runtime<'_> {
             return (Vec::new(), None);
         }
         let head = self.staged_card_head(now);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let layout = cardhint::place(
@@ -45541,6 +45815,9 @@ impl Runtime<'_> {
             // the terminal", so a flag that meant "the field is focused" would
             // switch the row off in exactly the state it is wanted.
             search_open: self.window.search.is_open(),
+            // **A terminal holding the keyboard, on either screen** (ticket 37) — the whole of
+            // [`shortcuts::Scope::Terminal`], and the first half of `terminal_primary` above.
+            terminal: self.keyboard_owner_is_a_shell(),
             // **A page holding the keyboard, and not merely a page being on
             // screen** (§7.7, W2 slice ④). `Ctrl+L` and `F12` are the page's
             // verbs and `Escape` is claimed only while there is a capsule to put
@@ -46812,7 +47089,7 @@ impl Runtime<'_> {
         let lines = restore::unsaved_lines(quit.names());
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let room = restore::content_width(width, scale);
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let message_lines = lines
@@ -47204,7 +47481,7 @@ impl Runtime<'_> {
         match trigger {
             float::FloatTrigger::Tab(id) => {
                 let index = self.window.tabs.iter().position(|tab| tab.id == id)?;
-                let scale = self.window.renderer.metrics().scale_factor as f32;
+                let scale = self.window.renderer.scale_factor() as f32;
                 match self.window.rail.layout {
                     seats::TabLayoutMode::Vertical => {
                         let rail = self.rail_geometry_now(Instant::now())?;
@@ -47238,7 +47515,7 @@ impl Runtime<'_> {
                 if self.window.tabs[self.window.active_tab].id != leaf.tab {
                     return None;
                 }
-                let scale = self.window.renderer.metrics().scale_factor as f32;
+                let scale = self.window.renderer.scale_factor() as f32;
                 seats::pane_files_box(
                     &self.seats,
                     &self.seat_layout,
@@ -47686,7 +47963,7 @@ impl Runtime<'_> {
     /// handed in rather than walked twice.
     fn running_journeys(&self, now: Instant, strip: bool, thumbs: bool) -> pace::Lanes {
         let motion = self.app.motion;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         pace::Lanes {
             // The strip's ring, the `˅`, a pane in flight, a card breathing, the
             // dock's fade — and the card column's nudge, which lives here and
@@ -47747,7 +48024,7 @@ impl Runtime<'_> {
             return 0;
         }
         let reveal = self.window.focus_reveal.sample(now, self.app.motion).0;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let width = self.rail_posture().width_logical_px() * scale;
         (width * (1.0 - reveal.clamp(0.0, 1.0))).round() as i32
     }
@@ -48019,7 +48296,7 @@ impl Runtime<'_> {
     /// closed on the window, and where the hand closed does not move because the
     /// tab list scrolled underneath it.
     fn open_broker(&mut self, source: &DragSource, position: PhysicalPosition<f64>) {
-        let scale = self.window.renderer.metrics().scale_factor.max(0.01);
+        let scale = self.window.renderer.scale_factor().max(0.01);
         let size = self.window.window.inner_size();
         let window = self.window_id();
         self.app.drag_broker = Some(DragBroker {
@@ -48131,7 +48408,7 @@ impl Runtime<'_> {
         now: Instant,
         height: f32,
     ) -> Option<seats::FocusRailGeometry> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         seats::focus_rail_geometry(
             height,
             scale,
@@ -48893,7 +49170,7 @@ impl Runtime<'_> {
             });
             return Ok(false);
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // Read before the walk rather than inside its `else`: what the refusal
         // has to say is how many cards it looked at, and a count is a number
         // where the list itself would be a borrow held across a trace line.
@@ -49047,7 +49324,10 @@ impl Runtime<'_> {
     /// beside it happened to be a folder would be a scroller whose behaviour
     /// depended on something the reader cannot see.
     fn line_height_subpixels(&self) -> std::num::NonZeroI64 {
-        self.window.renderer.metrics().cell_height_subpixels()
+        // **The chrome's scroll distance, not a pane's** (ticket 37): the Settings size at window
+        // scale, through the named base interface. A strip or a list that scrolled by the focused
+        // pane's row height would scroll further every time that pane's text grew.
+        self.window.renderer.base_metrics().cell_height_subpixels()
     }
 
     /// Read the open picker's thumb backwards into an offset (§7.1.6c-5).
@@ -49313,7 +49593,7 @@ impl Runtime<'_> {
             return;
         }
         let window = u64::from(self.window.window.id());
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(geometry) = self.focus_rail_geometry_now(Instant::now()) else {
             card_trace::line(|| card_trace::scale_without_a_column(window, why, before, after));
             return;
@@ -50985,7 +51265,10 @@ mod mouse_trace_station_tests {
     /// it puts the silence back one arm at a time and nothing else fails.
     #[test]
     fn every_exit_of_the_wheels_road_writes_a_line() {
-        assert_every_exit_is_traced("mouse_wheel", 22);
+        // 22 → 24 on 2026-09-24 (ticket 37): the text-size rung spends a notch, and
+        // spends it in two ways — a whole rung or a carried fraction — each with its
+        // own `wheel_route taken=text-size` line above it.
+        assert_every_exit_is_traced("mouse_wheel", 24);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
@@ -52944,7 +53227,7 @@ mod formula_tool_seat_tests {
             "the band is named, and the name is the one the ground was laid under"
         );
         assert!(
-            placed.contains("math_tool_boxes(body, frame, hovered)"),
+            placed.contains("math_tool_boxes(metrics, body, frame, hovered)"),
             "and the name is what the boxes are asked for"
         );
         assert!(
@@ -53395,13 +53678,13 @@ mod formula_tool_seat_tests {
         let hit = method_body("Runtime", "math_hit");
         assert!(
             hit.contains("seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)")
-                && hit.contains("math_hit_test(body, frame, position.x, position.y)"),
+                && hit.contains("math_hit_test(metrics, body, frame, position.x, position.y)"),
             "the pointer's own pane is what its band is cut to:\n{hit}"
         );
         let placed = method_body("Runtime", "math_tool_placement");
         assert!(
-            placed.contains("let (body, frame) = frame_for(*seat)?;")
-                && placed.contains("math_tool_boxes(body, frame, hovered)"),
+            placed.contains("let (body, frame, metrics) = frame_for(*seat)?;")
+                && placed.contains("math_tool_boxes(metrics, body, frame, hovered)"),
             "the present hands one pane-and-frame pair to drawing:\n{placed}"
         );
         // One handed `body`, spent on the boxes and on the translation, so the
@@ -58841,6 +59124,14 @@ impl FolioApp {
         };
         for id in settling {
             if let Some(mut runtime) = self.runtime(*id) {
+                // **The carried panes are measured where they now stand** (ticket 37): each keeps
+                // its rung, and its metrics are derived again at the scale this window has
+                // recorded — no new sampling of where the window is — before the re-solve below
+                // hands every pane its grid. The panes already here re-derive to what they have,
+                // which `apply_leaf_metrics` answers by touching nothing.
+                if *id == into {
+                    runtime.apply_every_leaf_metrics()?;
+                }
                 runtime.settle_seat_set_change()?;
                 let picture = runtime.window_snapshot();
                 runtime.app.record_window(*id, picture, now);
@@ -63294,6 +63585,23 @@ enum WheelRoute {
 /// than the child's: Shift is the explicit local override, and an
 /// alternate-screen pane already displaced into local review stays there until
 /// it is scrolled back to rest.
+/// **Whether this notch over a terminal is a text-size step** (ticket 37) — the rung
+/// `Runtime::mouse_wheel` asks after it has chosen the terminal and before the math-block pan
+/// and [`wheel_route`] are asked anything.
+///
+/// Yes exactly when the gesture's own modifier is held and nothing else
+/// ([`input::text_size_wheel_held_on`]) and the notch has a vertical component: a report that is
+/// sideways only falls through to the routes it had, which is `scroll_web_page`'s own `y != 0`
+/// rule. Nothing about the pane is asked — which screen it is on, whether its program reads the
+/// mouse, whether its view is scrolled — because the size is the pane's on every one of them.
+fn wheel_steps_text_size(
+    modifiers: ModifiersState,
+    platform: bt_platform::HostPlatform,
+    delta: MouseScrollDelta,
+) -> bool {
+    input::text_size_wheel_held_on(modifiers, platform) && wheel_zoom_notches(delta) != 0.0
+}
+
 fn wheel_route(shift: bool, modes: bt_term::TerminalModes, target_is_scrolled: bool) -> WheelRoute {
     // Sticky local review: while the alternate-screen viewport is displaced into
     // the projection-local overflow (Shift+wheel entered it), the user is looking
@@ -68209,7 +68517,7 @@ fn solve_seats(
     SeatViewport,
     LogicalRect,
 ) {
-    let dpi_milli = renderer.metrics().dpi_milli().get();
+    let dpi_milli = renderer.dpi_milli().get();
     let metrics = seats::seat_metrics(dpi_milli);
     let scale_ppm = seats::scale_ppm(dpi_milli);
     let viewport = seats::logical_viewport(
@@ -68248,7 +68556,7 @@ fn solve_seats(
         seats,
         &layout,
         seats.focus(),
-        renderer.metrics().scale_factor as f32,
+        renderer.scale_factor() as f32,
     )
     .unwrap_or(SeatViewport::whole(
         render_physical.width.max(1),
@@ -69437,6 +69745,8 @@ fn main() -> Result<()> {
 /// which of the two it means.
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod text_size_tests;
 
 /// **The files in which `bt-app` is allowed to know what platform it is on**
 /// (`docs/plans/port/macos-plan-2026-09-12.md` §4.3, ticket M1-10).

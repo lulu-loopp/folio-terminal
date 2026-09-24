@@ -200,6 +200,36 @@ impl Runtime<'_> {
                     );
                 }
             }
+            // **Each pane head's text-size mark** (ticket 37), in the same pass and inside the
+            // same guard: the verb a click on it is, and — only when the clamp changed what the
+            // percentage says — the size the pane is actually drawn at.
+            let text_sizes = self.pane_text_sizes();
+            let base = self.app.gpu.terminal_font_size_logical_px();
+            for seat in text_sizes.keys() {
+                let Some(mark) = seats::pane_text_size_box(
+                    &self.seats,
+                    &self.seat_layout,
+                    *seat,
+                    &text_sizes,
+                    scale,
+                    capsule,
+                ) else {
+                    continue;
+                };
+                let Some(leaf) = self.sessions.get(seat) else {
+                    continue;
+                };
+                anchors.push(
+                    tooltip::TooltipAnchorId::PaneTextSize(*seat),
+                    mark,
+                    i18n::text_size_tip(
+                        i18n::Text::ShortcutTextActualSize.text(),
+                        base,
+                        leaf.text_scale.percent(),
+                        leaf.text_scale.effective_logical_px(base),
+                    ),
+                );
+            }
             // A page's hand-off arrow, in the same pass and inside the same
             // guard: it is a pane head's control like the chevron above, and a
             // head under a drag is a head nobody is pointing at. Only the seats
@@ -239,6 +269,7 @@ impl Runtime<'_> {
                     rect,
                     bt_layout::SeatKind::Preview,
                     self.seat_layout.seat_is_on_stage(seat),
+                    false,
                     scale,
                 );
                 let geometry =
@@ -603,7 +634,7 @@ impl Runtime<'_> {
             return Vec::new();
         };
         let (text, host, face) = (anchor.text.clone(), anchor.rect, anchor.face);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let font_px = face.font_logical_px() * scale;
         // Only the font knows how wide a line is, so the measuring happens here,
         // beside the renderer, exactly as the badge's and the editor's do — first

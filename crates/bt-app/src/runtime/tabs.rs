@@ -14,6 +14,7 @@ use crate::{
     settling, solve_seats, stepped_tab, strip_insert_slot, tab_close_action, tab_surface,
     tear_pane_into_tab, two_tabs_mut, webnav,
 };
+use crate::{LeafView, TextScale};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::SeatId;
@@ -95,9 +96,11 @@ impl Runtime<'_> {
                 prefill: None,
             },
         )]);
+        let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
         let (tab, _) = create_tab_state(
             id,
             seats,
+            born,
             &self.window.renderer,
             render_physical,
             wake,
@@ -134,7 +137,7 @@ impl Runtime<'_> {
     /// Everything else the strip does about scrolling, it does because the wheel
     /// asked.
     pub(crate) fn reveal_tab(&mut self, index: usize) -> bool {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let width = self
             .window
             .renderer
@@ -668,12 +671,8 @@ impl Runtime<'_> {
     }
 
     /// The stamp a table picture laid out now would carry.
-    fn table_paint_stamp(
-        &self,
-        palette: &bt_render::ChromePalette,
-    ) -> (u32, [u8; 3], [u8; 3], [u8; 3]) {
+    fn table_paint_stamp(&self, palette: &bt_render::ChromePalette) -> ([u8; 3], [u8; 3], [u8; 3]) {
         (
-            self.window.renderer.metrics().font_size_px.to_bits(),
             palette.preview_grid_line,
             palette.preview_table_head_text,
             palette.files_row_hover,
@@ -688,7 +687,13 @@ impl Runtime<'_> {
     /// out again, and a table nothing has drawn yet is laid out for the first time. The renderer is
     /// only told when something actually moved, so a window full of unchanged tables costs one map
     /// walk a frame and no allocation at all.
-    pub(in crate::runtime) fn refresh_table_paints(&mut self, sources: &[String]) {
+    ///
+    /// **One picture per source per text size** (ticket 37): `sources` names each table with the
+    /// size of the pane showing it, and a picture is laid out at that size.
+    pub(in crate::runtime) fn refresh_table_paints(
+        &mut self,
+        sources: &[bt_render::TableBlockKey],
+    ) {
         let palette = bt_render::chrome_palette();
         let stamp = self.table_paint_stamp(&palette);
         let mut changed = false;
@@ -702,7 +707,7 @@ impl Runtime<'_> {
                 .retain(|source, _| sources.contains(source));
             changed = true;
         }
-        let stale: Vec<String> = sources
+        let stale: Vec<bt_render::TableBlockKey> = sources
             .iter()
             .filter(|source| {
                 self.window
@@ -713,7 +718,8 @@ impl Runtime<'_> {
             .cloned()
             .collect();
         for source in stale {
-            let Some(block) = self.build_table_block(&source) else {
+            let font_size_px = f32::from_bits(source.font_size_bits);
+            let Some(block) = self.build_table_block(&source.source, font_size_px) else {
                 continue;
             };
             self.window.table_paints.insert(
@@ -736,17 +742,28 @@ impl Runtime<'_> {
         }
     }
 
-    /// Every rendered table a set of frames is showing, by source.
+    /// Every rendered table a set of frames is showing, by source **and by the size it is shown
+    /// at** (ticket 37): each frame comes with the metrics it is drawn at, and two panes showing
+    /// one source at two sizes name two pictures. `font_environment` is the device's
+    /// [`bt_render::GpuContext::font_environment_epoch`].
     pub(in crate::runtime) fn table_sources<'a>(
-        frames: impl Iterator<Item = &'a bt_viewport::ViewportFrame>,
-    ) -> Vec<String> {
-        let mut sources: Vec<String> = frames
-            .flat_map(|frame| frame.math_blocks.iter())
-            .filter(|placement| {
+        frames: impl Iterator<Item = (&'a bt_viewport::ViewportFrame, bt_render::CellMetrics)>,
+        font_environment: u64,
+    ) -> Vec<bt_render::TableBlockKey> {
+        let mut sources: Vec<bt_render::TableBlockKey> = frames
+            .flat_map(|(frame, metrics)| {
+                frame
+                    .math_blocks
+                    .iter()
+                    .map(move |placement| (placement, metrics))
+            })
+            .filter(|(placement, _)| {
                 placement.artifact.kind == bt_viewport::RgbaArtifactKind::Table
                     && placement.display == bt_viewport::MathBlockDisplay::Rendered
             })
-            .map(|placement| placement.artifact.source.clone())
+            .map(|(placement, metrics)| {
+                bt_render::TableBlockKey::of(&placement.artifact.source, metrics, font_environment)
+            })
             .collect();
         sources.sort();
         sources.dedup();
@@ -760,12 +777,16 @@ impl Runtime<'_> {
     /// a table is — see [`bt_render::TableBlockPaint`]. The size is what the block reports as its
     /// artifact extent, so it is what decides how many transcript rows the block covers, and it is
     /// measured with the same shaper that will draw it.
+    ///
+    /// `font_size_px` is the asking pane's own face size (ticket 37): the extent decides how many
+    /// of *that* pane's rows the block covers.
     pub(in crate::runtime) fn table_raster(
         &mut self,
         source: &str,
+        font_size_px: f32,
     ) -> std::result::Result<MathRaster, MathRenderError> {
         let block = self
-            .build_table_block(source)
+            .build_table_block(source, font_size_px)
             .ok_or(MathRenderError::NotDetected)?;
         Ok(MathRaster {
             rgba: Vec::new(),
@@ -927,7 +948,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn tab_menu_layout(&mut self) -> Option<profiles::TabMenuLayout> {
         let menu = self.window.tab_menu.as_ref()?;
         let (point, subject, submenu_open) = (menu.point, menu.subject, menu.submenu_open);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let windows = self.other_window_rows();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -1697,7 +1718,7 @@ impl Runtime<'_> {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<seats::ChromeTarget> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let now = Instant::now();
@@ -1822,7 +1843,7 @@ impl Runtime<'_> {
     /// The strip's live geometry — the slots every drag judgement is made
     /// against.
     fn strip_geometry(&self, now: Instant) -> seats::TabStripGeometry {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
         seats::tab_strip_geometry(
             width as f32,
@@ -1866,7 +1887,7 @@ impl Runtime<'_> {
         }
         match self.window.rail.layout {
             seats::TabLayoutMode::Horizontal => {
-                let scale = self.window.renderer.metrics().scale_factor as f32;
+                let scale = self.window.renderer.scale_factor() as f32;
                 Some(seats::strip_run(&self.strip_geometry(now), scale))
             }
             seats::TabLayoutMode::Vertical => {
@@ -2004,7 +2025,7 @@ impl Runtime<'_> {
                 run.aim(
                     position.x,
                     position.y,
-                    self.window.renderer.metrics().scale_factor as f32,
+                    self.window.renderer.scale_factor() as f32,
                     *seam,
                 )
             })
@@ -2752,9 +2773,11 @@ impl Runtime<'_> {
         };
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
+        let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
         let (tab, _) = create_tab_state(
             id,
             seats,
+            born,
             &self.window.renderer,
             render_physical,
             &self.window.pty_wake,
@@ -3307,7 +3330,7 @@ impl Runtime<'_> {
 
     /// A wheel notch over the tab strip, turned into horizontal motion (A7/A8).
     pub(in crate::runtime) fn scroll_tab_strip(&mut self, delta: MouseScrollDelta) -> Result<()> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let width = self
             .window
             .renderer

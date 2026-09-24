@@ -59,7 +59,7 @@ impl Runtime<'_> {
     /// a confident sentence over somewhere else. `None` is what sends it to the
     /// window's corner — the fallback, and only that.
     fn toast_anchor_rect(&self, anchor: toast::ToastAnchor) -> Option<[f32; 4]> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         match anchor {
             // The column's page body, whichever page it is showing. A notice
             // about what this column was asked to do does not move to the corner
@@ -99,7 +99,7 @@ impl Runtime<'_> {
             return Vec::new();
         }
         let now = Instant::now();
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // The rectangles first, while nothing is borrowed: `place` needs both the
         // anchor resolver (which reads the layout) and the measurer (which holds
@@ -360,7 +360,7 @@ impl Runtime<'_> {
     /// sentence fits", which is the disagreement between what is drawn and what
     /// is pressed that this map exists to prevent.
     pub(in crate::runtime) fn notice_layers(&mut self) -> Vec<marks::OverlayLayer> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let palette = bt_render::chrome_palette();
         let font = notice::FONT_LOGICAL_PX * scale;
         // Both kinds of seat, because both kinds wear this band since the
@@ -493,7 +493,7 @@ impl Runtime<'_> {
         &mut self,
         id: float::FloatId,
     ) -> Option<marks::OverlayLayer> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let palette = bt_render::chrome_palette();
         let host = NoticeHost::Float(id);
         let strip = self.window.notice_layouts.get(&host)?.clone();

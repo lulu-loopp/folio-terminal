@@ -6,6 +6,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- Each terminal pane can have its own text size: Ctrl+= and Ctrl+− (⌘ on a
+  Mac) or Ctrl+wheel over the pane, Ctrl+0 to reset. The pane shows the size
+  while it is not 100 %; it resets when Folio restarts.
+
 ### Fixed
 
 - Typing no longer pauses while Folio asks Windows several times a turn

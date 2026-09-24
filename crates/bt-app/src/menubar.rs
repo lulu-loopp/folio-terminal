@@ -352,6 +352,15 @@ const NOT_ON_THE_BAR: &[(&str, &str)] = &[
         "the preview buffer's undo; the Edit menu's Undo is the first responder's",
     ),
     ("redo-preview", "as undo-preview"),
+    // **The pane's text size** (ticket 37). No menu row is ruled for them: the owner's ruling
+    // names the three keys and the pane head's mark, and nothing else. The question of a View
+    // menu row is recorded in ticket 37's report rather than answered here.
+    (
+        "text-larger",
+        "no menu row is ruled; the keys and the pane head's mark are the doors",
+    ),
+    ("text-smaller", "as text-larger"),
+    ("text-actual-size", "as text-larger"),
     // **The summon.** Its chord is registered with the system (M4-8, Carbon
     // `RegisterEventHotKey`) so that it fires while another app is frontmost,
     // which is the whole point of it; the menu bar is only shown while Folio
@@ -702,6 +711,7 @@ mod tests {
         Focus {
             preview: true,
             terminal_primary: true,
+            terminal: true,
             search_open: true,
             web_page: false,
         }
@@ -1010,7 +1020,11 @@ mod tests {
         match scope {
             Scope::Window => focus.terminal_primary = true,
             Scope::Preview | Scope::PreviewDocument => focus.preview = true,
-            Scope::TerminalPrimary | Scope::SearchHost => focus.terminal_primary = true,
+            Scope::TerminalPrimary | Scope::SearchHost => {
+                focus.terminal_primary = true;
+                focus.terminal = true;
+            }
+            Scope::Terminal => focus.terminal = true,
             Scope::SearchOpen => {
                 focus.terminal_primary = true;
                 focus.search_open = true;
@@ -1137,12 +1151,14 @@ mod tests {
         let on_a_shell = Focus {
             preview: false,
             terminal_primary: true,
+            terminal: true,
             search_open: false,
             web_page: false,
         };
         let on_a_preview = Focus {
             preview: true,
             terminal_primary: false,
+            terminal: false,
             search_open: false,
             web_page: false,
         };

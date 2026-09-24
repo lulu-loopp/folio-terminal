@@ -3661,9 +3661,10 @@ impl WebSeat {
 
     /// One notch of `Ctrl`+wheel.
     ///
-    /// **`Ctrl`+wheel is empty everywhere else in this window** — there is no
-    /// type-size zoom in this product and a picture zooms on the bare wheel — so
-    /// nothing is being taken from anything by claiming it over a page.
+    /// **`Ctrl`+wheel scales whatever it is over** — over a page it is the
+    /// page's zoom, over a terminal it is that pane's text size (ticket 37), and a
+    /// picture zooms on the bare wheel — so claiming it over a page takes nothing
+    /// from anything.
     ///
     /// **The engine is the authority on where the page is, in both directions**
     /// (user ruling 2026-08-25). The ladder is walked from `ZoomFactor` rather
@@ -4285,6 +4286,9 @@ mod keyboard_tests {
         // this list moved with it — a claim spelled for a chord the window can
         // never be reached by is a claim that takes nothing back from anybody.
         ("zoom-pane", "Ctrl+Shift+x"),
+        ("text-larger", "Ctrl+="),
+        ("text-smaller", "Ctrl+-"),
+        ("text-actual-size", "Ctrl+0"),
         ("files-pane", "Ctrl+Shift+b"),
         ("git-page", "Ctrl+Shift+g"),
         ("open-settings", "Ctrl+,"),
@@ -4409,7 +4413,11 @@ mod keyboard_tests {
     /// person has to change on purpose, which is what makes the next row
     /// scoped away from a page a decision somebody took rather than one that
     /// happened.
-    const KEPT_BY_A_PAGE: usize = 2;
+    ///
+    /// Five since ticket 37: the three text-size rows are [`Scope::Terminal`]'s, and a page
+    /// holding the keyboard is not a terminal holding it, so a page keeps `Ctrl+=`, `Ctrl+-`
+    /// and `Ctrl+0` for its own zoom.
+    const KEPT_BY_A_PAGE: usize = 5;
 
     /// RED — and every one of them reaches a virtual key, because
     /// `AcceleratorKeyPressed` speaks Win32 and nothing else.
@@ -4531,6 +4539,7 @@ mod keyboard_tests {
         let on_a_page = Focus {
             preview: true,
             terminal_primary: false,
+            terminal: false,
             search_open: false,
             web_page: true,
         };
@@ -4664,6 +4673,10 @@ mod keyboard_tests {
         Focus {
             preview: true,
             terminal_primary: true,
+            // **Not the terminal's own scope** (ticket 37): whatever else this focus stands
+            // for, the keyboard is on the page, and `Scope::Terminal` is exactly the claim
+            // a page must not take — the page keeps its own `Ctrl+=`.
+            terminal: false,
             search_open: true,
             web_page: true,
         }

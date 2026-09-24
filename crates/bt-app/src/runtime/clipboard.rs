@@ -575,7 +575,7 @@ impl Runtime<'_> {
         let shell = profile_banner_name(&tab.sessions.get(&seat)?.profile);
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let lines = pending.lines;
         let word = |answer| match answer {
             PasteAnswer::Join => restore::PasteCardTarget::Join,

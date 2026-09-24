@@ -5,15 +5,16 @@ use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
     FlashBand, FormulaSwitches, LeafId, LeafSession, LocalImageActivation, MouseRoute,
     RailJumpLanding, ReferenceCard, RowHost, Runtime, SelectionDrag, SelectionDragMode, Step,
-    TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace,
-    cell_width_subpixels, cmdrail, coalesce, create_leaf_session, cubic_bezier,
-    deliver_osc_attention, drain_may_take_another_slice, drain_tab_pty, drain_whole_units, files,
-    first_run, hang_watch, in_drain_feed_turn, input, input_line_needs_a_space_first,
-    local_image_activation, marks, mouse_trace, paste_text, presentation_physical_size,
-    reference_card, reference_run_rect, restart_seed, scrollback_quota, seats, shell_integration,
-    shell_literal, should_copy_on_select_release, stepped_command_mark,
-    terminal_link_answers_a_press, termscroll, toast, write_pty_input,
+    TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace, cmdrail,
+    coalesce, create_leaf_session, cubic_bezier, deliver_osc_attention,
+    drain_may_take_another_slice, drain_tab_pty, drain_whole_units, files, first_run, hang_watch,
+    in_drain_feed_turn, input, input_line_needs_a_space_first, local_image_activation, marks,
+    mouse_trace, paste_text, presentation_physical_size, reference_card, reference_run_rect,
+    restart_seed, scrollback_quota, seats, shell_integration, shell_literal,
+    should_copy_on_select_release, stepped_command_mark, terminal_link_answers_a_press, termscroll,
+    toast, write_pty_input,
 };
+use crate::{LeafView, TextStep, pane_cell_metrics, step_leaf_text_scale};
 use anyhow::Context;
 use anyhow::Result;
 use bt_doc::Bias;
@@ -50,7 +51,7 @@ impl Runtime<'_> {
         seat: SeatId,
         mark: bt_term::CommandMarkId,
     ) -> Result<Option<RailJumpLanding>> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return Ok(None);
         };
@@ -273,23 +274,13 @@ impl Runtime<'_> {
     /// open, which never touched a row and is drawing out of the same font
     /// database.
     pub(crate) fn adopt_terminal_font(&mut self) -> Result<()> {
-        let metrics = apply_stored_terminal_font(
+        apply_stored_terminal_font(
             &mut self.app.gpu,
             &mut self.window.renderer,
             self.app.settings_store.loaded(),
         )?;
-        for tab in &mut self.window.tabs {
-            for (_, leaf) in tab.leaves_mut() {
-                leaf.session
-                    .set_cell_height_subpixels(metrics.cell_height_subpixels());
-                leaf.session
-                    .set_cell_width_subpixels(cell_width_subpixels(metrics));
-                leaf.session
-                    .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
-                leaf.session
-                    .set_font_size_subpixels(metrics.font_size_subpixels());
-            }
-        }
+        // **The base moved; every pane keeps its rung** (ticket 37) and is re-derived from it.
+        self.apply_every_leaf_metrics()?;
         let physical = self.window.window.inner_size();
         if physical.width > 0 && physical.height > 0 {
             let render_physical =
@@ -383,7 +374,7 @@ impl Runtime<'_> {
         if leaf.session.terminal_modes().alternate_screen {
             return None;
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         Some([
             body.x as f32,
@@ -405,7 +396,7 @@ impl Runtime<'_> {
     ) -> Option<termscroll::TerminalScrollBar> {
         let body = self.terminal_scroll_body(seat)?;
         let leaf = self.sessions.get(&seat)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         termscroll::bar(
             body,
             leaf.projection.scroll_extent_subpixels(),
@@ -432,7 +423,7 @@ impl Runtime<'_> {
         let body = self.terminal_scroll_body(seat)?;
         let leaf = self.sessions.get(&seat)?;
         let axis = leaf.projection.horizontal();
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         termscroll::column_bar(
             body,
             axis.content_extent().0,
@@ -597,7 +588,9 @@ impl Runtime<'_> {
                 end_column: column,
             })
             .ok()?;
-        let metrics = self.window.renderer.metrics();
+        // The cell the card's anchor is measured in is the one the pane's picture was drawn at
+        // (ticket 37), not the window's.
+        let metrics = self.pane_frame_metrics(seat)?;
         let scale = metrics.scale_factor as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         let subpixels = |value: i64| value as f32 / bt_viewport::SUBPIXELS_PER_PX as f32;
@@ -644,6 +637,46 @@ impl Runtime<'_> {
         .then_some((RowHost::Terminal(seat), usize::try_from(cell).ok()?))
     }
 
+    /// **The one mutation door of a pane's text size** (ticket 37).
+    ///
+    /// The three keyboard rows (`text-larger`, `text-smaller`, `text-actual-size`), the wheel's
+    /// text-size rung and a click on the pane head's indicator all come through here, and nothing
+    /// else writes a pane's rung. It moves the rung of `seat` in the tab on screen, derives and
+    /// applies the metrics that rung now means ([`step_leaf_text_scale`]), and — only when they
+    /// moved — re-solves the panes through the resize road every geometry change already takes:
+    /// the local reflow at once when the integer grid changed, the child told at most once, with
+    /// the final grid, after the quiet boundary (and not at all when that grid is the one it
+    /// already has), and a new picture even when the grid did not change. Keyboard focus does not
+    /// move.
+    ///
+    /// `count` is how many times `step` is taken — one for a key or a click, the whole rungs a
+    /// wheel burst spent for the wheel — and the rung moves by all of them before anything is
+    /// derived, so a burst of notches is one apply and one re-solve, not one per notch.
+    pub(crate) fn step_pane_text_scale(
+        &mut self,
+        seat: SeatId,
+        step: TextStep,
+        count: u32,
+    ) -> Result<()> {
+        let active = self.window.active_tab;
+        let (gpu, renderer) = (&mut self.app.gpu, &self.window.renderer);
+        let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        let moved = step_leaf_text_scale(leaf, step, count, |scale| {
+            pane_cell_metrics(gpu, renderer, scale)
+        })?;
+        // The indicator shows the requested rung, which moves even when the clamp keeps the
+        // drawn size where it was.
+        self.refresh_chrome();
+        if !moved {
+            return self.present_chrome_change();
+        }
+        self.resize_leaves_to_layout(Instant::now(), "re-solve a pane at its new text size")?;
+        self.sync_math_layout_key();
+        self.repaint_pane_change(seat)
+    }
+
     /// `Restart shell…` — **the same seat, the same profile, the same folder**
     /// (`docs/M2-restart-shell-contract.md` §1.1).
     ///
@@ -680,7 +713,13 @@ impl Runtime<'_> {
             return Ok(());
         };
         let seed = restart_seed(&leaf.profile, leaf.session.working_directory());
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        // **The replacement is born at the old view's rung** (ticket 37): *Restart shell* keeps
+        // the pane, so it keeps its text size, and the constructor is handed the rung rather
+        // than the new leaf being repaired to it afterwards. Nothing else of the old view is
+        // carried — its selection, its frames and its resize debt belong to a transcript that
+        // is about to end. A spawn that fails leaves the old leaf exactly as it was.
+        let text_scale = leaf.text_scale;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
         else {
             return Ok(());
@@ -688,9 +727,10 @@ impl Runtime<'_> {
         let wake = &self.window.pty_wake;
         let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
         let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
+        let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?;
         self.window.restarting = Some(seat);
         let spawned = create_leaf_session(
-            &self.window.renderer,
+            view,
             body,
             LeafId {
                 tab: self.window.tabs[self.window.active_tab].id,

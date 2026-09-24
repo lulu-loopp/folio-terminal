@@ -1047,9 +1047,11 @@ mod tests {
         assert!(retained.contains(".then(|| self.window.renderer.seat_viewport())"));
         assert!(retained.contains(".get(&seat)?"));
         let redraw = method_body("redraw");
-        assert!(redraw.contains("return Some((focused_body.viewport, &frame));"));
+        // Since ticket 37 each pair is a triple: the frame travels with the metrics it is
+        // drawn at, so the formula lanes measure it in the pane's own cells.
+        assert!(redraw.contains("return Some((focused_body.viewport, &frame, metrics));"));
         assert!(redraw.contains("find(|(pane, _)| pane.seat == seat)"));
-        assert!(redraw.contains(".map(|(pane, projected)| (pane.viewport, projected))"));
+        assert!(redraw.contains(".map(|(pane, projected)| (pane.viewport, projected, metrics))"));
     }
 
     // ── the bodies these four pins are about ─────────────────────────────

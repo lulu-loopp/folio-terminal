@@ -151,7 +151,7 @@ impl Runtime<'_> {
             return None;
         }
         let now = Instant::now();
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // The button that opened the menu is the button the menu hangs off, and
         // which surface holds it is [`profile_menu_anchor`]'s whole subject —
@@ -669,13 +669,14 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {
         let seat = self.window.root_menu.seat()?;
         let (rect, choices) = self.root_menu_stand(seat)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let names = self.files_names();
         let widths = self.measure_files_names(&names);
         let head = seats::pane_head_geometry(
             rect,
             bt_layout::SeatKind::Files,
             self.seat_layout.seat_is_on_stage(seat),
+            false,
             scale,
         );
         // **The button when the head seats one, else the caption it wraps** —

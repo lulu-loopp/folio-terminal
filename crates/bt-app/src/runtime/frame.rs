@@ -1129,6 +1129,7 @@ impl Runtime<'_> {
                     viewport: seat.seat,
                     clip: seat.clip,
                     focused: seat.focused,
+                    metrics: seat.metrics,
                 }
             })
             .collect();
@@ -1293,14 +1294,17 @@ impl Runtime<'_> {
             // a lit or travelling band can make the answer visible.
             let mut math_band_trace = None;
             if self.formula_overlay_is_active() {
+                // Each frame with the metrics it was just projected at (ticket 37).
+                let tab = &self.window.tabs[active];
                 let frame_for = |seat| {
+                    let metrics = tab.sessions.get(&seat)?.metrics;
                     if seat == focused_leaf {
-                        return Some((focused_body.viewport, &frame));
+                        return Some((focused_body.viewport, &frame, metrics));
                     }
                     unfocused_frames
                         .iter()
                         .find(|(pane, _)| pane.seat == seat)
-                        .map(|(pane, projected)| (pane.viewport, projected))
+                        .map(|(pane, projected)| (pane.viewport, projected, metrics))
                 };
                 let trace = self.math_band_trace_for_present(frame_for);
                 let placement = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
@@ -1317,8 +1321,30 @@ impl Runtime<'_> {
                     .trace_perf
                     .then(|| self.math_band_trace_line(now, trace));
             }
+            // **Both construction paths carry the seat's own metrics** (ticket 37): every frame
+            // here was projected this pass from its leaf's session, which was last applied at
+            // `LeafSession::metrics`, so that is what the picture is drawn at — and what the
+            // commit below records beside it as `presented_metrics`. One list, read once, so
+            // the tables, the seat frames and the commit are handed the same pairs.
+            let frame_metrics: Vec<bt_render::CellMetrics> = {
+                let sessions = &self.window.tabs[active].sessions;
+                let focused_metrics = sessions
+                    .get(&focused_leaf)
+                    .map_or_else(|| self.window.renderer.base_metrics(), |leaf| leaf.metrics);
+                std::iter::once(focused_metrics)
+                    .chain(unfocused_frames.iter().map(|(pane, _)| {
+                        sessions
+                            .get(&pane.seat)
+                            .expect("an unfocused frame was projected from a leaf of this tab")
+                            .metrics
+                    }))
+                    .collect()
+            };
             let table_sources = Self::table_sources(
-                std::iter::once(&frame).chain(unfocused_frames.iter().map(|(_, it)| it)),
+                std::iter::once(&frame)
+                    .chain(unfocused_frames.iter().map(|(_, it)| it))
+                    .zip(frame_metrics.iter().copied()),
+                self.app.gpu.font_environment_epoch(),
             );
             hang_watch::during(hang_watch::Station::RedrawTables, || {
                 self.refresh_table_paints(&table_sources)
@@ -1328,6 +1354,7 @@ impl Runtime<'_> {
                 seat: focused_body.viewport,
                 clip: focused_body.clip,
                 frame: &frame,
+                metrics: frame_metrics[0],
                 // **The owner, not the focus** (user report + ruling, 2026-08-13).
                 // This flag is read by `seat_caret` alone, and what it is asked
                 // there is "is this the caret typing would land in" — see
@@ -1335,11 +1362,12 @@ impl Runtime<'_> {
                 // being "yes, it is the focused pane".
                 focused: self.keyboard_owner_is_a_shell(),
             });
-            for (pane, projected) in &unfocused_frames {
+            for ((pane, projected), metrics) in unfocused_frames.iter().zip(&frame_metrics[1..]) {
                 seat_frames.push(bt_render::SeatFrame {
                     seat: pane.viewport,
                     clip: pane.clip,
                     frame: projected,
+                    metrics: *metrics,
                     focused: false,
                 });
             }
@@ -1439,14 +1467,21 @@ impl Runtime<'_> {
                     // tab that lit up for a sibling of the pane holding the keyboard
                     // was the bug this pass was written to end.
                     let active = self.window.active_tab;
-                    for (pane, projected) in unfocused_frames {
+                    // Each frame and the metrics it was drawn at, recorded together: the pair is
+                    // what every pointer question about the pane reads (ticket 37).
+                    for ((pane, projected), metrics) in unfocused_frames
+                        .into_iter()
+                        .zip(frame_metrics.iter().skip(1))
+                    {
                         if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) {
                             leaf.last_presented_frame = Some(projected);
+                            leaf.presented_metrics = *metrics;
                             mark_leaf_painted(leaf);
                         }
                     }
                     if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&focused_leaf) {
                         leaf.last_presented_frame = Some(frame.clone());
+                        leaf.presented_metrics = frame_metrics[0];
                         mark_leaf_painted(leaf);
                     }
                     self.window.last_presented_frame = Some(frame);

@@ -992,7 +992,12 @@ impl CellMetrics {
     /// The row height comes out of [`LINE_HEIGHT_TO_FONT_SIZE_RATIO`] rather
     /// than from a constant, so a larger face gets a taller row and the
     /// descenders that a fixed row height would clip stay inside the cell.
-    fn measure_at(
+    ///
+    /// **The narrow measuring service** (ticket 37): every size a terminal pane is drawn at is
+    /// measured here, once, from a logical face size and a display scale — the scale is applied
+    /// inside and nowhere else, so nothing pre-multiplies by DPI or scales a measured cell after.
+    /// Products reach it through [`GpuContext::terminal_cell_metrics`]'s memo.
+    pub fn measure_at(
         font_system: &mut FontSystem,
         scale_factor: f64,
         font_size_logical_px: f32,
@@ -2727,6 +2732,36 @@ struct GlyphRefusalLog {
     reported: TextRefusals,
 }
 
+/// **Which picture of a rendered table a pane's placement is drawn from** (ticket 37).
+///
+/// A table is set in its pane's own text at its pane's own size, so one source in a pane at 80 %
+/// and in a pane at 150 % of one window is two pictures. The identity is the source, the face
+/// size it was laid out at and the font environment it was laid out in — the paint's owner
+/// (`bt_app`'s `Runtime::refresh_table_paints`) keys its map the same way, and
+/// [`WindowRenderer::set_table_blocks`] takes the map it built.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+pub struct TableBlockKey {
+    /// The block's render source.
+    pub source: String,
+    /// `font_size_px` of the metrics the table was laid out for, as bits.
+    pub font_size_bits: u32,
+    /// [`GpuContext::font_environment_epoch`] when it was laid out.
+    pub font_environment: u64,
+}
+
+impl TableBlockKey {
+    /// The picture of `source` a pane drawn at `metrics` in font environment `font_environment`
+    /// needs.
+    #[must_use]
+    pub fn of(source: &str, metrics: CellMetrics, font_environment: u64) -> Self {
+        Self {
+            source: source.to_owned(),
+            font_size_bits: metrics.font_size_px.to_bits(),
+            font_environment,
+        }
+    }
+}
+
 /// One rendered table block's picture, in the block's own coordinates.
 ///
 /// **Coordinates, not pixels, and that is the whole of what makes a table different from a
@@ -3317,9 +3352,9 @@ fn buffer_resident_bytes(buffer: &Buffer) -> usize {
 }
 
 fn shape_entry_resident_bytes(key: &ShapeKey, buffer: &Buffer, value_bytes: usize) -> usize {
-    size_of::<Arc<ShapeKey>>()
+    size_of::<Arc<SizedShapeKey>>()
         .saturating_add(3 * size_of::<usize>())
-        .saturating_add(size_of::<ShapeKey>())
+        .saturating_add(size_of::<SizedShapeKey>())
         .saturating_add(key.text.heap_bytes())
         .saturating_add(value_bytes)
         .saturating_add(buffer_resident_bytes(buffer))
@@ -3403,6 +3438,17 @@ struct NarrowGlyph {
     color: Color,
 }
 
+/// What a cell asks the shaping caches for: the cluster and its style.
+///
+/// **Not the whole of a cache's key** (ticket 37). The buffer a cache hands back is laid out at
+/// one em and its offsets are measured against one cell — its width, its height, its baseline and
+/// the primary face's cap geometry — so the same `M` in a pane at 150 % and in a pane at 100 % of
+/// one window is two shapes. The caches file an entry under [`SizedShapeKey`], this key plus
+/// every measured input of the placement, and a caller cannot build the one without the other:
+/// `get_or_shape` takes the metrics it shapes at and keys by them itself. The font environment is
+/// the other input, and it is held by a clearing contract rather than a key field:
+/// [`WindowRenderer::adopt_metrics`] empties both caches whenever
+/// [`GpuContext::set_terminal_font`] or a display change moves it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ShapeKey {
     /// The cluster itself, inline. A key is built for *every* non-blank cell on
@@ -3411,6 +3457,13 @@ struct ShapeKey {
     text: CellText,
     bold: bool,
     italic: bool,
+}
+
+/// A shaping cache's own key: the cluster, and the metrics it was shaped and placed at.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SizedShapeKey {
+    shape: ShapeKey,
+    metrics: RowMetricsKey,
 }
 
 struct CachedNarrowShape {
@@ -3441,7 +3494,7 @@ impl ShapeCacheCounters {
 }
 
 struct NarrowShapingCache {
-    entries: ByteLru<ShapeKey, CachedNarrowShape>,
+    entries: ByteLru<SizedShapeKey, CachedNarrowShape>,
     track_perf: bool,
     counters: ShapeCacheCounters,
     #[cfg(test)]
@@ -3481,7 +3534,11 @@ impl NarrowShapingCache {
         metrics: CellMetrics,
         cjk_families: &TerminalCjkFamilies,
     ) -> (Arc<Buffer>, f32, f32) {
-        if let Some(cached) = self.entries.get(&key) {
+        let sized = SizedShapeKey {
+            shape: key,
+            metrics: metrics.into(),
+        };
+        if let Some(cached) = self.entries.get(&sized) {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
@@ -3494,7 +3551,7 @@ impl NarrowShapingCache {
 
         let miss_started = self.track_perf.then(Instant::now);
         let (mut buffer, family, size_policy) = shape_narrow_buffer_for_key(
-            &key,
+            &sized.shape,
             font_system,
             swash_cache,
             metrics,
@@ -3511,7 +3568,8 @@ impl NarrowShapingCache {
                     metrics.cell_width_px,
                 );
                 if em_scale < 1.0 {
-                    buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale, family);
+                    buffer =
+                        shape_narrow_buffer(&sized.shape, font_system, metrics, em_scale, family);
                 }
                 let glyph_baseline_px = buffer
                     .layout_runs()
@@ -3531,7 +3589,8 @@ impl NarrowShapingCache {
                     metrics.primary_cap_height_px,
                 );
                 if (em_scale - 1.0).abs() > f32::EPSILON {
-                    buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale, family);
+                    buffer =
+                        shape_narrow_buffer(&sized.shape, font_system, metrics, em_scale, family);
                 }
                 align_ink_offsets(
                     &buffer,
@@ -3551,9 +3610,9 @@ impl NarrowShapingCache {
         };
         let buffer = Arc::new(buffer);
         let resident_bytes =
-            shape_entry_resident_bytes(&key, &buffer, size_of::<CachedNarrowShape>());
+            shape_entry_resident_bytes(&sized.shape, &buffer, size_of::<CachedNarrowShape>());
         let (_, evictions) = self.entries.insert(
-            key,
+            sized,
             CachedNarrowShape {
                 buffer: Arc::clone(&buffer),
                 left_offset_px,
@@ -3581,7 +3640,7 @@ struct CachedWideShape {
 }
 
 struct WideShapingCache {
-    entries: ByteLru<ShapeKey, CachedWideShape>,
+    entries: ByteLru<SizedShapeKey, CachedWideShape>,
     track_perf: bool,
     counters: ShapeCacheCounters,
     #[cfg(test)]
@@ -3621,7 +3680,11 @@ impl WideShapingCache {
         metrics: CellMetrics,
         cjk_families: &TerminalCjkFamilies,
     ) -> (Arc<Buffer>, f32, f32) {
-        if let Some(cached) = self.entries.get(&key) {
+        let sized = SizedShapeKey {
+            shape: key,
+            metrics: metrics.into(),
+        };
+        if let Some(cached) = self.entries.get(&sized) {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
@@ -3634,7 +3697,7 @@ impl WideShapingCache {
 
         let miss_started = self.track_perf.then(Instant::now);
         let (buffer, size_policy) = shape_wide_buffer_for_key(
-            &key,
+            &sized.shape,
             font_system,
             swash_cache,
             metrics,
@@ -3663,9 +3726,9 @@ impl WideShapingCache {
         };
         let buffer = Arc::new(buffer);
         let resident_bytes =
-            shape_entry_resident_bytes(&key, &buffer, size_of::<CachedWideShape>());
+            shape_entry_resident_bytes(&sized.shape, &buffer, size_of::<CachedWideShape>());
         let (_, evictions) = self.entries.insert(
-            key,
+            sized,
             CachedWideShape {
                 buffer: Arc::clone(&buffer),
                 left_offset_px,
@@ -4284,6 +4347,61 @@ struct SeatTextSlot {
     status_text_renderer: TextRenderer,
 }
 
+/// **The memo of the one measuring service** (ticket 37): the cell metrics of a face size at a
+/// display scale, keyed by (font environment, size bits, scale bits).
+///
+/// Derived and discardable: an entry is what [`CellMetrics::measure_at`] answers for its key, and
+/// nothing reads it as intent. **Bounded**, at [`Self::CAPACITY`] entries, and emptied whole when
+/// it would grow past them. **Cleared when the font environment moves** — the epoch
+/// [`GpuContext::set_terminal_font`] already advances — so no second epoch is invented beside it.
+#[derive(Debug, Default)]
+pub struct CellMetricsMemo {
+    epoch: u64,
+    entries: HashMap<(u32, u64), CellMetrics>,
+}
+
+impl CellMetricsMemo {
+    /// Twelve rungs at a few scales and a few Settings sizes, with room to spare.
+    pub const CAPACITY: usize = 64;
+
+    /// The metrics of `font_size_logical_px` at `scale_factor` in font environment `epoch`,
+    /// measured on the first ask and remembered for the next.
+    pub fn measure(
+        &mut self,
+        font_system: &mut FontSystem,
+        epoch: u64,
+        scale_factor: f64,
+        font_size_logical_px: f32,
+    ) -> Result<CellMetrics, RenderError> {
+        if self.epoch != epoch {
+            self.entries.clear();
+            self.epoch = epoch;
+        }
+        let key = (font_size_logical_px.to_bits(), scale_factor.to_bits());
+        if let Some(metrics) = self.entries.get(&key) {
+            return Ok(*metrics);
+        }
+        let metrics = CellMetrics::measure_at(font_system, scale_factor, font_size_logical_px)?;
+        if self.entries.len() >= Self::CAPACITY {
+            self.entries.clear();
+        }
+        self.entries.insert(key, metrics);
+        Ok(metrics)
+    }
+
+    /// How many sizes are remembered — for the memo's own tests.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether nothing is remembered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// Everything one process's GPU costs once — the device, the shared glyph
 /// atlas, the two pipelines, the font system — and nothing that belongs to a
 /// single window.
@@ -4330,6 +4448,8 @@ pub struct GpuContext {
     font_system: FontSystem,
     /// Changes when fonts or family mappings change; scopes measurement reuse.
     font_environment_epoch: u64,
+    /// The measuring service's memo — see [`CellMetricsMemo`].
+    cell_metrics: CellMetricsMemo,
     /// Resolved, per-script CJK families plus the user's stored preference.
     terminal_cjk_families: TerminalCjkFamilies,
     swash_cache: SwashCache,
@@ -4996,7 +5116,12 @@ pub struct WindowRenderer {
     /// no moment at which they could disagree, because the only writer is the
     /// constructor.
     max_texture_dimension_2d: u32,
-    metrics: CellMetrics,
+    /// **The window's base metrics** (ticket 37): the Settings face size measured at this
+    /// window's display scale. What chrome that follows the Settings size reads, through
+    /// [`Self::base_metrics`] — and never what a terminal pane is drawn at. A pane's own metrics
+    /// arrive with its [`SeatFrame`], derived from its rung by the pane's owner, and every
+    /// per-seat helper below takes them as a parameter.
+    base_metrics: CellMetrics,
     /// This window's share of [`RendererInitTimings`] — configuring its own
     /// swapchain, and measuring the cell against its own scale factor. The rest
     /// of that report is the device layer's and is charged once per process.
@@ -5034,7 +5159,7 @@ pub struct WindowRenderer {
     /// tracing; nothing in this module branches on it.
     preview_text_frame: PreviewTextFrame,
     /// This frame's table pictures, keyed by the source text of the block each belongs to.
-    table_blocks: HashMap<String, TableBlockPaint>,
+    table_blocks: HashMap<TableBlockKey, TableBlockPaint>,
     preview_text_renderer: TextRenderer,
     trace_perf: bool,
     perf_frame: u64,
@@ -5212,6 +5337,15 @@ pub struct SeatFrame<'a> {
     /// the flight lands.
     pub clip: SeatViewport,
     pub frame: &'a ViewportFrame,
+    /// **The metrics this seat's picture is drawn at** (ticket 37) — the pane's own, derived
+    /// from its rung by its owner, and never the window's.
+    ///
+    /// Paired with [`Self::frame`] because the two are one picture: the frame's rows were
+    /// projected at this cell height and its `layout_key` carries this face size, and every
+    /// helper that turns the frame into pixels — the shaping, the atlas preparation, the status
+    /// text, the procedural glyphs, the backgrounds, the caret, the selection, the search marks,
+    /// the formulas and the tables — takes these as a parameter rather than asking the window.
+    pub metrics: CellMetrics,
     /// Whether this is the seat holding keyboard focus.
     ///
     /// It is what the caret is drawn from. A window nobody is looking at fades
@@ -6828,6 +6962,7 @@ impl GpuContext {
             max_texture_dimension_2d,
             font_system,
             font_environment_epoch: 1,
+            cell_metrics: CellMetricsMemo::default(),
             terminal_cjk_families,
             swash_cache,
             glyphon_cache,
@@ -6939,6 +7074,25 @@ impl GpuContext {
     #[must_use]
     pub fn font_environment_epoch(&self) -> u64 {
         self.font_environment_epoch
+    }
+
+    /// **The terminal's cell metrics at one face size and one display scale** — the measuring
+    /// service every pane size goes through (ticket 37), memoised by
+    /// ([`Self::font_environment_epoch`], size, scale).
+    ///
+    /// A pane at 150 % beside a pane at 100 % asks for two sizes; a wheel ramp asks for the same
+    /// dozen again and again, and after the first ask of each it costs a map lookup.
+    pub fn terminal_cell_metrics(
+        &mut self,
+        scale_factor: f64,
+        font_size_logical_px: f32,
+    ) -> Result<CellMetrics, RenderError> {
+        self.cell_metrics.measure(
+            &mut self.font_system,
+            self.font_environment_epoch,
+            scale_factor,
+            font_size_logical_px,
+        )
     }
 
     /// The grid's face size in logical pixels, as last set.
@@ -7885,7 +8039,7 @@ impl WindowRenderer {
             math_texture_refusals: 0,
             textureless_math_blocks: 0,
             max_texture_dimension_2d: gpu.max_texture_dimension_2d,
-            metrics,
+            base_metrics: metrics,
             surface_configure_time,
             font_metrics_time,
             text_rows: Vec::new(),
@@ -7921,6 +8075,7 @@ impl WindowRenderer {
     /// Read diagnostics from this present's named, lit band. No GPU access.
     pub fn math_band_trace(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         named: &MathBlockAnchor,
@@ -7930,7 +8085,7 @@ impl WindowRenderer {
                 && placement.toolbar_visible
                 && placement.anchor.same_block(named)
         })?;
-        let geometry = math_block_geometry_px(self.metrics, seat, frame, placement)?;
+        let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
         Some(MathBandTrace {
             seat: MathToolBoxes {
                 anchor: placement.anchor.clone(),
@@ -7945,12 +8100,47 @@ impl WindowRenderer {
         })
     }
 
-    pub fn metrics(&self) -> CellMetrics {
-        self.metrics
+    /// **The window's base metrics** — the Settings face size at this window's display scale
+    /// (ticket 37).
+    ///
+    /// The named base/chrome interface, and the only one: chrome that follows the Settings size
+    /// and stays at window scale reads it (the chrome scroll distance, a flash band's padding).
+    /// **A terminal pane is never drawn, hit or sized from it**: a pane's metrics are derived from
+    /// its own rung by its owner and arrive here with its [`SeatFrame`]. What wants only the
+    /// display scale asks [`Self::scale_factor`] or [`Self::dpi_milli`], not this.
+    /// `text_size_tests::no_pane_reads_the_windows_metrics` names every reader.
+    #[must_use]
+    pub fn base_metrics(&self) -> CellMetrics {
+        self.base_metrics
     }
 
-    pub fn ime_cursor_area(&self, frame: &ViewportFrame) -> ImeCursorArea {
-        ime_cursor_area_for_metrics(self.metrics, frame)
+    /// This window's display scale — what every chrome rectangle is multiplied by.
+    #[must_use]
+    pub fn scale_factor(&self) -> f64 {
+        self.base_metrics.scale_factor
+    }
+
+    /// [`Self::scale_factor`] in thousandths, as layout keys and the seat solver carry it.
+    #[must_use]
+    pub fn dpi_milli(&self) -> NonZeroU32 {
+        self.base_metrics.dpi_milli()
+    }
+
+    /// **A terminal pane's metrics at an effective face size**, measured at this window's display
+    /// scale through the one measuring service ([`GpuContext::terminal_cell_metrics`]).
+    ///
+    /// The size is the pane's effective logical size, derived from its rung by its owner; the
+    /// scale is applied once, inside the measurement, and never by the caller.
+    pub fn pane_cell_metrics(
+        &self,
+        gpu: &mut GpuContext,
+        font_size_logical_px: f32,
+    ) -> Result<CellMetrics, RenderError> {
+        gpu.terminal_cell_metrics(self.base_metrics.scale_factor, font_size_logical_px)
+    }
+
+    pub fn ime_cursor_area(&self, metrics: CellMetrics, frame: &ViewportFrame) -> ImeCursorArea {
+        ime_cursor_area_for_metrics(metrics, frame)
     }
 
     /// **Where one named band's floor and its two marks stand**, in the pane
@@ -7984,11 +8174,12 @@ impl WindowRenderer {
     #[must_use]
     pub fn math_tool_boxes(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         hovered: &MathBlockAnchor,
     ) -> Option<MathToolBoxes> {
-        math_tool_boxes_for(self.metrics, seat, frame, hovered)
+        math_tool_boxes_for(metrics, seat, frame, hovered)
     }
 
     /// **Where the named band's rows stand on this picture** — see
@@ -8000,17 +8191,19 @@ impl WindowRenderer {
     /// up.
     pub fn math_band_face(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         named: &MathBlockAnchor,
     ) -> Option<MathBandFace> {
-        math_band_face_for(self.metrics, seat, frame, named)
+        math_band_face_for(metrics, seat, frame, named)
     }
 
     /// The pointer's half of [`Self::math_tool_boxes`], cut to the same `seat`
     /// and for the same reason (RC-2).
     pub fn math_hit_test(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         x: f64,
@@ -8018,7 +8211,7 @@ impl WindowRenderer {
     ) -> Option<MathHit> {
         let point = [x as f32, y as f32];
         if let Some(failure) = frame.math_failures.iter().rev().find(|failure| {
-            self.math_failure_geometry(seat, frame, failure)
+            self.math_failure_geometry(metrics, seat, frame, failure)
                 .is_some_and(|(_, hit)| point_in_rect(point, hit))
         }) {
             return Some(MathHit {
@@ -8030,7 +8223,7 @@ impl WindowRenderer {
             if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math {
                 return None;
             }
-            let geometry = self.math_block_geometry(seat, frame, placement)?;
+            let geometry = self.math_block_geometry(metrics, seat, frame, placement)?;
             let target = if geometry.eye.is_some_and(|rect| point_in_rect(point, rect)) {
                 MathHitTarget::ToggleSource
             } else if geometry.copy.is_some_and(|rect| point_in_rect(point, rect)) {
@@ -8105,7 +8298,7 @@ impl WindowRenderer {
             retained_revision: self.retained_revision,
             surface_generation: self.surface_generation,
             size: (self.config.width, self.config.height),
-            scale_factor: self.metrics.scale_factor.to_bits(),
+            scale_factor: self.base_metrics.scale_factor.to_bits(),
             font_revision: self.font_revision,
             theme_revision: theme_revision(),
             cursor_style: current_cursor_style(),
@@ -8146,8 +8339,8 @@ impl WindowRenderer {
         peek_thumbnail_extent(
             seat.width as f32,
             seat.height as f32,
-            self.metrics.padding_px,
-            self.metrics.scale_factor as f32,
+            self.base_metrics.padding_px,
+            self.base_metrics.scale_factor as f32,
             image_width_px,
             image_height_px,
         )
@@ -8392,7 +8585,7 @@ impl WindowRenderer {
     /// method never holds, while the source is on the placement the renderer is already reading.
     /// Two panes showing the same table are then showing one picture, which is also correct — and
     /// the caller owns staleness, since it hands the whole map over every time anything moves.
-    pub fn set_table_blocks(&mut self, blocks: HashMap<String, TableBlockPaint>) -> bool {
+    pub fn set_table_blocks(&mut self, blocks: HashMap<TableBlockKey, TableBlockPaint>) -> bool {
         let changed = self.table_blocks != blocks;
         self.table_blocks = blocks;
         self.retained_revision = self
@@ -8930,13 +9123,9 @@ impl WindowRenderer {
         gpu: &mut GpuContext,
         scale_factor: f64,
     ) -> Result<CellMetrics, RenderError> {
-        let metrics = CellMetrics::measure_at(
-            &mut gpu.font_system,
-            scale_factor,
-            gpu.terminal_font_size_logical_px,
-        )?;
+        let metrics = gpu.terminal_cell_metrics(scale_factor, gpu.terminal_font_size_logical_px)?;
         self.adopt_metrics(gpu, metrics);
-        Ok(self.metrics)
+        Ok(self.base_metrics)
     }
 
     /// Re-measure and re-shape after [`GpuContext::set_terminal_font`] moved the
@@ -8955,13 +9144,12 @@ impl WindowRenderer {
     /// does not move the window, so the monitor it is on is the monitor it was
     /// already on.
     pub fn apply_font_change(&mut self, gpu: &mut GpuContext) -> Result<CellMetrics, RenderError> {
-        let metrics = CellMetrics::measure_at(
-            &mut gpu.font_system,
-            self.metrics.scale_factor,
+        let metrics = gpu.terminal_cell_metrics(
+            self.base_metrics.scale_factor,
             gpu.terminal_font_size_logical_px,
         )?;
         self.adopt_metrics(gpu, metrics);
-        Ok(self.metrics)
+        Ok(self.base_metrics)
     }
 
     /// Take a freshly measured grid and throw away everything that described
@@ -8972,7 +9160,7 @@ impl WindowRenderer {
     /// glyphs at the wrong size, from a cache whose key did not happen to
     /// include the thing that moved.
     fn adopt_metrics(&mut self, gpu: &mut GpuContext, metrics: CellMetrics) {
-        self.metrics = metrics;
+        self.base_metrics = metrics;
         self.text_rows.clear();
         self.status_overlay = None;
         self.composed_row_cache.clear();
@@ -9038,6 +9226,9 @@ impl WindowRenderer {
                 // out in, and the two calls below take the values they always did.
                 clip: self.seat,
                 frame,
+                // The single-seat door is a replay's or a probe's, whose one pane has no rung of
+                // its own: it is drawn at the window's base size, 100 %.
+                metrics: self.base_metrics,
                 focused: true,
             }],
             trigger,
@@ -9222,7 +9413,7 @@ impl WindowRenderer {
             let frame = entry.frame;
             self.seat = entry.seat;
             phase(PresentPhase::TextShaping);
-            let text_stats = self.prepare_text_rows(gpu, frame)?;
+            let text_stats = self.prepare_text_rows(gpu, entry.metrics, frame)?;
             rows_prepared_at = Instant::now();
             // `text_rows` and `status_overlay` stay single slots on purpose:
             // they are staging for the prepare that immediately follows, and
@@ -9240,7 +9431,7 @@ impl WindowRenderer {
                     &self.text_viewport,
                     &mut gpu.swash_cache,
                     &self.text_rows,
-                    self.metrics,
+                    entry.metrics,
                     frame,
                     entry.seat,
                 ) {
@@ -9253,7 +9444,7 @@ impl WindowRenderer {
                         &self.text_viewport,
                         &mut gpu.swash_cache,
                         self.status_overlay.as_deref(),
-                        self.metrics,
+                        entry.metrics,
                         frame,
                         entry.seat.width as f32,
                         entry.seat,
@@ -9280,7 +9471,7 @@ impl WindowRenderer {
                     TextLane::Grid,
                     &mut gpu.font_system,
                     &mut gpu.swash_cache,
-                    grid_text_areas(&self.text_rows, self.metrics, frame, entry.seat),
+                    grid_text_areas(&self.text_rows, entry.metrics, frame, entry.seat),
                 );
                 census.record(
                     TextLane::Grid,
@@ -9288,7 +9479,7 @@ impl WindowRenderer {
                     &mut gpu.swash_cache,
                     status_text_areas(
                         self.status_overlay.as_deref(),
-                        self.metrics,
+                        entry.metrics,
                         frame,
                         entry.seat.width as f32,
                         entry.seat,
@@ -9307,8 +9498,12 @@ impl WindowRenderer {
             // Math draws first: the hover dim rect decorates a block's raster, so it must know which
             // rasters this frame actually put on screen before it decides to darken anything.
             phase(PresentPhase::Layout);
-            let math_batch = self.prepare_math_draws(gpu, frame);
-            table_block_bodies.extend(self.table_block_bodies(frame));
+            let math_batch = self.prepare_math_draws(gpu, entry.metrics, frame);
+            table_block_bodies.extend(self.table_block_bodies(
+                entry.metrics,
+                gpu.font_environment_epoch,
+                frame,
+            ));
             math_prepared_at = Instant::now();
             // **The gate again, where this seat starts asking the device for
             // memory** (§7.1.3m ⑤″). The one at the top of this function
@@ -9327,6 +9522,7 @@ impl WindowRenderer {
                 grounds: ground_rects,
                 ink: rects,
             } = self.rectangles(
+                entry.metrics,
                 frame,
                 &math_batch.drawn,
                 self.window_focused && entry.focused,
@@ -9348,7 +9544,7 @@ impl WindowRenderer {
                 .status_text
                 .as_deref()
                 .and_then(|status| {
-                    status_overlay_geometry(self.metrics, frame, status, entry.seat.width as f32)
+                    status_overlay_geometry(entry.metrics, frame, status, entry.seat.width as f32)
                 })
                 .map(|geometry| self.float_tag_rects(geometry.rect))
                 .unwrap_or_default();
@@ -9362,8 +9558,8 @@ impl WindowRenderer {
             // The wash first, the block's own chrome after it: see
             // [`Self::math_selection_wash_rectangles`] for why this buffer's order is the
             // z-order that matters here.
-            let mut math_overlays = self.math_selection_wash_rectangles(frame);
-            math_overlays.extend(self.math_overlay_rectangles(frame));
+            let mut math_overlays = self.math_selection_wash_rectangles(entry.metrics, frame);
+            math_overlays.extend(self.math_overlay_rectangles(entry.metrics, frame));
             let overlay_data = if math_overlays.is_empty() {
                 empty_rect.as_slice()
             } else {
@@ -10468,11 +10664,12 @@ impl WindowRenderer {
     fn prepare_text_rows(
         &mut self,
         gpu: &mut GpuContext,
+        metrics: CellMetrics,
         frame: &ViewportFrame,
     ) -> Result<TextPreparationStats, RenderError> {
         prepare_text_rows_with_cjk(
             frame,
-            self.metrics,
+            metrics,
             &mut self.text_rows,
             &mut self.status_overlay,
             &mut self.composed_row_cache,
@@ -10486,7 +10683,12 @@ impl WindowRenderer {
         )
     }
 
-    fn prepare_math_draws(&mut self, gpu: &mut GpuContext, frame: &ViewportFrame) -> MathDrawBatch {
+    fn prepare_math_draws(
+        &mut self,
+        gpu: &mut GpuContext,
+        metrics: CellMetrics,
+        frame: &ViewportFrame,
+    ) -> MathDrawBatch {
         // UI-UX §7.5c, M1.9a ruling: do not invent automatic math line breaking. With terminal
         // wrapping on (the current native default), the pane clips a left-aligned, max-content
         // raster and therefore acts as the block's horizontal viewport. Scrolling controls are
@@ -10495,10 +10697,10 @@ impl WindowRenderer {
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
         let mut drawn = HashSet::new();
-        let pane_left = self.metrics.padding_px;
-        let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
+        let pane_left = metrics.padding_px;
+        let pane_right = (pane_left + frame.columns.get() as f32 * metrics.cell_width_px)
             .min(self.seat.width as f32);
-        let pane_top = self.metrics.padding_px;
+        let pane_top = metrics.padding_px;
         let pane_bottom = self.seat.height as f32;
 
         for (index, placement) in frame.math_blocks.iter().enumerate() {
@@ -10527,7 +10729,8 @@ impl WindowRenderer {
                 self.note_textureless_block(gpu, key, placement.artifact.rgba.len());
                 continue;
             };
-            let Some(geometry) = self.math_block_geometry(self.seat, frame, placement) else {
+            let Some(geometry) = self.math_block_geometry(metrics, self.seat, frame, placement)
+            else {
                 continue;
             };
             drawn.insert(index);
@@ -10539,7 +10742,7 @@ impl WindowRenderer {
             let block_top = if placement.artifact.mode == MathMode::Inline {
                 pane_top
                     + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32
-                    + self.metrics.ascii_baseline_px
+                    + metrics.ascii_baseline_px
                     - placement.artifact.baseline_subpixels as f32 / SUBPIXELS_PER_PX as f32
             } else {
                 pane_top
@@ -10550,7 +10753,7 @@ impl WindowRenderer {
                         / SUBPIXELS_PER_PX as f32
             };
             let block_left_px = math_block_left_px(
-                self.metrics,
+                metrics,
                 placement.left_subpixels,
                 math_block_takes_the_left_indent(placement),
             );
@@ -10655,8 +10858,8 @@ impl WindowRenderer {
             overlay.seat.height as f32,
             self.config.width as f32,
             self.config.height as f32,
-            self.metrics.padding_px,
-            self.metrics.scale_factor as f32,
+            self.base_metrics.padding_px,
+            self.base_metrics.scale_factor as f32,
             overlay.width_px,
             overlay.height_px,
             overlay.pointer_x,
@@ -10735,21 +10938,25 @@ impl WindowRenderer {
     /// terminal is showing, with the round's antialiasing on both of its edges
     /// instead of only the outer one.
     fn peek_box_rects(&self, layout: &PeekBoxLayout) -> Vec<RectInstance> {
-        peek_box_fills(layout, chrome_palette(), self.metrics.scale_factor as f32)
-            .into_iter()
-            .map(|fill| {
-                // Normalized by the surface, not by `self.seat`: the flyout is a floating window
-                // over the whole window, and its rectangles arrive here already in the window's
-                // own pixels.
-                surface_pixel_rect_with_alpha(
-                    fill.rect,
-                    fill.color,
-                    fill.alpha,
-                    self.config.width,
-                    self.config.height,
-                )
-            })
-            .collect()
+        peek_box_fills(
+            layout,
+            chrome_palette(),
+            self.base_metrics.scale_factor as f32,
+        )
+        .into_iter()
+        .map(|fill| {
+            // Normalized by the surface, not by `self.seat`: the flyout is a floating window
+            // over the whole window, and its rectangles arrive here already in the window's
+            // own pixels.
+            surface_pixel_rect_with_alpha(
+                fill.rect,
+                fill.color,
+                fill.alpha,
+                self.config.width,
+                self.config.height,
+            )
+        })
+        .collect()
     }
 
     /// Upload and place every chrome mark, in whole-surface pixels.
@@ -11045,11 +11252,12 @@ impl WindowRenderer {
     /// pane happens to have the keyboard.
     fn math_block_geometry(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         placement: &MathBlockPlacement,
     ) -> Option<MathBlockGeometry> {
-        math_block_geometry_px(self.metrics, seat, frame, placement)
+        math_block_geometry_px(metrics, seat, frame, placement)
     }
 
     /// This seat's rendered tables, turned into bodies in whole-window coordinates.
@@ -11060,13 +11268,18 @@ impl WindowRenderer {
     /// with that box then differs: a raster is a quad with a texture on it, and a table is the
     /// fills and the text its layout already decided, translated to the box's corner and cropped
     /// by the clip the body carries.
-    fn table_block_bodies(&self, frame: &ViewportFrame) -> Vec<PreviewBody> {
+    fn table_block_bodies(
+        &self,
+        metrics: CellMetrics,
+        font_environment: u64,
+        frame: &ViewportFrame,
+    ) -> Vec<PreviewBody> {
         if self.table_blocks.is_empty() {
             return Vec::new();
         }
         let origin_x = self.seat.x as f32;
         let origin_y = self.seat.y as f32;
-        let pane_top = self.metrics.padding_px;
+        let pane_top = metrics.padding_px;
         frame
             .math_blocks
             .iter()
@@ -11075,10 +11288,14 @@ impl WindowRenderer {
                     && placement.display == MathBlockDisplay::Rendered
             })
             .filter_map(|placement| {
-                let paint = self.table_blocks.get(&placement.artifact.source)?;
-                let geometry = self.math_block_geometry(self.seat, frame, placement)?;
+                let paint = self.table_blocks.get(&TableBlockKey::of(
+                    &placement.artifact.source,
+                    metrics,
+                    font_environment,
+                ))?;
+                let geometry = self.math_block_geometry(metrics, self.seat, frame, placement)?;
                 let indent = math_block_takes_the_left_indent(placement);
-                let left = math_block_left_px(self.metrics, placement.left_subpixels, indent)
+                let left = math_block_left_px(metrics, placement.left_subpixels, indent)
                     - placement.horizontal_scroll_px as f32;
                 let top = pane_top
                     + placement
@@ -11133,6 +11350,7 @@ impl WindowRenderer {
     /// the focused pane is a press that lands somewhere else.
     fn math_failure_geometry(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         placement: &bt_viewport::MathFailurePlacement,
@@ -11140,10 +11358,10 @@ impl WindowRenderer {
         if !frame.drawable_interval_overlaps(placement.top_subpixels, placement.height_subpixels) {
             return None;
         }
-        let pane_left = self.metrics.padding_px;
-        let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
-            .min(seat.width as f32);
-        let pane_top = self.metrics.padding_px;
+        let pane_left = metrics.padding_px;
+        let pane_right =
+            (pane_left + frame.columns.get() as f32 * metrics.cell_width_px).min(seat.width as f32);
+        let pane_top = metrics.padding_px;
         let pane_bottom = seat.height as f32;
         let raw_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
         let raw_bottom = raw_top + placement.height_subpixels as f32 / SUBPIXELS_PER_PX as f32;
@@ -11152,7 +11370,7 @@ impl WindowRenderer {
         if bottom <= top || pane_right <= pane_left {
             return None;
         }
-        let scale = self.metrics.scale_factor as f32;
+        let scale = metrics.scale_factor as f32;
         let marker_right = pane_right - scale;
         let marker_left = (marker_right - 2.0 * scale).max(pane_left);
         let inset = (4.0 * scale).min((bottom - top) / 3.0);
@@ -11418,6 +11636,7 @@ impl WindowRenderer {
     /// selection over glass goes half-transparent.
     fn rectangles(
         &self,
+        metrics: CellMetrics,
         frame: &ViewportFrame,
         drawn_math_blocks: &HashSet<usize>,
         seat_focused: bool,
@@ -11436,7 +11655,7 @@ impl WindowRenderer {
             let (_, background) = resolve_colors(&cell.style);
             if background != default_background() {
                 grounds.push(premultiplied_by_ground(
-                    self.cell_rect(frame, index / columns, index % columns, background),
+                    self.cell_rect(metrics, frame, index / columns, index % columns, background),
                     ground_alpha,
                 ));
             }
@@ -11450,6 +11669,7 @@ impl WindowRenderer {
             let end = span.end_column.min(frame.columns.get()) as usize;
             if end > start && (span.row as usize) < drawable_rows {
                 rects.push(self.cell_rect_span(
+                    metrics,
                     frame,
                     span,
                     start,
@@ -11469,8 +11689,7 @@ impl WindowRenderer {
         // happens in the projection — `rounded_rect_coverage` on a five-cell run
         // rounds the run's own two ends, and rounding every cell would draw four
         // beads with pinched joins between them.
-        let match_radius =
-            (SEARCH_MATCH_RADIUS_LOGICAL_PX * self.metrics.scale_factor as f32).max(0.0);
+        let match_radius = (SEARCH_MATCH_RADIUS_LOGICAL_PX * metrics.scale_factor as f32).max(0.0);
         for (spans, ground) in [
             (&frame.search_spans, search_match_rgb()),
             (&frame.current_search_spans, search_current_rgb()),
@@ -11481,8 +11700,7 @@ impl WindowRenderer {
                 if end <= start || (span.row as usize) >= drawable_rows {
                     continue;
                 }
-                let bounds =
-                    selection_span_bounds_px(self.metrics, frame, span, start, end - start);
+                let bounds = selection_span_bounds_px(metrics, frame, span, start, end - start);
                 rects.extend(rounded_rect_coverage(bounds, match_radius).into_iter().map(
                     |entry| {
                         self.pixel_rect_with_coverage(
@@ -11521,10 +11739,11 @@ impl WindowRenderer {
         // over them. That was already true of the scrim it replaces; it matters
         // far more now that the fill is opaque.
         let ground_radius =
-            (PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX * self.metrics.scale_factor as f32).max(0.0);
+            (PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX * metrics.scale_factor as f32).max(0.0);
         for (index, placement) in frame.math_blocks.iter().enumerate() {
             if math_block_ground_is_drawn(placement, drawn_math_blocks.contains(&index))
-                && let Some(geometry) = self.math_block_geometry(self.seat, frame, placement)
+                && let Some(geometry) =
+                    self.math_block_geometry(metrics, self.seat, frame, placement)
             {
                 rects.extend(
                     rounded_rect_coverage(geometry.block, ground_radius)
@@ -11543,7 +11762,9 @@ impl WindowRenderer {
             }
         }
         for failure in &frame.math_failures {
-            if let Some((marker, _)) = self.math_failure_geometry(self.seat, frame, failure) {
+            if let Some((marker, _)) =
+                self.math_failure_geometry(metrics, self.seat, frame, failure)
+            {
                 rects.push(self.pixel_rect_with_coverage(
                     marker[0],
                     marker[1],
@@ -11555,7 +11776,7 @@ impl WindowRenderer {
             }
         }
         if let Some(caret) = seat_caret(
-            self.metrics,
+            metrics,
             frame,
             seat_focused,
             self.cursor_blink_visible,
@@ -11583,7 +11804,7 @@ impl WindowRenderer {
             }
             let row = index / columns;
             let column = index % columns;
-            let [left, top, right, bottom] = frame_cell_bounds_px(self.metrics, frame, row, column);
+            let [left, top, right, bottom] = frame_cell_bounds_px(metrics, frame, row, column);
             let Some(geometry) = procedural::geometry(
                 character,
                 left,
@@ -11597,7 +11818,7 @@ impl WindowRenderer {
                 // was before the size became a setting. A DPI change and a Font
                 // size change both move `font_size_px`, and both should thicken
                 // these rules by the same factor.
-                self.metrics.font_size_px / DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX,
+                metrics.font_size_px / DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX,
             ) else {
                 continue;
             };
@@ -11620,12 +11841,11 @@ impl WindowRenderer {
             if cell.style.flags.contains(CellFlags::UNDERLINE) {
                 let row = index / columns;
                 let column = index % columns;
-                let [left, _, right, bottom] =
-                    frame_cell_bounds_px(self.metrics, frame, row, column);
+                let [left, _, right, bottom] = frame_cell_bounds_px(metrics, frame, row, column);
                 let (foreground, _) = resolve_colors(&cell.style);
                 rects.push(self.pixel_rect(
                     left,
-                    bottom - self.metrics.scale_factor as f32,
+                    bottom - metrics.scale_factor as f32,
                     right,
                     bottom,
                     foreground,
@@ -11643,10 +11863,10 @@ impl WindowRenderer {
             let (foreground, _) = resolve_colors(&cell.style);
             let end = dotted_underline_run_end(&frame.cells, index, columns, drawable_cells);
 
-            let [left, _, _, bottom] = frame_cell_bounds_px(self.metrics, frame, row, start_column);
-            let right = left + (end - index) as f32 * self.metrics.cell_width_px;
+            let [left, _, _, bottom] = frame_cell_bounds_px(metrics, frame, row, start_column);
+            let right = left + (end - index) as f32 * metrics.cell_width_px;
             rects.extend(
-                dotted_underline_segments(left, right, bottom, self.metrics.scale_factor)
+                dotted_underline_segments(left, right, bottom, metrics.scale_factor)
                     .into_iter()
                     .map(|[segment_left, top, segment_right, segment_bottom]| {
                         self.pixel_rect(
@@ -11678,10 +11898,11 @@ impl WindowRenderer {
     /// failures, and could not name which of several blocks it meant.
     fn math_overflow_fade_rectangles(
         &self,
+        metrics: CellMetrics,
         placement: &MathBlockPlacement,
         geometry: &MathBlockGeometry,
     ) -> Vec<RectInstance> {
-        math_overflow_fade_slabs(self.metrics, placement, geometry)
+        math_overflow_fade_slabs(metrics, placement, geometry)
             .into_iter()
             .map(|(rect, coverage)| {
                 self.pixel_rect_with_coverage(
@@ -11711,7 +11932,11 @@ impl WindowRenderer {
     /// rest of it, and both of those belong over the wash — a fade that a selection had covered
     /// would stop saying the formula continues, and a button the reader is about to press must
     /// not be tinted by a drag that happens to have crossed it.
-    fn math_selection_wash_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
+    fn math_selection_wash_rectangles(
+        &self,
+        metrics: CellMetrics,
+        frame: &ViewportFrame,
+    ) -> Vec<RectInstance> {
         // Read once per frame from the same atomic word the band reads, for the band's own
         // reason: a theme switch must never leave one half of a selection wearing the previous
         // canvas's fill while the other half wears the new one.
@@ -11721,11 +11946,12 @@ impl WindowRenderer {
             if placement.selection_spans.is_empty() {
                 continue;
             }
-            let Some(geometry) = self.math_block_geometry(self.seat, frame, placement) else {
+            let Some(geometry) = self.math_block_geometry(metrics, self.seat, frame, placement)
+            else {
                 continue;
             };
             rects.extend(
-                math_selection_wash_slabs(self.metrics, frame, placement, &geometry)
+                math_selection_wash_slabs(metrics, frame, placement, &geometry)
                     .into_iter()
                     .map(|rect| {
                         self.pixel_rect_with_coverage(
@@ -11760,30 +11986,37 @@ impl WindowRenderer {
     /// So the marks moved up a crate, to where marks are rasterized, and this
     /// file kept the half only it can answer: *where* they stand
     /// ([`WindowRenderer::math_tool_boxes`]).
-    fn math_overlay_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
+    fn math_overlay_rectangles(
+        &self,
+        metrics: CellMetrics,
+        frame: &ViewportFrame,
+    ) -> Vec<RectInstance> {
         let mut rects = Vec::new();
         for placement in &frame.math_blocks {
-            let Some(geometry) = self.math_block_geometry(self.seat, frame, placement) else {
+            let Some(geometry) = self.math_block_geometry(metrics, self.seat, frame, placement)
+            else {
                 continue;
             };
-            rects.extend(self.math_overflow_fade_rectangles(placement, &geometry));
+            rects.extend(self.math_overflow_fade_rectangles(metrics, placement, &geometry));
         }
         rects
     }
 
     fn cell_rect(
         &self,
+        metrics: CellMetrics,
         frame: &ViewportFrame,
         row: usize,
         column: usize,
         color: [u8; 3],
     ) -> RectInstance {
-        let [left, top, right, bottom] = frame_cell_bounds_px(self.metrics, frame, row, column);
+        let [left, top, right, bottom] = frame_cell_bounds_px(metrics, frame, row, column);
         self.pixel_rect(left, top, right, bottom, color)
     }
 
     fn cell_rect_span(
         &self,
+        metrics: CellMetrics,
         frame: &ViewportFrame,
         selection: &SelectionSpan,
         column: usize,
@@ -11791,7 +12024,7 @@ impl WindowRenderer {
         color: [u8; 3],
     ) -> RectInstance {
         let [left, top, right, bottom] =
-            selection_span_bounds_px(self.metrics, frame, selection, column, span);
+            selection_span_bounds_px(metrics, frame, selection, column, span);
         self.pixel_rect(left, top, right, bottom, color)
     }
 
@@ -11815,7 +12048,7 @@ impl WindowRenderer {
     /// Without it the chip has no edge at all on every light scheme this product
     /// ships, where `--menu` and `--termbg` are one colour.
     fn float_tag_rects(&self, rect: [f32; 4]) -> Vec<RectInstance> {
-        let hairline = (self.metrics.scale_factor as f32).max(1.0);
+        let hairline = (self.base_metrics.scale_factor as f32).max(1.0);
         float_tag_boxes(rect, hairline, chrome_palette().float_tag())
             .into_iter()
             .map(|(box_of, colour)| {
@@ -11878,7 +12111,7 @@ impl WindowRenderer {
         self.text_viewport
             .update(&gpu.queue, Resolution { width, height });
         let seat = SeatViewport::whole(width, height);
-        let text_stats = self.prepare_text_rows(gpu, frame)?;
+        let text_stats = self.prepare_text_rows(gpu, self.base_metrics, frame)?;
         let rows_prepared_at = Instant::now();
         {
             let slot = &mut self.seat_slots[0];
@@ -11891,7 +12124,7 @@ impl WindowRenderer {
                 &self.text_viewport,
                 &mut gpu.swash_cache,
                 &self.text_rows,
-                self.metrics,
+                self.base_metrics,
                 frame,
                 seat,
             )
@@ -11905,7 +12138,7 @@ impl WindowRenderer {
                 &self.text_viewport,
                 &mut gpu.swash_cache,
                 self.status_overlay.as_deref(),
-                self.metrics,
+                self.base_metrics,
                 frame,
                 // A headless probe has no seat: it renders into the whole target, so the surface is
                 // the pane.
@@ -23084,6 +23317,107 @@ mod tests {
         assert!(!Arc::ptr_eq(&first[0].buffer, &bold[0].buffer));
     }
 
+    /// The two sizes ticket 37's shaping tests shape one cluster at: the default face and the
+    /// same face half again as large, at one scale, as two panes of one window would be.
+    fn two_pane_sizes(font_system: &mut FontSystem) -> (CellMetrics, CellMetrics) {
+        let small = CellMetrics::measure_at(font_system, 1.0, 14.0).unwrap();
+        let large = CellMetrics::measure_at(font_system, 1.0, 21.0).unwrap();
+        assert!(large.cell_width_px > small.cell_width_px);
+        (small, large)
+    }
+
+    /// RED (37) — **one cluster shaped at two sizes is two shapes in the narrow cache.**
+    ///
+    /// A window's panes share one `NarrowShapingCache`, and a pane at 150 % beside a pane at
+    /// 100 % asks it for the same `M` at two sizes. Keyed by the cluster and its style alone, the
+    /// second ask was answered with the first size's buffer and offsets: glyphs of one pane's
+    /// size drawn into the other pane's cells, with nothing to say so. Both orders are driven
+    /// through one shared cache, because two fresh caches would pass vacuously.
+    ///
+    /// MUTATION: drop the metrics from the key `NarrowShapingCache::get_or_shape` looks up.
+    #[test]
+    fn one_cluster_shaped_at_two_sizes_is_two_shapes_in_the_narrow_cache() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let (small, large) = two_pane_sizes(&mut font_system);
+        let cells = [CapturedCell::plain("M")];
+        for order in [[small, large, small], [large, small, large]] {
+            let mut cache = NarrowShapingCache::new();
+            let mut seen: Vec<(CellMetrics, Arc<Buffer>)> = Vec::new();
+            for metrics in order {
+                let glyphs = shape_narrow_glyphs(
+                    &cells,
+                    &mut font_system,
+                    &mut swash_cache,
+                    metrics,
+                    &mut cache,
+                );
+                assert_eq!(
+                    glyphs[0].buffer.metrics().font_size,
+                    metrics.font_size_px,
+                    "the shape handed back is the size it was asked for",
+                );
+                if let Some((_, earlier)) = seen.iter().find(|(m, _)| *m == metrics) {
+                    assert!(
+                        Arc::ptr_eq(earlier, &glyphs[0].buffer),
+                        "a repeat ask at one size is the cached shape of that size",
+                    );
+                } else {
+                    for (_, other) in &seen {
+                        assert!(!Arc::ptr_eq(other, &glyphs[0].buffer));
+                    }
+                    seen.push((metrics, Arc::clone(&glyphs[0].buffer)));
+                }
+            }
+            assert_eq!(cache.entries.len(), 2);
+        }
+    }
+
+    /// RED (37) — **one cluster shaped at two sizes is two shapes in the wide cache.**
+    ///
+    /// The two-cell twin of the narrow test: a CJK ideograph in a pane at 150 % and in a pane
+    /// at 100 % of one window shares `WideShapingCache`, whose key was the cluster and its style.
+    /// The second pane got the first pane's buffer, and its offsets, which are centred in the
+    /// first pane's two-cell slot.
+    ///
+    /// MUTATION: drop the metrics from the key `WideShapingCache::get_or_shape` looks up.
+    #[test]
+    fn one_cluster_shaped_at_two_sizes_is_two_shapes_in_the_wide_cache() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let (small, large) = two_pane_sizes(&mut font_system);
+        let mut cell = CapturedCell::plain("中");
+        cell.style.flags.insert(CellFlags::WIDE_CHAR);
+        let cells = [cell];
+        for order in [[small, large, small], [large, small, large]] {
+            let mut cache = WideShapingCache::new();
+            let mut seen: Vec<(CellMetrics, Arc<Buffer>)> = Vec::new();
+            for metrics in order {
+                let glyphs = shape_wide_glyphs(
+                    &cells,
+                    &mut font_system,
+                    &mut swash_cache,
+                    metrics,
+                    &mut cache,
+                );
+                assert_eq!(
+                    glyphs[0].buffer.metrics().font_size,
+                    metrics.font_size_px,
+                    "the shape handed back is the size it was asked for",
+                );
+                if let Some((_, earlier)) = seen.iter().find(|(m, _)| *m == metrics) {
+                    assert!(Arc::ptr_eq(earlier, &glyphs[0].buffer));
+                } else {
+                    for (_, other) in &seen {
+                        assert!(!Arc::ptr_eq(other, &glyphs[0].buffer));
+                    }
+                    seen.push((metrics, Arc::clone(&glyphs[0].buffer)));
+                }
+            }
+            assert_eq!(cache.entries.len(), 2);
+        }
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn regional_indicator_flag_cells_pin_every_glyph_to_its_grid_column() {
@@ -23877,7 +24211,7 @@ mod tests {
             width: WIDTH,
             height: HEIGHT,
         };
-        let frame = single_cell_cursor_frame(window.metrics());
+        let frame = single_cell_cursor_frame(window.base_metrics());
 
         let mut labels = Vec::new();
         let mut paragraphs = Vec::new();
@@ -23937,6 +24271,7 @@ mod tests {
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat,
                     clip: seat,
                     frame: &frame,
@@ -24014,6 +24349,7 @@ mod tests {
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat,
                     clip: seat,
                     frame: &frame,
@@ -24376,7 +24712,7 @@ mod tests {
         let mut window =
             WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
         window.set_glyph_census(true);
-        let fixture = chinese_four_k_frame(window.metrics(), WIDTH, HEIGHT);
+        let fixture = chinese_four_k_frame(window.base_metrics(), WIDTH, HEIGHT);
         assert!(
             fixture.cards_out_of_view > 0,
             "eight cards at this height must overflow the column, or the fixture is not the \
@@ -24390,6 +24726,7 @@ mod tests {
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat: fixture.seat,
                     clip: fixture.seat,
                     frame: &fixture.frame,
@@ -24501,11 +24838,12 @@ mod tests {
             rasters: Vec::new(),
         }]);
 
-        let frame = single_cell_cursor_frame(window.metrics());
+        let frame = single_cell_cursor_frame(window.base_metrics());
         window
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat: SeatViewport {
                         x: 0,
                         y: 0,
@@ -24792,11 +25130,12 @@ mod tests {
         );
 
         window.set_chrome(Vec::new(), labels, Vec::new());
-        let frame = single_cell_cursor_frame(window.metrics());
+        let frame = single_cell_cursor_frame(window.base_metrics());
         window
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat: SeatViewport {
                         x: 0,
                         y: 0,
@@ -24866,7 +25205,7 @@ mod tests {
         let mut gpu = on_this_machines_adapter(FORMAT);
         let mut window =
             WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
-        let frame = single_cell_cursor_frame(window.metrics());
+        let frame = single_cell_cursor_frame(window.base_metrics());
         let picture: Arc<[u8]> = Arc::from(vec![255_u8; 4 * 8 * 8].into_boxed_slice());
         let escapes = [
             // The crash report's own rectangle.
@@ -24922,6 +25261,7 @@ mod tests {
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat: SeatViewport::whole(WIDTH, HEIGHT),
                         clip,
                         frame: &frame,
@@ -25022,7 +25362,7 @@ mod tests {
         );
         let mut window =
             WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
-        let metrics = window.metrics();
+        let metrics = window.base_metrics();
         let mut han = HanStream::new(0x5EA7_11FF);
         let mut worst: Option<(usize, String)> = None;
         for frame_index in 0..FRAMES {
@@ -25069,6 +25409,7 @@ mod tests {
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat: SeatViewport {
                             x: 0,
                             y: 0,
@@ -25306,7 +25647,7 @@ mod tests {
         let mut window =
             WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
         window.set_glyph_census(true);
-        let metrics = window.metrics();
+        let metrics = window.base_metrics();
         let mut han = HanStream::new(0x4C1D_9A37);
         let mut refused_frames = 0usize;
         let mut longest_run = 0usize;
@@ -25363,6 +25704,7 @@ mod tests {
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat: SeatViewport {
                             x: 0,
                             y: 0,
@@ -25432,6 +25774,275 @@ mod tests {
         );
     }
 
+    /// A frame of `rows` rows of text, cell for cell, projected at `metrics` — narrow ASCII, a
+    /// CJK ideograph and an emoji written as their lead cell and spacer, the three shaping lanes a
+    /// terminal draws (ticket 37). Windows-only like the two GPU tests that use it.
+    #[cfg(target_os = "windows")]
+    fn mixed_text_frame(
+        metrics: CellMetrics,
+        columns: u32,
+        rows: u32,
+        seed: u32,
+        han: &mut HanStream,
+    ) -> ViewportFrame {
+        const EMOJI: [&str; 4] = ["😀", "🚀", "🎉", "📁"];
+        let mut cells = Vec::with_capacity((columns * rows) as usize);
+        for row in 0..rows {
+            let mut column = 0;
+            while column < columns {
+                let pick = (row * 31 + column * 7 + seed) as usize;
+                let lane = (column / 4 + row + seed) % 3;
+                if lane != 0 && column + 1 < columns {
+                    let text = if lane == 1 {
+                        han.next_char().to_string()
+                    } else {
+                        EMOJI[pick % EMOJI.len()].to_owned()
+                    };
+                    let mut lead = CapturedCell::plain(&text);
+                    lead.style.flags.insert(CellFlags::WIDE_CHAR);
+                    cells.push(lead);
+                    cells.push(CapturedCell {
+                        wide_spacer: true,
+                        ..CapturedCell::default()
+                    });
+                    column += 2;
+                } else {
+                    let letter = char::from(b'A' + (pick % 26) as u8).to_string();
+                    cells.push(CapturedCell::plain(&letter));
+                    column += 1;
+                }
+            }
+        }
+        ViewportFrame {
+            columns: NonZeroU32::new(columns).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns),
+            grid_rows: NonZeroU32::new(rows).unwrap(),
+            rows: NonZeroU32::new(rows).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells,
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: false,
+            },
+            cell_anchors: test_cell_anchors((columns * rows) as usize),
+            row_map: test_row_map_for_metrics(rows, metrics),
+            selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(columns),
+            view_generation: bt_doc::ViewGeneration(1),
+        }
+    }
+
+    /// NEW (37) — **two identical tables at two text sizes keep two paints.**
+    ///
+    /// A table is set in its pane's own text, so the same source in a pane at 80 % and in a pane
+    /// at 150 % is two pictures. The renderer's map is keyed by [`TableBlockKey`] — source, face
+    /// size and font environment — and each seat's placement is looked up with the metrics that
+    /// seat is drawn at, so each pane draws its own paint. On base the map was keyed by the
+    /// source, and the second size's paint replaced the first; this test cannot be written against
+    /// that shape (the key type is new), so its red is the mutation below. The app's half — which
+    /// sizes `Runtime::table_sources` names — is pinned in `bt-app`.
+    ///
+    /// MUTATION: make `TableBlockKey::of` ignore the metrics (a fixed `font_size_bits`) — the two
+    /// paints share one key, the map keeps one, and the 80 % pane draws the 150 % paint.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn two_identical_tables_at_two_text_sizes_keep_two_paints() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, 800, 400, 1.0, FORMAT).expect("a window");
+        let environment = gpu.font_environment_epoch();
+        let small = gpu.terminal_cell_metrics(1.0, 12.8).expect("measures");
+        let large = gpu.terminal_cell_metrics(1.0, 24.0).expect("measures");
+        let source = "| a | b |\n| 1 | 2 |";
+        let paint = |ink: u8| TableBlockPaint {
+            quads: vec![PreviewQuad {
+                rect: [0.0, 0.0, 10.0, 10.0],
+                color: [ink, ink, ink],
+            }],
+            paragraphs: Vec::new(),
+        };
+        assert!(window.set_table_blocks(HashMap::from([
+            (TableBlockKey::of(source, small, environment), paint(80)),
+            (TableBlockKey::of(source, large, environment), paint(150)),
+        ])));
+        for (metrics, ink) in [(small, 80), (large, 150)] {
+            let mut frame = mixed_text_frame(metrics, 40, 6, 0, &mut HanStream::new(37));
+            let mut placement = test_math_placement(source, 0, 4 * SUBPIXELS_PER_PX, 4);
+            placement.artifact.kind = bt_viewport::RgbaArtifactKind::Table;
+            placement.artifact.source = source.to_owned();
+            placement.artifact.width_px = 100;
+            placement.artifact.height_px = 4;
+            frame.math_blocks.push(placement);
+            let bodies = window.table_block_bodies(metrics, environment, &frame);
+            assert_eq!(bodies.len(), 1, "the table is drawn");
+            assert_eq!(
+                bodies[0].quads[0].color,
+                [ink, ink, ink],
+                "a pane at {} px draws the paint laid out at its own size",
+                metrics.font_size_px
+            );
+        }
+    }
+
+    /// NEW (37) — **seats at mixed sizes share the atlas, and get their text back.**
+    ///
+    /// The atlas has no area proof ([`GpuContext::close_the_frame`] retracts it: the bucketed
+    /// allocator fragments across sizes). What is asserted is the contract that replaces it,
+    /// under the load per-pane sizes add: three seats drawn in the same frame at three sizes,
+    /// with narrow text, CJK and emoji, in two windows presented in turn, on a device whose
+    /// textures stop at 1024 so the shared atlas is under real pressure — on WARP, which is CI's
+    /// device. A frame may lose its text (the packer can wear out); the next frame of that window
+    /// must not, and at the end each window's seats are read back and every one of them has ink
+    /// on it. The run is asserted to have reached a refusal at all, or it would prove nothing.
+    ///
+    /// **What it does not discriminate, measured on 2026-09-24:** taking the re-pack arm out of
+    /// `GpuContext::close_the_frame`, or leaving a refused frame untrimmed, leaves it green at this
+    /// scale (80 frames: 2 refusals, never two in a row, with or without the arm; at 400 frames
+    /// 7 against 3). The packer wears out over hours, not over a CI minute, and the soak that
+    /// shows it is `a_session_long_enough_to_wear_the_packer_out_gets_its_text_back` (ignored,
+    /// D-59). What this holds is the contract at the load per-pane sizes add.
+    ///
+    /// MUTATION: shape a seat's rows from another seat's frame (hand `prepare_text_rows` the
+    /// first seat's frame for every seat) — red: the pairing of frame and metrics breaks.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn mixed_size_seats_share_the_atlas_and_get_their_text_back() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        // Within the ceiling: the surface is a texture too, and a wider one is clamped to it.
+        const WIDTH: u32 = 504;
+        const HEIGHT: u32 = 504;
+        const CEILING: u32 = 512;
+        const FRAMES: usize = 80;
+        /// Every rung of ticket 37's ladder over the largest Settings size, 24 px — the sizes a
+        /// window of panes can hold at once, the top one exactly the 72 px clamp.
+        const SIZES: [f32; 12] = [
+            12.0, 16.08, 19.2, 21.6, 24.0, 26.4, 30.0, 36.0, 42.0, 48.0, 60.0, 72.0,
+        ];
+        let mut gpu = on_a_device_whose_textures_stop_at(FORMAT, CEILING);
+        let mut windows = [
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window"),
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window"),
+        ];
+        let seat_width = WIDTH / 3;
+        let seats: [SeatViewport; 3] = std::array::from_fn(|index| SeatViewport {
+            x: index as u32 * seat_width,
+            y: 0,
+            width: seat_width,
+            height: HEIGHT,
+        });
+        // One frame of one window: three seats at three sizes, built afresh each time.
+        let mut han = HanStream::new(0x37_7E57);
+        let mut present = |gpu: &mut GpuContext, window: &mut WindowRenderer, index: usize| {
+            let metrics: [CellMetrics; 3] = std::array::from_fn(|seat| {
+                let size = SIZES[(index * 5 + seat * 4) % SIZES.len()];
+                gpu.terminal_cell_metrics(1.0, size).expect("measures")
+            });
+            let frames: Vec<ViewportFrame> = metrics
+                .iter()
+                .enumerate()
+                .map(|(seat, metrics)| {
+                    let grid = metrics.grid_for_pixels(seat_width, HEIGHT);
+                    mixed_text_frame(
+                        *metrics,
+                        u32::from(grid.columns.get()),
+                        u32::from(grid.rows.get()),
+                        (index * 3 + seat) as u32,
+                        &mut han,
+                    )
+                })
+                .collect();
+            let seat_frames: Vec<SeatFrame<'_>> = frames
+                .iter()
+                .zip(metrics)
+                .zip(seats)
+                .enumerate()
+                .map(|(seat_index, ((frame, metrics), seat))| SeatFrame {
+                    seat,
+                    clip: seat,
+                    frame,
+                    metrics,
+                    focused: seat_index == 0,
+                })
+                .collect();
+            window
+                .present_frame(
+                    gpu,
+                    &seat_frames,
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("one frame")
+        };
+        let mut refused_in_a_row = [0usize; 2];
+        let mut longest = 0usize;
+        let mut refused = 0usize;
+        for frame_index in 0..FRAMES {
+            let which = frame_index % 2;
+            let outcome = present(&mut gpu, &mut windows[which], frame_index);
+            if matches!(outcome, PresentOutcome::PresentedWithoutText(_)) {
+                refused += 1;
+                refused_in_a_row[which] += 1;
+                longest = longest.max(refused_in_a_row[which]);
+            } else {
+                refused_in_a_row[which] = 0;
+            }
+        }
+        println!(
+            "mixed-size stress: {refused} of {FRAMES} frames refused, {} atlas re-packs",
+            gpu.glyph_atlas_refits()
+        );
+        assert!(
+            refused > 0,
+            "the fixture never reached the atlas's pressure, so it proves nothing about it"
+        );
+        assert!(
+            longest <= 1,
+            "a window lost its text on {longest} frames in a row: the atlas was not given back"
+        );
+        assert!(
+            refused * 4 < FRAMES,
+            "{refused} of {FRAMES} frames were drawn without their text"
+        );
+        // Each window once more, and every one of its seats has ink on it: a frame that lost its
+        // text is owed again, and the one retry the contract allows is all it may take.
+        for (which, window) in windows.iter_mut().enumerate() {
+            let complete = (0..2).any(|attempt| {
+                matches!(
+                    present(&mut gpu, window, FRAMES + which * 2 + attempt),
+                    PresentOutcome::Presented(_)
+                )
+            });
+            assert!(
+                complete,
+                "window {which} got its text back within one retry"
+            );
+            let pixels = window.read_back(&gpu).expect("the frame reads back");
+            for seat in seats {
+                let ground = pixels[(seat.y * WIDTH + seat.x) as usize];
+                let inked = (seat.y..seat.y + seat.height)
+                    .flat_map(|y| (seat.x..seat.x + seat.width).map(move |x| (x, y)))
+                    .filter(|(x, y)| pixels[(y * WIDTH + x) as usize] != ground)
+                    .count();
+                assert!(
+                    inked > (seat.width * seat.height / 200) as usize,
+                    "window {which}, seat at x={}: {inked} inked pixels — its text did not come                      back",
+                    seat.x
+                );
+            }
+        }
+    }
+
     /// RED — **a card's text reaches the glass on the very frame its layout
     /// lands, and the frame says so.**
     ///
@@ -25472,7 +26083,7 @@ mod tests {
             width: WIDTH,
             height: HEIGHT,
         };
-        let frame = single_cell_cursor_frame(window.metrics());
+        let frame = single_cell_cursor_frame(window.base_metrics());
         window.set_modal_overlay(vec![OverlayLayer {
             quads: vec![
                 OverlayQuad {
@@ -25530,6 +26141,7 @@ mod tests {
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat,
                     clip: seat,
                     frame: &frame,
@@ -27806,7 +28418,7 @@ mod tests {
         let wash = only(
             needle!(Pattern::text(concat!(
                 "self.math_selection_wash_",
-                "rectangles(frame);"
+                "rectangles(entry.metrics, frame);"
             ))),
             View::Raw,
             "the wash's own list",
@@ -27814,7 +28426,7 @@ mod tests {
         let chrome = only(
             needle!(Pattern::text(concat!(
                 "math_overlays.extend(self.math_overlay_",
-                "rectangles(frame));"
+                "rectangles(entry.metrics, frame));"
             ))),
             View::Raw,
             "the block's chrome joining the same list",
@@ -28816,12 +29428,13 @@ mod tests {
                 picture(2, right, "the recording's still", RIGHT),
             ]);
 
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
             window
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat,
                         clip: seat,
                         frame: &frame,
@@ -29177,7 +29790,8 @@ mod tests {
             let window = WindowRenderer::offscreen(&mut gpu, 400, 200, 1.0, FORMAT)
                 .expect("an offscreen window");
             let frame = grid();
-            let rects = window.rectangles(&frame, &HashSet::new(), true, ALPHA);
+            let rects =
+                window.rectangles(window.base_metrics(), &frame, &HashSet::new(), true, ALPHA);
 
             assert_eq!(
                 rects.grounds.len(),
@@ -29225,7 +29839,8 @@ mod tests {
             let window = WindowRenderer::offscreen(&mut gpu, 400, 200, 1.0, FORMAT)
                 .expect("an offscreen window");
             let frame = grid();
-            let opaque = window.rectangles(&frame, &HashSet::new(), true, 1.0);
+            let opaque =
+                window.rectangles(window.base_metrics(), &frame, &HashSet::new(), true, 1.0);
             for ground in &opaque.grounds {
                 assert!(
                     (ground.color[3] - 1.0).abs() < 1e-6,
@@ -29240,7 +29855,8 @@ mod tests {
             );
             // And the ink half is untouched at every alpha: it is the same list,
             // built by the same arithmetic, whatever the window's opacity is.
-            let glass = window.rectangles(&frame, &HashSet::new(), true, 0.3);
+            let glass =
+                window.rectangles(window.base_metrics(), &frame, &HashSet::new(), true, 0.3);
             assert_eq!(opaque.ink, glass.ink);
         }
 
@@ -29484,23 +30100,23 @@ mod tests {
                 WindowRenderer::offscreen(&mut gpu, 400, 300, 2.0, FORMAT).expect("a 2.0x window");
             let mut coarse =
                 WindowRenderer::offscreen(&mut gpu, 800, 600, 1.5, FORMAT).expect("a 1.5x window");
-            assert_eq!(fine.metrics().scale_factor, 2.0);
-            assert_eq!(coarse.metrics().scale_factor, 1.5);
+            assert_eq!(fine.base_metrics().scale_factor, 2.0);
+            assert_eq!(coarse.base_metrics().scale_factor, 1.5);
             assert!(
-                fine.metrics().font_size_px > coarse.metrics().font_size_px,
+                fine.base_metrics().font_size_px > coarse.base_metrics().font_size_px,
                 "the same logical size on a denser window is more pixels: {} vs {}",
-                fine.metrics().font_size_px,
-                coarse.metrics().font_size_px
+                fine.base_metrics().font_size_px,
+                coarse.base_metrics().font_size_px
             );
 
-            let fine_metrics = fine.metrics();
+            let fine_metrics = fine.base_metrics();
             let fine_revision = fine.font_revision;
             coarse
                 .update_scale_factor(&mut gpu, 3.0)
                 .expect("the coarse window follows its own monitor");
-            assert_eq!(coarse.metrics().scale_factor, 3.0);
+            assert_eq!(coarse.base_metrics().scale_factor, 3.0);
             assert_eq!(
-                fine.metrics(),
+                fine.base_metrics(),
                 fine_metrics,
                 "one window's DPI change may not re-measure another window's cell"
             );
@@ -29524,7 +30140,7 @@ mod tests {
                 WindowRenderer::offscreen(&mut gpu, 400, 300, 1.0, FORMAT).expect("first window");
             let mut second =
                 WindowRenderer::offscreen(&mut gpu, 400, 300, 1.0, FORMAT).expect("second window");
-            let frame = single_cell_cursor_frame(first.metrics());
+            let frame = single_cell_cursor_frame(first.base_metrics());
 
             let cold = first
                 .probe_frame(&mut gpu, &frame)
@@ -29582,7 +30198,7 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, 400, 300, 1.0, FORMAT).expect("a window");
 
-            let before = window.metrics();
+            let before = window.base_metrics();
             let revision_before = window.font_revision();
             let frame = single_cell_cursor_frame(before);
             let warm = window.probe_frame(&mut gpu, &frame).expect("one frame");
@@ -29667,7 +30283,7 @@ mod tests {
                 .expect("a headless probe");
             assert!(!probe.adapter_name().is_empty());
             assert!(probe.max_texture_dimension_2d() > 0);
-            let frame = single_cell_cursor_frame(probe.window.metrics());
+            let frame = single_cell_cursor_frame(probe.window.base_metrics());
             let sample = probe.prepare_frame(&frame).expect("one replayed frame");
             assert!(sample.narrow_glyphs > 0);
             assert_eq!(sample.row_cache_misses, 1);
@@ -29723,7 +30339,7 @@ mod tests {
                 width: 320,
                 height: 300,
             };
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             window.set_chrome(
                 Vec::new(),
                 vec![ChromeLabel {
@@ -29745,6 +30361,7 @@ mod tests {
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat,
                         clip: seat,
                         frame: &frame,
@@ -29861,7 +30478,7 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             // Two pixels, BGRA: the left one blue, the right one green.
             let recording: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
             window.set_video_layers(vec![VideoLayer {
@@ -29883,6 +30500,7 @@ mod tests {
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat,
                         clip: seat,
                         frame: &frame,
@@ -29971,12 +30589,13 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
                 window
                     .present_frame(
                         gpu,
                         &[SeatFrame {
+                            metrics: window.base_metrics(),
                             seat,
                             clip: seat,
                             frame: &frame,
@@ -30060,12 +30679,13 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
                 window
                     .present_frame(
                         gpu,
                         &[SeatFrame {
+                            metrics: window.base_metrics(),
                             seat,
                             clip: seat,
                             frame: &frame,
@@ -30179,12 +30799,13 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
                 window
                     .present_frame(
                         gpu,
                         &[SeatFrame {
+                            metrics: window.base_metrics(),
                             seat,
                             clip: seat,
                             frame: &frame,
@@ -30281,12 +30902,13 @@ mod tests {
             let mut second = WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT)
                 .expect("and a second one");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            let frame = single_cell_cursor_frame(first.metrics());
+            let frame = single_cell_cursor_frame(first.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
                 window
                     .present_frame(
                         gpu,
                         &[SeatFrame {
+                            metrics: window.base_metrics(),
                             seat,
                             clip: seat,
                             frame: &frame,
@@ -30661,6 +31283,7 @@ mod tests {
             window.present_frame(
                 gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat,
                     clip: seat,
                     frame,
@@ -30707,7 +31330,7 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             window.set_modal_overlay(a_sentence_this_window_keeps());
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
 
             one_frame(&mut window, &mut gpu, &frame).expect("the frame before the loss");
             let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
@@ -30794,7 +31417,7 @@ mod tests {
                 display_height_px: 80,
                 pan_px: [0.0, 0.0],
             }]);
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
 
             one_frame(&mut window, &mut gpu, &frame).expect("the frame that uploads it");
             let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
@@ -30885,7 +31508,7 @@ mod tests {
                     above_text: false,
                 }],
             );
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
 
             one_frame(&mut window, &mut gpu, &frame).expect("the frame");
             assert!(
@@ -30937,7 +31560,7 @@ mod tests {
                 WindowRenderer::offscreen(&mut gpu, 240, 160, 2.0, FORMAT).expect("second window");
             first.set_modal_overlay(a_sentence_this_window_keeps());
             second.set_modal_overlay(a_sentence_this_window_keeps());
-            let frame = single_cell_cursor_frame(first.metrics());
+            let frame = single_cell_cursor_frame(first.base_metrics());
             one_frame(&mut first, &mut gpu, &frame).expect("the first window's frame");
             one_frame(&mut second, &mut gpu, &frame).expect("the second window's frame");
             let (before_first, before_second) = (
@@ -31089,7 +31712,7 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, 320, 200, 1.0, FORMAT).expect("a window");
             window.set_modal_overlay(a_sentence_this_window_keeps());
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             one_frame(&mut window, &mut gpu, &frame).expect("the frame before the loss");
             let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
             assert!(before > 0, "there has to be a picture to lose");
@@ -31152,7 +31775,7 @@ mod tests {
             let mut gpu = on_this_machines_adapter(FORMAT);
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, 240, 160, 1.0, FORMAT).expect("a window");
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             one_frame(&mut window, &mut gpu, &frame).expect("the frame before the fault");
             assert!(
                 gpu.device_fault().is_none(),

@@ -144,19 +144,22 @@ fn expected_unreached() -> BTreeMap<String, Vec<String>> {
     BTreeMap::new()
 }
 
-/// RED — **`bt-app`'s wholly-test files are the twelve the plan names**, derived
-/// from the declarations rather than listed.
+/// RED — **`bt-app`'s wholly-test files are the thirteen the plan names**, derived
+/// from the declarations rather than listed. Twelve when the plan was written
+/// (`docs/plans/bt-app-split-prep.md` §6.6); the thirteenth is
+/// `text_size_tests.rs` (0.4.5 ticket 37, 2026-09-24), declared `#[cfg(test)] mod
+/// text_size_tests;` in `main.rs`.
 ///
 /// `scripts/dev/bt-app-graph.py` carries this set as a hand-written literal of
 /// five names, and §6.6 of the plan is about the seven it is missing — four of
 /// which contain source readers. This is the reading P0 makes that table agree
-/// with, so the day a thirteenth appears is a red test rather than a table that
+/// with, so the day a fourteenth appears is a red test rather than a table that
 /// quietly means less than it says.
 ///
 /// MUTATION: take `#[cfg(test)]` off `mod tests;` in `main.rs` and the set loses
 /// `tests.rs`; put one on `mod quake;` and it gains `quake.rs`.
 #[test]
-fn the_wholly_test_files_of_bt_app_are_the_twelve() {
+fn the_wholly_test_files_of_bt_app_are_the_thirteen() {
     let workspace = workspace();
     let package = workspace.package("bt-app").expect("bt-app");
     let universe = universes::crate_sources(package, Vendor::Excluded).expect("bt-app's own src");
@@ -180,9 +183,10 @@ fn the_wholly_test_files_of_bt_app_are_the_twelve() {
             "preview_viewport_tests.rs",
             "source_pin.rs",
             "tests.rs",
+            "text_size_tests.rs",
             "uninstall_tests.rs",
         ],
-        "the twelve of `docs/plans/bt-app-split-prep.md` §6.6"
+        "the thirteen of `docs/plans/bt-app-split-prep.md` §6.6"
     );
     println!("bt-app: {} files reached", enumeration.files().len());
     assert!(

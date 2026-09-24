@@ -21,6 +21,7 @@ use crate::{
     scrollback_quota, seats, shell_integration, size_authority_for_rectangle, solve_seats,
     solve_tree, trace_sink, trace_unchanged_present, video_seat, webhost,
 };
+use crate::{LeafView, TextScale};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{Axis, SeatId, SeatMetrics, SizePolicy};
@@ -89,13 +90,13 @@ impl Runtime<'_> {
             seats::logical_viewport(
                 render_physical.width,
                 render_physical.height,
-                seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get()),
+                seats::scale_ppm(self.window.renderer.dpi_milli().get()),
                 seats::rail_inset_device_px(
                     self.rail_posture(),
-                    seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get()),
+                    seats::scale_ppm(self.window.renderer.dpi_milli().get()),
                 ),
                 seats::chrome_band_device_px(
-                    seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get()),
+                    seats::scale_ppm(self.window.renderer.dpi_milli().get()),
                     self.platform_chrome(),
                 ),
             ),
@@ -176,7 +177,7 @@ impl Runtime<'_> {
     }
 
     pub(crate) fn seat_metrics(&self) -> SeatMetrics {
-        seats::seat_metrics(self.window.renderer.metrics().dpi_milli().get())
+        seats::seat_metrics(self.window.renderer.dpi_milli().get())
     }
 
     /// One terminal pane's body, or `None` when the rail has nothing to stand on.
@@ -190,7 +191,7 @@ impl Runtime<'_> {
     /// picture.
     pub(crate) fn command_rail_body(&self, seat: SeatId) -> Option<[f32; 4]> {
         let leaf = self.sessions.get(&seat)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         cmdrail::host_rect(
             [
@@ -301,7 +302,7 @@ impl Runtime<'_> {
     /// travels — so [`cmdrail::RailCache::picture`] paints those afresh and caches
     /// only the resting one.
     pub(in crate::runtime) fn command_rail_layers(&mut self) -> Vec<marks::OverlayLayer> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let palette = bt_render::chrome_palette();
         let motion = self.app.motion;
         let now = Instant::now();
@@ -481,7 +482,7 @@ impl Runtime<'_> {
             position.y as f32,
         )?;
         let leaf = self.sessions.get(&seat)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let resolved = cmdrail::resolve(
             body,
             &self.command_rail_stack(seat),
@@ -881,7 +882,7 @@ impl Runtime<'_> {
         if !self.window.restore_prompt.is_open() || self.app.restore_question.is_empty() {
             return None;
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -1095,14 +1096,14 @@ impl Runtime<'_> {
             } else {
                 ""
             },
-            self.window.renderer.metrics().scale_factor as f32,
+            self.window.renderer.scale_factor() as f32,
         );
         let Some(overlay) = overlay else {
             return Vec::new();
         };
         let mut layers = seats::build_dock_overlay(
             &overlay,
-            self.window.renderer.metrics().scale_factor as f32,
+            self.window.renderer.scale_factor() as f32,
             bt_render::chrome_palette(),
         );
         for layer in &mut layers {
@@ -1376,7 +1377,7 @@ impl Runtime<'_> {
     /// there would cut a tall pane sideways because the wide one next door said
     /// so.
     pub(crate) fn pane_split_axis(&self, seat: SeatId) -> Axis {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
             .map_or(Axis::Row, |body| auto_split_axis(body.width, body.height))
     }
@@ -1426,7 +1427,7 @@ impl Runtime<'_> {
         // columns it has, and that answer comes from the solve the split just
         // changed — never invented here (red line L10).
         self.commit_seat_geometry()?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, arriving, scale)
         else {
             // The solver placed no rectangle for the seat it just minted, which
@@ -1456,8 +1457,11 @@ impl Runtime<'_> {
         let wake = &self.window.pty_wake;
         let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
         let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
+        // **A split starts at 100 %** (owner ruling 2026-09-23, 3): it inherits its source's
+        // profile and place, and not its text size.
+        let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
         let leaf = create_leaf_session(
-            &self.window.renderer,
+            view,
             body,
             LeafId {
                 tab: self.window.tabs[self.window.active_tab].id,
@@ -1775,7 +1779,7 @@ impl Runtime<'_> {
         &mut self,
         host: RowHost,
     ) -> Option<seats::FilesTreeGeometry> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         match host {
             // A Git page is not a tree and has no tree geometry. Everything that
             // needs a row's rectangle asks [`Self::peek_row_rect`], which knows
@@ -1870,7 +1874,7 @@ impl Runtime<'_> {
         };
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let room = restore::content_width(width, scale);
         let offers_save = request.offers_save();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -1924,7 +1928,7 @@ impl Runtime<'_> {
         let crumbs: Vec<String> = menu.crumbs.iter().map(|level| level.name.clone()).collect();
         let (subject, powers) = (menu.subject, file_menu_powers(menu.row.as_ref()));
         let look = self.file_menu_look(subject, powers, &crumbs);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -1955,7 +1959,7 @@ impl Runtime<'_> {
                 submenu_open: menu.submenu_open,
             },
         );
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // **The effective table**, so a rebound chord follows into the menu the
         // same frame it follows into the hint card (gesture audit 2026-08-26,
@@ -2094,7 +2098,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn pane_menu_layout(&mut self) -> Option<profiles::PaneMenuLayout> {
         let menu = self.window.pane_menu.as_ref()?;
         let (point, submenu, zoomed) = (menu.point, menu.submenu, menu.zoomed);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let windows = self.other_window_rows();
         let shortcuts = &self.app.shortcuts;
@@ -2183,7 +2187,7 @@ impl Runtime<'_> {
         let Some(anchor) = self.pane_chevron_box(seat) else {
             return Ok(());
         };
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         self.open_pane_menu(
             seat,
             [
@@ -2205,7 +2209,7 @@ impl Runtime<'_> {
     /// window keeps: the rectangle a menu hangs off has to be the rectangle the
     /// button was drawn in, by one derivation and not by two that agree today.
     fn pane_chevron_box(&self, seat: SeatId) -> Option<[f32; 4]> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         seats::pane_chevron_box(
             &self.seats,
             &self.seat_layout,
@@ -2831,7 +2835,7 @@ impl Runtime<'_> {
         id: float::FloatId,
     ) -> Option<(float::FloatGeometry, float::FloatFade)> {
         let now = Instant::now();
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let tools = self.float_head_tools(id);
         let (mode, frame, fade) = {
             let win = self.window.float.drawn().find(|win| win.epoch == id)?;
@@ -3035,7 +3039,7 @@ impl Runtime<'_> {
     }
 
     pub(in crate::runtime) fn drawn_rail(&self, now: Instant) -> (i32, u8) {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let state = self.sampled_rail(now);
         (
             (state.width_logical_px() * scale).round() as i32,
@@ -3164,7 +3168,7 @@ impl Runtime<'_> {
         if !self.window.dpi_rectangle.may_cut_a_grid() {
             return Ok(None);
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // **The shells are about to be told what the tree looks like**, which
         // makes this the one honest place to record that they know. See
         // [`WindowRuntime::shells_settled_revision`]: every other reading of "the seat
@@ -3181,12 +3185,12 @@ impl Runtime<'_> {
         // gesture is aimed at is the last one this turn touches.
         for target in plan.iter().copied().filter(|target| !target.focused) {
             let (seat, body) = (target.seat, target.body);
-            let metrics = self.window.renderer.metrics();
             let physical = PhysicalSize::new(body.width, body.height);
             let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
                 continue;
             };
-            let next_grid = leaf.grid_for(&metrics, body);
+            // This leaf's own metrics (ticket 37), through `LeafSession::grid_for`.
+            let next_grid = leaf.grid_for(body);
             schedule_leaf_grid_change(
                 leaf,
                 next_grid,
@@ -3215,10 +3219,15 @@ impl Runtime<'_> {
         let body = target.body;
         // A tab with no shell has no mark and so no rail; its grid is only ever
         // traced, and [`Self::schedule_grid_change`] carries it nowhere (§7.1.6h).
-        let has_rail = self.window.tabs[active]
-            .focused()
-            .is_some_and(|leaf| leaf.has_rail);
-        let next_grid = cmdrail::terminal_grid_for(&self.window.renderer.metrics(), body, has_rail);
+        //
+        // At the focused pane's own metrics (ticket 37): `grid_for` subtracts the rail's
+        // reservation at window scale first and divides by this pane's cell after, which is
+        // `cmdrail::terminal_grid_for`'s own order. A tab with no shell has no pane metrics
+        // either, and its grid is traced at the window's base size.
+        let next_grid = match self.window.tabs[active].focused() {
+            Some(leaf) => leaf.grid_for(body),
+            None => cmdrail::terminal_grid_for(&self.window.renderer.base_metrics(), body, false),
+        };
         self.schedule_grid_change(
             next_grid,
             PhysicalSize::new(body.width, body.height),
@@ -3275,8 +3284,8 @@ impl Runtime<'_> {
     ) -> Result<()> {
         // Read before any tab is borrowed mutably (`BT_CARD_TRACE`).
         let window = u64::from(self.window.window.id());
-        let scale = self.window.renderer.metrics().scale_factor as f32;
-        let metrics = seats::seat_metrics(self.window.renderer.metrics().dpi_milli().get());
+        let scale = self.window.renderer.scale_factor() as f32;
+        let metrics = seats::seat_metrics(self.window.renderer.dpi_milli().get());
         let viewport = self.window.seat_viewport;
         let policy = self.window.size_policy;
         let active = self.window.active_tab;
@@ -3286,9 +3295,6 @@ impl Runtime<'_> {
             }
             let tab = &self.window.tabs[index];
             let (layout, overflow) = solve_tree(&tab.seats, viewport, &metrics, policy);
-            // Read while the renderer is still only borrowed, because the tab it
-            // is about is borrowed mutably the moment its layout lands on it.
-            let cell_metrics = self.window.renderer.metrics();
             let sized: Vec<(SeatId, GridSize, PhysicalSize<u32>)> =
                 leaf_resize_plan(&tab.seats, &layout, tab.focused_leaf, scale)
                     .into_iter()
@@ -3296,7 +3302,7 @@ impl Runtime<'_> {
                         let leaf = tab.sessions.get(&target.seat)?;
                         Some((
                             target.seat,
-                            leaf.grid_for(&cell_metrics, target.body),
+                            leaf.grid_for(target.body),
                             PhysicalSize::new(target.body.width, target.body.height),
                         ))
                     })
@@ -3335,9 +3341,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn pane_frame_hit(&self) -> Option<(SeatId, bt_render::GridHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
         let hit = self
-            .window
-            .renderer
-            .metrics()
+            .pane_frame_metrics(seat)?
             .hit_test_frame(frame, position.x, position.y)?;
         Some((seat, hit))
     }
@@ -3371,6 +3375,28 @@ impl Runtime<'_> {
     /// answers, and the callers already do nothing about.
     pub(crate) fn pane_frame(&self, seat: SeatId) -> Option<&ViewportFrame> {
         self.sessions.get(&seat)?.last_presented_frame.as_ref()
+    }
+
+    /// **The terminal panes of the tab on screen that are not at 100 %, with the percentage
+    /// each asked for** (ticket 37) — read off each pane's own rung whenever it is asked, for the
+    /// painter and the hit test alike, and never kept.
+    pub(crate) fn pane_text_sizes(&self) -> std::collections::BTreeMap<SeatId, u16> {
+        self.sessions
+            .iter()
+            .filter(|(_, leaf)| !leaf.text_scale.is_actual())
+            .map(|(seat, leaf)| (*seat, leaf.text_scale.percent()))
+            .collect()
+    }
+
+    /// **The metrics [`Self::pane_frame`]'s picture was drawn at** (ticket 37) — the one answer
+    /// every pointer question about `seat` measures cells with.
+    ///
+    /// The presented picture's, never the pane's newest: a size step whose picture has not yet
+    /// reached the glass has changed [`LeafSession::metrics`] and not the rows under the
+    /// pointer, and a hit that paired the old row map with the new cell width would name a cell
+    /// nobody can see.
+    pub(crate) fn pane_frame_metrics(&self, seat: SeatId) -> Option<bt_render::CellMetrics> {
+        Some(self.sessions.get(&seat)?.presented_metrics)
     }
 
     /// **Which spelling of an absolute path the shell in `seat` prints** — the pane's namespace,
@@ -3446,12 +3472,10 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn drag_hit_in_pane(&self, seat: SeatId) -> Option<bt_render::GridHit> {
         let position = self.window.pointer_position?;
         let frame = self.pane_frame(seat)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         let (x, y) = clamp_into_body(body, position.x, position.y);
-        self.window
-            .renderer
-            .metrics()
+        self.pane_frame_metrics(seat)?
             .clamped_hit_test_frame(frame, x, y)
     }
 
@@ -3486,9 +3510,7 @@ impl Runtime<'_> {
     ) -> Option<(SeatId, &LeafSession, bt_render::GridHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
         let hit = self
-            .window
-            .renderer
-            .metrics()
+            .pane_frame_metrics(seat)?
             .hit_test_frame(frame, position.x, position.y)?;
         Some((seat, self.sessions.get(&seat)?, hit))
     }
@@ -3633,7 +3655,7 @@ impl Runtime<'_> {
             Axis::Row => position.x,
             Axis::Col => position.y,
         };
-        let scale_ppm = seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get());
+        let scale_ppm = seats::scale_ppm(self.window.renderer.dpi_milli().get());
         let metrics = self.seat_metrics();
         // A refusal, and a clamp that changed nothing, both mean "do not
         // re-solve": §2.4 rules that an infeasible drag has zero side effects
@@ -3792,7 +3814,7 @@ impl Runtime<'_> {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<seats::ChromeTarget> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
         let width = width as f32;
         let rail = self.sampled_rail(Instant::now());
@@ -3816,6 +3838,19 @@ impl Runtime<'_> {
                     &self.seat_layout,
                     &self.window.files_name_widths,
                     scale,
+                    position.x,
+                    position.y,
+                )
+            })
+            // And the text-size mark, which lives inside a terminal head for the same
+            // reason and answers before it (ticket 37).
+            .or_else(|| {
+                seats::hit_text_size(
+                    &self.seats,
+                    &self.seat_layout,
+                    &self.pane_text_sizes(),
+                    scale,
+                    self.window.search.seat(),
                     position.x,
                     position.y,
                 )
@@ -4132,7 +4167,7 @@ impl Runtime<'_> {
     /// begins.
     pub(crate) fn layout_host_rect(&self) -> [f64; 4] {
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let dpi_milli = self.window.renderer.metrics().dpi_milli().get();
+        let dpi_milli = self.window.renderer.dpi_milli().get();
         let scale_ppm = seats::scale_ppm(dpi_milli);
         // The same inset `solve_seats` hands `logical_viewport`, through the same
         // helper: these two are twins, and a rim measured one pixel to the left
@@ -4617,7 +4652,7 @@ impl Runtime<'_> {
         let listing = state.listing().clone();
         let scroll = state.scroll();
         let (shown, before, typed) = self.palette_field_look();
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -4651,7 +4686,7 @@ impl Runtime<'_> {
     /// collapsed one. That is [`seats::rail_geometry`]'s own answer passed
     /// through rather than a second reading of the same question.
     pub(crate) fn rail_geometry_now(&self, now: Instant) -> Option<seats::RailGeometry> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (_, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (trailers, pinned) = self.rail_list(now);
         seats::rail_geometry(
@@ -4687,7 +4722,7 @@ impl Runtime<'_> {
         if !self.rail_posture().draws_icon_rail() {
             return;
         }
-        let scale = self.window.renderer.metrics().scale_factor;
+        let scale = self.window.renderer.scale_factor();
         let aiming_open = self.window.rail_open.to > 0.5;
         let target = seats::RailState {
             open: f32::from(u8::from(aiming_open)),
@@ -5051,7 +5086,7 @@ impl Runtime<'_> {
     /// drawn through the transform this instant, and a second copy of this
     /// arithmetic would be a second answer.
     pub(in crate::runtime) fn pane_draws(&mut self, now: Instant) -> Vec<PaneDraw> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let motion = self.app.motion;
         let bodies: Vec<PaneDraw> = self
             .seats
@@ -5346,7 +5381,11 @@ impl Runtime<'_> {
         // this one and leave the chrome to cover its own tracks. The list is
         // then simply empty, and `present_frame` composes zero seats and the
         // chrome over them, which is exactly what such a tab is made of.
-        if let Some(frame) = focused_frame {
+        //
+        // **Each retained picture with the metrics it was presented at** (ticket 37): a frame
+        // on the glass is a pair, and drawing it again at the pane's newer metrics would lay
+        // its old rows out in cells of another size.
+        if let Some((frame, leaf)) = focused_frame.zip(tab.sessions.get(&focused_leaf)) {
             let focused_body = bodies
                 .iter()
                 .find(|pane| pane.seat == focused_leaf)
@@ -5361,6 +5400,7 @@ impl Runtime<'_> {
                 seat: focused_body.viewport,
                 clip: focused_body.clip,
                 frame,
+                metrics: leaf.presented_metrics,
                 focused,
             });
         }
@@ -5385,6 +5425,7 @@ impl Runtime<'_> {
                 seat: pane.viewport,
                 clip: pane.clip,
                 frame: projected,
+                metrics: leaf.presented_metrics,
                 focused: false,
             });
         }

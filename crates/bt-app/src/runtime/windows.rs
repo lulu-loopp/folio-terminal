@@ -17,6 +17,7 @@ use crate::{
     session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
     tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
 };
+use crate::{LeafView, TextScale};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{SeatId, SizePolicy, WorkAreaHint};
@@ -268,7 +269,7 @@ impl Runtime<'_> {
         let translucency_available = renderer
             .alpha_report()
             .is_some_and(bt_render::SurfaceAlphaReport::is_premultiplied);
-        ensure_metrics_match_authoritative_scale(renderer.metrics().scale_factor, scale_factor)?;
+        ensure_metrics_match_authoritative_scale(renderer.scale_factor(), scale_factor)?;
         ensure_swapchain_matches_inner(&renderer, physical)?;
         let render_physical = presentation_physical_size(renderer.presentation_geometry());
         let pty_wake = PtyWakeSignal::new(app.event_proxy.clone());
@@ -373,6 +374,7 @@ impl Runtime<'_> {
             let (tab, _) = create_tab_state(
                 app.tab_ids.mint(),
                 seats,
+                LeafView::at(&mut app.gpu, &renderer, TextScale::ACTUAL)?,
                 &renderer,
                 render_physical,
                 wake,
@@ -457,7 +459,7 @@ impl Runtime<'_> {
             SessionWindowV1 {
                 placement: WindowStateV1 {
                     bounds: persisted_window_bounds(stood_at, scale_factor),
-                    dpi: renderer.metrics().dpi_milli().get(),
+                    dpi: renderer.dpi_milli().get(),
                     maximized,
                     monitor_id: None,
                 },
@@ -880,9 +882,11 @@ impl Runtime<'_> {
             }
         }
         let preview = PreviewRestore::from_pages(preview_cur);
+        let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
         let (tab, _) = create_tab_state(
             id,
             seats,
+            born,
             &self.window.renderer,
             render_physical,
             wake,
@@ -964,9 +968,11 @@ impl Runtime<'_> {
             let (seats, seed, leaves, files, preview) = revive_plan(tab);
             let wake = &self.window.pty_wake;
             let id = self.app.tab_ids.mint();
+            let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
             let (revived, _) = create_tab_state(
                 id,
                 seats,
+                born,
                 &self.window.renderer,
                 render_physical,
                 wake,
@@ -1046,7 +1052,7 @@ impl Runtime<'_> {
         if self.app.window_ring != Some(self.window_id()) {
             return Vec::new();
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         if width <= 0.0 || height <= 0.0 {
@@ -1091,12 +1097,7 @@ impl Runtime<'_> {
         let Ok(rect) = bt_platform::get_work_area(native) else {
             return;
         };
-        let scale = self
-            .window
-            .renderer
-            .metrics()
-            .scale_factor
-            .max(f64::MIN_POSITIVE);
+        let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
         let width = ((rect.right - rect.left).max(0) as f64 / scale).round() as i64;
         let height = ((rect.bottom - rect.top).max(0) as f64 / scale).round() as i64;
         self.window.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
@@ -1155,12 +1156,7 @@ impl Runtime<'_> {
         // down the line it last ran (§7.54e ④).
         let is_quake = self.is_quake_window();
         let previous = self.app.window_picture(self.window.window.id());
-        let scale = self
-            .window
-            .renderer
-            .metrics()
-            .scale_factor
-            .max(f64::MIN_POSITIVE);
+        let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
         let native = native_window(&self.window.window).ok();
         let posture = if native.is_some_and(bt_platform::is_window_minimized) {
             WindowPosture::Minimized
@@ -1221,7 +1217,7 @@ impl Runtime<'_> {
         let mut window = SessionWindowV1 {
             placement: WindowStateV1 {
                 bounds,
-                dpi: self.window.renderer.metrics().dpi_milli().get(),
+                dpi: self.window.renderer.dpi_milli().get(),
                 maximized,
                 monitor_id: was.monitor_id,
             },
@@ -1822,7 +1818,7 @@ impl Runtime<'_> {
     /// button in; `window_band_px` answers in the physical pixels the stage is
     /// solved in, so the scale it was solved at is divided back out here.
     pub(crate) fn follow_the_window_band(&self) -> Result<()> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let band = seats::window_band_px(scale, self.platform_chrome());
         self.window
             .custom_window_frame

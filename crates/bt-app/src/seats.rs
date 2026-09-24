@@ -2756,6 +2756,10 @@ pub enum ChromeTarget {
     /// a button that shared the header's target would begin a tear-out on the
     /// way to a menu.
     PaneMenu(SeatId),
+    /// **A terminal pane head's text-size mark** (ticket 37): `125%` while the pane is not at
+    /// 100 %, and a click puts it back. Its own target for [`Self::PaneClose`]'s reason: the head
+    /// is a drag handle and this is a button inside it.
+    PaneTextSize(SeatId),
     /// One row of one files column's tree (C30/C155).
     ///
     /// **By index and not by id.** The hit test's whole job is "which rectangle
@@ -6306,6 +6310,7 @@ pub fn hit_chrome(
                 rect,
                 placement.kind,
                 layout.seat_is_on_stage(placement.id),
+                false,
                 scale,
             );
             // What this head is *showing*, asked once for the whole trailing
@@ -7086,9 +7091,44 @@ pub fn pane_ghost_folder_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]
     pane_ghost_door_geometry(rect, scale, crate::icons::ActionIcon::OpenFilesPane)
 }
 
+/// **Where a terminal pane's text-size mark stands: beside its top-right controls, to their
+/// left** (ticket 37; owner ruling 2026-09-24).
+///
+/// One rule for a pane with a head and a pane without one, because the controls it stands
+/// beside are on every terminal pane — the head's run (`⌄ 🗀 ×`) or the headless pane's corner
+/// (`⌄ 🗀`) — while a head's title is not. `chevron` is the run's first box, the `⌄`; the mark
+/// ends where it begins (the run's boxes abut, so the mark is one more slot in the same rhythm),
+/// shares its top and height, and is [`PANE_TEXT_SIZE_MARK_WIDTH_LOGICAL_PX`] wide. `None` when
+/// it would start left of `floor` — there is no room, and a mark over the pane's own leading
+/// furniture is worse than none.
+#[must_use]
+pub fn text_size_mark_beside(chevron: [f32; 4], floor: f32, scale: f32) -> Option<[f32; 4]> {
+    let right = chevron[0];
+    let left = right
+        - (PANE_TEXT_SIZE_MARK_WIDTH_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
+    (left >= floor).then_some([left, chevron[1], right, chevron[3]])
+}
+
+/// **A headless terminal pane's text-size mark** (ticket 37) — [`text_size_mark_beside`] asked
+/// of the corner's own `⌄` ([`pane_ghost_geometry`]): a lone terminal, a pane in focus mode, a
+/// pane whose head is not drawn. `None` when the corner has no `⌄` or no room left of it.
+#[must_use]
+pub fn pane_ghost_text_size_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+    text_size_mark_beside(pane_ghost_geometry(rect, scale)?, rect[0], scale)
+}
+
 /// The zoom state mark's own box, in physical pixels — 13 logical, the size the
 /// seat marks beside it are cut at.
 pub const PANE_ZOOM_MARK_LOGICAL_PX: f32 = 13.0;
+
+/// **How wide a pane head's text-size mark is**, in logical pixels (ticket 37): room for the
+/// widest label the ladder can put in it, `300%`, in the head's own caption type with tabular
+/// numerals and a small inset either side. One width for every rung, so the title beside it
+/// does not move as the size is stepped — and so the box can be derived without a renderer,
+/// which is what lets the painter and the hit test ask one function.
+pub const PANE_TEXT_SIZE_MARK_WIDTH_LOGICAL_PX: f32 = 38.0;
 
 /// **How far a head's run dissolves the title under it** — one character of the
 /// title's own type (user ruling, 2026-08-27:「渐变底…宽度约控件运宽 + 一个字
@@ -7164,6 +7204,21 @@ pub struct PaneHeadGeometry {
     /// no mark, and the pane is still legibly zoomed from the fact that it is the
     /// only pane on the stage plus the menu row that says `Restore pane`.
     pub zoom_mark: Option<[f32; 4]>,
+    /// **The text-size mark's box** (ticket 37; owner rulings 2026-09-23, 2, and 2026-09-24),
+    /// or `None` on a head whose pane is at 100 %, that is not a terminal's, or that has no room
+    /// for it.
+    ///
+    /// **Beside the pane's top-right controls, to their left** — [`text_size_mark_beside`], the
+    /// one placement rule a head and a headless pane's corner ([`pane_ghost_text_size_geometry`])
+    /// both ask, because those controls are on every terminal pane and a head's title is not. It
+    /// ends where [`Self::chevron`] begins, in the run's own slot rhythm (the run's boxes abut),
+    /// and a head with no `⌄` has no room for it either. It is a slot of this geometry and the
+    /// head's other occupants give way to it: the name stops a gap short of it
+    /// ([`Self::title`]'s right edge), and so do the leading controls ([`Self::control_limit`]).
+    /// Unlike the run it rests visible, because it is state, not a verb waiting for a hover. It
+    /// is set in chrome type at window scale — never at the pane's own text size — and shows the
+    /// pane's **requested** percentage; a click on it is the `text-actual-size` verb.
+    pub text_size: Option<[f32; 4]>,
     /// **The whole of the row after the leading mark**, less the head's own
     /// trailing padding — and *not* less the trailing run (user report,
     /// 2026-08-27).
@@ -7304,10 +7359,15 @@ pub fn pane_head_control_boxes(
 /// own answer about which seat holds the viewport alone — rather than from a
 /// painter's guess, so the head a hit test measures and the head the frame draws
 /// cannot be wearing different postures.
+///
+/// **`text_size` is the third** (ticket 37): whether this head wears the text-size mark — a
+/// terminal pane that is not at 100 % — and, like `zoomed`, a parameter because it decides where
+/// the name starts. It is ignored on every kind but a terminal's.
 pub fn pane_head_geometry(
     rect: [f32; 4],
     kind: SeatKind,
     zoomed: bool,
+    text_size: bool,
     scale: f32,
 ) -> PaneHeadGeometry {
     let PaneHeadBand {
@@ -7417,7 +7477,14 @@ pub fn pane_head_geometry(
     // that says what it is for. Cut before the zoom mark because the mark has to
     // stop at it: `control_limit` is a fact about the *trailing* run, and a
     // leading slot that moved it would be the two deciding each other.
-    let control_limit = match run_left {
+    // **The text-size mark, left of the `⌄`** (ticket 37) — [`text_size_mark_beside`], the rule
+    // a headless corner asks too. The kind's mark is the floor it may not cross.
+    let text_size = (text_size && kind == SeatKind::Terminal)
+        .then(|| {
+            text_size_mark_beside(chevron?, mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale, scale)
+        })
+        .flatten();
+    let control_limit = match text_size.map(|mark| mark[0]).or(run_left) {
         Some(left) => left - SEAT_TITLE_GAP_LOGICAL_PX * scale,
         None => title_right,
     }
@@ -7439,10 +7506,14 @@ pub fn pane_head_geometry(
         })
         .flatten();
     // The name starts after the last slot the leading run is actually wearing —
-    // the kind's mark, or the zoom mark when there is one.
+    // the kind's mark, or the zoom mark when there is one — and stops a gap short of the
+    // text-size mark when the pane wears one (ticket 37).
+    let title_right = text_size.map_or(title_right, |size| {
+        (size[0] - SEAT_TITLE_GAP_LOGICAL_PX * scale).min(title_right)
+    });
     let title_left = match zoom_mark {
         None => mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale,
-        Some(zoom) => (zoom[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale)
+        Some(slot) => (slot[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale)
             .round()
             .min(title_right.max(mark[2])),
     };
@@ -7451,6 +7522,7 @@ pub fn pane_head_geometry(
         content_bottom,
         mark,
         zoom_mark,
+        text_size,
         title: [
             title_left,
             rect[1],
@@ -8440,6 +8512,9 @@ static NO_FILES_NAMES: BTreeMap<SeatId, String> = BTreeMap::new();
 /// name nobody has measured has no width for one to be built from.
 #[cfg(test)]
 static NO_FILES_NAME_WIDTHS: BTreeMap<SeatId, f32> = BTreeMap::new();
+/// And for the panes' text sizes: "every pane here is at 100 %" (ticket 37).
+#[cfg(test)]
+static NO_TEXT_SIZES: BTreeMap<SeatId, u16> = BTreeMap::new();
 /// And once more for the rows: "no files column here has been walked".
 ///
 /// A column with no entry draws no tree and no notice — which is what every
@@ -8573,6 +8648,7 @@ pub fn build_chrome_with_preview(
             search_seat: None,
             head_raised: None,
             resizing_cards: None,
+            text_sizes: &NO_TEXT_SIZES,
         },
     )
     .flattened()
@@ -9197,6 +9273,12 @@ pub struct ChromeContent<'a> {
     /// ends when the button comes up, whereas the card's 100ms is measured from
     /// the release; so this field would exist even once E52 lands.
     pub resizing_cards: Option<ResizingCards>,
+    /// **Each terminal pane that is not at 100 %, and the percentage it asked for** (ticket 37).
+    ///
+    /// Built for this frame from each pane's own rung and handed down, the way
+    /// [`Self::terminal_names`] is: a reading of the pane, not a copy of its size kept anywhere.
+    /// A pane missing from it wears no text-size mark.
+    pub text_sizes: &'a BTreeMap<SeatId, u16>,
     /// Which pane has a **search capsule** open on it, if any — the one fact the
     /// corner ghost's existence depends on and `Seats` cannot answer
     /// ([`Seats::seat_wears_ghost`]).
@@ -9522,6 +9604,7 @@ pub fn build_chrome_for_tabs(
         search_seat,
         head_raised,
         resizing_cards: carded,
+        text_sizes,
     } = content;
     // Each seat is asked about *itself*. Written as a closure beside the two
     // call sites rather than inlined at each, so the collapsed bar and the pane
@@ -9738,6 +9821,7 @@ pub fn build_chrome_for_tabs(
                     head_box,
                     placement.kind,
                     layout.seat_is_on_stage(placement.id),
+                    text_sizes.contains_key(&placement.id),
                     scale,
                 );
                 let head_bottom = head.head[3];
@@ -9832,6 +9916,38 @@ pub fn build_chrome_for_tabs(
                         box_,
                         palette.accent,
                     ));
+                }
+                // **The text size, while it is not 100 %** (ticket 37; owner ruling 2026-09-23,
+                // 2): the requested percentage in the head's own caption type — chrome at window
+                // scale, never the pane's text size — and a click puts the pane back. The pill
+                // under it appears under the pointer only, as the files head's root button's
+                // does, so a head at rest shows a number and not a control.
+                if let (Some(box_), Some(percent)) = (head.text_size, text_sizes.get(&placement.id))
+                {
+                    if pointer.hover == Some(ChromeTarget::PaneTextSize(placement.id)) {
+                        pane_sprites.push(ChromeSprite::new(
+                            ChromeMark::ControlPill {
+                                radius_px: (FILES_ROOT_BUTTON_RADIUS_LOGICAL_PX * scale)
+                                    .round()
+                                    .max(1.0) as u32,
+                            },
+                            box_,
+                            palette.pane_close_pill,
+                        ));
+                    }
+                    pane_labels.push(ChromeLabel {
+                        mono: false,
+                        text: crate::i18n::zoom_percent(f64::from(*percent) / 100.0),
+                        rect: box_,
+                        font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                        color: palette.pane_title,
+                        align_right: false,
+                        align_center: true,
+                        letter_spacing_em: seat_title_face(focused).letter_spacing_em,
+                        weight: seat_title_face(focused).weight,
+                        tabular_numerals: true,
+                        clip: None,
+                    });
                 }
                 // B15/B16 — a files head's name is a button, and the chevron
                 // beside it is the whole of what says so. The fill only appears
@@ -10619,6 +10735,40 @@ pub fn build_chrome_for_tabs(
                 if seats.seat_wears_ghost(placement.kind, placement.id, search_seat) =>
             {
                 let ghost_box = card_rect_of(placement.id, rect).unwrap_or(rect);
+                // **The text size, beside the corner's `⌄`** (ticket 37; owner ruling
+                // 2026-09-24) — the head's rule asked of the corner, and resting visible. It
+                // floats over the pane's own text, so it brings its own ground, as a lit door
+                // does.
+                if let (Some(box_), Some(percent)) = (
+                    pane_ghost_text_size_geometry(ghost_box, scale),
+                    text_sizes.get(&placement.id),
+                ) {
+                    pane_sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (PANE_GHOST_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                                as u32,
+                        },
+                        box_,
+                        palette.menu_surface,
+                    ));
+                    pane_labels.push(ChromeLabel {
+                        mono: false,
+                        text: crate::i18n::zoom_percent(f64::from(*percent) / 100.0),
+                        rect: box_,
+                        font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                        color: if pointer.hover == Some(ChromeTarget::PaneTextSize(placement.id)) {
+                            palette.accent
+                        } else {
+                            palette.pane_title
+                        },
+                        align_right: false,
+                        align_center: true,
+                        letter_spacing_em: 0.0,
+                        weight: ChromeLabelWeight::Regular,
+                        tabular_numerals: true,
+                        clip: None,
+                    });
+                }
                 if let Some(ghost) = pane_ghost_geometry(ghost_box, scale) {
                     // **One door, written once, drawn twice** (user proposal,
                     // Claude 认可 2026-08-25). The corner carries 🗀 and `⌄`
@@ -16926,6 +17076,7 @@ pub fn hit_files_root(
             rect,
             placement.kind,
             layout.seat_is_on_stage(placement.id),
+            false,
             scale,
         );
         let width = name_widths.get(&placement.id).copied().unwrap_or(0.0);
@@ -16934,6 +17085,76 @@ pub fn hit_files_root(
         }
     }
     None
+}
+
+/// **One terminal pane's text-size mark, where the painter drew it** (ticket 37), or `None`
+/// when that pane is at 100 % or has no room for the mark.
+///
+/// Left of the pane's `⌄` whether the pane wears a head (its run) or not (its corner) —
+/// [`text_size_mark_beside`], asked through [`pane_head_geometry`] or
+/// [`pane_ghost_text_size_geometry`] from the same posture the painter used, so the mark you can
+/// press, the mark whose tip is registered and the mark you can see are one box. `capsule` is the
+/// pane the search capsule is standing on, whose corner it takes ([`Seats::seat_wears_ghost`]).
+#[must_use]
+pub fn pane_text_size_box(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    text_sizes: &BTreeMap<SeatId, u16>,
+    scale: f32,
+    capsule: Option<SeatId>,
+) -> Option<[f32; 4]> {
+    if !text_sizes.contains_key(&seat) {
+        return None;
+    }
+    let placement = layout.rects.iter().find(|placement| {
+        placement.id == seat
+            && placement.kind == SeatKind::Terminal
+            && matches!(placement.presentation, Presentation::Full)
+    })?;
+    let device = placement.device_rect?;
+    let rect = [
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ];
+    if seats.seat_wears_head(placement.kind) {
+        return pane_head_geometry(
+            rect,
+            placement.kind,
+            layout.seat_is_on_stage(placement.id),
+            true,
+            scale,
+        )
+        .text_size;
+    }
+    seats
+        .seat_wears_ghost(placement.kind, placement.id, capsule)
+        .then(|| pane_ghost_text_size_geometry(rect, scale))
+        .flatten()
+}
+
+/// **Which terminal pane's text-size mark the pointer is on** (ticket 37).
+///
+/// [`hit_files_root`]'s sentence for the other button that lives inside a head's drag handle,
+/// and asked before [`hit_chrome`] for the same reason: the smaller affordance answers first.
+#[must_use]
+pub fn hit_text_size(
+    seats: &Seats,
+    layout: &SeatLayout,
+    text_sizes: &BTreeMap<SeatId, u16>,
+    scale: f32,
+    capsule: Option<SeatId>,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    text_sizes.keys().copied().find_map(|seat| {
+        pane_text_size_box(seats, layout, seat, text_sizes, scale, capsule)
+            .filter(|mark| contains(*mark, x, y))
+            .map(|_| ChromeTarget::PaneTextSize(seat))
+    })
 }
 
 /// What one files column is showing this frame.
@@ -17861,6 +18082,7 @@ pub fn pane_chevron_box(
             rect,
             placement.kind,
             layout.seat_is_on_stage(placement.id),
+            false,
             scale,
         )
         .chevron;
@@ -17909,6 +18131,7 @@ pub fn pane_files_box(
             rect,
             placement.kind,
             layout.seat_is_on_stage(placement.id),
+            false,
             scale,
         )
         .files;
@@ -17956,6 +18179,7 @@ pub fn pane_control_boxes(
             rect,
             placement.kind,
             layout.seat_is_on_stage(placement.id),
+            false,
             scale,
         ));
     }
@@ -18284,6 +18508,7 @@ pub fn hit_preview_head(
             rect,
             placement.kind,
             layout.seat_is_on_stage(placement.id),
+            false,
             scale,
         );
         let geometry = preview_head_geometry(&head, scale, tools);
@@ -23430,6 +23655,7 @@ mod tests {
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         );
         let WindowChrome { seats, .. } = chrome;
@@ -23519,6 +23745,7 @@ mod tests {
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             );
             chrome
@@ -23651,6 +23878,7 @@ mod tests {
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             );
             let drawn: Vec<&ChromeLabel> = chrome
@@ -23756,7 +23984,7 @@ mod tests {
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let seat = seats.preview().expect("the preview seat");
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
-        pane_head_geometry(rect, SeatKind::Preview, false, 1.0).head
+        pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0).head
     }
 
     /// PIN (P11-P31) — **the preview head's whole run, and the reveal ladder it
@@ -24541,7 +24769,7 @@ mod tests {
             name_width: 60.0,
             count_width: 8.0,
         };
-        let head = pane_head_geometry(rect, SeatKind::Preview, false, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0);
         let geometry = preview_head_geometry(&head, 1.0, tools);
         let centre = |box_: [f32; 4]| {
             (
@@ -24639,7 +24867,7 @@ mod tests {
             name_width: 60.0,
             count_width: 8.0,
         };
-        let head = pane_head_geometry(rect, SeatKind::Preview, false, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0);
         let geometry = preview_head_geometry(&head, 1.0, tools);
         let centre = |box_: Option<[f32; 4]>| {
             let box_ = box_.expect("a head this wide seats every control");
@@ -24738,7 +24966,7 @@ mod tests {
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let seat = seats.preview().expect("the preview seat");
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
-        let head = pane_head_geometry(rect, SeatKind::Preview, false, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0);
         let page = PreviewHeadTools {
             web: true,
             name_width: 60.0,
@@ -29557,6 +29785,7 @@ mod tests {",
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             )
             .flattened();
@@ -29837,6 +30066,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened()
@@ -29949,6 +30179,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened();
@@ -30270,7 +30501,7 @@ mod tests {",
             device.right as f32,
             device.bottom as f32,
         ];
-        let head = pane_head_geometry(rect, SeatKind::Files, false, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Files, false, false, 1.0);
 
         let short = files_root_box(&head, 1.0, 30.0).expect("a named head has a button");
         assert!(
@@ -30350,7 +30581,7 @@ mod tests {",
             device.right as f32,
             device.bottom as f32,
         ];
-        let head = pane_head_geometry(rect, SeatKind::Files, false, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Files, false, false, 1.0);
         let close = head.close.expect("the head is wide enough for its ×");
 
         // A name wide enough to want the whole head is still clamped clear of
@@ -30965,7 +31196,7 @@ mod tests {",
         let mut trees = BTreeMap::new();
         trees.insert(column, content.clone());
         let rect = device_rect_of(&layout, column);
-        let head = pane_head_geometry(rect, SeatKind::Files, false, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Files, false, false, 1.0);
         let body = [rect[0], head.head[3], rect[2], rect[3]];
         let geometry = files_tree_geometry(body, content.rows.len(), 0.0, 1.0);
         for index in 0..content.rows.len() {
@@ -31379,7 +31610,7 @@ mod tests {",
             "and a row twenty down has been scrolled into view"
         );
         let rect = device_rect_of(&layout, column);
-        let head = pane_head_geometry(rect, SeatKind::Files, false, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Files, false, false, 1.0);
         // Nothing may *straddle* the seam between the head and the body: the
         // head's own mark sits wholly above it and every row's glyph wholly
         // below, and a glyph that spans it is a row bleeding into the caption.
@@ -31902,6 +32133,7 @@ mod tests {",
                 chevron_turn: 1.0,
                 pane_motion: PaneMotionFrame::default(),
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         );
         (chrome, ghost)
@@ -34406,6 +34638,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened()
@@ -34619,6 +34852,7 @@ mod tests {",
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             )
             .flattened();
@@ -34739,6 +34973,7 @@ mod tests {",
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             )
             .flattened()
@@ -34949,7 +35184,7 @@ mod tests {",
     /// place nothing but that picture may be.
     fn body_centre(layout: &SeatLayout, seat: SeatId, kind: SeatKind, scale: f32) -> [f32; 2] {
         let rect = device_rect_of(layout, seat);
-        let head = pane_head_geometry(rect, kind, false, scale);
+        let head = pane_head_geometry(rect, kind, false, false, scale);
         [(rect[0] + rect[2]) / 2.0, (head.head[3] + rect[3]) / 2.0]
     }
 
@@ -35052,6 +35287,7 @@ mod tests {",
                 search_seat,
                 head_raised,
                 resizing_cards: cards,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened()
@@ -35161,7 +35397,7 @@ mod tests {",
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = [100.0_f32, 40.0, 700.0, 500.0];
-            let head = pane_head_geometry(rect, SeatKind::Terminal, false, scale);
+            let head = pane_head_geometry(rect, SeatKind::Terminal, false, false, scale);
             let close = head.close.expect("a 600px head seats a 17px button");
             let box_px = (17.0 * scale).round();
 
@@ -35225,7 +35461,7 @@ mod tests {",
     fn a_head_at_rest_gives_its_name_the_whole_row() {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = [100.0_f32, 40.0, 700.0, 500.0];
-            let head = pane_head_geometry(rect, SeatKind::Terminal, false, scale);
+            let head = pane_head_geometry(rect, SeatKind::Terminal, false, false, scale);
             let chevron = head.chevron.expect("a 600px head seats the whole run");
             let files = head.files.expect("and the folder");
             let close = head.close.expect("and the `×`");
@@ -35278,7 +35514,13 @@ mod tests {",
 
         // A head too narrow for even the `×` has no run, so it has no ground
         // to stand one on and nothing to dissolve.
-        let narrow = pane_head_geometry([0.0, 0.0, 30.0, 200.0], SeatKind::Terminal, false, 1.0);
+        let narrow = pane_head_geometry(
+            [0.0, 0.0, 30.0, 200.0],
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
         assert_eq!(narrow.close, None);
         assert_eq!(narrow.run, None);
         assert_eq!(narrow.scrim, None);
@@ -35421,7 +35663,7 @@ mod tests {",
                                 // `one_collapsed_seat`'s own reason.
                                 for kind in [placement.kind, SeatKind::Placeholder] {
                                     let zoomed = layout.seat_is_on_stage(placement.id);
-                                    let head = pane_head_geometry(rect, kind, zoomed, scale);
+                                    let head = pane_head_geometry(rect, kind, zoomed, false, scale);
                                     let where_ = format!(
                                         "{kind:?} at {scale}x in {tabs}, {room}, \
                                          {} (name {name_width}px)",
@@ -35615,7 +35857,7 @@ mod tests {",
                 SeatKind::Placeholder,
             ] {
                 let rect = [100.0_f32, 40.0, 700.0, 500.0];
-                let tiled = pane_head_geometry(rect, kind, false, scale);
+                let tiled = pane_head_geometry(rect, kind, false, false, scale);
                 assert_eq!(tiled.zoom_mark, None, "{kind:?}: a tiled head is bare");
                 assert_eq!(
                     tiled.title[0],
@@ -35624,7 +35866,7 @@ mod tests {",
                      which is where it started before there was a slot between them",
                 );
 
-                let zoomed = pane_head_geometry(rect, kind, true, scale);
+                let zoomed = pane_head_geometry(rect, kind, true, false, scale);
                 let mark = zoomed.zoom_mark.expect("a 600px head seats the mark");
                 // `pane_zoom_mark_box`'s own arithmetic, kept as the pin.
                 let size = (PANE_ZOOM_MARK_LOGICAL_PX * scale).round().max(1.0);
@@ -35661,7 +35903,13 @@ mod tests {",
         // head at 2.0 whose pane begins at 560 put its zoom mark at 624–650 and
         // started the name at 624 — one `x` for two drawings. The mark has not
         // moved; the name now starts one gap after it.
-        let head = pane_head_geometry([560.0, 100.0, 1_900.0, 900.0], SeatKind::Preview, true, 2.0);
+        let head = pane_head_geometry(
+            [560.0, 100.0, 1_900.0, 900.0],
+            SeatKind::Preview,
+            true,
+            false,
+            2.0,
+        );
         assert_eq!(
             head.zoom_mark.map(|mark| [mark[0], mark[2]]),
             Some([624.0, 650.0])
@@ -35710,7 +35958,7 @@ mod tests {",
             .solve(viewport, &metrics, SizePolicy::Lawful)
             .expect("the stage fits");
         let rect = full_pane_rect(&layout, preview).expect("a full pane");
-        let head = pane_head_geometry(rect, SeatKind::Preview, true, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Preview, true, false, 1.0);
         let mark = head.zoom_mark.expect("a zoomed head wears the mark");
         let geometry = preview_head_geometry(&head, 1.0, tools);
         let (x, y) = centre(mark);
@@ -35760,7 +36008,7 @@ mod tests {",
             .solve(viewport, &metrics, SizePolicy::Lawful)
             .expect("the stage fits");
         let rect = full_pane_rect(&layout, column).expect("a full pane");
-        let head = pane_head_geometry(rect, SeatKind::Files, true, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Files, true, false, 1.0);
         let mark = head.zoom_mark.expect("a zoomed head wears the mark");
         let button = files_root_box(&head, 1.0, 30.0).expect("a named head has a button");
         let mut widths = BTreeMap::new();
@@ -35832,7 +36080,7 @@ mod tests {",
                 .solve(viewport, &metrics, SizePolicy::Sovereign)
                 .expect("a rectangle the user chose is never refused");
             let rect = full_pane_rect(&layout, preview)?;
-            let head = pane_head_geometry(rect, SeatKind::Preview, false, 1.0);
+            let head = pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0);
             let geometry = preview_head_geometry(&head, 1.0, tools);
             (geometry.pill.is_none() && geometry.name[2] > geometry.name[0])
                 .then_some((layout, preview, geometry))
@@ -35883,6 +36131,7 @@ mod tests {",
         let head = pane_head_geometry(
             device_rect_of(&layout, terminal),
             SeatKind::Terminal,
+            false,
             false,
             1.0,
         );
@@ -35973,6 +36222,7 @@ mod tests {",
         let head = pane_head_geometry(
             device_rect_of(&layout, terminal),
             SeatKind::Terminal,
+            false,
             false,
             1.0,
         );
@@ -36098,8 +36348,13 @@ mod tests {",
             .expect("the second seat is the files column")
             .id;
 
-        let column_head =
-            pane_head_geometry(device_rect_of(&layout, column), SeatKind::Files, false, 1.0);
+        let column_head = pane_head_geometry(
+            device_rect_of(&layout, column),
+            SeatKind::Files,
+            false,
+            false,
+            1.0,
+        );
         let float = column_head.float.expect("a files head carries the pop-out");
         let close = column_head.close.expect("and the `×` beside it");
         let centre = |box_: [f32; 4]| {
@@ -36141,6 +36396,7 @@ mod tests {",
         let head = pane_head_geometry(
             device_rect_of(&layout, terminal),
             SeatKind::Terminal,
+            false,
             false,
             1.0,
         );
@@ -36239,6 +36495,7 @@ mod tests {",
             device_rect_of(&layout, terminal),
             SeatKind::Terminal,
             false,
+            false,
             1.0,
         );
         let centre = |box_: [f32; 4]| {
@@ -36279,10 +36536,15 @@ mod tests {",
 
         // ── and the menu lights its own head and nobody else's ───────────────
         assert!(!head_run_revealed(standing, column));
-        let column_close =
-            pane_head_geometry(device_rect_of(&layout, column), SeatKind::Files, false, 1.0)
-                .close
-                .expect("a files head carries a `×`");
+        let column_close = pane_head_geometry(
+            device_rect_of(&layout, column),
+            SeatKind::Files,
+            false,
+            false,
+            1.0,
+        )
+        .close
+        .expect("a files head carries a `×`");
         let (x, y) = centre(column_close);
         assert_eq!(
             hit_chrome(&seats, &layout, 1.0, standing, x, y),
@@ -36378,6 +36640,7 @@ mod tests {",
         let head = pane_head_geometry(
             device_rect_of(&layout, terminal),
             SeatKind::Terminal,
+            false,
             false,
             1.0,
         );
@@ -36593,7 +36856,7 @@ mod tests {",
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = device_rect_of(&layout, terminal);
-            let head = pane_head_geometry(rect, SeatKind::Terminal, false, scale);
+            let head = pane_head_geometry(rect, SeatKind::Terminal, false, false, scale);
             let split = head.chevron.expect("the head is wide enough for all three");
             let files = head.files.expect("and for the folder");
             let close = head.close.expect("and for the `×`");
@@ -36651,6 +36914,7 @@ mod tests {",
         let head = pane_head_geometry(
             device_rect_of(&layout, terminal),
             SeatKind::Terminal,
+            false,
             false,
             1.0,
         );
@@ -36731,6 +36995,7 @@ mod tests {",
         let head = pane_head_geometry(
             device_rect_of(&layout, terminal),
             SeatKind::Terminal,
+            false,
             false,
             1.0,
         );
@@ -36990,6 +37255,7 @@ mod tests {",
         let head = pane_head_geometry(
             device_rect_of(&split_layout, terminal),
             SeatKind::Terminal,
+            false,
             false,
             1.0,
         );
@@ -37296,6 +37562,7 @@ mod tests {",
             device_rect_of(&split_layout, terminal),
             SeatKind::Terminal,
             false,
+            false,
             1.0,
         );
         assert!(head.files.is_some(), "a terminal head carries the folder");
@@ -37501,6 +37768,7 @@ mod tests {",
             device_rect_of(&layout, terminal),
             SeatKind::Terminal,
             false,
+            false,
             1.0,
         );
         assert!(term_head.files.is_some(), "a terminal peeks its own folder");
@@ -37509,8 +37777,13 @@ mod tests {",
             "and has no column of its own to pop out"
         );
 
-        let files_head =
-            pane_head_geometry(device_rect_of(&layout, column), SeatKind::Files, false, 1.0);
+        let files_head = pane_head_geometry(
+            device_rect_of(&layout, column),
+            SeatKind::Files,
+            false,
+            false,
+            1.0,
+        );
         assert!(
             files_head.float.is_some(),
             "a column offers to become a window"
@@ -37544,6 +37817,7 @@ mod tests {",
             pane_head_geometry(
                 device_rect_of(&layout, column),
                 SeatKind::Preview,
+                false,
                 false,
                 1.0
             )
@@ -37766,6 +38040,7 @@ mod tests {",
         let head = pane_head_geometry(
             device_rect_of(&layout, terminal),
             SeatKind::Terminal,
+            false,
             false,
             1.0,
         );
@@ -39393,6 +39668,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened();
@@ -39467,6 +39743,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened();
@@ -40277,6 +40554,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .rail
@@ -40559,6 +40837,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened()
@@ -40825,6 +41104,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened();
@@ -40996,6 +41276,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened();
@@ -42578,6 +42859,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
     }
@@ -48415,6 +48697,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         );
 
@@ -50244,7 +50527,7 @@ mod tests {",
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let seat = seats.preview().expect("the preview seat");
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
-        let head = pane_head_geometry(rect, SeatKind::Preview, false, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0);
         let geometry = preview_head_geometry(&head, 1.0, tools);
         (seat, layout, geometry)
     }
@@ -50367,7 +50650,13 @@ mod tests {",
         for width in [
             480.0_f32, 640.0, 900.0, 1_280.0, 1_600.0, 1_920.0, 2_560.0, 3_840.0,
         ] {
-            let head = pane_head_geometry([0.0, 0.0, width, 900.0], SeatKind::Preview, false, 1.0);
+            let head = pane_head_geometry(
+                [0.0, 0.0, width, 900.0],
+                SeatKind::Preview,
+                false,
+                false,
+                1.0,
+            );
             let geometry = preview_head_geometry(&head, 1.0, tools);
             let close = head.close.expect("a head this wide seats its `×`");
             assert!(
@@ -50618,6 +50907,7 @@ mod tests {",
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             );
             let label = chrome
@@ -50761,6 +51051,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         );
         let WindowChrome { seats, .. } = chrome;

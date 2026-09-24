@@ -33,6 +33,9 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Alt+Shift+= | Cmd+D | Split vertically |  | `split-vertical` |
 | Ctrl+Shift+D | Shift+Cmd+U | Duplicate pane into a split |  | `duplicate-pane-split` |
 | Ctrl+Shift+X | Shift+Cmd+X | Zoom pane |  | `zoom-pane` |
+| Ctrl+= | Cmd+= | Larger text | In a terminal | `text-larger` |
+| Ctrl+- | Cmd+- | Smaller text | In a terminal | `text-smaller` |
+| Ctrl+0 | Cmd+0 | Actual text size | In a terminal | `text-actual-size` |
 | Ctrl+Shift+B | Shift+Cmd+B | Files column |  | `files-pane` |
 | Ctrl+Shift+G | Shift+Cmd+R | Show Git in the files column |  | `git-page` |
 | Ctrl+, | Cmd+, | Settings |  | `open-settings` |
@@ -79,6 +82,9 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Alt+Shift+= | Cmd+D | 竖向拆分 |  | `split-vertical` |
 | Ctrl+Shift+D | Shift+Cmd+U | 复制窗格并拆分 |  | `duplicate-pane-split` |
 | Ctrl+Shift+X | Shift+Cmd+X | 放大窗格 |  | `zoom-pane` |
+| Ctrl+= | Cmd+= | Larger text | In a terminal | `text-larger` |
+| Ctrl+- | Cmd+- | Smaller text | In a terminal | `text-smaller` |
+| Ctrl+0 | Cmd+0 | Actual text size | In a terminal | `text-actual-size` |
 | Ctrl+Shift+B | Shift+Cmd+B | 文件列 |  | `files-pane` |
 | Ctrl+Shift+G | Shift+Cmd+R | 文件列切到 Git |  | `git-page` |
 | Ctrl+, | Cmd+, | 设置 |  | `open-settings` |

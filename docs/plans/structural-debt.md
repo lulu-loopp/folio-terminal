@@ -91,7 +91,7 @@ ledger's.
 | D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
-| D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded |
+| D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not) |
 | D-6 | cross-crate chains are visible nowhere | K-10 · C-4 | through D-48…D-50 | 0.4.7 | open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff` |
 | D-7 | source-reading guards are the architecture document; their rules owe prose | K-14 · C-4 | with D-28 | 0.4.6 — with D-28: the guards' prose is written when the migration list reaches zero | open |
 | D-8 | the asking/telling family has no taxonomy | K-3 · C-4 | none yet | 0.4.6 — the owner rules the table first | open |
@@ -127,7 +127,7 @@ ledger's.
 | D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | none yet | 0.4.5 — a per-keystroke cost | open |
 | D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | 0.4.6 | open |
 | D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | 0.4.6 | open |
-| D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | 0.4.5 — presenting off the input thread is the typing-stability work | open |
+| D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | 0.4.5 — presenting off the input thread is the typing-stability work | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both |
 | D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | 0.4.6, after D-41 | open |
 | D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open |
 | D-44 | §5.3 row 12 — the synchronous `ResizePseudoConsole` round trip | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — as D-43 | open |
@@ -145,7 +145,7 @@ ledger's.
 | D-56 | §11 emergency termination — a journal and a defined recoverable revision | §11 | none yet | 0.4.7 | open |
 | D-57 | §12.1 — `bt-workbench` is born | §12.1 | none yet | 0.4.6 | open |
 | D-58 | `profile_runtime`'s two tests failing `WouldBlock` on a slow CI disk | `docs/DESIGN.md`, 2026-09-23 | 34 | — | repaid on `fbfab1ff` |
-| D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open |
+| D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open — ticket 37 added a CI-runnable mixed-size stress (`mixed_size_seats_share_the_atlas_and_get_their_text_back`, WARP, texture ceiling 512) and no ignore; the soaks were not extended |
 | D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | 0.4.6 | open |
 | D-61 | a Mac-only red test in `webnav` | ticket 13's report | none yet | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | open |
 | D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | none yet | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | open |
@@ -390,7 +390,7 @@ eighteen of fifty-three rows are folded; thirty-five are marked `not yet folded`
 with their addresses listed. The remaining work is folding, one subsystem at a
 time, by the ticket that needs it.
 
-**Ledger.** source: K-2 · C-4 · ticket: the ticket that depends on each row · version: 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket · status: open — 19 folded.
+**Ledger.** source: K-2 · C-4 · ticket: the ticket that depends on each row · version: 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket · status: open — 19 folded; row 28's wheel half folded by ticket 37 on 2026-09-24, the press half not.
 
 ---
 
@@ -491,6 +491,13 @@ is ruled by the project owner**, who rules UI.
 
 **Status.** open. The inventory and the two fixed points are in
 `docs/ARCHITECTURE.md` §8.
+
+**Inventory rows, added by the tickets that add a case (the owner rules the
+table; these rows only record what exists).**
+
+| added | message kind | urgency | modality | surface | where the surface is absent |
+|---|---|---|---|---|---|
+| 2026-09-24, ticket 37 | persistent pane state — a terminal pane's text size while it is not 100 % | non-urgent | non-modal | the existing top-right controls: left of the pane's `⌄` (`seats::text_size_mark_beside`); a click resets it | ruled 2026-09-24 (owner): the same rule in a headless pane's corner, left of its `⌄`; no room, no mark |
 
 **Ledger.** source: K-3 · C-4 · ticket: none yet · version: 0.4.6 — the owner rules the table first · status: open.
 

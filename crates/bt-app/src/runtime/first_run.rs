@@ -508,7 +508,7 @@ impl Runtime<'_> {
         let install_text = i18n::Text::PsReadLineInstall.text();
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let room = restore::content_width(width, scale);
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut wrap = |text: &str| {
@@ -668,7 +668,7 @@ impl Runtime<'_> {
         }
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let rows: Vec<first_run::Row> = self.window.first_run.rows().to_vec();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);

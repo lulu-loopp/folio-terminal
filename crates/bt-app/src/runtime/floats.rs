@@ -47,7 +47,7 @@ impl Runtime<'_> {
         // back at the end rather than kept. There is no early return in this
         // body — the bracket is exact.
         let leaving_station = hang_watch::enter(hang_watch::Station::Chrome);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
         // **The window's own drag handler is told what the bar is wearing now**
         // (§13.11 ⑥). It is handed the boxes Folio draws up there, not a
@@ -736,6 +736,9 @@ impl Runtime<'_> {
         // hold one.
         let pane_transforms = self.pane_transforms(now);
         let resizing_cards = self.resizing_cards_frame(now);
+        // **Each terminal pane not at 100 %, read off the pane for this frame** (ticket 37) — the
+        // pane head's text-size mark. A reading handed down, like `terminal_names`, never kept.
+        let text_sizes = self.pane_text_sizes();
         // Q173, one row per window on screen — a list since 浮窗多开.
         let float_shown = self.float_shown_tabs();
         // Measured into the runtime rather than into a local, because the hit
@@ -1014,6 +1017,7 @@ impl Runtime<'_> {
                 chevron_turn: self.window.chevron_turn.sample(now, self.app.motion).0,
                 pane_motion: seats::PaneMotionFrame::new(&pane_transforms),
                 resizing_cards,
+                text_sizes: &text_sizes,
                 // §7.1.6i: the two facts a lone pane's corner ghost is a
                 // function of, and neither of them is `Seats`'s to know — which
                 // pane the search capsule is standing on (it takes the ghost's
@@ -1466,7 +1470,7 @@ impl Runtime<'_> {
         key: &str,
     ) -> Result<()> {
         let now = Instant::now();
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let trees = self.files_trees(now);
         let Some((index, kind)) = trees.get(&seat).and_then(|tree| {
             tree.rows
@@ -2449,7 +2453,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Option<(float::FloatId, float::FloatPart)> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // Measured once for the whole sweep: the caption is the same width in
         // every window, and asking the renderer inside the loop would borrow it
         // against the host we are walking.
@@ -2593,7 +2597,7 @@ impl Runtime<'_> {
         // the two questions at the foot — which the note on them says are asked
         // "on every turn of the loop" — were asked on no turn at all. See
         // [`Self::animation_frame_is_due`] for the three things an advancer does.
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let mut changed = false;
         // A *transient* peek whose trigger has gone — the tab closed, the split
         // collapsed, the pane it hung from stopped being a terminal — has nothing
@@ -2845,7 +2849,7 @@ impl Runtime<'_> {
             self.forget_dead_float_gestures();
             self.sweep_preview_panes();
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let viewport = self.float_viewport();
         // Every live window, whoever is inside it: the preview float inherits
         // P67's translate-home for free because the chassis is shared, and a
@@ -2894,7 +2898,7 @@ impl Runtime<'_> {
 
     /// The float's next appointment.
     pub(in crate::runtime) fn float_deadline(&self, now: Instant) -> Option<Instant> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let owner = self.window.float.deadline(
             now,
             self.app.motion,
@@ -3257,11 +3261,7 @@ impl Runtime<'_> {
     /// the dated annotation there.
     pub(in crate::runtime) fn float_viewport(&self) -> [f32; 4] {
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        float_viewport_rect(
-            width,
-            height,
-            self.window.renderer.metrics().scale_factor as f32,
-        )
+        float_viewport_rect(width, height, self.window.renderer.scale_factor() as f32)
     }
 
     /// Summon a float at a trigger. **Always** — a trigger has one answer.
@@ -3361,7 +3361,7 @@ impl Runtime<'_> {
             self.window.chevrons.menu_gone(Popup::Profile);
         }
         self.window.root_menu.close();
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let viewport = self.float_viewport();
         let git_page = self.git_panel_on() && state.view == seats::FilesView::Git;
         let size = float::float_opening_size(
@@ -3468,7 +3468,7 @@ impl Runtime<'_> {
         };
         let body = geometry.viewport;
         let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(files) = self
             .window
             .float

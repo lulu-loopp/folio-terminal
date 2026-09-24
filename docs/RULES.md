@@ -493,11 +493,54 @@ key; `paste_card_key` is the whole of what it answers. In `KeyboardOwner` it is
 part of `menu_or_dialog`, so `is_modal` is true while it is up and a composition
 resolves to `ImeOwner::Modal`.
 
-### 28. Mouse routing — `not yet folded`
+Entry added 2026-09-24 (owner ruling on Q1, 2026-09-23; 0.4.5 ticket 37): **a
+pane's text size answers `Ctrl+=` / `Ctrl+-` / `Ctrl+0` on Windows and `Cmd+=` /
+`Cmd+-` / `Cmd+0` on a Mac, in `Scope::Terminal`** — held while
+`keyboard_owner_is_a_shell`, on either screen, and not while a tree, a field, a
+menu, a modal, a preview or a page holds the keyboard (a page keeps the three for
+its own zoom). The rows reach `Runtime::step_pane_text_scale` through the shortcut
+rung; **no keyboard rung is added**. On Windows bare `Ctrl` on these three keys is
+a documented terminal-scoped exception to "Control is left to the terminal": the
+encoder spells none of `-`, `=`, `0` as a control byte, but a layout that produces
+`U+001F` for `Ctrl+-` loses that byte to the row, because `Chord::matches` accepts
+the unmodified key. What real layouts report for the three was not measured for
+this entry, and `takes_a_shell_control_key` is unchanged until it is. A repeat does
+not step. Entry: DESIGN 2026-09-24 *Each terminal pane has its own text size*. The
+row stays `not yet folded`: the full rung order of `Runtime::keyboard_input` is
+design-note T5, and this entry adds no rung to it.
+
+### 28. Mouse routing — `not yet folded` (the wheel half is folded, 2026-09-24)
 Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; §7.60
 *`T-WHEEL-TRACE`: the wheel has no road in a recording, so an aiming question
 cannot be settled by reading*. Same finding as row 27 for the rung order of
 `Runtime::mouse_input`.
+
+**The wheel, folded 2026-09-24 (0.4.5 ticket 37).** A notch reaches
+`Runtime::mouse_wheel` as one burst (`queue_wheel` merges reports of one currency,
+after `upright_wheel`; `flush_wheel` spends it), and the first station that takes
+it keeps it. The stations, in order: the hover card under the pointer scrolls its
+body (otherwise a hover card is put away); the first-run card; the Settings sheet;
+a toast (swallowed); the palette (its list, or nothing over its field); a hosted
+page (`scroll_web_page` — the page's own scroll and its own `Ctrl`/`⌘`+wheel
+zoom); a files float (its tree or its Git page); the card column or the vertical
+rail (`scroll_rail`, where `Alt` aims a card's window, §7.1.6b′) or the horizontal
+tab strip; a files column's tree or Git panel; a Git graph; a picture (the bare
+wheel zooms it); a preview's document body. Then the terminal is chosen — the pane
+under the pointer, the lone terminal when the pointer is off every pane, the
+focused leaf when there is no pointer; a pane that is not a terminal, or no pane,
+swallows the notch — and a hover card anchored to its text is dismissed. Then,
+**the text-size rung**: the exact `Ctrl` (`⌘` on a Mac, nothing else held) with a
+vertical component steps that pane's text size (`wheel_steps_text_size`,
+`TextSizeAim`, `Runtime::step_pane_text_scale`), **ahead of the mouse report on
+both screens** — the `Ctrl` bit of an SGR wheel report is no longer delivered.
+Then a hovered, scrollable formula pans by whole pixels. Last, `wheel_route`: the
+program's mouse reports, alternate-scroll arrows, the pane's own scrollback (rows,
+or columns on a pane with a horizontal axis), or nothing for a mute full-screen
+program; `Shift` is §7.1.5f's "this notch is the window's" throughout. Every exit
+writes a `wheel_route` line (`every_exit_of_the_wheels_road_writes_a_line`; the
+words are `mouse_trace::WHEEL_ROUTES`). The press half — the rung order of
+`Runtime::mouse_input` — is not folded, which is why the row as a whole stays
+`not yet folded`.
 
 Ruling added 2026-09-23 (owner, next86 touch test, 2026-09-22; 0.4.4 ticket 11),
 refining the 2026-09-21 entry *Owner ruling: touch is handed to the system, which

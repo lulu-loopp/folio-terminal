@@ -64,7 +64,7 @@ impl Runtime<'_> {
                 })
             })
             .collect();
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let palette = bt_render::chrome_palette();
         let mut layers = Vec::new();
         for (seat, say, detail, verb) in standing {
@@ -168,7 +168,7 @@ impl Runtime<'_> {
             return;
         }
         let leaving_station = hang_watch::enter(hang_watch::Station::WebPlace);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let motion = self.app.motion;
         let obstructed = self.a_modal_covers_the_window();
         // Every page, and its answer read off the tab that holds it — a page on a
@@ -831,7 +831,7 @@ impl Runtime<'_> {
             // a number this window gave it, and the first of them has to be
             // right: a page opened on the second display lays itself out before
             // anything else happens to it.
-            self.window.renderer.metrics().scale_factor,
+            self.window.renderer.scale_factor(),
             // **And the colour scheme its pages prefer, at birth** (0.4.4 ticket 09), for the
             // scale's reason: the engine is told it before its first page lays out.
             self.web_color_scheme_in_force(),
@@ -1612,10 +1612,12 @@ impl Runtime<'_> {
     ) {
         // **`Ctrl`+wheel zooms the page** (方案 §0's five extras).
         //
-        // Nothing is being taken from anything: this product has no type-size
-        // zoom bound to a wheel at all — a picture zooms on the *bare* wheel —
-        // so `Ctrl`+wheel is empty everywhere else in this window, which is what
-        // makes it free to be the browser gesture here.
+        // Nothing is being taken from anything, and since ticket 37 that is true
+        // for a reason rather than by absence: over a *terminal* the same gesture
+        // steps that pane's own text size (`docs/RULES.md` row 28), and over a
+        // page it is the page's zoom. Each surface scales itself, and this rung
+        // stands above the terminal's on the wheel's road, so a notch over a page
+        // never reaches a pane. A picture still zooms on the *bare* wheel.
         //
         // The notch is not forwarded as well. A page that received both would
         // scroll while it zoomed, which is the one combination no browser does.

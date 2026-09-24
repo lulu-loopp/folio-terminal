@@ -283,7 +283,7 @@ impl WheelAim {
 /// this is the declaration those literals are checked against. A copy compiled
 /// into the product would be a second list for somebody to forget.
 #[cfg(test)]
-pub const WHEEL_ROUTES: [&str; 10] = [
+pub const WHEEL_ROUTES: [&str; 11] = [
     // The card column's aim spent it on a mini window (`Alt`+wheel).
     "rail-aim",
     // The card column or the vertical rail scrolled — or would have.
@@ -306,4 +306,6 @@ pub const WHEEL_ROUTES: [&str; 10] = [
     "pty",
     // Swallowed on purpose: no surface under it wanted it.
     "nobody",
+    // The exact `Ctrl` (`⌘` on a Mac) over a terminal: that pane's text size (ticket 37).
+    "text-size",
 ];

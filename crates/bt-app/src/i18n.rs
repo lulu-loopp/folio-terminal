@@ -2111,6 +2111,16 @@ pub enum Text {
     ShortcutScopeWebPage,
     /// The tag for a row in force on either of the search capsule's two hosts.
     ShortcutScopeSearchHost,
+    /// `text-larger`'s row (ticket 37): one rung up the pane's text-size ladder.
+    ShortcutTextLarger,
+    /// `text-smaller`'s row (ticket 37).
+    ShortcutTextSmaller,
+    /// `text-actual-size`'s row (ticket 37) — and the pane head's indicator's tip, which is the
+    /// same verb.
+    ShortcutTextActualSize,
+    /// The tag for a row in force while a terminal holds the keyboard, on either screen
+    /// (ticket 37).
+    ShortcutScopeTerminal,
     /// `.pv-nav.pv-back`'s tip.
     PreviewWebBack,
     /// `.pv-nav.pv-fwd`'s tip.
@@ -4891,6 +4901,12 @@ impl Text {
             Self::ShortcutScopeSearchHost => {
                 pick(lang, "Where there is text to search", "有内容可搜索的地方")
             }
+            // English in both columns until opus46 writes the Chinese: every one of these is in
+            // `CHINESE_PENDING`, so the missing translation is loud rather than invisible.
+            Self::ShortcutTextLarger => pick(lang, "Larger text", "Larger text"),
+            Self::ShortcutTextSmaller => pick(lang, "Smaller text", "Smaller text"),
+            Self::ShortcutTextActualSize => pick(lang, "Actual text size", "Actual text size"),
+            Self::ShortcutScopeTerminal => pick(lang, "In a terminal", "In a terminal"),
             Self::PreviewWebBack => pick(lang, "Back", "后退"),
             Self::PreviewWebForward => pick(lang, "Forward", "前进"),
             Self::PreviewWebReload => pick(lang, "Reload", "重新加载"),
@@ -5419,7 +5435,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 766] = [
+    pub const ALL: [Self; 770] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6025,6 +6041,10 @@ impl Text {
         Self::ShortcutCloseSearch,
         Self::ShortcutScopeWebPage,
         Self::ShortcutScopeSearchHost,
+        Self::ShortcutTextLarger,
+        Self::ShortcutTextSmaller,
+        Self::ShortcutTextActualSize,
+        Self::ShortcutScopeTerminal,
         Self::PreviewWebBack,
         Self::PreviewWebForward,
         Self::PreviewWebReload,
@@ -6337,7 +6357,17 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 8] = [
+        // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
+        (Self::ShortcutTextLarger, HostPlatform::Windows),
+        (Self::ShortcutTextLarger, HostPlatform::MacOs),
+        (Self::ShortcutTextSmaller, HostPlatform::Windows),
+        (Self::ShortcutTextSmaller, HostPlatform::MacOs),
+        (Self::ShortcutTextActualSize, HostPlatform::Windows),
+        (Self::ShortcutTextActualSize, HostPlatform::MacOs),
+        (Self::ShortcutScopeTerminal, HostPlatform::Windows),
+        (Self::ShortcutScopeTerminal, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -6977,6 +7007,19 @@ pub fn progress_percent(percent: u32) -> String {
 #[must_use]
 pub fn zoom_percent(factor: f64) -> String {
     format!("{}%", (factor * 100.0).round())
+}
+
+/// **The pane head's text-size mark's tip** (ticket 37): the reset verb's name and, only when
+/// the 8–72 px clamp drew the pane at a size its percentage does not say, that size — `8 px`,
+/// a number and a unit, with no sentence around it.
+#[must_use]
+pub fn text_size_tip(verb: &str, base_logical_px: f32, percent: u16, effective_px: f32) -> String {
+    let asked = base_logical_px * f32::from(percent) / 100.0;
+    if (asked - effective_px).abs() > f32::EPSILON {
+        format!("{verb} ({} px)", effective_px.round())
+    } else {
+        verb.to_owned()
+    }
 }
 
 /// …and the two that qualify it.
