@@ -12,6 +12,13 @@ All notable changes to Folio are recorded here. The format follows
   Mac) or Ctrl+wheel over the pane, Ctrl+0 to reset. The pane shows the size
   while it is not 100 %; it resets when Folio restarts.
 
+### Fixed
+
+- Typing no longer pauses while Folio asks Windows several times a turn
+  where its window is; it asks once.
+- A program that keeps changing its window title no longer slows typing;
+  Folio passes the title on at most once a frame.
+
 ## 0.4.4-preview — 2026-09-24
 
 ### Added

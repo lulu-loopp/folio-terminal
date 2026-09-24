@@ -240,7 +240,7 @@ impl Runtime<'_> {
         self.resolve_seat_layout(render_physical);
         self.resize_leaves_to_layout(Instant::now(), "resize activated tab to its seat layout")?;
         self.sync_math_layout_key();
-        self.window.window.set_title(&self.display_title());
+        self.want_title();
         self.refresh_chrome();
         self.mark_session_dirty(Instant::now());
         self.publish_frame(FrameTrigger {
@@ -3277,7 +3277,7 @@ impl Runtime<'_> {
                 // new name up from here without a second write — and the OS
                 // window title is the active tab's own.
                 if index == self.window.active_tab {
-                    self.window.window.set_title(&self.display_title());
+                    self.want_title();
                 }
                 self.mark_session_dirty(Instant::now());
             }

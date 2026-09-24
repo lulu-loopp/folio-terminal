@@ -797,7 +797,7 @@ impl Runtime<'_> {
         } else if ime_outbound::enabled() {
             self.trace_ime_area(
                 area,
-                if self.window.ime_cursor_throttle.pending.is_some() {
+                if self.window.ime_cursor_throttle.is_pending() {
                     "throttled"
                 } else {
                     "unchanged"

@@ -8327,9 +8327,12 @@ fn a_seam_that_flips_twenty_times_under_one_hand_is_settled_once() {
     let mut settlement = DpiSettlement::default();
 
     // Twenty flips with the hand on the frame. None of them buys the
-    // expensive half, and the turns of the loop that happen in between —
-    // Windows pumps its own message loop while the modal move/size loop runs
-    // — do not smuggle it in either.
+    // expensive half, and asking `due` while the hand is still on does not
+    // smuggle it in either. No turn is expected there — Windows pumps its own
+    // message loop while the modal move/size loop runs, which delivers events
+    // but sends no `AboutToWait` (see `hang_watch`'s
+    // `a_thread_that_answers_is_alive_even_when_its_loop_has_stopped_turning`)
+    // — and the settlement does not rely on that.
     let mut paid = 0;
     for _ in 0..20 {
         if settlement.arrived(true) {
@@ -17502,6 +17505,289 @@ fn a_window_move_re_arms_the_caret_rectangle_without_dropping_the_clock() {
     assert_eq!(
         throttle.flush_due(start + IME_CURSOR_AREA_INTERVAL * 2),
         Some(area),
+    );
+}
+
+// ── where the window is, asked once a turn (0.4.5 ticket 48) ──────────────
+//
+// `Runtime` cannot be built without a window, and the door itself asks the
+// desktop about a real window, so these read the roads through `bt_source`:
+// who asks the door, who writes the reading, and in what order a turn and a
+// between-turn delivery do it.
+
+/// The body of `AppEvent::AttentionSpoke`'s arm in `FolioApp::user_event`.
+fn attention_spoke_arm() -> &'static str {
+    let events =
+        item_body(&ItemQuery::method("FolioApp", "user_event").of_trait("ApplicationHandler"));
+    let start = events
+        .find("AppEvent::AttentionSpoke => {")
+        .expect("user_event answers AttentionSpoke");
+    let rest = &events[start..];
+    let end = rest[1..].find("AppEvent::").map_or(rest.len(), |at| at + 1);
+    &rest[..end]
+}
+
+/// RED (48) — **One turn asks the desktop where the window is exactly once,
+/// however many passes read the answer.**
+///
+/// The owner's stall reports (next89/next90) caught `sample_window_place` —
+/// four to eight system calls, two of them to other processes — holding the
+/// window thread for up to 3 s, and in six turns it was asked twice: once by
+/// the drain and once by the strip tick, about the same instant. The door now
+/// has one caller, `Runtime::observe_window_place`, which the turn calls once
+/// at its head, before the drain and the strip tick that read its answer; the
+/// strip tick names neither the door nor the writer.
+///
+/// MUTATION: restore the `sample_window_place` call in `drain_pty` (or in
+/// `advance_strip_animation`) — red.
+#[test]
+fn one_turn_asks_the_desktop_where_the_window_is_exactly_once() {
+    let asks = free_calls_of("sample_window_place").in_the_product(source());
+    assert_eq!(
+        reader_names(&asks),
+        vec!["observe_window_place".to_owned()],
+        "{}",
+        asks.report(source())
+    );
+    assert_eq!(asks.len(), 1, "{}", asks.report(source()));
+    let turn = method_body("Runtime", "turn");
+    assert_eq!(
+        turn.matches("self.observe_window_place()").count(),
+        1,
+        "the turn takes one reading"
+    );
+    let observed = turn.find("self.observe_window_place()").unwrap();
+    let drained = turn.find("self.drain_pty()").expect("the turn drains");
+    let ticked = turn
+        .find("self.advance_strip_animation(now)")
+        .expect("the turn ticks the strip");
+    assert!(
+        observed < drained && observed < ticked,
+        "the reading is taken before either pass reads it"
+    );
+    let tick = method_body("Runtime", "advance_strip_animation");
+    for asking in ["sample_window_place", "observe_window_place", "has_focus()"] {
+        assert!(
+            !tick.contains(asking),
+            "the strip tick does not call {asking}"
+        );
+    }
+    assert!(tick.contains("self.window.observed_place"));
+}
+
+/// RED (48) — **A delivery that arrives between turns is decided on a fresh
+/// reading of its own: one reading per turn, plus one per between-turn
+/// delivery.**
+///
+/// The brief's first design parked `AttentionSpoke` messages for the next
+/// turn. On Windows there may be no next turn for seconds: inside the OS's
+/// modal move/size loop winit sends no `AboutToWait` (the record is
+/// `hang_watch`'s `a_thread_that_answers_is_alive_even_when_its_loop_has_stopped_turning`),
+/// so a notification that arrived during a drag would wait for the hand to let
+/// go. Coordinator ruling 2026-09-24: the arm keeps a reading of its own, taken
+/// through the one writer, and decides the delivery on it. So the writer has
+/// exactly three callers — the turn's head, the window's birth and this arm —
+/// and in the arm the reading comes before the delivery that reads it.
+///
+/// MUTATION: drop `runtime.observe_window_place()` from the `AttentionSpoke`
+/// arm (the delivery would decide on the last turn's reading) — red.
+#[test]
+fn a_delivery_between_turns_is_decided_on_a_fresh_reading_of_its_own() {
+    let writers = calls_of("Runtime", "observe_window_place").in_the_product(source());
+    assert_eq!(
+        reader_names(&writers),
+        vec![
+            "dress_new_window".to_owned(),
+            "turn".to_owned(),
+            "user_event".to_owned()
+        ],
+        "{}",
+        writers.report(source())
+    );
+    assert_eq!(writers.len(), 3, "{}", writers.report(source()));
+    let arm = attention_spoke_arm();
+    let observed = arm
+        .find("runtime.observe_window_place();")
+        .expect("the arm takes a reading of its own");
+    let read = arm
+        .find("let place = runtime.window.observed_place;")
+        .expect("and decides on that reading");
+    let delivered = arm.find("deliver_attention(").expect("the arm delivers");
+    assert!(observed < read && read < delivered);
+    assert!(
+        !arm.contains("sample_window_place"),
+        "through the one writer"
+    );
+}
+
+/// RED (48) — **The drain never asks the desktop.**
+///
+/// `drain_pty` runs on every turn a shell speaks, and it used to open with the
+/// place door and a `has_focus` call of its own, each under a drain station;
+/// the reports show `drain_pty 0 ms (sample_window_place 1198 ms)`. It now
+/// reads the turn's reading and names neither the door, the writer, the focus
+/// call nor their stations.
+///
+/// MUTATION: put the `sample_window_place` call (or `Station::Place`) back in
+/// `drain_pty` — red.
+#[test]
+fn the_drain_never_asks_the_desktop() {
+    let drain = method_body("Runtime", "drain_pty");
+    for asking in [
+        "sample_window_place",
+        "observe_window_place",
+        "has_focus()",
+        "Station::Place",
+        "Station::PlaceFocus",
+    ] {
+        assert!(!drain.contains(asking), "the drain does not name {asking}");
+    }
+    assert!(
+        drain.contains("let place = self.window.observed_place;"),
+        "it reads the turn's reading"
+    );
+}
+
+// ── the window's title, once a frame at most (0.4.5 ticket 49) ────────────
+//
+// `Runtime` cannot be built without a window, so the policy is run on the real
+// `TitleSlot` the window keeps — the same `want` the five roads call and the same
+// `take_due` `Runtime::flush_title` spends — and the two facts about the runtime
+// that a slot cannot show are read through `bt_source`.
+
+/// The display frame the title tests are paced to: 60 Hz, as `FrameClock` is
+/// born with.
+const TITLE_FRAME: Duration = pace::DEFAULT_FRAME_INTERVAL;
+
+/// RED (49) — **A title that did not change is never written to the OS again.**
+///
+/// A shell that sets the title on every prompt (OSC 0/2) makes the drain say
+/// "the chrome changed" on every turn, and until ticket 49 every one of those
+/// turns called `Window::set_title` with the same string — a message to the
+/// taskbar measured waiting up to 2.2 s. A hundred turns a whole frame apart,
+/// each wanting the same title: one write.
+///
+/// MUTATION: write on every offer (drop the equality check in
+/// `pace::LatestThrottle::offer`) — a hundred writes.
+#[test]
+fn a_title_that_did_not_change_is_never_written_to_the_os_again() {
+    let start = Instant::now();
+    let mut slot = TitleSlot::default();
+    let mut writes = Vec::new();
+    for turn in 0..100_u32 {
+        slot.want("pwsh — ~/src".to_owned());
+        if let Some(title) = slot.take_due(TITLE_FRAME, start + TITLE_FRAME * turn) {
+            writes.push(title);
+        }
+    }
+    assert_eq!(writes, vec!["pwsh — ~/src".to_owned()]);
+    assert_eq!(
+        slot.deadline(),
+        None,
+        "nothing is held, so nothing wakes the loop"
+    );
+}
+
+/// RED (49) — **A title that changes every turn reaches the OS at most once per
+/// frame interval, and the last one always arrives.**
+///
+/// A program that animates its title changes it faster than any taskbar can
+/// show. Ten turns a quarter of a frame apart, each with a new title: the OS
+/// hears at most one per frame, and once the held title's deadline comes — the
+/// wake the turn folds in — it holds the tenth.
+///
+/// MUTATION: drop the pending value when the interval has not passed (no
+/// trailing write) in `pace::LatestThrottle::offer` — the OS is left holding
+/// the ninth.
+#[test]
+fn a_title_that_changes_every_turn_reaches_the_os_at_most_once_a_frame_and_the_last_one_arrives() {
+    let start = Instant::now();
+    let quarter = TITLE_FRAME / 4;
+    let mut slot = TitleSlot::default();
+    let mut os_holds: Option<String> = None;
+    let mut writes = 0_u32;
+    let mut now = start;
+    for turn in 0..10_u32 {
+        now = start + quarter * turn;
+        slot.want(format!("building {turn}/10"));
+        if let Some(title) = slot.take_due(TITLE_FRAME, now) {
+            writes += 1;
+            os_holds = Some(title);
+        }
+    }
+    // The turns after the last change want nothing new; the one the deadline
+    // books writes what was held.
+    let due = slot.deadline().expect("the tenth title is held and booked");
+    assert!(
+        due > now && due <= now + TITLE_FRAME,
+        "held for at most one frame"
+    );
+    assert_eq!(
+        slot.take_due(TITLE_FRAME, due - Duration::from_millis(1)),
+        None
+    );
+    if let Some(title) = slot.take_due(TITLE_FRAME, due) {
+        writes += 1;
+        os_holds = Some(title);
+    }
+    assert!(
+        writes <= 10_u32.div_ceil(4) + 1,
+        "{writes} writes for ten titles"
+    );
+    assert_eq!(os_holds.as_deref(), Some("building 9/10"));
+    assert_eq!(slot.deadline(), None);
+}
+
+/// RED (49) — **Only one function in bt-app calls Window::set_title.**
+///
+/// Five roads used to write the title straight to the OS — the drain, a tab
+/// switch, a finished rename, a released synchronized update and a window's
+/// birth — and a sixth written the same way would bring back the unthrottled
+/// write this ticket removed. Read through `bt_source`, product files only.
+///
+/// MUTATION: put a direct `self.window.window.set_title(&self.display_title())`
+/// back in `Runtime::activate_tab` — red.
+#[test]
+fn only_one_function_in_bt_app_calls_window_set_title() {
+    let calls =
+        found(needle!(Pattern::call("set_title")), View::Identifiers).in_the_product(source());
+    assert_eq!(
+        reader_names(&calls),
+        vec!["flush_title".to_owned()],
+        "{}",
+        calls.report(source())
+    );
+    assert_eq!(calls.len(), 1, "{}", calls.report(source()));
+    assert_eq!(calls.outside_items(source()), 0);
+}
+
+/// RED (49) — **A new window carries its title before its first frame.**
+///
+/// The throttle holds a title only against an earlier write, and a window being
+/// dressed has had none, so the one thing that could leave it untitled on the
+/// taskbar is a birth that only *says* what it wants and waits for a turn.
+/// `dress_new_window` wants and writes in the same call, before it returns to
+/// the door that shows the window. (The slot half — a first offer is written at
+/// once — is the last assertion.)
+///
+/// MUTATION: make `dress_new_window` only offer (drop its `flush_title` call) —
+/// red.
+#[test]
+fn a_new_window_carries_its_title_before_its_first_frame() {
+    let dress = method_body("Runtime", "dress_new_window");
+    let wanted = dress
+        .find("self.want_title();")
+        .expect("a window being dressed says which title it wants");
+    let written = dress
+        .find("self.flush_title(")
+        .expect("and writes it in the same call, with no turn run");
+    assert!(wanted < written, "wanted first, then written");
+    let mut slot = TitleSlot::default();
+    slot.want("Folio".to_owned());
+    assert_eq!(
+        slot.take_due(TITLE_FRAME, Instant::now()),
+        Some("Folio".to_owned()),
+        "a slot that has written nothing writes its first title at once"
     );
 }
 

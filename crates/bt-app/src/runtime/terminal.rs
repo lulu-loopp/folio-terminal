@@ -10,7 +10,7 @@ use crate::{
     drain_may_take_another_slice, drain_tab_pty, drain_whole_units, files, first_run, hang_watch,
     in_drain_feed_turn, input, input_line_needs_a_space_first, local_image_activation, marks,
     mouse_trace, paste_text, presentation_physical_size, reference_card, reference_run_rect,
-    restart_seed, sample_window_place, scrollback_quota, seats, shell_integration, shell_literal,
+    restart_seed, scrollback_quota, seats, shell_integration, shell_literal,
     should_copy_on_select_release, stepped_command_mark, terminal_link_answers_a_press, termscroll,
     toast, write_pty_input,
 };
@@ -945,19 +945,12 @@ impl Runtime<'_> {
         let marks_before = hang_watch::during(hang_watch::Station::DrainWatermark, || {
             self.command_marks_watermark()
         });
-        let window_focused = hang_watch::during(hang_watch::Station::DrainFocus, || {
-            self.window.window.has_focus()
-        });
-        // **Asked of the window on the same turn and for the same reason** (`attention` plan §5.2):
-        // it is a fact about where this window is, and a cached answer taken at the last
-        // transition is a cached answer about a window that has since been minimised.
-        let place = hang_watch::during(hang_watch::Station::DrainPlace, || {
-            sample_window_place(&self.window.window, window_focused)
-        });
-        self.window.window_hidden = place.hidden;
-        self.window.window_exposed = place.exposed;
-        self.window.attention_sampled_at = Some(Instant::now());
-        self.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
+        // **Read, not asked** (ticket 48). The turn's head took this window's place once
+        // (the one writer, in `frame.rs`), focus from the window itself for the reason above;
+        // the drain decides from that reading and never asks the desktop about the same turn
+        // again.
+        let place = self.window.observed_place;
+        let window_focused = place.focused;
         let switches = self.notification_switches();
         let owner_is_a_shell = self.keyboard_owner_is_a_shell();
         let active_tab = self.window.active_tab;
@@ -1181,9 +1174,9 @@ impl Runtime<'_> {
             })?;
         }
         if chrome_changed {
-            hang_watch::during(hang_watch::Station::DrainTitle, || {
-                self.window.window.set_title(&self.display_title())
-            });
+            // Said, not written: the turn writes it once, after every pass that can
+            // change it (`Runtime::flush_title`, ticket 49).
+            self.want_title();
             self.refresh_chrome();
             if !active_changed {
                 self.present_chrome_change()?;

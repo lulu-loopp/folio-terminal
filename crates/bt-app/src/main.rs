@@ -13675,6 +13675,10 @@ struct WindowRuntime {
     composing_in: Composing,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
+    /// **The title this window wants, and the one the OS was last given**
+    /// (ticket 49). Written by [`Runtime::want_title`], sent only by
+    /// [`Runtime::flush_title`]; see [`TitleSlot`].
+    title: TitleSlot,
     /// The tab-rename caret's line box in window pixels, as the strip last drew
     /// it — the one caret in this window whose geometry cannot be re-derived.
     ///
@@ -13737,6 +13741,14 @@ struct WindowRuntime {
     /// between one wait and the next, and nothing tells this process when they
     /// do. Born `false`, which is what Windows ships.
     taskbar_auto_hidden: bool,
+    /// **The last reading of where this window is, whole** (ticket 48): the
+    /// four facts [`sample_window_place`] answered, focus included, as the pass
+    /// that decides a delivery takes them. Written with the four fields above in
+    /// one assignment by [`Runtime::observe_window_place`] and by nothing else:
+    /// at the head of every turn, at the window's birth, and by an attention
+    /// delivery that arrives between turns. **Read for one turn and never
+    /// across two**: the next turn's head replaces it before anything reads it.
+    observed_place: notify::WindowPlace,
     ime_outbound: ime_outbound::State,
     ime_system_caret: bt_platform::ImeSystemCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
@@ -15148,8 +15160,8 @@ impl WindowRuntime {
     /// *inside* a turn whose pass has already sampled these on the same frame, so asking the OS
     /// again here would be asking it twice about one instant.
     ///
-    /// The passes themselves take a place built from a fresh sample — see
-    /// [`sample_window_place`], which is what writes the three fields this reads.
+    /// The passes themselves read [`Self::observed_place`], the turn's one reading with the
+    /// window's own focus answer; [`Runtime::observe_window_place`] writes both (ticket 48).
     fn place(&self) -> notify::WindowPlace {
         notify::WindowPlace {
             focused: self.window_focused,
@@ -26167,79 +26179,83 @@ fn local_image_activation(
     }
 }
 
-#[derive(Debug, Default)]
-struct ImeCursorThrottle {
-    last_sent_at: Option<Instant>,
-    last_sent_area: Option<ImeCursorArea>,
-    pending: Option<ImeCursorArea>,
+/// **The caret area's throttle** — [`pace::LatestThrottle`] at
+/// [`IME_CURSOR_AREA_INTERVAL`].
+///
+/// The policy is the generic one's (ticket 49 extracted it from here so the
+/// window's title could share it); this type only fixes the interval, so the
+/// input method's cadence is said once.
+#[derive(Debug)]
+struct ImeCursorThrottle(pace::LatestThrottle<ImeCursorArea>);
+
+impl Default for ImeCursorThrottle {
+    fn default() -> Self {
+        Self(pace::LatestThrottle::new(IME_CURSOR_AREA_INTERVAL))
+    }
 }
 
-impl ImeCursorThrottle {
-    fn offer(&mut self, area: ImeCursorArea, now: Instant) -> Option<ImeCursorArea> {
-        if self.last_sent_area == Some(area) {
-            self.pending = None;
-            return None;
+impl std::ops::Deref for ImeCursorThrottle {
+    type Target = pace::LatestThrottle<ImeCursorArea>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ImeCursorThrottle {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+/// **The window's title as one fact** (ticket 49; `docs/ARCHITECTURE.md` §5.3
+/// row 14).
+///
+/// Before this, five roads each called `Window::set_title` with whatever the
+/// active tab was called, on every turn a shell renamed itself, with no
+/// comparison against what the OS already held — and on Windows that call is a
+/// message to the shell's taskbar that was measured waiting 486–2,206 ms. Now
+/// the roads say what they want ([`Self::want`]) and the turn asks, once, what
+/// is owed ([`Self::take_due`]). The policy is the caret area's
+/// ([`pace::LatestThrottle`]): a title equal to the one written is dropped, one
+/// offered a frame after the last write goes now, and one offered sooner is held
+/// with a deadline the turn wakes for.
+#[derive(Debug)]
+struct TitleSlot {
+    /// The newest title a road asked for and the turn has not yet offered.
+    wanted: Option<String>,
+    written: pace::LatestThrottle<String>,
+}
+
+impl Default for TitleSlot {
+    fn default() -> Self {
+        Self {
+            wanted: None,
+            written: pace::LatestThrottle::new(pace::DEFAULT_FRAME_INTERVAL),
         }
-        if self
-            .last_sent_at
-            .is_none_or(|last| now.saturating_duration_since(last) >= IME_CURSOR_AREA_INTERVAL)
-        {
-            self.mark_sent(area, now);
-            Some(area)
-        } else {
-            self.pending = Some(area);
-            None
+    }
+}
+
+impl TitleSlot {
+    /// The title this window wants now. Costs nothing but the string: the OS
+    /// hears about it from [`Self::take_due`].
+    fn want(&mut self, title: String) {
+        self.wanted = Some(title);
+    }
+
+    /// The title to write to the OS now, if any, at `interval` (the display
+    /// frame the window is on).
+    fn take_due(&mut self, interval: Duration, now: Instant) -> Option<String> {
+        self.written.set_interval(interval);
+        match self.wanted.take() {
+            Some(title) => self.written.offer(title, now),
+            None => self.written.flush_due(now),
         }
     }
 
-    fn flush_due(&mut self, now: Instant) -> Option<ImeCursorArea> {
-        let area = self.pending?;
-        if now < self.deadline()? {
-            return None;
-        }
-        self.mark_sent(area, now);
-        Some(area)
-    }
-
+    /// When a held title is owed to the OS; the turn's wake fold reads it.
     fn deadline(&self) -> Option<Instant> {
-        self.pending.and(
-            self.last_sent_at
-                .map(|last| last + IME_CURSOR_AREA_INTERVAL),
-        )
-    }
-
-    fn mark_sent(&mut self, area: ImeCursorArea, now: Instant) {
-        self.last_sent_at = Some(now);
-        self.last_sent_area = Some(area);
-        self.pending = None;
-    }
-
-    /// The rectangle the platform is currently working from, if it has been
-    /// told one at all.
-    fn last_sent(&self) -> Option<ImeCursorArea> {
-        self.last_sent_area
-    }
-
-    /// **Forget *what* the platform was last told without forgetting *when***
-    /// (user report 2026-09-14, `docs/DESIGN.md` §13.16 ⑥).
-    ///
-    /// [`Self::offer`] drops an area equal to the one already sent, and while a
-    /// caret sits still that is the whole of its work. A window that *moves*
-    /// keeps the very same window-relative rectangle and lands somewhere else on
-    /// the screen, so there the suppression is exactly backwards: the answer the
-    /// platform has cached is a **screen** rectangle, it is now stale, and
-    /// nothing else in this process is going to say so.
-    ///
-    /// Only the area is forgotten. [`Self::reset`] drops the clock with it,
-    /// which is right when a composition ends and wrong here: a drag emits a
-    /// move per frame, and re-arming must not turn one drag into a call per
-    /// move.
-    fn rearm(&mut self) {
-        self.last_sent_area = None;
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
+        self.written.deadline()
     }
 }
 
@@ -26726,19 +26742,27 @@ fn window_is_hidden(window: &Window) -> bool {
 ///
 /// The one place the four facts of [`notify::WindowPlace`] are *read* rather than remembered, and
 /// it exists so that "sampled together, on one turn" is a call and not a convention three passes
-/// each keep on their own. Focus is the caller's, because the two passes that run this disagree
-/// about where it comes from and both are right: `drain_pty` asks the window itself, the animation
-/// tick uses the answer `WM_SETFOCUS` left behind.
+/// each keep on their own. **Its one caller is [`Runtime::observe_window_place`]** (ticket 48):
+/// the head of every turn, a window's birth, and an attention delivery that arrives between turns.
+/// Focus is that caller's, and it asks the window itself (`Window::has_focus`) for the reason
+/// `drain_pty` gives.
 ///
 /// Between four and eight syscalls a turn — `IsIconic`, `DwmGetWindowAttribute`,
 /// `SHAppBarMessage`, and the `GetWindowRect` plus one to three `WindowFromPoint`/`GetAncestor`
 /// pairs the exposure probe costs — against a pass that walks every leaf of every tab. That is why
-/// the answers land in `WindowRuntime`'s fields on the way past: the doors that fire *inside* a turn
-/// read them back from there rather than asking again about the same instant. **This is the pass
+/// the answers land in `WindowRuntime`'s fields: the drain, the strip tick and the doors that fire
+/// *inside* a turn read them back from there rather than asking again about the same instant. **This is the pass
 /// that decides a delivery**, which is what the probe is priced against; nothing on the drawing path
 /// asks any of these.
 fn sample_window_place(window: &Window, focused: bool) -> notify::WindowPlace {
+    // **Each probe under its own station** (ticket 48): two of them go to other processes —
+    // the hit tests to whatever window is under each point, `SHAppBarMessage` to the shell's
+    // taskbar — and a stall line should say which one waited.
+    // Spelled as `enter`/`at` rather than `during` so the fused call keeps the exact line
+    // `present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value` reads.
+    let leaving = hang_watch::enter(hang_watch::Station::PlaceHidden);
     let hidden = window_is_hidden(window);
+    hang_watch::at(leaving);
     notify::WindowPlace {
         focused,
         hidden,
@@ -26748,11 +26772,16 @@ fn sample_window_place(window: &Window, focused: bool) -> notify::WindowPlace {
         // against that rectangle would be an answer about somewhere the window is not. A cloaked
         // window is on no screen by definition. Either way the honest answer is that nothing of it
         // is showing, and `desktop_reach` tests the hidden bit outermost anyway.
-        exposed: !hidden && window_is_exposed(window),
+        exposed: !hidden
+            && hang_watch::during(hang_watch::Station::PlaceExposure, || {
+                window_is_exposed(window)
+            }),
         // **Every turn, never cached across them.** The reader can turn auto-hide on in Settings
         // between one wait and the next, and Windows tells this process nothing when they do — so
         // the only honest reading is the one taken at the delivery it decides.
-        taskbar_is_auto_hidden: bt_platform::taskbar_is_auto_hidden(),
+        taskbar_is_auto_hidden: hang_watch::during(hang_watch::Station::PlaceTaskbar, || {
+            bt_platform::taskbar_is_auto_hidden()
+        }),
     }
 }
 
@@ -39845,6 +39874,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         composing_in: Composing::Idle,
         ime_active: false,
         ime_cursor_throttle: ImeCursorThrottle::default(),
+        title: TitleSlot::default(),
         rename_caret_line: None,
         cursor_blink: CursorBlink::new(Instant::now(), motion),
         // A window is focused when it opens, and `CursorBlink` starts from
@@ -39866,6 +39896,14 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // looked at yet, and the assumption would cost a toast rather than a
         // flash.
         taskbar_auto_hidden: false,
+        // The born answers of the four fields beside it, and winit's own `has_focus` start
+        // (false). `dress_new_window` replaces it with a real reading before anything reads it.
+        observed_place: notify::WindowPlace {
+            focused: false,
+            hidden: false,
+            exposed: true,
+            taskbar_is_auto_hidden: false,
+        },
         ime_outbound: ime_outbound::State::default(),
         ime_system_caret,
         pointer_position: None,
@@ -47759,7 +47797,7 @@ impl Runtime<'_> {
         self.window.unpainted_pane_output |= active_finished_off_focus;
         self.panes_spoke(&spoke, now);
         if chrome_changed {
-            self.window.window.set_title(&self.display_title());
+            self.want_title();
             self.refresh_chrome();
         }
         if active_finished {
@@ -62362,12 +62400,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 };
                 let now = Instant::now();
                 self.for_each_window(|runtime| {
-                    let place =
-                        sample_window_place(&runtime.window.window, runtime.window.window_focused);
-                    runtime.window.window_hidden = place.hidden;
-                    runtime.window.window_exposed = place.exposed;
-                    runtime.window.attention_sampled_at = Some(Instant::now());
-                    runtime.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
+                    // **A fresh reading of its own, not the next turn's** (ticket 48, coordinator
+                    // ruling 2026-09-24). This arm can run where no turn follows it for seconds:
+                    // inside Windows' modal move/size loop winit sends no `AboutToWait`, so a
+                    // message parked for the turn would wait for the hand to let go. Through the
+                    // one writer, so the reading it decides on is also the one the window keeps.
+                    runtime.observe_window_place();
+                    let place = runtime.window.observed_place;
                     let mut raised: Vec<AttentionDelivery> = Vec::new();
                     let switches = runtime.notification_switches();
                     deliver_attention(
