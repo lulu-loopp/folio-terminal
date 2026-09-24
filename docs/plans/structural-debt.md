@@ -52,12 +52,12 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 9 | 9 | 0 |
+| 0.4.5 | 9 | 7 | 2 |
 | 0.4.6 | 39 | 39 | 0 |
 | 0.4.7 | 13 | 13 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
 | already repaid | 1 | 0 | 1 |
-| **total** | **65** | **64** | **1** |
+| **total** | **65** | **62** | **3** |
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -69,7 +69,13 @@ not a fourth entrance (D-9). Ticket 32 (`4ba5df7e`) repaid no row and added none
 Ticket 39 (`66174d8a`) repaid no row and added none: the web pane's arrow now
 hands an address to the browser through the OS hand-off lane, one more caller of
 the lane §5.3 row 1 already made, not a part of any open row. As of 2026-09-24
-no part of D-64 or D-65 is repaid.
+no part of D-64 or D-65 is repaid. By the 0.4.5 tickets: ticket 49 repaid D-46
+whole (§5.3 row 14: the window's title has one writer to the OS, throttled to
+one write a frame) and with it that row's part of D-2; it added no row. Ticket
+48 repaid D-45 whole (§5.3 row 13: one reading of the window's place per turn,
+taken at its head, plus one per attention delivery between turns, because no
+turn runs inside Windows' modal move/size loop) and that row's part of D-2; it
+added no row.
 
 ## The ledger
 
@@ -82,7 +88,7 @@ ledger's.
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
-| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3` |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded |
@@ -125,8 +131,8 @@ ledger's.
 | D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | 0.4.6, after D-41 | open |
 | D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open |
 | D-44 | §5.3 row 12 — the synchronous `ResizePseudoConsole` round trip | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — as D-43 | open |
-| D-45 | §5.3 row 13 — `sample_window_place` resampled at three sites for one instant | §5.3 | none yet | 0.4.5 — one site is `drain_pty` | open |
-| D-46 | §5.3 row 14 — `Window::set_title` at five sites with no throttle | §5.3 | none yet | 0.4.5 — one site is `drain_pty` | open |
+| D-45 | §5.3 row 13 — `sample_window_place` resampled at three sites for one instant | §5.3 | 48 | 0.4.5 — one site is `drain_pty` | repaid (ticket 48) |
+| D-46 | §5.3 row 14 — `Window::set_title` at five sites with no throttle | §5.3 | 49 | 0.4.5 — one site is `drain_pty` | repaid (ticket 49) |
 | D-47 | §5.3 row 20 — renames, the preserving save and store writes on the window thread | §5.3 | none yet | 0.4.6 | open |
 | D-48 | §7.2 chain stub — attention ingress | §7.2 | none yet | 0.4.6, with D-57 | open |
 | D-49 | §7.2 chain stub — resize | §7.2 | none yet | 0.4.7 | open |
@@ -269,7 +275,7 @@ first cut must not be advertised as eliminating every window-thread stall**.
 **Status.** open. Lanes, the exception list and the migration order are in
 `docs/ARCHITECTURE.md` §5.
 
-**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`.
+**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46).
 
 ---
 

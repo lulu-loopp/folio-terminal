@@ -9,8 +9,8 @@ use crate::{
     chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files, git,
     hang_watch, hyperlink_activation, ime_outbound, mark_leaf_painted, math_copy_window,
     native_window, present_diagnostics, present_gate, preview, pty_drain_says_nothing_new,
-    pty_frame_is_unchanged, seats, settings, settling, startup_poll_delay, take_math_worker_notice,
-    trace_sink, trace_unchanged_present, webhost,
+    pty_frame_is_unchanged, sample_window_place, seats, settings, settling, startup_poll_delay,
+    take_math_worker_notice, trace_sink, trace_unchanged_present, webhost,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -1509,6 +1509,45 @@ impl Runtime<'_> {
     /// turning them once per window would be a folder re-read per window and a
     /// debounce that fires N times; exactly one window in the process is given
     /// the job, and it is the one that opened first — see [`FolioApp::order`].
+    /// **Ask the desktop where this window is, once, and keep the answer for the turn**
+    /// (ticket 48; `docs/ARCHITECTURE.md` §5.3 row 13; `attention` plan §5.2).
+    ///
+    /// The only writer of [`WindowRuntime::observed_place`] and the four fields it is written
+    /// with (`window_hidden`, `window_exposed`, `taskbar_auto_hidden`, `attention_sampled_at`),
+    /// and the only caller of [`sample_window_place`]. Called from three places, and each is
+    /// the moment a delivery can be decided:
+    ///
+    /// * **the head of [`Self::turn`]** — one reading shared by `drain_pty` and
+    ///   `advance_strip_animation`, which used to take one each on the same turn (owner's
+    ///   stall reports 2026-09-23/24: the same question asked twice and paid for twice);
+    /// * **the window's birth** (`dress_new_window`), so the install road's drain, which runs
+    ///   before the first turn, reads a real answer;
+    /// * **an attention delivery that arrives between turns** (`AppEvent::AttentionSpoke`).
+    ///   Not parked for the next turn, because on Windows there may be none for seconds: inside
+    ///   the OS's modal move/size loop winit sends no `AboutToWait`, so a message held for a
+    ///   turn would wait for the hand to let go of the frame.
+    ///
+    /// "Every turn, never cached across them" (user rulings 2026-08-28 and 2026-09-01) holds:
+    /// a turn's head replaces the reading before anything in that turn reads it.
+    ///
+    /// Focus is the window's own answer (`Window::has_focus`), for the measured reason
+    /// `drain_pty` gives; `WindowRuntime::window_focused` keeps its `WM_SETFOCUS` writer and is
+    /// not written here.
+    pub(crate) fn observe_window_place(&mut self) {
+        let window = &self.window.window;
+        let place = hang_watch::during(hang_watch::Station::Place, || {
+            let focused =
+                hang_watch::during(hang_watch::Station::PlaceFocus, || window.has_focus());
+            sample_window_place(window, focused)
+        });
+        let window = &mut *self.window;
+        window.observed_place = place;
+        window.window_hidden = place.hidden;
+        window.window_exposed = place.exposed;
+        window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
+        window.attention_sampled_at = Some(Instant::now());
+    }
+
     pub(crate) fn turn(
         &mut self,
         now: Instant,
@@ -1526,6 +1565,10 @@ impl Runtime<'_> {
         // the live question. See [`crate::pace`].
         let last_present = self.window.last_present_at;
         self.window.frame_clock.open(last_present, now);
+        // **Where the window is, asked once for the whole turn** (ticket 48; `ARCHITECTURE`
+        // §5.3 row 13). The drain and the strip tick both decide what the reader is owed from
+        // it, and the doors that fire inside the turn read it back; none of them asks again.
+        self.observe_window_place();
         // First, because everything below it is allowed to assume the window is
         // where the hand last left it. This is the door the coalescing is *for*:
         // the queue has just run dry, so whatever the wheel collected while the
@@ -1913,6 +1956,11 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::ClockAdvancePreviewRefusal, || {
             self.advance_preview_refusal(now)
         })?;
+        // **The window's title, told to the OS once a turn at most** (ticket 49). After
+        // the drain and every clock above, because any of them can change which tab is
+        // active or what it is called; `want_title` only said so. A title held for
+        // its frame books its wake-up in the fold below.
+        self.flush_title(now);
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
@@ -1970,7 +2018,7 @@ impl Runtime<'_> {
         // printed the block is often not the one holding the keyboard. See
         // [`Self::live_stability_deadline`].
         let live_stability_deadline = self.live_stability_deadline();
-        const DEADLINE_OWNERS: [&str; 49] = [
+        const DEADLINE_OWNERS: [&str; 50] = [
             "startup poll",
             "IME cursor",
             "shell caret",
@@ -2020,6 +2068,7 @@ impl Runtime<'_> {
             "preview watch",
             "files watch",
             "refused frame",
+            "window title",
         ];
         let deadlines = [
             startup_deadline,
@@ -2266,6 +2315,10 @@ impl Runtime<'_> {
                 .owes_a_frame()
                 .then(|| self.next_animation_deadline())
                 .flatten(),
+            // **A title held for its frame** (ticket 49): the one wake-up that makes
+            // "the last title always reaches the OS" true on a window where nothing
+            // else is happening. Absent unless a title is being held.
+            self.window.title.deadline(),
         ];
         let wake = earliest_named_deadline(DEADLINE_OWNERS, deadlines);
         if self.app.trace_perf

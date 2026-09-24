@@ -321,7 +321,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 195;
+const STATION_COUNT: usize = 199;
 
 #[path = "hang_watch_detail.rs"]
 mod detail;
@@ -783,8 +783,13 @@ pub enum Station {
     RetainedPicture = 89,
     RedrawCommit = 90,
     PresentSeats = 91,
-    DrainPlace = 92,
-    DrainFocus = 93,
+    /// `sample_window_place`, from `Runtime::observe_window_place` — the one
+    /// reading of where the window is, taken at the head of every turn, at a
+    /// window's birth and by an attention delivery between turns (ticket 48; was
+    /// `DrainPlace`, same id and label, when the drain took it).
+    Place = 92,
+    /// `Window::has_focus`, the focus half of that reading (was `DrainFocus`).
+    PlaceFocus = 93,
     DrainPane = 94,
     DrainPalette = 95,
     DrainRingStats = 96,
@@ -793,7 +798,10 @@ pub enum Station {
     DrainAttention = 99,
     DrainRaiseAttention = 100,
     DrainGit = 101,
-    DrainTitle = 102,
+    /// `Window::set_title`, from `Runtime::flush_title` — the one write of the
+    /// window's title, once a turn at most (ticket 49; was `DrainTitle`, same id
+    /// and label, when the drain wrote it).
+    WindowTitle = 102,
     DrainBegin = 103,
     DrainWake = 104,
     DrainWatermark = 105,
@@ -886,6 +894,17 @@ pub enum Station {
     ImeTrace = 192,
     DiagnosticWrite = 193,
     SurfaceConfigure = 194,
+    /// `IsIconic` and the DWM cloak query, inside `sample_window_place`.
+    PlaceHidden = 195,
+    /// `bt_platform::window_is_exposed` — the exposure probe's `GetWindowRect`
+    /// and hit tests, which ask whatever window is under each point.
+    PlaceExposure = 196,
+    /// `bt_platform::taskbar_is_auto_hidden` — `SHAppBarMessage`, a message to
+    /// the shell's taskbar.
+    PlaceTaskbar = 197,
+    /// `TaskbarMirror::show`, the taskbar button's progress, from
+    /// `Runtime::advance_strip_animation`.
+    TaskbarMirror = 198,
 }
 
 impl Station {
@@ -985,8 +1004,8 @@ impl Station {
             Self::RetainedPicture => "present_retained_picture",
             Self::RedrawCommit => "redraw bookkeeping",
             Self::PresentSeats => "present_seats_and_commit",
-            Self::DrainPlace => "sample_window_place",
-            Self::DrainFocus => "Window::has_focus",
+            Self::Place => "sample_window_place",
+            Self::PlaceFocus => "Window::has_focus",
             Self::DrainPane => "drain pane",
             Self::DrainPalette => "terminal palette",
             Self::DrainRingStats => "PTY ring stats",
@@ -995,7 +1014,7 @@ impl Station {
             Self::DrainAttention => "deliver_osc_attention",
             Self::DrainRaiseAttention => "drain raise_attention",
             Self::DrainGit => "reread_git_surfaces",
-            Self::DrainTitle => "Window::set_title",
+            Self::WindowTitle => "Window::set_title",
             Self::DrainBegin => "begin_feed_turn",
             Self::DrainWake => "PTY wake accept",
             Self::DrainWatermark => "command_marks_watermark",
@@ -1088,6 +1107,10 @@ impl Station {
             Self::ImeTrace => "IME trace::Dump::line",
             Self::SurfaceConfigure => "surface configure",
             Self::DiagnosticWrite => "stderr diagnostic write",
+            Self::PlaceHidden => "IsIconic + cloak",
+            Self::PlaceExposure => "window_is_exposed",
+            Self::PlaceTaskbar => "taskbar_is_auto_hidden",
+            Self::TaskbarMirror => "TaskbarMirror::show",
         }
     }
 
@@ -1200,8 +1223,8 @@ impl Station {
             89 => Self::RetainedPicture,
             90 => Self::RedrawCommit,
             91 => Self::PresentSeats,
-            92 => Self::DrainPlace,
-            93 => Self::DrainFocus,
+            92 => Self::Place,
+            93 => Self::PlaceFocus,
             94 => Self::DrainPane,
             95 => Self::DrainPalette,
             96 => Self::DrainRingStats,
@@ -1210,7 +1233,7 @@ impl Station {
             99 => Self::DrainAttention,
             100 => Self::DrainRaiseAttention,
             101 => Self::DrainGit,
-            102 => Self::DrainTitle,
+            102 => Self::WindowTitle,
             103 => Self::DrainBegin,
             104 => Self::DrainWake,
             105 => Self::DrainWatermark,
@@ -1304,6 +1327,10 @@ impl Station {
             192 => Self::ImeTrace,
             193 => Self::DiagnosticWrite,
             194 => Self::SurfaceConfigure,
+            195 => Self::PlaceHidden,
+            196 => Self::PlaceExposure,
+            197 => Self::PlaceTaskbar,
+            198 => Self::TaskbarMirror,
             _ => Self::Starting,
         }
     }
