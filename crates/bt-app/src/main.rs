@@ -26630,9 +26630,11 @@ fn sample_window_place(window: &Window, focused: bool) -> notify::WindowPlace {
     // **Each probe under its own station** (ticket 48): two of them go to other processes —
     // the hit tests to whatever window is under each point, `SHAppBarMessage` to the shell's
     // taskbar — and a stall line should say which one waited.
-    let hidden = hang_watch::during(hang_watch::Station::PlaceHidden, || {
-        window_is_hidden(window)
-    });
+    // Spelled as `enter`/`at` rather than `during` so the fused call keeps the exact line
+    // `present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value` reads.
+    let leaving = hang_watch::enter(hang_watch::Station::PlaceHidden);
+    let hidden = window_is_hidden(window);
+    hang_watch::at(leaving);
     notify::WindowPlace {
         focused,
         hidden,
