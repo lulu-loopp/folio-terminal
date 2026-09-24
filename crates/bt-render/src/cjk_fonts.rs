@@ -270,8 +270,11 @@ impl CjkCatalog {
 /// Family ownership is decided before matching weight/style. fontdb applies
 /// CSS matching inside that family; cosmic-text must receive the resulting
 /// face attributes because its named-family iterator rejects weight misses.
-/// A missing bold/italic cut uses the family's available face. We do not add
-/// custom emboldening to glyphon's rasterizer or its atlas/cache contract.
+/// A missing bold/italic cut uses the family's available face. In the terminal
+/// grid a bold request on such a face is then drawn heavier from that face's own
+/// outline (`synthetic_bold`, ticket 38, 2026-09-24 — superseding the sentence
+/// of 2026-09-20 that said no emboldening would be added); chrome labels and
+/// previews draw the available face as it is.
 pub(super) fn match_cjk_attrs<'a>(fs: &FontSystem, attrs: Attrs<'a>) -> Attrs<'a> {
     let Family::Name(name) = attrs.family else {
         return attrs;

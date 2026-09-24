@@ -10,8 +10,13 @@ pub mod motion;
 mod procedural;
 mod rounded_rect;
 mod scheme;
+mod synthetic_bold;
 mod theme;
 mod video;
+use synthetic_bold::{
+    GridCellArea, SyntheticBoldGlyphs, SyntheticBoldIdsExhausted, SyntheticPlacements,
+    place_synthetic_bold, synthetic_bold_glyphs, with_synthetic_bold,
+};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -3428,6 +3433,10 @@ struct WideGlyph {
     left_offset_px: f32,
     top_offset_px: f32,
     color: Color,
+    /// Which of the buffer's glyphs are drawn emboldened from their own face
+    /// ([`synthetic_bold_glyphs`]); `None` for a cell drawn as shaped. Decided at
+    /// the shaping cache's miss and carried with the shape, never per frame.
+    synthetic_bold: Option<Arc<[bool]>>,
 }
 
 struct NarrowGlyph {
@@ -3436,6 +3445,10 @@ struct NarrowGlyph {
     left_offset_px: f32,
     top_offset_px: f32,
     color: Color,
+    /// Which of the buffer's glyphs are drawn emboldened from their own face
+    /// ([`synthetic_bold_glyphs`]); `None` for a cell drawn as shaped. Decided at
+    /// the shaping cache's miss and carried with the shape, never per frame.
+    synthetic_bold: Option<Arc<[bool]>>,
 }
 
 /// What a cell asks the shaping caches for: the cluster and its style.
@@ -3470,6 +3483,18 @@ struct CachedNarrowShape {
     buffer: Arc<Buffer>,
     left_offset_px: f32,
     top_offset_px: f32,
+    /// Which of the buffer's glyphs are drawn emboldened from their own face
+    /// ([`synthetic_bold_glyphs`]); `None` for a cell drawn as shaped. Decided at
+    /// the shaping cache's miss and carried with the shape, never per frame.
+    synthetic_bold: Option<Arc<[bool]>>,
+}
+
+/// What a shaping cache hands back for one cell — a cached shape, shared.
+struct ShapedCell {
+    buffer: Arc<Buffer>,
+    left_offset_px: f32,
+    top_offset_px: f32,
+    synthetic_bold: Option<Arc<[bool]>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3533,7 +3558,7 @@ impl NarrowShapingCache {
         swash_cache: &mut SwashCache,
         metrics: CellMetrics,
         cjk_families: &TerminalCjkFamilies,
-    ) -> (Arc<Buffer>, f32, f32) {
+    ) -> ShapedCell {
         let sized = SizedShapeKey {
             shape: key,
             metrics: metrics.into(),
@@ -3542,11 +3567,12 @@ impl NarrowShapingCache {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
-            return (
-                Arc::clone(&cached.buffer),
-                cached.left_offset_px,
-                cached.top_offset_px,
-            );
+            return ShapedCell {
+                buffer: Arc::clone(&cached.buffer),
+                left_offset_px: cached.left_offset_px,
+                top_offset_px: cached.top_offset_px,
+                synthetic_bold: cached.synthetic_bold.clone(),
+            };
         }
 
         let miss_started = self.track_perf.then(Instant::now);
@@ -3608,6 +3634,12 @@ impl NarrowShapingCache {
                 metrics.cell_height_px,
             ),
         };
+        let synthetic_bold = synthetic_bold_glyphs(
+            sized.shape.bold,
+            size_policy == NarrowSizePolicy::ColorEmoji,
+            &buffer,
+            font_system,
+        );
         let buffer = Arc::new(buffer);
         let resident_bytes =
             shape_entry_resident_bytes(&sized.shape, &buffer, size_of::<CachedNarrowShape>());
@@ -3617,6 +3649,7 @@ impl NarrowShapingCache {
                 buffer: Arc::clone(&buffer),
                 left_offset_px,
                 top_offset_px,
+                synthetic_bold: synthetic_bold.clone(),
             },
             resident_bytes,
         );
@@ -3629,7 +3662,12 @@ impl NarrowShapingCache {
                 .miss_time
                 .saturating_add(miss_started.elapsed());
         }
-        (buffer, left_offset_px, top_offset_px)
+        ShapedCell {
+            buffer,
+            left_offset_px,
+            top_offset_px,
+            synthetic_bold,
+        }
     }
 }
 
@@ -3637,6 +3675,10 @@ struct CachedWideShape {
     buffer: Arc<Buffer>,
     left_offset_px: f32,
     top_offset_px: f32,
+    /// Which of the buffer's glyphs are drawn emboldened from their own face
+    /// ([`synthetic_bold_glyphs`]); `None` for a cell drawn as shaped. Decided at
+    /// the shaping cache's miss and carried with the shape, never per frame.
+    synthetic_bold: Option<Arc<[bool]>>,
 }
 
 struct WideShapingCache {
@@ -3679,7 +3721,7 @@ impl WideShapingCache {
         swash_cache: &mut SwashCache,
         metrics: CellMetrics,
         cjk_families: &TerminalCjkFamilies,
-    ) -> (Arc<Buffer>, f32, f32) {
+    ) -> ShapedCell {
         let sized = SizedShapeKey {
             shape: key,
             metrics: metrics.into(),
@@ -3688,11 +3730,12 @@ impl WideShapingCache {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
-            return (
-                Arc::clone(&cached.buffer),
-                cached.left_offset_px,
-                cached.top_offset_px,
-            );
+            return ShapedCell {
+                buffer: Arc::clone(&cached.buffer),
+                left_offset_px: cached.left_offset_px,
+                top_offset_px: cached.top_offset_px,
+                synthetic_bold: cached.synthetic_bold.clone(),
+            };
         }
 
         let miss_started = self.track_perf.then(Instant::now);
@@ -3724,6 +3767,12 @@ impl WideShapingCache {
                 metrics.cell_height_px,
             ),
         };
+        let synthetic_bold = synthetic_bold_glyphs(
+            sized.shape.bold,
+            matches!(size_policy, WideSizePolicy::ColorEmojiBox { .. }),
+            &buffer,
+            font_system,
+        );
         let buffer = Arc::new(buffer);
         let resident_bytes =
             shape_entry_resident_bytes(&sized.shape, &buffer, size_of::<CachedWideShape>());
@@ -3733,6 +3782,7 @@ impl WideShapingCache {
                 buffer: Arc::clone(&buffer),
                 left_offset_px,
                 top_offset_px,
+                synthetic_bold: synthetic_bold.clone(),
             },
             resident_bytes,
         );
@@ -3745,7 +3795,12 @@ impl WideShapingCache {
                 .miss_time
                 .saturating_add(miss_started.elapsed());
         }
-        (buffer, left_offset_px, top_offset_px)
+        ShapedCell {
+            buffer,
+            left_offset_px,
+            top_offset_px,
+            synthetic_bold,
+        }
     }
 }
 
@@ -4457,6 +4512,10 @@ pub struct GpuContext {
     /// mint its own viewport without rebuilding anything.
     glyphon_cache: Cache,
     atlas: TextAtlas,
+    /// **The custom-glyph ids `atlas` may hold for synthetic bold** (ticket 38),
+    /// and how to draw each of them again. Emptied only by
+    /// [`GpuContext::replace_atlas`], with the atlas it lives beside.
+    synthetic_bold: SyntheticBoldGlyphs,
     /// **Whether the shelf layout under the atlas has already been thrown away
     /// once for a refusal no complete frame has answered yet** — the latch that
     /// makes [`GpuContext::close_the_frame`] a repair and not a reflex.
@@ -6732,7 +6791,7 @@ impl GpuContext {
         self.format = format;
         self.max_texture_dimension_2d = max_texture_dimension_2d;
         self.glyphon_cache = glyphon_cache;
-        self.atlas = atlas;
+        self.replace_atlas(atlas);
         // A fresh packing is not a repair of a fragmented one, so the episode
         // the re-pack latch was in ends with the device it was in.
         self.glyph_atlas_refitted = false;
@@ -6967,6 +7026,7 @@ impl GpuContext {
             swash_cache,
             glyphon_cache,
             atlas,
+            synthetic_bold: SyntheticBoldGlyphs::new(),
             glyph_atlas_refitted: false,
             glyph_atlas_refits: 0,
             device_loss,
@@ -7392,6 +7452,15 @@ impl GpuContext {
     /// lost one it does nothing at all: no trim, no re-pack, no line. The frame
     /// that comes after says what actually happened, once, by name
     /// ([`RenderError::DeviceLost`]).
+    /// **The one door that replaces the shared atlas**, and with it every
+    /// synthetic-bold id the old one could hold (ticket 38). An id retired while
+    /// its atlas lives would let two rasters share one key in it; an atlas
+    /// replaced without its ids would leave them spent for nothing.
+    fn replace_atlas(&mut self, atlas: TextAtlas) {
+        self.atlas = atlas;
+        self.synthetic_bold.retire_all();
+    }
+
     fn close_the_frame(&mut self, outcome: &Result<PresentOutcome, RenderError>) {
         if self.still_has_its_device().is_err() {
             return;
@@ -7403,8 +7472,9 @@ impl GpuContext {
             }
             Ok(PresentOutcome::PresentedWithoutText(_)) if !self.glyph_atlas_refitted => {
                 self.glyph_atlas_refitted = true;
-                self.atlas =
+                let atlas =
                     TextAtlas::new(&self.device, &self.queue, &self.glyphon_cache, self.format);
+                self.replace_atlas(atlas);
                 // Unconditional, and numbered by the same statement that does
                 // the numbering — see [`note_a_repack`]. A re-pack the log does
                 // not carry is a re-pack nobody on the machine it happened on
@@ -9420,36 +9490,57 @@ impl WindowRenderer {
             // glyphon copies what it needs into this seat's own renderer. What
             // may not be shared is the renderer, and it is not.
             phase(PresentPhase::AtlasUpload);
-            let text_prepare_result = {
-                let slot = &mut self.seat_slots[index];
-                match prepare_text_atlas(
-                    &mut slot.text_renderer,
-                    &gpu.device,
-                    &gpu.queue,
-                    &mut gpu.font_system,
-                    &mut gpu.atlas,
-                    &self.text_viewport,
-                    &mut gpu.swash_cache,
-                    &self.text_rows,
-                    entry.metrics,
-                    frame,
-                    entry.seat,
-                ) {
-                    Ok(()) => prepare_status_text_atlas(
-                        &mut slot.status_text_renderer,
+            // The synthesized-bold glyphs of this seat's grid and status overlay,
+            // placed on the same geometry glyphon is about to be handed. An id
+            // space that has run out is a full atlas by another name, and takes
+            // the same road: the lane is refused, the frame is presented without
+            // text, and `close_the_frame` repacks and retires every id (ticket 38).
+            let placements = seat_synthetic_bold(
+                &mut gpu.synthetic_bold,
+                &mut gpu.font_system,
+                &self.text_rows,
+                self.status_overlay.as_deref(),
+                entry.metrics,
+                frame,
+                entry.seat,
+            );
+            let text_prepare_result = match &placements {
+                Err(SyntheticBoldIdsExhausted) => Err(PrepareError::AtlasFull),
+                Ok((grid_placements, status_placements)) => {
+                    let slot = &mut self.seat_slots[index];
+                    match prepare_text_atlas(
+                        &mut slot.text_renderer,
                         &gpu.device,
                         &gpu.queue,
                         &mut gpu.font_system,
                         &mut gpu.atlas,
                         &self.text_viewport,
                         &mut gpu.swash_cache,
-                        self.status_overlay.as_deref(),
+                        &mut gpu.synthetic_bold,
+                        &self.text_rows,
                         entry.metrics,
                         frame,
-                        entry.seat.width as f32,
                         entry.seat,
-                    ),
-                    Err(error) => Err(error),
+                        grid_placements,
+                    ) {
+                        Ok(()) => prepare_status_text_atlas(
+                            &mut slot.status_text_renderer,
+                            &gpu.device,
+                            &gpu.queue,
+                            &mut gpu.font_system,
+                            &mut gpu.atlas,
+                            &self.text_viewport,
+                            &mut gpu.swash_cache,
+                            &mut gpu.synthetic_bold,
+                            self.status_overlay.as_deref(),
+                            entry.metrics,
+                            frame,
+                            entry.seat.width as f32,
+                            entry.seat,
+                            status_placements,
+                        ),
+                        Err(error) => Err(error),
+                    }
                 }
             };
             // glyphon grows each atlas geometrically before returning AtlasFull. If the device
@@ -9464,14 +9555,22 @@ impl WindowRenderer {
             // fit. The trim this frame owes is the unconditional one in
             // [`Self::present_frame`], and the retry is
             // [`PresentOutcome::PresentedWithoutText`].
-            if let Some(census) = census.as_mut() {
+            if let (Some(census), Ok((grid_placements, status_placements))) =
+                (census.as_mut(), &placements)
+            {
                 // The same two sequences the two prepares above were handed, in
                 // the same order — see [`grid_text_areas`].
                 census.record(
                     TextLane::Grid,
                     &mut gpu.font_system,
                     &mut gpu.swash_cache,
-                    grid_text_areas(&self.text_rows, entry.metrics, frame, entry.seat),
+                    grid_text_areas(
+                        &self.text_rows,
+                        entry.metrics,
+                        frame,
+                        entry.seat,
+                        grid_placements,
+                    ),
                 );
                 census.record(
                     TextLane::Grid,
@@ -9483,6 +9582,7 @@ impl WindowRenderer {
                         frame,
                         entry.seat.width as f32,
                         entry.seat,
+                        status_placements,
                     ),
                 );
             }
@@ -9745,6 +9845,7 @@ impl WindowRenderer {
                 &mut gpu.atlas,
                 &self.text_viewport,
                 &mut gpu.swash_cache,
+                &mut gpu.synthetic_bold,
                 &preview_text_layouts,
             );
             accept_text_prepare(
@@ -9784,6 +9885,7 @@ impl WindowRenderer {
                 &mut gpu.atlas,
                 &self.text_viewport,
                 &mut gpu.swash_cache,
+                &mut gpu.synthetic_bold,
                 &chrome_layouts,
             );
             accept_text_prepare(
@@ -10002,6 +10104,7 @@ impl WindowRenderer {
                     &mut gpu.atlas,
                     &self.text_viewport,
                     &mut gpu.swash_cache,
+                    &mut gpu.synthetic_bold,
                     &layouts,
                 );
                 accept_text_prepare(
@@ -12114,6 +12217,16 @@ impl WindowRenderer {
         let text_stats = self.prepare_text_rows(gpu, self.base_metrics, frame)?;
         let rows_prepared_at = Instant::now();
         {
+            let (grid_placements, status_placements) = seat_synthetic_bold(
+                &mut gpu.synthetic_bold,
+                &mut gpu.font_system,
+                &self.text_rows,
+                self.status_overlay.as_deref(),
+                self.base_metrics,
+                frame,
+                seat,
+            )
+            .map_err(|_| RenderError::GlyphRender(PrepareError::AtlasFull.to_string()))?;
             let slot = &mut self.seat_slots[0];
             prepare_text_atlas(
                 &mut slot.text_renderer,
@@ -12123,10 +12236,12 @@ impl WindowRenderer {
                 &mut gpu.atlas,
                 &self.text_viewport,
                 &mut gpu.swash_cache,
+                &mut gpu.synthetic_bold,
                 &self.text_rows,
                 self.base_metrics,
                 frame,
                 seat,
+                &grid_placements,
             )
             .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
             prepare_status_text_atlas(
@@ -12137,6 +12252,7 @@ impl WindowRenderer {
                 &mut gpu.atlas,
                 &self.text_viewport,
                 &mut gpu.swash_cache,
+                &mut gpu.synthetic_bold,
                 self.status_overlay.as_deref(),
                 self.base_metrics,
                 frame,
@@ -12144,6 +12260,7 @@ impl WindowRenderer {
                 // the pane.
                 width as f32,
                 seat,
+                &status_placements,
             )
             .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
         }
@@ -14047,9 +14164,13 @@ fn prepare_chrome_text_atlas(
     atlas: &mut TextAtlas,
     viewport: &Viewport,
     swash_cache: &mut SwashCache,
+    synthetic_bold: &mut SyntheticBoldGlyphs,
     layouts: &[ChromeTextLayout],
 ) -> Result<(), PrepareError> {
-    text_renderer.prepare(
+    // Chrome text carries no custom glyph, but it shares the grid's atlas, and
+    // glyphon redraws every custom raster that atlas holds through whichever
+    // prepare grows it — a `None` there is a panic (ticket 38).
+    text_renderer.prepare_with_custom(
         device,
         queue,
         font_system,
@@ -14057,6 +14178,7 @@ fn prepare_chrome_text_atlas(
         viewport,
         chrome_text_areas(layouts),
         swash_cache,
+        |request| synthetic_bold.rasterize(request),
     )
 }
 
@@ -14092,12 +14214,28 @@ fn grid_glyph_ink(
 /// second opinion about where the grid's glyphs sit, and a subpixel bin is
 /// decided by exactly that geometry — so the count would drift from the demand
 /// it claims to measure at the first change to either.
+///
+/// A cell drawn with synthetic bold carries an empty buffer and its custom
+/// glyphs ([`with_synthetic_bold`]); `placements` is what
+/// [`place_synthetic_bold`] made of [`grid_cell_areas`] for this frame.
 fn grid_text_areas<'a>(
     text_rows: &'a [Arc<ComposedRow>],
     metrics: CellMetrics,
     frame: &'a ViewportFrame,
     seat: SeatViewport,
+    placements: &'a SyntheticPlacements,
 ) -> impl Iterator<Item = TextArea<'a>> + 'a {
+    with_synthetic_bold(grid_cell_areas(text_rows, metrics, frame, seat), placements)
+}
+
+/// **Where each of one seat's grid cells is drawn** — the one geometry
+/// [`grid_text_areas`] and [`place_synthetic_bold`] both read.
+fn grid_cell_areas<'a>(
+    text_rows: &'a [Arc<ComposedRow>],
+    metrics: CellMetrics,
+    frame: &'a ViewportFrame,
+    seat: SeatViewport,
+) -> impl Iterator<Item = GridCellArea<'a>> + 'a {
     // **The seat's corner, added here and nowhere else** (§7.36). Everything
     // above this line is seat-local, as the whole terminal side of this crate
     // is; everything glyphon is handed is the window's, because the window is
@@ -14130,27 +14268,30 @@ fn grid_text_areas<'a>(
                 let [left, top, _, bottom] =
                     frame_cell_bounds_px(metrics, frame, row, glyph.column);
                 let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
-                TextArea {
-                    buffer: &glyph.buffer,
-                    left: left + glyph.left_offset_px,
-                    top: top + glyph.top_offset_px,
-                    scale: 1.0,
-                    // Clip to the terminal row, not the cell. The grid owns pen origins, while
-                    // accents and fallback ink remain free to overhang adjacent cells.
-                    bounds: TextBounds {
-                        left: (origin_x + padding).floor() as i32,
-                        top: top.floor() as i32,
-                        right: text_right,
-                        bottom: bottom.ceil() as i32,
+                GridCellArea {
+                    area: TextArea {
+                        buffer: &glyph.buffer,
+                        left: left + glyph.left_offset_px,
+                        top: top + glyph.top_offset_px,
+                        scale: 1.0,
+                        // Clip to the terminal row, not the cell. The grid owns pen origins,
+                        // while accents and fallback ink remain free to overhang adjacent cells.
+                        bounds: TextBounds {
+                            left: (origin_x + padding).floor() as i32,
+                            top: top.floor() as i32,
+                            right: text_right,
+                            bottom: bottom.ceil() as i32,
+                        },
+                        default_color: grid_glyph_ink(
+                            frame,
+                            current_ink,
+                            row,
+                            glyph.column,
+                            glyph.color,
+                        ),
+                        custom_glyphs: &[],
                     },
-                    default_color: grid_glyph_ink(
-                        frame,
-                        current_ink,
-                        row,
-                        glyph.column,
-                        glyph.color,
-                    ),
-                    custom_glyphs: &[],
+                    synthetic_bold: glyph.synthetic_bold.as_deref(),
                 }
             })
         });
@@ -14161,23 +14302,57 @@ fn grid_text_areas<'a>(
             text_row.wide_glyphs.iter().map(move |wide| {
                 let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, wide.column);
                 let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
-                TextArea {
-                    buffer: &wide.buffer,
-                    left: left + wide.left_offset_px,
-                    top: top + wide.top_offset_px,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: left.floor() as i32,
-                        top: top.floor() as i32,
-                        right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
-                        bottom: bottom.ceil() as i32,
+                GridCellArea {
+                    area: TextArea {
+                        buffer: &wide.buffer,
+                        left: left + wide.left_offset_px,
+                        top: top + wide.top_offset_px,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: left.floor() as i32,
+                            top: top.floor() as i32,
+                            right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
+                            bottom: bottom.ceil() as i32,
+                        },
+                        default_color: grid_glyph_ink(
+                            frame,
+                            current_ink,
+                            row,
+                            wide.column,
+                            wide.color,
+                        ),
+                        custom_glyphs: &[],
                     },
-                    default_color: grid_glyph_ink(frame, current_ink, row, wide.column, wide.color),
-                    custom_glyphs: &[],
+                    synthetic_bold: wide.synthetic_bold.as_deref(),
                 }
             })
         });
     narrow_text_areas.chain(wide_text_areas)
+}
+
+/// **One seat's synthesized-bold glyphs, grid and status overlay**, placed on
+/// the geometry their prepares read ([`grid_cell_areas`], [`status_cell_areas`]).
+#[allow(clippy::too_many_arguments)]
+fn seat_synthetic_bold(
+    table: &mut SyntheticBoldGlyphs,
+    font_system: &mut FontSystem,
+    text_rows: &[Arc<ComposedRow>],
+    status_overlay: Option<&ComposedRow>,
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    seat: SeatViewport,
+) -> Result<(SyntheticPlacements, SyntheticPlacements), SyntheticBoldIdsExhausted> {
+    let grid = place_synthetic_bold(
+        grid_cell_areas(text_rows, metrics, frame, seat),
+        table,
+        font_system,
+    )?;
+    let status = place_synthetic_bold(
+        status_cell_areas(status_overlay, metrics, frame, seat.width as f32, seat),
+        table,
+        font_system,
+    )?;
+    Ok((grid, status))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -14189,19 +14364,22 @@ fn prepare_text_atlas(
     atlas: &mut TextAtlas,
     viewport: &Viewport,
     swash_cache: &mut SwashCache,
+    synthetic_bold: &mut SyntheticBoldGlyphs,
     text_rows: &[Arc<ComposedRow>],
     metrics: CellMetrics,
     frame: &ViewportFrame,
     seat: SeatViewport,
+    placements: &SyntheticPlacements,
 ) -> Result<(), PrepareError> {
-    text_renderer.prepare(
+    text_renderer.prepare_with_custom(
         device,
         queue,
         font_system,
         atlas,
         viewport,
-        grid_text_areas(text_rows, metrics, frame, seat),
+        grid_text_areas(text_rows, metrics, frame, seat, placements),
         swash_cache,
+        |request| synthetic_bold.rasterize(request),
     )
 }
 
@@ -14212,7 +14390,24 @@ fn status_text_areas<'a>(
     frame: &'a ViewportFrame,
     seat_width_px: f32,
     seat: SeatViewport,
+    placements: &'a SyntheticPlacements,
 ) -> impl Iterator<Item = TextArea<'a>> + 'a {
+    with_synthetic_bold(
+        status_cell_areas(status_overlay, metrics, frame, seat_width_px, seat),
+        placements,
+    )
+}
+
+/// Where each cell of a seat's status overlay is drawn — the geometry
+/// [`status_text_areas`] and [`place_synthetic_bold`] both read, as
+/// [`grid_cell_areas`] is for the grid.
+fn status_cell_areas<'a>(
+    status_overlay: Option<&'a ComposedRow>,
+    metrics: CellMetrics,
+    frame: &'a ViewportFrame,
+    seat_width_px: f32,
+    seat: SeatViewport,
+) -> impl Iterator<Item = GridCellArea<'a>> + 'a {
     let Some(status) = frame.status_text.as_deref() else {
         return None.into_iter().flatten();
     };
@@ -14235,37 +14430,43 @@ fn status_text_areas<'a>(
     let narrow_text_areas = row.narrow_glyphs.iter().map(move |glyph| {
         let left = rect[0]
             + glyph.column.saturating_sub(geometry.first_column) as f32 * metrics.cell_width_px;
-        TextArea {
-            buffer: &glyph.buffer,
-            left: left + glyph.left_offset_px,
-            top: rect[1] + glyph.top_offset_px,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: rect[0].floor() as i32,
-                top: rect[1].floor() as i32,
-                right: rect[2].ceil() as i32,
-                bottom: rect[3].ceil() as i32,
+        GridCellArea {
+            area: TextArea {
+                buffer: &glyph.buffer,
+                left: left + glyph.left_offset_px,
+                top: rect[1] + glyph.top_offset_px,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: rect[0].floor() as i32,
+                    top: rect[1].floor() as i32,
+                    right: rect[2].ceil() as i32,
+                    bottom: rect[3].ceil() as i32,
+                },
+                default_color: glyph.color,
+                custom_glyphs: &[],
             },
-            default_color: glyph.color,
-            custom_glyphs: &[],
+            synthetic_bold: glyph.synthetic_bold.as_deref(),
         }
     });
     let wide_text_areas = row.wide_glyphs.iter().map(move |wide| {
         let left = rect[0]
             + wide.column.saturating_sub(geometry.first_column) as f32 * metrics.cell_width_px;
-        TextArea {
-            buffer: &wide.buffer,
-            left: left + wide.left_offset_px,
-            top: rect[1] + wide.top_offset_px,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: left.floor() as i32,
-                top: rect[1].floor() as i32,
-                right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
-                bottom: rect[3].ceil() as i32,
+        GridCellArea {
+            area: TextArea {
+                buffer: &wide.buffer,
+                left: left + wide.left_offset_px,
+                top: rect[1] + wide.top_offset_px,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: left.floor() as i32,
+                    top: rect[1].floor() as i32,
+                    right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
+                    bottom: rect[3].ceil() as i32,
+                },
+                default_color: wide.color,
+                custom_glyphs: &[],
             },
-            default_color: wide.color,
-            custom_glyphs: &[],
+            synthetic_bold: wide.synthetic_bold.as_deref(),
         }
     });
     Some(narrow_text_areas.chain(wide_text_areas))
@@ -14282,20 +14483,30 @@ fn prepare_status_text_atlas(
     atlas: &mut TextAtlas,
     viewport: &Viewport,
     swash_cache: &mut SwashCache,
+    synthetic_bold: &mut SyntheticBoldGlyphs,
     status_overlay: Option<&ComposedRow>,
     metrics: CellMetrics,
     frame: &ViewportFrame,
     seat_width_px: f32,
     seat: SeatViewport,
+    placements: &SyntheticPlacements,
 ) -> Result<(), PrepareError> {
-    text_renderer.prepare(
+    text_renderer.prepare_with_custom(
         device,
         queue,
         font_system,
         atlas,
         viewport,
-        status_text_areas(status_overlay, metrics, frame, seat_width_px, seat),
+        status_text_areas(
+            status_overlay,
+            metrics,
+            frame,
+            seat_width_px,
+            seat,
+            placements,
+        ),
         swash_cache,
+        |request| synthetic_bold.rasterize(request),
     )
 }
 
@@ -15722,15 +15933,15 @@ fn shape_narrow_glyphs_with_cjk(
                 bold: slot.style.flags.contains(CellFlags::BOLD),
                 italic: slot.style.flags.contains(CellFlags::ITALIC),
             };
-            let (buffer, left_offset_px, top_offset_px) =
-                cache.get_or_shape(key, font_system, swash_cache, metrics, cjk_families);
+            let shaped = cache.get_or_shape(key, font_system, swash_cache, metrics, cjk_families);
             let (foreground, _) = resolve_colors(&slot.style);
             NarrowGlyph {
                 column: slot.column,
-                buffer,
-                left_offset_px,
-                top_offset_px,
+                buffer: shaped.buffer,
+                left_offset_px: shaped.left_offset_px,
+                top_offset_px: shaped.top_offset_px,
                 color: Color::rgb(foreground[0], foreground[1], foreground[2]),
+                synthetic_bold: shaped.synthetic_bold,
             }
         })
         .collect()
@@ -15770,15 +15981,15 @@ fn shape_wide_glyphs_with_cjk(
                 bold: slot.style.flags.contains(CellFlags::BOLD),
                 italic: slot.style.flags.contains(CellFlags::ITALIC),
             };
-            let (buffer, left_offset_px, top_offset_px) =
-                cache.get_or_shape(key, font_system, swash_cache, metrics, cjk_families);
+            let shaped = cache.get_or_shape(key, font_system, swash_cache, metrics, cjk_families);
             let (foreground, _) = resolve_colors(&slot.style);
             WideGlyph {
                 column: slot.column,
-                buffer,
-                left_offset_px,
-                top_offset_px,
+                buffer: shaped.buffer,
+                left_offset_px: shaped.left_offset_px,
+                top_offset_px: shaped.top_offset_px,
                 color: Color::rgb(foreground[0], foreground[1], foreground[2]),
+                synthetic_bold: shaped.synthetic_bold,
             }
         })
         .collect()
@@ -31829,8 +32040,12 @@ mod tests {
         /// A checked-in test font written where `set_terminal_font` can load
         /// it from a path, the way the picker hands it a family's files.
         fn font_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+            // A directory of its own per call: fontdb maps a loaded file, and
+            // Windows refuses to rewrite a mapped file under another test.
+            static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!(
-                "folio-bt-render-synthetic-bold-{}",
+                "folio-bt-render-synthetic-bold-{}-{call}",
                 std::process::id()
             ));
             std::fs::create_dir_all(&dir).expect("a scratch directory");
@@ -31934,6 +32149,778 @@ mod tests {
                 drawn_faces(&mut gpu, "A", true),
                 [("Test CJK".to_owned(), 700)]
             );
+        }
+
+        // ── step 2: synthetic bold ─────────────────────────────────────────
+
+        fn test_other_file() -> std::path::PathBuf {
+            font_file(
+                "Test-Other400.ttf",
+                include_bytes!("../tests/fonts/Test-Other400.ttf"),
+            )
+        }
+
+        /// The product's road for a user who picked single-weight faces: a
+        /// primary with no bold cut (Test Sans) and a Chinese family with no
+        /// bold cut (Test Other), both handed to `set_terminal_font` as files.
+        fn regular_only_families(gpu: &mut GpuContext, size_logical_px: f32) {
+            gpu.set_terminal_font(
+                "Test Sans",
+                &[test_sans_file()],
+                "Test Other",
+                &[test_other_file()],
+                size_logical_px,
+            );
+            assert_eq!(gpu.terminal_font_family(), "Test Sans");
+            assert_eq!(gpu.terminal_cjk_font_family(), "Test Other");
+        }
+
+        /// The ink colour every test cell is written in, and the test for it.
+        /// `[b, g, r, a]` on the way back.
+        const INK: TerminalColor = TerminalColor::Rgb(255, 0, 0);
+        fn is_ink(pixel: &[u8; 4]) -> bool {
+            let (blue, green, red) = (
+                u32::from(pixel[0]),
+                u32::from(pixel[1]),
+                u32::from(pixel[2]),
+            );
+            red > 40 && blue * 3 < red && green * 3 < red
+        }
+
+        /// One test cell: its text and flags. A wide cell is followed by its
+        /// spacer, as the terminal writes it.
+        fn row_cells(cells: &[(&str, CellFlags)]) -> Vec<CapturedCell> {
+            let mut row = Vec::new();
+            for &(text, flags) in cells {
+                let mut cell = CapturedCell::plain(text);
+                cell.style.flags = flags;
+                cell.style.foreground = INK;
+                let wide = flags.contains(CellFlags::WIDE_CHAR);
+                row.push(cell);
+                if wide {
+                    let mut spacer = CapturedCell::plain("");
+                    spacer.wide_spacer = true;
+                    spacer.style.foreground = INK;
+                    row.push(spacer);
+                }
+            }
+            row
+        }
+
+        fn one_row_frame(cells: Vec<CapturedCell>, metrics: CellMetrics) -> ViewportFrame {
+            let columns = cells.len() as u32;
+            ViewportFrame {
+                columns: NonZeroU32::new(columns).unwrap(),
+                horizontal: HorizontalProjection::unscrolled(columns),
+                grid_rows: NonZeroU32::new(1).unwrap(),
+                rows: NonZeroU32::new(1).unwrap(),
+                presentation_offset_subpixels: 0,
+                cells,
+                cursor: bt_viewport::GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+                cell_anchors: test_cell_anchors(columns as usize),
+                row_map: test_row_map_for_metrics(1, metrics),
+                selection_spans: Vec::new(),
+                search_spans: Vec::new(),
+                current_search_spans: Vec::new(),
+                math_blocks: Vec::new(),
+                math_failures: Vec::new(),
+                status_text: None,
+                viewport_origin: FrameViewportOrigin::Bottom,
+                scroll_offset_rows: 0,
+                layout_key: bt_doc_layout_key(columns),
+                view_generation: bt_doc::ViewGeneration(1),
+            }
+        }
+
+        fn present(
+            window: &mut WindowRenderer,
+            gpu: &mut GpuContext,
+            frame: &ViewportFrame,
+        ) -> PresentOutcome {
+            let seat = SeatViewport::whole(window.config.width, window.config.height);
+            window
+                .present_frame(
+                    gpu,
+                    &[SeatFrame {
+                        metrics: window.base_metrics(),
+                        seat,
+                        clip: seat,
+                        frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("a frame")
+        }
+
+        /// The ink inside columns `first..first + width` of the one row: the
+        /// red channel summed over the pixels that read as ink, so a stroke
+        /// that gained part of a pixel counts the part it gained.
+        fn ink_in_columns(
+            pixels: &[[u8; 4]],
+            surface_width: u32,
+            metrics: CellMetrics,
+            frame: &ViewportFrame,
+            first: usize,
+            width: usize,
+        ) -> usize {
+            let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, 0, first);
+            let right = left + width as f32 * metrics.cell_width_px;
+            let (x0, x1) = (left.floor() as usize, right.ceil() as usize);
+            let (y0, y1) = (top.floor() as usize, bottom.ceil() as usize);
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| pixels[y * surface_width as usize + x]))
+                .filter(is_ink)
+                .map(|pixel| usize::from(pixel[2]))
+                .sum()
+        }
+
+        /// The ink of one cell's raster alone, measured off the swash image
+        /// the product makes: regular (`embolden` false) or synthesized.
+        fn raster_ink(gpu: &mut GpuContext, key: glyphon::CacheKey, embolden: bool) -> [i32; 4] {
+            let font = gpu
+                .font_system
+                .get_font(key.font_id, key.font_weight)
+                .expect("the face");
+            let image = crate::synthetic_bold::synthetic_bold_image(
+                &mut swash::scale::ScaleContext::new(),
+                &font,
+                key,
+                embolden,
+            )
+            .expect("a raster");
+            let p = image.placement;
+            [
+                p.left,
+                -p.top,
+                p.left + p.width as i32,
+                -p.top + p.height as i32,
+            ]
+        }
+
+        /// RED (38) — **a bold cell in a family with no bold cut has more ink
+        /// than its regular twin, and both are drawn by that family.**
+        ///
+        /// Since 2026-09-20 such a cell keeps its family's regular face, so on
+        /// `097a4863` it is drawn exactly like the regular text beside it — the
+        /// two cells read back with equal ink. The Chinese family arrives the
+        /// way a picked family does (a file handed to `set_terminal_font`, the
+        /// `file_reads` Fonts lane, fontdb, `resolve_terminal_cjk_families`),
+        /// and the frame goes through `present_frame` on the software adapter
+        /// and is read back, so every step between the cell and the glass is
+        /// the product's.
+        ///
+        /// MUTATION: make `SYNTHETIC_BOLD_STRENGTH_EM` zero, or have
+        /// `synthetic_bold_glyphs` answer `None`, and the two cells carry the
+        /// same ink.
+        #[test]
+        fn a_bold_cell_in_a_family_with_no_bold_cut_has_more_ink_than_its_regular_twin() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            let frame = one_row_frame(
+                row_cells(&[
+                    ("你", CellFlags::WIDE_CHAR),
+                    ("你", CellFlags::WIDE_CHAR | CellFlags::BOLD),
+                ]),
+                metrics,
+            );
+            assert!(matches!(
+                present(&mut window, &mut gpu, &frame),
+                PresentOutcome::Presented(_)
+            ));
+            let pixels = window.read_back(&gpu).expect("it reads back");
+            let width = window.config.width;
+            let regular = ink_in_columns(&pixels, width, metrics, &frame, 0, 2);
+            let bold = ink_in_columns(&pixels, width, metrics, &frame, 2, 2);
+            eprintln!("BT_SYNTHETIC_BOLD cjk regular_ink={regular} bold_ink={bold}");
+            assert!(regular > 0, "the regular cell drew");
+            assert!(
+                bold * 100 >= regular * 105,
+                "the bold cell carries at least 5% more ink: {bold} against {regular}"
+            );
+            let families: Vec<String> = window.text_rows[0]
+                .wide_glyphs
+                .iter()
+                .flat_map(|wide| {
+                    wide.buffer
+                        .layout_runs()
+                        .flat_map(|run| run.glyphs.iter())
+                        .map(|glyph| {
+                            gpu.font_system.db().face(glyph.font_id).unwrap().families[0]
+                                .0
+                                .clone()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(families, ["Test Other", "Test Other"]);
+        }
+
+        /// RED (38) — **a bold cell in a primary family with no bold cut is
+        /// emboldened in that family.** Step 0 keeps the cell in Test Sans; this
+        /// is the ink that step leaves owed.
+        ///
+        /// MUTATION: have `synthetic_bold_glyphs` answer `None` for
+        /// `Family::Monospace` cells (skip the primary), and the two `A`s read
+        /// back equal.
+        #[test]
+        fn a_bold_cell_in_a_primary_family_with_no_bold_cut_is_emboldened_in_that_family() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 160, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            // Test Sans draws its `A` wider than the cell (the cell is measured
+            // on an `M` the face does not have), so each `A` is given the empty
+            // cell after it to overhang into, and its ink is read over both.
+            let frame = one_row_frame(
+                row_cells(&[
+                    ("A", CellFlags::empty()),
+                    (" ", CellFlags::empty()),
+                    ("A", CellFlags::BOLD),
+                    (" ", CellFlags::empty()),
+                ]),
+                metrics,
+            );
+            present(&mut window, &mut gpu, &frame);
+            let pixels = window.read_back(&gpu).expect("it reads back");
+            let width = window.config.width;
+            let regular = ink_in_columns(&pixels, width, metrics, &frame, 0, 2);
+            let bold = ink_in_columns(&pixels, width, metrics, &frame, 2, 2);
+            eprintln!("BT_SYNTHETIC_BOLD primary regular_ink={regular} bold_ink={bold}");
+            assert!(regular > 0);
+            assert!(
+                bold * 100 >= regular * 105,
+                "the bold `A` carries at least 5% more ink: {bold} against {regular}"
+            );
+            for glyph in &window.text_rows[0].narrow_glyphs {
+                for laid in glyph.buffer.layout_runs().flat_map(|run| run.glyphs.iter()) {
+                    let face = gpu.font_system.db().face(laid.font_id).unwrap();
+                    assert_eq!(face.families[0].0, "Test Sans");
+                }
+            }
+        }
+
+        /// RED (38) — **synthetic bold never changes the family that draws the
+        /// cell.** For all four bold/italic combinations in Test Other, the
+        /// shaped glyph comes from Test Other, and the raster the synthesis
+        /// makes for it is made from that same face — the table is keyed by the
+        /// glyph's own `CacheKey`, face id included. Beside
+        /// `cjk_chosen_regular_only_family_survives_bold_italic`, which holds
+        /// the shaping half on its own and is unedited.
+        ///
+        /// MUTATION: rasterize a synthesized glyph from `CacheKey { font_id:
+        /// <the primary's id>, .. }` in `place_synthetic_bold`, and the face the
+        /// raster came from is not Test Other.
+        #[test]
+        fn synthetic_bold_never_changes_the_family_that_draws_the_cell() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            regular_only_families(&mut gpu, 16.0);
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut flags = CellFlags::WIDE_CHAR;
+                flags.set(CellFlags::BOLD, bold);
+                flags.set(CellFlags::ITALIC, italic);
+                let cells = row_cells(&[("你", flags)]);
+                let gpu = &mut *gpu;
+                let shaped = shape_wide_glyphs_with_cjk(
+                    &cells,
+                    &mut gpu.font_system,
+                    &mut gpu.swash_cache,
+                    metrics,
+                    &mut WideShapingCache::new(),
+                    &gpu.terminal_cjk_families,
+                );
+                assert_eq!(shaped[0].synthetic_bold.is_some(), bold, "{bold} {italic}");
+                let area = GridCellArea {
+                    area: TextArea {
+                        buffer: &shaped[0].buffer,
+                        left: 0.0,
+                        top: 0.0,
+                        scale: 1.0,
+                        bounds: TextBounds::default(),
+                        default_color: Color::rgb(255, 0, 0),
+                        custom_glyphs: &[],
+                    },
+                    synthetic_bold: shaped[0].synthetic_bold.as_deref(),
+                };
+                gpu.synthetic_bold.retire_all();
+                let placed =
+                    place_synthetic_bold([area], &mut gpu.synthetic_bold, &mut gpu.font_system)
+                        .expect("ids");
+                assert_eq!(placed.glyph_count(), usize::from(bold));
+                let faces: Vec<_> = shaped[0]
+                    .buffer
+                    .layout_runs()
+                    .flat_map(|run| run.glyphs.iter())
+                    .map(|glyph| glyph.font_id)
+                    .chain(gpu.synthetic_bold.faces())
+                    .map(|id| gpu.font_system.db().face(id).unwrap().families[0].0.clone())
+                    .collect();
+                assert!(
+                    faces.iter().all(|family| family == "Test Other"),
+                    "bold={bold} italic={italic}: {faces:?}"
+                );
+            }
+        }
+
+        /// PIN (38) — **a family with a bold cut draws its own bold and is not
+        /// emboldened**: Test CJK (400 and 700) as the Chinese family, a bold
+        /// cell shaped from the 700 face and carrying no synthesis.
+        ///
+        /// MUTATION: drop the face-weight half of `synthetic_bold_glyphs`'
+        /// condition and the 700 face is emboldened on top of its own bold.
+        #[test]
+        fn a_family_with_a_bold_cut_draws_its_own_bold_and_is_not_emboldened() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let files = [
+                font_file(
+                    "Test-CJK400.ttf",
+                    include_bytes!("../tests/fonts/Test-CJK400.ttf"),
+                ),
+                font_file(
+                    "Test-CJK700.ttf",
+                    include_bytes!("../tests/fonts/Test-CJK700.ttf"),
+                ),
+            ];
+            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], "Test CJK", &files, 16.0);
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            let cells = row_cells(&[("你", CellFlags::WIDE_CHAR | CellFlags::BOLD)]);
+            let gpu = &mut *gpu;
+            let shaped = shape_wide_glyphs_with_cjk(
+                &cells,
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &mut WideShapingCache::new(),
+                &gpu.terminal_cjk_families,
+            );
+            let glyph = shaped[0].buffer.layout_runs().next().unwrap().glyphs[0].clone();
+            let face = gpu.font_system.db().face(glyph.font_id).unwrap();
+            assert_eq!(
+                (face.families[0].0.as_str(), face.weight.0),
+                ("Test CJK", 700)
+            );
+            assert!(shaped[0].synthetic_bold.is_none(), "no custom glyph");
+        }
+
+        /// PIN (38) — **a bold colour emoji and a bold box-drawing cell are
+        /// unchanged**: the emoji carries no synthesis (its route is colour),
+        /// and a box-drawing cell never reaches the shaper at all (it is
+        /// procedural geometry).
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_bold_colour_emoji_and_a_bold_box_drawing_cell_are_not_emboldened() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            let gpu = &mut *gpu;
+            let emoji = shape_wide_glyphs_with_cjk(
+                &row_cells(&[("👍", CellFlags::WIDE_CHAR | CellFlags::BOLD)]),
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &mut WideShapingCache::new(),
+                &gpu.terminal_cjk_families,
+            );
+            assert_eq!(emoji.len(), 1);
+            assert!(emoji[0].synthetic_bold.is_none());
+            let boxed = shape_narrow_glyphs_with_cjk(
+                &row_cells(&[("─", CellFlags::BOLD)]),
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &mut NarrowShapingCache::new(),
+                &gpu.terminal_cjk_families,
+            );
+            assert!(boxed.is_empty(), "box drawing is not shaped");
+        }
+
+        /// RED (38) — **bold-italic in a regular-only family is slanted and
+        /// heavier**: more ink than the italic-only cell, and the same slant
+        /// (the left edge of the ink moves right from its bottom row to its
+        /// top row, as `FAKE_ITALIC`'s 14° skew moves it).
+        ///
+        /// MUTATION: drop the `.transform(..)` from `synthetic_bold_image` and
+        /// the bold-italic cell stands upright.
+        #[test]
+        fn bold_italic_in_a_regular_only_family_is_slanted_and_heavier() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            let frame = one_row_frame(
+                row_cells(&[
+                    ("你", CellFlags::WIDE_CHAR | CellFlags::ITALIC),
+                    (
+                        "你",
+                        CellFlags::WIDE_CHAR | CellFlags::ITALIC | CellFlags::BOLD,
+                    ),
+                ]),
+                metrics,
+            );
+            present(&mut window, &mut gpu, &frame);
+            let pixels = window.read_back(&gpu).expect("it reads back");
+            let width = window.config.width;
+            let italic = ink_in_columns(&pixels, width, metrics, &frame, 0, 2);
+            let bold_italic = ink_in_columns(&pixels, width, metrics, &frame, 2, 2);
+            assert!(
+                bold_italic * 100 >= italic * 105,
+                "heavier: {bold_italic} against {italic}"
+            );
+            // The slant, read off the ink: the leftmost ink column of the top
+            // ink row against that of the bottom ink row, inside each cell.
+            let slant = |first: usize| {
+                let [left, top, _, bottom] = frame_cell_bounds_px(metrics, &frame, 0, first);
+                let x0 = left.floor() as usize;
+                let x1 = (left + 2.0 * metrics.cell_width_px).ceil() as usize;
+                let rows: Vec<usize> = (top.floor() as usize..bottom.ceil() as usize)
+                    .filter(|y| (x0..x1).any(|x| is_ink(&pixels[y * width as usize + x])))
+                    .collect();
+                let leftmost = |y: usize| {
+                    (x0..x1)
+                        .find(|x| is_ink(&pixels[y * width as usize + x]))
+                        .unwrap() as i64
+                };
+                leftmost(*rows.first().unwrap()) - leftmost(*rows.last().unwrap())
+            };
+            let (italic_slant, bold_italic_slant) = (slant(0), slant(2));
+            eprintln!(
+                "BT_SYNTHETIC_BOLD italic_ink={italic} bold_italic_ink={bold_italic} \
+                 italic_slant={italic_slant} bold_italic_slant={bold_italic_slant}"
+            );
+            assert!(italic_slant >= 1, "the italic cell is slanted");
+            assert!(
+                (bold_italic_slant - italic_slant).abs() <= 1,
+                "and the bold-italic one by the same skew: {bold_italic_slant} against \
+                 {italic_slant}"
+            );
+        }
+
+        /// PIN (38) — **synthetic bold ink stays inside its cell's tolerance**
+        /// at the smallest and the largest size a pane is drawn at (8 and 72
+        /// logical pixels, ticket 37), at display scales 1 and 2.
+        ///
+        /// swash's embolden moves every outline point by the strength plus its
+        /// bisector shift, so the ink grows by up to twice the strength on the
+        /// right and top and not at all on the left and bottom. The tolerance is
+        /// that growth, rounded out to whole pixels plus one of antialiasing,
+        /// and the grown ink must still lie inside the slot a wide cell's text
+        /// area is clipped to — two cells wide, one row tall — so nothing of it
+        /// is cut off.
+        ///
+        /// MUTATION: make `SYNTHETIC_BOLD_STRENGTH_EM` `1.0 / 8.0` and the grown
+        /// ink crosses the right edge of the two-cell slot.
+        #[test]
+        fn synthetic_bold_ink_stays_inside_its_cell_tolerance() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            regular_only_families(&mut gpu, 16.0);
+            for size in [8.0_f32, 72.0] {
+                for scale in [1.0_f64, 2.0] {
+                    let metrics = gpu.terminal_cell_metrics(scale, size).expect("metrics");
+                    let cells = row_cells(&[("你", CellFlags::WIDE_CHAR | CellFlags::BOLD)]);
+                    let gpu = &mut *gpu;
+                    let shaped = shape_wide_glyphs_with_cjk(
+                        &cells,
+                        &mut gpu.font_system,
+                        &mut gpu.swash_cache,
+                        metrics,
+                        &mut WideShapingCache::new(),
+                        &gpu.terminal_cjk_families,
+                    );
+                    let run = shaped[0].buffer.layout_runs().next().unwrap();
+                    let (line_y, glyph) = (run.line_y, run.glyphs[0].clone());
+                    let origin = (shaped[0].left_offset_px, shaped[0].top_offset_px);
+                    let physical = glyph.physical(origin, 1.0);
+                    let regular = raster_ink(gpu, physical.cache_key, false);
+                    let bold = raster_ink(gpu, physical.cache_key, true);
+                    let strength = crate::synthetic_bold::SYNTHETIC_BOLD_STRENGTH_EM
+                        * f32::from_bits(physical.cache_key.font_size_bits);
+                    let tolerance = (2.0 * strength).ceil() as i32 + 1;
+                    eprintln!(
+                        "BT_SYNTHETIC_BOLD size={size} scale={scale} strength_px={strength:.2} \
+                         regular={regular:?} bold={bold:?}"
+                    );
+                    assert!(bold[0] >= regular[0] - 1, "left edge {size}/{scale}");
+                    assert!(bold[3] <= regular[3] + 1, "bottom edge {size}/{scale}");
+                    assert!(
+                        bold[2] <= regular[2] + tolerance,
+                        "right edge {size}/{scale}"
+                    );
+                    assert!(bold[1] >= regular[1] - tolerance, "top edge {size}/{scale}");
+                    // Inside the wide slot, in slot coordinates.
+                    let x = physical.x;
+                    let y = line_y.round() as i32 + physical.y;
+                    let slot_right = (2.0 * metrics.cell_width_px).ceil() as i32;
+                    let row_bottom = metrics.cell_height_px.ceil() as i32;
+                    assert!(
+                        x + bold[0] >= 0 && x + bold[2] <= slot_right,
+                        "{size}/{scale}"
+                    );
+                    assert!(
+                        y + bold[1] >= 0 && y + bold[3] <= row_bottom,
+                        "{size}/{scale}"
+                    );
+                }
+            }
+        }
+
+        /// A frame asking for two synthesized rasters: a bold `A` in the primary
+        /// and a bold `你` in the Chinese family — two faces, two ids. Narrow
+        /// cells are placed first, so the `A` is given the first id.
+        fn two_synthesized_cells(metrics: CellMetrics) -> ViewportFrame {
+            one_row_frame(
+                row_cells(&[
+                    ("A", CellFlags::BOLD),
+                    ("你", CellFlags::WIDE_CHAR | CellFlags::BOLD),
+                ]),
+                metrics,
+            )
+        }
+
+        fn one_bold_han(metrics: CellMetrics) -> ViewportFrame {
+            one_row_frame(
+                row_cells(&[("你", CellFlags::WIDE_CHAR | CellFlags::BOLD)]),
+                metrics,
+            )
+        }
+
+        fn all_ink(pixels: &[[u8; 4]]) -> usize {
+            pixels
+                .iter()
+                .filter(|pixel| is_ink(pixel))
+                .map(|pixel| usize::from(pixel[2]))
+                .sum()
+        }
+
+        /// RED (38) — **when the synthetic-bold ids run out the frame is
+        /// refused as a full atlas, and the repack gives them back.**
+        ///
+        /// The id space is glyphon's `u16`; a test-only ceiling of one stands in
+        /// for 65,536, as the soaks stand a small texture roof in for a real
+        /// one. The frame that needs a second id is presented without its grid
+        /// text, `close_the_frame` repacks once, and the frame after — asking
+        /// for the id the refused frame never got — is drawn.
+        ///
+        /// MUTATION: answer an exhausted table with `Ok(None)` (draw the cell
+        /// without its glyph) in `SyntheticBoldGlyphs::raster`, and the frame
+        /// is presented as complete with a character missing.
+        #[test]
+        fn running_out_of_synthetic_bold_ids_refuses_the_frame_and_the_repack_gives_them_back() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            gpu.synthetic_bold.set_ceiling(1);
+            let refits = gpu.glyph_atlas_refits();
+
+            let refused = present(&mut window, &mut gpu, &two_synthesized_cells(metrics));
+            assert!(
+                matches!(refused, PresentOutcome::PresentedWithoutText(_)),
+                "{refused:?}"
+            );
+            assert_eq!(gpu.glyph_atlas_refits(), refits + 1, "one repack");
+            assert_eq!(gpu.synthetic_bold.len(), 0, "every id went with the atlas");
+
+            let drawn = present(&mut window, &mut gpu, &one_bold_han(metrics));
+            assert!(matches!(drawn, PresentOutcome::Presented(_)), "{drawn:?}");
+            assert!(all_ink(&window.read_back(&gpu).expect("it reads back")) > 0);
+        }
+
+        /// RED (38) — **a synthetic bold glyph is drawn again after the atlas is
+        /// repacked**, with the same ink, and the id table started again with
+        /// the new atlas.
+        ///
+        /// The repack is a real `close_the_frame` episode, forced through the
+        /// id ceiling (the road the test above pins). Before it the table holds
+        /// the bold `你`'s id; the episode empties it; drawing the bold `你`
+        /// again gives out exactly one id, and the same ink reaches the glass.
+        ///
+        /// MUTATION: drop `self.synthetic_bold.retire_all()` from
+        /// `GpuContext::replace_atlas`, and the table still holds the old
+        /// atlas's id after the repack.
+        #[test]
+        fn a_synthetic_bold_glyph_is_drawn_again_after_the_atlas_is_repacked() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            let han = one_bold_han(metrics);
+            present(&mut window, &mut gpu, &han);
+            let before = all_ink(&window.read_back(&gpu).expect("it reads back"));
+            assert!(before > 0);
+
+            assert_eq!(gpu.synthetic_bold.len(), 1);
+            gpu.synthetic_bold.set_ceiling(1);
+            present(&mut window, &mut gpu, &two_synthesized_cells(metrics));
+            assert_eq!(gpu.glyph_atlas_refits(), 1, "the episode happened");
+            assert_eq!(
+                gpu.synthetic_bold.len(),
+                0,
+                "the id table was retired with the atlas it described"
+            );
+            gpu.synthetic_bold.set_ceiling(usize::MAX);
+
+            assert!(matches!(
+                present(&mut window, &mut gpu, &han),
+                PresentOutcome::Presented(_)
+            ));
+            assert_eq!(
+                all_ink(&window.read_back(&gpu).expect("it reads back")),
+                before,
+                "the same glyph, redrawn into the new atlas"
+            );
+            assert_eq!(gpu.synthetic_bold.len(), 1, "one id, given out afresh");
+        }
+
+        /// RED (38) — **the glyph census counts a synthesized cell.** Its text
+        /// area carries an empty buffer and one custom glyph, so a census that
+        /// walked buffers alone would report a bold Chinese screen as empty.
+        ///
+        /// MUTATION: drop the custom-glyph loop from `GlyphCensus::record` and
+        /// the grid lane asks for nothing.
+        #[test]
+        fn the_glyph_census_counts_a_synthesized_cell() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            window.set_glyph_census(true);
+            let metrics = window.base_metrics();
+            present(&mut window, &mut gpu, &one_bold_han(metrics));
+            let census = window.glyph_census().expect("a census");
+            let grid = census.lane(TextLane::Grid);
+            assert_eq!(grid.requested, 1, "{grid:?}");
+            assert_eq!(grid.unique, 1, "{grid:?}");
+            assert!(grid.ink_px > 0, "{grid:?}");
+        }
+
+        /// A chrome label and a preview paragraph, bold and regular, Latin and
+        /// Chinese — the two surfaces ticket 38 may not touch.
+        fn chrome_and_preview(window: &mut WindowRenderer) {
+            let label = |text: &str, top: f32, weight: ChromeLabelWeight, mono: bool| ChromeLabel {
+                mono,
+                text: text.to_owned(),
+                rect: [4.0, top, 236.0, top + 20.0],
+                font_size_px: 14.0,
+                color: [255, 0, 0],
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight,
+                tabular_numerals: false,
+                clip: None,
+            };
+            window.set_chrome(
+                Vec::new(),
+                vec![
+                    label("Bold 你好 A", 40.0, ChromeLabelWeight::SemiBold, false),
+                    label("Mono 你 A", 60.0, ChromeLabelWeight::SemiBold, true),
+                ],
+                Vec::new(),
+            );
+            let run = |text: &str, bold: bool, mono: bool| PreviewRun {
+                text: text.into(),
+                color: [255, 0, 0],
+                mono,
+                bold,
+                italic: false,
+                font_scale: 1.0,
+                inline_box_px: None,
+            };
+            window.set_preview_bodies(vec![PreviewBody {
+                clip: [0.0, 80.0, 240.0, 120.0],
+                quads: Vec::new(),
+                paragraphs: vec![PreviewParagraph {
+                    runs: vec![
+                        run("preview 你 ", false, false),
+                        run("bold 你 ", true, false),
+                        run("mono 你", true, true),
+                    ],
+                    rect: [4.0, 84.0, 236.0, 116.0],
+                    font_size_px: 14.0,
+                    line_height_px: 20.0,
+                    wrap: false,
+                    letter_spacing_em: 0.0,
+                    align_right: false,
+                    align_center: false,
+                    cell_advance: None,
+                }],
+                blocks: Vec::new(),
+                rasters: Vec::new(),
+            }]);
+        }
+
+        /// PIN (38) — **chrome and preview pixels are untouched by synthetic
+        /// bold.** Every prepare against the shared atlas now carries the
+        /// custom-glyph rasterizer (glyphon redraws every custom raster through
+        /// whichever prepare grows the atlas), and none of those text areas
+        /// carries a custom glyph. The pin: the same bold chrome labels and
+        /// preview runs, over a grid of regular-weight cells, read back byte for
+        /// byte the same on a context whose atlas holds synthesized rasters as
+        /// on a fresh one. (The before-and-after-the-ticket digest of this frame
+        /// is in the ticket 38 report.)
+        ///
+        /// MUTATION: route a chrome label through `place_synthetic_bold`, or
+        /// draw the grid's bold cell into the chrome's rows, and the two frames
+        /// part company.
+        #[test]
+        fn chrome_and_preview_bold_are_untouched() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 120, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            chrome_and_preview(&mut window);
+            let plain = one_row_frame(row_cells(&[("A", CellFlags::empty())]), metrics);
+            present(&mut window, &mut gpu, &plain);
+            let fresh = window.read_back(&gpu).expect("it reads back");
+            eprintln!(
+                "BT_SYNTHETIC_BOLD chrome_digest={:016x}",
+                pixel_digest(&fresh)
+            );
+
+            present(&mut window, &mut gpu, &two_synthesized_cells(metrics));
+            assert!(
+                gpu.synthetic_bold.len() >= 2,
+                "the atlas holds synthesized rasters"
+            );
+            present(&mut window, &mut gpu, &plain);
+            let after = window.read_back(&gpu).expect("it reads back");
+            assert!(fresh == after, "chrome and preview pixels moved");
+        }
+
+        fn pixel_digest(pixels: &[[u8; 4]]) -> u64 {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            pixels.hash(&mut hasher);
+            hasher.finish()
         }
     }
 }

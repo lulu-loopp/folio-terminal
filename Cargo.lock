@@ -419,6 +419,7 @@ dependencies = [
  "bytemuck",
  "glyphon",
  "pollster",
+ "swash",
  "thiserror 2.0.18",
  "ttf-parser",
  "unicode-properties",
