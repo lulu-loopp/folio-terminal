@@ -12,6 +12,9 @@ All notable changes to Folio are recorded here. The format follows
   where its window is; it asks once.
 - A program that keeps changing its window title no longer slows typing;
   Folio passes the title on at most once a frame.
+### Changed
+
+- Glance-card head spacing, drag-tag padding and spacing, and peek-tag line height now match the other floating tags.
 
 ## 0.4.4-preview — 2026-09-24
 

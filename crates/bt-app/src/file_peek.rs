@@ -128,8 +128,8 @@ pub const PEEK_HEAD_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
 /// and the weight and tracking beside it, spent where the name label is built in
 /// [`build`].
 pub const PEEK_HEAD_FONT_LOGICAL_PX: f32 = bt_render::HEAD_TITLE_FONT_LOGICAL_PX;
-/// `.fpeek-head { gap: 6px }`.
-pub const PEEK_HEAD_GAP_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC.md G1: eight logical pixels from an icon to its label.
+pub const PEEK_HEAD_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.pmark { width: 15px }` (mock-up 246), which is the head's file mark.
 pub const PEEK_MARK_LOGICAL_PX: f32 = 15.0;
 // `.fpeek-head .dirty { font-size: 9px }` is gone: the unsaved-edits dot is a
@@ -1795,6 +1795,27 @@ pub fn dwell<T: PartialEq + ?Sized>(over: Option<&T>, waiting: Option<&T>) -> Dw
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (23) — **the glance head leaves eight pixels between its mark and name.**
+    ///
+    /// UI-SPEC.md G1 applies the icon-to-label rule to the real card layout.
+    /// MUTATION: restore PEEK_HEAD_GAP_LOGICAL_PX to 6.0.
+    #[test]
+    fn ui_spec_float_tag_rest_values_follow_the_rule() {
+        assert_eq!(PEEK_HEAD_GAP_LOGICAL_PX, 8.0, "UI-SPEC.md G1");
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let card = content(lines(2));
+            let laid = layout(
+                &card,
+                PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
+                (1600.0, 900.0),
+                ruler(&card.name, PEEK_HEAD_FONT_LOGICAL_PX) * scale,
+                ruler(&card.ftype, PEEK_TYPE_FONT_LOGICAL_PX) * scale,
+                scale,
+            );
+            assert_eq!(laid.name[0] - laid.mark[2], (8.0 * scale).round());
+        }
+    }
 
     const SCALE: f32 = 1.0;
 

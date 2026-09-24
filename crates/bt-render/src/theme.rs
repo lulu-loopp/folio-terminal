@@ -3160,12 +3160,12 @@ pub const FLOAT_WINDOW_RISE_LOGICAL_PX: f32 = crate::motion::MOTION_TRAVEL_LOGIC
 pub const DRAG_GHOST_RADIUS_LOGICAL_PX: f32 = 7.0;
 /// `.drag-ghost { border: 1px solid var(--border) }`.
 pub const DRAG_GHOST_BORDER_LOGICAL_PX: f32 = 1.0;
-/// `.drag-ghost { padding: 5px 12px }` — the horizontal half.
-pub const DRAG_GHOST_PADDING_X_LOGICAL_PX: f32 = 12.0;
-/// `.drag-ghost { padding: 5px 12px }` — the vertical half.
+/// UI-SPEC.md S9: ten logical pixels at each side, like a single-line tag.
+pub const DRAG_GHOST_PADDING_X_LOGICAL_PX: f32 = 10.0;
+/// UI-SPEC.md section 3: five logical pixels above and below a single-line tag.
 pub const DRAG_GHOST_PADDING_Y_LOGICAL_PX: f32 = 5.0;
-/// `.drag-ghost { gap: 7px }` — between the mark and the name.
-pub const DRAG_GHOST_GAP_LOGICAL_PX: f32 = 7.0;
+/// UI-SPEC.md G3: eight logical pixels between the mark and the name.
+pub const DRAG_GHOST_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.drag-ghost { font-size: 12.5px }`.
 pub const DRAG_GHOST_FONT_LOGICAL_PX: f32 = 12.5;
 /// How far below and to the right of the pointer the ghost hangs — `g.style.left
@@ -3649,6 +3649,21 @@ fn ansi_16_rgb_for(theme: Theme) -> [[u8; 3]; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (23) — **the drag ghost uses the float-tag gap and side padding.**
+    ///
+    /// UI-SPEC.md G3 sets every icon-to-label gap to eight; S9 uses the
+    /// single-line tag's tooltip::PEEK_PADDING_X_LOGICAL_PX, in bt-app.
+    /// MUTATION: restore DRAG_GHOST_GAP_LOGICAL_PX to 7.0.
+    /// MUTATION: restore DRAG_GHOST_PADDING_X_LOGICAL_PX to 12.0.
+    #[test]
+    fn ui_spec_float_tag_rest_values_follow_the_rule() {
+        assert_eq!(
+            (DRAG_GHOST_GAP_LOGICAL_PX, DRAG_GHOST_PADDING_X_LOGICAL_PX),
+            (8.0, 10.0),
+            "UI-SPEC.md G3/S9; tooltip::PEEK_PADDING_X_LOGICAL_PX"
+        );
+    }
 
     /// RED (ticket 19) — **every head title is 11, and the rail's section
     /// label carries the same tracking Settings and the git page do.**
