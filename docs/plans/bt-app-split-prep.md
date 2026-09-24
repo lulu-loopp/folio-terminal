@@ -637,6 +637,8 @@ The twelve wholly-test files, by the declaration that makes each one:
 | `preview_viewport.rs` | `mod tests;` (`#[path]`) | `preview_viewport_tests.rs` |
 | `uninstall.rs` | `mod tests;` (`#[path]`) | `uninstall_tests.rs` |
 
+**A thirteenth since 2026-09-24** (0.4.5 ticket 37): `main.rs` declares `#[cfg(test)] mod text_size_tests;`, which makes `text_size_tests.rs` wholly test. `bt-source`'s `the_wholly_test_files_of_bt_app_are_the_thirteen` names it.
+
 ---
 
 ## 7. The end measurement

@@ -28417,7 +28417,7 @@ mod tests {
         let wash = only(
             needle!(Pattern::text(concat!(
                 "self.math_selection_wash_",
-                "rectangles(frame);"
+                "rectangles(entry.metrics, frame);"
             ))),
             View::Raw,
             "the wash's own list",
@@ -28425,7 +28425,7 @@ mod tests {
         let chrome = only(
             needle!(Pattern::text(concat!(
                 "math_overlays.extend(self.math_overlay_",
-                "rectangles(frame));"
+                "rectangles(entry.metrics, frame));"
             ))),
             View::Raw,
             "the block's chrome joining the same list",
