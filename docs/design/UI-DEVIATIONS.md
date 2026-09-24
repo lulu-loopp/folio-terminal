@@ -15,7 +15,7 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 - **Platform:** every deviation is in code shared by the Windows and macOS builds, so every row applies to **both**.
 - **Rulings of 2026-09-22 folded in:** the icon-to-label gap is 8 everywhere (G1–G3); every head title is 11 (T1). The terminal pane's resting radius (0) and the two boolean controls (combo in Settings, switch on the first-run card) are rules as they stand and produce no rows.
 
-**Totals: 29 deviations, touching 47 constants.** A 0 · B 9 · C 10 · D 10.
+**Totals: 28 deviations, touching 44 constants.** A 0 · B 9 · C 9 · D 10.
 
 ---
 
@@ -45,10 +45,9 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 | 25 | T5 | Other 11.5-pt captions: files `Files`/`Git` words, restore row path, no-preview card detail, web sheet detail | `seats.rs::FILES_SEG_FONT_LOGICAL_PX`, `restore.rs::ROW_CWD_FONT_LOGICAL_PX`, `seats.rs::PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX`, `websheet.rs::DETAIL_FONT_LOGICAL_PX` | 11.5 | 11 | Caption (17 constants at 11). With T1, 11.5 leaves the product. |
 | 26 | I2 | Icon sizes off the ladder | `peek_strip.rs::LIST_MARK_LOGICAL_PX`, `seats.rs::WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX`, `video_seat.rs::BAR_MARK_LOGICAL_PX`, `peek_strip.rs::LEAF_MARK_LOGICAL_PX` | 11, 12, 16, 9 | 10, 13, 14, 10 | Nearest `icons.rs::MarkSlot` size (14 / 13 / 10). |
 | 27 | T6 | 10.5-pt badges, pills and hashes | `peek_strip.rs::LEAF_FONT_LOGICAL_PX` | 10.5 | 10 | Badge (`theme.rs::WINDOW_TAB_BADGE_FONT_LOGICAL_PX` and 5 more). |
-| 28 | G3 | Icon-to-label gap: pane head, palette dot, palette row | `theme.rs::SEAT_TITLE_GAP_LOGICAL_PX`, `palette.rs::DOT_GAP_LOGICAL_PX`, `palette.rs::ROW_GAP_LOGICAL_PX` | 7, 7, 9 | 8 | One icon-to-label gap everywhere (ruled 2026-09-22). 1 pt each; the pane head's is on every pane. |
+| 28 | G3 | Icon-to-label gap: pane head | `theme.rs::SEAT_TITLE_GAP_LOGICAL_PX` | 7 | 8 | One icon-to-label gap everywhere (ruled 2026-09-22). 1 pt; the pane head is on every pane. |
 | 29 | S8 | Row text inset: restore list | `restore.rs::ROW_PADDING_X_LOGICAL_PX` | 8 | 10 | `profiles.rs::ITEM_PADDING_X_LOGICAL_PX`, `settings.rs::ITEM_PADDING_X_LOGICAL_PX`, `palette.rs::ROW_PADDING_X_LOGICAL_PX`, `theme.rs::RAIL_TAB_PADDING_LEFT_LOGICAL_PX`. |
 | 30 | S5 | Float window head padding | `float.rs::FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX`, `float.rs::FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX` | 10 · 5 | 12 · 6 | Strip / pane head (`theme.rs::SEAT_TITLE_PADDING_LOGICAL_PX`, `SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX`). |
-| 31 | R3 | Command palette rows | `palette.rs::ROW_RADIUS_LOGICAL_PX` | 7 | 6 | List row. The `restore.rs` constant with the same name is 6. |
 | 33 | T8 | First-run title line box | `first_run.rs::TITLE_LINE_LOGICAL_PX` | 21 | 18 | The same 15-pt title sits on `restore.rs::TITLE_LINE_LOGICAL_PX` 18. |
 | 34 | F1 | Files-row keyboard focus ring | `seats.rs::FILES_ROW_FOCUS_RING_LOGICAL_PX` | 1.5 | 2 | `settings.rs::FOCUS_RING_WIDTH_LOGICAL_PX`, `first_run.rs::FOCUS_RING_WIDTH_LOGICAL_PX`. |
 | 37 | S7 | Video bar side padding | `video_seat.rs::BAR_PADDING_X_LOGICAL_PX` | 10 | 12 | Strip leading. |
@@ -81,7 +80,7 @@ Each group is one ticket. A row whose constants live in several files is split a
 - **Web sheet** (`websheet.rs`): S2, E2, R2; the `websheet.rs` members of T5, R8, T10.
 - **Pane head, files column, float window** (`seats.rs`, `theme.rs`, `float.rs`): T1, H3, H5, S5, F1, C1, R12; G1 `FILES_ROW_GAP_LOGICAL_PX`, `FILES_FOOT_GAP_LOGICAL_PX`, `FLOAT_HEAD_GAP_LOGICAL_PX`, `FOCUS_CARD_HEAD_GAP_LOGICAL_PX`; G3 `SEAT_TITLE_GAP_LOGICAL_PX`; the `seats.rs` members of T5 and I2; T7's `RAIL_LABEL_TRACKING_EM`.
 - **Menus** (`profiles.rs`): G2; T7's `profiles.rs` members.
-- **Palette** (`palette.rs`): R3; the `palette.rs` members of T3 and T4; G3 `DOT_GAP_LOGICAL_PX`, `ROW_GAP_LOGICAL_PX`.
+- **Palette** (`palette.rs`): T3/T4 fixed in ticket 20; R3 and the palette members of G3 fixed in ticket 27. No palette members remain open.
 - **Everything else** (`notice.rs`, `toast.rs`, `search.rs`, `video_seat.rs`, `peek_strip.rs`, `restore.rs`, and the members of the rows above that no group names): T9, H6, S7, S6, R6, R7, R8, R10, H7; the leftover members of I2, T5, T6 and S8.
 
 ## Fixed in ticket 23
@@ -112,3 +111,8 @@ Each group is one ticket. A row whose constants live in several files is split a
 - Row 28 / G3: `git_graph.rs::GRAPH_ROW_GAP_LOGICAL_PX` fixed at 8; other members remain open.
 - Row 29 / S8: `git_panel.rs::GIT_ROW_PADDING_X_LOGICAL_PX` and `git_graph.rs::GRAPH_ROW_PADDING_X_LOGICAL_PX` fixed at 10; other members remain open.
 - Row 39 / R13: `git_panel.rs::GIT_PILL_RADIUS_LOGICAL_PX` and `git_graph.rs::GRAPH_REF_RADIUS_LOGICAL_PX` fixed at half their respective height constants (8); the preview-count member remains open.
+
+## Fixed in ticket 27
+
+- Row 28 / G3: `palette.rs::DOT_GAP_LOGICAL_PX` and `palette.rs::ROW_GAP_LOGICAL_PX` fixed at 8; the pane-head member remains open.
+- Row 31 / R3: `palette.rs::ROW_RADIUS_LOGICAL_PX` fixed at 6; row closed.
