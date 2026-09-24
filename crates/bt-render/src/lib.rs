@@ -15576,10 +15576,9 @@ fn shape_narrow_buffer(
     // so the shaping buffer itself must stay horizontally unbounded.
     buffer.set_size(None, Some(metrics.cell_height_px));
     buffer.set_monospace_width(None);
-    let mut attrs = match_grid_attrs(font_system, shape_attrs(key, family)).metrics(Metrics::new(
-        metrics.font_size_px * em_scale,
-        metrics.cell_height_px,
-    ));
+    let mut attrs = match_grid_attrs(font_system, shape_attrs(key, family), &key.text).metrics(
+        Metrics::new(metrics.font_size_px * em_scale, metrics.cell_height_px),
+    );
     if matches!(family, Family::Monospace) && key.text.chars().count() == 1 {
         attrs = attrs.letter_spacing(
             (metrics.cell_width_px - metrics.primary_advance_px) / metrics.font_size_px,
@@ -16073,7 +16072,7 @@ fn shape_wide_buffer(
             shape_attrs(key, family).metrics(Metrics::new(em_px, metrics.cell_height_px))
         }
     };
-    let attrs = match_grid_attrs(font_system, attrs);
+    let attrs = match_grid_attrs(font_system, attrs, &key.text);
     buffer.set_text(&key.text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
     buffer
@@ -32476,6 +32475,51 @@ mod tests {
                     "bold={bold} italic={italic}: {faces:?}"
                 );
             }
+        }
+
+        /// RED (38, coordinator 2026-09-24) — **a cluster the chosen primary
+        /// family does not cover asks its fallback at the weight asked, and a
+        /// fallback with a real bold cut draws that bold, with no synthesis.**
+        ///
+        /// The 2026-09-20 rule is that the *chosen* family never changes for
+        /// weight. Test Sans has no `M`, so an `M` leaves it at any weight; the
+        /// swap in `match_grid_attrs` is owed only to clusters the primary
+        /// draws. Applied to every request, it asked the fallback for 400, and
+        /// the fallback's regular face was then emboldened instead of its bold
+        /// cut being drawn. The fallback here is the product database's own
+        /// (Consolas on Windows, whose `consolab.ttf` is always loaded).
+        ///
+        /// MUTATION: drop the `primary_font_supports_text` guard from
+        /// `match_grid_attrs` (apply the swap to every request), and the `M` is
+        /// drawn from a 400 face with a custom glyph minted for it.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_cluster_the_primary_does_not_cover_draws_its_fallbacks_real_bold() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            regular_only_families(&mut gpu, 16.0);
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            let gpu = &mut *gpu;
+            let shaped = shape_narrow_glyphs_with_cjk(
+                &row_cells(&[("M", CellFlags::BOLD)]),
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &mut NarrowShapingCache::new(),
+                &gpu.terminal_cjk_families,
+            );
+            let glyph = shaped[0].buffer.layout_runs().next().unwrap().glyphs[0].clone();
+            assert_ne!(glyph.glyph_id, 0);
+            let face = gpu.font_system.db().face(glyph.font_id).unwrap();
+            assert_ne!(face.families[0].0, "Test Sans", "Test Sans has no `M`");
+            assert_eq!(
+                (face.families[0].0.as_str(), face.weight.0),
+                ("Consolas", 700),
+                "the fallback's own bold cut"
+            );
+            assert!(
+                shaped[0].synthetic_bold.is_none(),
+                "no custom glyph is minted"
+            );
         }
 
         /// PIN (38) — **a family with a bold cut draws its own bold and is not

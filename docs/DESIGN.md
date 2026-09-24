@@ -11951,6 +11951,8 @@ Coordinator ruling, 2026-09-24, on the residual the entry above left open (`docs
 
 **Pinned by** `a_bold_cell_in_a_primary_family_with_no_bold_cut_stays_in_that_family` (red on `097a4863`: `[("Consolas", 700)]` against `[("Test Sans", 400)]`) and `a_primary_family_with_a_bold_cut_draws_its_own_bold` (`bt-render` `tests::synthetic_bold`).
 
+**2026-09-24, later the same day (coordinator ruling, ticket 38 commit 3).** The swap applies only to a cluster the chosen primary family covers (`primary_font_supports_text`): the rule is that the *chosen* family never changes for weight, a cluster the primary cannot draw leaves it at any weight, and its fallback is asked at the weight the cell asked, so a fallback with a real bold cut draws that bold and no synthetic glyph is minted; this narrows the sentence above that begins "The swap applies whatever face finally draws the cluster". Pinned by `a_cluster_the_primary_does_not_cover_draws_its_fallbacks_real_bold` (red on `6d122308`: `("Consolas", 400)` against `("Consolas", 700)`).
+
 ### 2026-09-24 — A bold cell whose family has no bold cut is drawn heavier from that family's own regular glyph
 
 0.4.5 ticket 38, step 2 (owner ruling 2026-09-23, design note `design-pane-zoom-2026-09-23.md`, last paragraph). **Refines** the 2026-09-20 rule (`1ddd516c`): its first half — the weight asked for never changes the family — stands, and holds for the primary family too since the entry above; its second half, the sentence on `match_cjk_attrs` saying no emboldening would be added to glyphon's rasterizer or its atlas contract, **is superseded**.

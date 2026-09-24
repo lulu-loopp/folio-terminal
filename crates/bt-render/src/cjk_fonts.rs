@@ -297,8 +297,17 @@ pub(super) fn match_cjk_attrs<'a>(fs: &FontSystem, attrs: Attrs<'a>) -> Attrs<'a
 /// then prefers any monospace face with a nearer weight — so on Windows every
 /// regular-only primary drew bold cells in Consolas Bold (ticket 38, step 0).
 /// Grid only: chrome labels and previews keep [`match_cjk_attrs`].
-pub(super) fn match_grid_attrs<'a>(fs: &FontSystem, attrs: Attrs<'a>) -> Attrs<'a> {
+///
+/// **Only for a cluster the chosen primary family covers** (coordinator,
+/// 2026-09-24): the rule is that the *chosen* family never changes for weight.
+/// A cluster the primary cannot draw leaves it at any weight, and the family it
+/// falls back to is asked at the weight the cell asked, so one with a real bold
+/// cut draws its real bold.
+pub(super) fn match_grid_attrs<'a>(fs: &mut FontSystem, attrs: Attrs<'a>, text: &str) -> Attrs<'a> {
     if matches!(attrs.family, Family::Monospace) {
+        if !primary_font_supports_text(fs, text) {
+            return attrs;
+        }
         return offered_attrs(&fs.primary_faces().matches, attrs);
     }
     match_cjk_attrs(fs, attrs)
