@@ -1,10 +1,11 @@
 # Architecture debt ledger
 
 **The rule (2026-09-23).** This is the one ledger of architecture debt. Every row
-is assigned to a ticket and a version, and **the ledger reads zero before 0.5
-starts**: 0.4.5 is typing stability, per-pane zoom and what fits beside them;
-0.4.6 is the updater and architecture closure. A row that cannot be cleared by
-0.4.6 says why and where it goes (`deferred →` below). Two obligations follow:
+is assigned to a ticket and a version, and **the ledger reads zero at the end
+of 0.4.7**: 0.4.5 is typing stability, per-pane text size and UI; 0.4.6 is the
+updater and the first half of architecture closure; 0.4.7 is the second half. A
+row that cannot be cleared by 0.4.7 says why and where it goes (`deferred →`
+below). Two obligations follow:
 
 - **Every ticket's *Architecture impact* section cites the rows it repays,
   moves or adds**, by ID. A ticket that repays a row sets its status to
@@ -24,10 +25,21 @@ must not grow with the number of features.*
 
 **Ledger columns.** *Source* — where the debt was first recorded. *Ticket* — the
 ticket that repays it (a number from the 0.4.4/0.4.5 ticket set, a preparation
-step such as P14, or `none yet`). *Version* — 0.4.5 · 0.4.6 ·
+step such as P14, or `none yet`). *Version* — 0.4.5 · 0.4.6 · 0.4.7 ·
 `deferred → <where>` with the reason. *Status* — `open` · `in ticket` ·
 `repaid on <sha>`; a note after a dash records a part already repaid inside an
-open row. The versions are proposals until the release plan adopts them.
+open row.
+
+**The versions (owner ruling, 2026-09-24).** The release plan adopts these
+versions, superseding the proposals of 2026-09-23: 0.4.5 (typing stability,
+per-pane text size, UI) takes D-33, D-37, D-38, D-41, D-45, D-46 and D-64, and
+keeps D-61 and D-62 because they are small and the Mac CI job is in 0.4.6;
+0.4.6 (the updater, and architecture closure's first half) takes the rest of
+what the proposals put in 0.4.5 and keeps most of what they put in 0.4.6;
+0.4.7 (architecture closure's second half) takes D-6, D-16, D-49, D-51,
+D-54, D-55, D-56 and D-65, and the first slices the owner wants before 0.5 of
+rows once deferred — D-1, D-9, D-12, D-15, D-17. Only D-43, D-44 and D-59 stay
+deferred.
 
 **Not on this ledger.** Defects (the adversarial-review ledgers, and the
 incidental list below); UI constants
@@ -40,9 +52,10 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 22 | 20 | 2 |
-| 0.4.6 | 34 | 34 | 0 |
-| deferred (reason on the row) | 8 | 8 | 0 |
+| 0.4.5 | 9 | 7 | 2 |
+| 0.4.6 | 39 | 39 | 0 |
+| 0.4.7 | 13 | 13 | 0 |
+| deferred (reason on the row) | 3 | 3 | 0 |
 | already repaid | 1 | 0 | 1 |
 | **total** | **65** | **62** | **3** |
 
@@ -74,37 +87,37 @@ ledger's.
 
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
-| D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | deferred → 0.5 (attention and session identity), 0.6 (backend) — it *is* the 0.5/0.6 work; its 0.4.6 first step is D-57 | open |
+| D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
 | D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
-| D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.5 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
+| D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded |
-| D-6 | cross-crate chains are visible nowhere | K-10 · C-4 | through D-48…D-50 | 0.4.6 | open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff` |
-| D-7 | source-reading guards are the architecture document; their rules owe prose | K-14 · C-4 | with D-28 | 0.4.6 | open |
+| D-6 | cross-crate chains are visible nowhere | K-10 · C-4 | through D-48…D-50 | 0.4.7 | open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff` |
+| D-7 | source-reading guards are the architecture document; their rules owe prose | K-14 · C-4 | with D-28 | 0.4.6 — with D-28: the guards' prose is written when the migration list reaches zero | open |
 | D-8 | the asking/telling family has no taxonomy | K-3 · C-4 | none yet | 0.4.6 — the owner rules the table first | open |
-| D-9 | configuration entrances: the fourth row | K-4 · C-4 | none yet | deferred → 0.5's outward-interface design — the fourth entrance does not exist until then | open — §9 table written; export ruled not an entrance on `5f433943` |
+| D-9 | configuration entrances: the fourth row | K-4 · C-4 | none yet | 0.4.7 — the fourth entrance's design, the tool face; the entrance itself arrives with 0.5's outward interface | open — §9 table written; export ruled not an entrance on `5f433943` |
 | D-10 | diagnostics have plumbing but no event model | K-5 · C-4 | none yet | 0.4.6 — the operation vocabulary; its event carrier waits for a subscriber | open |
 | D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | none yet | 0.4.6, with D-32 | open |
-| D-12 | `bt-platform` is a drawer | K-11 | none yet | deferred → 0.5 — one move at a time, and the `bt-app` move ends with D-32 in 0.4.6 | open |
-| D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | 0.4.5 | open |
+| D-12 | `bt-platform` is a drawer | K-11 | none yet | 0.4.7 — the first extraction, after the `bt-app` move ends with D-32 in 0.4.6 | open |
+| D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | 0.4.6 | open |
 | D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | none yet | 0.4.6 | open |
-| D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27 | deferred → the composition-layer design (0.5) — nothing to repay before that layer exists | open (recorded debt) |
-| D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | none yet | 0.4.6 | open — rule stated |
-| D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | deferred → 0.5, with D-1's document owner | open |
-| D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | none yet | 0.4.5 — D-29…D-32 need a true census | open |
-| D-19 | MIGRATION-DEBT class P0 — the documentation generators (3 rows) | `docs/plans/MIGRATION-DEBT.tsv`; split prep §6 | P0 | 0.4.5 | open |
-| D-20 | MIGRATION-DEBT class P10 — the portable-core walk (1 row) | same | P10 | 0.4.5 | open |
-| D-21 | MIGRATION-DEBT class P12 — `bt-platform`'s walkers and the `stand_in` guard (5 rows) | same | P12 | 0.4.5 | open |
-| D-22 | MIGRATION-DEBT class P13 — the remaining source-text walks (3 rows) | same | P13 | 0.4.5 | open |
+| D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27 | 0.4.7 — the first slice, ahead of the 0.5 composition layer | open (recorded debt) |
+| D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | none yet | 0.4.7 | open — rule stated |
+| D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.4.7 — the first slice, with D-1's first slice | open |
+| D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | none yet | 0.4.6 — D-29…D-32 need a true census | open |
+| D-19 | MIGRATION-DEBT class P0 — the documentation generators (3 rows) | `docs/plans/MIGRATION-DEBT.tsv`; split prep §6 | P0 | 0.4.6 | open |
+| D-20 | MIGRATION-DEBT class P10 — the portable-core walk (1 row) | same | P10 | 0.4.6 | open |
+| D-21 | MIGRATION-DEBT class P12 — `bt-platform`'s walkers and the `stand_in` guard (5 rows) | same | P12 | 0.4.6 | open |
+| D-22 | MIGRATION-DEBT class P13 — the remaining source-text walks (3 rows) | same | P13 | 0.4.6 | open |
 | D-23 | MIGRATION-DEBT class P14 — named-body pins (192 rows) | same | P14 | 0.4.6 | open |
 | D-24 | MIGRATION-DEBT class P16 — ledger keys naming a file (63 rows), and the ten text `#[cfg(test)]` splits | same | P16 | 0.4.6 | open |
-| D-25 | MIGRATION-DEBT class P17 — cross-crate and script readers (13 rows) | same | P17 | 0.4.5 | open |
+| D-25 | MIGRATION-DEBT class P17 — cross-crate and script readers (13 rows) | same | P17 | 0.4.6 | open |
 | D-26 | the ~110 `[..].concat()` needle halves written whole | split prep §6 | P18 | 0.4.6 | open |
-| D-27 | the CI dependency-direction guard, and `bt-term → bt-math` recorded | split prep §8.4–§8.5 | P19 | 0.4.5 | open |
+| D-27 | the CI dependency-direction guard, and `bt-term → bt-math` recorded | split prep §8.4–§8.5 | P19 | 0.4.6 | open |
 | D-28 | MIGRATION-DEBT to zero and deleted; the allowlist final | split prep §7.2 | P20 | 0.4.6 | open |
-| D-29 | the unmoved topic `launch` (4 methods) | split prep Appendix C | none yet | 0.4.5 | open |
-| D-30 | the unmoved topic `settings` (31 methods) | split prep Appendix C | none yet | 0.4.5 | open |
-| D-31 | the unmoved topic `focus` (51 methods) | split prep Appendix C | none yet | 0.4.5 | open |
+| D-29 | the unmoved topic `launch` (4 methods) | split prep Appendix C | none yet | 0.4.6 | open |
+| D-30 | the unmoved topic `settings` (31 methods) | split prep Appendix C | none yet | 0.4.6 | open |
+| D-31 | the unmoved topic `focus` (51 methods) | split prep Appendix C | none yet | 0.4.6 | open |
 | D-32 | the unassigned `Runtime` methods still in `main.rs` (112 at the move, 115 today) | split prep §7.1, Appendix C | none yet | 0.4.6 | open |
 | D-33 | the lane contract as one shape, wrapping the existing lanes | §5.4 step 1, §5.1 | none yet | 0.4.5 — the presentation lane (D-41) is its second client | open — first instance, `handoff_lane`, on `2657e5e3` |
 | D-34 | §5.3 row 2 — the marks lock's install half on the window thread | §5.3 | none yet | 0.4.6 | open — the wait behind our own writer repaid on `fbfab1ff` |
@@ -122,23 +135,23 @@ ledger's.
 | D-46 | §5.3 row 14 — `Window::set_title` at five sites with no throttle | §5.3 | 49 | 0.4.5 — one site is `drain_pty` | repaid (ticket 49) |
 | D-47 | §5.3 row 20 — renames, the preserving save and store writes on the window thread | §5.3 | none yet | 0.4.6 | open |
 | D-48 | §7.2 chain stub — attention ingress | §7.2 | none yet | 0.4.6, with D-57 | open |
-| D-49 | §7.2 chain stub — resize | §7.2 | none yet | 0.4.6 | open |
-| D-50 | §7.2 chain stub — paste convergence | §7.2 | none yet | 0.4.5 — tickets 02 and 03 have just walked it | open |
-| D-51 | §4.2 class — observations of external state (survey facts 1, 5, 6, 7, 12) | §4.2; survey Part 4 | none yet | 0.4.6 | open |
+| D-49 | §7.2 chain stub — resize | §7.2 | none yet | 0.4.7 | open |
+| D-50 | §7.2 chain stub — paste convergence | §7.2 | none yet | 0.4.6 — tickets 02 and 03 have just walked it | open |
+| D-51 | §4.2 class — observations of external state (survey facts 1, 5, 6, 7, 12) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
 | D-52 | §4.2 class — asynchronous publication and competing operations (facts 4, 10, 13, 19, 22) | §4.2; survey Part 4 | none yet | 0.4.6, with D-3 | open |
 | D-53 | §4.2 class — durability and external transactions (facts 8, 9, 11) | §4.2; survey Part 4 | none yet | 0.4.6, with D-34 and D-47 | open |
-| D-54 | §4.2 class — identity, admission and lifecycle (facts 2, 3, 14, 20) | §4.2; survey Part 4 | none yet | 0.4.6 | open |
-| D-55 | §4.2 class — projections, delivery and loss (facts 15, 16, 17, 18, 21) | §4.2; survey Part 4 | none yet | 0.4.6 | open |
-| D-56 | §11 emergency termination — a journal and a defined recoverable revision | §11 | none yet | 0.4.6 | open |
+| D-54 | §4.2 class — identity, admission and lifecycle (facts 2, 3, 14, 20) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
+| D-55 | §4.2 class — projections, delivery and loss (facts 15, 16, 17, 18, 21) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
+| D-56 | §11 emergency termination — a journal and a defined recoverable revision | §11 | none yet | 0.4.7 | open |
 | D-57 | §12.1 — `bt-workbench` is born | §12.1 | none yet | 0.4.6 | open |
 | D-58 | `profile_runtime`'s two tests failing `WouldBlock` on a slow CI disk | `docs/DESIGN.md`, 2026-09-23 | 34 | — | repaid on `fbfab1ff` |
 | D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open |
 | D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | 0.4.6 | open |
-| D-61 | a Mac-only red test in `webnav` | ticket 13's report | none yet | 0.4.5 | open |
-| D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | none yet | 0.4.5 | open |
+| D-61 | a Mac-only red test in `webnav` | ticket 13's report | none yet | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | open |
+| D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | none yet | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | open |
 | D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | none yet | 0.4.6 | open |
 | D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open |
-| D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.6 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.6 before the 0.5 restyle, and the row closes with it | open |
+| D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.7 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.7 before the 0.5 restyle, and the row closes with it | open |
 
 ---
 
@@ -210,7 +223,7 @@ state moved into the authoritative backend.
 
 **Status.** open. Direction stated in `docs/ARCHITECTURE.md` §4.1.
 
-**Ledger.** source: structure review C-1 · K-1 · ticket: none yet · version: deferred → 0.5 (attention and session identity), 0.6 (backend) — it *is* the 0.5/0.6 work; its 0.4.6 first step is D-57 · status: open.
+**Ledger.** source: structure review C-1 · K-1 · ticket: none yet · version: 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 · status: open.
 
 ---
 
@@ -346,7 +359,7 @@ above. Both are acceptable exits; the coordinator picks one.
 
 **Status.** open.
 
-**Ledger.** source: C-3 · K-8 · ticket: none yet · version: 0.4.5 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement · status: open.
+**Ledger.** source: C-3 · K-8 · ticket: none yet · version: 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement · status: open.
 
 ---
 
@@ -416,7 +429,7 @@ four crates of policy.
 **Status.** **partly discharged.** The printed-path chain is written hop by hop;
 attention ingress, resize and paste convergence are named as stubs to fill.
 
-**Ledger.** source: K-10 · C-4 · ticket: through D-48…D-50 · version: 0.4.6 · status: open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff`.
+**Ledger.** source: K-10 · C-4 · ticket: through D-48…D-50 · version: 0.4.7 · status: open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff`.
 
 ---
 
@@ -444,7 +457,7 @@ enforce are stated in prose** — in `docs/RULES.md` or
 **Version.** With the move. **Status.** decided (it is the preparation plan); the
 prose half is open.
 
-**Ledger.** source: K-14 · C-4 · ticket: with D-28 · version: 0.4.6 · status: open.
+**Ledger.** source: K-14 · C-4 · ticket: with D-28 · version: 0.4.6 — with D-28: the guards' prose is written when the migration list reaches zero · status: open.
 
 ---
 
@@ -508,7 +521,7 @@ depth review is explicit that a ladder would be inappropriate.
 `docs/ARCHITECTURE.md` §9; the fourth row is written when the outward interface
 is designed.
 
-**Ledger.** source: K-4 · C-4 · ticket: none yet · version: deferred → 0.5's outward-interface design — the fourth entrance does not exist until then · status: open — §9 table written; export ruled not an entrance on `5f433943`.
+**Ledger.** source: K-4 · C-4 · ticket: none yet · version: 0.4.7 — the fourth entrance's design, the tool face; the entrance itself arrives with 0.5's outward interface · status: open — §9 table written; export ruled not an entrance on `5f433943`.
 
 ---
 
@@ -600,7 +613,7 @@ them would be a second copy of a fact.
 
 **Status.** open.
 
-**Ledger.** source: K-11 · ticket: none yet · version: deferred → 0.5 — one move at a time, and the `bt-app` move ends with D-32 in 0.4.6 · status: open.
+**Ledger.** source: K-11 · ticket: none yet · version: 0.4.7 — the first extraction, after the `bt-app` move ends with D-32 in 0.4.6 · status: open.
 
 ---
 
@@ -632,7 +645,7 @@ alternatives; choice deferred.
 
 **Version.** 0.4.4. **Status.** open, with the choice already scoped.
 
-**Ledger.** source: K-12 · C-4 · split prep P21 · ticket: P21 · version: 0.4.5 · status: open.
+**Ledger.** source: K-12 · C-4 · split prep P21 · ticket: P21 · version: 0.4.6 · status: open.
 
 ---
 
@@ -682,7 +695,7 @@ nothing.
 
 **Version.** 0.5 at the earliest. **Status.** decided — recorded as debt.
 
-**Ledger.** source: C-4 · K-11 · ticket: recorded by D-27 · version: deferred → the composition-layer design (0.5) — nothing to repay before that layer exists · status: open (recorded debt).
+**Ledger.** source: C-4 · K-11 · ticket: recorded by D-27 · version: 0.4.7 — the first slice, ahead of the 0.5 composition layer · status: open (recorded debt).
 
 ---
 
@@ -712,7 +725,7 @@ manifest.
 stated in `docs/ARCHITECTURE.md` §6 and `docs/RULES.md` row 52; the enumeration
 lane and the thumbnail thread's band are open.
 
-**Ledger.** source: K-13 · ticket: none yet · version: 0.4.6 · status: open — rule stated.
+**Ledger.** source: K-13 · ticket: none yet · version: 0.4.7 · status: open — rule stated.
 
 ---
 
@@ -737,7 +750,7 @@ both faces consume it. Do **not** unify the three selection representations.
 
 **Version.** 0.5, with the document owner of D-1. **Status.** open.
 
-**Ledger.** source: C-4 · ticket: none yet · version: deferred → 0.5, with D-1's document owner · status: open.
+**Ledger.** source: C-4 · ticket: none yet · version: 0.4.7 — the first slice, with D-1's first slice · status: open.
 
 ---
 
@@ -837,13 +850,13 @@ content before their plate*, §4), beside D-65. **All six are fixed by ticket
 
 `scripts/dev/bt-app-split-freshness.py`'s census extracts a reader's subjects lexically, so a migrated body pin such as `method_body("Runtime", "apply_psreadline")` is counted as if the test still read `apply_psreadline` out of a file, and the row's impact reads *subject moves: retarget atomically* although the reading follows the item. This is §2.6's "a reader's own needle is not an occurrence" one level up, in subject extraction rather than search exclusion, and it will misclassify every migrated pin that names a `Runtime` method. The generator also bound a subject by bare name until 2026-09-22 (`add_to_profile`, `graph_filter_branches` — each declared twice); it now refuses a name whose declarations disagree about the move. Owed: subject extraction that tells a `bt-source` query argument from a file reading's needle, or a census that asks `bt-source` for the reader's subjects instead of scanning text.
 
-**Ledger.** source: split prep, 2026-09-22 · ticket: none yet · version: 0.4.5 — D-29…D-32 need a true census · status: open.
+**Ledger.** source: split prep, 2026-09-22 · ticket: none yet · version: 0.4.6 — D-29…D-32 need a true census · status: open.
 
 ---
 
 ## D-19…D-63 — the rows added on 2026-09-23
 
-One line each: what it is, its anchor by name, and why the proposed version.
+One line each: what it is, its anchor by name, and why its version.
 Ticket, version and status are in the ledger table.
 
 ### The split's second half — MIGRATION-DEBT, by class (280 rows)
@@ -857,15 +870,15 @@ file's `ticket` column.
 - **D-19 · P0 (3 rows).** The three Python documentation generators — a
   directory walk and named files, named files out of git blobs, named modules;
   anchors `scripts/dev/bt-app-graph.py`, `scripts/dev/bt-app-split-freshness.py`.
-  0.4.5, because D-29…D-32 regenerate the inventory through them.
+  0.4.6, because D-29…D-32 regenerate the inventory through them.
 - **D-20 · P10 (1 row).** The portable-core directory walk and its Rust twin;
   anchor `scripts/check-portable-core.ps1`, the agreement test
-  `the_gate_and_its_script_walk_the_same_files`. 0.4.5: small.
+  `the_gate_and_its_script_walk_the_same_files`. 0.4.6: small.
 - **D-21 · P12 (5 rows).** `bt-platform`'s three directory walkers and the
-  `stand_in` guard, one ticket because they share a file. 0.4.5: CI-only work
-  that can run beside the typing lane.
+  `stand_in` guard, one ticket because they share a file. 0.4.6: CI-only
+  work.
 - **D-22 · P13 (3 rows).** The remaining source-text walks — one directory walk,
-  two `include_str!`. 0.4.5.
+  two `include_str!`. 0.4.6.
 - **D-23 · P14 (192 rows).** Named-body pins: 153 `include_str!`, 37 fixture
   or manifest reads, 2 runtime reads — 49 call sites, 13 helpers, 16 module
   batches in the plan's count. 0.4.6: the largest class, mechanical, batched by
@@ -876,7 +889,7 @@ file's `ticket` column.
 - **D-25 · P17 (13 rows).** Cross-crate and script readers — five
   `include_str!`, four runtime reads, four script reads of named files;
   anchors the two `bt-term` integration-test readers,
-  `uninstall_tests`' hand-supplied file list, `context_menu` and `msix`. 0.4.5:
+  `uninstall_tests`' hand-supplied file list, `context_menu` and `msix`. 0.4.6:
   `uninstall_tests` reads a module graph rather than a list before settings
   moves.
 - **D-26 · P18 (not on the list).** The ~110 `[..].concat()` needle halves,
@@ -885,7 +898,7 @@ file's `ticket` column.
 - **D-27 · P19.** The CI dependency-direction guard of split prep §8.4 over
   `cargo metadata` plus a per-target scan, with the exception set compared
   against the merge base; and the line recording `bt-term → bt-math` (D-15).
-  0.4.5: cheap, independent of `bt-source`, and it keeps D-13's repair from
+  0.4.6: cheap, independent of `bt-source`, and it keeps D-13's repair from
   drifting back.
 - **D-28 · P20.** MIGRATION-DEBT at zero and deleted; `bt_source::FileScoped`
   final at four entries or fewer, each with a reason; the tripwire
@@ -895,9 +908,8 @@ file's `ticket` column.
 
 Step 2a moved 25 of 28 topics (1,195 methods) into `crates/bt-app/src/runtime/`.
 Each unmoved topic is held by a reader the move turns red — by split prep §6.0
-the reader's defect, not the move's. **0.4.5 for all three**: each is one
-reader fix plus a pure move, and moving them before the typing-stability work
-edits `main.rs` saves that work a rebase.
+the reader's defect, not the move's. **0.4.6 for all three**: each is one
+reader fix plus a pure move, beside the rest of the split's second half.
 
 - **D-29 · `launch` (4: `create`, `reseed_editor_env`, `apply_launch_opens`,
   `arrival_fits`).** Blocked by
@@ -950,10 +962,10 @@ edits `main.rs` saves that work a rebase.
   `raise_attention`. 0.4.6, written with D-57, which moves its core.
 - **D-49 · resize.** `ResizePlan`, `DualPlaneSession::resize_at`, the reflow,
   `PtySession::resize`, and the free functions in `main.rs` that sequence them;
-  the order `flush_pending_pty_resize` represents is the contract. 0.4.6.
+  the order `flush_pending_pty_resize` represents is the contract. 0.4.7.
 - **D-50 · paste convergence.** `Runtime::prepare_clipboard_paste`,
   `paste_text`, `bt-term`'s `input::paste_bytes`, and the clipboard read on
-  the window thread. 0.4.5: tickets 02 and 03 changed `deliver_paste` and the
+  the window thread. 0.4.6: tickets 02 and 03 changed `deliver_paste` and the
   hops are fresh.
 
 ### `docs/ARCHITECTURE.md` — ownership (§4)
@@ -962,7 +974,8 @@ edits `main.rs` saves that work a rebase.
 rules that the survey's twenty-two multi-owner facts are five problems with
 one rule each; none of the five rules is yet a shared shape in the code.
 Collapsing a class means its facts follow its one rule through one contract,
-with each fact's differing policy kept. All five are 0.4.6.
+with each fact's differing policy kept. D-52 and D-53 are 0.4.6, with the
+lanes they name; D-51, D-54 and D-55 are 0.4.7.
 
 - **D-51 · observations of external state** — facts 1 (the printed-path
   verdict ledger), 5 (`profiles::title`'s cache, keyed on one of its two
@@ -989,8 +1002,8 @@ with each fact's differing policy kept. All five are 0.4.6.
 - **D-56 · emergency termination.** `install_panic_log_hook` has no safe access
   to dirty buffers. Owed: a journal kept before the failure, independent of the
   owner's locks, and a stated recoverable revision with the bounded tail that
-  may be lost. D-4 is the controlled-failure half. 0.4.6: the journal is new
-  storage and belongs with the storage lane.
+  may be lost. D-4 is the controlled-failure half. 0.4.7: the journal is new
+  storage and follows the storage lane of 0.4.6.
 - **D-57 · `bt-workbench` born.** The attention state machine, the semantic
   notification decisions and the outward commands and events, as §12.1's
   table; `AttentionLedger::apply` moves first, `attention_wire::WAIT_TTL`'s
@@ -1067,5 +1080,5 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
   Owed, in two halves: **ticket 46 (M, 0.4.5)** — group opacity, each fading
   surface rendered at full strength offscreen and composited once onto a
   non-sRGB view of the swapchain, byte-identical at rest; **the L variant
-  (0.4.6)** — the whole overlay pass in encoded space (glyphon `ColorMode::Web`),
+  (0.4.7)** — the whole overlay pass in encoded space (glyphon `ColorMode::Web`),
   so the 0.5 restyle compares like with like. The row closes with the second.
