@@ -518,3 +518,754 @@ the crate's tests walk (`crates/bt-app/src/i18n.rs:5620` onward).
 - **R-23 — done.** §G: a new ticket 0 establishes capability, claim, lock and journal before any driver; ticket 1 returns a typed `Unsupported` before any network, staging, flush, wait or mutation, with offers capability-gated off and no `todo!()`; each driver has its own integration gate and its own injectable core; build and release scripts and `docs/RELEASING.md` are in ticket 0's file list.
 
 **Open for the owner**, both new in rev 2: whether GitHub's immutable-releases setting is enabled on this repository (R-8), and whether the highlight line is worth a second request per offer (R-17).
+
+---
+
+## Revision 2026-09-25 for 0.4.6
+
+Appended; nothing above is edited. Written against `design/self-update` after
+merging `main` at `f7826bd4` (the merge is `48723656`). Documents only: nothing
+was built, run, signed or installed. Where this section and §A–§I disagree, this
+section rules; where it is silent, §A–§I stand.
+
+### R.0 The rulings and facts this revision folds in
+
+| date | ruling (owner) | what it does here |
+|---|---|---|
+| 2026-09-16 | `update.rs` may download; the macOS §M4 deferral no longer holds | unchanged — the basis of §A |
+| 2026-09-20 | **0.4.6 = the updater.** The right-click menu is on by default **only in installs that have an uninstall hook**, told by an **install-time marker file, never a path guess**; **managed installs (scoop, winget, Homebrew) do not self-update** | §D's receipt lookups are replaced by the marker (R.2 C2); the Explorer default follows the marker (C3) |
+| 2026-09-20 | **Install and uninstall must be effortless**: anything Folio writes outside its own folder needs a UI-less undo | the ledger in R.4; the Windows download moves into Folio's own folder (C6); the RunOnce value gets a `--uninstall-cleanup` row (C5, U-17) |
+| 2026-09-23 | **Fewer words in the UI** | the card is rewritten in C9 |
+| 2026-09-25 | **0.4.6 code merges only after the 0.4.5 tag** | every ticket in R.6 ends at "committed, CI green on the branch" |
+
+Facts taken as given: the Windows executable is compiled by `build-release.yml`
+and signed on the owner's machine through Artifact Signing (`sign.ps1`;
+certificates valid three days; every signature time stamped; CI and
+`smoke.ps1 -ExpectSigned` check it); the macOS build is Developer ID signed with
+the hardened runtime, notarized and stapled (`sign.sh`, `notarize.sh`,
+`dmg.sh`); a release page carries `folio-<version>-windows-x64.zip`,
+`folio-windows-x64.zip`, `SHA256SUMS.txt`, `folio-<version>.cdx.json`,
+`Folio-<version>-macos-arm64.dmg`, `Folio-macos-arm64.dmg` and
+`SHA256SUMS-macos.txt`, with bare file names in both checksum files; the sparse
+`folio.msix` travels inside the zip, not as an asset; scoop and Homebrew
+manifests are rendered by `update-manifests.ps1` / `cask.sh` after the page
+exists; `/releases/latest/download/<stable name>` resolves; the app keeps
+`diagnostics.log` and a stall self-report (`hang_watch`).
+
+### R.1 What in the 2026-09-16 design still stands
+
+- **§A** — the check is unchanged: one `GET` of the releases list, at most once a
+  day across windows, silent on failure, `User-Agent: Folio`. The updater starts
+  where the check ends. `update.rs` on `main` is still exactly what §A
+  describes (no download code).
+- **§B's state machine** — one application-owned job, an immutable offer
+  captured when it is raised, `Idle → Available → Downloading → Staged →
+  Verified → Quitting → Committing`, Later / Skip / Cancel semantics, Skip by
+  precedence, switch-off cancels. Only the card's words change (C9) and the
+  managed arm leaves the card (C2).
+- **§C's recovery contract** — invariant I1, the fsynced journal, the applier P
+  running from outside the install set, health = claim + schema + first pane
+  text, deletion only at `Healthy`, the idempotent decision table of §C.6, the
+  claim adoption of §C.7, the quit barrier of §C.3. Two corrections (C5, C6)
+  and one macOS residual (C7) are the only changes.
+- **§E** — both requests use the offer's tag; the hash is integrity, the
+  signature is identity; bounded streaming download; quarantine preserved; the
+  redirect rules. The Windows identity paragraph is sharpened in C8, the macOS
+  one replaced in C7.
+- **§F** — the test list is kept whole; R.6 distributes it over tickets.
+- **§H** — every experiment stays; R.5 adds five.
+- **Velopack stays rejected** (`design/velopack-spike`, 2026-09-16): its Windows
+  applier has no journal, deletes its backup on the failure path, has no health
+  acknowledgement, and kills every process in the install folder sixty seconds
+  into a quit. Two things are still taken from it: `renamex_np(RENAME_SWAP)` for
+  the macOS flip (already §C.4), and `apply_windows_impl.rs` as the worked
+  example of what the review warned about.
+
+### R.2 What changed
+
+**C1. Updater capability is the running build's own signature, not a build
+flag.** §D (answering R-15) put a compile-time capability into the release build
+invocation. Since then the shipped Windows executable is compiled by
+`build-release.yml` for candidates and releases alike, from one command
+(`cargo build --release --locked -p bt-app`, `docs/WINDOWS-CI-RELEASE.md`), and
+what makes a release a release happens *after* compilation, on the owner's
+machine: `package.ps1 -Sign`. The CI artifact a candidate is made from is
+unsigned ("keep the unsigned original"). On macOS a candidate bundle is ad-hoc
+signed (`sign.sh` defaults `--identity -`) and only a release is Developer ID
+signed and notarized. So the one fact that separates the two is already in the
+bytes, and the updater needs it anyway, because identity (§E) is a comparison
+**against the running build's own signer**:
+
+- **Windows:** capable ⇔ `WinVerifyTrust` accepts the running `folio.exe` with a
+  time-stamped signature and its leaf subject parses as a distinguished name.
+- **macOS:** capable ⇔ the running bundle carries a valid signature whose
+  designated requirement is a Developer ID requirement (not ad-hoc).
+
+It is a capability, not a provenance claim, as R-15 asked: a signed copy anywhere
+is capable, and that is correct, because what the updater establishes is "the
+successor is the same publisher's Folio", not "this copy came from the page". It
+removes rev 2 ticket 0's changes to `build.rs`, `release.yml`, `package.ps1` and
+`smoke.ps1`. A signed candidate, should one ever exist, would update to the next
+public release — Q4.
+
+**C2. Managed-install detection is the install marker, not a receipt or a
+path.** The 2026-09-20 ruling and `docs/RULES.md` §41 ("How Folio was installed
+is read from a written channel marker, never inferred from a path") replace §D's
+Caskroom and winget-receipt lookups. Nothing writes or reads a marker on `main`
+(`clean-uninstall-2026-09-20.md` §6.7 scheduled it as T-C2; it was not built —
+`explorer_menu.rs` mentions only a withdrawn `pre_uninstall`).
+
+| | Windows | macOS |
+|---|---|---|
+| **where** | `folio-install.json` beside `folio.exe` — inside Folio's own folder | an extended attribute `io.github.lulu-loopp.folio.install` on the bundle directory — never a file inside the bundle (that breaks the seal, `clean-uninstall` §6.4 item 3) and never a sibling file in `/Applications` |
+| **content** | `{"v":1,"manager":"scoop","uninstall_hook":true}` | the same JSON as the attribute's value |
+| **who writes it** | scoop's `post_install`, into `$dir` (each version directory, so `current` always has one) | the tap's cask `postflight` (`lulu-loopp/homebrew-folio` is our own tap) |
+| **who removes it** | scoop, with the version directory | Homebrew, with the bundle |
+| **what reads it** | `install_channel::read`, once, at start, off the window thread | the same |
+
+Classification becomes: **marker present and well formed → Managed(manager)**;
+**no marker → Ours** when the install root passes §D's read-only probe, else
+**Not writable**; **marker malformed or of an unknown `v` → Unknown** (fails to
+the releases page, as §D). A copy of a managed folder carries its marker and is
+treated as managed — a false positive whose cost is a command that does nothing,
+the direction §D chose to fail in.
+
+**winget has no hook** (zip + portable installer,
+`packaging/winget/…/WeiyiShi.Folio.installer.yaml`), so it cannot write a marker.
+The recommended reading is winget's own uninstall record — the entry winget
+writes under `…\CurrentVersion\Uninstall\` naming this folder as its install
+location — which is a record written at install time by the manager, not a path
+guess. Q1.
+
+**Managed copies get no card.** §7.52 ① said a new version is not a thing that
+should interrupt anybody; the card is justified only when the press can finish
+the job here (§A's table). A managed copy keeps today's dot and General row, and
+the row names the manager's command with one **Copy** verb: `scoop update folio`,
+`brew upgrade --cask folio`, `winget upgrade --id WeiyiShi.Folio --exact`. Q3.
+
+**C3. The uninstall hook, and the Explorer default.** The marker's
+`uninstall_hook` field is the fact the 2026-09-20 ruling names for the
+right-click default. `first_run::rows_for` builds the Explorer row with
+`on: false` unconditionally today; after U-3 it is `on: true` exactly when the
+marker says `uninstall_hook: true`. The hooks, in the manifests this repository
+renders:
+
+- scoop: `post_install` writes the marker; `pre_uninstall`, guarded by
+  `if ($cmd -eq 'uninstall')` because scoop also runs it on update (verified in
+  `clean-uninstall-review-codex-2026-09-20.md`), runs
+  `& "$dir\folio.exe" --uninstall-cleanup`. Its exit 2 (a Folio is running) is
+  the door's existing answer, and scoop then abandons its uninstall with
+  everything intact.
+- Homebrew: `postflight` writes the attribute; `uninstall_preflight` runs
+  `Folio.app/Contents/MacOS/folio --uninstall-cleanup` with
+  `must_succeed: false`, so a refused removal never blocks `brew uninstall`.
+- The plain zip and the plain DMG have no install time and no hook: no marker,
+  Explorer default off, self-update on. That is the ruling's intent, not a gap.
+
+**C4. The Windows archive is ten files, and the updater does not hard-code the
+list.** §C.4 and §E say nine. Since 0.4.3 the archive carries `uninstall.cmd`
+too (`package.ps1`'s `$manifest`;
+`uninstall_tests::uninstall_archive_has_ten_files_and_cleanup_only_wrapper`).
+More to the point, the old binary performs the flip for a *newer* archive, whose
+list it cannot know. So:
+
+- **The new set** is what the archive holds under its one root
+  `folio-<manifest version>/`: regular files only, nothing below the root, at
+  most `ARCHIVE_MAX_ENTRIES` (32) entries and `ARCHIVE_MAX_BYTES` (200 MB)
+  expanded, with `folio.exe`, `conpty.dll` and `OpenConsole.exe` required, and
+  every refusal of §E kept.
+- **The old set** is the running build's own shipped list, a constant pinned to
+  `package.ps1`'s `$manifest` by a `bt_source` reader.
+- The flip moves `old ∩ on-disk` to backup and the new set in. A name in the new
+  set that exists on disk and is not in the old set is somebody else's file: the
+  transaction fails before any move with *Nothing changed*. Files in neither set
+  — a scoop marker, `.folio-update/`, anything the person put there — are never
+  touched.
+
+**C5. The applier runs from a copy no step moves (a hole in rev 2 §C.4).** Rev 2
+runs P from `<staging>\<txn>\folio.exe`, points the RunOnce entry at that same
+path, and then step 2 moves `<staging>\<txn>\*` into the install. From the
+moment step 2 moves the executable, the recovery entry names nothing and P has
+moved its own image. The fix: Prepare writes the verified new `folio.exe` twice
+— into `staging\<txn>\set\` (the files the flip moves in) and into
+`staging\<txn>\applier\folio.exe` (never moved, deleted only with the
+transaction). P starts from the applier copy and the RunOnce value names it. The
+applier copy runs headless (`--update-apply`, `--update-recover`) and needs no
+sidecar. The value is written as `!FolioUpdate-<txn8>`: the `!` prefix makes
+Windows delete a RunOnce value only after its command completes, so a recovery
+interrupted at logon runs again at the next logon; the finishing actor removes
+it explicitly either way. I1 now holds through step 2, as §C.4 claimed.
+
+**C6. Nothing new lands in the roaming profile.** Rev 2 let the download cache
+sit under `persist::storage_dir()` (roaming `%APPDATA%\Folio`, R-14's
+complaint). On Windows the archive now downloads straight into
+`<install-root>\.folio-update\staging\<txn>\` — Folio's own folder, on the
+destination volume, removed with the transaction or with the folder. On macOS
+there is no own folder to write into (the bundle is sealed and its parent is
+`/Applications`), so:
+
+- **staging and the downloaded image** go into the system's item-replacement
+  directory for the bundle's volume (`NSFileManager`
+  `URLForDirectory:NSItemReplacementDirectory appropriateForURL:<bundle>`),
+  which is on the destination volume by construction — what `RENAME_SWAP`
+  needs — and is the operating system's temporary space;
+- **the installation lock** is `flock(LOCK_EX|LOCK_NB)` on a descriptor opened on
+  the bundle directory itself, which writes nothing;
+- **the journal** lives in Folio's data root
+  (`~/Library/Application Support/Folio/update/<txn>.json`), class O data that
+  `--purge` already removes.
+
+**C7. macOS: the DMG is the transport, the swap is in place.** "DMG replace" —
+telling the person to drag a new image — is what the releases page already is,
+and it is what every class but **Ours** gets. For **Ours**:
+
+1. Download `Folio-<version>-macos-arm64.dmg` and `SHA256SUMS-macos.txt` of the
+   offer's tag into the item-replacement directory; hash.
+2. `hdiutil attach -nobrowse -readonly -noautoopen -mountrandom <staging>`
+   through `quiet_command_named` with the absolute path, bounded; the mount
+   point is recorded in the journal and detached on every exit path (R-11).
+3. Verify the mounted `Folio.app` (below), `ditto` it into the staging directory,
+   **verify the copy again**, detach.
+4. After the quit barrier, P swaps with `renamex_np(RENAME_SWAP)`, launches the
+   new bundle's executable with `--update-health`, and on health deletes the old
+   bundle, which the swap left in staging.
+
+**What notarization requires, and what the updater must not do.** The release
+already made the bundle Developer ID signed, hardened, notarized and stapled.
+The updater notarizes nothing and must **change nothing inside or on the copied
+bundle** — no plist edit, no attribute stripped, no file added — because the seal
+and the stapled ticket are what let Gatekeeper accept it offline; `ditto`
+carries both. Identity is checked **without a Team ID constant**
+(`docs/RELEASING.md`: no team identifier in this repository): the new bundle
+must satisfy **the running bundle's own designated requirement**
+(`SecCodeCopyDesignatedRequirement` of self, then `SecStaticCodeCheckValidity`
+on the new bundle with strict validation, all architectures and nested code,
+against that requirement), which names the certificate lineage and the bundle
+identifier `io.github.lulu-loopp.folio`. Gatekeeper's assessment is recorded,
+not required (`spctl` can be disabled, §E). `CFBundleShortVersionString` and the
+architecture must match the offer. **A translocated bundle** (run from a
+quarantined download without being moved) sits on a read-only randomized mount:
+**Not writable**, releases page.
+
+**The one residual.** On Windows the RunOnce value makes recovery reachable when
+the install cannot start. On macOS the swap is atomic, but a double fault — P
+dies (power loss) inside the 90 s health window **and** the new bundle cannot
+start at all — leaves a bundle that does not start and the old one in the
+item-replacement directory, which the system may purge at reboot. The fix would
+be a user LaunchAgent carrying the recovery command: another mark outside the
+bundle, with its own cleanup row. Q5.
+
+**C8. Windows identity, with three-day certificates.** Artifact Signing issues a
+certificate valid for three days, so **every release is signed by a different
+certificate** than the running build: "renewal with the same subject" (§E) is
+the everyday path, not an edge. The comparison is never a thumbprint:
+`WinVerifyTrust` with the system's revocation policy and a required RFC 3161 time
+stamp inside the certificate's validity; then the leaf subject compared as a
+parsed DN (`msix::distinguished_name`, value case preserved) against the running
+`folio.exe`'s own leaf subject — read from the running file, never a constant in
+the updater; the package's `Publisher` against its own signer; the two Microsoft
+sidecars as `package.ps1 -Sign` checks them; `VERSIONINFO` and machine type
+against the offer. A changed subject is a refusal.
+
+**C9. The card, in fewer words (2026-09-23).** A state is a word or a number; no
+sentence the reader did not need.
+
+| state | line | verbs |
+|---|---|---|
+| `Available` | `Folio 0.4.7` | **Update** · **Later** · **Skip** |
+| `Downloading` | bar + `12 / 41 MB` (bar alone, indeterminate, when the length is unknown) | **Cancel** |
+| `Verified` | `Ready. Running programs will close.` | **Restart** · **Later** |
+| `Failed`, nothing moved | the reason + `Nothing changed.` | **Releases** · **Close** |
+| `Failed`, rolled back | the reason + `Previous version restored.` | **Releases** · **Close** |
+| `Failed`, rollback failed | `Update incomplete.` + the journal's folder | **Show folder** · **Close** |
+
+The first verb becomes **Update**: it does not promise a restart (which is what
+§B's "Download and install" was guarding against), and the restart is asked for
+at `Verified`. The General row's foot gains **Restart to update** while a job
+waits at `Verified`. The highlight line (R-17) is dropped. The quit's own card
+still asks about unsaved documents.
+
+**C10. The release window, and the first real update.** Nothing in R.6 merges
+before the 0.4.5 tag (ruling 2026-09-25). 0.4.5 and every earlier build ship no
+updater, so **the first in-app update any reader sees is 0.4.6 → 0.4.7**; a
+0.4.5 reader moves to 0.4.6 by hand, as today. The clean-machine baseline (§F,
+R-21) is a signed 0.4.6 candidate updating to a signed, reachable successor or to
+an injected test source.
+
+**C11. What it checks, and when.** The cadence is the daily check, unchanged.
+When it answers a newer tag and the copy is eligible (switch on; newer than
+`skipped_tag` by precedence; class Ours; capable, C1), the card is raised at most
+once per launch in the most recently active ordinary window. **Nothing is
+downloaded until the press.** A press fetches exactly two files, by the
+**offer's tag**: `/releases/download/<tag>/folio-<version>-windows-x64.zip` and
+`SHA256SUMS.txt` (macOS: the versioned `.dmg` and `SHA256SUMS-macos.txt`) —
+never the `/releases/latest/download/` stable names, because "latest" can move
+under an open offer (R-8). `<version>` is the tag without `v` and `-preview`,
+the rule `docs/RELEASING.md` "The tag" states. Redirects to GitHub's asset host
+follow §E. `docs/PRIVACY.md` gains that paragraph in the enabling ticket.
+
+### R.3 Lanes and doors
+
+| step | where it runs | lane (`ARCHITECTURE.md` §5.1) | door (§6) |
+|---|---|---|---|
+| daily check | `bt-update-check` (existing) | observation | `spawn_at_priority`; `http::https_get` |
+| install marker read | once at start, a named worker | observation | `file_reads`, new lane for the marker; macOS `getxattr` inside `bt_platform` (metadata, outside the ledger — §6's stated bypass) |
+| offer, card, progress, verbs | window thread, accepting results only | window | new `AppEvent` arms with `station()` rows; distinct `hang_watch` stations for offer, progress, outcome and barrier |
+| lock, staging, download, hash, extract, verify, copy, journal `Prepared` | `bt-update-job`, one per job, `BelowNormal` | storage and integration transactions — the txn id is the operation identity, the journal the durable outcome | `spawn_at_priority`; new `http::https_download`; `file_reads` lane for the archive and journal; `quiet_command_named` for `hdiutil` / `ditto`; trust checks in-process (`WinVerifyTrust`, `Security.framework`) |
+| quit barrier, session receipt | window thread, the ordinary `quit::Quit` with reason `UpdateRestart` | window, receipt from `SessionWriter` | existing |
+| spawn P at `QuitStep::Exit` | window thread, one call | — | `quiet_command_named`, detached (a new child kind in §2.2) |
+| flip, health wait, rollback, deletion | **P**, the separate headless process `folio --update-apply` | not a thread of the running Folio | new `bt_platform::install_flip` (the only moves of installed files) and `bt_platform::logon_hook` (the only RunOnce writer) |
+| health acknowledgement | **N**, after `adopt_claim` and at the first pane text | window (one bounded journal write) | `install_flip::acknowledge` |
+| startup recovery | `fn main`, after the argv doors, before `launch_wire::hand_over`; one `stat`, and work only if a journal exists | no loop exists yet (§5.3 row 18's reasoning) | `install_flip` |
+
+K never stamps W's heartbeat; its phases go to `diagnostics.log`, one line per
+phase change with the txn id. P writes its phases into the journal and into
+`.folio-update/applier.log`; N copies them into `diagnostics.log` at health.
+`ARCHITECTURE.md` §2.1 gains two argv doors (`--update-apply`,
+`--update-recover`); `--update-health` is a flag on the ordinary launch.
+
+### R.4 What is written outside Folio's own folder, and its undo
+
+| what | platform | when it exists | undone by, without UI |
+|---|---|---|---|
+| HKCU `RunOnce` value `!FolioUpdate-<txn8>` naming this copy's applier | Windows | from the first destructive move to `Healthy` / `RolledBack` | the finishing actor; Windows after a completed run; **`--uninstall-cleanup`** (new per-copy row: removed if it names this copy's `.folio-update` or a path that no longer exists) |
+| staging, downloaded image, mount point, the old bundle until health | macOS | during a job | the transaction; the startup sweep (journal with no live lock); the system's temporary-item purge |
+| journal `update/<txn>.json` | macOS | during a job | the transaction; `--purge` (covers the data root already) |
+| `update-check.json` v2 | both | exists today | `--purge`, unchanged |
+| the sparse package re-registered at a new version | Windows | only after `Healthy`, only if already registered | the existing Explorer rows of `--uninstall-cleanup` / `--remove-explorer-menu` |
+| the install marker | both | written by the **package manager**, not by Folio | the manager, with the folder or bundle |
+
+Everything else — `.folio-update/{journal.json, lock, staging/, backup/,
+applier.log}` — is inside the Windows install folder and leaves with it.
+
+### R.5 The review's risks, now
+
+| item | status on 2026-09-25 |
+|---|---|
+| R-1 recovery entry | answered in rev 2; **corrected** by C5 (the applier copy is never moved) |
+| R-2 health, backups | answered; stands |
+| R-3 claim adoption | answered; refined: `is_writer_of` keeps caching a refusal (a non-writer must not become the writer mid-run); only the new `try_claim` does not cache |
+| R-4 quit first | answered; stands |
+| R-5 archive layout | **changed** by C4: ten files today, and the set is read from the archive under bounds |
+| R-6 same volume, read-only probe | answered; C6 moves the Windows download into the install folder and gives macOS the item-replacement directory |
+| R-7 installation lock | answered; the macOS lock is `flock` on the bundle directory (C6); another process still mapping the old image is detected by P's exclusive open of `folio.exe` (E3) |
+| R-8 tag pinning | answered; whether the repository has immutable releases enabled is still **unknown**, and no ticket depends on it |
+| R-9 Windows trust | answered; sharpened by C8 |
+| R-10 macOS identity | **changed** by C7: the running bundle's designated requirement, no Team ID constant |
+| R-11 quarantine, mounts | answered; the mount lives under staging (C7) |
+| R-12 redirects | answered; stands |
+| R-13 bounded download | answered; U-7 |
+| R-14 sweep and paths | answered; paths restated in C6 and R.4 |
+| R-15 capability | **changed** by C1: the running signature; Q4 |
+| R-16 skip race | answered; U-6 |
+| R-17 card eligibility | answered; C2 removes the managed card, C9 rewrites the words, the highlight line is dropped |
+| R-18 W never blocks | answered; R.3 names the stations |
+| R-19 manager ownership | **changed** by C2: the marker; winget is Q1 |
+| R-20 MSIX version | answered; U-19 |
+| R-21 clean machine | answered; baseline restated in C10 |
+| R-22 tests | adopted; distributed over R.6 |
+| R-23 split, no panic stub | answered; R.6 keeps the typed `Unsupported` and one enabling ticket per platform |
+
+Experiments added to §H:
+
+| id | risk | experiment |
+|---|---|---|
+| E1 | the marker attribute on the bundle directory breaks `codesign --verify --strict --deep` or Gatekeeper | write it on a notarized `Folio.app`, verify, assess, launch from a fresh account |
+| E2 | the shape of winget's uninstall record for a portable zip (hive, key name, install location) | `winget install WeiyiShi.Folio` on the Windows 10 VM; export the key; uninstall; export again |
+| E3 | an exclusive open of `folio.exe` refuses while another process runs from the folder and succeeds after it exits | two isolated-`APPDATA` Folios from one folder on the VM; open from a third process |
+| E4 | a `!`-prefixed HKCU RunOnce value survives an interrupted run and runs again | on the VM: a value whose command ends itself early; two logons |
+| E5 | the item-replacement directory for `/Applications` and `~/Applications` is on the bundle's volume and `RENAME_SWAP` works across it | on the Mac mini |
+
+### R.6 Ticket split
+
+Each ticket is S or M, keeps a typed `Unsupported` or no-op path until the
+enabling ticket for its platform, and is mergeable alone **after the 0.4.5 tag
+exists on main** (ruling 2026-09-25): every brief ends at "committed, CI green
+on the branch", and the coordinator merges after the tag. Numbers are `U-n`; the
+coordinator maps them into the ticket set at dispatch. Every brief carries
+`_standing-rules.md` in full; anchors are names, found by grep. Who: Opus for
+all; Codex may take U-7, U-9 and U-10 (pure, well bounded).
+
+**Order.** U-1, U-2, U-5 … U-12 are independent. U-3 needs U-1; U-4 needs U-1
+and Q1. U-13 needs U-6; U-14 needs U-13; U-15 needs U-7, U-8, U-9, U-10, U-13;
+U-16 needs U-13; U-17 needs U-8; U-18 needs U-5, U-15, U-16, U-17; U-19 needs
+U-18; U-20 needs U-7, U-8, U-11, U-12, U-13; U-21 needs U-5, U-16, U-20; U-22
+needs U-1, U-14, U-18, U-19 and the VM run; U-23 needs U-14, U-21 and the Mac
+run.
+
+| # | title | size | lane |
+|---|---|---|---|
+| U-1 | the install marker, read once | S | local |
+| U-2 | the package managers write the marker and call the door | S | no compile; VM + Mac mini |
+| U-3 | the Explorer menu is pre-ticked where an uninstall hook exists | S | local |
+| U-4 | winget copies are told by winget's own record (only if Q1 = read) | S | local + VM |
+| U-5 | `try_claim` and `adopt_claim` | M | local |
+| U-6 | `update-check.json` v2 under one owner | M | local |
+| U-7 | `https_download`: bounded streaming to a file | M | local + CI macOS |
+| U-8 | the journal, the lock and the recovery table as pure code | M | local |
+| U-9 | the Windows archive reader | S | local |
+| U-10 | Windows identity and capability | M | local |
+| U-11 | macOS identity and capability | M | CI macOS + Mac mini |
+| U-12 | macOS image mount and copy | S | CI macOS + Mac mini |
+| U-13 | the job, application-owned, headless | M | local |
+| U-14 | the card and the row | M | local |
+| U-15 | Windows Prepare | M | local |
+| U-16 | the quit barrier | M | local |
+| U-17 | the recovery entrances | M | local + VM |
+| U-18 | the Windows flip, health and rollback | M | local + VM |
+| U-19 | the sparse package after an update | S | local + VM |
+| U-20 | macOS Prepare | M | CI macOS + Mac mini |
+| U-21 | the macOS swap, health and rollback | M | Mac mini |
+| U-22 | enable on Windows | S | VM |
+| U-23 | enable on macOS | S | Mac mini |
+
+#### U-1 — The install marker, read once (S)
+**True on BASE.** `RULES.md` §41 says the channel is read from a written marker;
+no code writes or reads one (`rg -n "folio-install" crates` is empty).
+**Goal.** `install_channel::{read, classify}`: the Windows file beside
+`current_exe()`, the macOS attribute on the bundle directory;
+`classify(evidence) -> Channel { Ours, Managed(Manager), NotWritable, Unknown }`
+pure; read once at start on a named worker; one `diagnostics.log` line. Nothing
+acts on it yet.
+**Design.** C2. `Manager = Scoop | Homebrew | Winget`. No marker is `Ours` only
+after §D's read-only probe; a malformed or future marker is `Unknown`.
+**Tests red on BASE.** `a_well_formed_marker_makes_this_copy_managed`;
+`a_malformed_or_future_marker_is_unknown_and_never_ours`;
+`no_marker_and_a_writable_root_is_ours` (a real temp folder through the real
+reader).
+**Docs in the same commit.** `RULES.md` §41 gains the format and both
+locations; one `DESIGN.md` entry; the `file_reads_doors.txt` row; no CHANGELOG
+line (nothing visible) — the report says so.
+**Architecture impact.** (a) new fact *how this copy was installed*, owner
+`install_channel`; (b) `file_reads` (new lane), `spawn_at_priority`, macOS
+`getxattr` in `bt_platform` (metadata, outside the ledger); (c) none; (c′) none;
+(d) no.
+
+#### U-2 — The package managers write the marker and call the door (S)
+**True on BASE.** `cask.sh` renders `app`, `zap` and `depends_on`, no flight
+blocks; the scoop manifest `update-manifests.ps1` rewrites has no `post_install`
+or `pre_uninstall`.
+**Goal.** C3's hooks: scoop `post_install` marker and `pre_uninstall` gated on
+`$cmd -eq 'uninstall'`; cask `postflight` attribute and `uninstall_preflight`
+door with `must_succeed: false`; `update-manifests.ps1` preserves both. The
+owner pushes the two manifests.
+**Design.** C2, C3. E1 first; if E1 fails, stop and report — the macOS marker
+place is then an owner question.
+**Tests red on BASE.** A rendered cask contains both blocks; a render over a
+manifest carrying them keeps them byte-identical (in `smoke-tests.ps1`'s style);
+on the Windows 10 VM, scoop install / update / uninstall: marker present after
+install and after update, cleanup ran only on uninstall; on the Mac mini,
+`brew install` / `upgrade` / `uninstall` likewise.
+**Docs in the same commit.** `RELEASING.md` "Distribution manifests" names the
+hooks and why `$cmd` is checked; `docs/install.md` and `install.zh-CN.md`
+uninstall sections (Chinese by opus46 after); CHANGELOG *Added*: "scoop and
+Homebrew now clean up after Folio when they uninstall it."
+**Architecture impact.** (a) writes U-1's fact from outside the process;
+(b) no Folio door — the managers' own; they call `--uninstall-cleanup`; (c) none;
+(c′) a new writer of the install channel (the manager); reader: U-1 only;
+(d) no.
+
+#### U-3 — The Explorer menu is pre-ticked where an uninstall hook exists (S)
+**True on BASE.** `first_run::rows_for` builds the Explorer row with
+`on: false`.
+**Goal.** `on` = the marker's `uninstall_hook` (ruling 2026-09-20). Nothing else
+on the card changes.
+**Tests red on BASE.** `the_explorer_row_is_on_only_where_an_uninstall_hook_exists`
+over `Ours`, `Managed(Scoop)`, `Managed(Winget)`, `Unknown`.
+**Docs in the same commit.** `DESIGN.md` entry naming the §7.56 default it
+supersedes; `RULES.md` §35 and §37 fold the default; CHANGELOG *Changed*.
+**Architecture impact.** (a) a new reader of U-1's fact; (b) none new; (c) none;
+(c′) none; (d) no.
+
+#### U-4 — winget copies are told by winget's own record (S; only if Q1 = read)
+**True on BASE.** Nothing reads winget's uninstall entries.
+**Goal.** E2 first; then `install_channel` reads the entry whose install
+location canonicalizes to this folder → `Managed(Winget)` with
+`uninstall_hook: false`. A failed read is `Unknown`.
+**Tests red on BASE.** `a_winget_record_naming_this_folder_makes_it_managed`;
+`a_record_naming_another_folder_changes_nothing` (injected reader; the real one
+on the VM).
+**Docs in the same commit.** `RULES.md` §41 names this one exception to "a marker
+written by a hook"; `DESIGN.md` entry.
+**Architecture impact.** (a) U-1's fact gains a source; (b) a registry read in
+`bt_platform` — there is no door for registry reads; the brief names that and
+does not invent one; (c) none; (c′) new source: winget's record; reader: the
+classifier; (d) no.
+
+#### U-5 — `try_claim` and `adopt_claim` (M)
+**True on BASE.** `persist::is_writer_of` caches `claim_data_directory`'s
+answer, a refusal included, for the life of the process (`or_insert_with`).
+**Goal.** §C.7: `try_claim(dir)` without caching; `adopt_claim(dir, claim)`
+inserts an acquired guard into the same table before anyone asks.
+`is_writer_of` is unchanged (R.5, R-3).
+**Tests red on BASE.** `acquired_claim_is_adopted_without_a_gap`;
+`transient_claim_refusal_is_not_cached_by_try_claim`;
+`is_writer_of_still_remembers_a_refusal`;
+`manual_launch_and_relaunch_have_one_writer`.
+**Docs in the same commit.** `DESIGN.md` entry; `ARCHITECTURE.md` §2.1's claim
+sentence.
+**Architecture impact.** (a) the data-directory claim, owner `persist`'s table;
+(b) none new; (c) none; (c′) a new writer of the claim table (`adopt_claim`);
+readers: every `is_writer_of` caller, none of which may see a gap — that is the
+test; (d) no.
+
+#### U-6 — `update-check.json` v2 under one owner (M)
+**True on BASE.** `update::run` and `update::mark_seen` each read and write on
+their own; a Skip written between them would be lost; `UPDATE_CHECK_MIGRATIONS`
+is empty.
+**Goal.** v2 adds `skipped_tag`; one lock across every read-modify-write;
+comparison by precedence; a cached skipped tag stays hidden inside the day;
+switching off suppresses cached offers. No UI yet.
+**Tests red on BASE.** `skip_racing_check_and_seen_keeps_all_fields`;
+`cached_skipped_tag_stays_hidden_inside_daily_cadence`;
+`newer_tag_is_offered_after_skip`;
+`switch_off_suppresses_cached_and_inflight_offers`; the first migration's round
+trip.
+**Docs in the same commit.** `DESIGN.md` entry; `PRIVACY.md`'s
+`update-check.json` row gains the field (both languages; Chinese marked
+pending); `structural-debt.md` D-53 notes fact 11's part repaid.
+**Architecture impact.** (a) the update check's memory, file and claim (fact
+11), owner `update`; (b) existing; (c) repays D-53's fact-11 part; (c′) a new
+writer (Skip) of the state file; readers: `mark_is_lit` and the gear; (d) no.
+
+#### U-7 — `https_download`: bounded streaming to a file (M)
+**True on BASE.** `http::https_get` and the macOS arm accumulate a `Vec`; nothing
+downloads to a file.
+**Goal.** §E's `https_download` in all three arms: fixed buffer, byte cap checked
+before each write, unknown length as `None`, monotonic deadlines (30 s idle, 10
+min total), cancellation latency stated per phase, one pending progress wake.
+**Tests red on BASE.** §F's Transport group over a local fake transport,
+including `https_redirects_work_and_http_redirects_refuse`.
+**Docs in the same commit.** `DESIGN.md` entry; the `http.rs` module doc's bound
+restated for downloads.
+**Architecture impact.** (a) none owned; (b) extends the HTTP door; progress by
+the one-wake contract; (c) none; (c′) none; (d) no.
+
+#### U-8 — The journal, the lock and the recovery table as pure code (M)
+**True on BASE.** None of it exists.
+**Goal.** `update_txn`: the journal type (§C.1) and its fsynced write through a
+temporary file; the installation lock (Windows exclusive open, Unix `flock`);
+§C.6's table as `decide(phase, disk) -> Action`; C4's set rule; C5's applier
+copy — all over a durable fake filesystem that can be cut at any operation.
+**Tests red on BASE.** `every_crash_boundary_recovers_a_complete_launchable_install`
+(one case per row and per instant, the applier copy included);
+`recovery_can_itself_be_interrupted`;
+`rollback_failure_preserves_journal_and_backups`;
+`a_moved_installation_fails_the_transaction_without_touching_files`;
+`two_data_directories_share_one_install_lock`;
+`a_name_in_the_way_fails_before_any_move`.
+**Docs in the same commit.** `DESIGN.md` entry carrying the table.
+**Architecture impact.** (a) new fact *the installation's transaction*, owner
+`update_txn`; (b) none (pure); (c) none; (c′) none; (d) no.
+
+#### U-9 — The Windows archive reader (S)
+**True on BASE.** No zip reader in product code.
+**Goal.** C4: one root `folio-<version>/`, regular children, bounds, §E's
+refusals; the running build's shipped-list constant pinned to `package.ps1`'s
+`$manifest` through `bt_source`.
+**Tests red on BASE.** `packaged_zip_root_is_accepted` (a fixture built to the
+real ten-file layout); `duplicate_case_alias_stream_link_and_traversal_entries_are_refused`;
+`expanded_size_limit_precedes_disk_exhaustion`;
+`the_shipped_list_is_package_ps1s`.
+**Docs in the same commit.** `RELEASING.md` "What gets published": the updater
+reads the root name, so renaming it breaks in-app updates.
+**Architecture impact.** (a) none; (b) `file_reads` (the transaction's lane);
+(c) none — the pin reads through `bt_source`, no `MIGRATION-DEBT.tsv` row;
+(c′) none; (d) no.
+
+#### U-10 — Windows identity and capability (M)
+**True on BASE.** `msix::distinguished_name` and `publisher_matches_subject`
+exist; nothing in product code verifies a downloaded file's signature.
+**Goal.** C8's decision in `bt_platform::trust`, and C1's Windows capability.
+**Tests red on BASE.** `validly_signed_wrong_product_or_version_is_refused`;
+`dn_values_preserve_case_and_order`;
+`timestamp_policy_accepts_the_packagers_format`;
+`an_unsigned_running_build_is_not_capable`;
+`a_new_certificate_with_the_same_subject_is_accepted` — fixtures signed in the
+test with a certificate made in the test; the real `WinVerifyTrust` runs.
+**Docs in the same commit.** `RELEASING.md` "What signs what": changing the
+subject breaks in-app updates.
+**Architecture impact.** (a) none owned; (b) in-process trust calls, no child;
+(c) none; (c′) none; (d) no.
+
+#### U-11 — macOS identity and capability (M)
+**True on BASE.** `sign.sh` and `notarize.sh` verify at release time only.
+**Goal.** C7's check against the running bundle's designated requirement, the
+version and architecture, the stapled ticket's presence; C1's macOS capability
+(ad-hoc is not capable).
+**Tests red on BASE.** `a_bundle_outside_the_running_requirement_is_refused`;
+`an_ad_hoc_running_build_is_not_capable`; version and architecture mismatches —
+real `Security.framework` calls on CI macOS over bundles signed in the test.
+**Docs in the same commit.** `packaging/macos/README.md`: the updater relies on
+the designated requirement staying stable (identifier and certificate lineage).
+**Architecture impact.** (a) none; (b) in-process `Security.framework`; (c) none;
+(c′) none; (d) no.
+
+#### U-12 — macOS image mount and copy (S)
+**True on BASE.** Nothing mounts an image at run time.
+**Goal.** `hdiutil` attach / detach and `ditto` through `quiet_command_named`,
+bounded, the mount point recorded; copy into the item-replacement directory;
+detach on every path; E5.
+**Tests red on BASE.** `every_exit_path_detaches_what_it_attached` (fake tool);
+one real attach of a test image on CI macOS.
+**Docs in the same commit.** `ARCHITECTURE.md` §2.2 gains the row.
+**Architecture impact.** (a) none; (b) `quiet_command_named` with absolute
+paths; (c) none; (c′) none; (d) no.
+
+#### U-13 — The job, application-owned, headless (M)
+**True on BASE.** `update.rs` stops at a tag; there is no job.
+**Goal.** §B's state machine as `update_job`, owned by the application, with the
+immutable offer, C11's eligibility, C1's capability gate, two `AppEvent` arms
+with `station()` rows, stale events refused. The driver is a typed
+`Unsupported` that returns before any network, staging, flush or wait; offers
+stay gated off.
+**Tests red on BASE.** `offered_tag_survives_latest_changes`;
+`stale_progress_cannot_revive_a_cancelled_job`;
+`every_card_state_has_a_handler_for_every_verb`;
+`an_unsupported_driver_fails_without_downloading`;
+`a_suppressed_offer_does_not_consume_the_launch_gate`.
+**Docs in the same commit.** `DESIGN.md` entry; `ARCHITECTURE.md` §4.2's
+durability row names the job.
+**Architecture impact.** (a) new fact *the update job*, owner the application;
+(b) none used yet; (c) none; (c′) none; (d) no.
+
+#### U-14 — The card and the row (M)
+**True on BASE.** The General row offers the releases page; there is no card.
+**Goal.** C9's card on `first_run::Card`'s footing and the float-window surface,
+the determinate bar (new drawing), the row foot **Restart to update**, the
+managed row with **Copy** (C2). English only; every new `Text` listed in
+`Text::CHINESE_PENDING`. Offers still gated off (U-13).
+**Tests red on BASE.** Paint-model tests per state;
+`later_from_verified_leaves_a_resume_entry`;
+`a_managed_copy_shows_its_command_and_no_card`; the two-line budget test.
+**Docs in the same commit.** `DESIGN.md` successor entry to §7.52 for the
+surface; no CHANGELOG line until U-22.
+**Architecture impact.** (a) reads the job; (b) none new; (c) none; (c′) none;
+(d) no.
+
+#### U-15 — Windows Prepare (M)
+**True on BASE.** U-13's driver returns `Unsupported`.
+**Goal.** §C.2 on K for Windows: lock; staging under `.folio-update`; download
+(U-7) of the offer's two files; hash; extract (U-9); verify (U-10); write `set\`
+and `applier\` (C5); re-verify in place; journal `Prepared`. Cancel and every
+failure delete the transaction and say *Nothing changed*.
+**Tests red on BASE.** `mutated_asset_hash_pair_refuses_before_swap`;
+`short_write_disk_full_and_flush_failure_never_verify`;
+`staging_is_always_on_the_destination_volume`;
+`cancel_leaves_no_transaction` (real temp folders, fake transport).
+**Docs in the same commit.** `DESIGN.md` entry.
+**Architecture impact.** (a) writes the transaction (U-8's owner); (b)
+`spawn_at_priority` `bt-update-job`, `https_download`, `file_reads`; (c) if D-3's
+common probe contract has landed, the worker uses it; otherwise the worker is
+added to D-3's list in the same commit; (c′) none; (d) no.
+
+#### U-16 — The quit barrier (M)
+**True on BASE.** `quit::Quit` carries no reason; the quit write waits on
+`SessionWriter::wait_for`.
+**Goal.** §C.3: `UpdateRestart`; `Abandon` and a failed write abandon the update
+(card back to `Verified`, reason named); a named session generation with a
+deadline while W pumps; admissions refused from `Photograph`; at `Exit` one call
+spawns P from the applier copy; a spawn failure journals `Failed`.
+**Tests red on BASE.** `quit_cancel_or_failed_save_prevents_swap`;
+`session_receipt_matches_the_final_snapshot`;
+`close_during_each_phase_preserves_recovery`;
+`no_launch_is_admitted_after_the_photograph`.
+**Docs in the same commit.** `DESIGN.md` entry; `RULES.md` §43 names the new
+reason.
+**Architecture impact.** (a) the quit transaction, owner `quit::Quit`, and the
+session document; (b) `quiet_command_named`, detached (new §2.2 row); (c) none;
+(c′) a new trigger of the quit (the update); readers that assumed only a person
+quits — `launch_wire::admit` and the restore card — are named and tested;
+(d) no.
+
+#### U-17 — The recovery entrances (M)
+**True on BASE.** Six argv doors; nothing recovers at start;
+`--uninstall-cleanup` has no RunOnce row.
+**Goal.** The `--update-recover <journal>` door; the startup pass in `fn main`
+(R.3); `bt_platform::logon_hook` (set and remove the `!`-prefixed value); the
+per-copy `--uninstall-cleanup` row; E4.
+**Tests red on BASE.** `a_journal_found_at_start_is_decided_from_disk`;
+`the_cleanup_door_removes_this_copys_recovery_value_and_a_dead_one_only`;
+`startup_with_no_journal_costs_one_stat`.
+**Docs in the same commit.** `ARCHITECTURE.md` §2.1 and §6 tables;
+`RULES.md` §41's list of marks; `docs/install.md` cleanup list; `DESIGN.md`
+entry.
+**Architecture impact.** (a) the transaction; (b) new door `logon_hook`, new
+argv door; (c) none; (c′) a new actor advancing the transaction at start;
+(d) no.
+
+#### U-18 — The Windows flip, health and rollback (M)
+**True on BASE.** U-17's entrances with no flip.
+**Goal.** `--update-apply`: wait for O (E3's exclusive open and the claim probe),
+write the logon hook, flip per C4 through `bt_platform::install_flip`, launch N
+with `--update-health`, wait 90 s, delete the recorded backups at `Healthy` or
+roll back; N acknowledges after `adopt_claim` (U-5), the schema check and the
+first pane text.
+**Tests red on BASE.** §F's Health group;
+`a_manual_launch_of_the_new_build_satisfies_health`;
+`await_timeout_never_hands_over_or_starts_a_nonwriter`;
+`locked_backup_blocks_reuse`.
+**Docs in the same commit.** `ARCHITECTURE.md` §6 (`install_flip`); `DESIGN.md`
+entry.
+**Architecture impact.** (a) the transaction; the installed file set, a new fact
+owned by `install_flip`; (b) new door `install_flip`; (c) none; (c′) a new
+writer of the installed files; readers: the sparse package and the classic verb,
+which name the folder and are unchanged by an in-place flip — the brief states
+it; (d) no.
+
+#### U-19 — The sparse package after an update (S)
+**True on BASE.** `msix::registered()` returns no version.
+**Goal.** R-20: expose the registered version; after `Healthy`, on the
+registration worker, re-register when the registered version is older than the
+manifest's four-part one; a failure shows on the Explorer row and is never
+reported as "nothing changed".
+**Tests red on BASE.** `an_older_registration_is_renewed_only_after_health`;
+`a_rollback_never_touches_the_registration`.
+**Docs in the same commit.** `RELEASING.md` "The sparse MSIX package" notes the
+renewal.
+**Architecture impact.** (a) the Explorer registration (fact 10); (b) the
+existing registration worker; (c) touches D-52's fact 10 — noted, not widened;
+(c′) a new trigger (health) of registration; reader: the Explorer row; (d) no.
+
+#### U-20 — macOS Prepare (M)
+**True on BASE.** U-13's driver returns `Unsupported` on macOS.
+**Goal.** C7 steps 1–3 on K; translocated or unwritable → `NotWritable`;
+journal `Prepared`.
+**Tests red on BASE.** `renamed_bundle_updates_only_itself`;
+`a_translocated_bundle_is_not_writable`; quarantine preserved end to end (§H).
+**Docs in the same commit.** `DESIGN.md` entry.
+**Architecture impact.** (a) the transaction; (b) as U-12, plus
+`https_download`; (c) as U-15; (c′) none; (d) no.
+
+#### U-21 — The macOS swap, health and rollback (M)
+**True on BASE.** U-20 stops at `Prepared`.
+**Goal.** `--update-apply` on macOS: `RENAME_SWAP`, health, swap back on
+failure, delete the old bundle at `Healthy`; the LaunchAgent hook only if Q5
+says so.
+**Tests red on BASE.** `a_failed_health_swaps_back`;
+`swap_leaves_no_instant_without_a_bundle` (E5 and §H's running-bundle swap).
+**Docs in the same commit.** `DESIGN.md` entry; `packaging/macos/README.md`.
+**Architecture impact.** (a) the installed bundle (owner `install_flip`); (b)
+`install_flip`; (c) none; (c′) a new writer of the installed bundle; (d) no.
+
+#### U-22 — Enable on Windows (S)
+**True on BASE.** Everything above merged; offers gated off.
+**Goal.** Run the new `clean-vm.md` §4.4 on Windows 10 and 11 with a signed
+0.4.6 candidate and an injected successor; then turn the Windows gate on.
+**Tests.** The §4.4 checklist as recorded evidence; `the_windows_gate_is_on`.
+**Docs in the same commit.** `PRIVACY.md` (the press, the two files, the asset
+host); the `update.rs` module doc per §A's table; `DESIGN.md` successor to
+§7.52; `RULES.md` §36 folded; the macOS plan's §M4 note; CHANGELOG *Added*:
+"Folio can update itself when you press Update."
+**Architecture impact.** (a)–(d) none new.
+
+#### U-23 — Enable on macOS (S)
+As U-22, for macOS, after U-21, with a notarized successor on the Mac mini.
+
+### R.7 Open questions for the owner
+
+1. **winget:** tell a winget copy by winget's own uninstall record naming this folder (U-4), or treat it as ours and let it update itself?
+2. **Installer:** 0.4.6 ships no Windows installer (zip, scoop and winget stay the routes; the Apps entry and removal of shipped files stay deferred) — agreed?
+3. **Managed copies:** only the gear dot and a row showing the manager's command (recommended), or the update card as well?
+4. **Capability:** "the running build is signed" decides whether it may update itself (a signed candidate would then update to the next public release) — agreed, or keep a build flag?
+5. **macOS double fault:** accept that a power cut inside the 90 s health window plus a new build that cannot start means reinstalling from the DMG, or add a LaunchAgent recovery hook (one more mark outside the bundle, with its cleanup row)?
