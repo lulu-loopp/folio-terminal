@@ -28,6 +28,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Changed
 
 - The download notice uses the same padding, shadow, corners and text sizing as other dialogs and floating notices.
+- Right-click and drop-down menus use the same icon-to-label spacing as Settings.
 - The first-run card uses the same window-edge spacing and title line height as other dialogs.
 - Command palette rows use the same corners and icon spacing as other lists.
 - Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.

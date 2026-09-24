@@ -15,7 +15,7 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 - **Platform:** every deviation is in code shared by the Windows and macOS builds, so every row applies to **both**.
 - **Rulings of 2026-09-22 folded in:** the icon-to-label gap is 8 everywhere (G1–G3); every head title is 11 (T1). The terminal pane's resting radius (0) and the two boolean controls (combo in Settings, switch on the first-run card) are rules as they stand and produce no rows.
 
-**Totals: 15 deviations, touching 22 constants.** A 0 · B 3 · C 5 · D 7.
+**Totals: 14 deviations, touching 21 constants.** A 0 · B 2 · C 5 · D 7.
 
 ---
 
@@ -28,7 +28,6 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 
 | # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
 |---|---|---|---|---|---|---|
-| 15 | G2 | Icon-to-label gap in every menu `profiles.rs` builds | `profiles.rs::ITEM_GAP_LOGICAL_PX` | 10 | 8 | Same ruling. Every right-click and `⌄` menu's text moves 2 pt toward its icon; `settings.rs::ITEM_GAP_LOGICAL_PX` is already 8. |
 | 20 | T9 | Search capsule field text | `search.rs::FIELD_FONT_LOGICAL_PX` | 12 | 13 | Field (`settings.rs::FIELD_FONT_LOGICAL_PX`). |
 | 21 | H6 | Video bar | `video_seat.rs::VIDEO_BAR_HEIGHT_LOGICAL_PX` | 34 | 30 | Strip (`theme.rs::SEAT_TITLE_BAR_LOGICAL_PX`, `notice.rs::BAR_HEIGHT_LOGICAL_PX`, `seats.rs::FILES_SEG_BAR_LOGICAL_PX`). |
 
@@ -66,7 +65,7 @@ Each group is one ticket. A row whose constants live in several files is split a
 - **Git panel + graph** (`git_panel.rs`, `git_graph.rs`): class-A members fixed in ticket 18; remaining members fixed in ticket 25 (listed below).
 - **Web sheet** (`websheet.rs`): S2, E2, R2 and the web-sheet members of T5, R8, T10 fixed in ticket 30. No web-sheet members remain open.
 - **Pane head, files column, float window** (`seats.rs`, `theme.rs`, `float.rs`): class-A members fixed in ticket 19; H5, S5, F1, C1, R12 and the group members of G1, G3, T5 and I2 fixed in ticket 26 (listed below).
-- **Menus** (`profiles.rs`): G2; T7's `profiles.rs` members.
+- **Menus** (`profiles.rs`): T7 fixed in ticket 22; G2 fixed in ticket 29. No menu members remain open.
 - **Palette** (`palette.rs`): T3/T4 fixed in ticket 20; R3 and the palette members of G3 fixed in ticket 27. No palette members remain open.
 - **Everything else** (`notice.rs`, `toast.rs`, `search.rs`, `video_seat.rs`, `peek_strip.rs`, `restore.rs`, and the members of the rows above that no group names): T9, H6, S7, S6, R6, R7, R8, R10, H7; the leftover members of I2, T5, T6 and S8.
 
@@ -120,6 +119,10 @@ Each group is one ticket. A row whose constants live in several files is split a
 
 - Row 23 / S3: `first_run.rs::SURFACE_MARGIN_LOGICAL_PX` fixed at 24; row closed.
 - Row 33 / T8: `first_run.rs::TITLE_LINE_LOGICAL_PX` fixed at 18; row closed.
+
+## Fixed in ticket 29
+
+- Row 15 / G2: `profiles.rs::ITEM_GAP_LOGICAL_PX` fixed at 8; row closed.
 
 ## Fixed in ticket 30
 
