@@ -2314,7 +2314,10 @@ mod tests {
         let (frame, line_height, _) = super::place(tick, &[200.0], WINDOW, SCALE, peek).unwrap();
         assert_eq!(frame[2], tick[0] - 12.0, "twelve pixels off the tick");
         assert_eq!(frame[1], tick[1] - 8.0, "eight pixels above it");
-        assert_eq!(line_height, (PEEK_FONT_LOGICAL_PX * CHROME_LINE_HEIGHT).round());
+        assert_eq!(
+            line_height,
+            (PEEK_FONT_LOGICAL_PX * CHROME_LINE_HEIGHT).round()
+        );
         assert_eq!(
             frame[3] - frame[1],
             (line_height + 2.0 * (5.0 + 1.0)).round()
