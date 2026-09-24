@@ -105,17 +105,17 @@ ledger's.
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
 | D-6 | cross-crate chains are visible nowhere | K-10 · C-4 | through D-48…D-50 | 0.4.7 | open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff` |
 | D-7 | source-reading guards are the architecture document; their rules owe prose | K-14 · C-4 | with D-28 | 0.4.6 — with D-28: the guards' prose is written when the migration list reaches zero | open |
-| D-8 | the asking/telling family has no taxonomy | K-3 · C-4 | none yet | 0.4.6 — the owner rules the table first | open |
+| D-8 | the asking/telling family has no taxonomy | K-3 · C-4 | the census note's ticket D, after the ruling | 0.4.6 — the owner rules the table first | open — 28 surfaces inventoried and seven kinds proposed for the ruling in `docs/plans/design/ownership-census-2026-09-25.md` §3–§4 (2026-09-25) |
 | D-9 | configuration entrances: the fourth row | K-4 · C-4 | none yet | 0.4.7 — the fourth entrance's design, the tool face; the entrance itself arrives with 0.5's outward interface | open — §9 table written; export ruled not an entrance on `5f433943` |
 | D-10 | diagnostics have plumbing but no event model | K-5 · C-4 | none yet | 0.4.6 — the operation vocabulary; its event carrier waits for a subscriber | open |
-| D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | none yet | 0.4.6, with D-32 | open |
+| D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | the census note's ticket A | 0.4.6, with D-32 | open — census taken at `f7826bd4` (`docs/plans/design/ownership-census-2026-09-25.md` §2 and its TSV: 170 multi-writer facts); the query that regenerates it is ticket A |
 | D-12 | `bt-platform` is a drawer | K-11 | none yet | 0.4.7 — the first extraction, after the `bt-app` move ends with D-32 in 0.4.6 | open |
 | D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | 0.4.6 | open |
 | D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | none yet | 0.4.6 | open |
 | D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27 | 0.4.7 — the first slice, ahead of the 0.5 composition layer | open (recorded debt) |
 | D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | none yet | 0.4.7 | open — rule stated |
 | D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.4.7 — the first slice, with D-1's first slice | open |
-| D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | none yet | 0.4.6 — D-29…D-32 need a true census | open |
+| D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | the census note's ticket A | 0.4.6 — D-29…D-32 need a true census | open |
 | D-19 | MIGRATION-DEBT class P0 — the documentation generators (3 rows) | `docs/plans/MIGRATION-DEBT.tsv`; split prep §6 | P0 | 0.4.6 | open |
 | D-20 | MIGRATION-DEBT class P10 — the portable-core walk (1 row) | same | P10 | 0.4.6 | open |
 | D-21 | MIGRATION-DEBT class P12 — `bt-platform`'s walkers and the `stand_in` guard (5 rows) | same | P12 | 0.4.6 | open |
@@ -129,7 +129,7 @@ ledger's.
 | D-29 | the unmoved topic `launch` (4 methods) | split prep Appendix C | none yet | 0.4.6 | open |
 | D-30 | the unmoved topic `settings` (31 methods) | split prep Appendix C | none yet | 0.4.6 | open |
 | D-31 | the unmoved topic `focus` (51 methods) | split prep Appendix C | none yet | 0.4.6 | open |
-| D-32 | the unassigned `Runtime` methods still in `main.rs` (112 at the move, 115 today) | split prep §7.1, Appendix C | none yet | 0.4.6 | open |
+| D-32 | the unassigned `Runtime` methods still in `main.rs` (112 at the move, 115 today) | split prep §7.1, Appendix C | the census note's ticket G (the 35 the census places) | 0.4.6 | open |
 | D-33 | the lane contract as one shape, wrapping the existing lanes | §5.4 step 1, §5.1 | none yet | 0.4.5 — the presentation lane (D-41) is its second client | open — first instance, `handoff_lane`, on `2657e5e3`; the font lane (`settings::MonospaceFamilySlot`) numbers its requests since ticket 50, in its own slot and not yet through the shared shape |
 | D-34 | §5.3 row 2 — the marks lock's install half on the window thread | §5.3 | none yet | 0.4.6 | open — the wait behind our own writer repaid on `fbfab1ff` |
 | D-35 | §5.3 row 3 — `psreadline::apply_recorded`, nine files under the lock | §5.3 | none yet | 0.4.6 | open |
@@ -145,7 +145,7 @@ ledger's.
 | D-45 | §5.3 row 13 — `sample_window_place` resampled at three sites for one instant | §5.3 | 48 | 0.4.5 — one site is `drain_pty` | repaid (ticket 48) |
 | D-46 | §5.3 row 14 — `Window::set_title` at five sites with no throttle | §5.3 | 49 | 0.4.5 — one site is `drain_pty` | repaid (ticket 49) |
 | D-47 | §5.3 row 20 — renames, the preserving save and store writes on the window thread | §5.3 | none yet | 0.4.6 | open |
-| D-48 | §7.2 chain stub — attention ingress | §7.2 | none yet | 0.4.6, with D-57 | open |
+| D-48 | §7.2 chain stub — attention ingress | §7.2 | the census note's ticket C | 0.4.6, with D-57 | open |
 | D-49 | §7.2 chain stub — resize | §7.2 | none yet | 0.4.7 | open |
 | D-50 | §7.2 chain stub — paste convergence | §7.2 | none yet | 0.4.6 — tickets 02 and 03 have just walked it | open |
 | D-51 | §4.2 class — observations of external state (survey facts 1, 5, 6, 7, 12) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
@@ -154,7 +154,7 @@ ledger's.
 | D-54 | §4.2 class — identity, admission and lifecycle (facts 2, 3, 14, 20) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
 | D-55 | §4.2 class — projections, delivery and loss (facts 15, 16, 17, 18, 21) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
 | D-56 | §11 emergency termination — a journal and a defined recoverable revision | §11 | none yet | 0.4.7 | open |
-| D-57 | §12.1 — `bt-workbench` is born | §12.1 | none yet | 0.4.6 | open |
+| D-57 | §12.1 — `bt-workbench` is born | §12.1 | the census note's tickets B and C | 0.4.6 | open — day-one contents, order, public surface and guard entry in `docs/plans/design/ownership-census-2026-09-25.md` §5 (2026-09-25) |
 | D-58 | `profile_runtime`'s two tests failing `WouldBlock` on a slow CI disk | `docs/DESIGN.md`, 2026-09-23 | 34 | — | repaid on `fbfab1ff` |
 | D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open — ticket 37 added a CI-runnable mixed-size stress (`mixed_size_seats_share_the_atlas_and_get_their_text_back`, WARP, texture ceiling 512) and no ignore; the soaks were not extended |
 | D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | 0.4.6 | open |
