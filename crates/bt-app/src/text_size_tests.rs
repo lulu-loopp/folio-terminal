@@ -1194,11 +1194,16 @@ fn the_text_size_rows_are_in_force_only_while_a_shell_holds_the_keyboard() {
     );
 }
 
-/// NEW (37) — **the pane head wears the percentage while a terminal pane is not at 100 %, the
-/// title starts after it, and the box the hit test answers is the box the painter drew.**
+/// NEW (37; owner ruling 2026-09-24) — **a head wears the percentage beside its top-right
+/// controls, to the left of the `⌄`, while a terminal pane is not at 100 %; the title stops
+/// before it.**
 ///
-/// MUTATION: derive the title's left edge from the zoom mark alone — the name is printed through
-/// the mark.
+/// One placement rule for the titled head and the headless corner (the next test), so this
+/// asserts the rule's own terms: the mark ends where the `⌄` begins, shares its top and height,
+/// and neither the name nor a leading control runs into it.
+///
+/// MUTATION: place the mark after the leading run again (the 0.4.5 draft's slot) — it no longer
+/// ends at the `⌄`.
 #[test]
 fn the_pane_head_wears_the_text_size_while_it_is_not_100() {
     let rect = [0.0, 0.0, 900.0, 600.0];
@@ -1208,14 +1213,25 @@ fn the_pane_head_wears_the_text_size_while_it_is_not_100() {
             let marked = seats::pane_head_geometry(rect, SeatKind::Terminal, zoomed, true, scale);
             assert_eq!(bare.text_size, None, "nothing at 100 %");
             let mark = marked.text_size.expect("a 900px head seats the mark");
-            let lead = marked.zoom_mark.map_or(marked.mark[2], |zoom| zoom[2]);
-            assert!(mark[0] > lead, "after the leading run");
-            assert!(marked.title[0] > mark[2], "the name starts after the mark");
-            assert!(
-                mark[2] <= marked.control_limit,
-                "and it stops at the controls"
+            let chevron = marked.chevron.expect("and its `⌄`");
+            assert_eq!(mark[2], chevron[0], "it ends where the `⌄` begins");
+            assert_eq!(
+                (mark[1], mark[3]),
+                (chevron[1], chevron[3]),
+                "in the run's rhythm"
             );
-            assert_eq!(bare.close, marked.close, "the trailing run does not move");
+            assert!(marked.title[2] < mark[0], "the name stops before it");
+            assert!(
+                marked.control_limit < mark[0],
+                "and so do the leading controls"
+            );
+            let lead = marked.zoom_mark.map_or(marked.mark[2], |zoom| zoom[2]);
+            assert!(mark[0] > lead, "clear of the leading run");
+            assert_eq!(
+                bare.chevron, marked.chevron,
+                "the trailing run does not move"
+            );
+            assert_eq!(bare.close, marked.close);
         }
     }
     assert_eq!(
@@ -1228,6 +1244,61 @@ fn the_pane_head_wears_the_text_size_while_it_is_not_100() {
         seats::pane_head_geometry(narrow, SeatKind::Terminal, false, true, 1.0).text_size,
         None,
         "no room, no mark"
+    );
+}
+
+/// RED (37b) — **an untitled pane at 125 % lays the indicator left of its `⌄` box, and at
+/// 100 % lays nothing** (owner ruling 2026-09-24).
+///
+/// A lone terminal wears no head, so it has no title to stand beside; it has its corner's
+/// `⌄ 🗀` on every frame, and the mark stands left of that `⌄` by the same rule a head uses
+/// (`seats::text_size_mark_beside`). Asked through `seats::pane_text_size_box`, the one box the
+/// painter, the hit test and the tip all read, on a real lone-terminal layout; the hit test is
+/// asked at the mark's centre and answers the reset target.
+///
+/// MUTATION: drop the untitled arm of `pane_text_size_box` (answer `None` for a pane that wears
+/// no head) — the 125 % pane lays nothing.
+#[test]
+fn an_untitled_pane_lays_its_text_size_left_of_its_chevron() {
+    let lone = seats::Seats::lone_terminal();
+    let seat = lone.identity();
+    let (layout, _) = cross_solve(&lone);
+    assert!(
+        !lone.seat_wears_head(SeatKind::Terminal),
+        "a lone terminal has no head"
+    );
+    let at_125 = std::collections::BTreeMap::from([(seat, 125_u16)]);
+    let at_100 = std::collections::BTreeMap::new();
+    for scale in [1.0_f32, 2.0] {
+        let mark = seats::pane_text_size_box(&lone, &layout, seat, &at_125, scale, None)
+            .expect("a 125 % lone pane lays the indicator");
+        let rect = seats::full_pane_rect(&layout, seat).expect("the pane is on the stage");
+        let chevron = seats::pane_ghost_geometry(rect, scale).expect("the corner's `⌄`");
+        assert_eq!(mark[2], chevron[0], "left of the `⌄`, touching it");
+        assert_eq!((mark[1], mark[3]), (chevron[1], chevron[3]));
+        assert_eq!(
+            seats::hit_text_size(
+                &lone,
+                &layout,
+                &at_125,
+                scale,
+                None,
+                f64::from((mark[0] + mark[2]) / 2.0),
+                f64::from((mark[1] + mark[3]) / 2.0),
+            ),
+            Some(seats::ChromeTarget::PaneTextSize(seat)),
+            "and a click there is the reset"
+        );
+        assert_eq!(
+            seats::pane_text_size_box(&lone, &layout, seat, &at_100, scale, None),
+            None,
+            "at 100 % nothing is laid"
+        );
+    }
+    assert_eq!(
+        seats::pane_text_size_box(&lone, &layout, seat, &at_125, 1.0, Some(seat)),
+        None,
+        "a corner the search capsule has taken carries no mark"
     );
 }
 

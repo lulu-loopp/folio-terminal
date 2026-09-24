@@ -212,6 +212,7 @@ impl Runtime<'_> {
                     *seat,
                     &text_sizes,
                     scale,
+                    capsule,
                 ) else {
                     continue;
                 };

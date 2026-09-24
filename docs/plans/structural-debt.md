@@ -478,7 +478,7 @@ table; these rows only record what exists).**
 
 | added | message kind | urgency | modality | surface | where the surface is absent |
 |---|---|---|---|---|---|
-| 2026-09-24, ticket 37 | persistent pane state — a terminal pane's text size while it is not 100 % | non-urgent | non-modal | the existing pane-head control (a slot of `seats::PaneHeadGeometry`); a click resets it | open (owner) — a lone terminal and a narrow head wear no head |
+| 2026-09-24, ticket 37 | persistent pane state — a terminal pane's text size while it is not 100 % | non-urgent | non-modal | the existing top-right controls: left of the pane's `⌄` (`seats::text_size_mark_beside`); a click resets it | ruled 2026-09-24 (owner): the same rule in a headless pane's corner, left of its `⌄`; no room, no mark |
 
 **Ledger.** source: K-3 · C-4 · ticket: none yet · version: 0.4.6 — the owner rules the table first · status: open.
 

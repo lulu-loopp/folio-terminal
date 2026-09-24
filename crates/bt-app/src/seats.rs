@@ -7091,6 +7091,34 @@ pub fn pane_ghost_folder_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]
     pane_ghost_door_geometry(rect, scale, crate::icons::ActionIcon::OpenFilesPane)
 }
 
+/// **Where a terminal pane's text-size mark stands: beside its top-right controls, to their
+/// left** (ticket 37; owner ruling 2026-09-24).
+///
+/// One rule for a pane with a head and a pane without one, because the controls it stands
+/// beside are on every terminal pane — the head's run (`⌄ 🗀 ×`) or the headless pane's corner
+/// (`⌄ 🗀`) — while a head's title is not. `chevron` is the run's first box, the `⌄`; the mark
+/// ends where it begins (the run's boxes abut, so the mark is one more slot in the same rhythm),
+/// shares its top and height, and is [`PANE_TEXT_SIZE_MARK_WIDTH_LOGICAL_PX`] wide. `None` when
+/// it would start left of `floor` — there is no room, and a mark over the pane's own leading
+/// furniture is worse than none.
+#[must_use]
+pub fn text_size_mark_beside(chevron: [f32; 4], floor: f32, scale: f32) -> Option<[f32; 4]> {
+    let right = chevron[0];
+    let left = right
+        - (PANE_TEXT_SIZE_MARK_WIDTH_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
+    (left >= floor).then_some([left, chevron[1], right, chevron[3]])
+}
+
+/// **A headless terminal pane's text-size mark** (ticket 37) — [`text_size_mark_beside`] asked
+/// of the corner's own `⌄` ([`pane_ghost_geometry`]): a lone terminal, a pane in focus mode, a
+/// pane whose head is not drawn. `None` when the corner has no `⌄` or no room left of it.
+#[must_use]
+pub fn pane_ghost_text_size_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+    text_size_mark_beside(pane_ghost_geometry(rect, scale)?, rect[0], scale)
+}
+
 /// The zoom state mark's own box, in physical pixels — 13 logical, the size the
 /// seat marks beside it are cut at.
 pub const PANE_ZOOM_MARK_LOGICAL_PX: f32 = 13.0;
@@ -7176,15 +7204,20 @@ pub struct PaneHeadGeometry {
     /// no mark, and the pane is still legibly zoomed from the fact that it is the
     /// only pane on the stage plus the menu row that says `Restore pane`.
     pub zoom_mark: Option<[f32; 4]>,
-    /// **The text-size mark's box** (ticket 37; owner ruling 2026-09-23, 2), or `None` on a head
-    /// whose pane is at 100 %, that is not a terminal's, or that has no room for it.
+    /// **The text-size mark's box** (ticket 37; owner rulings 2026-09-23, 2, and 2026-09-24),
+    /// or `None` on a head whose pane is at 100 %, that is not a terminal's, or that has no room
+    /// for it.
     ///
-    /// **The third slot of the leading run**, after [`Self::zoom_mark`] and on its rule: a slot
-    /// of this geometry, cut by the same derivation that places the title, so the name starts
-    /// after it whenever it is there (the 2026-09-20 invariant on [`Self::title`]). It stops at
-    /// [`Self::control_limit`] like every control in the leading run. It is set in chrome type at
-    /// window scale — never at the pane's own text size — and shows the pane's **requested**
-    /// percentage; a click on it is the `text-actual-size` verb.
+    /// **Beside the pane's top-right controls, to their left** — [`text_size_mark_beside`], the
+    /// one placement rule a head and a headless pane's corner ([`pane_ghost_text_size_geometry`])
+    /// both ask, because those controls are on every terminal pane and a head's title is not. It
+    /// ends where [`Self::chevron`] begins, in the run's own slot rhythm (the run's boxes abut),
+    /// and a head with no `⌄` has no room for it either. It is a slot of this geometry and the
+    /// head's other occupants give way to it: the name stops a gap short of it
+    /// ([`Self::title`]'s right edge), and so do the leading controls ([`Self::control_limit`]).
+    /// Unlike the run it rests visible, because it is state, not a verb waiting for a hover. It
+    /// is set in chrome type at window scale — never at the pane's own text size — and shows the
+    /// pane's **requested** percentage; a click on it is the `text-actual-size` verb.
     pub text_size: Option<[f32; 4]>,
     /// **The whole of the row after the leading mark**, less the head's own
     /// trailing padding — and *not* less the trailing run (user report,
@@ -7444,7 +7477,14 @@ pub fn pane_head_geometry(
     // that says what it is for. Cut before the zoom mark because the mark has to
     // stop at it: `control_limit` is a fact about the *trailing* run, and a
     // leading slot that moved it would be the two deciding each other.
-    let control_limit = match run_left {
+    // **The text-size mark, left of the `⌄`** (ticket 37) — [`text_size_mark_beside`], the rule
+    // a headless corner asks too. The kind's mark is the floor it may not cross.
+    let text_size = (text_size && kind == SeatKind::Terminal)
+        .then(|| {
+            text_size_mark_beside(chevron?, mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale, scale)
+        })
+        .flatten();
+    let control_limit = match text_size.map(|mark| mark[0]).or(run_left) {
         Some(left) => left - SEAT_TITLE_GAP_LOGICAL_PX * scale,
         None => title_right,
     }
@@ -7465,28 +7505,13 @@ pub fn pane_head_geometry(
             (right <= control_limit).then_some([left, top, right, top + size])
         })
         .flatten();
-    // **The third slot** (ticket 37) — see [`PaneHeadGeometry::text_size`]. After whichever of
-    // the two before it the run is wearing, a gap on, the trigger's own height, and never past
-    // `control_limit`.
-    let text_size = (text_size && kind == SeatKind::Terminal)
-        .then(|| {
-            let lead = zoom_mark.map_or(mark[2], |zoom| zoom[2]);
-            let left = (lead + SEAT_TITLE_GAP_LOGICAL_PX * scale).round();
-            let right = left
-                + (PANE_TEXT_SIZE_MARK_WIDTH_LOGICAL_PX * scale)
-                    .round()
-                    .max(1.0);
-            (right <= control_limit && trigger_top >= rect[1]).then_some([
-                left,
-                trigger_top,
-                right,
-                trigger_top + trigger_box,
-            ])
-        })
-        .flatten();
     // The name starts after the last slot the leading run is actually wearing —
-    // the kind's mark, the zoom mark, or the text-size mark.
-    let title_left = match text_size.or(zoom_mark) {
+    // the kind's mark, or the zoom mark when there is one — and stops a gap short of the
+    // text-size mark when the pane wears one (ticket 37).
+    let title_right = text_size.map_or(title_right, |size| {
+        (size[0] - SEAT_TITLE_GAP_LOGICAL_PX * scale).min(title_right)
+    });
+    let title_left = match zoom_mark {
         None => mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale,
         Some(slot) => (slot[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale)
             .round()
@@ -10710,6 +10735,40 @@ pub fn build_chrome_for_tabs(
                 if seats.seat_wears_ghost(placement.kind, placement.id, search_seat) =>
             {
                 let ghost_box = card_rect_of(placement.id, rect).unwrap_or(rect);
+                // **The text size, beside the corner's `⌄`** (ticket 37; owner ruling
+                // 2026-09-24) — the head's rule asked of the corner, and resting visible. It
+                // floats over the pane's own text, so it brings its own ground, as a lit door
+                // does.
+                if let (Some(box_), Some(percent)) = (
+                    pane_ghost_text_size_geometry(ghost_box, scale),
+                    text_sizes.get(&placement.id),
+                ) {
+                    pane_sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (PANE_GHOST_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                                as u32,
+                        },
+                        box_,
+                        palette.menu_surface,
+                    ));
+                    pane_labels.push(ChromeLabel {
+                        mono: false,
+                        text: crate::i18n::zoom_percent(f64::from(*percent) / 100.0),
+                        rect: box_,
+                        font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                        color: if pointer.hover == Some(ChromeTarget::PaneTextSize(placement.id)) {
+                            palette.accent
+                        } else {
+                            palette.pane_title
+                        },
+                        align_right: false,
+                        align_center: true,
+                        letter_spacing_em: 0.0,
+                        weight: ChromeLabelWeight::Regular,
+                        tabular_numerals: true,
+                        clip: None,
+                    });
+                }
                 if let Some(ghost) = pane_ghost_geometry(ghost_box, scale) {
                     // **One door, written once, drawn twice** (user proposal,
                     // Claude 认可 2026-08-25). The corner carries 🗀 and `⌄`
@@ -17029,10 +17088,13 @@ pub fn hit_files_root(
 }
 
 /// **One terminal pane's text-size mark, where the painter drew it** (ticket 37), or `None`
-/// when that pane wears no head, is at 100 %, or its head has no room for the mark.
+/// when that pane is at 100 % or has no room for the mark.
 ///
-/// The box [`pane_head_geometry`] cut for the painter, from the same posture — so the mark you
-/// can press, the mark whose tip is registered and the mark you can see are one box.
+/// Left of the pane's `⌄` whether the pane wears a head (its run) or not (its corner) —
+/// [`text_size_mark_beside`], asked through [`pane_head_geometry`] or
+/// [`pane_ghost_text_size_geometry`] from the same posture the painter used, so the mark you can
+/// press, the mark whose tip is registered and the mark you can see are one box. `capsule` is the
+/// pane the search capsule is standing on, whose corner it takes ([`Seats::seat_wears_ghost`]).
 #[must_use]
 pub fn pane_text_size_box(
     seats: &Seats,
@@ -17040,6 +17102,7 @@ pub fn pane_text_size_box(
     seat: SeatId,
     text_sizes: &BTreeMap<SeatId, u16>,
     scale: f32,
+    capsule: Option<SeatId>,
 ) -> Option<[f32; 4]> {
     if !text_sizes.contains_key(&seat) {
         return None;
@@ -17049,9 +17112,6 @@ pub fn pane_text_size_box(
             && placement.kind == SeatKind::Terminal
             && matches!(placement.presentation, Presentation::Full)
     })?;
-    if !seats.seat_wears_head(placement.kind) {
-        return None;
-    }
     let device = placement.device_rect?;
     let rect = [
         device.left as f32,
@@ -17059,14 +17119,20 @@ pub fn pane_text_size_box(
         device.right as f32,
         device.bottom as f32,
     ];
-    pane_head_geometry(
-        rect,
-        placement.kind,
-        layout.seat_is_on_stage(placement.id),
-        true,
-        scale,
-    )
-    .text_size
+    if seats.seat_wears_head(placement.kind) {
+        return pane_head_geometry(
+            rect,
+            placement.kind,
+            layout.seat_is_on_stage(placement.id),
+            true,
+            scale,
+        )
+        .text_size;
+    }
+    seats
+        .seat_wears_ghost(placement.kind, placement.id, capsule)
+        .then(|| pane_ghost_text_size_geometry(rect, scale))
+        .flatten()
 }
 
 /// **Which terminal pane's text-size mark the pointer is on** (ticket 37).
@@ -17079,12 +17145,13 @@ pub fn hit_text_size(
     layout: &SeatLayout,
     text_sizes: &BTreeMap<SeatId, u16>,
     scale: f32,
+    capsule: Option<SeatId>,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
     text_sizes.keys().copied().find_map(|seat| {
-        pane_text_size_box(seats, layout, seat, text_sizes, scale)
+        pane_text_size_box(seats, layout, seat, text_sizes, scale, capsule)
             .filter(|mark| contains(*mark, x, y))
             .map(|_| ChromeTarget::PaneTextSize(seat))
     })

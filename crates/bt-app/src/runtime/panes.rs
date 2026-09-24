@@ -3850,6 +3850,7 @@ impl Runtime<'_> {
                     &self.seat_layout,
                     &self.pane_text_sizes(),
                     scale,
+                    self.window.search.seat(),
                     position.x,
                     position.y,
                 )
