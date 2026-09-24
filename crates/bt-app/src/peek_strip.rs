@@ -133,16 +133,15 @@ pub const LEAF_BORDER_LOGICAL_PX: f32 = 1.0;
 pub const LEAF_PADDING_X_LOGICAL_PX: f32 = 5.0;
 /// `.mini-leaf { gap: 4px }` — between the mark and the name (1915).
 pub const LEAF_GAP_LOGICAL_PX: f32 = 4.0;
-/// `.mini-leaf { font-size: 10.5px }` (1919).
-pub const LEAF_FONT_LOGICAL_PX: f32 = 10.5;
-/// `.mini-leaf .ticon { font-size: 9px }` (1922) — the schematic's mark, smaller
-/// than the list's because it has a cell to fit inside rather than a line.
-pub const LEAF_MARK_LOGICAL_PX: f32 = 9.0;
+/// UI-SPEC.md T6: leaf text uses the 10px badge size.
+pub const LEAF_FONT_LOGICAL_PX: f32 = 10.0;
+/// UI-SPEC.md I2: leaf marks use the 10px caption slot.
+pub const LEAF_MARK_LOGICAL_PX: f32 = 10.0;
 
 /// `.peek-list { font-size: 11px }` (1897).
 pub const LIST_FONT_LOGICAL_PX: f32 = 11.0;
-/// `.peek-list .ticon { width: auto }` at the list's own 11px (1897, 1904).
-pub const LIST_MARK_LOGICAL_PX: f32 = 11.0;
+/// UI-SPEC.md I2: list marks use the 10px caption slot.
+pub const LIST_MARK_LOGICAL_PX: f32 = 10.0;
 /// `.peek-list > span { gap: 5px }` — inside one entry (1901).
 pub const LIST_ITEM_GAP_LOGICAL_PX: f32 = 5.0;
 /// The `3px` of `.peek-list { gap: 3px 10px }` — between wrapped lines (1895).
@@ -955,6 +954,39 @@ fn leaf_mark(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (31) — **The peek_strip values follow their UI roles.**
+    ///
+    /// These product constants differ from their role values on BASE.
+    /// MUTATION: restore LEAF_FONT_LOGICAL_PX to 10.5.
+    /// MUTATION: restore LEAF_MARK_LOGICAL_PX to 9.0.
+    /// MUTATION: restore LIST_MARK_LOGICAL_PX to 11.0.
+    #[test]
+    fn ui_spec_peek_strip_values_follow_the_rule() {
+        let rules = [
+            (
+                LEAF_FONT_LOGICAL_PX,
+                bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+                "LEAF_FONT_LOGICAL_PX: UI-SPEC.md T6 badge",
+            ),
+            (
+                LEAF_MARK_LOGICAL_PX,
+                10.0,
+                "LEAF_MARK_LOGICAL_PX: UI-SPEC.md I2 icons::MarkSlot caption",
+            ),
+            (
+                LIST_MARK_LOGICAL_PX,
+                10.0,
+                "LIST_MARK_LOGICAL_PX: UI-SPEC.md I2 icons::MarkSlot caption",
+            ),
+        ];
+        let failures: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, expected, _)| actual != expected)
+            .collect();
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
     use bt_layout::{Ratio, Seat, SeatId, SplitId};
 
     const SCALE: f32 = 1.0;
@@ -2241,7 +2273,7 @@ mod tests {
         assert_eq!(GRID_HEIGHT_LOGICAL_PX, 92.0);
         assert_eq!(GRID_GAP_LOGICAL_PX, 3.0);
         assert_eq!(LEAF_RADIUS_LOGICAL_PX, 4.0);
-        assert_eq!(LEAF_FONT_LOGICAL_PX, 10.5);
+        assert_eq!(LEAF_FONT_LOGICAL_PX, 10.0, "UI-SPEC.md T6");
         assert_eq!(LEAF_GAP_LOGICAL_PX, 4.0);
         // `.peek-list` (1894-1904)
         assert_eq!(LIST_FONT_LOGICAL_PX, 11.0);

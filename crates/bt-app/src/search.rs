@@ -110,9 +110,9 @@ pub const FIELD_WIDTH_LOGICAL_PX: f32 = 118.0;
 pub const FIELD_MIN_WIDTH_LOGICAL_PX: f32 = 36.0;
 /// `.srchbar input { padding: 4px }`.
 pub const FIELD_PADDING_LOGICAL_PX: f32 = 4.0;
-/// `.srchbar input { font: 12px/1.4 Consolas, monospace }` — **monospace, because what it takes is
+/// UI-SPEC.md T9: 13px field text — **monospace, because what it takes is
 /// terminal text** and a proportional face would make the query look unlike the thing it finds.
-pub const FIELD_FONT_LOGICAL_PX: f32 = 12.0;
+pub const FIELD_FONT_LOGICAL_PX: f32 = 13.0;
 /// `.sb-cnt { min-width: 36px }`.
 pub const COUNTER_MIN_WIDTH_LOGICAL_PX: f32 = 36.0;
 /// `.sb-cnt { padding: 0 5px }`.
@@ -127,8 +127,8 @@ pub const TOGGLE_MIN_WIDTH_LOGICAL_PX: f32 = 21.0;
 pub const TOGGLE_PADDING_X_LOGICAL_PX: f32 = 3.0;
 /// `.sb-tg { font: 11px/1 Consolas, monospace }`.
 pub const TOGGLE_FONT_LOGICAL_PX: f32 = 11.0;
-/// `.srchbar button { border-radius: 6px }`.
-pub const BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC.md R8: tool boxes use a 5px radius.
+pub const BUTTON_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.sb-nav, .sb-x { width: 22px; height: 22px }`.
 pub const BUTTON_BOX_LOGICAL_PX: f32 = 22.0;
 /// The `10×10` chevron and cross inside those boxes.
@@ -1845,6 +1845,33 @@ pub fn row_is_wholly_visible(top_subpixels: i64, height_subpixels: i64, pane_hei
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (31) — **The search values follow their UI roles.**
+    ///
+    /// These product constants differ from their role values on BASE.
+    /// MUTATION: restore FIELD_FONT_LOGICAL_PX to 12.0.
+    /// MUTATION: restore BUTTON_RADIUS_LOGICAL_PX to 6.0.
+    #[test]
+    fn ui_spec_search_values_follow_the_rule() {
+        let rules = [
+            (
+                FIELD_FONT_LOGICAL_PX,
+                13.0,
+                "FIELD_FONT_LOGICAL_PX: UI-SPEC.md T9 settings::FIELD_FONT_LOGICAL_PX",
+            ),
+            (
+                BUTTON_RADIUS_LOGICAL_PX,
+                crate::seats::PREVIEW_TOOL_RADIUS_LOGICAL_PX,
+                "BUTTON_RADIUS_LOGICAL_PX: UI-SPEC.md R8 tool box",
+            ),
+        ];
+        let failures: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, expected, _)| actual != expected)
+            .collect();
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
     use bt_doc::GridGeneration;
     use bt_transcript::{CapturedRow, TranscriptStore};
     use std::num::NonZeroUsize;
