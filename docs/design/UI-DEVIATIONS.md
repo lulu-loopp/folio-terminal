@@ -15,7 +15,7 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 - **Platform:** every deviation is in code shared by the Windows and macOS builds, so every row applies to **both**.
 - **Rulings of 2026-09-22 folded in:** the icon-to-label gap is 8 everywhere (G1–G3); every head title is 11 (T1). The terminal pane's resting radius (0) and the two boolean controls (combo in Settings, switch on the first-run card) are rules as they stand and produce no rows.
 
-**Totals: 35 deviations, touching 68 constants.** A 0 · B 11 · C 12 · D 12.
+**Totals: 33 deviations, touching 64 constants.** A 0 · B 11 · C 11 · D 11.
 
 ---
 
@@ -44,17 +44,16 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 
 | # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
 |---|---|---|---|---|---|---|
-| 25 | T5 | Other 11.5-pt captions: files `Files`/`Git` words, key caps, restore row path, no-preview card detail, web sheet detail, git empty line, graph tools | `seats.rs::FILES_SEG_FONT_LOGICAL_PX`, `settings.rs::CAP_FONT_LOGICAL_PX`, `restore.rs::ROW_CWD_FONT_LOGICAL_PX`, `seats.rs::PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX`, `websheet.rs::DETAIL_FONT_LOGICAL_PX`, `git_panel.rs::GIT_EMPTY_FONT_LOGICAL_PX`, `git_graph.rs::GRAPH_TOOL_FONT_LOGICAL_PX` | 11.5 | 11 | Caption (17 constants at 11). With T1, 11.5 leaves the product. |
+| 25 | T5 | Other 11.5-pt captions: files `Files`/`Git` words, restore row path, no-preview card detail, web sheet detail, git empty line, graph tools | `seats.rs::FILES_SEG_FONT_LOGICAL_PX`, `restore.rs::ROW_CWD_FONT_LOGICAL_PX`, `seats.rs::PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX`, `websheet.rs::DETAIL_FONT_LOGICAL_PX`, `git_panel.rs::GIT_EMPTY_FONT_LOGICAL_PX`, `git_graph.rs::GRAPH_TOOL_FONT_LOGICAL_PX` | 11.5 | 11 | Caption (17 constants at 11). With T1, 11.5 leaves the product. |
 | 26 | I2 | Icon sizes off the ladder | `git_panel.rs::GIT_ACT_GLYPH_LOGICAL_PX`, `peek_strip.rs::LIST_MARK_LOGICAL_PX`, `seats.rs::WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX`, `video_seat.rs::BAR_MARK_LOGICAL_PX`, `git_graph.rs::GRAPH_REF_TAG_MARK_LOGICAL_PX`, `peek_strip.rs::LEAF_MARK_LOGICAL_PX` | 11, 11, 12, 16, 9, 9 | 10, 10, 13, 14, 10, 10 | Nearest `icons.rs::MarkSlot` size (14 / 13 / 10). |
-| 27 | T6 | 10.5-pt badges, pills and hashes | `git_panel.rs::GIT_HASH_FONT_LOGICAL_PX`, `git_panel.rs::GIT_PILL_FONT_LOGICAL_PX`, `git_graph.rs::GRAPH_REF_FONT_LOGICAL_PX`, `settings.rs::PROFILE_BADGE_FONT_LOGICAL_PX`, `peek_strip.rs::LEAF_FONT_LOGICAL_PX` | 10.5 | 10 | Badge (`theme.rs::WINDOW_TAB_BADGE_FONT_LOGICAL_PX` and 5 more). |
+| 27 | T6 | 10.5-pt badges, pills and hashes | `git_panel.rs::GIT_HASH_FONT_LOGICAL_PX`, `git_panel.rs::GIT_PILL_FONT_LOGICAL_PX`, `git_graph.rs::GRAPH_REF_FONT_LOGICAL_PX`, `peek_strip.rs::LEAF_FONT_LOGICAL_PX` | 10.5 | 10 | Badge (`theme.rs::WINDOW_TAB_BADGE_FONT_LOGICAL_PX` and 5 more). |
 | 28 | G3 | Icon-to-label gap: pane head, palette dot, palette row, git graph row | `theme.rs::SEAT_TITLE_GAP_LOGICAL_PX`, `palette.rs::DOT_GAP_LOGICAL_PX`, `palette.rs::ROW_GAP_LOGICAL_PX`, `git_graph.rs::GRAPH_ROW_GAP_LOGICAL_PX` | 7, 7, 9, 9 | 8 | One icon-to-label gap everywhere (ruled 2026-09-22). 1 pt each; the pane head's is on every pane. |
-| 29 | S8 | Row text inset: git panel, git graph, restore list, settings nav | `git_panel.rs::GIT_ROW_PADDING_X_LOGICAL_PX`, `git_graph.rs::GRAPH_ROW_PADDING_X_LOGICAL_PX`, `restore.rs::ROW_PADDING_X_LOGICAL_PX`, `settings.rs::NAV_ITEM_PADDING_LEFT_LOGICAL_PX` | 7, 8, 8, 12 | 10 | `profiles.rs::ITEM_PADDING_X_LOGICAL_PX`, `settings.rs::ITEM_PADDING_X_LOGICAL_PX`, `palette.rs::ROW_PADDING_X_LOGICAL_PX`, `theme.rs::RAIL_TAB_PADDING_LEFT_LOGICAL_PX`. |
+| 29 | S8 | Row text inset: git panel, git graph, restore list | `git_panel.rs::GIT_ROW_PADDING_X_LOGICAL_PX`, `git_graph.rs::GRAPH_ROW_PADDING_X_LOGICAL_PX`, `restore.rs::ROW_PADDING_X_LOGICAL_PX` | 7, 8, 8 | 10 | `profiles.rs::ITEM_PADDING_X_LOGICAL_PX`, `settings.rs::ITEM_PADDING_X_LOGICAL_PX`, `palette.rs::ROW_PADDING_X_LOGICAL_PX`, `theme.rs::RAIL_TAB_PADDING_LEFT_LOGICAL_PX`. |
 | 30 | S5 | Float window head padding | `float.rs::FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX`, `float.rs::FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX` | 10 · 5 | 12 · 6 | Strip / pane head (`theme.rs::SEAT_TITLE_PADDING_LOGICAL_PX`, `SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX`). |
 | 31 | R3 | Command palette rows | `palette.rs::ROW_RADIUS_LOGICAL_PX` | 7 | 6 | List row. The `restore.rs` constant with the same name is 6. |
 | 32 | R4 | Git graph rows | `git_graph.rs::GRAPH_ROW_RADIUS_LOGICAL_PX` | 7 | 6 | List row. |
 | 33 | T8 | First-run title line box | `first_run.rs::TITLE_LINE_LOGICAL_PX` | 21 | 18 | The same 15-pt title sits on `restore.rs::TITLE_LINE_LOGICAL_PX` 18. |
 | 34 | F1 | Files-row keyboard focus ring | `seats.rs::FILES_ROW_FOCUS_RING_LOGICAL_PX` | 1.5 | 2 | `settings.rs::FOCUS_RING_WIDTH_LOGICAL_PX`, `first_run.rs::FOCUS_RING_WIDTH_LOGICAL_PX`. |
-| 36 | S10 | Settings content bottom padding | `settings.rs::CONTENT_PADDING_BOTTOM_LOGICAL_PX` | 18 | 16 | Dialog bottom. |
 | 37 | S7 | Video bar side padding | `video_seat.rs::BAR_PADDING_X_LOGICAL_PX` | 10 | 12 | Strip leading. |
 
 ## Class D: invisible (tidying only)
@@ -69,7 +68,6 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 | 43 | T10 | Float-tag line height | `websheet.rs::LINE_HEIGHT` | 1.5 | 1.4 | `CHROME_LINE_HEIGHT` in `toast.rs`, `tooltip.rs`, `peek_strip.rs`, `seats.rs`. Slight when text wraps. |
 | 44 | R6 | Notice verb button | `notice.rs::VERB_RADIUS_LOGICAL_PX` | 5 | 6 | Button. The `websheet.rs` constant with the same name is 6. |
 | 45 | R7 | Toast action button | `toast.rs::TOAST_ACTION_RADIUS_LOGICAL_PX` | 5 | 6 | Button. |
-| 46 | R9 | Settings row-menu act box (18 pt) | `settings.rs::MENU_ACT_RADIUS_LOGICAL_PX` | 4 | 5 | Tool box radius. |
 | 47 | R11 | Git badge | `git_panel.rs::GIT_BADGE_RADIUS_LOGICAL_PX` | 5 | 4 | Chip / badge. |
 | 48 | R12 | Web preview address field | `seats.rs::PREVIEW_ADDRESS_RADIUS_LOGICAL_PX` | 5 | 4 | 20-pt chip, like `seats.rs::PREVIEW_CRUMB_RADIUS_LOGICAL_PX`. |
 | 49 | C1 | Pane head `⌄` reveal opacity | `seats.rs::PANE_HEAD_TRIGGER_REVEAL` | 0.7 | 0.6 | Hover-revealed control (`seats.rs::TAB_FILES_TRIGGER_REVEAL`, `seats.rs::FILES_ROOT_CHEVRON_OPACITY`). |
@@ -81,7 +79,7 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 Each group is one ticket. A row whose constants live in several files is split across the groups that own them; the IDs below say which part.
 
 - **Float-tag family** (`tooltip.rs`, `file_peek.rs`, the drag ghost in `theme.rs`): E1, S1, R1 fixed in ticket 16; remaining members fixed in ticket 23 (listed below).
-- **Settings** (`settings.rs`): I1, T2, H1, S10, R9; the `settings.rs` members of T3 (row title), T4 (nav), T5, T6 and S8 (nav).
+- **Settings** (`settings.rs`): I1, T2, H1 and the Settings members of T3/T4 fixed in ticket 17; S10, R9 and the Settings members of T5/T6/S8 fixed in ticket 24. No Settings members remain open.
 - **First-run** (`first_run.rs`): H4, S3, T8.
 - **Git panel + graph** (`git_panel.rs`, `git_graph.rs`): H2, S4, R4, R5, R11; the git members of T3, T4, T5, T6, T7, I2, S8, R13; G1 `FILES_BADGE_GAP_LOGICAL_PX`; G3 `GRAPH_ROW_GAP_LOGICAL_PX`.
 - **Web sheet** (`websheet.rs`): S2, E2, R2; the `websheet.rs` members of T5, R8, T10.
@@ -96,3 +94,11 @@ Each group is one ticket. A row whose constants live in several files is split a
 - Row 28 / G3: `theme.rs::DRAG_GHOST_GAP_LOGICAL_PX` fixed at 8; other members remain open.
 - Row 35 / S9: `theme.rs::DRAG_GHOST_PADDING_X_LOGICAL_PX` fixed at 10; row closed.
 - Row 43 / T10: `tooltip.rs::PEEK_LINE_HEIGHT` fixed at 1.4; the web-sheet member remains open.
+
+## Fixed in ticket 24
+
+- Row 25 / T5: `settings.rs::CAP_FONT_LOGICAL_PX` fixed at 11; other members remain open.
+- Row 27 / T6: `settings.rs::PROFILE_BADGE_FONT_LOGICAL_PX` fixed at 10; other members remain open.
+- Row 29 / S8: `settings.rs::NAV_ITEM_PADDING_LEFT_LOGICAL_PX` fixed at 10; other members remain open.
+- Row 36 / S10: `settings.rs::CONTENT_PADDING_BOTTOM_LOGICAL_PX` fixed at 16; row closed.
+- Row 46 / R9: `settings.rs::MENU_ACT_RADIUS_LOGICAL_PX` fixed at 5; row closed.
