@@ -1913,6 +1913,11 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::ClockAdvancePreviewRefusal, || {
             self.advance_preview_refusal(now)
         })?;
+        // **The window's title, told to the OS once a turn at most** (ticket 49). After
+        // the drain and every clock above, because any of them can change which tab is
+        // active or what it is called; `want_title` only said so. A title held for
+        // its frame books its wake-up in the fold below.
+        self.flush_title(now);
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
@@ -1970,7 +1975,7 @@ impl Runtime<'_> {
         // printed the block is often not the one holding the keyboard. See
         // [`Self::live_stability_deadline`].
         let live_stability_deadline = self.live_stability_deadline();
-        const DEADLINE_OWNERS: [&str; 49] = [
+        const DEADLINE_OWNERS: [&str; 50] = [
             "startup poll",
             "IME cursor",
             "shell caret",
@@ -2020,6 +2025,7 @@ impl Runtime<'_> {
             "preview watch",
             "files watch",
             "refused frame",
+            "window title",
         ];
         let deadlines = [
             startup_deadline,
@@ -2266,6 +2272,10 @@ impl Runtime<'_> {
                 .owes_a_frame()
                 .then(|| self.next_animation_deadline())
                 .flatten(),
+            // **A title held for its frame** (ticket 49): the one wake-up that makes
+            // "the last title always reaches the OS" true on a window where nothing
+            // else is happening. Absent unless a title is being held.
+            self.window.title.deadline(),
         ];
         let wake = earliest_named_deadline(DEADLINE_OWNERS, deadlines);
         if self.app.trace_perf

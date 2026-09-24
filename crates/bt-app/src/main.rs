@@ -13642,6 +13642,10 @@ struct WindowRuntime {
     composing_in: Composing,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
+    /// **The title this window wants, and the one the OS was last given**
+    /// (ticket 49). Written by [`Runtime::want_title`], sent only by
+    /// [`Runtime::flush_title`]; see [`TitleSlot`].
+    title: TitleSlot,
     /// The tab-rename caret's line box in window pixels, as the strip last drew
     /// it — the one caret in this window whose geometry cannot be re-derived.
     ///
@@ -26039,79 +26043,83 @@ fn local_image_activation(
     }
 }
 
-#[derive(Debug, Default)]
-struct ImeCursorThrottle {
-    last_sent_at: Option<Instant>,
-    last_sent_area: Option<ImeCursorArea>,
-    pending: Option<ImeCursorArea>,
+/// **The caret area's throttle** — [`pace::LatestThrottle`] at
+/// [`IME_CURSOR_AREA_INTERVAL`].
+///
+/// The policy is the generic one's (ticket 49 extracted it from here so the
+/// window's title could share it); this type only fixes the interval, so the
+/// input method's cadence is said once.
+#[derive(Debug)]
+struct ImeCursorThrottle(pace::LatestThrottle<ImeCursorArea>);
+
+impl Default for ImeCursorThrottle {
+    fn default() -> Self {
+        Self(pace::LatestThrottle::new(IME_CURSOR_AREA_INTERVAL))
+    }
 }
 
-impl ImeCursorThrottle {
-    fn offer(&mut self, area: ImeCursorArea, now: Instant) -> Option<ImeCursorArea> {
-        if self.last_sent_area == Some(area) {
-            self.pending = None;
-            return None;
+impl std::ops::Deref for ImeCursorThrottle {
+    type Target = pace::LatestThrottle<ImeCursorArea>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ImeCursorThrottle {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+/// **The window's title as one fact** (ticket 49; `docs/ARCHITECTURE.md` §5.3
+/// row 14).
+///
+/// Before this, five roads each called `Window::set_title` with whatever the
+/// active tab was called, on every turn a shell renamed itself, with no
+/// comparison against what the OS already held — and on Windows that call is a
+/// message to the shell's taskbar that was measured waiting 486–2,206 ms. Now
+/// the roads say what they want ([`Self::want`]) and the turn asks, once, what
+/// is owed ([`Self::take_due`]). The policy is the caret area's
+/// ([`pace::LatestThrottle`]): a title equal to the one written is dropped, one
+/// offered a frame after the last write goes now, and one offered sooner is held
+/// with a deadline the turn wakes for.
+#[derive(Debug)]
+struct TitleSlot {
+    /// The newest title a road asked for and the turn has not yet offered.
+    wanted: Option<String>,
+    written: pace::LatestThrottle<String>,
+}
+
+impl Default for TitleSlot {
+    fn default() -> Self {
+        Self {
+            wanted: None,
+            written: pace::LatestThrottle::new(pace::DEFAULT_FRAME_INTERVAL),
         }
-        if self
-            .last_sent_at
-            .is_none_or(|last| now.saturating_duration_since(last) >= IME_CURSOR_AREA_INTERVAL)
-        {
-            self.mark_sent(area, now);
-            Some(area)
-        } else {
-            self.pending = Some(area);
-            None
+    }
+}
+
+impl TitleSlot {
+    /// The title this window wants now. Costs nothing but the string: the OS
+    /// hears about it from [`Self::take_due`].
+    fn want(&mut self, title: String) {
+        self.wanted = Some(title);
+    }
+
+    /// The title to write to the OS now, if any, at `interval` (the display
+    /// frame the window is on).
+    fn take_due(&mut self, interval: Duration, now: Instant) -> Option<String> {
+        self.written.set_interval(interval);
+        match self.wanted.take() {
+            Some(title) => self.written.offer(title, now),
+            None => self.written.flush_due(now),
         }
     }
 
-    fn flush_due(&mut self, now: Instant) -> Option<ImeCursorArea> {
-        let area = self.pending?;
-        if now < self.deadline()? {
-            return None;
-        }
-        self.mark_sent(area, now);
-        Some(area)
-    }
-
+    /// When a held title is owed to the OS; the turn's wake fold reads it.
     fn deadline(&self) -> Option<Instant> {
-        self.pending.and(
-            self.last_sent_at
-                .map(|last| last + IME_CURSOR_AREA_INTERVAL),
-        )
-    }
-
-    fn mark_sent(&mut self, area: ImeCursorArea, now: Instant) {
-        self.last_sent_at = Some(now);
-        self.last_sent_area = Some(area);
-        self.pending = None;
-    }
-
-    /// The rectangle the platform is currently working from, if it has been
-    /// told one at all.
-    fn last_sent(&self) -> Option<ImeCursorArea> {
-        self.last_sent_area
-    }
-
-    /// **Forget *what* the platform was last told without forgetting *when***
-    /// (user report 2026-09-14, `docs/DESIGN.md` §13.16 ⑥).
-    ///
-    /// [`Self::offer`] drops an area equal to the one already sent, and while a
-    /// caret sits still that is the whole of its work. A window that *moves*
-    /// keeps the very same window-relative rectangle and lands somewhere else on
-    /// the screen, so there the suppression is exactly backwards: the answer the
-    /// platform has cached is a **screen** rectangle, it is now stale, and
-    /// nothing else in this process is going to say so.
-    ///
-    /// Only the area is forgotten. [`Self::reset`] drops the clock with it,
-    /// which is right when a composition ends and wrong here: a drag emits a
-    /// move per frame, and re-arming must not turn one drag into a call per
-    /// move.
-    fn rearm(&mut self) {
-        self.last_sent_area = None;
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
+        self.written.deadline()
     }
 }
 
@@ -39569,6 +39577,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         composing_in: Composing::Idle,
         ime_active: false,
         ime_cursor_throttle: ImeCursorThrottle::default(),
+        title: TitleSlot::default(),
         rename_caret_line: None,
         cursor_blink: CursorBlink::new(Instant::now(), motion),
         // A window is focused when it opens, and `CursorBlink` starts from
@@ -47482,7 +47491,7 @@ impl Runtime<'_> {
         self.window.unpainted_pane_output |= active_finished_off_focus;
         self.panes_spoke(&spoke, now);
         if chrome_changed {
-            self.window.window.set_title(&self.display_title());
+            self.want_title();
             self.refresh_chrome();
         }
         if active_finished {

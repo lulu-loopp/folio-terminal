@@ -17445,6 +17445,149 @@ fn a_window_move_re_arms_the_caret_rectangle_without_dropping_the_clock() {
     );
 }
 
+// ── the window's title, once a frame at most (0.4.5 ticket 49) ────────────
+//
+// `Runtime` cannot be built without a window, so the policy is run on the real
+// `TitleSlot` the window keeps — the same `want` the five roads call and the same
+// `take_due` `Runtime::flush_title` spends — and the two facts about the runtime
+// that a slot cannot show are read through `bt_source`.
+
+/// The display frame the title tests are paced to: 60 Hz, as `FrameClock` is
+/// born with.
+const TITLE_FRAME: Duration = pace::DEFAULT_FRAME_INTERVAL;
+
+/// RED (49) — **A title that did not change is never written to the OS again.**
+///
+/// A shell that sets the title on every prompt (OSC 0/2) makes the drain say
+/// "the chrome changed" on every turn, and until ticket 49 every one of those
+/// turns called `Window::set_title` with the same string — a message to the
+/// taskbar measured waiting up to 2.2 s. A hundred turns a whole frame apart,
+/// each wanting the same title: one write.
+///
+/// MUTATION: write on every offer (drop the equality check in
+/// `pace::LatestThrottle::offer`) — a hundred writes.
+#[test]
+fn a_title_that_did_not_change_is_never_written_to_the_os_again() {
+    let start = Instant::now();
+    let mut slot = TitleSlot::default();
+    let mut writes = Vec::new();
+    for turn in 0..100_u32 {
+        slot.want("pwsh — ~/src".to_owned());
+        if let Some(title) = slot.take_due(TITLE_FRAME, start + TITLE_FRAME * turn) {
+            writes.push(title);
+        }
+    }
+    assert_eq!(writes, vec!["pwsh — ~/src".to_owned()]);
+    assert_eq!(
+        slot.deadline(),
+        None,
+        "nothing is held, so nothing wakes the loop"
+    );
+}
+
+/// RED (49) — **A title that changes every turn reaches the OS at most once per
+/// frame interval, and the last one always arrives.**
+///
+/// A program that animates its title changes it faster than any taskbar can
+/// show. Ten turns a quarter of a frame apart, each with a new title: the OS
+/// hears at most one per frame, and once the held title's deadline comes — the
+/// wake the turn folds in — it holds the tenth.
+///
+/// MUTATION: drop the pending value when the interval has not passed (no
+/// trailing write) in `pace::LatestThrottle::offer` — the OS is left holding
+/// the ninth.
+#[test]
+fn a_title_that_changes_every_turn_reaches_the_os_at_most_once_a_frame_and_the_last_one_arrives() {
+    let start = Instant::now();
+    let quarter = TITLE_FRAME / 4;
+    let mut slot = TitleSlot::default();
+    let mut os_holds: Option<String> = None;
+    let mut writes = 0_u32;
+    let mut now = start;
+    for turn in 0..10_u32 {
+        now = start + quarter * turn;
+        slot.want(format!("building {turn}/10"));
+        if let Some(title) = slot.take_due(TITLE_FRAME, now) {
+            writes += 1;
+            os_holds = Some(title);
+        }
+    }
+    // The turns after the last change want nothing new; the one the deadline
+    // books writes what was held.
+    let due = slot.deadline().expect("the tenth title is held and booked");
+    assert!(
+        due > now && due <= now + TITLE_FRAME,
+        "held for at most one frame"
+    );
+    assert_eq!(
+        slot.take_due(TITLE_FRAME, due - Duration::from_millis(1)),
+        None
+    );
+    if let Some(title) = slot.take_due(TITLE_FRAME, due) {
+        writes += 1;
+        os_holds = Some(title);
+    }
+    assert!(
+        writes <= 10_u32.div_ceil(4) + 1,
+        "{writes} writes for ten titles"
+    );
+    assert_eq!(os_holds.as_deref(), Some("building 9/10"));
+    assert_eq!(slot.deadline(), None);
+}
+
+/// RED (49) — **Only one function in bt-app calls Window::set_title.**
+///
+/// Five roads used to write the title straight to the OS — the drain, a tab
+/// switch, a finished rename, a released synchronized update and a window's
+/// birth — and a sixth written the same way would bring back the unthrottled
+/// write this ticket removed. Read through `bt_source`, product files only.
+///
+/// MUTATION: put a direct `self.window.window.set_title(&self.display_title())`
+/// back in `Runtime::activate_tab` — red.
+#[test]
+fn only_one_function_in_bt_app_calls_window_set_title() {
+    let calls =
+        found(needle!(Pattern::call("set_title")), View::Identifiers).in_the_product(source());
+    assert_eq!(
+        reader_names(&calls),
+        vec!["flush_title".to_owned()],
+        "{}",
+        calls.report(source())
+    );
+    assert_eq!(calls.len(), 1, "{}", calls.report(source()));
+    assert_eq!(calls.outside_items(source()), 0);
+}
+
+/// RED (49) — **A new window carries its title before its first frame.**
+///
+/// The throttle holds a title only against an earlier write, and a window being
+/// dressed has had none, so the one thing that could leave it untitled on the
+/// taskbar is a birth that only *says* what it wants and waits for a turn.
+/// `dress_new_window` wants and writes in the same call, before it returns to
+/// the door that shows the window. (The slot half — a first offer is written at
+/// once — is the last assertion.)
+///
+/// MUTATION: make `dress_new_window` only offer (drop its `flush_title` call) —
+/// red.
+#[test]
+fn a_new_window_carries_its_title_before_its_first_frame() {
+    let dress = method_body("Runtime", "dress_new_window");
+    let wanted = dress
+        .find("self.want_title();")
+        .expect("a window being dressed says which title it wants");
+    let written = dress
+        .find("self.flush_title(")
+        .expect("and writes it in the same call, with no turn run");
+    assert!(wanted < written, "wanted first, then written");
+    let mut slot = TitleSlot::default();
+    slot.want("Folio".to_owned());
+    assert_eq!(
+        slot.take_due(TITLE_FRAME, Instant::now()),
+        Some("Folio".to_owned()),
+        "a slot that has written nothing writes its first title at once"
+    );
+}
+
 #[test]
 fn startup_polls_pty_until_the_first_text_frame_is_presented() {
     assert_eq!(startup_poll_delay(false), Some(STARTUP_PTY_POLL_INTERVAL));

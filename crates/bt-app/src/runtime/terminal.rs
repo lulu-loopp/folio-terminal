@@ -1141,9 +1141,9 @@ impl Runtime<'_> {
             })?;
         }
         if chrome_changed {
-            hang_watch::during(hang_watch::Station::DrainTitle, || {
-                self.window.window.set_title(&self.display_title())
-            });
+            // Said, not written: the turn writes it once, after every pass that can
+            // change it (`Runtime::flush_title`, ticket 49).
+            self.want_title();
             self.refresh_chrome();
             if !active_changed {
                 self.present_chrome_change()?;

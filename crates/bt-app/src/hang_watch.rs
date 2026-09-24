@@ -793,7 +793,10 @@ pub enum Station {
     DrainAttention = 99,
     DrainRaiseAttention = 100,
     DrainGit = 101,
-    DrainTitle = 102,
+    /// `Window::set_title`, from `Runtime::flush_title` — the one write of the
+    /// window's title, once a turn at most (ticket 49; was `DrainTitle`, same id
+    /// and label, when the drain wrote it).
+    WindowTitle = 102,
     DrainBegin = 103,
     DrainWake = 104,
     DrainWatermark = 105,
@@ -995,7 +998,7 @@ impl Station {
             Self::DrainAttention => "deliver_osc_attention",
             Self::DrainRaiseAttention => "drain raise_attention",
             Self::DrainGit => "reread_git_surfaces",
-            Self::DrainTitle => "Window::set_title",
+            Self::WindowTitle => "Window::set_title",
             Self::DrainBegin => "begin_feed_turn",
             Self::DrainWake => "PTY wake accept",
             Self::DrainWatermark => "command_marks_watermark",
@@ -1210,7 +1213,7 @@ impl Station {
             99 => Self::DrainAttention,
             100 => Self::DrainRaiseAttention,
             101 => Self::DrainGit,
-            102 => Self::DrainTitle,
+            102 => Self::WindowTitle,
             103 => Self::DrainBegin,
             104 => Self::DrainWake,
             105 => Self::DrainWatermark,

@@ -610,9 +610,50 @@ impl Runtime<'_> {
         // window is on the glass, so no frame is ever drawn with the lights on
         // the wrong axis.
         self.follow_the_window_band()?;
-        self.window.window.set_title(&self.display_title());
+        // **Written at once, not on the first turn** (ticket 49): a window must not
+        // reach the taskbar untitled, and nothing has been sent yet, so the
+        // throttle has no interval to hold it for.
+        self.want_title();
+        self.flush_title(Instant::now());
         self.refresh_chrome();
         Ok(())
+    }
+
+    /// **Say which title this window wants** (ticket 49; `docs/ARCHITECTURE.md`
+    /// §5.3 row 14).
+    ///
+    /// The active tab's display title, handed to [`WindowRuntime::title`]. Every
+    /// road that can change it — output renaming a tab, a tab switch, a rename
+    /// finished, a held-back screen released, a window born — calls this and
+    /// nothing else; none of them tells the OS. [`Self::flush_title`] does, once
+    /// a turn.
+    pub(crate) fn want_title(&mut self) {
+        let title = self.display_title();
+        self.window.title.want(title);
+    }
+
+    /// **The one call to `Window::set_title` in this program** (ticket 49).
+    ///
+    /// The wanted title reaches the OS only when it differs from the one last
+    /// written, and at most once a display frame ([`crate::pace::FrameClock::interval`]);
+    /// a title held back is written when its deadline comes, which the turn
+    /// folds into its wake-up, so the last one always lands. The interval is the
+    /// frame's rather than "once per presented frame" because a minimised or
+    /// cloaked window presents nothing, and its taskbar button and Alt+Tab entry
+    /// still show the title.
+    ///
+    /// Stays on this thread (§5.2: window title is native affinity). What this
+    /// removes is the repetition; one write that a real change needs can still
+    /// wait on the shell, and the station says so when it does.
+    pub(crate) fn flush_title(&mut self, now: Instant) {
+        let interval = self.window.frame_clock.interval();
+        let Some(title) = self.window.title.take_due(interval, now) else {
+            return;
+        };
+        let window = &self.window.window;
+        hang_watch::during(hang_watch::Station::WindowTitle, || {
+            window.set_title(&title)
+        });
     }
 
     /// Put the window on the screen — the other half of
