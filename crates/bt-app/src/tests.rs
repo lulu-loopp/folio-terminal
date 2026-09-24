@@ -52489,8 +52489,10 @@ fn a_turn_walks_a_search_in_progress_and_wakes_for_it() {
 /// fades' own doors at the first instant of each fade: the arrival register
 /// (menus, the palette, the settings dialog, the notice strip, the Cards
 /// bubble), the hover fade the tip and the glance card both read, and a notice
-/// card's opacity and slide. The one steady translucency, the tear-out ghost's
-/// 0.7, is not a fade and is a surface in every motion mode.
+/// card's opacity and slide. The tear-out ghost's 0.7 is a standing
+/// translucency, not motion, so reduced motion (which is about motion) does not
+/// forbid the group path there: it is a group in every motion mode, by the
+/// coordinator's ruling of 2026-09-24, and not a hole in this pin.
 ///
 /// MUTATION: sample the curve under `Reduced` in `hover_fade_opacity` (or
 /// keep an entry in `Passages::stage` under `Reduced`) and a span below 1 is
