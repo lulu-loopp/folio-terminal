@@ -876,3 +876,454 @@ its own.
 5. **May a macOS directory watcher that will not stop be abandoned to process
    exit** after a retirement bound, as ruling Q4 allows for an unreturned present?
    Or must retirement always join?
+
+---
+
+## Revision 2026-09-25 (b), after the Codex review
+
+Codex reviewed revision (a) at `5a37ae75`: **adopt with changes**. The review is
+`docs/plans/design/window-thread-budget-review-codex-2026-09-25.md`, committed
+beside this note. Sections 0–7 above are kept as written. **Where this section
+differs from them, this section rules.** Each finding is taken in order. None is
+refuted outright. All are checked against the code and adopted, and two carry
+corrections in detail.
+
+**Citation fix the review asked for.** "The split-prep review's S-1 to S-3" is
+Codex's answer of 2026-09-21. It lives outside the repository, at
+`D:\Developer\trace\split-prep-review-codex-answer.md`, and revision 2 of the
+design it reviewed is `…\split-prep-design-rev2-2026-09-21.md` in the same folder.
+The repository holds the adopted form in `docs/plans/bt-app-split-prep.md`:
+§2.1 (four views, none of them a default: S-1), §3.1–§3.2 (a universe is
+declared, and a migrated walker ships a file-set diff: S-2) and §4.1–§4.2 (owners
+are executable, and mutation is the acceptance: S-3). This section cites those.
+
+### R1 — the guard checks spellings, not execution: **adopted**
+
+Checked in the code. `bt_source`'s `Pattern::{path, call, identifier, text}`
+(`crates/bt-source/src/query.rs`) matches token shapes inside one package's
+index. It does not resolve receiver types, trait dispatch or cross-crate call
+graphs, so `receiver.recv()` is not found by `Receiver::recv`, and all four of
+Codex's sequences get through Part A as specified.
+
+The promise is narrowed. We no longer claim that every wait is found. What we
+claim is: **every blocking effect passes through a checked door, and every door
+knows which thread may call it.** §R-A restates the mechanism. It differs from
+revision (a) in four ways:
+
+1. **The raw effects are refused by the compiler's type-resolved lint, not by
+   spelling.** `clippy.toml` gains `disallowed-methods` for the std primitives
+   and foreign APIs that wait. Clippy resolves `receiver.recv()` and
+   `File::sync_all` by type, and refuses a disallowed path taken as a value
+   (a function pointer) as well as a call. The workspace runs clippy with
+   `-D warnings` on every crate. So a blocking helper added to `bt-platform` is
+   refused too, which answers sequence 1.
+2. **A door is the only place allowed to say `#[expect(clippy::disallowed_methods)]`.**
+   The source guard no longer checks who calls the raw effect. It checks where
+   the `expect` attributes are: owner and count, per door, against the registry.
+   Moving `fs::rename` out of a spawned closure into the spawning function
+   (sequence 2) leaves the call outside any door, so clippy goes red.
+3. **The door carries its thread.** `bt_platform::spawn_at_priority` is already
+   the only named-thread door (§6), and it sets the band as the thread's first
+   statement. It also sets a thread-local **role**: `Worker(name)`. `fn main`
+   sets `Window` before the event loop exists. Door functions assert the role.
+   A worker-only door calls `thread_role::expect_worker()`; an owner-thread door
+   takes a `WaitToken`. This settles the other half of sequence 2, a second
+   window-thread caller of a worker body, and it holds under `dyn Trait` and
+   function pointers (sequence 4). A door checks who *runs* it, not who names it.
+   A wrong role is a `debug_assert!`, which fails the test that reaches it. In a
+   release build it adds to a counter the budget line prints. Panicking in
+   release would break the "no crash" hard requirement.
+4. **An admitted owner-thread call is tied to its measurement by type.** The
+   token is created only inside the measuring scope:
+
+   ```rust
+   hang_watch::admitted(Row::R20, Station::RenameDisk, |token| {
+       persist::rename_on_owner(token, from, to)
+   })
+   ```
+
+   `WaitToken<'scope>` is `!Send`, and its lifetime is invariant, the
+   `std::thread::scope` pattern, so it cannot escape the closure. The door
+   function requires it. `during(station, || ()); wait()` (sequence 3) does not
+   compile, because the door has no token to take.
+
+**Mutations the acceptance must run**, all of them, each red. Each is planted,
+run and reverted:
+
+- (M1) a new blocking helper in `bt-platform` (`std::fs::metadata`), called from
+  a `Runtime` method;
+- (M2) a wait moved out of a spawned closure into the function that spawns it;
+- (M3) a direct window-thread call added to an existing worker body;
+- (M4) `hang_watch::admitted(…, |_| ()); door(…)`, which must fail to compile.
+  The harness pins this with a `compile_fail` doctest, or with a UI test that
+  asserts the compile error;
+- (M5) a door reached through `Box<dyn Fn()>` and through an `fn` pointer;
+- (M6) `rx.recv()` in method syntax;
+- (M7) a door's `#[expect]` moved to a different owner, keeping the total;
+- (M8) a disallowed-methods entry deleted, which is refused by the registry
+  comparison of R7;
+- (M9) a registry line added without a ruling.
+
+**The honest limit, stated where it applies.** A third-party function that
+blocks internally and is not in `disallowed-methods` is invisible to every static
+check. The backstop is the whole-turn accounting of R3, which reports the turn as
+unexplained. It does not name the wait as external.
+
+### R2 — 16/8/4 ms is a target with no admission argument: **adopted**
+
+Checked in the code. `SEARCH_HISTORY_SLICE` is 4,096 *lines*, and ticket 51
+estimated its time from one machine. The drain's gate
+(`slices_taken < DRAIN_SLICES_PER_TURN && elapsed < DRAIN_TURN_BUDGET`) checks
+elapsed time *between* slices, so one slice can run past the limit. Revision (a)
+took the drain's "other half" as a fresh 8 ms allowance for waits; that half was
+headroom.
+
+A second correction: revision (a) put all of rows 15–19 under "stay" as on the
+way out. **Row 19 (`OutputRing::try_pop`, `InputRing::try_push`) runs inside
+ordinary turns**, in `drain_leaf_pty` and `offer_pty_input`. Row 19 becomes
+**bound**: one lock, never waited on by design.
+
+The contract is restated as two separate things in §R-A and §R-B.
+
+### R3 — B2 cannot make its backstop true: **adopted**
+
+Checked in the code:
+
+- `Heartbeat::close_hold` returns when `held_ms < slow_hold_threshold_ms()`,
+  before anything is kept.
+- It publishes with `self.slow.try_lock()` into a queue capped at
+  `SLOW_HOLDS_KEPT` = 32, and counts drops in `slow_dropped`.
+- `charge` adds exclusive milliseconds per station, so two 3 ms calls and one
+  6 ms call leave the same record.
+
+B2 is restated as §R-C.
+
+### R4 — the hand-off lane is not a fully conformant reference: **adopted**
+
+Checked in the code:
+
+- `HandoffLane::answers` returns `take(turned_away)` extended by
+  `self.answers.try_iter()`: refusals first, then completions. A disconnected
+  channel reads as empty.
+- `start` builds the answer channel as an unbounded `mpsc::channel`. Only the
+  request side is `sync_channel(CAPACITY)`.
+- `next` starts at 0 in `start`, and `mint` counts up from it.
+- `LANE_GONE` is answered only on `TrySendError::Disconnected`, for a new
+  submission. Accepted requests of a dead worker stay in the window's `Pending`
+  with no terminal outcome.
+
+B3 is restated as §R-D.
+
+### R5 — the D-41 paragraph can reject the lane on evidence of its benefit: **adopted**
+
+The paragraph failed in four ways:
+
+- its exclusions, and classifying by the longest station only;
+- the 68/161 ratio used as if it were a rate;
+- CPU and paging figures used as attribution;
+- a present-led hold that coincides with the machine-wide beat counted
+  *against* D-41, when that is exactly the case D-41 exists for (the reviewed
+  note's Q1: typing stays live, the picture freezes).
+
+§R-E replaces §4's paragraph.
+
+### R6 — four claims do not cover the declared contract: **adopted**
+
+§3's table had three instances wrong:
+
+- Font is `LatestValue` coalescing by rescan. It has no cancellation API.
+- The PSReadLine probe is `LatestValue`, not grouped with path verify's
+  `PerQuestion`.
+- Computation's "its queue" is an unbounded `mpsc::channel` in
+  `MathWorker::spawn`, not a bound.
+
+The corrected table and the added policy tests are in §R-D.
+
+### R7 — the registry and the prose can disagree while Part B passes: **adopted**
+
+**One registry is authoritative**: `crates/bt-app/src/window_waits.tsv`.
+
+- **§5.3's table is generated from it** by
+  `scripts/dev/generate-window-waits-table.ps1`, following the
+  `generate-shortcuts-table.ps1` pattern. CI regenerates it and compares the
+  whole projection: owners, counts, stations, bounds, phase, status, disposition
+  and ruling.
+- **Every widening needs a review.** Widening means an added line, a raised
+  bound, a deleted disallowed method, a new lane body, a station moved from
+  `Wait` to `Scope` or `Work`, or a disposition moved away from `lane`. Each
+  needs a ruling-column citation of a DESIGN heading that was added on the
+  branch and names the row's number.
+- **Status is kept apart from residue.** A migration's status is `open` or
+  `done <sha>`; what the call leaves on the window thread is its admitted
+  residue. A done row keeps its number and its residue lines. So row 5's
+  `monospace_family_named` stays listed while row 5 is done, and when B4 closes
+  rows 2 and 3, their stations become `Scope` without breaking B2's exhaustive
+  check.
+
+Codex notes that a heading's existence cannot prove it rules on the row. That
+part is left to review. The script proves only that the citation exists.
+
+### R8 — the sequence is a dependency plan, not nine free tickets: **adopted**
+
+Each ticket now says "mergeable after its listed prerequisites", and describes
+the architecture that is true when it lands alone. The split is redone in §R-F.
+
+The first ticket that touches the ledger also makes two alignments:
+
+- D-33's version moves from 0.4.5 to 0.4.6, because the owner deferred the
+  presentation lane.
+- D-42's "after D-41" becomes "independent of D-41", with B9's barrier
+  conditions.
+
+### R-A. Contract 1: admission at checked effect doors (enforceable)
+
+**The doors.** A blocking effect runs only inside one of these. Each is a
+function carrying `#[expect(clippy::disallowed_methods, reason = "<door>")]`,
+listed in the registry with its role.
+
+| door | role | the raw effects it may hold |
+|---|---|---|
+| `bt_platform::file_reads` (existing; ten lanes) | as today, plus a role per lane | `fs::read`, `File::open` and reads |
+| `bt_platform::file_writes` (new; one per resource) | `Worker`, except the admitted owner-thread residue lines | `fs::write`, `rename`, `copy`, `create_dir_all`, `File::sync_all` |
+| `bt_platform::quiet_command_named` (existing) | `Worker`, except row 7's pre-loop read and row 18 | `Command::output`, `status`, `wait` |
+| `bt_platform::handoff` (existing) | `Worker` (the hand-off lane) | `ShellExecuteW`, `NSWorkspace` |
+| `bt_platform::spawn_at_priority` (existing) | any; it sets the role | `thread::Builder::spawn` |
+| `bt_platform::wait::{join_bounded, recv_bounded}` (new) | `Window` only for rows 15–17 (the way out); `Worker` otherwise | `JoinHandle::join`, `Receiver::recv*`, `Condvar::wait*`, `thread::sleep`, `pollster::block_on` |
+| the GPU present door (`WindowRenderer::present_frame*`, `configure_window_surface`) | `Window`, with a `WaitToken` (row 9) | wgpu `Surface::get_current_texture`, `Queue::submit`, `SurfaceTexture::present`, `Surface::configure` |
+| §5.2's native owner-thread doors (IME, title, focus, cursor, compositor commit, WebView2 creation) | `Window`, with a `WaitToken` | the platform calls |
+| PTY birth and resize (`PtySession::spawn_shell_in`, `PtySession::resize`) | `Window`, with a `WaitToken` (rows 11–12, deferred) | `CreatePseudoConsole`, `ResizePseudoConsole` |
+
+**Thread identity at worker-only doors.** `bt_platform::thread_role` is a
+thread-local set by `spawn_at_priority` (`Worker(name)`) and by `fn main`
+(`Window`). A worker-only door starts with `thread_role::expect_worker()`: a
+runtime check, run by the real producer, that fails in debug and test builds.
+
+**The tie between an admitted call and its wrapper.**
+`hang_watch::admitted(row, station, |token| …)` is the only constructor of
+`WaitToken<'scope>`. Owner-thread doors require the token, and the call records
+its start and end on it (§R-C).
+
+**The source guard, restated.** The test is
+`window_waits_tests::every_door_is_where_the_registry_says`. It reads through
+`bt_source`, and its universe is declared: every first-party product package in
+the workspace, with `vendor/` excluded. The file set is diffed as
+`bt-app-split-prep.md` §3.2 requires. It asserts four things:
+
+1. the owner and exact count of every `expect(clippy::disallowed_methods)`;
+2. that every door the registry names has one;
+3. that every `Window` door's signature takes `WaitToken`;
+4. that every worker-only door's body begins with `expect_worker()`.
+
+`clippy.toml`'s `disallowed-methods` list is compared with the registry's
+vocabulary, whole and with multiplicity.
+
+**Proof it fires.** The mutations are M1–M9. `gates-can-fail` plants two
+failures on every run: a raw `fs::rename` in a `Runtime` method, which clippy
+must refuse, and a registry line with no ruling, which the script must refuse.
+
+### R-B. Contract 2: observed responsiveness targets (not enforced)
+
+**The composition inequality.** For a turn starting at `t₀`, with `T` the
+earliest deadline among the active windows:
+
+```
+E + D + Σ_w S_w + P + N + I + H + U  ≤  T − t₀
+```
+
+| term | meaning |
+|---|---|
+| `E` | the events handled |
+| `D` | the drain: `DRAIN_TURN_BUDGET` plus one slice's overshoot |
+| `Σ_w S_w` | the search slices, summed over **every** window walking a search (each is a line quota, not a time) |
+| `P` | preparation and composition for each window whose frame is due |
+| `N` | admitted owner-thread waits: native calls and bound residues |
+| `I` | instrumentation |
+| `H` | headroom for publication and the platform round trip |
+| `U` | the largest non-preemptible unit in the turn |
+
+`T` is the earliest `FrameClock` deadline, or input obligation, among visible
+active windows. With none, it is `t₀ + DEFAULT_FRAME_INTERVAL`. Windows share
+one deadline; no window gets a fresh allowance.
+
+**The numbers are provisional policy targets**, with their citations, not
+derived limits:
+
+- **16 ms**: `pace::DEFAULT_FRAME_INTERVAL`.
+- **8 ms**: `DRAIN_TURN_BUDGET`. It is the drain's own quota, and is no longer
+  read as a second allowance for waits.
+- **4 ms**: ticket 51's slice estimate (about 4 ms at 100,000 lines, on one
+  machine) and ticket 50's lookup sample (2.6–3.4 ms cold, on one machine).
+
+**Enforced in 0.4.6.** Deferrable work consults a shared `TurnAllowance`, the
+time left before `T`, and yields when it would overrun. That covers the search
+walk's `SearchRefresh::Walk` turns and idle-disposition calls such as ticket 54's
+warm-up. The drain keeps its own quota. Events, preparation and admitted waits
+are not deferred.
+
+**Disclaimed.** No turn is guaranteed to meet `T`, and under a machine-wide
+stall no local policy can. A new ledger row records the part of D-2 still owed:
+"aggregate turn scheduling beyond deferrable work".
+
+- "Idle" is a start time, not a bound. Input that arrives during an idle call
+  waits for it, and the call is charged.
+- A registry line holds its **status** (`pending`, `deferred`,
+  `exempt by ruling`) separately from its **disposition**. An unresolved wait is
+  never shown as `bound`.
+
+**At 120 Hz**, the target is `T` from that window's own clock. The drain's fixed
+8 ms already consumes it, and that is recorded as a finding, not turned into a
+scaling rule. The budget line reports **scheduling delay** separately from time
+in the turn: the time from a wake that was due to the turn's start. A
+descheduled thread is then not blamed on a wait.
+
+### R-C. B2's accounting, restated
+
+1. **A whole-turn record for every turn.** At `park`, before the 500 ms early
+   return and independent of any queue, these go into fixed-size per-run
+   atomics: the turn's wall time, the union of its wait intervals, its
+   unattributed time (wall time minus every named station's exclusive time), and
+   its scheduling delay. Each is kept as a histogram, with a maximum, a count and
+   a sum. The detail line is separate.
+2. **Triggers.** Each writes a detail line:
+   - the turn's wall time past `T − t₀`;
+   - the wait union past the wait target;
+   - one call past its row's bound;
+   - unattributed time past the wait target. This one is reported as
+     **unexplained**, never as an external wait.
+3. **Per-call, inclusive.** `WaitToken` records the start and end, in µs, of each
+   admitted call. Durations are inclusive per call, with a count, a maximum and
+   a histogram per registry line. The per-turn wait total is the **union** of the
+   intervals, so nested waits neither hide latency nor count twice. `charge`'s
+   exclusive station time and the slow-hold line are unchanged in meaning and in
+   format.
+4. **Bounded delivery with loss counters.** Detail lines go through a
+   fixed-capacity ring that the window thread writes with `try_lock`. Every
+   refusal increments a loss counter. The next line printed and the exit summary
+   both carry the counter, so silence alongside drops is never read as clean. The
+   exit summary is written from the atomics, whatever was lost.
+5. **Cost.** Measured in the four regimes of rule 5: active, overloaded, failed
+   and quiescent. A parked loop takes no additional clock reads.
+
+**Deterministic acceptance cases**, on the injected clock the `_at` verbs already
+take:
+
+| case | expected |
+|---|---|
+| one call of 4,001 µs | one bound line |
+| two 3 ms calls in one turn | no per-call line; the union is 6 ms |
+| 5,000 calls of 0.9 µs | the sum is exact, not zero |
+| 9 ms of waits in one turn | a wait-union line |
+| 40 ms in an unclassified station | an unexplained line, not a wait |
+| nested admitted calls | the union counted once |
+| a contended or full ring | the loss counter rises; the exit summary is intact |
+| a call that never reaches `park` | no budget line (the watchdog owns it); the watchdog's report unchanged |
+
+### R-D. B3, restated: the hand-off lane as the reference for its partial contract
+
+**The obligations**, each tested against its lane's policy:
+
+- identity, and the reuse of a target;
+- execution order and delivery order, stated separately;
+- latest-value supersession, where "latest" means newest *requested* for fonts
+  and the PSReadLine probe, and newest *adopted* for the monotonic check;
+- exactly-once terminal accounting;
+- bounds on requests waiting, requests executing, answers held, **and answer
+  bytes**;
+- the consumer's clear-then-recheck of the wake;
+- a terminal or fault state that stays observable when the mailbox is full or
+  the wake is unavailable.
+
+**Expected failures are data.** The table
+`lane::EXPECTED_FAILURES: &[(Lane, Claim, Failure, Repair)]` lists them. The
+harness **fails** on any of four things: an unexpected pass, a failure of a
+different kind, a skipped adapter, or zero requests exercised. Passing claims run
+through the real admission, publication and acceptance path. The dead-worker
+claim runs through a worker that the test terminates.
+
+| lane | the partial contract it proves | expected failures, each with a repair row |
+|---|---|---|
+| hand-off (the reference) | an id within one lane incarnation (a counter reset by `start`; production relies on one lane for the application's lifetime); `Pending` acceptance; waiting bound 32 + 1; FIFO execution; publish, then wake | a dead worker's accepted requests get no terminal outcome (new row); the answers and `turned_away` are unbounded (new row). Delivery puts refusals before earlier completions: declared as the lane's delivery policy, not a failure |
+| font | numbered requests; one walk out and one `again` round; monotonic adoption against the adopted generation; the target is the application-wide slot | no per-request superseded or fault outcome, and no wake-failure policy (new row) |
+| path verify | one question, one answer, under `ShellAddress` | no request id; admission and results unbounded; no per-lane death signal, because the shared result sender outlives one worker (new rows) |
+| computation (`MathWorker`) | math keeps its stack; each job has its own channel | an adapter is **added**. The `mpsc::channel` is unbounded, and each job's generation, bytes and death are inventoried and declared (new rows) |
+
+B3 does not repay D-33. D-33 moves to "contract and harness landed, exceptions
+listed", and each exception has its own row and repair ticket.
+
+### R-E. D-41, the decision restated (replaces §4's paragraph)
+
+> The owner deferred the presentation lane (D-41) until the self-inflicted waits
+> were fixed, and next92 carries those fixes. Its logs can **classify and
+> prioritise**; on their own they cannot prove or disprove the lane's benefit.
+> There are three outcomes. **Supports investing:** present, acquire or submit
+> waits remain a material *contribution*, counting every material exclusive
+> station in a hold, not only the longest, and not excluding a hold because a
+> title write rode along. The contributions are counted per presentation attempt
+> and per active hour, with the build, the windows, the attempts, the landings,
+> the drops and the exposure to stall beats recorded beside them. A present wait
+> that coincides with the machine-wide beat **still counts**: keeping input
+> runnable while the compositor stalls is what the lane is for, and a frozen
+> picture then is accepted (ruling Q1). **Lowers priority:** present
+> contributions largely gone per attempt, at matched exposure. Holds led by
+> configure, WebView2 or real work show residual work; they do not refute a
+> separate present wait. **Insufficient:** too little exposure, no sub-500 ms
+> distribution (B2 has not landed), or no contemporaneous scheduling evidence
+> where attribution matters. Low thread CPU shows only that little CPU was
+> consumed, and the process-wide fault count does not show that one present was
+> paging. Benefit is established only by a matched or interleaved baseline and
+> candidate run that measures input dispatch latency, present-plus-commit, and
+> the time for pictures to resume, each separately. A build that shows no
+> present-led holds because it presented nothing has failed. The decision is the
+> owner's.
+
+### R-F. The tickets, re-split
+
+Every ticket ends at **committed, CI green on the branch**. Merges wait for the
+0.4.5 tag. After that, each ticket is mergeable once its prerequisites are in,
+and the architecture it leaves is true if it lands alone.
+
+| id | title | size | prerequisites | lands alone as |
+|---|---|---|---|---|
+| A1 | Threads know their role, and owner-thread waits carry a token | M | none | `thread_role` in `spawn_at_priority` and `fn main`; `WaitToken` and `hang_watch::admitted`; R-A's doors converted in place with no behaviour change; the registry schema (R7) and the generated §5.3 table, with versions aligned to the ledger; the D-33 and D-42 version notes |
+| A2 | The compiler refuses a blocking call outside its door | M | A1 | `disallowed-methods` in `clippy.toml`; the door `expect`s pinned by `every_door_is_where_the_registry_says`; the `gates-can-fail` plants; mutations M1–M9 |
+| A3 | Every turn is accounted, and waits are measured per call | M | A1 (the token) | §R-C in full, with its eight deterministic cases and the overhead measurements; the slow-hold line unchanged |
+| A4 | Deferrable work yields to the earliest window's deadline | S | A3 | `TurnAllowance` from the earliest active `FrameClock`; the search walk and idle calls consult it; the new "aggregate scheduling" ledger row |
+| A5 | One lane contract, with each lane's gaps declared as failures | M | none (contract only) | §R-D: `bt-app::lane`, four adapters, the policy tests, `EXPECTED_FAILURES`, the new exception rows |
+| B4 | The marks record is written only on the storage lane | M | A1, A5, 0.4.5 ticket 56, a reviewed design note | revision (a)'s B4, plus: every marks-resource producer pinned; tests for queue full, worker failure, target closure and command order; the `lock` owner check replaced by the role assertion at the storage door |
+| B5 | PSReadLine's presence is observed on a lane | S | A5 | revision (a)'s B5, plus: the probe is invalidated and reissued by both today's synchronous apply and B4's receipt, tested with a real stale-probe-after-apply interleaving |
+| B6 | The macOS locale is read before the loop | S | A5 (a one-shot exception) | revision (a)'s B6; late pane births and spawn or read failures preserved; measured first. The late-answer policy follows the measurement: the shell is born without the declaration unless the wait measures under the startup road's bound |
+| B7 | A macOS directory watch starts and retires without the window thread waiting | M | A1, A5; retention per Codex's answer to Q5 (§R-G) | revision (a)'s B7, plus: armed, refused and closed-before-armed states; changes during arming not lost (a rescan on armed); callback lifetime tests; a bound on retained stuck watches, with their count in the budget line |
+| B8 | Settings, keybindings and profiles are written on the storage lane | S–M | A1, A5 | revision (a)'s B8, plus: admission refusal, a failed last write, retry and snapshot order; quit reuses the current writers and states what it does on a disconnected writer |
+| B9 | Device recovery rests on deadlines and rebuilds on a worker | M | A1, A5, a reviewed design note | revision (a)'s B9, plus the barrier the note must specify: bootstrap-surface affinity and compatibility (today `rebuild_after_device_loss` surrenders the targets and makes a compatible surface before it requests the adapter), target teardown, exclusive device ownership, every device mutation or read while recovering, every writer of the epoch, and close, quit and late-answer cleanup |
+
+A1, A3 and A5 can proceed in parallel. Row 20's document half and D-41 remain
+separately designed, and no ticket closes their residual debt.
+
+### R-G. Open questions: only those Codex did not settle
+
+Three of Codex's answers are **adopted**:
+
+- **Q2**: one shared earliest-window deadline. It is in §R-B.
+- **Q3**: explicit measured exceptions, each with an owner, an exposure, an
+  expiry and mitigation debt, and still charged. It is the registry's
+  `exempt by ruling` status.
+- **Q5**: retention to process exit only with proof of callback and resource
+  lifetime, and a bound on outstanding watches. It is in B7.
+
+Two need the owner, because each changes a rule or something the reader sees:
+
+1. **How D-2 leaves the ledger.**
+   - *Codex:* "Close only the explicitly redefined inventory/accounting
+     milestone after corrected B1+B2 acceptance; keep aggregate scheduling,
+     unclassified-effect coverage and unresolved waits as named open debt."
+   - *Mine:* agree. Concretely, D-2 is repaid by A1–A3, and two new rows are
+     opened: aggregate scheduling (A4 pays part of it) and effects outside the
+     vocabulary. The ledger's rule says a row leaves only by repayment or a dated
+     ruling, so the owner must rule that D-2's remaining scope is those rows.
+2. **A preview save that shows "saved" later.**
+   - *Codex:* "show saved only for the matching durable revision receipt,
+     preserve newer dirty edits, and specify failure and bounded-quit recovery;
+     'a turn later' must not promise a maximum completion delay."
+   - *Mine:* agree. It changes what the reader sees after Ctrl+S, so
+     `CONVENTIONS` §十 rule 1 requires asking the owner before that ticket is
+     drafted.
