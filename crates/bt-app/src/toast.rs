@@ -159,10 +159,10 @@ pub const TOAST_MARK_LOGICAL_PX: f32 = 14.0;
 pub const TOAST_DOT_LOGICAL_PX: f32 = 6.0;
 /// The gap between the mark column and the text.
 pub const TOAST_MARK_GAP_LOGICAL_PX: f32 = 8.0;
-/// `.gact`'s own 18 — the dismiss verb's box.
-pub const TOAST_CLOSE_LOGICAL_PX: f32 = 18.0;
-/// `.gact { border-radius: 5px }` — its pill.
-pub const TOAST_CLOSE_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// UI-SPEC.md H7: the dismiss box uses the 17px head-close size.
+pub const TOAST_CLOSE_LOGICAL_PX: f32 = 17.0;
+/// UI-SPEC.md R10: the close box uses a 4px radius.
+pub const TOAST_CLOSE_RADIUS_LOGICAL_PX: f32 = 4.0;
 // Its glyph is the compact head's slot now, asked per mark: the same `#i-close`
 // was struck at 8 here, 8 on a tab, 8 on a focus card, 9 on a float's head and
 // 10 in the title bar, which the 2026-08-25 audit measured as three pens
@@ -180,13 +180,10 @@ pub const TOAST_ACTION_MARGIN_TOP_LOGICAL_PX: f32 = 6.0;
 /// The padding either side of the verb, which is what its pressable box is
 /// wider than its word by.
 ///
-/// `.gact`'s register carried onto a word instead of a glyph: the `×` gets an
-/// 18px box round an 8px mark, and this gets the same five pixels of air on the
-/// axis a word actually grows along.
+/// Word actions keep their horizontal padding when the head-close box changes.
 pub const TOAST_ACTION_PADDING_X_LOGICAL_PX: f32 = 6.0;
-/// `.gact { border-radius: 5px }`, the dismiss verb's own pill — one round for
-/// the two pressable things on a card.
-pub const TOAST_ACTION_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// UI-SPEC.md R7: an action button uses a 6px radius.
+pub const TOAST_ACTION_RADIUS_LOGICAL_PX: f32 = 6.0;
 
 /// The most lines of body text a card will show before it stops.
 ///
@@ -1255,6 +1252,39 @@ fn centred(rect: [f32; 4], size: f32) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (31) — **The toast values follow their UI roles.**
+    ///
+    /// These product constants differ from their role values on BASE.
+    /// MUTATION: restore TOAST_CLOSE_LOGICAL_PX to 18.0.
+    /// MUTATION: restore TOAST_CLOSE_RADIUS_LOGICAL_PX to 5.0.
+    /// MUTATION: restore TOAST_ACTION_RADIUS_LOGICAL_PX to 5.0.
+    #[test]
+    fn ui_spec_toast_values_follow_the_rule() {
+        let rules = [
+            (
+                TOAST_CLOSE_LOGICAL_PX,
+                bt_render::WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
+                "TOAST_CLOSE_LOGICAL_PX: UI-SPEC.md H7 close box",
+            ),
+            (
+                TOAST_CLOSE_RADIUS_LOGICAL_PX,
+                bt_render::WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX,
+                "TOAST_CLOSE_RADIUS_LOGICAL_PX: UI-SPEC.md R10 close box",
+            ),
+            (
+                TOAST_ACTION_RADIUS_LOGICAL_PX,
+                6.0,
+                "TOAST_ACTION_RADIUS_LOGICAL_PX: UI-SPEC.md R7 settings::BUTTON_RADIUS_LOGICAL_PX",
+            ),
+        ];
+        let failures: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, expected, _)| actual != expected)
+            .collect();
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
     use crate::Motion;
 
     const SCALE: f32 = 1.0;

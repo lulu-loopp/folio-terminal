@@ -101,9 +101,9 @@ const LIST_MARGIN_BOTTOM_LOGICAL_PX: f32 = 16.0;
 const LIST_GAP_LOGICAL_PX: f32 = 1.0;
 
 // ── `.restore-list li` ─────────────────────────────────────────────────────
-/// `padding: 6px 8px`.
+/// Vertical row padding remains 6px; UI-SPEC.md S8 sets the text inset to 10px.
 const ROW_PADDING_Y_LOGICAL_PX: f32 = 6.0;
-const ROW_PADDING_X_LOGICAL_PX: f32 = 8.0;
+const ROW_PADDING_X_LOGICAL_PX: f32 = 10.0;
 /// That padding around the tallest thing in the row, which is the 13px label's
 /// own line box: 6 + 15.5 + 6.
 ///
@@ -125,9 +125,9 @@ const ROW_MARK_COLUMN_LOGICAL_PX: f32 = 15.0;
 /// narrower than its column, and centred in it, exactly as the flex box centres
 /// it.
 pub const ROW_MARK_LOGICAL_PX: f32 = 14.0;
-/// `.restore-list .rcwd { font-size: 11.5px }`.
-pub const ROW_CWD_FONT_LOGICAL_PX: f32 = 11.5;
-/// The 11.5px line box, measured in the mock-up.
+/// UI-SPEC.md T5: row paths use the 11px caption size.
+pub const ROW_CWD_FONT_LOGICAL_PX: f32 = 11.0;
+/// The row path keeps its measured 14px line box.
 const ROW_CWD_LINE_LOGICAL_PX: f32 = 14.0;
 
 // ── `.restore-actions`, `.btn` ─────────────────────────────────────────────
@@ -744,7 +744,7 @@ fn row_layout(row: &RestoreRow, frame: [f32; 4], scale: f32) -> RowLayout {
     let mark_rect = [mark_left, mark_top, mark_left + mark, mark_top + mark];
 
     // `align-items: center` — each of the row's texts is centred on the row by
-    // its own line box, which is why the 13px label and the 11.5px cwd share a
+    // its own line box, which is why the 13px label and the 11px cwd share a
     // centre line and not an edge.
     let line = |box_height: f32| {
         let top = (frame[1] + frame[3] - px(box_height)) / 2.0;
@@ -2862,6 +2862,32 @@ pub fn paste_card_build(
 mod tests {
     use super::*;
 
+    /// RED (31) — **The restore values follow their UI roles.**
+    ///
+    /// These product constants differ from their role values on BASE.
+    /// MUTATION: restore ROW_CWD_FONT_LOGICAL_PX to 11.5.
+    /// MUTATION: restore ROW_PADDING_X_LOGICAL_PX to 8.0.
+    #[test]
+    fn ui_spec_restore_values_follow_the_rule() {
+        let rules = [
+            (
+                ROW_CWD_FONT_LOGICAL_PX,
+                bt_render::HEAD_TITLE_FONT_LOGICAL_PX,
+                "ROW_CWD_FONT_LOGICAL_PX: UI-SPEC.md T5 caption",
+            ),
+            (
+                ROW_PADDING_X_LOGICAL_PX,
+                bt_render::RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
+                "ROW_PADDING_X_LOGICAL_PX: UI-SPEC.md S8 row inset",
+            ),
+        ];
+        let failures: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, expected, _)| actual != expected)
+            .collect();
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
     /// The window the mock-up was measured in, and the shape every geometry
     /// claim below is stated against.
     const SURFACE: (f32, f32) = (1440.0, 756.0);
@@ -3148,7 +3174,7 @@ mod tests {
     /// 1931-1969), nailed to the stylesheet.
     ///
     /// The line boxes are the four that are not declarations: 15px → 18,
-    /// 13px → 15.5, 11.5px → 14, all reported by the mock-up's own renderer,
+    /// 13px → 15.5 and the cwd line stays 14px after UI-SPEC.md T5,
     /// and the paragraph's 18.75 which *is* a declaration (`line-height: 1.5`)
     /// and so is arithmetic rather than a measurement.
     #[test]
@@ -3185,7 +3211,10 @@ mod tests {
         );
         assert_eq!(LIST_GAP_LOGICAL_PX, 1.0, ".restore-list gap: 1px");
         assert_eq!(ROW_HEIGHT_LOGICAL_PX, 27.5, "6 + the 13px line box + 6");
-        assert_eq!(ROW_PADDING_X_LOGICAL_PX, 8.0, "li padding: 6px 8px");
+        assert_eq!(
+            ROW_PADDING_X_LOGICAL_PX, 10.0,
+            "UI-SPEC.md S8: row text inset"
+        );
         assert_eq!(ROW_RADIUS_LOGICAL_PX, 6.0, "li border-radius: 6px");
         assert_eq!(ROW_GAP_LOGICAL_PX, 8.0, "li gap: 8px");
         assert_eq!(ROW_FONT_LOGICAL_PX, 13.0, "li font-size: 13px");
@@ -3196,10 +3225,10 @@ mod tests {
             ".restore-list .pmark {{ width: 14px; height: 14px }}"
         );
         assert_eq!(
-            ROW_CWD_FONT_LOGICAL_PX, 11.5,
-            ".restore-list .rcwd font-size: 11.5px"
+            ROW_CWD_FONT_LOGICAL_PX, 11.0,
+            "UI-SPEC.md T5: caption font-size: 11px"
         );
-        assert_eq!(ROW_CWD_LINE_LOGICAL_PX, 14.0, "the 11.5px line box");
+        assert_eq!(ROW_CWD_LINE_LOGICAL_PX, 14.0, "the row path line box");
 
         assert_eq!(ACTIONS_GAP_LOGICAL_PX, 8.0, ".restore-actions gap: 8px");
         assert_eq!(BUTTON_PADDING_X_LOGICAL_PX, 14.0, ".btn padding: 6px 14px");
@@ -3593,16 +3622,16 @@ in the folders you left them, as new shells."
         let scale = 1.0;
         let layout = placed(scale);
         let row = &layout.rows[1];
-        // 8px of padding, then a 14px mark centred on its 15px column — which
+        // UI-SPEC.md S8: 10px of padding, then a 14px mark in its 15px column, which
         // puts it half a pixel in, and a raster on a half pixel is a blurred
         // raster, so the mark alone is snapped (the same call `profiles.rs`
         // makes for the same reason).
-        assert_eq!(row.mark_rect[0] - row.frame[0], 9.0, "8 + round(0.5)");
+        assert_eq!(row.mark_rect[0] - row.frame[0], 11.0, "10 + round(0.5)");
         assert_eq!(width(row.mark_rect), 14.0);
         assert_eq!(
             row.label_rect[0] - row.frame[0],
-            31.0,
-            "8 padding + 15 column + 8 gap"
+            33.0,
+            "10 padding + 15 column + 8 gap"
         );
         assert_eq!(
             row.cwd_rect[0] - row.label_rect[2],
@@ -3617,7 +3646,7 @@ in the folders you left them, as new shells."
         // line box 6.75 below it.
         assert_eq!(height(row.label_rect), 15.5, "the 13px line box");
         assert_eq!(row.label_rect[1] - row.frame[1], 6.0);
-        assert_eq!(height(row.cwd_rect), 14.0, "the 11.5px line box");
+        assert_eq!(height(row.cwd_rect), 14.0, "the row path line box");
         assert_eq!(row.cwd_rect[1] - row.frame[1], 6.75);
 
         // Now crowd it: a cwd far too long for the row must shrink to exactly

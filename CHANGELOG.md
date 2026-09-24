@@ -27,6 +27,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- Search, video controls, notices, toasts, tab previews, restore lists and close buttons now use the same text sizes, spacing and corners as the rest of the window.
 - Right-click and drop-down menus use the same icon-to-label spacing as Settings.
 - The first-run card uses the same window-edge spacing and title line height as other dialogs.
 - Command palette rows use the same corners and icon spacing as other lists.

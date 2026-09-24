@@ -15,7 +15,7 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 - **Platform:** every deviation is in code shared by the Windows and macOS builds, so every row applies to **both**.
 - **Rulings of 2026-09-22 folded in:** the icon-to-label gap is 8 everywhere (G1–G3); every head title is 11 (T1). The terminal pane's resting radius (0) and the two boolean controls (combo in Settings, switch on the first-run card) are rules as they stand and produce no rows.
 
-**Totals: 18 deviations, touching 27 constants.** A 0 · B 5 · C 5 · D 8.
+**Totals: 6 deviations, touching 6 constants.** A 0 · B 3 · C 1 · D 2.
 
 ---
 
@@ -31,31 +31,19 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 | 17 | S2 | Web sheet ("download not replayed") padding | `websheet.rs::PADDING_LOGICAL_PX` | 22 on all sides | 20 top / 22 sides / 16 bottom | Dialog padding (`restore.rs::DIALOG_PADDING_*`, `first_run.rs::PADDING_*`). |
 | 18 | E2 | Web sheet shadow | `websheet.rs::SHADOW_SPREAD_LOGICAL_PX` | 24 (u8) | 3 | `theme.rs::FLOAT_WINDOW_SHADOW_LOGICAL_PX`. |
 | 19 | R2 | Web sheet radius | `websheet.rs::RADIUS_LOGICAL_PX` | 8 | 10 | Dialog (`theme.rs::FLOAT_WINDOW_RADIUS_LOGICAL_PX`). The web sheet is scrimmed and modal. |
-| 20 | T9 | Search capsule field text | `search.rs::FIELD_FONT_LOGICAL_PX` | 12 | 13 | Field (`settings.rs::FIELD_FONT_LOGICAL_PX`). |
-| 21 | H6 | Video bar | `video_seat.rs::VIDEO_BAR_HEIGHT_LOGICAL_PX` | 34 | 30 | Strip (`theme.rs::SEAT_TITLE_BAR_LOGICAL_PX`, `notice.rs::BAR_HEIGHT_LOGICAL_PX`, `seats.rs::FILES_SEG_BAR_LOGICAL_PX`). |
 
 ## Class C: barely visible
 
 | # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
 |---|---|---|---|---|---|---|
-| 25 | T5 | Other 11.5-pt captions: restore row path, web sheet detail | `restore.rs::ROW_CWD_FONT_LOGICAL_PX`, `websheet.rs::DETAIL_FONT_LOGICAL_PX` | 11.5 | 11 | Caption (17 constants at 11). With T1, 11.5 leaves the product. |
-| 26 | I2 | Icon sizes off the ladder | `peek_strip.rs::LIST_MARK_LOGICAL_PX`, `video_seat.rs::BAR_MARK_LOGICAL_PX`, `peek_strip.rs::LEAF_MARK_LOGICAL_PX` | 11, 16, 9 | 10, 14, 10 | Nearest `icons.rs::MarkSlot` size (14 / 13 / 10). |
-| 27 | T6 | 10.5-pt badges, pills and hashes | `peek_strip.rs::LEAF_FONT_LOGICAL_PX` | 10.5 | 10 | Badge (`theme.rs::WINDOW_TAB_BADGE_FONT_LOGICAL_PX` and 5 more). |
-| 29 | S8 | Row text inset: restore list | `restore.rs::ROW_PADDING_X_LOGICAL_PX` | 8 | 10 | `profiles.rs::ITEM_PADDING_X_LOGICAL_PX`, `settings.rs::ITEM_PADDING_X_LOGICAL_PX`, `palette.rs::ROW_PADDING_X_LOGICAL_PX`, `theme.rs::RAIL_TAB_PADDING_LEFT_LOGICAL_PX`. |
-| 37 | S7 | Video bar side padding | `video_seat.rs::BAR_PADDING_X_LOGICAL_PX` | 10 | 12 | Strip leading. |
+| 25 | T5 | Other 11.5-pt captions: web sheet detail | `websheet.rs::DETAIL_FONT_LOGICAL_PX` | 11.5 | 11 | Caption (17 constants at 11). With T1, 11.5 leaves the product. |
 
 ## Class D: invisible (tidying only)
 
 | # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
 |---|---|---|---|---|---|---|
-| 38 | R8 | 22-pt boxes: search buttons, notice close, web sheet close, pane ghost | `search.rs::BUTTON_RADIUS_LOGICAL_PX`, `notice.rs::CLOSE_RADIUS_LOGICAL_PX`, `websheet.rs::CLOSE_RADIUS_LOGICAL_PX`, `seats.rs::PANE_GHOST_RADIUS_LOGICAL_PX` | 6 | 5 | Tool box radius (`seats.rs::PREVIEW_TOOL_RADIUS_LOGICAL_PX` and 11 more). |
-| 39 | R13 | Pill constants written larger than they draw | `seats.rs::PREVIEW_COUNT_RADIUS_LOGICAL_PX` | 8 | h/2 (7) | Pill. They already draw round, so this is spelling only. |
-| 40 | S6 | Notice strip padding | `notice.rs::PADDING_LEFT_LOGICAL_PX`, `notice.rs::PADDING_RIGHT_LOGICAL_PX` | 11 · 8 | 12 · 6 | Strip. |
-| 41 | R10 | Toast close box; float head close box | `toast.rs::TOAST_CLOSE_RADIUS_LOGICAL_PX`, `float.rs::FLOAT_BUTTON_RADIUS_LOGICAL_PX` (as used for the 17-pt `float.rs::FLOAT_CLOSE_BOX_LOGICAL_PX`) | 5 | 4 | Close box in a head (`theme.rs::WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX`, `SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX`). **Ticket note:** `FLOAT_BUTTON_RADIUS_LOGICAL_PX` also rounds the float's other head buttons; split the close box off rather than change the shared constant. |
-| 42 | H7 | Close boxes 18 / 16 | `toast.rs::TOAST_CLOSE_LOGICAL_PX`, `theme.rs::FOCUS_CARD_CLOSE_BOX_LOGICAL_PX` | 18, 16 | 17 | `theme.rs::WINDOW_TAB_CLOSE_BOX_LOGICAL_PX`, `SEAT_PANE_CLOSE_BOX_LOGICAL_PX`, `float.rs::FLOAT_CLOSE_BOX_LOGICAL_PX`. |
+| 38 | R8 | 22-pt boxes: web sheet close | `websheet.rs::CLOSE_RADIUS_LOGICAL_PX` | 6 | 5 | Tool box radius (`seats.rs::PREVIEW_TOOL_RADIUS_LOGICAL_PX` and 11 more). |
 | 43 | T10 | Float-tag line height | `websheet.rs::LINE_HEIGHT` | 1.5 | 1.4 | `CHROME_LINE_HEIGHT` in `toast.rs`, `tooltip.rs`, `peek_strip.rs`, `seats.rs`. Slight when text wraps. |
-| 44 | R6 | Notice verb button | `notice.rs::VERB_RADIUS_LOGICAL_PX` | 5 | 6 | Button. The `websheet.rs` constant with the same name is 6. |
-| 45 | R7 | Toast action button | `toast.rs::TOAST_ACTION_RADIUS_LOGICAL_PX` | 5 | 6 | Button. |
 
 ---
 
@@ -71,7 +59,7 @@ Each group is one ticket. A row whose constants live in several files is split a
 - **Pane head, files column, float window** (`seats.rs`, `theme.rs`, `float.rs`): class-A members fixed in ticket 19; H5, S5, F1, C1, R12 and the group members of G1, G3, T5 and I2 fixed in ticket 26 (listed below).
 - **Menus** (`profiles.rs`): T7 fixed in ticket 22; G2 fixed in ticket 29. No menu members remain open.
 - **Palette** (`palette.rs`): T3/T4 fixed in ticket 20; R3 and the palette members of G3 fixed in ticket 27. No palette members remain open.
-- **Everything else** (`notice.rs`, `toast.rs`, `search.rs`, `video_seat.rs`, `peek_strip.rs`, `restore.rs`, and the members of the rows above that no group names): T9, H6, S7, S6, R6, R7, R8, R10, H7; the leftover members of I2, T5, T6 and S8.
+- **Everything else** (`notice.rs`, `toast.rs`, `search.rs`, `video_seat.rs`, `peek_strip.rs`, `restore.rs`, and the members of the rows above that no group names): T9, H6, S7, S6, R6, R7, R10, H7, R13 and the remaining group members of R8, I2, T5, T6 and S8 fixed in ticket 31. No members remain open in this group.
 
 ## Fixed in ticket 23
 
@@ -127,3 +115,20 @@ Each group is one ticket. A row whose constants live in several files is split a
 ## Fixed in ticket 29
 
 - Row 15 / G2: `profiles.rs::ITEM_GAP_LOGICAL_PX` fixed at 8; row closed.
+
+## Fixed in ticket 31
+
+- Row 20 / T9: `search.rs::FIELD_FONT_LOGICAL_PX` fixed at 13; row closed.
+- Row 21 / H6: `video_seat.rs::VIDEO_BAR_HEIGHT_LOGICAL_PX` fixed at 30; row closed.
+- Row 25 / T5: `restore.rs::ROW_CWD_FONT_LOGICAL_PX` fixed at 11; the web-sheet member remains open.
+- Row 26 / I2: `peek_strip.rs::LIST_MARK_LOGICAL_PX`, `video_seat.rs::BAR_MARK_LOGICAL_PX` and `peek_strip.rs::LEAF_MARK_LOGICAL_PX` fixed at 10, 14 and 10; row closed.
+- Row 27 / T6: `peek_strip.rs::LEAF_FONT_LOGICAL_PX` fixed at 10; row closed.
+- Row 29 / S8: `restore.rs::ROW_PADDING_X_LOGICAL_PX` fixed at 10; row closed.
+- Row 37 / S7: `video_seat.rs::BAR_PADDING_X_LOGICAL_PX` fixed at 12; row closed.
+- Row 38 / R8: `search.rs::BUTTON_RADIUS_LOGICAL_PX`, `notice.rs::CLOSE_RADIUS_LOGICAL_PX` and `seats.rs::PANE_GHOST_RADIUS_LOGICAL_PX` fixed at 5; the web-sheet member remains open.
+- Row 39 / R13: `seats.rs::PREVIEW_COUNT_RADIUS_LOGICAL_PX` fixed at half `PREVIEW_COUNT_HEIGHT_LOGICAL_PX` (7); row closed.
+- Row 40 / S6: `notice.rs::PADDING_LEFT_LOGICAL_PX` and `notice.rs::PADDING_RIGHT_LOGICAL_PX` fixed at 12 and 6; row closed.
+- Row 41 / R10: `toast.rs::TOAST_CLOSE_RADIUS_LOGICAL_PX` fixed at 4; the float close draw uses the new `float.rs::FLOAT_CLOSE_RADIUS_LOGICAL_PX` at 4 while `FLOAT_BUTTON_RADIUS_LOGICAL_PX` stays 5; row closed.
+- Row 42 / H7: `toast.rs::TOAST_CLOSE_LOGICAL_PX` and `theme.rs::FOCUS_CARD_CLOSE_BOX_LOGICAL_PX` fixed at 17; row closed.
+- Row 44 / R6: `notice.rs::VERB_RADIUS_LOGICAL_PX` fixed at 6; row closed.
+- Row 45 / R7: `toast.rs::TOAST_ACTION_RADIUS_LOGICAL_PX` fixed at 6; row closed.

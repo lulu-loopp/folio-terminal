@@ -601,8 +601,10 @@ pub const FLOAT_DOCK_GAP_LOGICAL_PX: f32 = 4.0;
 pub const FLOAT_DOCK_HEIGHT_LOGICAL_PX: f32 = crate::seats::PREVIEW_TOOL_BOX_LOGICAL_PX;
 /// `.float-win .fly-head button { font-size: 10px }`.
 pub const FLOAT_DOCK_FONT_LOGICAL_PX: f32 = 10.0;
-/// `.float-win .fly-head button { border-radius: 5px }`, shared by the `×`.
+/// UI-SPEC.md R8: float head tool buttons keep their 5px radius.
 pub const FLOAT_BUTTON_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// UI-SPEC.md R10: only the head close box uses the 4px close radius.
+pub const FLOAT_CLOSE_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// `.float-win .fly-foot { padding: 0 18px 0 10px }` — the left half.
 pub const FLOAT_FOOT_PADDING_LEFT_LOGICAL_PX: f32 = 10.0;
 /// The right half. Wider than the left, because the grip lives in that corner.
@@ -2292,7 +2294,7 @@ pub fn build(
     if close_lit {
         sprites.push(ChromeSprite::new(
             ChromeMark::ControlPill {
-                radius_px: button_radius,
+                radius_px: px(FLOAT_CLOSE_RADIUS_LOGICAL_PX).round().max(1.0) as u32,
             },
             geometry.close,
             palette.dialog_hover,
@@ -2425,6 +2427,60 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// RED (31) — **Only the float head's close box uses the close radius.**
+    ///
+    /// Run the real geometry and painter: the shared button radius on BASE
+    /// makes the close hover too round, while the dock keeps its tool radius.
+    /// MUTATION: use button_radius again at the close hover draw site.
+    /// MUTATION: restore FLOAT_CLOSE_RADIUS_LOGICAL_PX to 5.0.
+    #[test]
+    fn ui_spec_float_values_follow_the_rule() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let geometry = float_geometry(
+                frame(100.0, 100.0, 640.0, 400.0),
+                FloatMode::Pinned,
+                scale,
+                30.0,
+                FloatHeadTools::default(),
+            );
+            for (part, rect, radius) in [
+                (
+                    FloatPart::Close,
+                    geometry.close,
+                    bt_render::WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX,
+                ),
+                (
+                    FloatPart::Dock,
+                    geometry.dock.expect("dock fits"),
+                    FLOAT_BUTTON_RADIUS_LOGICAL_PX,
+                ),
+            ] {
+                let layer = build(
+                    &geometry,
+                    &chrome(Some(part)),
+                    FloatBody {
+                        quads: Vec::new(),
+                        labels: Vec::new(),
+                        sprites: Vec::new(),
+                    },
+                    scale,
+                    &bt_render::chrome_palette(),
+                    FloatFade {
+                        opacity: 1.0,
+                        rise: 0.0,
+                        moving: false,
+                    },
+                );
+                assert!(layer.sprites.iter().any(|sprite| {
+                    sprite.rect == rect && matches!(sprite.mark, ChromeMark::ControlPill { radius_px } if radius_px == (radius * scale).round() as u32)
+                }), "UI-SPEC.md R10: {part:?} at {scale}");
+            }
+        }
+        assert_eq!(
+            FLOAT_BUTTON_RADIUS_LOGICAL_PX,
+            crate::seats::PREVIEW_TOOL_RADIUS_LOGICAL_PX
+        );
+    }
 
     const SCALE: f32 = 1.0;
     /// A window with room for anything the tests below ask for.

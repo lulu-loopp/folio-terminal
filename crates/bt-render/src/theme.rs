@@ -2782,12 +2782,8 @@ pub const FOCUS_CARD_HEAD_GAP_LOGICAL_PX: f32 = 8.0;
 /// Two steps under the strip's 13px tab title, because a card says the same
 /// thing in a narrower column and the mock-up gives the whole card this size.
 pub const FOCUS_CARD_FONT_LOGICAL_PX: f32 = 11.0;
-/// `.fc-head .fc-close { width: 16px; height: 16px }`.
-///
-/// Its own 16 and not [`WINDOW_TAB_CLOSE_BOX_LOGICAL_PX`]'s 17: the mock-up
-/// writes a different number for the card's `×`, and it is the tallest thing in
-/// the head, so it is what sets the card's height.
-pub const FOCUS_CARD_CLOSE_BOX_LOGICAL_PX: f32 = 16.0;
+/// UI-SPEC.md H7: the card close box shares the 17px tab/head-close size.
+pub const FOCUS_CARD_CLOSE_BOX_LOGICAL_PX: f32 = 17.0;
 /// `.fc-head .fc-close { border-radius: 4px }` — the pill under the hovered `×`.
 pub const FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX: f32 = 4.0;
 // **A card's pin has no number of its own** — it is drawn at the strip's
@@ -3649,6 +3645,24 @@ fn ansi_16_rgb_for(theme: Theme) -> [[u8; 3]; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (31) — **The theme values follow their UI roles.**
+    ///
+    /// These product constants differ from their role values on BASE.
+    /// MUTATION: restore FOCUS_CARD_CLOSE_BOX_LOGICAL_PX to 16.0.
+    #[test]
+    fn ui_spec_theme_values_follow_the_rule() {
+        let rules = [(
+            FOCUS_CARD_CLOSE_BOX_LOGICAL_PX,
+            WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
+            "FOCUS_CARD_CLOSE_BOX_LOGICAL_PX: UI-SPEC.md H7 close box",
+        )];
+        let failures: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, expected, _)| actual != expected)
+            .collect();
+        assert!(failures.is_empty(), "{failures:?}");
+    }
 
     /// RED (23) — **the drag ghost uses the float-tag gap and side padding.**
     ///

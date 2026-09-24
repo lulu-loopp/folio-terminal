@@ -44,24 +44,24 @@ use crate::{
 /// two are the same kind of band and a reader who sees both must not see two
 /// heights.
 pub const BAR_HEIGHT_LOGICAL_PX: f32 = 30.0;
-/// `padding: 0 8px 0 11px`.
-const PADDING_LEFT_LOGICAL_PX: f32 = 11.0;
-const PADDING_RIGHT_LOGICAL_PX: f32 = 8.0;
+/// UI-SPEC.md S6: strip padding is 12px leading and 6px trailing.
+const PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
+const PADDING_RIGHT_LOGICAL_PX: f32 = 6.0;
 /// `gap: 8px`.
 const GAP_LOGICAL_PX: f32 = 8.0;
 /// `font-size: 12px`, for the sentence and for the verbs alike.
 pub const FONT_LOGICAL_PX: f32 = 12.0;
-/// `.pn-act { padding: 3px 7px; border-radius: 5px }`, around a 12px line box.
+/// Verbs keep their 3px by 7px padding; UI-SPEC.md R6 sets their radius to 6px.
 const VERB_PADDING_X_LOGICAL_PX: f32 = 7.0;
 const VERB_HEIGHT_LOGICAL_PX: f32 = 22.0;
-const VERB_RADIUS_LOGICAL_PX: f32 = 5.0;
+const VERB_RADIUS_LOGICAL_PX: f32 = 6.0;
 /// `.pn-act:last-of-type { margin-right: 2px }` — the trailing column belongs to
 /// the `×`, so the last verb and the close can never share a pixel however long
 /// the word gets.
 const VERB_TRAILING_GAP_LOGICAL_PX: f32 = 2.0;
-/// `.pn-x { width: 22px; height: 22px; border-radius: 6px }` with a 10px glyph.
+/// A 22px close tool with a 10px glyph; UI-SPEC.md R8 sets its radius to 5px.
 const CLOSE_BOX_LOGICAL_PX: f32 = 22.0;
-const CLOSE_RADIUS_LOGICAL_PX: f32 = 6.0;
+const CLOSE_RADIUS_LOGICAL_PX: f32 = 5.0;
 const CLOSE_GLYPH_LOGICAL_PX: f32 = 10.0;
 
 /// One of the strip's pressable words.
@@ -671,6 +671,44 @@ fn centred(rect: [f32; 4], size: f32) -> [f32; 4] {
 mod tests {
     use super::*;
 
+    /// RED (31) — **The notice values follow their UI roles.**
+    ///
+    /// These product constants differ from their role values on BASE.
+    /// MUTATION: restore PADDING_LEFT_LOGICAL_PX to 11.0.
+    /// MUTATION: restore PADDING_RIGHT_LOGICAL_PX to 8.0.
+    /// MUTATION: restore VERB_RADIUS_LOGICAL_PX to 5.0.
+    /// MUTATION: restore CLOSE_RADIUS_LOGICAL_PX to 6.0.
+    #[test]
+    fn ui_spec_notice_values_follow_the_rule() {
+        let rules = [
+            (
+                PADDING_LEFT_LOGICAL_PX,
+                bt_render::SEAT_TITLE_PADDING_LOGICAL_PX,
+                "PADDING_LEFT_LOGICAL_PX: UI-SPEC.md S6 strip leading",
+            ),
+            (
+                PADDING_RIGHT_LOGICAL_PX,
+                bt_render::SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX,
+                "PADDING_RIGHT_LOGICAL_PX: UI-SPEC.md S6 strip trailing",
+            ),
+            (
+                VERB_RADIUS_LOGICAL_PX,
+                6.0,
+                "VERB_RADIUS_LOGICAL_PX: UI-SPEC.md R6 settings::BUTTON_RADIUS_LOGICAL_PX",
+            ),
+            (
+                CLOSE_RADIUS_LOGICAL_PX,
+                crate::seats::PREVIEW_TOOL_RADIUS_LOGICAL_PX,
+                "CLOSE_RADIUS_LOGICAL_PX: UI-SPEC.md R8 tool box",
+            ),
+        ];
+        let failures: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, expected, _)| actual != expected)
+            .collect();
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
     const STRIP: [f32; 4] = [100.0, 40.0, 700.0, 70.0];
 
     /// A band's `×`. Every test below that reads one is about a band, where
@@ -796,8 +834,8 @@ mod tests {
         let bar = lay_out(STRIP, NoticeSay::band(Notice::Offer), &[90.0, 100.0], 1.0);
         assert_eq!(
             close_of(&bar)[2],
-            692.0,
-            "8px of padding off the right edge"
+            694.0,
+            "UI-SPEC.md S6: 6px of padding off the right edge"
         );
         assert_eq!(close_of(&bar)[2] - close_of(&bar)[0], 22.0);
         let boxes: Vec<[f32; 4]> = bar.verbs.iter().map(|(_, box_)| *box_).collect();
@@ -823,7 +861,10 @@ mod tests {
             bar.text[2] <= boxes[0][0],
             "the sentence stops one gap short of the first word"
         );
-        assert_eq!(bar.text[0], 111.0, "11px of padding off the left edge");
+        assert_eq!(
+            bar.text[0], 112.0,
+            "UI-SPEC.md S6: 12px of padding off the left edge"
+        );
     }
 
     /// A pane too narrow to hold the sentence still holds the verbs. The strip

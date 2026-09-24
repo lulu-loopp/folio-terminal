@@ -96,16 +96,16 @@ pub const VIDEO_BAR_FADE: Duration = bt_render::MOTION_FAST;
 // Every one of these is the number the shell page's stylesheet carried, so that
 // retiring the page changed where the bar is drawn and not what it looks like.
 
-/// `#bar{height:34px}`.
-pub const VIDEO_BAR_HEIGHT_LOGICAL_PX: f32 = 34.0;
-/// `#bar{padding:0 10px}`.
-const BAR_PADDING_X_LOGICAL_PX: f32 = 10.0;
+/// UI-SPEC.md H6: a strip is 30px tall.
+pub const VIDEO_BAR_HEIGHT_LOGICAL_PX: f32 = 30.0;
+/// UI-SPEC.md S7: strip side padding is 12px.
+const BAR_PADDING_X_LOGICAL_PX: f32 = 12.0;
 /// `#bar{gap:8px}`.
 const BAR_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.ib{width:22px;height:22px}` — the hit box of an icon button.
 const BAR_BUTTON_LOGICAL_PX: f32 = 22.0;
-/// `.ib svg{width:16px;height:16px}` — the mark inside it.
-const BAR_MARK_LOGICAL_PX: f32 = 16.0;
+/// UI-SPEC.md I2: the toolbar mark uses the 14px slot.
+const BAR_MARK_LOGICAL_PX: f32 = 14.0;
 /// `.tb{min-width:32px}` — the speed button, which is text and not a mark.
 const BAR_RATE_WIDTH_LOGICAL_PX: f32 = 32.0;
 /// `#vol{flex:0 0 54px}`.
@@ -1511,6 +1511,38 @@ impl Drop for VideoSeats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (31) — **The video_seat values follow their UI roles.**
+    ///
+    /// These product constants differ from their role values on BASE.
+    /// MUTATION: restore VIDEO_BAR_HEIGHT_LOGICAL_PX to 34.0.
+    /// MUTATION: restore BAR_PADDING_X_LOGICAL_PX to 10.0.
+    /// MUTATION: restore BAR_MARK_LOGICAL_PX to 16.0.
+    #[test]
+    fn ui_spec_video_seat_values_follow_the_rule() {
+        let rules = [
+            (
+                VIDEO_BAR_HEIGHT_LOGICAL_PX,
+                bt_render::SEAT_TITLE_BAR_LOGICAL_PX,
+                "VIDEO_BAR_HEIGHT_LOGICAL_PX: UI-SPEC.md H6 strip",
+            ),
+            (
+                BAR_PADDING_X_LOGICAL_PX,
+                bt_render::SEAT_TITLE_PADDING_LOGICAL_PX,
+                "BAR_PADDING_X_LOGICAL_PX: UI-SPEC.md S7 strip leading",
+            ),
+            (
+                BAR_MARK_LOGICAL_PX,
+                14.0,
+                "BAR_MARK_LOGICAL_PX: UI-SPEC.md I2 icons::MarkSlot toolbar",
+            ),
+        ];
+        let failures: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, expected, _)| actual != expected)
+            .collect();
+        assert!(failures.is_empty(), "{failures:?}");
+    }
 
     fn a_body() -> [f32; 4] {
         [100.0, 40.0, 1_060.0, 640.0]

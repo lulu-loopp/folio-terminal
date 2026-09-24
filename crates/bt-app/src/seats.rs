@@ -6952,8 +6952,8 @@ pub const PANE_GHOST_RIGHT_LOGICAL_PX: f32 =
 /// stands alone over the terminal's own text with no head to give it a margin,
 /// and 22 is what the mock-up measured it at.
 pub const PANE_GHOST_BOX_LOGICAL_PX: f32 = 22.0;
-/// `.pane-ghost { border-radius: 6px }`.
-pub const PANE_GHOST_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC.md R8: the pane ghost uses the 5px tool-box radius.
+pub const PANE_GHOST_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.pane-ghost svg { width: 11px }` — **the slot's box since P1**.
 ///
 /// The ghost opens the pane menu, which is what the head's own chevron does,
@@ -15641,8 +15641,8 @@ pub const PREVIEW_SWITCH_CHEVRON_HEIGHT_LOGICAL_PX: f32 = PREVIEW_SWITCH_CHEVRON
 pub const PREVIEW_COUNT_HEIGHT_LOGICAL_PX: f32 = 14.0;
 /// `.pv-count { padding: 0 5px }`, on each side of the digits.
 pub const PREVIEW_COUNT_PADDING_X_LOGICAL_PX: f32 = 5.0;
-/// `.pv-count { border-radius: 8px }`.
-pub const PREVIEW_COUNT_RADIUS_LOGICAL_PX: f32 = 8.0;
+/// UI-SPEC.md R13: a pill radius is half its height.
+pub const PREVIEW_COUNT_RADIUS_LOGICAL_PX: f32 = PREVIEW_COUNT_HEIGHT_LOGICAL_PX / 2.0;
 /// `.pv-count { font-size: 10px; font-weight: 700 }`.
 pub const PREVIEW_COUNT_FONT_LOGICAL_PX: f32 = 10.0;
 
@@ -22475,6 +22475,33 @@ fn from_persisted(node: &LayoutNodeV1, next_seat: &mut u64, next_split: &mut u64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (31) — **The seats values follow their UI roles.**
+    ///
+    /// These product constants differ from their role values on BASE.
+    /// MUTATION: restore PANE_GHOST_RADIUS_LOGICAL_PX to 6.0.
+    /// MUTATION: restore PREVIEW_COUNT_RADIUS_LOGICAL_PX to 8.0.
+    #[test]
+    fn ui_spec_seats_values_follow_the_rule() {
+        let rules = [
+            (
+                PANE_GHOST_RADIUS_LOGICAL_PX,
+                PREVIEW_TOOL_RADIUS_LOGICAL_PX,
+                "PANE_GHOST_RADIUS_LOGICAL_PX: UI-SPEC.md R8 tool box",
+            ),
+            (
+                PREVIEW_COUNT_RADIUS_LOGICAL_PX,
+                PREVIEW_COUNT_HEIGHT_LOGICAL_PX / 2.0,
+                "PREVIEW_COUNT_RADIUS_LOGICAL_PX: UI-SPEC.md R13 pill",
+            ),
+        ];
+        let failures: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, expected, _)| actual != expected)
+            .collect();
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
     use bt_persist::{
         SESSION_SCHEMA_VERSION, SessionV1, TabV1, read_session, write_session_atomic,
     };
@@ -37180,7 +37207,7 @@ mod tests {",
              the rail's own 3 — one number moves both instruments"
         );
         assert_eq!(PANE_GHOST_BOX_LOGICAL_PX, 22.0);
-        assert_eq!(PANE_GHOST_RADIUS_LOGICAL_PX, 6.0);
+        assert_eq!(PANE_GHOST_RADIUS_LOGICAL_PX, 5.0, "UI-SPEC.md R8");
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = [100.0_f32, 40.0, 700.0, 500.0];
