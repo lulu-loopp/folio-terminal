@@ -321,7 +321,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 195;
+const STATION_COUNT: usize = 202;
 
 #[path = "hang_watch_detail.rs"]
 mod detail;
@@ -886,6 +886,55 @@ pub enum Station {
     ImeTrace = 192,
     DiagnosticWrite = 193,
     SurfaceConfigure = 194,
+    /// `WebSeat::start_environment`'s call into the host — the first page in
+    /// the process spends `CreateCoreWebView2EnvironmentWithOptions` here (the
+    /// loader, the runtime's discovery and the browser's launch request); every
+    /// later page finds the process-wide environment cached and only queues its
+    /// answer.
+    ///
+    /// **Born naming a stall that had already been reported** (ticket 43,
+    /// D-64). The two holds of 2026-09-23 while a web preview opened —
+    /// 4,099 ms and 2,884 ms — read `window_event 3979 ms` with every named
+    /// child under 130 ms: the engine coming up had no word in this ledger, so
+    /// the gesture that asked for it, the callback road it answered on and the
+    /// burst that installed it were all one remainder. This station and the
+    /// six after it are that remainder, named.
+    WebEnvironment = 195,
+    /// `WebHost::request_controller` —
+    /// `CreateCoreWebView2CompositionController` on this window, a synchronous
+    /// call whose controller arrives later by callback. Reached from
+    /// [`Self::WebSpoke`] on the turn the environment's callback is read.
+    WebController = 196,
+    /// `Compositor::attach_web_visual` — the DirectComposition visual a
+    /// controller that has just arrived is given, the first part of the
+    /// `WebEffect::InstallEvents` burst.
+    WebVisual = 197,
+    /// `WebHost::install` — the controller taken, its settings said, every
+    /// handler attached and its root visual target set, in one walk
+    /// (`INSTALL_SEQUENCE`). The burst's second part.
+    WebInstall = 198,
+    /// `WebSeat::stand_on_the_floor` on the install turn — the new visual
+    /// placed, its cover said, and the controller's scale, bounds and
+    /// visibility told before anything navigates. The burst's third part; the
+    /// same call on a frame's clock is [`Self::WebPlace`]'s.
+    WebFloor = 199,
+    /// `WebHost::navigate` — `ICoreWebView2::Navigate`, the first of which the
+    /// install burst ends in, and every later one a seat is asked for.
+    WebNavigate = 200,
+    /// **Control is back with the platform's message pump inside a turn** —
+    /// stamped at the foot of `window_event` and of `user_event`, so what the
+    /// thread does between one of this program's handlers and the next is not
+    /// charged to the handler that has already returned.
+    ///
+    /// **The callback road** (ticket 43). WebView2 is a single-threaded engine
+    /// whose in-process half runs on this thread: its creation callbacks and
+    /// whatever else it posts to itself are dispatched by the pump winit drives,
+    /// between handlers. Before this station that time was charged to the last
+    /// station standing, which after a window event was [`Self::Event`] — and
+    /// that is the `window_event 3979 ms` the 2026-09-23 report could not
+    /// divide. Time here is the platform's own loop and anything that runs on
+    /// it: winit, the engine, a hook another program installed.
+    Pump = 201,
 }
 
 impl Station {
@@ -1088,6 +1137,13 @@ impl Station {
             Self::ImeTrace => "IME trace::Dump::line",
             Self::SurfaceConfigure => "surface configure",
             Self::DiagnosticWrite => "stderr diagnostic write",
+            Self::WebEnvironment => "request_environment",
+            Self::WebController => "request_controller",
+            Self::WebVisual => "attach_web_visual",
+            Self::WebInstall => "WebHost::install",
+            Self::WebFloor => "stand_on_the_floor",
+            Self::WebNavigate => "WebHost::navigate",
+            Self::Pump => "message pump",
         }
     }
 
@@ -1304,6 +1360,13 @@ impl Station {
             192 => Self::ImeTrace,
             193 => Self::DiagnosticWrite,
             194 => Self::SurfaceConfigure,
+            195 => Self::WebEnvironment,
+            196 => Self::WebController,
+            197 => Self::WebVisual,
+            198 => Self::WebInstall,
+            199 => Self::WebFloor,
+            200 => Self::WebNavigate,
+            201 => Self::Pump,
             _ => Self::Starting,
         }
     }
@@ -3124,9 +3187,10 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
-        Answer, Footprint, HangWatch, Heartbeat, Paging, Park, Pulse, ReportFacts, STATION_COUNT,
-        SlowHold, Stall, Station, Verdict, can_come_round, prune_reports, render_healed,
-        render_report, report_filename, slow_hold_threshold_ms, utc_timestamp, write_report,
+        Answer, Footprint, HangWatch, Heartbeat, Location, Paging, Park, Pulse, ReportFacts,
+        STATION_COUNT, SlowHold, Stall, Station, Verdict, can_come_round, prune_reports,
+        render_healed, render_report, report_filename, slow_hold_threshold_ms, utc_timestamp,
+        write_report,
     };
 
     /// A heartbeat on a platform that counts nothing, which is what every test
@@ -4376,6 +4440,115 @@ mod tests {
                 "{label} does not come back out of the ledger it goes into",
             );
         }
+    }
+
+    /// RED (43) — **the stall self-report has a word for every phase of a web
+    /// page coming up.**
+    ///
+    /// The two holds of 2026-09-23 while a web preview opened read
+    /// `window_event 3979 ms` and `window_event 2703 ms` with every named child
+    /// under 130 ms: the environment request, the controller request, the
+    /// install burst's parts, the first navigation and the pump the engine's
+    /// callbacks arrive on had no word in this vocabulary, so a four-second
+    /// stall could only be called an event. Each word is the function a reader
+    /// greps for, and each comes back out of the ledger it goes into.
+    ///
+    /// MUTATION: drop `Self::WebInstall => "WebHost::install"` from
+    /// [`Station::label`] (or the variant) and the install burst has no word.
+    #[test]
+    fn the_stall_report_has_a_word_for_every_phase_of_a_web_page_coming_up() {
+        let vocabulary: Vec<&'static str> = (0..STATION_COUNT)
+            .map(|slot| Station::from_byte(u8::try_from(slot).expect("one byte")).label())
+            .collect();
+        for word in [
+            "request_environment",
+            "request_controller",
+            "attach_web_visual",
+            "WebHost::install",
+            "stand_on_the_floor",
+            "WebHost::navigate",
+            "message pump",
+        ] {
+            assert!(
+                vocabulary.contains(&word),
+                "`{word}` is not a word the stall self-report can say"
+            );
+        }
+    }
+
+    /// RED (43) — **a hold spent bringing a web page up says which phase spent
+    /// it**, and the pump the engine's callbacks run on is not charged to the
+    /// event that had already returned.
+    ///
+    /// The synthetic turn is the shape of the 2026-09-23 report: a press that
+    /// opens the page, the thread handed back to the pump, the environment's
+    /// answer read on its own wake, and the controller's answer installed and
+    /// navigated. Before ticket 43 the pump's three seconds went to
+    /// `window_event` and the install burst to `drive_web_page`.
+    ///
+    /// MUTATION: map `Station::Pump` to the label `window_event` shares and the
+    /// line reads `window_event 3000 ms` again (and
+    /// `every_station_prints_its_own_word` goes red with it).
+    #[test]
+    fn a_hold_spent_bringing_a_web_page_up_says_which_phase_spent_it() {
+        let heart = Heartbeat::sampling(no_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::Event, 1_000);
+        let press = heart.enter_at(Station::EventMouse, 0, 1_000);
+        let environment = heart.enter_at(Station::WebEnvironment, 0, 1_010);
+        if let Location::Resume {
+            station,
+            node,
+            scope,
+        } = environment
+        {
+            heart.resume_at(station, node, scope, 1_090);
+        }
+        if let Location::Resume {
+            station,
+            node,
+            scope,
+        } = press
+        {
+            heart.resume_at(station, node, scope, 1_100);
+        }
+        heart.at_station(Station::Pump, 1_100);
+        heart.at_station(Station::WebSpoke, 4_100);
+        heart.at_station(Station::WebController, 4_110);
+        heart.at_station(Station::WebVisual, 4_150);
+        heart.at_station(Station::WebInstall, 4_160);
+        heart.at_station(Station::WebFloor, 4_260);
+        heart.at_station(Station::WebNavigate, 4_280);
+        heart.at_station(Station::Pump, 4_300);
+        heart.park_at(Park::Indefinite, 4_300);
+        let (holds, dropped) = heart.take_slow_holds();
+        assert_eq!(dropped, 0);
+        let [hold] = holds.as_slice() else {
+            panic!("one hold, and it ran long: {holds:?}")
+        };
+        assert_eq!(hold.spent_ms[Station::Pump.slot()], 3_000);
+        assert_eq!(hold.spent_ms[Station::Event.slot()], 0);
+        assert_eq!(hold.spent_ms[Station::WebInstall.slot()], 100);
+        let line = hold.line();
+        for named in [
+            "message pump 3000 ms",
+            "WebHost::install 100 ms",
+            "request_environment 80 ms",
+            "request_controller 40 ms",
+            "stand_on_the_floor 20 ms",
+            "WebHost::navigate 20 ms",
+            "attach_web_visual 10 ms",
+        ] {
+            assert!(
+                line.contains(named),
+                "`{named}` is not in the line:\n{line}"
+            );
+        }
+        assert!(
+            line.contains("window_event 0 ms (mouse_input 20 ms (request_environment 80 ms))"),
+            "the pump's time is charged to an event that had returned, or the \
+             environment request is not the gesture's own child:\n{line}"
+        );
     }
 
     /// **The ledger is emptied between holds**, or the next slow line would be
