@@ -1585,6 +1585,22 @@ impl Runtime<'_> {
         window.attention_sampled_at = Some(Instant::now());
     }
 
+    /// **Nothing in this window is moving, and nothing is owed to its glass**: no
+    /// journey running, no refused animation frame, no frame waiting to be presented,
+    /// no chrome present pending, no picture or card owing a frame.
+    ///
+    /// The idle test the turn's `BT_PERF_TRACE idle_wake` line was written with, named
+    /// so that the web engine's warm-up asks the same question (ticket 54) rather than
+    /// a second spelling of it.
+    fn window_at_rest(&self, running: crate::pace::Lanes) -> bool {
+        !running.any()
+            && !self.window.frame_clock.owes_a_frame()
+            && self.window.pending_frames.pending_frame().is_none()
+            && !self.window.chrome_present_pending
+            && !self.window.pictures_owe_a_frame
+            && !self.window.cards.owes_frame()
+    }
+
     pub(crate) fn turn(
         &mut self,
         now: Instant,
@@ -2063,7 +2079,22 @@ impl Runtime<'_> {
         // printed the block is often not the one holding the keyboard. See
         // [`Self::live_stability_deadline`].
         let live_stability_deadline = self.live_stability_deadline();
-        const DEADLINE_OWNERS: [&str; 51] = [
+        // **The web engine's warm-up** (ticket 54, D-64; `ARCHITECTURE` §5.3 row 21).
+        // Every window says whether it is at rest — the same test the idle trace below
+        // uses, plus a resize still owed to a shell — and a window that is not stirs the
+        // clock; the window that turns the application's clocks then asks it, and it
+        // fires at most once per process. After the fold's inputs above, because they
+        // are what "at rest" is read from, and before the fold, which books its wake.
+        if !self.window_at_rest(running)
+            || pty_resize_deadline.is_some()
+            || resize_finish_deadline.is_some()
+        {
+            self.app.web_warmup.stir(now);
+        }
+        if application_clocks {
+            hang_watch::during(hang_watch::Station::WebWarmup, || self.warm_web_engine(now));
+        }
+        const DEADLINE_OWNERS: [&str; 52] = [
             "startup poll",
             "IME cursor",
             "shell caret",
@@ -2115,6 +2146,7 @@ impl Runtime<'_> {
             "refused frame",
             "window title",
             "search walk",
+            "web engine warm-up",
         ];
         let deadlines = [
             startup_deadline,
@@ -2370,15 +2402,22 @@ impl Runtime<'_> {
             // and no other event. Absent unless a walk is partial, and a walk ends in
             // at most (history / slice) turns, so this is never a standing wake.
             self.search_walk_deadline(now),
+            // **The web engine's warm-up** (ticket 54): the end of the grace or of the
+            // quiet stretch, whichever is later, until it has fired once — so an idle
+            // window that nothing else wakes still reaches the turn the clock is due
+            // on. Absent once it has fired, before the first frame, and while the
+            // restore card stands (the gesture that answers it books the next one).
+            application_clocks
+                .then(|| {
+                    self.app
+                        .web_warmup
+                        .deadline(self.web_warmup_waits_for_the_restore_card())
+                })
+                .flatten(),
         ];
         let wake = earliest_named_deadline(DEADLINE_OWNERS, deadlines);
         if self.app.trace_perf
-            && !running.any()
-            && !self.window.frame_clock.owes_a_frame()
-            && self.window.pending_frames.pending_frame().is_none()
-            && !self.window.chrome_present_pending
-            && !self.window.pictures_owe_a_frame
-            && !self.window.cards.owes_frame()
+            && self.window_at_rest(running)
             && let Some((owner, at)) = wake
             && at.saturating_duration_since(now) < Duration::from_millis(100)
         {

@@ -1039,6 +1039,11 @@ impl Runtime<'_> {
         );
         let pending = drain_result?;
         let drain_parent = hang_watch::enter(hang_watch::Station::DrainOutcomes);
+        // **A shell that spoke is a stir for the web engine's warm-up** (ticket 54): the
+        // warm-up waits for a stretch in which no window drained anything.
+        if outcomes.iter().any(|outcome| outcome.bytes > 0) {
+            self.app.web_warmup.stir(now);
+        }
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome = &mut outcomes[index];
             // **The OSC lane's turn, on the turn the bytes arrived.** A standing request a program

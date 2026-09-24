@@ -6,7 +6,7 @@ use crate::{
     WebPlacement, a_page_is_off_the_glass, a_page_still_has_a_pane, a_page_was_replaced,
     a_retirement_happens_on_this_turn, hang_watch, hole_for, input, marks, native_window, preview,
     preview_image_placement, restore, revived_page_of, seats, shown_address, web_mouse_button,
-    web_trace, webhost, webnav, websheet,
+    web_trace, web_warmup, webhost, webnav, websheet,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -16,6 +16,38 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton};
 
 impl Runtime<'_> {
+    /// **The web engine, asked for on an idle turn after startup** (0.4.5 ticket 54,
+    /// D-64; `docs/ARCHITECTURE.md` §5.3 row 21).
+    ///
+    /// Called from [`Self::turn`] by the window that turns the application's clocks,
+    /// under its own station. Tells the clock about this window's presented frame
+    /// (the grace is counted from the first), and asks it whether this is the turn:
+    /// once per process, [`web_warmup::WEB_ENGINE_WARMUP_AFTER`] after the first
+    /// frame, [`web_warmup::WEB_ENGINE_WARMUP_QUIET`] after the last stir, with the
+    /// restore card down and nobody having asked for the environment yet. The ask is
+    /// the process's own door ([`bt_platform::warm_web_environment`]), the same
+    /// creation call and options a page's `request_environment` makes; it never waits,
+    /// and its failure is one `diagnostics.log` line.
+    pub(crate) fn warm_web_engine(&mut self, now: Instant) {
+        self.app.web_warmup.saw_frame(self.window.last_present_at);
+        let restore_card_up = self.web_warmup_waits_for_the_restore_card();
+        // What the door answered is already said where it matters: a failure is the
+        // clock's one `diagnostics.log` line, and the ask's cost is this station's.
+        let _ = self.app.web_warmup.turn(
+            now,
+            restore_card_up,
+            &mut web_warmup::ThisProcess,
+            crate::diagnostics::note,
+        );
+    }
+
+    /// **Whether the restore card is up in this window** — the one condition of the
+    /// warm-up that is not a stir, because it stands for as long as the reader leaves
+    /// it (ticket 54). The same two facts the card's own keyboard rung and layout ask.
+    pub(crate) fn web_warmup_waits_for_the_restore_card(&self) -> bool {
+        self.window.restore_prompt.is_open() && !self.app.restore_question.is_empty()
+    }
+
     /// **The page on one seat of the tab in front, and the one door to it** —
     /// every reader of a hosted page goes through this pair.
     ///

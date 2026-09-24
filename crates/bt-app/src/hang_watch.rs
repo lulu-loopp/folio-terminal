@@ -321,7 +321,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 207;
+const STATION_COUNT: usize = 208;
 
 #[path = "hang_watch_detail.rs"]
 mod detail;
@@ -965,6 +965,14 @@ pub enum Station {
     /// font list has landed this is one family asked of the system font
     /// collection; after, a row of that list.
     FontLookup = 206,
+    /// **`Runtime::warm_web_engine`** — the warm-up clock's ask for the
+    /// process's web environment, on an idle turn after startup (ticket 54,
+    /// D-64). Its own name so that the request's cost on this thread (the
+    /// creation call, 10–38 ms on the first ask by ticket 43's measurement) is
+    /// never charged to the clock run around it, and so that a first page's
+    /// stall line that no longer names [`Self::WebEnvironment`] can be read
+    /// beside the turn that paid for it instead.
+    WebWarmup = 207,
 }
 
 impl Station {
@@ -1179,6 +1187,7 @@ impl Station {
             Self::WebNavigate => "WebHost::navigate",
             Self::Pump => "message pump",
             Self::FontLookup => "font family lookup",
+            Self::WebWarmup => "warm_web_engine",
         }
     }
 
@@ -1407,6 +1416,7 @@ impl Station {
             204 => Self::WebNavigate,
             205 => Self::Pump,
             206 => Self::FontLookup,
+            207 => Self::WebWarmup,
             _ => Self::Starting,
         }
     }
@@ -4508,6 +4518,7 @@ mod tests {
             "stand_on_the_floor",
             "WebHost::navigate",
             "message pump",
+            "warm_web_engine",
         ] {
             assert!(
                 vocabulary.contains(&word),

@@ -159,6 +159,7 @@ mod video_seat;
 mod watch_clock;
 mod web_thumb;
 mod web_trace;
+mod web_warmup;
 mod webhost;
 mod webnav;
 mod websheet;
@@ -12552,6 +12553,12 @@ struct App {
     /// Two lists rather than one because they answer two different questions, and
     /// a single list would have to carry the routing that those two *are*.
     restore_question: Vec<TabV1>,
+    /// **The web engine's warm-up clock** (0.4.5 ticket 54, D-64): the
+    /// application's and not a window's, because the environment it asks for is
+    /// the process's. Stirred by a gesture in any window, by output drained in
+    /// any window and by any window not at rest; turned by the window that turns
+    /// the application's clocks (`Runtime::warm_web_engine`).
+    web_warmup: web_warmup::WebWarmup,
     /// **Saved windows that have not opened, because nothing in them was pinned**
     /// (multiwindow slice D).
     ///
@@ -39121,8 +39128,9 @@ struct DrainOutcome {
     /// wait on a pane that has not would be a pane held back by a decision that was never about
     /// it.
     arrived_uncapped: bool,
-    /// How many bytes this turn took out of the rings. Diagnostic only — it is what the
-    /// per-drain trace line reports, so a traced run can be read against its own recording.
+    /// How many bytes this turn took out of the rings. It is what the per-drain trace line
+    /// reports, so a traced run can be read against its own recording — and whether it is zero
+    /// is what the web engine's warm-up hears as "a shell spoke" (ticket 54).
     bytes: usize,
     /// **A DEC 2026 synchronized update committed on this pane during this turn.**
     ///
@@ -41372,6 +41380,7 @@ impl Runtime<'_> {
             // fall back to before this window has measured itself once.
             window_pictures: vec![(window.id(), opening.clone())],
             restore_question: Vec::new(),
+            web_warmup: web_warmup::WebWarmup::default(),
             pending_restore_windows: Vec::new(),
             pending_restore_answer: None,
             pending_application_change: None,
@@ -62742,6 +62751,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     ) {
         if file_reads::is_user_input(&event) {
             bt_platform::file_reads::input();
+            // **A gesture is a stir for the web engine's warm-up** (ticket 54): the
+            // same classifier the file-read ledger asks, so "the reader did
+            // something" is one judgement in this program and not two.
+            if let Some(app) = self.app.as_mut() {
+                app.web_warmup.stir(Instant::now());
+            }
         }
         present_diagnostics::event();
         hang_watch::at(hang_watch::Station::Event);
