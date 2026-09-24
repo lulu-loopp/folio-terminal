@@ -610,6 +610,9 @@ impl Runtime<'_> {
         // window is on the glass, so no frame is ever drawn with the lights on
         // the wrong axis.
         self.follow_the_window_band()?;
+        // **Where the window is, before anything reads it** (ticket 48): the install road drains
+        // this window's shells before its first turn, and that drain reads the turn's reading.
+        self.observe_window_place();
         // **Written at once, not on the first turn** (ticket 49): a window must not
         // reach the taskbar untitled, and nothing has been sent yet, so the
         // throttle has no interval to hold it for.

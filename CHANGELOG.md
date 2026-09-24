@@ -8,6 +8,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Typing no longer pauses while Folio asks Windows several times a turn
+  where its window is; it asks once.
 - A program that keeps changing its window title no longer slows typing;
   Folio passes the title on at most once a frame.
 

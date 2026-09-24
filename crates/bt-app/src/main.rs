@@ -13708,6 +13708,14 @@ struct WindowRuntime {
     /// between one wait and the next, and nothing tells this process when they
     /// do. Born `false`, which is what Windows ships.
     taskbar_auto_hidden: bool,
+    /// **The last reading of where this window is, whole** (ticket 48): the
+    /// four facts [`sample_window_place`] answered, focus included, as the pass
+    /// that decides a delivery takes them. Written with the four fields above in
+    /// one assignment by [`Runtime::observe_window_place`] and by nothing else:
+    /// at the head of every turn, at the window's birth, and by an attention
+    /// delivery that arrives between turns. **Read for one turn and never
+    /// across two**: the next turn's head replaces it before anything reads it.
+    observed_place: notify::WindowPlace,
     ime_outbound: ime_outbound::State,
     ime_system_caret: bt_platform::ImeSystemCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
@@ -15113,8 +15121,8 @@ impl WindowRuntime {
     /// *inside* a turn whose pass has already sampled these on the same frame, so asking the OS
     /// again here would be asking it twice about one instant.
     ///
-    /// The passes themselves take a place built from a fresh sample — see
-    /// [`sample_window_place`], which is what writes the three fields this reads.
+    /// The passes themselves read [`Self::observed_place`], the turn's one reading with the
+    /// window's own focus answer; [`Runtime::observe_window_place`] writes both (ticket 48).
     fn place(&self) -> notify::WindowPlace {
         notify::WindowPlace {
             focused: self.window_focused,
@@ -26606,19 +26614,25 @@ fn window_is_hidden(window: &Window) -> bool {
 ///
 /// The one place the four facts of [`notify::WindowPlace`] are *read* rather than remembered, and
 /// it exists so that "sampled together, on one turn" is a call and not a convention three passes
-/// each keep on their own. Focus is the caller's, because the two passes that run this disagree
-/// about where it comes from and both are right: `drain_pty` asks the window itself, the animation
-/// tick uses the answer `WM_SETFOCUS` left behind.
+/// each keep on their own. **Its one caller is [`Runtime::observe_window_place`]** (ticket 48):
+/// the head of every turn, a window's birth, and an attention delivery that arrives between turns.
+/// Focus is that caller's, and it asks the window itself (`Window::has_focus`) for the reason
+/// `drain_pty` gives.
 ///
 /// Between four and eight syscalls a turn — `IsIconic`, `DwmGetWindowAttribute`,
 /// `SHAppBarMessage`, and the `GetWindowRect` plus one to three `WindowFromPoint`/`GetAncestor`
 /// pairs the exposure probe costs — against a pass that walks every leaf of every tab. That is why
-/// the answers land in `WindowRuntime`'s fields on the way past: the doors that fire *inside* a turn
-/// read them back from there rather than asking again about the same instant. **This is the pass
+/// the answers land in `WindowRuntime`'s fields: the drain, the strip tick and the doors that fire
+/// *inside* a turn read them back from there rather than asking again about the same instant. **This is the pass
 /// that decides a delivery**, which is what the probe is priced against; nothing on the drawing path
 /// asks any of these.
 fn sample_window_place(window: &Window, focused: bool) -> notify::WindowPlace {
-    let hidden = window_is_hidden(window);
+    // **Each probe under its own station** (ticket 48): two of them go to other processes —
+    // the hit tests to whatever window is under each point, `SHAppBarMessage` to the shell's
+    // taskbar — and a stall line should say which one waited.
+    let hidden = hang_watch::during(hang_watch::Station::PlaceHidden, || {
+        window_is_hidden(window)
+    });
     notify::WindowPlace {
         focused,
         hidden,
@@ -26628,11 +26642,16 @@ fn sample_window_place(window: &Window, focused: bool) -> notify::WindowPlace {
         // against that rectangle would be an answer about somewhere the window is not. A cloaked
         // window is on no screen by definition. Either way the honest answer is that nothing of it
         // is showing, and `desktop_reach` tests the hidden bit outermost anyway.
-        exposed: !hidden && window_is_exposed(window),
+        exposed: !hidden
+            && hang_watch::during(hang_watch::Station::PlaceExposure, || {
+                window_is_exposed(window)
+            }),
         // **Every turn, never cached across them.** The reader can turn auto-hide on in Settings
         // between one wait and the next, and Windows tells this process nothing when they do — so
         // the only honest reading is the one taken at the delivery it decides.
-        taskbar_is_auto_hidden: bt_platform::taskbar_is_auto_hidden(),
+        taskbar_is_auto_hidden: hang_watch::during(hang_watch::Station::PlaceTaskbar, || {
+            bt_platform::taskbar_is_auto_hidden()
+        }),
     }
 }
 
@@ -39599,6 +39618,14 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // looked at yet, and the assumption would cost a toast rather than a
         // flash.
         taskbar_auto_hidden: false,
+        // The born answers of the four fields beside it, and winit's own `has_focus` start
+        // (false). `dress_new_window` replaces it with a real reading before anything reads it.
+        observed_place: notify::WindowPlace {
+            focused: false,
+            hidden: false,
+            exposed: true,
+            taskbar_is_auto_hidden: false,
+        },
         ime_outbound: ime_outbound::State::default(),
         ime_system_caret,
         pointer_position: None,
@@ -62080,12 +62107,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 };
                 let now = Instant::now();
                 self.for_each_window(|runtime| {
-                    let place =
-                        sample_window_place(&runtime.window.window, runtime.window.window_focused);
-                    runtime.window.window_hidden = place.hidden;
-                    runtime.window.window_exposed = place.exposed;
-                    runtime.window.attention_sampled_at = Some(Instant::now());
-                    runtime.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
+                    // **A fresh reading of its own, not the next turn's** (ticket 48, coordinator
+                    // ruling 2026-09-24). This arm can run where no turn follows it for seconds:
+                    // inside Windows' modal move/size loop winit sends no `AboutToWait`, so a
+                    // message parked for the turn would wait for the hand to let go. Through the
+                    // one writer, so the reading it decides on is also the one the window keeps.
+                    runtime.observe_window_place();
+                    let place = runtime.window.observed_place;
                     let mut raised: Vec<AttentionDelivery> = Vec::new();
                     let switches = runtime.notification_switches();
                     deliver_attention(

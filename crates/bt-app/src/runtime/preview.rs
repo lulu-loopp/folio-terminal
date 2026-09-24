@@ -46,13 +46,12 @@ use crate::{
     preview_text, preview_text_box_at, preview_text_boxes, preview_text_grain, preview_trace,
     preview_viewport, preview_watch, preview_wide_blocks, preview_wrap, preview_wrap_columns,
     profiles, recoverable_clipboard_write, resolve_document_pictures, revealable_preview_file,
-    same_path_ignoring_case, sample_window_place, scroll_bar_layer, scrollback_quota, seats,
-    settings, settle_attention, shown_address, source_opens_as_a_page, step_preview_caret_by_row,
-    strip_animation_tick_is_due, surface_pixels, surface_subject_of, surface_takes_image_zoom,
-    switcher_rows, tab_owes_frame, tab_trailing_targets, table_block, text_field,
-    tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key, video_seat,
-    video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
-    wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
+    same_path_ignoring_case, scroll_bar_layer, scrollback_quota, seats, settings, settle_attention,
+    shown_address, source_opens_as_a_page, step_preview_caret_by_row, strip_animation_tick_is_due,
+    surface_pixels, surface_subject_of, surface_takes_image_zoom, switcher_rows, tab_owes_frame,
+    tab_trailing_targets, table_block, text_field, tick_owes_a_present, toast, tooltip, trace_sink,
+    video_frame_texture_key, video_seat, video_still_destination, viewport_of_rect, visible_range,
+    webhost, webnav, wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -12297,7 +12296,9 @@ impl Runtime<'_> {
         let WindowRuntime {
             taskbar, window, ..
         } = &mut self.window;
-        taskbar.show(window, wanted);
+        hang_watch::during(hang_watch::Station::TaskbarMirror, || {
+            taskbar.show(window, wanted)
+        });
         if !strip_animation_tick_is_due(
             self.window.strip_animation_ticked_at,
             now,
@@ -12320,15 +12321,11 @@ impl Runtime<'_> {
         // Every door of the attention queue, in one pass over one leaf at a time
         // — see `settle_attention` for why they stopped being two passes whose
         // order was the mechanism, and for the order the four that are left run in.
-        // Sampled here beside the pass that reads it, and on the same turn: the facts that separate
-        // "not in front of you" from "not on any screen" — and from "there is no taskbar to look
-        // at" — are facts about *now*, and this pass is the one that decides what the reader is
-        // owed.
-        let place = sample_window_place(&self.window.window, self.window.window_focused);
-        self.window.window_hidden = place.hidden;
-        self.window.window_exposed = place.exposed;
-        self.window.attention_sampled_at = Some(Instant::now());
-        self.window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
+        // **The turn's own reading, not a second one** (ticket 48): the facts that separate "not
+        // in front of you" from "not on any screen" — and from "there is no taskbar to look at" —
+        // are facts about this turn, and its head asked them once
+        // (the one writer, in `frame.rs`), focus included, for the drain and for this pass.
+        let place = self.window.observed_place;
         let mut raised: Vec<AttentionDelivery> = Vec::new();
         let switches = self.notification_switches();
         settle_attention(
