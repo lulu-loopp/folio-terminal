@@ -1456,7 +1456,7 @@ impl Runtime<'_> {
         &mut self,
         below: usize,
         now: Instant,
-    ) -> Vec<marks::OverlayLayer> {
+    ) -> marks::Band {
         // Rebuilt from nothing on every pass, exactly as the float group's two
         // ledgers are: it is a record of what *this* frame drew, and a stale
         // index in it is a picture drawn into somebody else's layer.
@@ -1466,7 +1466,7 @@ impl Runtime<'_> {
         // opacity, and a number left behind is a frame debt owed for a card that
         // is not there.
         self.window.file_peek_drawn_opacity = None;
-        let mut layers = self.file_peek_card_layers();
+        let mut layers = marks::Band::from(self.file_peek_card_layers());
         if layers.is_empty() {
             return layers;
         }
@@ -1489,7 +1489,7 @@ impl Runtime<'_> {
         // [`OverlayStack::below_the_file_peek`]'s reason: the index is a fact
         // about the stack, and only the chrome pass has a view of the stack.
         self.window.file_peek_level = Some(below + layers.len());
-        layers.push(marks::OverlayLayer::default());
+        layers.layers.push(marks::OverlayLayer::default());
         // **The ▶ on the card, and the ruling that put it there** (user
         // 2026-08-28: *「能动的就动」*). §7.23's card drew a first frame and said
         // out loud that winding it was not what that build did. It is what this
@@ -1500,34 +1500,40 @@ impl Runtime<'_> {
         // Above the slot, with the bar, for the float's reason: a layer paints
         // its quads before the picture it carries, and the picture here is a
         // video drawn over the slot's own (empty) ground.
-        layers.extend(self.video_play_mark_layer(PreviewSurface::Peek));
-        layers.extend(self.video_bar_layer(PreviewSurface::Peek));
+        layers
+            .layers
+            .extend(self.video_play_mark_layer(PreviewSurface::Peek));
+        if let Some(bar) = self.video_bar_layer(PreviewSurface::Peek) {
+            layers.append(bar);
+        }
         // **The card fades in as one thing** (owner's ruling 2026-09-13, option
         // B of the four-way motion mock): `opacity 0 -> 1` over
         // [`tooltip::TOOLTIP_FADE`] on the tip's own `ease`, no travel and no
         // scale, and instant on the way out.
         //
-        // Folded here, over **every** layer the card put down, rather than
+        // Wrapped here, round **every** layer the card put down, rather than
         // handed to `file_peek::build` for the card's face alone: the face, the
-        // scroll bar beside its document, the ▶ on a recording and that
-        // recording's control bar are one surface arriving, and a fade that
+        // scroll bar beside its document, the ▶ on a recording, the recording
+        // itself and its control bar are one surface arriving, and a fade that
         // reached the face would have left a solid bar hanging in the air over a
-        // card that was not there yet. It is the argument
-        // `bt_render::OverlayLayer::opacity` is a layer's and not a fill's, made
-        // once more one level up — and the reason this is the wrapper's line and
-        // not `file_peek_card_layers`', which returns from five places.
+        // card that was not there yet — and the reason this is the wrapper's
+        // line and not `file_peek_card_layers`', which returns from five places.
         //
-        // Multiplied into whatever each layer already carries, never assigned
-        // over it: a layer that is faded for a reason of its own is faded for
-        // that reason *and* for this one.
+        // **One surface, composited once** (ticket 46): the card is the
+        // band's group and the renderer draws it whole, so its plate, its
+        // hairline, its shadow and its letters arrive together, as
+        // `.file-peek { opacity }` does in the mock-up. It is no longer folded
+        // into each layer's opacity, which faded each fill and each letter on
+        // its own in linear light — the plate overshooting and the letters
+        // leading — and could not reach the recording at all (the audit's F1):
+        // a picture on the card is drawn into the card's surface and fades with
+        // it. A layer that fades for a reason of its own (the recording's bar)
+        // keeps its own group inside this one, and the two multiply.
         let opacity = self.file_peek_opacity(now).expect(
             "a card with layers is a card on screen, and PeekClock::Shown carries its epoch",
         );
         self.window.file_peek_drawn_opacity = Some(opacity);
-        for layer in &mut layers {
-            layer.opacity *= opacity;
-        }
-        layers
+        layers.faded(opacity, [0.0, 0.0])
     }
 
     fn file_peek_card_layers(&mut self) -> Vec<marks::OverlayLayer> {

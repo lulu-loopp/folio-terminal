@@ -405,11 +405,24 @@ separate and only the third is paced: *service* (ungated — picture service, dr
 autoscroll), *sample and draw* (at compose), and *ask for a frame of its own*
 (the only gated one). Every composed frame carries every running journey, and
 **landings are never paced**.
+- **A surface fades as one piece** (2026-09-24). A fading or travelling surface —
+  a tip, the glance card, a menu, the palette, the settings scrim and dialog, a
+  notice, the key hint, the Cards bubble, a float, the rail's fold, the dock
+  preview, the drag ghost, a video's bar — is one group (`bt_render::OverlayGroup`,
+  handed in as `marks::Band`): drawn whole at full strength and composited once, on
+  encoded bytes, exactly as CSS `opacity` composites an element. Its fade and its
+  travel are never folded into its layers' own opacity or rectangles. A group at
+  opacity 1 with no offset is drawn exactly as before, byte for byte; under reduced
+  motion no fade leaves a group below 1. A ground inside a group cross-fades against
+  what stands under it; everything else in it composites over. Spans nest and
+  multiply.
 **From.** §7.1 items ⑬ and ⑬′ (one pacer per window; the hover leaves with the
 pointer); the `pace.rs` and `animation.rs` module docs; §7.18 *motion tokens:
 three steps, one travel distance, two curves, and a register that forbids a
 fourth*; §7.19 *an overlay's entry and exit: a picture that fades, not a menu that
-can still be clicked*; §7.20 *the ones that are not overlays*.
+can still be clicked*; §7.20 *the ones that are not overlays*; trailing entry
+2026-09-24 *A fading surface is drawn whole and composited once, on encoded bytes,
+as CSS does*.
 **Overrides.** ⑬′ supersedes the earlier half-second hover delay. The pacing
 closure series replaced four patches with three general rules, which are the
 three above.

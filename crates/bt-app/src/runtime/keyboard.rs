@@ -31,7 +31,7 @@ impl Runtime<'_> {
     /// (`el.title` is rewritten on every paint), and here it earns its keep
     /// twice: a chord recorded in the settings dialog takes effect on the next
     /// press, and the scope a row is in force in moves with the keyboard.
-    pub(in crate::runtime) fn key_hint_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn key_hint_layer(&mut self) -> marks::Band {
         // Recorded at the end and only on the path that paints, so the
         // frame-debt comparison is against what is *on screen* — the tip's own
         // note, one surface over.
@@ -43,7 +43,7 @@ impl Runtime<'_> {
         // for one turn and spend a `WaitUntil` on it. A transparent layer costs
         // one draw of nothing; a spin costs the loop's sleep.
         let Some((held, opacity)) = self.key_hint_on_screen(now) else {
-            return Vec::new();
+            return marks::Band::default();
         };
         let lines = self.app.shortcuts.hint_lines(held, self.shortcut_focus());
         let caps = shortcuts::live_caps(held);
@@ -57,7 +57,7 @@ impl Runtime<'_> {
             scale,
             &mut |run, size| renderer.measure_chrome_text(gpu, run, size),
         ) else {
-            return Vec::new();
+            return marks::Band::default();
         };
         let palette = bt_render::chrome_palette();
         self.window.key_hint_drawn_opacity = Some(opacity);

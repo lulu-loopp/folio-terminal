@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad};
 use winit::keyboard::ModifiersState;
 
-use crate::marks::OverlayLayer;
+use crate::marks::{Band, OverlayLayer};
 use crate::settings::push_float_window;
 use crate::shortcuts::HintLine;
 use crate::{EASE, Motion, cubic_bezier};
@@ -506,14 +506,11 @@ pub(crate) fn cap_box_width(
 
 // ── the paint ──────────────────────────────────────────────────────────────
 
-/// Paint the card — **one layer**, so it carries one fade.
+/// Paint the card — **one layer and one surface**, so it carries one fade, and
+/// that fade is the surface's (ticket 46): drawn whole and put back once, the
+/// caps, their names and the plate under them arrive together.
 #[must_use]
-pub fn build(
-    layout: &KeyHintLayout,
-    palette: &ChromePalette,
-    scale: f32,
-    opacity: f32,
-) -> Vec<OverlayLayer> {
+pub fn build(layout: &KeyHintLayout, palette: &ChromePalette, scale: f32, opacity: f32) -> Band {
     let px = |logical: f32| logical * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
     let border = px(KEY_HINT_BORDER_LOGICAL_PX);
@@ -533,7 +530,6 @@ pub fn build(
     );
     let mut layer = OverlayLayer {
         quads,
-        opacity,
         ..OverlayLayer::default()
     };
 
@@ -592,7 +588,7 @@ pub fn build(
             clip: Some(layout.frame),
         });
     }
-    vec![layer]
+    Band::surface(vec![layer], opacity, [0.0, 0.0])
 }
 
 #[cfg(test)]

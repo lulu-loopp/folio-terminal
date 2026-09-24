@@ -162,13 +162,13 @@ impl Runtime<'_> {
             // Lower still than the rail, because a pane's own scroll bar is not
             // a surface floating over the window at all — see
             // [`OverlayStack::preview_bars`].
-            preview_bars: self.preview_seat_bar_layers(),
+            preview_bars: self.preview_seat_bar_layers().into(),
             // Directly above them and for the same argument: it belongs to a
             // pane. See [`OverlayStack::video_bars`] for why it cannot be drawn
             // in any earlier lane.
             video_bars: self.preview_seat_video_bars(),
-            terminal_bars: self.terminal_bar_layers(),
-            command_rail: self.command_rail_layers(),
+            terminal_bars: self.terminal_bar_layers().into(),
+            command_rail: self.command_rail_layers().into(),
             // **The hovered formula band's two marks**, above the command rail
             // and below everything a menu can drop over a pane (owner's ruling
             // 2026-09-14 ②). Empty on every frame no pointer is on a formula,
@@ -177,7 +177,7 @@ impl Runtime<'_> {
             // **And, under them, the other face of a band that is changing into
             // it** (§7.1.5p ⑪): one block, one lane, and the marks stand on the
             // source text exactly as they stand on the picture it is replacing.
-            formula_tools,
+            formula_tools: formula_tools.into(),
             rail: self.rail_overlay_layers(),
             // **Directly above the list it came out of** (§7.1.6b″). At full
             // opacity and never at the rail's fold: the fold is what a panel
@@ -191,18 +191,18 @@ impl Runtime<'_> {
             // `.srchbar { z-index: 30 }` — above the ground drawings, below the
             // schematic. It also stores the capsule's rectangle for the press
             // router, so the box you can press is the box you can see.
-            search: self.search_layers(),
+            search: self.search_layers().into(),
             // Beside the capsule, and above it in the list for the reason it
             // is above it on the glass: the capsule floats over the pane's
             // own text and this stands in a row the text was moved out of, so
             // the two can never overlap and the order between them says which
             // would win if the arithmetic were ever broken.
-            pane_notices: self.notice_layers(),
+            pane_notices: self.notice_layers().into(),
             // **Above the capsule and the strip, below every menu.** It is a
             // notice standing on one pane's own body, and §7.7 ④ puts its Escape
             // 「排在 pane 菜单之上」 — so the paint and the ladder agree by being
             // written in the same order.
-            web_sheet: self.web_sheet_layers(),
+            web_sheet: self.web_sheet_layers().into(),
             ..OverlayStack::default()
         };
         // **The notice joins the popup family** (the animation slice, 2026-08-26).
@@ -506,9 +506,9 @@ impl Runtime<'_> {
             // Nothing this slice animates: the quit card, the dirty gate, the
             // PowerShell invite and the restore prompt are drawn exactly as they
             // were, and an empty band is empty.
-            ModalBand::Fixed => modal,
+            ModalBand::Fixed => modal.into(),
             ModalBand::Menu(popup, travel) => {
-                self.stage(Layered::Popup(popup), modal, Some(travel), now)
+                self.stage(Layered::Popup(popup), modal.into(), Some(travel), now)
             }
             ModalBand::Settings => {
                 // `settings::build` puts the scrim on the first layer and the
@@ -521,9 +521,14 @@ impl Runtime<'_> {
                 // because it did not come from anywhere: it is the window
                 // itself going dark, and a dimming that slid four pixels would
                 // be the whole window sliding under the dialog on it.
-                let mut painted = self.stage(Layered::SettingsScrim, layers, None, now);
-                let dialog = self.stage(Layered::SettingsDialog, dialog, Some(Travel::Down), now);
-                painted.extend(dialog);
+                let mut painted = self.stage(Layered::SettingsScrim, layers.into(), None, now);
+                let dialog = self.stage(
+                    Layered::SettingsDialog,
+                    dialog.into(),
+                    Some(Travel::Down),
+                    now,
+                );
+                painted.append(dialog);
                 painted
             }
         };
@@ -531,15 +536,15 @@ impl Runtime<'_> {
         // menu that is going and a menu that is coming are one gesture seen from
         // both ends (E61 — the opener closes the others), and what a hand is
         // reaching for is the one that is arriving.
-        stack.modal = Vec::new();
+        stack.modal = marks::Band::default();
         for leaving in Layered::MODAL_BANDS {
             if !holding.contains(&leaving) {
-                let ghost = self.stage(leaving, Vec::new(), None, now);
-                stack.modal.extend(ghost);
+                let ghost = self.stage(leaving, marks::Band::default(), None, now);
+                stack.modal.append(ghost);
             }
         }
-        stack.modal.extend(live);
-        stack.layout_peek = self.layout_peek_layer();
+        stack.modal.append(live);
+        stack.layout_peek = self.layout_peek_layer().into();
         // **Read after the last group under the floats and before the floats
         // themselves** (§7.14c): this is the offset every floated page's hole is
         // spelled against, and the one place the stack's order and that index
@@ -566,7 +571,7 @@ impl Runtime<'_> {
         // travelling from that direction, and leaves as a picture over the fast
         // span like every other layer this window puts down.
         let (card_hint, card_hint_travel) = self.card_hint_layer(now);
-        stack.card_hint = self.stage(Layered::CardHint, card_hint, card_hint_travel, now);
+        stack.card_hint = self.stage(Layered::CardHint, card_hint.into(), card_hint_travel, now);
         let tooltip = self.tooltip_layer();
         stack.tooltip = self.stage_departure(Layered::Tip, tooltip, now);
         // **Read before the card's own layers go in, and for
@@ -579,22 +584,23 @@ impl Runtime<'_> {
         let below_peek = stack.below_the_file_peek();
         stack.file_peek = self.file_peek_layer(below_peek, now);
         stack.drag_ghost = self.drag_ghost_layer();
-        stack.window_ring = self.window_ring_layer();
+        stack.window_ring = self.window_ring_layer().into();
         let flattened = stack.flattened();
         dump_overlay_frame(&flattened);
+        let marks::Band { layers, groups } = flattened;
         let layers = self
             .window
             .settings_marks
-            .resolve_overlay(flattened, &bt_render::chrome_palette());
+            .resolve_overlay(layers, &bt_render::chrome_palette());
         // **Where each layer stands, kept for the pages under them** (M4-3).
         // Read here because this is the one place the stack's order is settled,
         // which is the order `WebHole::above` is an index into - the same
-        // sentence `below_the_floats` is read for a few lines up.
-        self.window.overlay_bounds = layers
-            .iter()
-            .map(bt_render::OverlayLayer::opaque_bounds)
-            .collect();
-        self.window.renderer.set_modal_overlay(layers)
+        // sentence `below_the_floats` is read for a few lines up. Read through
+        // the groups (ticket 46): a surface's fade and travel are on its span
+        // now, not in its layers, so a menu leaving at nothing covers no page
+        // and one arriving stands where it is drawn.
+        self.window.overlay_bounds = bt_render::overlay_layer_bounds(&layers, &groups);
+        self.window.renderer.set_modal_overlay(layers, groups)
     }
 
     /// Point the "Display formulas" switch at `enabled` (user ruling 2026-08-10).

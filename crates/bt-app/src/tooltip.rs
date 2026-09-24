@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad};
 use bt_term::ProgressState;
 
-use crate::marks::OverlayLayer;
+use crate::marks::{Band, OverlayLayer};
 use crate::settings::push_float_window;
 use crate::{EASE, Motion, cubic_bezier};
 
@@ -899,9 +899,13 @@ impl TooltipHost {
 /// popups you summon by *not moving* — a fade-in is exactly the kind of
 /// unrequested motion the preference is about.
 ///
-/// There is deliberately no fade **out**: the mock-up's `.tip` transitions on the
-/// way in and simply loses `.show` on the way out, and a card that lingers after
-/// the pointer has left is a card answering a question nobody is asking any more.
+/// **This curve is the way in only.** The way out is not this function's: the
+/// tip leaves over [`bt_render::POPUP_EXIT`] through
+/// `arrival::Passages::stage_departure` (DESIGN §7.19 ⑥), a picture of the tip
+/// fading as one surface round the one this curve drew. The glance card has no
+/// way out at all — it goes the instant the pointer does (T-PEEK-FADE, §7.29 ⑭).
+/// (This paragraph used to say that neither surface fades out; the tip gained
+/// its departure after it was written — the fade audit's F4, 2026-09-23.)
 #[must_use]
 pub fn hover_fade_opacity(since: Duration, motion: Motion) -> f32 {
     if motion == Motion::Reduced {
@@ -1234,11 +1238,16 @@ pub fn layout(
     Some(TooltipLayout { frame, lines })
 }
 
-/// Paint the tip — one layer, always the last one handed to the renderer.
+/// Paint the tip — one layer, always the last one handed to the renderer, and
+/// one surface at `opacity`.
 ///
 /// `z-index: 60` against the menu's `30` (mock-up 1207 and the note at 7339):
 /// the tip is the only thing in this window that is *never* covered, because it
 /// is the only thing that exists to explain what is under it.
+///
+/// The fade is the band's group, not the layer's own opacity (ticket 46): the
+/// plate, its hairline, its shadow and its words are drawn whole and put back
+/// once, so they arrive together as `.tip { transition: opacity .09s }` does.
 #[must_use]
 pub fn build(
     layout: &TooltipLayout,
@@ -1246,7 +1255,7 @@ pub fn build(
     scale: f32,
     opacity: f32,
     face: TipFace,
-) -> Vec<OverlayLayer> {
+) -> Band {
     let px = |logical: f32| logical * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
     let mut quads: Vec<OverlayQuad> = Vec::new();
@@ -1346,18 +1355,21 @@ pub fn build(
                 cell_advance: None,
             })
             .collect();
-        return vec![OverlayLayer {
-            quads,
-            body: Some(bt_render::PreviewBody {
-                clip: layout.frame,
-                quads: Vec::new(),
-                paragraphs,
-                blocks: Vec::new(),
-                rasters: Vec::new(),
-            }),
+        return Band::surface(
+            vec![OverlayLayer {
+                quads,
+                body: Some(bt_render::PreviewBody {
+                    clip: layout.frame,
+                    quads: Vec::new(),
+                    paragraphs,
+                    blocks: Vec::new(),
+                    rasters: Vec::new(),
+                }),
+                ..OverlayLayer::default()
+            }],
             opacity,
-            ..OverlayLayer::default()
-        }];
+            [0.0, 0.0],
+        );
     }
 
     let labels = layout
@@ -1378,12 +1390,15 @@ pub fn build(
         })
         .collect();
 
-    vec![OverlayLayer {
-        quads,
-        labels,
+    Band::surface(
+        vec![OverlayLayer {
+            quads,
+            labels,
+            ..OverlayLayer::default()
+        }],
         opacity,
-        ..OverlayLayer::default()
-    }]
+        [0.0, 0.0],
+    )
 }
 
 #[cfg(test)]
@@ -1421,12 +1436,7 @@ mod tests {
         super::layout(text, host, line_widths, window, scale, TipFace::Chrome)
     }
 
-    fn build(
-        layout: &TooltipLayout,
-        palette: &ChromePalette,
-        scale: f32,
-        opacity: f32,
-    ) -> Vec<OverlayLayer> {
+    fn build(layout: &TooltipLayout, palette: &ChromePalette, scale: f32, opacity: f32) -> Band {
         super::build(layout, palette, scale, opacity, TipFace::Chrome)
     }
 
@@ -2048,8 +2058,13 @@ mod tests {
         .unwrap();
         let layers = build(&laid, &palette, SCALE, 0.4);
         assert_eq!(layers.len(), 1, "a tip is one layer");
-        let layer = &layers[0];
-        assert!((layer.opacity - 0.4).abs() < 0.001);
+        let layer = &layers.layers[0];
+        // One surface at the tip's opacity, over the one layer drawn at full
+        // strength (ticket 46).
+        assert_eq!(layers.groups.len(), 1);
+        assert_eq!(layers.groups[0].layers, 0..1);
+        assert!((layers.groups[0].opacity - 0.4).abs() < 0.001);
+        assert!((layer.opacity - 1.0).abs() < 0.001);
         assert_eq!(layer.labels.len(), 2);
         assert_eq!(layer.labels[0].text, "bash");
         assert_eq!(layer.labels[1].text, "Working folder · /tmp");
@@ -2146,7 +2161,7 @@ mod tests {
         let token = host(400.0, 300.0, 449.0, 318.0);
         let laid = super::layout("#7a99ff", token, &[49.0], WINDOW, SCALE, face).unwrap();
         let layers = super::build(&laid, &palette, SCALE, 1.0, face);
-        let layer = &layers[0];
+        let layer = &layers.layers[0];
 
         let well: Vec<&bt_render::OverlayQuad> = layer
             .quads
@@ -2201,7 +2216,7 @@ mod tests {
         };
         let token = host(400.0, 300.0, 465.0, 318.0);
         let laid = super::layout("#7a99ff80", token, &[63.0], WINDOW, SCALE, face).unwrap();
-        let layer = &super::build(&laid, &palette, SCALE, 1.0, face)[0];
+        let layer = &super::build(&laid, &palette, SCALE, 1.0, face).layers[0];
         let inside: Vec<&bt_render::OverlayQuad> = layer
             .quads
             .iter()
@@ -2416,7 +2431,7 @@ mod tests {
         )
         .expect("a card is placed");
         let layers = super::build(&laid, &palette, SCALE, 1.0, peek);
-        let layer = &layers[0];
+        let layer = &layers.layers[0];
         assert!(layer.labels.is_empty(), "not a chrome label");
         let body = layer.body.as_ref().expect("the monospace channel");
         assert_eq!(body.clip, laid.frame);
@@ -2440,7 +2455,7 @@ mod tests {
         // annotation already wears.
         let muted = super::build(&laid, &palette, SCALE, 1.0, TipFace::Peek { muted: true });
         assert_eq!(
-            muted[0].body.as_ref().unwrap().paragraphs[0].runs[0].color,
+            muted.layers[0].body.as_ref().unwrap().paragraphs[0].runs[0].color,
             palette.menu_item_hint_text
         );
         assert_ne!(palette.menu_item_hint_text, palette.menu_item_text);

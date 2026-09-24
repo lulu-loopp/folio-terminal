@@ -28,6 +28,8 @@ All notable changes to Folio are recorded here. The format follows
 ### Changed
 
 - Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.
+- Tooltips, cards, menus and other fading surfaces now fade as one piece, so
+  their edges and text no longer arrive before their plates.
 - Bold text in a terminal font that has no bold style is now drawn heavier in
   that same font, instead of looking like the text around it.
 - Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.

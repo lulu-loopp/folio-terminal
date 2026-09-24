@@ -34,11 +34,11 @@
 //! of a scrubber would be three scrubbers that disagree the first time one of
 //! them is touched.
 //!
-//! [`VideoSeat::bar`] therefore returns a [`crate::marks::OverlayLayer`] — a
-//! bundle of quads, marks and captions in whole-surface pixels — and each
-//! surface pours it into its own channel: a pane's into an overlay layer of its
-//! own, a float's into the float's layer, a card's into the card's flyout. The
-//! bundle is surface-neutral because the bar is.
+//! [`VideoSeat::bar`] therefore returns a [`crate::marks::Band`] — one layer of
+//! quads, marks and captions in whole-surface pixels, fading as one surface —
+//! and each surface stacks it where it belongs: a pane's on its own, a float's
+//! over the float's layer, a card's over the card. The bundle is
+//! surface-neutral because the bar is.
 //!
 //! # The one thing the engine is not asked twice
 //!
@@ -55,7 +55,7 @@ use std::time::{Duration, Instant};
 use bt_platform::video::engine::{Engine, EngineError, EngineState};
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad, VideoStage};
 
-use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
+use crate::marks::{Band, ChromeMark, ChromeSprite, OverlayLayer};
 
 // ── the two waits, and where they came from ───────────────────────────────
 
@@ -1101,13 +1101,21 @@ impl VideoSeat {
     // ── the bar, painted ──────────────────────────────────────────────────
 
     /// **The bar as chrome**, in whole-surface physical pixels — or an empty
-    /// layer when it is not up or there is no room for it.
+    /// band when it is not up or there is no room for it.
     ///
-    /// A [`crate::marks::OverlayLayer`] because that is the one bundle every
-    /// surface in this window can pour into: a float appends it to its own
-    /// layer, a pane gets a layer of its own, and the glance card pours the
-    /// three vectors into the three it is already building. The bundle is
-    /// surface-neutral because the bar is.
+    /// A [`crate::marks::Band`] of one layer because that is the one bundle
+    /// every surface in this window can pour into: a float stacks it over its
+    /// own layer, a pane gets it on its own, and the glance card stacks it over
+    /// the card. The bundle is surface-neutral because the bar is.
+    ///
+    /// **The bar fades as one surface** (the fade audit's F2, ticket 46). Its
+    /// presence was written by hand into each fill's alpha and each mark's
+    /// opacity, and a [`ChromeLabel`] has no alpha to write it into — so in a
+    /// docked pane the clock, the rate and the file's line stood solid while
+    /// the panel faded in and out round them. The layer is now drawn at full
+    /// strength and the presence is the band's group: every channel of it,
+    /// letters included, arrives and leaves together. Inside a float or on the
+    /// card it stands inside that surface's own group, and the two multiply.
     ///
     /// **Every colour is one of the palette's**, and they are the same six the
     /// shell page's `:root` carried, borrowed from the same entries: the panel
@@ -1123,176 +1131,194 @@ impl VideoSeat {
         motion: crate::Motion,
         palette: &ChromePalette,
         meta: BarMeta<'_>,
-    ) -> OverlayLayer {
-        let presence = self.presence(now, motion);
-        if presence.opacity <= 0.0 {
-            return OverlayLayer::default();
-        }
-        let state = self.engine.state();
-        let elapsed = clock_text(state.position_secs);
-        let whole = clock_text(state.duration_secs.unwrap_or(0.0));
-        let figures = clock_figures(state.position_secs, state.duration_secs);
-        let Some(layout) = bar_layout(body, scale, figures, meta.width) else {
-            return OverlayLayer::default();
-        };
-        let alpha = presence.opacity;
-        let font_px = font_logical_px() * scale;
+    ) -> Band {
+        paint_bar(
+            &self.engine.state(),
+            self.grab,
+            self.presence(now, motion).opacity,
+            body,
+            scale,
+            palette,
+            meta,
+        )
+    }
+}
 
-        let mut quads: Vec<OverlayQuad> = Vec::with_capacity(12);
-        let mut sprites: Vec<ChromeSprite> = Vec::with_capacity(2);
-        let mut labels: Vec<ChromeLabel> = Vec::with_capacity(3);
+/// [`VideoSeat::bar`] with its three readings of the seat already taken — the
+/// engine's state, the hand on a track, and how present the bar is — so that
+/// what it paints is a function of what it was handed and nothing else.
+fn paint_bar(
+    state: &EngineState,
+    grab: Option<BarSlot>,
+    presence: f32,
+    body: [f32; 4],
+    scale: f32,
+    palette: &ChromePalette,
+    meta: BarMeta<'_>,
+) -> Band {
+    if presence <= 0.0 {
+        return Band::default();
+    }
+    let elapsed = clock_text(state.position_secs);
+    let whole = clock_text(state.duration_secs.unwrap_or(0.0));
+    let figures = clock_figures(state.position_secs, state.duration_secs);
+    let Some(layout) = bar_layout(body, scale, figures, meta.width) else {
+        return Band::default();
+    };
+    let font_px = font_logical_px() * scale;
 
-        // The panel and its one hairline. No radius on either: the bar sits on
-        // the bottom edge of a box that has already been rounded by whatever
-        // drew it, and a second rounding here would be a second authority for
-        // the same corner.
-        quads.push(OverlayQuad {
-            rect: layout.bar,
-            color: palette.preview_code_ground,
-            alpha,
-        });
-        quads.push(OverlayQuad {
-            rect: layout.edge,
-            color: palette.preview_code_border,
-            alpha,
-        });
+    let mut quads: Vec<OverlayQuad> = Vec::with_capacity(12);
+    let mut sprites: Vec<ChromeSprite> = Vec::with_capacity(2);
+    let mut labels: Vec<ChromeLabel> = Vec::with_capacity(3);
 
-        // The two two-faced controls read the engine rather than remembering
-        // what they were told — a player that remembered it had pressed play
-        // lies the moment a video reaches its end.
-        let playing = state.playing && !state.ended;
-        sprites.push(ChromeSprite {
-            opacity: alpha,
-            ..ChromeSprite::new(
-                if playing {
-                    ChromeMark::Pause
-                } else {
-                    ChromeMark::Play
-                },
-                layout.play_mark,
-                palette.preview_body_text,
-            )
-        });
-        if let Some(mark) = layout.mute_mark {
-            let silent = state.muted || state.volume <= 0.0;
-            sprites.push(ChromeSprite {
-                opacity: alpha,
-                ..ChromeSprite::new(
-                    if silent {
-                        ChromeMark::SpeakerMuted
-                    } else {
-                        ChromeMark::Speaker
-                    },
-                    mark,
-                    palette.preview_body_text,
-                )
-            });
-        }
+    // The panel and its one hairline. No radius on either: the bar sits on
+    // the bottom edge of a box that has already been rounded by whatever
+    // drew it, and a second rounding here would be a second authority for
+    // the same corner.
+    quads.push(OverlayQuad {
+        rect: layout.bar,
+        color: palette.preview_code_ground,
+        alpha: 1.0,
+    });
+    quads.push(OverlayQuad {
+        rect: layout.edge,
+        color: palette.preview_code_border,
+        alpha: 1.0,
+    });
 
-        let clock_label = |text: String, rect: [f32; 4], align_right: bool| ChromeLabel {
-            text,
+    // The two two-faced controls read the engine rather than remembering
+    // what they were told — a player that remembered it had pressed play
+    // lies the moment a video reaches its end.
+    let playing = state.playing && !state.ended;
+    sprites.push(ChromeSprite::new(
+        if playing {
+            ChromeMark::Pause
+        } else {
+            ChromeMark::Play
+        },
+        layout.play_mark,
+        palette.preview_body_text,
+    ));
+    if let Some(mark) = layout.mute_mark {
+        let silent = state.muted || state.volume <= 0.0;
+        sprites.push(ChromeSprite::new(
+            if silent {
+                ChromeMark::SpeakerMuted
+            } else {
+                ChromeMark::Speaker
+            },
+            mark,
+            palette.preview_body_text,
+        ));
+    }
+
+    let clock_label = |text: String, rect: [f32; 4], align_right: bool| ChromeLabel {
+        text,
+        rect,
+        clip: None,
+        font_size_px: font_px,
+        color: palette.preview_code_text,
+        align_right,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        // The one thing on this bar that changes under a fixed layout.
+        tabular_numerals: true,
+        mono: false,
+    };
+    if let Some(rect) = layout.at {
+        labels.push(clock_label(elapsed, rect, false));
+    }
+    if let Some(rect) = layout.duration {
+        labels.push(clock_label(whole, rect, true));
+    }
+    if let Some(rect) = layout.rate {
+        labels.push(clock_label(rate_text(state.rate), rect, true));
+    }
+    // **What the file is, at the end of the row** (owner's ruling
+    // 2026-09-12). Quieter than the controls beside it, because it is the
+    // one thing here that is not one: `--ink2` against their body ink, which
+    // is the same step the path row's own facts take away from its
+    // breadcrumbs.
+    if let Some(rect) = layout.meta {
+        labels.push(ChromeLabel {
+            text: meta.text.to_owned(),
             rect,
-            clip: None,
+            clip: Some(rect),
             font_size_px: font_px,
-            color: palette.preview_code_text,
-            align_right,
+            color: palette.files_row_muted,
+            align_right: true,
             align_center: false,
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
-            // The one thing on this bar that changes under a fixed layout.
-            tabular_numerals: true,
+            tabular_numerals: false,
             mono: false,
-        };
-        if let Some(rect) = layout.at {
-            labels.push(clock_label(elapsed, rect, false));
-        }
-        if let Some(rect) = layout.duration {
-            labels.push(clock_label(whole, rect, true));
-        }
-        if let Some(rect) = layout.rate {
-            labels.push(clock_label(rate_text(state.rate), rect, true));
-        }
-        // **What the file is, at the end of the row** (owner's ruling
-        // 2026-09-12). Quieter than the controls beside it, because it is the
-        // one thing here that is not one: `--ink2` against their body ink, which
-        // is the same step the path row's own facts take away from its
-        // breadcrumbs.
-        if let Some(rect) = layout.meta {
-            labels.push(ChromeLabel {
-                text: meta.text.to_owned(),
-                rect,
-                clip: Some(rect),
-                font_size_px: font_px,
-                color: palette.files_row_muted,
-                align_right: true,
-                align_center: false,
-                letter_spacing_em: 0.0,
-                weight: ChromeLabelWeight::Regular,
-                tabular_numerals: false,
-                mono: false,
-            });
-        }
+        });
+    }
 
-        // The two tracks: a rail of the bar's own hairline, a fill of the
-        // accent, and a dot only while the hand is on it.
-        let progress = state
-            .duration_secs
-            .filter(|duration| duration.is_finite() && *duration > 0.0)
-            .map_or(0.0, |duration| {
-                (state.position_secs / duration).clamp(0.0, 1.0)
-            });
-        let gain = if state.muted {
-            0.0
-        } else {
-            state.volume.clamp(0.0, 1.0)
-        };
-        for (rail, track, fraction, slot) in [
-            Some((layout.seek_rail, layout.seek, progress, BarSlot::Seek)),
-            layout
-                .volume_rail
-                .zip(layout.volume)
-                .map(|(rail, track)| (rail, track, gain, BarSlot::Volume)),
-        ]
-        .into_iter()
-        .flatten()
-        {
+    // The two tracks: a rail of the bar's own hairline, a fill of the
+    // accent, and a dot only while the hand is on it.
+    let progress = state
+        .duration_secs
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .map_or(0.0, |duration| {
+            (state.position_secs / duration).clamp(0.0, 1.0)
+        });
+    let gain = if state.muted {
+        0.0
+    } else {
+        state.volume.clamp(0.0, 1.0)
+    };
+    for (rail, track, fraction, slot) in [
+        Some((layout.seek_rail, layout.seek, progress, BarSlot::Seek)),
+        layout
+            .volume_rail
+            .zip(layout.volume)
+            .map(|(rail, track)| (rail, track, gain, BarSlot::Volume)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        quads.push(OverlayQuad {
+            rect: rail,
+            color: palette.preview_code_border,
+            alpha: 1.0,
+        });
+        let filled = rail[0] + (rail[2] - rail[0]) * fraction as f32;
+        if filled > rail[0] {
             quads.push(OverlayQuad {
-                rect: rail,
-                color: palette.preview_code_border,
-                alpha,
+                rect: [rail[0], rail[1], filled, rail[3]],
+                color: palette.accent,
+                alpha: 1.0,
             });
-            let filled = rail[0] + (rail[2] - rail[0]) * fraction as f32;
-            if filled > rail[0] {
-                quads.push(OverlayQuad {
-                    rect: [rail[0], rail[1], filled, rail[3]],
-                    color: palette.accent,
-                    alpha,
-                });
-            }
-            if self.grab == Some(slot) {
-                let radius = (BAR_KNOB_LOGICAL_PX * scale / 2.0).max(1.0);
-                let middle = (track[1] + track[3]) / 2.0;
-                quads.extend(bt_render::rounded_overlay_fill(
-                    [
-                        filled - radius,
-                        middle - radius,
-                        filled + radius,
-                        middle + radius,
-                    ],
-                    radius,
-                    palette.accent,
-                    alpha,
-                ));
-            }
         }
+        if grab == Some(slot) {
+            let radius = (BAR_KNOB_LOGICAL_PX * scale / 2.0).max(1.0);
+            let middle = (track[1] + track[3]) / 2.0;
+            quads.extend(bt_render::rounded_overlay_fill(
+                [
+                    filled - radius,
+                    middle - radius,
+                    filled + radius,
+                    middle + radius,
+                ],
+                radius,
+                palette.accent,
+                1.0,
+            ));
+        }
+    }
 
-        OverlayLayer {
+    Band::surface(
+        vec![OverlayLayer {
             quads,
             labels,
             sprites,
             ..OverlayLayer::default()
-        }
-    }
+        }],
+        presence,
+        [0.0, 0.0],
+    )
 }
 
 impl Drop for VideoSeat {
@@ -1959,5 +1985,87 @@ mod tests {
         assert_eq!(rate_text(1.5), "1.5\u{d7}");
         assert_eq!(rate_text(2.0), "2\u{d7}");
         assert_eq!(VIDEO_RATES, [1.0, 1.25, 1.5, 2.0]);
+    }
+
+    /// RED (46) — **the docked bar's clock fades with its panel, because the
+    /// bar is one surface.**
+    ///
+    /// The fade audit's gate (f) and its F2. The bar's presence was written by
+    /// hand into each fill's alpha and each mark's opacity, and a label has no
+    /// alpha — so in a docked pane the clock, the rate and the file's line
+    /// stood solid while the panel faded in and out round them, popping off at
+    /// the end. The bar is now drawn at full strength and handed over as one
+    /// span at its presence, over the one layer that holds the panel *and* the
+    /// letters; the renderer's `overlay_groups` readbacks show a letter inside a
+    /// span arriving with its plate.
+    ///
+    /// MUTATION: write `presence` into the quads' alpha and the marks' opacity
+    /// again and return the layer with no span — the parts carry the fade and
+    /// the letters do not.
+    #[test]
+    fn the_docked_bars_clock_fades_with_its_panel() {
+        let state = EngineState {
+            duration_secs: Some(95.0),
+            position_secs: 12.0,
+            playing: true,
+            ready: true,
+            has_video: true,
+            has_audio: true,
+            volume: 1.0,
+            rate: 1.0,
+            ..EngineState::default()
+        };
+        let palette = bt_render::chrome_palette();
+        let bar = paint_bar(
+            &state,
+            None,
+            0.5,
+            [0.0, 0.0, 900.0, 500.0],
+            1.0,
+            &palette,
+            BarMeta::none(),
+        );
+        assert_eq!(
+            bar.layers.len(),
+            1,
+            "the panel and its letters are one layer"
+        );
+        let layer = &bar.layers[0];
+        assert!(
+            layer.labels.iter().any(|label| label.text == "0:12"),
+            "the clock is on the bar: {:?}",
+            layer.labels
+        );
+        assert_eq!(bar.groups.len(), 1);
+        assert_eq!(
+            bar.groups[0].layers,
+            0..1,
+            "one surface over panel and clock"
+        );
+        assert!((bar.groups[0].opacity - 0.5).abs() < 1e-6);
+        assert!(
+            layer
+                .quads
+                .iter()
+                .all(|quad| (quad.alpha - 1.0).abs() < 1e-6)
+                && layer
+                    .sprites
+                    .iter()
+                    .all(|mark| (mark.opacity - 1.0).abs() < 1e-6),
+            "and no part wears the fade itself"
+        );
+        assert!(
+            paint_bar(
+                &state,
+                None,
+                0.0,
+                [0.0, 0.0, 900.0, 500.0],
+                1.0,
+                &palette,
+                BarMeta::none()
+            )
+            .is_empty(),
+            "a bar that is not there is no surface"
+        );
     }
 }

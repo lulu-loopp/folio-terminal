@@ -936,7 +936,7 @@ impl Runtime<'_> {
     /// each sprite is also what keeps the fade from compounding with the label
     /// fade the rail already runs (Q183): they are two declarations on two
     /// elements, and CSS multiplies them exactly once each.
-    pub(in crate::runtime) fn rail_overlay_layers(&self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn rail_overlay_layers(&self) -> marks::Band {
         // **The fold belongs to the ordinary rail, and to nothing else**
         // (§7.1.6b′: the `Sidebar` row's three rest states govern the *ordinary*
         // panel, and the card column is card-width whatever they say). A window
@@ -1072,13 +1072,13 @@ impl Runtime<'_> {
     /// (`#dock-shift` 24 and `#dock-preview` 25 against `.combo-menu`'s 30 and
     /// `.tip`'s 60) — this is a drawing *on* the layout, not a surface floating
     /// over the window.
-    pub(in crate::runtime) fn dock_overlay_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn dock_overlay_layers(&self, now: Instant) -> marks::Band {
         let Some(shown) = self.window.drop_preview.as_ref() else {
-            return Vec::new();
+            return marks::Band::default();
         };
         let reveal = shown.reveal.sample(now, self.app.motion).0;
         if reveal <= 0.0 {
-            return Vec::new();
+            return marks::Band::default();
         }
         let overlay = seats::dock_overlay(
             &shown.plan,
@@ -1099,17 +1099,22 @@ impl Runtime<'_> {
             self.window.renderer.scale_factor() as f32,
         );
         let Some(overlay) = overlay else {
-            return Vec::new();
+            return marks::Band::default();
         };
-        let mut layers = seats::build_dock_overlay(
-            &overlay,
-            self.window.renderer.scale_factor() as f32,
-            bt_render::chrome_palette(),
-        );
-        for layer in &mut layers {
-            layer.opacity = reveal;
-        }
-        layers
+        // **One surface, faded as one** (ticket 46): the box, its ring and its
+        // caption arrive together rather than the caption ahead of the
+        // translucent box it names — and the fade is the surface's, wrapped
+        // round the layers as they were built rather than written over each
+        // layer's own opacity (the audit's F6).
+        marks::Band::surface(
+            seats::build_dock_overlay(
+                &overlay,
+                self.window.renderer.scale_factor() as f32,
+                bt_render::chrome_palette(),
+            ),
+            reveal,
+            [0.0, 0.0],
+        )
     }
 
     /// **Whether one of the popups now up is one the sidebar grew** —

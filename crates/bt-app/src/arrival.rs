@@ -52,7 +52,7 @@ use std::time::Instant;
 
 use bt_render::{EASE, GRAB_EASE, POPUP_ENTER, POPUP_EXIT, Travel};
 
-use crate::marks::OverlayLayer;
+use crate::marks::Band;
 use crate::{Motion, cubic_bezier};
 
 /// Which half of its life on the glass a surface is in.
@@ -75,7 +75,7 @@ enum Half {
 /// travel.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Passing {
-    /// `0.0 ..= 1.0`, multiplied into every layer's own opacity.
+    /// `0.0 ..= 1.0` — the opacity the whole band is drawn at, as one surface.
     pub opacity: f32,
     /// Physical pixels the whole band is displaced by, `[dx, dy]`.
     pub offset: [f32; 2],
@@ -102,11 +102,11 @@ struct Passage {
     travel: Option<Travel>,
     /// **The picture, as it was last painted at full strength.**
     ///
-    /// Untransformed: the fade and the travel are applied on the way out of
-    /// [`Passages::stage`], so what is kept is the band itself and a departure
-    /// starting mid-entrance does not inherit a four-pixel displacement it would
-    /// then never work off.
-    ghost: Vec<OverlayLayer>,
+    /// Untransformed: the fade and the travel are wrapped round it on the way
+    /// out of [`Passages::stage`], so what is kept is the band itself and a
+    /// departure starting mid-entrance does not inherit a four-pixel
+    /// displacement it would then never work off.
+    ghost: Band,
     /// How solid it was on the frame it began to leave.
     ///
     /// A menu dismissed 40ms into its own entrance is 40ms solid, and fading it
@@ -196,12 +196,12 @@ impl<K: Copy + PartialEq> Passages<K> {
     pub fn stage(
         &mut self,
         key: K,
-        layers: Vec<OverlayLayer>,
+        layers: Band,
         travel: Option<Travel>,
         now: Instant,
         motion: Motion,
         scale: f32,
-    ) -> Vec<OverlayLayer> {
+    ) -> Band {
         if motion == Motion::Reduced {
             // Nothing is kept and nothing is owed: the band is what it is, on
             // the first frame, in its final place.
@@ -222,13 +222,7 @@ impl<K: Copy + PartialEq> Passages<K> {
     /// away the entrance they already had, and without briefly running two fades
     /// over one card.
     #[must_use]
-    pub fn stage_departure(
-        &mut self,
-        key: K,
-        layers: Vec<OverlayLayer>,
-        now: Instant,
-        motion: Motion,
-    ) -> Vec<OverlayLayer> {
+    pub fn stage_departure(&mut self, key: K, layers: Band, now: Instant, motion: Motion) -> Band {
         if motion == Motion::Reduced {
             self.entries.retain(|(held, _)| *held != key);
             return layers;
@@ -237,11 +231,12 @@ impl<K: Copy + PartialEq> Passages<K> {
             return self.depart(key, now, 1.0);
         }
         // **Remembered exactly as it drew itself**, which is what makes "leaves
-        // from where it had got to" fall out rather than be arranged: the layers
-        // carry the surface's own fade in their own opacity, and a departure
-        // multiplies whatever that was down to nothing. The direction is the one
-        // no departure ever consults — this surface has no entrance of this
-        // register's to travel on.
+        // from where it had got to" fall out rather than be arranged: the band
+        // carries the surface's own fade as its own group, and a departure is a
+        // second surface wrapped round it, fading whatever that was down to
+        // nothing — the two multiply. The direction is the one no departure
+        // ever consults — this surface has no entrance of this register's to
+        // travel on.
         self.remember(key, &layers, None, Half::Standing, now);
         layers
     }
@@ -250,11 +245,11 @@ impl<K: Copy + PartialEq> Passages<K> {
     fn arrive(
         &mut self,
         key: K,
-        layers: Vec<OverlayLayer>,
+        layers: Band,
         travel: Option<Travel>,
         now: Instant,
         scale: f32,
-    ) -> Vec<OverlayLayer> {
+    ) -> Band {
         let started = match self.find(key) {
             // Already coming: the clock it started on, not this frame's.
             Some(passage) if passage.half == Half::Arriving => passage.started,
@@ -274,9 +269,9 @@ impl<K: Copy + PartialEq> Passages<K> {
 
     /// Begin or continue a departure, and answer with what is left of the
     /// picture.
-    fn depart(&mut self, key: K, now: Instant, scale: f32) -> Vec<OverlayLayer> {
+    fn depart(&mut self, key: K, now: Instant, scale: f32) -> Band {
         let Some(index) = self.entries.iter().position(|(held, _)| *held == key) else {
-            return Vec::new();
+            return Band::default();
         };
         if self.entries[index].1.half != Half::Leaving {
             let left_at = self.entries[index].1.sample(now, scale).opacity;
@@ -291,7 +286,7 @@ impl<K: Copy + PartialEq> Passages<K> {
             // a transparent one is what makes [`Passages::moving`] fall silent
             // and the window go genuinely idle.
             self.entries.remove(index);
-            return Vec::new();
+            return Band::default();
         }
         // Never travels — a layer that is ending is not going anywhere.
         passed(self.entries[index].1.ghost.clone(), passing)
@@ -301,7 +296,7 @@ impl<K: Copy + PartialEq> Passages<K> {
     fn remember(
         &mut self,
         key: K,
-        layers: &[OverlayLayer],
+        layers: &Band,
         travel: Option<Travel>,
         half: Half,
         started: Instant,
@@ -310,10 +305,10 @@ impl<K: Copy + PartialEq> Passages<K> {
             half,
             started,
             travel,
-            ghost: layers.to_vec(),
+            ghost: layers.clone(),
             // Full strength until a departure says otherwise: an entrance is
             // measured from nothing, and a standing picture is already drawn at
-            // whatever strength its own fade left in its layers.
+            // whatever strength its own fade left in its own group.
             left_at: 1.0,
         };
         match self.entries.iter_mut().find(|(held, _)| *held == key) {
@@ -368,76 +363,19 @@ impl<K: Copy + PartialEq> Passages<K> {
     }
 }
 
-/// Apply one passage to a band: fade every layer, and move the whole of it.
+/// Apply one passage to a band: the whole of it, faded and moved as one
+/// surface.
 ///
 /// The whole of it, in one place, because a band that faded and travelled in
-/// pieces would be a menu whose shadow arrived before its face.
+/// pieces would be a menu whose shadow arrived before its face — and so the
+/// layers are not touched at all. The fade and the travel are the surface's
+/// ([`Band::faded`]): the renderer draws the band whole and composites it once,
+/// on encoded bytes, as CSS `opacity` and `transform` do (ticket 46). Folded
+/// into every layer's own opacity, as this used to, each fill and each letter
+/// was faded on its own in linear light, and the letters arrived first.
 #[must_use]
-fn passed(layers: Vec<OverlayLayer>, passing: Passing) -> Vec<OverlayLayer> {
-    let [dx, dy] = passing.offset;
-    layers
-        .into_iter()
-        .map(|layer| nudged(layer, passing.opacity, dx, dy))
-        .collect()
-}
-
-/// One layer, faded and moved.
-///
-/// Destructured rather than mutated field by field so that a field added to
-/// [`OverlayLayer`] fails to compile here: the day a band carries a new kind of
-/// geometry is the day this function has to say whether it moves with the rest,
-/// and a `..` would answer "no" silently.
-fn nudged(layer: OverlayLayer, opacity: f32, dx: f32, dy: f32) -> OverlayLayer {
-    let OverlayLayer {
-        mut grounds,
-        mut quads,
-        mut labels,
-        mut sprites,
-        opacity: own,
-        // A scrolled document, and no band that passes through here has one:
-        // the preview float is its only tenant and a float runs its own
-        // entrance (`float::fade`). Left alone rather than moved, so that the
-        // day one does arrive here the picture is wrong in a way a reader can
-        // see rather than subtly stale.
-        body,
-        mut images,
-    } = layer;
-    let shift = |rect: &mut [f32; 4]| {
-        rect[0] += dx;
-        rect[1] += dy;
-        rect[2] += dx;
-        rect[3] += dy;
-    };
-    for ground in &mut grounds {
-        shift(&mut ground.rect);
-    }
-    for quad in &mut quads {
-        shift(&mut quad.rect);
-    }
-    for label in &mut labels {
-        shift(&mut label.rect);
-        if let Some(clip) = label.clip.as_mut() {
-            shift(clip);
-        }
-    }
-    for sprite in &mut sprites {
-        shift(&mut sprite.rect);
-    }
-    for image in &mut images {
-        shift(&mut image.rect);
-        if let Some(clip) = image.clip.as_mut() {
-            shift(clip);
-        }
-    }
-    OverlayLayer {
-        grounds,
-        quads,
-        labels,
-        sprites,
-        opacity: own * opacity,
-        body,
-        images,
-    }
+fn passed(layers: Band, passing: Passing) -> Band {
+    layers.faded(passing.opacity, passing.offset)
 }
 
 #[cfg(test)]
@@ -448,19 +386,35 @@ mod tests {
 
     /// One band with one quad at a known place, so a shift and a fade are both
     /// readable off the answer.
-    fn band(left: f32, top: f32) -> Vec<OverlayLayer> {
-        vec![OverlayLayer {
+    fn band(left: f32, top: f32) -> Band {
+        Band::from(vec![crate::marks::OverlayLayer {
             quads: vec![OverlayQuad {
                 rect: [left, top, left + 100.0, top + 40.0],
                 color: [0, 0, 0],
                 alpha: 1.0,
             }],
-            ..OverlayLayer::default()
-        }]
+            ..crate::marks::OverlayLayer::default()
+        }])
     }
 
-    fn only_rect(layers: &[OverlayLayer]) -> [f32; 4] {
-        layers[0].quads[0].rect
+    /// The one quad, where its builder put it — a band's layers are never
+    /// moved; the surface is.
+    fn only_rect(band: &Band) -> [f32; 4] {
+        band.layers[0].quads[0].rect
+    }
+
+    /// How the band's one layer is drawn: every surface it stands in,
+    /// multiplied and added — the renderer's own reading of nested spans.
+    fn drawn_at(band: &Band) -> (f32, [f32; 2]) {
+        band.groups
+            .iter()
+            .filter(|group| group.layers.contains(&0))
+            .fold((1.0, [0.0, 0.0]), |(opacity, offset), group| {
+                (
+                    opacity * group.opacity,
+                    [offset[0] + group.offset[0], offset[1] + group.offset[1]],
+                )
+            })
     }
 
     /// RED — **a popup arrives over the base span, from four pixels toward the
@@ -482,13 +436,18 @@ mod tests {
             1.0,
         );
         assert!(
-            first[0].opacity < 0.01,
+            drawn_at(&first).0 < 0.01,
             "a menu that is fully solid on its first frame did not arrive, it appeared"
         );
         assert_eq!(
-            only_rect(&first),
-            [200.0, 96.0, 300.0, 136.0],
+            drawn_at(&first).1,
+            [0.0, -4.0],
             "it has to start four pixels up, against the control it dropped out of"
+        );
+        assert_eq!(
+            only_rect(&first),
+            [200.0, 100.0, 300.0, 140.0],
+            "and it is the surface that is moved, never the layers its builder drew"
         );
 
         // Half way along the curve it is neither, and still owes frames.
@@ -500,7 +459,7 @@ mod tests {
             Motion::Full,
             1.0,
         );
-        assert!(middle[0].opacity > 0.5 && middle[0].opacity < 1.0);
+        assert!(drawn_at(&middle).0 > 0.5 && drawn_at(&middle).0 < 1.0);
         assert!(passages.moving(now + POPUP_ENTER / 2, Motion::Full));
 
         // And at the end it is exactly the band its builder handed over.
@@ -512,7 +471,7 @@ mod tests {
             Motion::Full,
             1.0,
         );
-        assert_eq!(landed[0].opacity, 1.0);
+        assert_eq!(drawn_at(&landed), (1.0, [0.0, 0.0]));
         assert_eq!(only_rect(&landed), [200.0, 100.0, 300.0, 140.0]);
         assert!(!passages.moving(now + POPUP_ENTER, Motion::Full));
     }
@@ -530,12 +489,12 @@ mod tests {
         let now = Instant::now();
         let first = passages.stage(1, band(0.0, 0.0), None, now, Motion::Full, 2.0);
         assert!(
-            first[0].opacity < 0.01,
+            drawn_at(&first).0 < 0.01,
             "it still fades in over the base span"
         );
         assert_eq!(
-            only_rect(&first),
-            [0.0, 0.0, 100.0, 40.0],
+            drawn_at(&first).1,
+            [0.0, 0.0],
             "and it is exactly where its builder put it, on the first frame"
         );
         let half = passages.stage(
@@ -546,8 +505,8 @@ mod tests {
             Motion::Full,
             2.0,
         );
-        assert_eq!(only_rect(&half), [0.0, 0.0, 100.0, 40.0]);
-        assert!(half[0].opacity > 0.5 && half[0].opacity < 1.0);
+        assert_eq!(drawn_at(&half).1, [0.0, 0.0]);
+        assert!(drawn_at(&half).0 > 0.5 && drawn_at(&half).0 < 1.0);
     }
 
     /// RED — **the picture outlives the state, and only the picture.**
@@ -581,22 +540,43 @@ mod tests {
         );
 
         // The popup is closed: its builders have nothing to hand over.
-        let going = passages.stage(1, Vec::new(), Some(Travel::Down), landed, Motion::Full, 1.0);
+        let going = passages.stage(
+            1,
+            Band::default(),
+            Some(Travel::Down),
+            landed,
+            Motion::Full,
+            1.0,
+        );
         assert_eq!(going.len(), 1, "the picture it drew is still on the glass");
         assert_eq!(
-            only_rect(&going),
-            [200.0, 100.0, 300.0, 140.0],
+            drawn_at(&going).1,
+            [0.0, 0.0],
             "and it is where it stood: nothing travels on the way out"
         );
 
         let half = landed + POPUP_EXIT / 2;
-        let fading = passages.stage(1, Vec::new(), Some(Travel::Down), half, Motion::Full, 1.0);
-        assert!(fading[0].opacity > 0.0 && fading[0].opacity < 1.0);
-        assert_eq!(only_rect(&fading), [200.0, 100.0, 300.0, 140.0]);
+        let fading = passages.stage(
+            1,
+            Band::default(),
+            Some(Travel::Down),
+            half,
+            Motion::Full,
+            1.0,
+        );
+        assert!(drawn_at(&fading).0 > 0.0 && drawn_at(&fading).0 < 1.0);
+        assert_eq!(drawn_at(&fading).1, [0.0, 0.0]);
 
         // And when the fast span is up it is gone, and owes nothing.
         let after = landed + POPUP_EXIT;
-        let gone = passages.stage(1, Vec::new(), Some(Travel::Down), after, Motion::Full, 1.0);
+        let gone = passages.stage(
+            1,
+            Band::default(),
+            Some(Travel::Down),
+            after,
+            Motion::Full,
+            1.0,
+        );
         assert!(gone.is_empty());
         assert!(
             !passages.moving(after, Motion::Full),
@@ -627,12 +607,19 @@ mod tests {
             Motion::Full,
             1.0,
         );
-        let reached = partway[0].opacity;
+        let reached = drawn_at(&partway).0;
         assert!(reached > 0.0 && reached < 1.0);
 
-        let leaving = passages.stage(1, Vec::new(), Some(Travel::Down), third, Motion::Full, 1.0);
+        let leaving = passages.stage(
+            1,
+            Band::default(),
+            Some(Travel::Down),
+            third,
+            Motion::Full,
+            1.0,
+        );
         assert!(
-            (leaving[0].opacity - reached).abs() < 1e-3,
+            (drawn_at(&leaving).0 - reached).abs() < 1e-3,
             "the departure has to begin at {reached}, not at a full 1.0 it never had"
         );
     }
@@ -658,17 +645,29 @@ mod tests {
             Motion::Reduced,
             1.0,
         );
-        assert_eq!(first[0].opacity, 1.0, "it is simply there");
+        assert_eq!(drawn_at(&first).0, 1.0, "it is simply there");
         assert_eq!(
-            only_rect(&first),
-            [200.0, 100.0, 300.0, 140.0],
+            drawn_at(&first).1,
+            [0.0, 0.0],
             "and there is where it belongs — no four pixels to work off"
+        );
+        assert!(
+            first.groups.is_empty(),
+            "and it is no surface in passage at all: the renderer's group path \
+             is never so much as offered"
         );
         assert!(!passages.moving(now, Motion::Reduced));
         assert!(passages.drawn(now, Motion::Reduced, 1.0).is_empty());
 
         // And it goes the instant it is closed, leaving nothing behind.
-        let gone = passages.stage(1, Vec::new(), Some(Travel::Down), now, Motion::Reduced, 1.0);
+        let gone = passages.stage(
+            1,
+            Band::default(),
+            Some(Travel::Down),
+            now,
+            Motion::Reduced,
+            1.0,
+        );
         assert!(gone.is_empty());
         assert!(!passages.moving(now, Motion::Reduced));
     }
@@ -682,16 +681,15 @@ mod tests {
     fn a_departure_only_band_is_handed_back_exactly_as_its_own_fade_left_it() {
         let mut passages = Passages::<u8>::default();
         let now = Instant::now();
-        let mut half_faded = band(10.0, 10.0);
-        half_faded[0].opacity = 0.4;
+        let half_faded = band(10.0, 10.0).faded(0.4, [0.0, 0.0]);
         let shown = passages.stage_departure(7, half_faded, now, Motion::Full);
-        assert_eq!(shown[0].opacity, 0.4, "the tip's own fade is untouched");
+        assert_eq!(drawn_at(&shown).0, 0.4, "the tip's own fade is untouched");
         assert_eq!(only_rect(&shown), [10.0, 10.0, 110.0, 50.0]);
 
         // Taken down: it leaves from the 0.4 it had reached.
-        let leaving = passages.stage_departure(7, Vec::new(), now, Motion::Full);
-        assert!((leaving[0].opacity - 0.4).abs() < 1e-3);
-        let gone = passages.stage_departure(7, Vec::new(), now + POPUP_EXIT, Motion::Full);
+        let leaving = passages.stage_departure(7, Band::default(), now, Motion::Full);
+        assert!((drawn_at(&leaving).0 - 0.4).abs() < 1e-3);
+        let gone = passages.stage_departure(7, Band::default(), now + POPUP_EXIT, Motion::Full);
         assert!(gone.is_empty());
     }
 
@@ -718,7 +716,7 @@ mod tests {
             Motion::Full,
             1.0,
         );
-        assert_eq!(parent[0].opacity, 1.0, "the parent has long since landed");
+        assert_eq!(drawn_at(&parent).0, 1.0, "the parent has long since landed");
         let child = passages.stage(
             2,
             band(100.0, 0.0),
@@ -727,10 +725,10 @@ mod tests {
             Motion::Full,
             1.0,
         );
-        assert!(child[0].opacity < 0.01, "the child is only now arriving");
+        assert!(drawn_at(&child).0 < 0.01, "the child is only now arriving");
         assert_eq!(
-            only_rect(&child),
-            [96.0, 0.0, 196.0, 40.0],
+            drawn_at(&child).1,
+            [-4.0, 0.0],
             "and it comes out of its parent's row, from the left"
         );
     }
@@ -762,6 +760,38 @@ mod tests {
         assert_eq!(
             passages.drawn(now + POPUP_ENTER, Motion::Full, 1.0),
             vec![(1, 255, 0, 0)]
+        );
+    }
+
+    /// RED (46) — **a band in passage is handed back as its builder drew it,
+    /// with the fade and the travel on the surface round it.**
+    ///
+    /// The fade audit of 2026-09-23: folded into every layer's opacity and
+    /// written into every rectangle, a menu's fade became each fill, mark and
+    /// letter fading on its own, blended in linear light — the plate overshot
+    /// and the letters arrived first. The layers now leave this register
+    /// untouched and the band gains one span over all of them, which the
+    /// renderer draws whole and composites once, as CSS does. A band that
+    /// already holds a surface of its own (the tip's entrance) keeps it inside.
+    ///
+    /// MUTATION: fold `passing.opacity` into each layer's opacity in `passed`
+    /// again (and shift its rectangles) and the layers come back changed.
+    #[test]
+    fn a_band_in_passage_is_one_surface_round_the_layers_its_builder_drew() {
+        let mut passages = Passages::<u8>::default();
+        let now = Instant::now();
+        let mut two = band(20.0, 30.0);
+        two.append(band(40.0, 50.0).faded(0.5, [0.0, 0.0]));
+        let drawn = passages.stage(1, two.clone(), Some(Travel::Down), now, Motion::Full, 1.0);
+        assert_eq!(drawn.layers, two.layers, "the layers are the builder's own");
+        let outer = &drawn.groups[0];
+        assert_eq!(outer.layers, 0..2, "one surface over the whole band");
+        assert!(outer.opacity < 1.0);
+        assert!(outer.offset[1] < 0.0, "travelling down, it starts above");
+        assert_eq!(
+            drawn.groups[1].layers,
+            1..2,
+            "and the surface the band already held stands inside it"
         );
     }
 }
