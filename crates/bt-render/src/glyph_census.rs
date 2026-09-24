@@ -62,7 +62,14 @@ struct LaneRasters {
     /// Raster key to the area it occupies. A map and not a set because the two
     /// facts are asked together and a second pass would rasterize twice.
     rasters: HashMap<CacheKey, u64>,
+    /// The same for custom glyphs — a grid cell drawn with synthetic bold
+    /// (ticket 38) — under glyphon's own key for them (id, width, height; the
+    /// grid snaps them, so their subpixel bins are always zero).
+    custom: HashMap<CustomRasterKey, u64>,
 }
+
+/// glyphon's key for a snapped custom glyph.
+type CustomRasterKey = (u16, u16, u16);
 
 impl GlyphCensus {
     /// A fresh census for a frame drawn against a device with this texture roof.
@@ -80,8 +87,8 @@ impl GlyphCensus {
         let entry = &self.lanes[lane.index()];
         LaneGlyphDemand {
             requested: entry.requested,
-            unique: entry.rasters.len(),
-            ink_px: entry.rasters.values().sum(),
+            unique: entry.rasters.len() + entry.custom.len(),
+            ink_px: entry.rasters.values().sum::<u64>() + entry.custom.values().sum::<u64>(),
         }
     }
 
@@ -96,13 +103,13 @@ impl GlyphCensus {
     /// the same size is one raster in it.
     #[must_use]
     pub fn unique(&self) -> usize {
-        self.union().len()
+        self.union().len() + self.custom_union().len()
     }
 
     /// The area those distinct rasters cover.
     #[must_use]
     pub fn ink_px(&self) -> u64 {
-        self.union().values().sum()
+        self.union().values().sum::<u64>() + self.custom_union().values().sum::<u64>()
     }
 
     /// How much atlas the device allows.
@@ -199,7 +206,17 @@ impl GlyphCensus {
             flattened.y_bin = SubpixelBin::Zero;
             collapsed.insert(flattened);
         }
-        collapsed.len()
+        collapsed.len() + self.custom_union().len()
+    }
+
+    fn custom_union(&self) -> HashMap<CustomRasterKey, u64> {
+        let mut all = HashMap::new();
+        for lane in &self.lanes {
+            for (key, area) in &lane.custom {
+                all.insert(*key, *area);
+            }
+        }
+        all
     }
 
     fn union(&self) -> HashMap<CacheKey, u64> {
@@ -269,6 +286,16 @@ impl GlyphCensus {
     ) {
         let entry = &mut self.lanes[lane.index()];
         for area in areas {
+            // A custom glyph's size is its raster's, rounded as glyphon rounds it.
+            for glyph in area.custom_glyphs {
+                entry.requested += 1;
+                let width = (glyph.width * area.scale).round() as u16;
+                let height = (glyph.height * area.scale).round() as u16;
+                entry.custom.insert(
+                    (glyph.id, width, height),
+                    u64::from(width) * u64::from(height),
+                );
+            }
             let visible = |run: &glyphon::cosmic_text::LayoutRun| {
                 let start = (area.top + (run.line_top * area.scale)) as i32;
                 let end = start + (run.line_height * area.scale) as i32;

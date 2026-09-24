@@ -167,6 +167,15 @@ thiserror = "2"
 # resolves: a second major would be a second copy of a font parser in the tree
 # for the sake of two bytes.
 ttf-parser = "0.25"
+# **The rasterizer glyphon already draws every glyph with**, named so that
+# `bt-render` can draw one more kind: a grid glyph whose family has no bold cut,
+# emboldened from its own outline (`Render::embolden`, ticket 38). cosmic-text
+# depends on it and re-exports its image types but not its scaler, so the scaler
+# has to be reached by name. Already in the lock file through cosmic-text, so
+# naming it here costs no new package; pinned to the locked version with the
+# features cosmic-text enables (`std` through its own `std`, `scale`, `render`),
+# so this edge compiles the copy that is already there and nothing else.
+swash = { version = "=0.2.9", default-features = false, features = ["std", "scale", "render"] }
 # The user's own `~/.codex/config.toml`, which the attention block's codex
 # installer adds one key to and must be able to hand back byte for byte
 # (`attention_codex`). A format-preserving editor and not `toml` + a serializer:

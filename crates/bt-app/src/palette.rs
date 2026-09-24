@@ -722,12 +722,12 @@ pub const LIST_PADDING_LOGICAL_PX: f32 = 5.0;
 /// rounded to an even number of logical pixels so that no two rows in a
 /// column disagree by half a pixel about where their middle is.
 pub const ROW_HEIGHT_LOGICAL_PX: f32 = 30.0;
-/// `.pal-item { border-radius: 7px }`.
-pub const ROW_RADIUS_LOGICAL_PX: f32 = 7.0;
+/// List-row corners follow UI-SPEC.md R3, as in the restore list.
+pub const ROW_RADIUS_LOGICAL_PX: f32 = 6.0;
 /// The `10px` of `.pal-item`'s padding.
 pub const ROW_PADDING_X_LOGICAL_PX: f32 = 10.0;
-/// `.pal-item { gap: 9px }` — between the mark's column and the text.
-pub const ROW_GAP_LOGICAL_PX: f32 = 9.0;
+/// The mark-to-label gap follows UI-SPEC.md G3.
+pub const ROW_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.pico { width: 16px }` — the column, reserved on every row.
 pub const ROW_ICON_COLUMN_LOGICAL_PX: f32 = 16.0;
 /// `.pico svg { width: 14px }` — the mark inside that column.
@@ -741,8 +741,8 @@ pub const HINT_FONT_LOGICAL_PX: f32 = 11.0;
 pub const HINT_MAX_FRACTION: f32 = 0.45;
 /// The status dot's diameter, on the tab strip's own reading of the same fact.
 pub const DOT_LOGICAL_PX: f32 = 6.0;
-/// The air between the label and the dot after it.
-pub const DOT_GAP_LOGICAL_PX: f32 = 7.0;
+/// The label-to-dot gap follows UI-SPEC.md G3.
+pub const DOT_GAP_LOGICAL_PX: f32 = 8.0;
 /// A section heading's own size — the hint's, because both are the muted voice.
 pub const HEADING_FONT_LOGICAL_PX: f32 = 11.0;
 /// The band a section heading is laid out in.
