@@ -11747,7 +11747,15 @@ struct TabState {
     /// said.
     manual_name: Option<String>,
     pending_keyboard_at: Option<Instant>,
-    pending_resize_present: Option<GridSize>,
+    /// **A resize present is owed to this tab's focused pane** (ticket 47).
+    ///
+    /// Set by the two resize roads ([`TabState::owe_resize_present`]) and paid by the first
+    /// frame that reaches the glass. A debt and nothing more: the grid that frame must carry is
+    /// read off the focused leaf when the frame is validated ([`TabState::admit_resize_present`]),
+    /// because other roads move that grid while the debt is outstanding — the command rail's
+    /// arrival at a shell's first mark takes its resting reserve out of the grid, and a debt that
+    /// had kept the grid it was incurred at refused the reprojected frame and stopped Folio.
+    resize_present_owed: bool,
     seats: seats::Seats,
     seat_layout: SeatLayout,
     /// What the L4 fit-what-fits strip could not show, when the last solve
@@ -17957,6 +17965,45 @@ impl TabState {
 
     fn focused_mut(&mut self) -> Option<&mut LeafSession> {
         self.sessions.get_mut(&self.focused_leaf)
+    }
+
+    /// **Owe the glass a frame of the grid the focused pane has now** (ticket 47).
+    ///
+    /// Asked by the roads that resize the tab's panes and then compose at once. A tab with no
+    /// shell has no grid and so nothing to gate (§7.1.6h): the present it is about to make is
+    /// chrome and a files column, neither of which is measured in cells.
+    fn owe_resize_present(&mut self) {
+        self.resize_present_owed = self.focused().is_some();
+    }
+
+    /// **While a resize present is owed, a frame is admitted only if it carries the grid the
+    /// focused pane projects now** (ticket 47).
+    ///
+    /// The gate exists so that a frame composed before a resize never reaches the glass after
+    /// it, and "the grid the pane has now" is exactly that sentence. It is read here, at
+    /// validation, and never recorded when the debt is incurred: between the resize and the first
+    /// present that lands, other roads move the focused pane's grid — the command rail's arrival
+    /// takes its reserve at the shell's first mark, which on a Mac restore comes before a window
+    /// that is not yet on screen has presented anything — and a recorded grid would refuse the
+    /// frame that is right. A frame that really carries some other grid is still refused, with
+    /// the sentence the diagnostics log has always carried.
+    fn admit_resize_present(&self, frame: &ViewportFrame) -> Result<()> {
+        let Some(expected) = self
+            .focused()
+            .map(|leaf| leaf.grid)
+            .filter(|_| self.resize_present_owed)
+        else {
+            return Ok(());
+        };
+        ensure!(
+            frame_matches_grid(frame, expected),
+            "resize presentation requires the newly projected grid: expected {}x{}, got {}x{}",
+            expected.columns,
+            expected.rows,
+            frame.columns,
+            frame.grid_rows
+        );
+        Ok(())
     }
 
     /// **The focused leaf, on a path that has already established there is
@@ -37599,7 +37646,7 @@ fn assemble_tab_state(
         landing: LandTween::default(),
         last_drawn_offset: None,
         last_drawn_landing: None,
-        pending_resize_present: None,
+        resize_present_owed: false,
         seats,
         seat_layout,
         seat_overflow,

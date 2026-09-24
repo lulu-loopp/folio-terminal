@@ -10,7 +10,7 @@ use crate::{
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
-use bt_render::{FrameSource, FrameTrigger, GridSize};
+use bt_render::{FrameSource, FrameTrigger};
 use std::time::Instant;
 use winit::dpi::PhysicalSize;
 
@@ -196,7 +196,7 @@ impl Runtime<'_> {
         let mut wake_deadline: Option<Instant> = None;
         let mut committed_any = false;
         let mut active_tab_wants_a_frame = false;
-        let mut focused_reflow: Option<GridSize> = None;
+        let mut focused_reflowed = false;
         // **Any leaf at all, because the key is that leaf's own columns.**
         // `sync_math_layout_key` writes every leaf of every tab a key built out
         // of `leaf.grid`, and this release is where a pane behind another tab
@@ -273,7 +273,7 @@ impl Runtime<'_> {
                 if index == active {
                     active_tab_wants_a_frame |= commit.worth_a_frame();
                     if commit.reflowed && *seat == focused_seat {
-                        focused_reflow = Some(leaf.grid);
+                        focused_reflowed = true;
                     }
                 }
             }
@@ -284,8 +284,8 @@ impl Runtime<'_> {
         // The present gate is the focused pane's alone: it admits the grid the
         // frame this window is about to draw really carries, and a pane nobody
         // is looking at draws no frame.
-        if focused_reflow.is_some() {
-            self.pending_resize_present = focused_reflow;
+        if focused_reflowed {
+            self.owe_resize_present();
         }
         if committed_any {
             // The quiet boundary is also where a resize *ends*, so it is the
@@ -389,7 +389,7 @@ impl Runtime<'_> {
         // The grid actually in force, which inside a coalescing window is not yet the one the
         // child has heard. A tab with no shell has no grid and nothing to gate,
         // exactly as in `commit_seat_geometry` (§7.1.6h).
-        self.pending_resize_present = self.focused().map(|leaf| leaf.grid);
+        self.owe_resize_present();
         self.publish_frame(resize_trigger)?;
         // Windows dispatches Resized from its modal move/size loop. `Renderer::resize` only records
         // the requested swapchain geometry; `present` prepares this newly projected frame first,

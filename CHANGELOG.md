@@ -75,6 +75,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Folio no longer stops within seconds of launch when a restored window's
+  shell prints its first prompt before the window has drawn; this stopped
+  every launch on macOS.
 - The multi-line paste card's title no longer runs under its × button; a very
   long profile name is shortened with an ellipsis.
 - A zoomed picture in a floating window can be dragged to pan it, and a

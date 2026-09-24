@@ -1113,8 +1113,22 @@ impl Runtime<'_> {
         // which re-derives every leaf's grid and changes only the one whose
         // answer moved: the pane on screen reflows now and tells its child at
         // the quiet boundary, a pane behind another tab does both there.
+        //
+        // **And the frame in the slot is re-composed at the grid the pane has now** (ticket 47),
+        // as it is on every other road that re-solves the panes — a font change, a tab arriving,
+        // a DPI correction all publish straight after. A frame composed before the reserve is a
+        // frame of a grid the pane no longer has, and the resize present gate reads the pane's
+        // grid as it stands: left in the slot for the drain's coalescing wait below, it is the
+        // frame a redraw would take and the gate would refuse.
+        let focused_grid = self.focused().map(|leaf| leaf.grid);
         if rail_began {
             self.resize_leaves_to_layout(now, "reserve the command rail's room")?;
+            if self.focused().map(|leaf| leaf.grid) != focused_grid {
+                self.publish_frame(FrameTrigger {
+                    occurred_at: now,
+                    source: FrameSource::Expose,
+                })?;
+            }
         }
         // **R31's third invalidation moment, A: a command finished.** A shell
         // standing inside a repository this tab is showing has just done
