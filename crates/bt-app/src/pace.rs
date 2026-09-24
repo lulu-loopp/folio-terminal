@@ -353,6 +353,135 @@ impl FrameClock {
     }
 }
 
+/// **The latest value, told to the platform at most once an interval, and the
+/// last one always told** (ticket 49, extracted from the IME caret area's
+/// throttle; `docs/ARCHITECTURE.md` §5.3 row 14).
+///
+/// One policy for every window-thread call that repeats a value the platform
+/// already holds or that changes faster than anybody can see: the caret area
+/// the input method hangs its list from (`IME_CURSOR_AREA_INTERVAL`) and the
+/// window's title (one display frame). Three rules, and they are the whole of
+/// it:
+///
+/// * **a value equal to the one last sent is dropped**, and so is anything
+///   pending — a caret that came back to where it was owes nothing;
+/// * **a value offered once the interval has passed since the last send is sent
+///   now**;
+/// * **otherwise it is held as the one pending value**, replacing any earlier
+///   one, with [`Self::deadline`] saying when [`Self::flush_due`] will send it.
+///   The caller folds that deadline into its wake-up, so the last value always
+///   arrives even when nothing else happens.
+///
+/// It sends nothing itself: `offer` and `flush_due` answer the value the caller
+/// must hand to the platform now, and the caller is the one door that does.
+#[derive(Debug)]
+pub struct LatestThrottle<T> {
+    interval: Duration,
+    last_sent_at: Option<Instant>,
+    last_sent: Option<T>,
+    pending: Option<T>,
+}
+
+impl<T: PartialEq + Clone> LatestThrottle<T> {
+    /// A throttle that has sent nothing, spacing its sends by `interval`.
+    #[must_use]
+    pub const fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_sent_at: None,
+            last_sent: None,
+            pending: None,
+        }
+    }
+
+    /// Change the spacing, for a caller whose interval is the display's and
+    /// follows it (`FrameClock::interval`). A value already pending keeps its
+    /// place and is judged against the new interval.
+    pub fn set_interval(&mut self, interval: Duration) {
+        self.interval = interval;
+    }
+
+    /// Offer the latest value. `Some` is the value to send now.
+    pub fn offer(&mut self, value: T, now: Instant) -> Option<T> {
+        if self.last_sent.as_ref() == Some(&value) {
+            self.pending = None;
+            return None;
+        }
+        if self
+            .last_sent_at
+            .is_none_or(|last| now.saturating_duration_since(last) >= self.interval)
+        {
+            self.mark_sent(value.clone(), now);
+            Some(value)
+        } else {
+            self.pending = Some(value);
+            None
+        }
+    }
+
+    /// The pending value, once its deadline has come. `Some` is the value to
+    /// send now.
+    pub fn flush_due(&mut self, now: Instant) -> Option<T> {
+        if now < self.deadline()? {
+            return None;
+        }
+        let value = self.pending.take()?;
+        self.mark_sent(value.clone(), now);
+        Some(value)
+    }
+
+    /// When the pending value may be sent, or `None` when nothing is pending.
+    #[must_use]
+    pub fn deadline(&self) -> Option<Instant> {
+        self.pending.as_ref()?;
+        self.last_sent_at.map(|last| last + self.interval)
+    }
+
+    /// Whether a value is being held for its deadline.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    fn mark_sent(&mut self, value: T, now: Instant) {
+        self.last_sent_at = Some(now);
+        self.last_sent = Some(value);
+        self.pending = None;
+    }
+
+    /// The value the platform is currently working from, if it has been told
+    /// one at all.
+    #[must_use]
+    pub fn last_sent(&self) -> Option<T> {
+        self.last_sent.clone()
+    }
+
+    /// **Forget *what* the platform was last told without forgetting *when***
+    /// (user report 2026-09-14, `docs/DESIGN.md` §13.16 ⑥).
+    ///
+    /// [`Self::offer`] drops a value equal to the one already sent, and while a
+    /// caret sits still that is the whole of its work. A window that *moves*
+    /// keeps the very same window-relative rectangle and lands somewhere else on
+    /// the screen, so there the suppression is exactly backwards: the answer the
+    /// platform has cached is a **screen** rectangle, it is now stale, and
+    /// nothing else in this process is going to say so.
+    ///
+    /// Only the value is forgotten. [`Self::reset`] drops the clock with it,
+    /// which is right when a composition ends and wrong here: a drag emits a
+    /// move per frame, and re-arming must not turn one drag into a call per
+    /// move.
+    pub fn rearm(&mut self) {
+        self.last_sent = None;
+    }
+
+    /// Forget everything but the interval.
+    pub fn reset(&mut self) {
+        self.last_sent_at = None;
+        self.last_sent = None;
+        self.pending = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_FRAME_INTERVAL, FrameClock, Lanes, interval_from_millihertz};
