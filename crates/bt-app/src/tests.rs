@@ -670,14 +670,14 @@ fn the_modal_family_covers_the_float_and_the_tip_covers_them_both() {
     // One marker quad per family, carrying its own name in a colour so the
     // flattened order reads back as the families in order.
     let mark = |tag: u8| {
-        vec![marks::OverlayLayer {
+        marks::Band::from(vec![marks::OverlayLayer {
             quads: vec![bt_render::OverlayQuad {
                 rect: [0.0, 0.0, 1.0, 1.0],
                 color: [tag, 0, 0],
                 alpha: 1.0,
             }],
             ..marks::OverlayLayer::default()
-        }]
+        }])
     };
     let stack = OverlayStack {
         preview_bars: mark(0),
@@ -724,6 +724,7 @@ fn the_modal_family_covers_the_float_and_the_tip_covers_them_both() {
     };
     let order: Vec<u8> = stack
         .flattened()
+        .layers
         .iter()
         .map(|layer| layer.quads[0].color[0])
         .collect();
@@ -840,7 +841,7 @@ fn the_modal_family_covers_the_float_and_the_tip_covers_them_both() {
 fn a_family_with_nothing_in_it_adds_nothing_to_the_overlay() {
     assert!(OverlayStack::default().flattened().is_empty());
     let only_float = OverlayStack {
-        float: vec![marks::OverlayLayer::default()],
+        float: vec![marks::OverlayLayer::default()].into(),
         ..OverlayStack::default()
     };
     assert_eq!(only_float.flattened().len(), 1);
@@ -19107,7 +19108,7 @@ fn the_rails_panel_reaches_the_overlay_as_a_ground_and_its_hairline_as_ink() {
         images: Vec::new(),
     };
     let layers = rail_overlay_layer(&rail, 1.0);
-    let [layer] = layers.as_slice() else {
+    let [layer] = layers.layers.as_slice() else {
         panic!("a rail with quads in it is one layer");
     };
     assert_eq!(
@@ -19123,12 +19124,16 @@ fn the_rails_panel_reaches_the_overlay_as_a_ground_and_its_hairline_as_ink() {
         vec![hairline],
         "the border-right is struck on the panel and stays opaque"
     );
-    // The fold is the layer's, not the panel's: a ground has no alpha of its
-    // own to fade, and lowering the layer's opacity must not be answered by
-    // moving the panel out of the ground channel.
+    // The fold is the surface's, not the panel's: a ground has no alpha of
+    // its own to fade, and lowering the surface's opacity must not be
+    // answered by moving the panel out of the ground channel. Since ticket 46
+    // the fold is the band's group, over the one layer drawn at full strength.
     let folding = rail_overlay_layer(&rail, 0.4);
-    assert_eq!(folding[0].grounds, layer.grounds);
-    assert!((folding[0].opacity - 0.4).abs() < 1e-6);
+    assert_eq!(folding.layers[0].grounds, layer.grounds);
+    assert!((folding.layers[0].opacity - 1.0).abs() < 1e-6);
+    assert_eq!(folding.groups.len(), 1);
+    assert_eq!(folding.groups[0].layers, 0..1);
+    assert!((folding.groups[0].opacity - 0.4).abs() < 1e-6);
     // An empty rail is no layer at all, which is what a horizontal layout
     // and a collapsed rail both hand this function.
     assert!(rail_overlay_layer(&seats::ChromeGroup::default(), 1.0).is_empty());
@@ -25585,16 +25590,20 @@ fn the_arriving_panes_veil_is_the_bottom_most_overlay_layer() {
         ..marks::OverlayLayer::default()
     }];
 
-    let stacked = ground_overlay_layers(vec![veil.clone()], dock.clone());
+    let stacked = ground_overlay_layers(vec![veil.clone()], dock.clone().into());
     assert_eq!(
-        stacked.first(),
+        stacked.layers.first(),
         Some(&veil),
         "the veil paints first and is therefore covered by everything after it"
     );
-    assert_eq!(&stacked[1..], dock.as_slice(), "and the dock is over it");
     assert_eq!(
-        ground_overlay_layers(Vec::new(), dock.clone()),
-        dock,
+        &stacked.layers[1..],
+        dock.as_slice(),
+        "and the dock is over it"
+    );
+    assert_eq!(
+        ground_overlay_layers(Vec::new(), dock.clone().into()),
+        marks::Band::from(dock),
         "with nothing arriving the stack is the one that was there before P177"
     );
 }
@@ -52495,5 +52504,106 @@ fn a_turn_walks_a_search_in_progress_and_wakes_for_it() {
         method_body("Runtime", "publish_frame_inner")
             .contains("self.refresh_search(SearchRefresh::Output)"),
         "a published frame carries the answer and reads no slice"
+    );
+}
+
+/// RED (46) — **under reduced motion no fade offers the renderer its group
+/// path**: every surface a fade would have drawn apart stands at rest, and a
+/// band that passes through the arrival register carries no span at all.
+///
+/// The fade audit's gate (c), the producers' half; the renderer's half
+/// (`bt-render` `tests::overlay_groups::a_group_at_rest_never_takes_the_group_path`)
+/// holds that a span at rest is drawn straight onto the frame. Asked of the
+/// fades' own doors at the first instant of each fade: the arrival register
+/// (menus, the palette, the settings dialog, the notice strip, the Cards
+/// bubble), the hover fade the tip and the glance card both read, and a notice
+/// card's opacity and slide. The tear-out ghost's 0.7 is a standing
+/// translucency, not motion, so reduced motion (which is about motion) does not
+/// forbid the group path there: it is a group in every motion mode, by the
+/// coordinator's ruling of 2026-09-24, and not a hole in this pin.
+///
+/// MUTATION: sample the curve under `Reduced` in `hover_fade_opacity` (or
+/// keep an entry in `Passages::stage` under `Reduced`) and a span below 1 is
+/// handed over.
+#[test]
+fn under_reduced_motion_no_fade_offers_the_group_path() {
+    let now = Instant::now();
+    let layer = || marks::OverlayLayer {
+        quads: vec![bt_render::OverlayQuad {
+            rect: [10.0, 10.0, 110.0, 50.0],
+            color: [40, 40, 40],
+            alpha: 1.0,
+        }],
+        ..marks::OverlayLayer::default()
+    };
+
+    let mut passages = arrival::Passages::<u8>::default();
+    let menu = passages.stage(
+        1,
+        vec![layer()].into(),
+        Some(Travel::Down),
+        now,
+        Motion::Reduced,
+        2.0,
+    );
+    assert!(
+        menu.groups.is_empty(),
+        "a band arriving under reduced motion is no surface in passage"
+    );
+
+    let tip = tooltip::hover_fade_opacity(Duration::ZERO, Motion::Reduced);
+    let laid = tooltip::layout(
+        "bash",
+        [400.0, 10.0, 460.0, 40.0],
+        &[40.0],
+        (1000.0, 700.0),
+        1.0,
+        tooltip::TipFace::Chrome,
+    )
+    .expect("a tip is placed");
+    let band = tooltip::build(
+        &laid,
+        &bt_render::chrome_palette(),
+        1.0,
+        tip,
+        tooltip::TipFace::Chrome,
+    );
+    assert!(
+        band.groups.iter().all(bt_render::OverlayGroup::at_rest),
+        "the tip on its first frame under reduced motion: {:?}",
+        band.groups
+    );
+
+    let mut host = toast::ToastHost::default();
+    host.raise(
+        toast::ToastKind::Ok,
+        toast::ToastAnchor::Window,
+        None,
+        "done",
+        None,
+        Motion::Reduced,
+        now,
+    );
+    let laid = toast::place(
+        host.toasts(),
+        |_| None,
+        (1000.0, 700.0),
+        1.0,
+        &mut |run, _| run.chars().count() as f32 * 8.0,
+    );
+    let cards = toast::build(
+        &laid,
+        &host,
+        toast::ToastPointer::default(),
+        &bt_render::chrome_palette(),
+        1.0,
+        now,
+        Motion::Reduced,
+    );
+    assert!(!cards.is_empty(), "the card is drawn on its first frame");
+    assert!(
+        cards.groups.iter().all(bt_render::OverlayGroup::at_rest),
+        "a notice card on its first frame under reduced motion: {:?}",
+        cards.groups
     );
 }

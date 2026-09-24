@@ -37,7 +37,7 @@ impl Runtime<'_> {
     /// ([`DropLanding::shows_itself`]) — not built and then hidden, because an
     /// invisible layer still costs a text shaping pass and a raster lookup every
     /// frame the pointer moves, and "not drawn" is the same picture either way.
-    pub(in crate::runtime) fn drag_ghost_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn drag_ghost_layer(&mut self) -> marks::Band {
         // **F2 — the visitor's ghost, laid out at *this* window's scale.**
         //
         // The four facts it says arrived on the broker ([`GhostFace`]); where
@@ -71,7 +71,7 @@ impl Runtime<'_> {
                     .filter(|drag| drag.ghost_is_shown())
                 else {
                     self.forget_the_ghost();
-                    return Vec::new();
+                    return marks::Band::default();
                 };
                 let (pointer, source) = (drag.pointer, drag.source.clone());
                 let palette = bt_render::chrome_palette();
@@ -79,7 +79,7 @@ impl Runtime<'_> {
                     self.drag_label(&source, palette)
                 else {
                     self.forget_the_ghost();
-                    return Vec::new();
+                    return marks::Band::default();
                 };
                 (pointer, mark, mark_logical, mark_color, text)
             }
@@ -133,7 +133,7 @@ impl Runtime<'_> {
             Instant::now(),
             self.app.motion,
         );
-        let mut ghost = seats::build_drag_ghost(
+        let ghost = seats::build_drag_ghost(
             &layout,
             mark,
             mark_color,
@@ -141,14 +141,20 @@ impl Runtime<'_> {
             scale,
             bt_render::chrome_palette(),
         );
-        ghost.opacity *= ink;
         // Off the glass the ghost is held at this window's edge rather than at
         // the hand, so it is drawn back a little to stop it asserting a position
         // it has not got — [`seats::TEAR_OUT_GHOST_OPACITY`].
-        if tearing_out.is_some() {
-            ghost.opacity *= seats::TEAR_OUT_GHOST_OPACITY;
-        }
-        vec![ghost]
+        let held_back = if tearing_out.is_some() {
+            seats::TEAR_OUT_GHOST_OPACITY
+        } else {
+            1.0
+        };
+        // **One surface at that opacity** (ticket 46): the plate, its hairline,
+        // its mark and its name drawn whole and put back once. Folded into the
+        // layer's own opacity instead, every fill of the ghost was faded on its
+        // own, and at 0.7 the hairline showed through the face for as long as
+        // the ghost was held off the glass (the fade audit's row 31).
+        marks::Band::surface(vec![ghost], ink * held_back, [0.0, 0.0])
     }
 
     /// What the ghost says — `dragLabel(d)`, mock-up 6734-6751.

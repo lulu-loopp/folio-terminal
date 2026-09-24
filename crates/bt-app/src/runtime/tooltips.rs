@@ -615,7 +615,7 @@ impl Runtime<'_> {
     /// the frame the tip appeared on, so a tab renamed under an open tip says its
     /// new name on the next frame — the mock-up rewrites `el.title` on every
     /// paint for the same reason (line 4331).
-    pub(in crate::runtime) fn tooltip_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn tooltip_layer(&mut self) -> marks::Band {
         // Recorded at the end and only on the paths that actually paint, so the
         // frame-debt comparison is against what is *on screen*. Recording the
         // intent instead would let a tip that could not be laid out report itself
@@ -623,7 +623,7 @@ impl Runtime<'_> {
         self.window.tooltip_drawn_opacity = None;
         let now = Instant::now();
         let Some(opacity) = self.tooltip_opacity(now) else {
-            return Vec::new();
+            return marks::Band::default();
         };
         let Some(anchor) = self
             .window
@@ -631,7 +631,7 @@ impl Runtime<'_> {
             .active()
             .and_then(|id| self.window.tooltip_anchors.find(id))
         else {
-            return Vec::new();
+            return marks::Band::default();
         };
         let (text, host, face) = (anchor.text.clone(), anchor.rect, anchor.face);
         let scale = self.window.renderer.scale_factor() as f32;
@@ -694,7 +694,7 @@ impl Runtime<'_> {
             scale,
             face,
         ) else {
-            return Vec::new();
+            return marks::Band::default();
         };
         let palette = bt_render::chrome_palette();
         self.window.tooltip_drawn_opacity = Some(opacity);

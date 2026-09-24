@@ -1997,7 +1997,7 @@ impl Runtime<'_> {
         id: float::FloatId,
         now: Instant,
     ) -> Option<marks::OverlayLayer> {
-        let (geometry, fade) = self.float_geometry_of(id)?;
+        let (geometry, _) = self.float_geometry_of(id)?;
         let scale = self.window.renderer.scale_factor() as f32;
         let motion = self.app.motion;
         let (mode, root) = {
@@ -2102,8 +2102,8 @@ impl Runtime<'_> {
         }
         let body = float::FloatBody {
             // Chrome fills are opaque by construction, so the lift into the
-            // overlay's vocabulary is the rail's own: alpha 1.0, and the layer's
-            // opacity carries the fade for all three channels at once.
+            // overlay's vocabulary is the rail's own: alpha 1.0, and the
+            // window's group carries the fade for every channel at once.
             quads: quads
                 .into_iter()
                 .map(|quad| bt_render::OverlayQuad {
@@ -2183,7 +2183,6 @@ impl Runtime<'_> {
             body,
             scale,
             &palette,
-            fade,
         ))
     }
 

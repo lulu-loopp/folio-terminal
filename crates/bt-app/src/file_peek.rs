@@ -2087,11 +2087,6 @@ mod tests {
             },
             SCALE,
             &palette,
-            crate::float::FloatFade {
-                opacity: 1.0,
-                rise: 0.0,
-                moving: false,
-            },
         );
         let window_name = &window_layer.labels[0];
         assert_eq!(
