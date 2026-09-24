@@ -2478,11 +2478,6 @@ mod tests {
                     },
                     scale,
                     &bt_render::chrome_palette(),
-                    FloatFade {
-                        opacity: 1.0,
-                        rise: 0.0,
-                        moving: false,
-                    },
                 );
                 assert!(layer.sprites.iter().any(|sprite| {
                     sprite.rect == rect && matches!(sprite.mark, ChromeMark::ControlPill { radius_px } if radius_px == (radius * scale).round() as u32)
