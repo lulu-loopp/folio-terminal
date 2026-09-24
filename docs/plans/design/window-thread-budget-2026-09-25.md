@@ -1327,3 +1327,341 @@ Two need the owner, because each changes a rule or something the reader sees:
    - *Mine:* agree. It changes what the reader sees after Ctrl+S, so
      `CONVENTIONS` §十 rule 1 requires asking the owner before that ticket is
      drafted.
+
+---
+
+## Revision 2026-09-25 (c): the admission contract
+
+Codex's second, scoped review is
+`docs/plans/design/window-thread-budget-review-codex-2026-09-25-b.md`,
+committed beside this note. It reviewed revision (b) at `f566e89c`, and found:
+
+- R2–R8 answered;
+- R1 answered only in part;
+- A5 may go after the 0.4.5 tag;
+- A1 is held until its admission contract is corrected;
+- A3 is dispatched against the agreed A1 interface, and lands after A1.
+
+This section closes R1's remaining gaps as the review states them, and re-issues
+A1 and A2. **Where it differs from (b), it rules**: in particular it replaces
+§R-A and R1's items 3 and 4, and M1–M9. A5 is unchanged. A3 keeps (b)'s scope
+and gains two acceptance notes (§C-7).
+
+### C-1. The invariant, restated
+
+> **The enumerated effects, under the verified configurations and escape
+> restrictions, pass through the checked doors.** An effect is *enumerated* if
+> it is a line of the registry's vocabulary. The *verified configurations* are
+> the ones §C-4 names, each linted by a CI job that plants a violation. The
+> *escape restrictions* are §C-2 and §C-3. Everything else is **explicitly
+> outside** the invariant:
+>
+> - unlisted third-party functions that block internally;
+> - effects reached only through a route §C-3 marks "outside";
+> - configurations §C-4 does not name.
+>
+> For effects outside the invariant, the whole-turn accounting of §R-C is a
+> report, not an admission. A short unregistered call breaks admission even when
+> no report fires.
+
+"Contract 1 is enforceable" in (b) is withdrawn as a general claim. It holds
+only for the invariant above.
+
+### C-2. Lint suppression: one door, one `expect`, one effect
+
+Codex's point is that suppression is broader than a counted `expect`. An
+`#[allow]` on an unregistered helper makes the lint silent there, and
+`-D warnings` does not make a locally allowed lint fire.
+
+**The policy:**
+
+1. **The lint's level is fixed in one place.** `[workspace.lints.clippy]` gains
+   `disallowed_methods = "deny"`. No member's `[lints]` table, no `.cargo/config.toml`
+   `rustflags`, no `RUSTFLAGS`/`CLIPPY_FLAGS` in `.github/workflows/*.yml` or
+   `scripts/**`, and no `clippy` command line may lower it: no `-A`, `-W` or
+   `--cap-lints` touching `clippy::disallowed_methods`, `clippy::style`,
+   `clippy::all` or `warnings`.
+2. **Suppression appears only at pinned doors.** Only a registered door function
+   may say `#[expect(clippy::disallowed_methods, reason = "<door id>")]`, and
+   only on the function item itself, never a module, impl, crate or statement.
+   These forms appear **nowhere** in first-party product code:
+   - `#[allow(clippy::disallowed_methods)]`;
+   - `#![allow(...)]` or `#![expect(...)]` naming it;
+   - `cfg_attr(…, allow/expect(…disallowed_methods…))`;
+   - an allow or expect of a group that contains it: `clippy::style` (the lint's
+     group on the pinned Clippy), `clippy::all`, `warnings`.
+
+   `#[deny]` and `#[forbid]` are allowed. `forbid` is not used, because a door's
+   `expect` must be able to lower it.
+3. **One `expect` authorises one effect.** The door's body holds exactly the
+   number of vocabulary effects its registry line declares (normally one),
+   counted by the source guard as vocabulary paths and method names found in the
+   body through `bt_source`'s identifier view. A second listed effect under an
+   unchanged `expect` is red. That the `expect` was fulfilled proves only that
+   the lint fired at least once; the count is what proves the number of effects.
+
+**The check.** Part of `every_door_is_where_the_registry_says`, plus
+`scripts/ci/check-window-waits.ps1` for the non-Rust inputs (manifests, cargo
+config, workflows, scripts). The source half reads attributes through
+`bt_source` with a declared universe: every first-party product target, test
+modules excluded by declaration (split-prep §2.3), and `vendor/` excluded
+because it is not first-party. It matches attribute paths in both spellings
+(`clippy::disallowed_methods`, and `clippy :: disallowed_methods` split across
+tokens) and inside `cfg_attr` at any depth.
+
+### C-3. Macro expansion, FFI and asynchrony: the coverage matrix
+
+| route | what the resolved lint sees | what covers it instead | inside or outside the invariant |
+|---|---|---|---|
+| a direct call or method call of a listed path, in a compiled first-party function | the resolved path or the type-resolved method; also a listed function taken as a value | the lint (M1, M6) | inside |
+| a listed **inherent method on a foreign Rust type** (`File::sync_all`, wgpu `Queue::submit`, `SurfaceTexture::present`, a windows-rs COM interface method, an objc2-generated AppKit method) | resolved, on the pinned Clippy, which walks nonlocal inherent impls (review, citing the pinned lint and path resolver) | the lint, with a positive control per entry on its target (§C-4) | inside |
+| a local `macro_rules!` expanding to a listed call, used in its own crate | the expanded call (a local macro is not external) | the lint; the source guard additionally refuses vocabulary inside a `macro_rules!` body anywhere except inside a door (split-prep §2.7's lexical traversal) | inside |
+| a first-party `#[macro_export]` macro whose expansion runs in another crate | possibly nothing: the compiler may suppress diagnostics from external macros | the source guard: **no first-party exported macro body may name a vocabulary path or method** | inside, by prohibition |
+| a third-party macro that expands to a blocking call (`objc2::msg_send!`, a windows-rs `implement` stub) | nothing reliable (external-macro diagnostics) | `msg_send!` and `msg_send_id!` only in the listed macOS FFI functions, owner and count pinned. A selector named there that can block is a registry line of that door. | inside for the pinned owners; any other use is refused |
+| a windows-rs **free binding** (`ShellExecuteW`, `CreatePseudoConsole`, `ResizePseudoConsole`) | resolved path | the lint | inside |
+| a COM call through a raw vtable (`Interface::vtable(x).Method(…)`), a function pointer from `GetProcAddress`, or a new `extern "system"`/`extern "C"` block or `#[link]` | an indirect call: nothing | the source guard: `vtable(`, `GetProcAddress`, `extern` blocks and `#[link]` appear only in the listed FFI functions and modules, owner and count pinned | inside by prohibition; the listed FFI functions are themselves doors |
+| `async fn`, `async` blocks, returned closures, returned `impl FnOnce`/`Future`/`Iterator`, `Box<dyn Fn*>` or `fn` pointers from a door; callbacks a door registers | construction is linted; *execution* happens later, elsewhere | milestone 1 admits **synchronous doors only** (§C-5): the source guard refuses any door whose signature returns one of these, takes a `'static` closure, or is `async`. The effect must execute inside the door's own call. | async, callback and streaming doors are **outside** milestone 1; each needs its own declared contract, checked at every executing or polling entry |
+| a blocking **`Drop`** (`DirWatch`'s join today) | the call inside `drop`, if listed | the source guard: vocabulary is refused inside any `impl Drop`. Blocking teardown goes through an explicit `retire(self, &WorkerCtx)` door. | inside by prohibition |
+| `pollster::block_on` and any executor entry | resolved path | the lint (listed) | inside |
+| a third-party function that blocks inside and is not listed | nothing | §R-C reports the turn as unexplained | **outside** (named debt, row R-G 1) |
+| `build.rs`, tests, examples, benches, dev tools | whatever they compile | nothing; not product code | **outside** |
+
+### C-4. Configurations
+
+A2 names the supported product configurations and lints each with the whole
+product workspace:
+
+| configuration | CI job | state on this base | planted violation (a `gates-can-fail` step per job) |
+|---|---|---|---|
+| Windows x86_64 MSVC, release profile and default features | `logic` on `windows-2025` (`cargo clippy --workspace --all-targets --locked`) | lints the workspace | a `bt_platform::handoff` `ShellExecuteW` call copied into a `Runtime` method under `cfg(windows)`, plus `rx.recv()` in method syntax |
+| macOS aarch64 (`macos-14`, deployment target 14.0) | `core-macos` | **lints only `bt-platform`** (`cargo clippy --locked --all-targets -p bt-platform`); checks, but does not lint, the rest | an objc2 `NSWorkspace` open-URL method called outside the macOS hand-off door, and a `msg_send!` outside the pinned FFI owners |
+| Linux x86_64 | the portable-core job | CI-only; not a product configuration | none. It is listed as outside, so a Linux-only branch is not claimed covered. |
+
+**Prerequisites.** A2's macOS half cannot land until the macOS job lints every
+product crate:
+
+- **D-63**, the macOS CI job's reach;
+- **D-67**, the row the coordinator names for the macOS lint (not on this base's
+  ledger; the ticket cites it by the number the ledger holds when A2 is drafted);
+- **D-61 and D-62**, which 0.4.5 ticket 55 repays, the red test and the clippy
+  failures that currently keep the job narrow.
+
+A2's Windows half may land first, **with the invariant stated for Windows
+only**, until the macOS half follows.
+
+**Target-specific vocabulary.** Every vocabulary entry carries its target set in
+the registry. For each target, the job for that target must resolve every entry
+the registry assigns to it. The ticket first establishes, on the pinned Clippy,
+how an entry that does not resolve is reported. It then makes that report fatal
+for entries assigned to the current target, and gives each job its own
+configuration (a per-target `clippy.toml` directory through `CLIPPY_CONF_DIR`) if
+one shared file cannot tell "unavailable on this target" from "misspelled". The
+script also checks that every entry is assigned to at least one target, and that
+each assigned target's job lints it. An entry nothing lints is red. Skipping an
+entry silently is never coverage.
+
+### C-5. The capabilities: who may mint, what a door accepts
+
+The token needs authority as well as scope. Worker-only doors need a guarantee
+in release builds, not just debug builds. This section provides both.
+
+**Crate ownership.** The capability types, the door-identity trait and the
+role state live in **`bt_platform::admission`**. `bt-app`, `bt-render` and
+`bt-pty` all depend on `bt-platform`, so every door in the workspace can take
+them. `hang_watch` stays in `bt-app`; it registers its meter once, at startup,
+through `admission::install_meter(fn(DoorKey, start, end))`, which can be called
+only once. There is no public mint and no externally implementable token trait.
+
+**Door identity is a type.**
+
+```rust
+mod sealed { pub trait Sealed {} }
+pub trait Door: sealed::Sealed {                 // sealed: no impl outside admission
+    const ROW: Row;                               // the §5.3 row
+    const STATION: u8;                            // hang_watch's station byte
+    const PHASES: Phases;                         // Starting | Running | Exiting, as ruled
+}
+pub mod doors { pub enum RenameDisk {} /* … one uninhabited type per registry line … */ }
+```
+
+The door types are declared in `admission::doors`, one per registry line. The
+source guard holds the list equal to the registry, and each type's `ROW` and
+`STATION` equal to the registry's line.
+
+**The owner-thread token is generative, sealed and parameterised.**
+
+```rust
+pub struct WaitToken<'scope, D: Door> {
+    _scope: PhantomData<fn(&'scope ()) -> &'scope ()>, // invariant in 'scope
+    _door: PhantomData<D>,
+    _local: PhantomData<*const ()>,                    // !Send and !Sync
+}
+
+pub fn admitted<D: Door, R>(
+    work: impl for<'scope> FnOnce(WaitToken<'scope, D>) -> R,
+) -> Result<R, Refused>
+```
+
+- **Generativity.** The closure is higher-ranked, `for<'scope>`, and the result
+  type `R` is chosen outside that binder, so `R` cannot mention `'scope`. The
+  token, a reference to it, and a closure or future that captures it cannot be
+  returned or stored beyond the call. This is `std::thread::scope`'s pattern.
+  Invariance alone would not make the lifetime fresh; the higher-ranked binder
+  does.
+- **Authority, checked in every build.** `admitted` first reads the calling
+  thread's role. If the role is not `Window`, or the process phase is not in
+  `D::PHASES`, it returns `Err(Refused { door, role, phase })` and **does not run
+  `work`**. It also adds to a persistent violation counter, printed in every
+  budget line and in the exit summary, however much detail delivery drops. Every
+  caller handles `Refused`, as it handles the door's own error today (for
+  example, the strip keeps its verb). This is a refusal, not a crash and not a
+  fallback: the effect does not happen on the wrong thread.
+- **Identity.** A door's signature names its own type:
+  `fn rename_on_owner(token: WaitToken<'_, doors::RenameDisk>, …)`. A token
+  minted for another door does not type-check.
+- **Measurement is owned by `admitted`, not by the token.** `admitted` takes the
+  start time before `work` and the end time after it returns. So
+  `mem::forget(token)` suppresses nothing, and the charge is the whole
+  synchronous call.
+
+**Worker-only doors get a capability, not just an assertion.**
+
+```rust
+pub struct WorkerCtx { name: &'static str, _local: PhantomData<*const ()> } // !Send, !Sync, private fields
+
+pub fn spawn_at_priority<F, T>(name: &'static str, band: ThreadPriority, body: F) -> io::Result<JoinHandle<T>>
+where F: FnOnce(&WorkerCtx) -> T + Send + 'static, T: Send + 'static
+```
+
+- `spawn_at_priority` (and `spawn_at_priority_with_stack`) creates the
+  `WorkerCtx` inside the new thread's running closure, after setting the band
+  and the role, and lends it to `body` by reference. No other constructor
+  exists.
+- A worker-only door takes `&WorkerCtx`. A window-thread caller has none, so the
+  call **does not compile**. This is the release-build guarantee Codex asked
+  for. `expect_worker()` stays in the door's body as a backstop, with the same
+  counter.
+- Changing `spawn_at_priority`'s closure signature touches every spawn site.
+  The implementer states the spawn-site census in the ticket (the 45 sites of
+  ARCHITECTURE §5.1, less those A1 leaves alone). Most sites only add a `_ctx`
+  parameter.
+
+**Roles.** The role is a thread-local set only in two places, both sealed:
+
+- by `spawn_at_priority`, as `Worker(name)`;
+- by `admission::enter_window_thread()`, as `Window`. It can be called only
+  once, and its one caller, the top of `fn main` before the loop, is pinned.
+
+The process phase (`Starting`, `Running`, `Exiting`) is written by three pinned
+calls: before the loop, at its first turn, and at `settle_quit`. Rows 15–18
+admit `Exiting` or `Starting`, and ordinary rows admit `Running`.
+
+A thread that entered through neither is `Unset`, and **`Unset` is never
+treated as a worker**. OS callback threads that run first-party code (the
+FSEvents run loop on the watcher thread is our own worker; a WASAPI or
+video-engine callback is not) are named in the registry. Each is entered through
+`admission::enter_callback(name)`, which sets `Callback(name)`, a role that no
+owner-thread door accepts.
+
+**Unsafe fabrication is fenced.** The source guard enforces three rules:
+
+- `bt_platform::admission` contains **no `unsafe`**;
+- the doors' modules contain `unsafe` only in the listed FFI functions, with
+  owner and count pinned;
+- `WaitToken`, `WorkerCtx` and `admission::doors` are never named inside an
+  `unsafe` block or `unsafe fn` anywhere in the workspace, and never inside
+  `transmute`, `zeroed`, `MaybeUninit` or `read` expressions.
+
+This leaves fabrication as possible only through code the guard refuses.
+
+**Synchronous doors only (milestone 1).** A door executes its effect inside its
+own call, and its signature **may not** do any of these:
+
+- return a closure, `impl Fn*`, `impl Future`, `impl Iterator`, a `Box<dyn …>`
+  or an `fn` pointer;
+- be `async`;
+- take a `'static` closure it stores or registers.
+
+It may return data. A door that hands out a resource whose `Drop` would block is
+covered by §C-3's `Drop` row.
+
+### C-6. The acceptance set: what each mutation proves, and how it is refused
+
+Every mutation is planted, run, and reverted. The harness asserts the **stated
+reason**: the lint name, the source-guard assertion's message, the compile error
+code, or the runtime counter and `Refused` value. An unrelated compile error,
+zero exercised requests or zero matched owners never counts. Each has a
+**passing control**: the correctly admitted form of the same call, which must
+compile and run.
+
+| # | mutation | rejected by | on which path |
+|---|---|---|---|
+| M1 | a new `bt-platform` helper calling `std::fs::metadata`, called from `Runtime` | lint `disallowed_methods` | resolved cross-crate call |
+| M2a | a wait moved out of a spawned closure into its spawner | lint (outside every `expect`) | — |
+| M2b | a wait moved *within* one door, from inside a nested closure to outside it | **not rejected: a passing control.** The effect still executes inside the door's synchronous call, and its count is unchanged (a second effect is M7d) | executed |
+| M3 | a direct window-thread call of a worker-only door | **compile error**: no `&WorkerCtx` in scope | the call |
+| M3r | the same, through `unsafe`-free code that passes a `WorkerCtx` from a worker to the window thread | compile error: `WorkerCtx: !Send` | — |
+| M4a | `admitted(…, \|_\| ()); door(…)` | compile error: no token | — |
+| M4b | returning the token, or a reference to it, from `work` | compile error: `'scope` escapes the higher-ranked binder | — |
+| M4c | storing the token in a field or static that outlives `work` | compile error | — |
+| M4d | returning a closure or `async` block that captures the token | compile error | — |
+| M4e | sending the token to another thread, by value or by reference | compile error: `!Send`, `!Sync` | — |
+| M4f | constructing `WaitToken` in an unrelated module | compile error: private fields | — |
+| M4g | calling `admitted` on a worker | **runtime `Refused`**, `work` not run, counter +1: executed by a test that spawns through `spawn_at_priority` | executed |
+| M4h | using a `RenameDisk` token at another door | compile error: type mismatch | — |
+| M4i | calling `admitted::<D>` in a phase outside `D::PHASES` | runtime `Refused` | executed |
+| M5 | a door reached through `Box<dyn Fn()>` and an `fn` pointer, from the window thread without a capability | compile error (M3) or `Refused` (M4g) through the indirection; **passing control**: the correctly admitted indirect call | executed |
+| M6 | `rx.recv()` in method syntax; a listed foreign inherent method (`File::sync_all`; on each target, one listed platform binding) | lint | each target's job |
+| M7a | a door's `expect` moved to another owner, total unchanged | source guard (owner) | — |
+| M7b | an unregistered `#[allow(clippy::disallowed_methods)]` helper | source guard (§C-2) | — |
+| M7c | a module-level, crate-level, `cfg_attr`, `clippy::style` or `warnings` allowance | source guard (§C-2) | — |
+| M7d | a second listed effect under an unchanged `expect` | source guard (one `expect`, one effect) | — |
+| M7e | `-A clippy::disallowed_methods` added to a workflow, `RUSTFLAGS` or `.cargo/config.toml` | the script (§C-2) | — |
+| M8a | a vocabulary entry deleted from `clippy.toml` or the registry | the script (the registry comparison of R7) | — |
+| M8b | a vocabulary entry misspelled, and an entry assigned to a target whose job does not resolve it | that target's job (§C-4) | each target |
+| M9 | a registry line added without a ruling | the script | — |
+| M10 | the effect moved into a closure or `async` block the door returns, or into a callback it registers | source guard (§C-5: synchronous doors only) | — |
+| M11 | a first-party `#[macro_export]` macro naming a vocabulary path | source guard (§C-3) | — |
+| M12 | `msg_send!`, `vtable(`, a new `extern` block or `#[link]` outside the pinned FFI owners | source guard (§C-3) | — |
+| M13 | vocabulary inside an `impl Drop` | source guard (§C-3) | — |
+| M14 | `WaitToken` or `WorkerCtx` named inside an `unsafe` block, or `unsafe` added to `admission` | source guard (§C-5) | — |
+| M15 | a Windows-only and a macOS-only violation (§C-4's plants) | each job's lint | each target |
+
+The two `gates-can-fail` plants stay, and one plant per target job is added.
+They are ongoing proofs that the lint and the script can fail. M3, M4g and M4i
+are the executed proofs that the role and phase boundary can fail, which the
+plants do not exercise.
+
+### C-7. A3's acceptance notes (from the second review; not new findings)
+
+- **Sub-microsecond precision before aggregation.** `WaitToken` (through
+  `admitted`) records durations as `Duration`, or as integer nanoseconds, and
+  the per-line sums and histograms aggregate at that precision. Converting to
+  microseconds happens only when a line is printed. The 5,000 × 0.9 µs case
+  must sum to 4.5 ms exactly, and it would fail if each call were truncated to
+  0 µs.
+- **The 40 ms unclassified case covers named time too.** The case runs twice:
+  40 ms outside every station, and 40 ms inside a named `Scope` or `Work`
+  station with no admitted call under it. Both produce an **unexplained** line
+  (unexplained meaning "not an admitted wait"), and neither is reported as a
+  wait.
+- **Dependency.** A3 is dispatched against A1's interface as §C-5 states it
+  (`admitted`, `Door`, `install_meter`), and it lands after A1.
+
+### C-8. A1 and A2, re-issued; A5 unchanged
+
+| id | title | size | prerequisites | lands alone as |
+|---|---|---|---|---|
+| A1 | Doors know their thread: sealed capabilities for the window thread and for workers | M | the 0.4.5 tag; a reviewed design note for `spawn_at_priority`'s new closure signature (rule 11: the thread door's contract changes) | `bt_platform::admission` (roles, phases, `Door`, `doors`, `WaitToken`, `admitted` with authority and phase checked in every build, `install_meter`, `enter_window_thread`, `enter_callback`); `WorkerCtx` lent by `spawn_at_priority` at every spawn site; the doors of the (b) table converted in place to take a token or `&WorkerCtx`, with no behaviour change other than `Refused` on a wrong thread; the registry schema and generated §5.3 table (R7); the source guard's §C-2 attribute checks, §C-3 prohibitions (exported macros, FFI owners, `Drop`), §C-5 fences (unsafe, synchronous doors) and door-type equality; mutations M3–M5, M7a–M7d, M10–M14; the D-33 and D-42 version notes |
+| A2 | The compiler refuses a listed blocking call outside its door, on every product configuration | M | A1; for its macOS half, D-63 and D-67 (the macOS job lints every product crate), which in turn need D-61 and D-62 (0.4.5 ticket 55) | `disallowed_methods = "deny"` in the workspace lints and the vocabulary in `clippy.toml` (per target through `CLIPPY_CONF_DIR` if needed, §C-4); the script's non-Rust checks (§C-2 item 1); one `gates-can-fail` plant per product target; mutations M1, M2, M6, M7e, M8, M9, M15. **The Windows half may land first, with the invariant stated for Windows only** until the macOS half follows. |
+| A3 | Every turn is accounted, and waits are measured per call | M | dispatched against §C-5's interface; lands after A1 | (b)'s §R-C, with §C-7's acceptance notes |
+| A5 | One lane contract; each lane's gaps are declared failures | M | the 0.4.5 tag | unchanged from (b) |
+
+The rest of (b)'s §R-F is unchanged: A4 and B4–B9, with their prerequisites.
+B4, B7 and B9 now also depend on A1's `WorkerCtx`, which is how their worker
+doors are typed.
+
+**Open questions.** None are added. §C-5 chooses the release-build guarantee
+that Codex asked to have chosen (a sealed worker capability rather than a
+diagnostic only), because it leaves no debt and no crash path. The owner's two
+questions in §R-G stand.
