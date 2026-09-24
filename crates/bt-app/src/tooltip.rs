@@ -109,15 +109,15 @@ pub const TIP_MAX_WIDTH_LOGICAL_PX: f32 = 360.0;
 // must not be written twice, while the type, the measure and the placement are
 // the card's and are not the tip's in any of the four.
 
-/// `font: 12px/1.5 Consolas, "Cascadia Mono", monospace` — the size.
+/// The 12px size of the monospace command tag; UI-SPEC.md T10 sets its leading.
 ///
 /// A point larger than the chrome tip beside it, and set in the *terminal's* face
 /// rather than the window's, because what it quotes is a command line: the card
 /// shows a thing the reader typed at a grid, and a proportional rendering of it is
 /// a paraphrase.
 pub const PEEK_FONT_LOGICAL_PX: f32 = 12.0;
-/// The `1.5` of the same declaration.
-pub const PEEK_LINE_HEIGHT: f32 = 1.5;
+/// UI-SPEC.md T10: float-tag running text uses the chrome line height (1.4).
+pub const PEEK_LINE_HEIGHT: f32 = 1.4;
 /// The `10px` of `padding: 5px 10px`.
 pub const PEEK_PADDING_X_LOGICAL_PX: f32 = 10.0;
 /// The `5px` of `padding: 5px 10px`.
@@ -232,8 +232,8 @@ impl TipFace {
             Self::Chrome => CHROME_LINE_HEIGHT,
             Self::Peek { .. } => PEEK_LINE_HEIGHT,
             // **The swatch is the line box.** A well 28 logical pixels tall
-            // inside a card sized to a 12/1.5 line would overflow the card by
-            // ten pixels, so the leading is what gives way: one line, as tall as
+            // inside a card sized to the peek text line would overflow it,
+            // so the leading is what gives way: one line, as tall as
             // the well beside it, with the token set on its centre. Derived
             // rather than written as 2.333 so that moving either number keeps
             // the two the same height.
@@ -2220,6 +2220,33 @@ mod tests {
         );
     }
 
+    /// RED (23) — **the peek tag uses the chrome line height.**
+    ///
+    /// UI-SPEC.md T10 gives float-tag text the same leading as chrome.
+    /// The real placement producer must spend that leading on every line.
+    /// MUTATION: restore PEEK_LINE_HEIGHT to 1.5.
+    #[test]
+    fn ui_spec_float_tag_rest_values_follow_the_rule() {
+        assert_eq!(PEEK_LINE_HEIGHT, CHROME_LINE_HEIGHT, "UI-SPEC.md T10");
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let face = TipFace::Peek { muted: false };
+            let (frame, line, border) = super::place(
+                host(800.0, 200.0, 820.0, 220.0),
+                &[100.0, 80.0],
+                WINDOW,
+                scale,
+                face,
+            )
+            .unwrap();
+            let expected = (PEEK_FONT_LOGICAL_PX * scale * CHROME_LINE_HEIGHT).round();
+            assert_eq!(line, expected, "UI-SPEC.md T10 at {scale}");
+            assert_eq!(
+                frame[3] - frame[1],
+                (2.0 * expected + 2.0 * (PEEK_PADDING_Y_LOGICAL_PX * scale + border)).round()
+            );
+        }
+    }
+
     // ── `#cmd-peek`: the second face (D-19) ────────────────────────────────
 
     /// A monospace measure with one number in it: every character is `advance`
@@ -2228,12 +2255,15 @@ mod tests {
         move |text: &str| text.chars().count() as f32 * advance
     }
 
-    /// The card's metrics are the card's, and none of them is the tip's.
+    /// RED (23) — **the command tag shares chrome leading while keeping its own type.**
+    ///
+    /// UI-SPEC.md T10 brings the leading into the float-tag family.
+    /// MUTATION: restore PEEK_LINE_HEIGHT to 1.5.
     #[test]
     fn the_glance_cards_face_is_larger_rounder_and_wider_than_the_tips() {
         let peek = TipFace::Peek { muted: false };
         assert_eq!(peek.font_logical_px(), 12.0);
-        assert_eq!(peek.line_height(), 1.5);
+        assert_eq!(peek.line_height(), CHROME_LINE_HEIGHT);
         assert_eq!(peek.padding_logical_px(), (10.0, 5.0));
         assert_eq!(peek.radius_logical_px(), 8.0);
         assert_eq!(peek.max_width_logical_px(), 460.0);
@@ -2268,6 +2298,11 @@ mod tests {
         );
     }
 
+    /// RED (23) — **the card uses chrome leading in its placed line box.**
+    ///
+    /// UI-SPEC.md T10 sets the line-height pin; placement invariants stay the same.
+    /// MUTATION: restore PEEK_LINE_HEIGHT to 1.5.
+    ///
     /// **The card stands to the left of its tick and eight pixels above it**, and
     /// is held inside the window on every side.
     ///
@@ -2282,7 +2317,10 @@ mod tests {
         let (frame, line_height, _) = super::place(tick, &[200.0], WINDOW, SCALE, peek).unwrap();
         assert_eq!(frame[2], tick[0] - 12.0, "twelve pixels off the tick");
         assert_eq!(frame[1], tick[1] - 8.0, "eight pixels above it");
-        assert_eq!(line_height, (12.0 * 1.5_f32).round());
+        assert_eq!(
+            line_height,
+            (PEEK_FONT_LOGICAL_PX * CHROME_LINE_HEIGHT).round()
+        );
         assert_eq!(
             frame[3] - frame[1],
             (line_height + 2.0 * (5.0 + 1.0)).round()

@@ -150,7 +150,7 @@ ledger's.
 | D-61 | a Mac-only red test in `webnav` | ticket 13's report | none yet | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | open |
 | D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | none yet | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | open |
 | D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | none yet | 0.4.6 | open |
-| D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open |
+| D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open — narrowed by ticket 43: the phases are named in the stall self-report; the remaining cost is the engine's own thread-affine work (§5.3 row 21) ruled 2026-09-24: warm the engine at a quiet moment — follow-up warm-up, ticket 54 |
 | D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.7 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.7 before the 0.5 restyle, and the row closes with it | open |
 
 ---
@@ -1072,6 +1072,22 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
   requested on a lane, the controller's callback not pumped inside a gesture,
   and the install burst split across turns. 0.4.5: ticket 43 adds the probes
   first and repays or narrows the row; a residue under the frame budget closes it.
+  **Ticket 43, 2026-09-24.** The phases are stations of the stall self-report
+  now, and the pump between handlers is one of them (`message pump`). Measured
+  headless on the development machine (three runs, a message-only parent):
+  the first page's `request_controller` 88–269 ms synchronous with ~4,500 page
+  faults, then one engine dispatch of 70–303 ms on the pump; later pages ~3 ms
+  and ~50 ms; the environment 10–38 ms; the install burst 2–6 ms, under the
+  frame budget, so it is not split. The environment cannot be made on a lane:
+  WebView2 answers `0x802A000C` ("can only be called from the thread that
+  created the object") to an environment made on another thread, for both
+  `BrowserVersionString` and `CreateCoreWebView2CompositionController`. What is
+  left is §5.3 row 21, and the row stays open until a ruling chooses how to
+  move it. **Ruled 2026-09-24 (coordinator):** the environment, and with it the
+  runtime's processes, is warmed on the window thread during an idle turn after
+  startup, before the first page is asked for; the controller is still made per
+  page; hosting WebView2 on its own UI thread is not taken (it changes §5.2).
+  Follow-up: the warm-up, ticket 54.
 - **D-65 · overlay fades composited per primitive in linear light.**
   `OverlayLayer::opacity` is folded into each primitive (`faded_quads`,
   `faded_icons`, `faded_document_rasters`, `shape_chrome_labels_with_cjk`), and

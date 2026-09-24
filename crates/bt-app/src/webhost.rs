@@ -48,6 +48,7 @@ use bt_persist::{SearchEngineV1, WebColorSchemeV1};
 use bt_platform::{WebChord, WebColorScheme, WebEvent, WebHost, WebNavigationVerdict};
 use winit::keyboard::{ModifiersState, NamedKey};
 
+use crate::hang_watch;
 use crate::shortcuts::{Action, ChordKey, Focus, Shortcuts};
 
 // ── The recovery state machine (plan §4, gate 10) ──────────────────────────
@@ -2602,10 +2603,12 @@ impl WebSeat {
                 // this seat, and it draws the card rather than escaping into
                 // `apply`'s generic report — which says a fault out loud and
                 // leaves the seat with nothing on it.
-                match self
-                    .host
-                    .request_controller(self.address.window, self.machine.generation())
-                {
+                let window = self.address.window;
+                let generation = self.machine.generation();
+                let asked = hang_watch::during(hang_watch::Station::WebController, || {
+                    self.host.request_controller(window, generation)
+                });
+                match asked {
                     Ok(()) => {
                         self.engine_owes_an_answer = Some(Instant::now() + ENGINE_START_DEADLINE);
                     }
@@ -2616,15 +2619,22 @@ impl WebSeat {
             WebEffect::InstallEvents => {
                 // The visual first: the controller is told where to render
                 // before it is told to do anything at all.
-                compositor.attach_web_visual(self.address.page)?;
+                //
+                // **Each part of this burst is its own station** (ticket 43), so a
+                // hold on the turn a controller arrives says which part held it.
+                let page = self.address.page;
+                hang_watch::during(hang_watch::Station::WebVisual, || {
+                    compositor.attach_web_visual(page)
+                })?;
                 // **What this controller actually carries, recorded rather than
                 // assumed** (R2-16). A build that would not take one of the
                 // switches or one of the gates says so here, and the seat is
                 // the thing that then refuses a local file — see
                 // [`WebSeat::issue`].
-                let report =
-                    self.host
-                        .install(compositor, self.address.page, self.machine.generation())?;
+                let generation = self.machine.generation();
+                let report = hang_watch::during(hang_watch::Station::WebInstall, || {
+                    self.host.install(compositor, page, generation)
+                })?;
                 self.guards = report.guards;
                 if !report.unapplied.is_empty() {
                     let named = report
@@ -2653,8 +2663,9 @@ impl WebSeat {
                 // begins loading against the controller's default zero-by-zero
                 // bounds rasters its text for a viewport it will never be shown
                 // in. See [`WebSeat::wanted`].
-                self.stand_on_the_floor(compositor)?;
-                let generation = self.machine.generation();
+                hang_watch::during(hang_watch::Station::WebFloor, || {
+                    self.stand_on_the_floor(compositor)
+                })?;
                 Ok(Some(self.machine.on_events_installed(generation)))
             }
             WebEffect::Navigate(url) => {
@@ -2708,7 +2719,13 @@ impl WebSeat {
                 // two orderly; on Windows it is one line that does nothing.
                 self.host.set_request_rules(&content_rules(&minted))?;
                 *self.mint.borrow_mut() = minted;
-                self.host.navigate(&target)?;
+                hang_watch::during(
+                    hang_watch::Station::WebNavigate,
+                    || -> Result<(), String> {
+                        self.host.navigate(&target)?;
+                        Ok(())
+                    },
+                )?;
                 Ok(None)
             }
             WebEffect::Reload => {
@@ -2861,7 +2878,13 @@ impl WebSeat {
     fn start_environment(&mut self, outcomes: &mut Vec<WebOutcome>) {
         let generation = self.machine.generation();
         let folder = self.folder.clone();
-        match self.host.request_environment(&folder, generation) {
+        // **Its own station** (ticket 43): the first page in the process
+        // spends the loader and the browser's launch request here, inside
+        // whichever gesture asked for the page.
+        let asked = hang_watch::during(hang_watch::Station::WebEnvironment, || {
+            self.host.request_environment(&folder, generation)
+        });
+        match asked {
             Ok(()) => self.engine_owes_an_answer = Some(Instant::now() + ENGINE_START_DEADLINE),
             Err(error) => self.the_engine_did_not_start(error, outcomes),
         }
