@@ -3317,9 +3317,9 @@ fn buffer_resident_bytes(buffer: &Buffer) -> usize {
 }
 
 fn shape_entry_resident_bytes(key: &ShapeKey, buffer: &Buffer, value_bytes: usize) -> usize {
-    size_of::<Arc<ShapeKey>>()
+    size_of::<Arc<SizedShapeKey>>()
         .saturating_add(3 * size_of::<usize>())
-        .saturating_add(size_of::<ShapeKey>())
+        .saturating_add(size_of::<SizedShapeKey>())
         .saturating_add(key.text.heap_bytes())
         .saturating_add(value_bytes)
         .saturating_add(buffer_resident_bytes(buffer))
@@ -3403,6 +3403,17 @@ struct NarrowGlyph {
     color: Color,
 }
 
+/// What a cell asks the shaping caches for: the cluster and its style.
+///
+/// **Not the whole of a cache's key** (ticket 37). The buffer a cache hands back is laid out at
+/// one em and its offsets are measured against one cell — its width, its height, its baseline and
+/// the primary face's cap geometry — so the same `M` in a pane at 150 % and in a pane at 100 % of
+/// one window is two shapes. The caches file an entry under [`SizedShapeKey`], this key plus
+/// every measured input of the placement, and a caller cannot build the one without the other:
+/// `get_or_shape` takes the metrics it shapes at and keys by them itself. The font environment is
+/// the other input, and it is held by a clearing contract rather than a key field:
+/// [`WindowRenderer::adopt_metrics`] empties both caches whenever
+/// [`GpuContext::set_terminal_font`] or a display change moves it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ShapeKey {
     /// The cluster itself, inline. A key is built for *every* non-blank cell on
@@ -3411,6 +3422,13 @@ struct ShapeKey {
     text: CellText,
     bold: bool,
     italic: bool,
+}
+
+/// A shaping cache's own key: the cluster, and the metrics it was shaped and placed at.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SizedShapeKey {
+    shape: ShapeKey,
+    metrics: RowMetricsKey,
 }
 
 struct CachedNarrowShape {
@@ -3441,7 +3459,7 @@ impl ShapeCacheCounters {
 }
 
 struct NarrowShapingCache {
-    entries: ByteLru<ShapeKey, CachedNarrowShape>,
+    entries: ByteLru<SizedShapeKey, CachedNarrowShape>,
     track_perf: bool,
     counters: ShapeCacheCounters,
     #[cfg(test)]
@@ -3481,7 +3499,11 @@ impl NarrowShapingCache {
         metrics: CellMetrics,
         cjk_families: &TerminalCjkFamilies,
     ) -> (Arc<Buffer>, f32, f32) {
-        if let Some(cached) = self.entries.get(&key) {
+        let sized = SizedShapeKey {
+            shape: key,
+            metrics: metrics.into(),
+        };
+        if let Some(cached) = self.entries.get(&sized) {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
@@ -3494,7 +3516,7 @@ impl NarrowShapingCache {
 
         let miss_started = self.track_perf.then(Instant::now);
         let (mut buffer, family, size_policy) = shape_narrow_buffer_for_key(
-            &key,
+            &sized.shape,
             font_system,
             swash_cache,
             metrics,
@@ -3511,7 +3533,8 @@ impl NarrowShapingCache {
                     metrics.cell_width_px,
                 );
                 if em_scale < 1.0 {
-                    buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale, family);
+                    buffer =
+                        shape_narrow_buffer(&sized.shape, font_system, metrics, em_scale, family);
                 }
                 let glyph_baseline_px = buffer
                     .layout_runs()
@@ -3531,7 +3554,8 @@ impl NarrowShapingCache {
                     metrics.primary_cap_height_px,
                 );
                 if (em_scale - 1.0).abs() > f32::EPSILON {
-                    buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale, family);
+                    buffer =
+                        shape_narrow_buffer(&sized.shape, font_system, metrics, em_scale, family);
                 }
                 align_ink_offsets(
                     &buffer,
@@ -3551,9 +3575,9 @@ impl NarrowShapingCache {
         };
         let buffer = Arc::new(buffer);
         let resident_bytes =
-            shape_entry_resident_bytes(&key, &buffer, size_of::<CachedNarrowShape>());
+            shape_entry_resident_bytes(&sized.shape, &buffer, size_of::<CachedNarrowShape>());
         let (_, evictions) = self.entries.insert(
-            key,
+            sized,
             CachedNarrowShape {
                 buffer: Arc::clone(&buffer),
                 left_offset_px,
@@ -3581,7 +3605,7 @@ struct CachedWideShape {
 }
 
 struct WideShapingCache {
-    entries: ByteLru<ShapeKey, CachedWideShape>,
+    entries: ByteLru<SizedShapeKey, CachedWideShape>,
     track_perf: bool,
     counters: ShapeCacheCounters,
     #[cfg(test)]
@@ -3621,7 +3645,11 @@ impl WideShapingCache {
         metrics: CellMetrics,
         cjk_families: &TerminalCjkFamilies,
     ) -> (Arc<Buffer>, f32, f32) {
-        if let Some(cached) = self.entries.get(&key) {
+        let sized = SizedShapeKey {
+            shape: key,
+            metrics: metrics.into(),
+        };
+        if let Some(cached) = self.entries.get(&sized) {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
@@ -3634,7 +3662,7 @@ impl WideShapingCache {
 
         let miss_started = self.track_perf.then(Instant::now);
         let (buffer, size_policy) = shape_wide_buffer_for_key(
-            &key,
+            &sized.shape,
             font_system,
             swash_cache,
             metrics,
@@ -3663,9 +3691,9 @@ impl WideShapingCache {
         };
         let buffer = Arc::new(buffer);
         let resident_bytes =
-            shape_entry_resident_bytes(&key, &buffer, size_of::<CachedWideShape>());
+            shape_entry_resident_bytes(&sized.shape, &buffer, size_of::<CachedWideShape>());
         let (_, evictions) = self.entries.insert(
-            key,
+            sized,
             CachedWideShape {
                 buffer: Arc::clone(&buffer),
                 left_offset_px,
@@ -23082,6 +23110,107 @@ mod tests {
         );
         assert_eq!(cache.entries.len(), 2);
         assert!(!Arc::ptr_eq(&first[0].buffer, &bold[0].buffer));
+    }
+
+    /// The two sizes ticket 37's shaping tests shape one cluster at: the default face and the
+    /// same face half again as large, at one scale, as two panes of one window would be.
+    fn two_pane_sizes(font_system: &mut FontSystem) -> (CellMetrics, CellMetrics) {
+        let small = CellMetrics::measure_at(font_system, 1.0, 14.0).unwrap();
+        let large = CellMetrics::measure_at(font_system, 1.0, 21.0).unwrap();
+        assert!(large.cell_width_px > small.cell_width_px);
+        (small, large)
+    }
+
+    /// RED (37) — **one cluster shaped at two sizes is two shapes in the narrow cache.**
+    ///
+    /// A window's panes share one `NarrowShapingCache`, and a pane at 150 % beside a pane at
+    /// 100 % asks it for the same `M` at two sizes. Keyed by the cluster and its style alone, the
+    /// second ask was answered with the first size's buffer and offsets: glyphs of one pane's
+    /// size drawn into the other pane's cells, with nothing to say so. Both orders are driven
+    /// through one shared cache, because two fresh caches would pass vacuously.
+    ///
+    /// MUTATION: drop the metrics from the key `NarrowShapingCache::get_or_shape` looks up.
+    #[test]
+    fn one_cluster_shaped_at_two_sizes_is_two_shapes_in_the_narrow_cache() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let (small, large) = two_pane_sizes(&mut font_system);
+        let cells = [CapturedCell::plain("M")];
+        for order in [[small, large, small], [large, small, large]] {
+            let mut cache = NarrowShapingCache::new();
+            let mut seen: Vec<(CellMetrics, Arc<Buffer>)> = Vec::new();
+            for metrics in order {
+                let glyphs = shape_narrow_glyphs(
+                    &cells,
+                    &mut font_system,
+                    &mut swash_cache,
+                    metrics,
+                    &mut cache,
+                );
+                assert_eq!(
+                    glyphs[0].buffer.metrics().font_size,
+                    metrics.font_size_px,
+                    "the shape handed back is the size it was asked for",
+                );
+                if let Some((_, earlier)) = seen.iter().find(|(m, _)| *m == metrics) {
+                    assert!(
+                        Arc::ptr_eq(earlier, &glyphs[0].buffer),
+                        "a repeat ask at one size is the cached shape of that size",
+                    );
+                } else {
+                    for (_, other) in &seen {
+                        assert!(!Arc::ptr_eq(other, &glyphs[0].buffer));
+                    }
+                    seen.push((metrics, Arc::clone(&glyphs[0].buffer)));
+                }
+            }
+            assert_eq!(cache.entries.len(), 2);
+        }
+    }
+
+    /// RED (37) — **one cluster shaped at two sizes is two shapes in the wide cache.**
+    ///
+    /// The two-cell twin of the narrow test: a CJK ideograph in a pane at 150 % and in a pane
+    /// at 100 % of one window shares `WideShapingCache`, whose key was the cluster and its style.
+    /// The second pane got the first pane's buffer, and its offsets, which are centred in the
+    /// first pane's two-cell slot.
+    ///
+    /// MUTATION: drop the metrics from the key `WideShapingCache::get_or_shape` looks up.
+    #[test]
+    fn one_cluster_shaped_at_two_sizes_is_two_shapes_in_the_wide_cache() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let (small, large) = two_pane_sizes(&mut font_system);
+        let mut cell = CapturedCell::plain("中");
+        cell.style.flags.insert(CellFlags::WIDE_CHAR);
+        let cells = [cell];
+        for order in [[small, large, small], [large, small, large]] {
+            let mut cache = WideShapingCache::new();
+            let mut seen: Vec<(CellMetrics, Arc<Buffer>)> = Vec::new();
+            for metrics in order {
+                let glyphs = shape_wide_glyphs(
+                    &cells,
+                    &mut font_system,
+                    &mut swash_cache,
+                    metrics,
+                    &mut cache,
+                );
+                assert_eq!(
+                    glyphs[0].buffer.metrics().font_size,
+                    metrics.font_size_px,
+                    "the shape handed back is the size it was asked for",
+                );
+                if let Some((_, earlier)) = seen.iter().find(|(m, _)| *m == metrics) {
+                    assert!(Arc::ptr_eq(earlier, &glyphs[0].buffer));
+                } else {
+                    for (_, other) in &seen {
+                        assert!(!Arc::ptr_eq(other, &glyphs[0].buffer));
+                    }
+                    seen.push((metrics, Arc::clone(&glyphs[0].buffer)));
+                }
+            }
+            assert_eq!(cache.entries.len(), 2);
+        }
     }
 
     #[cfg(target_os = "windows")]
