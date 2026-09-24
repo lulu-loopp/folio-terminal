@@ -801,8 +801,8 @@ fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
 /// (`pictures_match`), its seat signature differs by the metrics it carries, and the gate asks
 /// for a present; the leaf's presented metrics stay the old ones until a present records the new.
 ///
-/// MUTATION: drop `metrics` from `SeatSignature` and drop `layout_key` from
-/// `presentation_equivalent` — the gate calls the new picture the old one.
+/// MUTATION: drop `layout_key` from `presentation_equivalent` — with one cell box on both
+/// sides, the new picture is called the old one.
 #[test]
 fn a_size_change_with_an_unchanged_grid_still_presents_and_input_uses_the_displayed_picture() {
     let mut tab = tab_holding(pane_at_rest("same grid"));
@@ -818,7 +818,15 @@ fn a_size_change_with_an_unchanged_grid_still_presents_and_input_uses_the_displa
     };
     let leaf = tab.focused_mut().unwrap();
     let grid = leaf.grid;
-    assert!(apply_leaf_metrics(leaf, fixture_cell_metrics(1.0, 16.5)));
+    // A face a tenth of a pixel smaller measures to the same cell box: the one case where
+    // nothing but the face size tells the two pictures apart.
+    let smaller = fixture_cell_metrics(1.0, 15.9);
+    assert_eq!(
+        (smaller.cell_width_px, smaller.cell_height_px),
+        (old_metrics.cell_width_px, old_metrics.cell_height_px),
+        "the fixture's two sizes share one cell"
+    );
+    assert!(apply_leaf_metrics(leaf, smaller));
     assert_eq!(leaf.grid, grid, "the apply operation moved no grid");
     let after = focused_frame(&mut tab);
     assert!(frame_matches_grid(&after, grid), "the grid is unchanged");
@@ -1045,8 +1053,8 @@ fn six_twenty_pixel_reports_are_one_step_and_a_reversal_at_the_top_steps_down_on
 /// NEW (37) — **`Ctrl+Alt` and `Ctrl+Shift` keep the wheel's existing routes, and on a Mac the
 /// gesture is `⌘`, never Control.**
 ///
-/// MUTATION: build the modifier on `modifiers.control_key()` alone — the Ctrl+Alt, Ctrl+Shift and
-/// Mac-Control rows go red.
+/// MUTATION: drop the Shift and Alt exclusions from `input::text_size_wheel_held_on` — the
+/// Ctrl+Alt and Ctrl+Shift rows go red (and, with it, the extended sweep).
 #[test]
 fn ctrl_alt_and_ctrl_shift_wheel_keep_their_existing_routes() {
     use bt_platform::HostPlatform::Windows;
