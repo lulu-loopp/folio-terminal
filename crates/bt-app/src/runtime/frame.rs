@@ -4,7 +4,7 @@
 use crate::{
     BrokerAim, Drag, FILES_NOTICE_DWELL, FOOT_REVEAL_FEEDBACK, Fading, FrameImageReferences,
     FrameTraces, GhostFace, HyperlinkActivation, PaneDraw, PointerTarget, PresentIntent, Runtime,
-    STARTUP_PTY_POLL_INTERVAL, TabPress, a_bare_redraw_still_owes_a_present,
+    STARTUP_PTY_POLL_INTERVAL, SearchRefresh, TabPress, a_bare_redraw_still_owes_a_present,
     advance_periodic_deadline, apply_hover_marks, attention_ledger_deadline, chrome_over,
     chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files, git,
     hang_watch, hyperlink_activation, ime_outbound, mark_leaf_painted, math_copy_window,
@@ -187,8 +187,10 @@ impl Runtime<'_> {
             // reader is standing on keeps its place (B58's first half), and the two
             // planes that did not move are not re-scanned at all (see
             // [`SearchScanCache`]). A frame that changed nothing about the search
-            // costs one comparison of a fifty-row scan.
-            self.refresh_search(false)?;
+            // costs one comparison of a fifty-row scan. **And it reads no slice of a
+            // walk in progress** (ticket 51): the keystroke or the turn that caused
+            // this publish has read its one, and the next is the next turn's.
+            self.refresh_search(SearchRefresh::Output)?;
             let active = self.window.active_tab;
             let tasks = self.app.math_worker.tasks.clone();
             let scale_tasks = self.app.math_worker.scale_tasks.clone();
@@ -1754,6 +1756,14 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::ClockFinishPtyCoalesceIfDue, || {
             self.finish_pty_coalesce_if_due(now)
         })?;
+        // **A changed search's history, one slice a turn** (ticket 51, D-38;
+        // `ARCHITECTURE` §5.3 row 6). The keystroke read the newest slice; this reads
+        // the next, after the drain so the lines the shell froze meanwhile are carried
+        // rather than owed. Under the scan's own name, which is what the work is; the
+        // fold below books the next turn at once while a walk is still owed.
+        hang_watch::during(hang_watch::Station::SearchScan, || {
+            self.advance_search_scan()
+        })?;
         // The watcher's own clock (R31's D), beside the rest of this window's:
         // it asks for a wake-up only while it is holding news, and the
         // subscriptions it keeps level with the screen are dropped here the turn
@@ -2053,7 +2063,7 @@ impl Runtime<'_> {
         // printed the block is often not the one holding the keyboard. See
         // [`Self::live_stability_deadline`].
         let live_stability_deadline = self.live_stability_deadline();
-        const DEADLINE_OWNERS: [&str; 50] = [
+        const DEADLINE_OWNERS: [&str; 51] = [
             "startup poll",
             "IME cursor",
             "shell caret",
@@ -2104,6 +2114,7 @@ impl Runtime<'_> {
             "files watch",
             "refused frame",
             "window title",
+            "search walk",
         ];
         let deadlines = [
             startup_deadline,
@@ -2354,6 +2365,11 @@ impl Runtime<'_> {
             // "the last title always reaches the OS" true on a window where nothing
             // else is happening. Absent unless a title is being held.
             self.window.title.deadline(),
+            // **A search walk still owed** (ticket 51): the next turn at once, so the
+            // rest of a changed question's history is read a slice a turn with no timer
+            // and no other event. Absent unless a walk is partial, and a walk ends in
+            // at most (history / slice) turns, so this is never a standing wake.
+            self.search_walk_deadline(now),
         ];
         let wake = earliest_named_deadline(DEADLINE_OWNERS, deadlines);
         if self.app.trace_perf

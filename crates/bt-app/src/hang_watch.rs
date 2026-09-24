@@ -623,6 +623,11 @@ pub enum Station {
     /// Entered and left around the two scans themselves rather than around
     /// `refresh_search`, which leaves through eight doors: a station that is put
     /// back on only one of them would be a worse lie than the one this replaces.
+    ///
+    /// **Bounded since ticket 51** (D-38): a keystroke now reads the volatile
+    /// planes and at most `search::SEARCH_HISTORY_SLICE` frozen lines, and the
+    /// rest of the history is read a slice per turn by
+    /// `Runtime::advance_search_scan`, which stands under this name as well.
     SearchScan = 34,
     /// `WindowEvent::CloseRequested` — the dirty gate, which asks the reader
     /// about preview buffers that would not survive the shut, and the summoned

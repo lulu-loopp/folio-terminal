@@ -358,6 +358,16 @@ pub struct SearchState {
     hits: Vec<Hit>,
     /// Which of them is current, as an index into [`Self::hits`].
     current: Option<usize>,
+    /// Whether the reader has chosen the current match since the question last changed — a step
+    /// ([`Self::step`]) or a tick ([`Self::set_current`]) — rather than having it chosen for them
+    /// by where the eye was.
+    ///
+    /// **The half of B58 a partial walk needs** (ticket 51). While a changed question is still
+    /// being answered a slice per turn, each slice's install re-decides the current match from the
+    /// viewport until the reader has picked one, and keeps the reader's pick after that. See
+    /// [`Self::keeps_current`]. Cleared by an install that does not keep the current match, which
+    /// is exactly the install a new question makes.
+    walked: bool,
     /// What the regex engine said, when it refused the pattern. `Some` is exactly the `.bad` state
     /// (A28: the typed text turns red, said where it is typed) and the message is the tip.
     error: Option<String>,
@@ -601,6 +611,7 @@ impl SearchState {
         from: Option<&ContentAnchor>,
     ) {
         let standing = keep_current.then(|| self.current()).flatten().cloned();
+        self.walked &= keep_current;
         self.revision = self.revision.wrapping_add(1);
         self.hits = hits;
         self.error = error;
@@ -625,6 +636,23 @@ impl SearchState {
             Some(from.map_or(0, |anchor| self.first_at_or_after(anchor)))
         };
         self.rebuild_highlights();
+    }
+
+    /// **Whether a rebuild keeps the current match** — B58 over an answer that can be partial
+    /// (ticket 51), the one place the rule is decided.
+    ///
+    /// * `asked` — the reader changed the question or opened the capsule: the match is re-decided
+    ///   from where the eye is, as it always was.
+    /// * Otherwise, over an answer whose walk `was_complete` before this rebuild — output arrived,
+    ///   or a line was evicted — the match the eye is on is kept, as it always was.
+    /// * Otherwise the rebuild is a slice of a walk still in progress, or output landing in the
+    ///   middle of one, and the match is re-decided from the eye **until the reader has walked**,
+    ///   and kept after. That is what makes the answer a finished walk leaves behind the answer a
+    ///   scan from scratch would have given, while a reader who has already pressed `Enter` is not
+    ///   moved by the slices arriving behind them.
+    #[must_use]
+    pub fn keeps_current(&self, asked: bool, was_complete: bool) -> bool {
+        !asked && (was_complete || self.walked)
     }
 
     /// The first hit standing at or after `anchor`, or the first of all when none does.
@@ -656,6 +684,7 @@ impl SearchState {
             (at + count - 1) % count
         };
         self.current = Some(next);
+        self.walked = true;
         self.rebuild_highlights();
         self.hits.get(next)
     }
@@ -671,6 +700,7 @@ impl SearchState {
             return None;
         }
         self.current = Some(index);
+        self.walked = true;
         self.rebuild_highlights();
         self.hits.get(index)
     }
@@ -853,17 +883,17 @@ fn unit_range(boundaries: &[u32], range: ByteRange) -> (u32, u32) {
 /// asked. The split is honest rather than a shortcut, because the frozen plane genuinely cannot
 /// change under a caller that has not seen its two end ids move.
 ///
-/// **This is the whole-plane answer, and it is owed to exactly one event: the question changing.**
-/// A pattern, a toggle or a new pane has nothing to carry forward, so every line is read. What a
-/// line *freezing* owes is [`scan_history_after`]'s much smaller answer — see its head for why
-/// running this one per frame instead is what a reader feels as a pause while they type.
+/// **This is the whole-plane answer — the definition every bounded road is measured against.**
+/// Nothing on the window thread asks for it any more (ticket 51): a changed question is answered a
+/// slice at a time by [`scan_history_slice`], and what a line *freezing* owes is
+/// [`scan_history_after`]'s much smaller answer. It is the unbounded case of the one scan, not a
+/// second one (CONVENTIONS §十 rule 9).
+#[cfg(test)]
 #[must_use]
 pub fn scan_history(compiled: &CompiledSearch, transcript: &TranscriptStore) -> Vec<Hit> {
-    let mut hits = Vec::new();
-    for line in transcript.frozen() {
-        push_frozen_hits(&mut hits, compiled, line);
-    }
-    hits
+    scan_history_slice(compiled, transcript, None, usize::MAX)
+        .scan
+        .hits
 }
 
 /// **Which frozen lines an answer was found over** — how many, and the ids at the two ends.
@@ -935,15 +965,31 @@ impl HistoryWindow {
 }
 
 /// A history scan, kept so the next one does not have to be a history scan.
+///
+/// **It can be partial** (ticket 51). A changed question reads the newest
+/// [`SEARCH_HISTORY_SLICE`] lines on the keystroke's frame, and the rest a slice per turn after
+/// it; between those turns this is the answer so far, and `unread_through` says how far the walk
+/// still has to go.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HistoryScan {
     window: HistoryWindow,
     hits: Vec<Hit>,
+    /// **The walk's cursor**: the newest line of [`Self::window`] the pattern has not been run
+    /// over yet. Every line from the plane's front up to and including it is still owed, and every
+    /// line after it has been read — the walk goes newest first, so what is owed is always a
+    /// prefix of the plane. `None` once nothing is owed: the walk is complete, and [`Self::hits`]
+    /// is what [`scan_history`] would say about this window.
+    ///
+    /// An id rather than a count, for the reason [`HistoryWindow`] gives: the plane's two moves
+    /// shift every index and no id, so an eviction can only ever take owed lines off the front of
+    /// the owed prefix, and an append only ever lands after the cursor.
+    unread_through: Option<TranscriptId>,
 }
 
 impl HistoryScan {
     /// Which lines this was found over. Two scans with the same window over the same seat and the
-    /// same query are the same answer, which is what lets a caller decide that nothing happened.
+    /// same query are the same answer **once each is complete** — see [`Self::reads_as`] for the
+    /// comparison that also holds while a walk is partial.
     #[must_use]
     pub fn window(&self) -> HistoryWindow {
         self.window
@@ -953,6 +999,22 @@ impl HistoryScan {
     #[must_use]
     pub fn hits(&self) -> &[Hit] {
         &self.hits
+    }
+
+    /// Whether every line of the window has been read.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.unread_through.is_none()
+    }
+
+    /// Whether `other` has read exactly the lines this one has — the same window and the same
+    /// cursor. Of two scans of one question over one transcript, that is the same answer, which is
+    /// what lets a caller decide that nothing happened without comparing the hits themselves. A
+    /// partial walk that took a slice is **not** the same answer as the one before it, however
+    /// still the plane stood.
+    #[must_use]
+    pub fn reads_as(&self, other: &Self) -> bool {
+        self.window == other.window && self.unread_through == other.unread_through
     }
 }
 
@@ -965,13 +1027,42 @@ impl HistoryScan {
 pub struct HistoryRescan {
     /// The answer, and the window to hand back next time.
     pub scan: HistoryScan,
-    /// How many frozen lines the pattern was actually run over — the whole plane on a scan from
-    /// scratch, and the lines that have frozen since on an incremental one. What
+    /// How many frozen lines the pattern was actually run over — the lines that have frozen since
+    /// the last scan, plus the slice of the walk this call took (at most its budget). What
     /// `BT_PERF_TRACE search_scan` prints.
     pub lines_scanned: usize,
 }
 
-/// The frozen plane, scanned **from where the last scan left off**.
+/// How many frozen lines one step of a walk runs the pattern over (ticket 51, D-38).
+///
+/// **A line count and not a time**, so a test can say exactly what a keystroke is allowed to read
+/// and a slice cannot come out a different size on a machine under load. Sized so that one slice
+/// costs about a quarter of a 60 Hz frame (about 4 ms) at the worst rate measured: by
+/// `tests::a_slice_of_history_costs_a_quarter_of_a_frame`, over 100,000 generated lines on the
+/// development machine in the test profile, the pattern ran at 281–718 ns a line (the worst a
+/// plain five-letter query) and installing a hit cost about 250 ns. 4,096 lines is 2.9 ms of
+/// scan plus about 1 ms of install when every line holds a hit. The `docs/DESIGN.md` entry of
+/// 2026-09-24 has the table.
+pub const SEARCH_HISTORY_SLICE: usize = 4_096;
+
+/// The frozen plane, scanned **from where the last scan left off** — every line that has frozen
+/// since, and whatever a walk still owes.
+///
+/// The unbounded case of [`scan_history_slice`]: a partial `previous` handed in here is finished
+/// in this one call. Nothing on the window thread passes one; the tests that pin the carry-forward
+/// rule do.
+#[cfg(test)]
+#[must_use]
+pub fn scan_history_after(
+    compiled: &CompiledSearch,
+    transcript: &TranscriptStore,
+    previous: Option<&HistoryScan>,
+) -> HistoryRescan {
+    scan_history_slice(compiled, transcript, previous, usize::MAX)
+}
+
+/// **The one history scan** — carry the previous answer across the plane's moves, then read at
+/// most `budget_lines` more of what a walk still owes, newest first.
 ///
 /// # Why this exists
 ///
@@ -983,69 +1074,103 @@ pub struct HistoryRescan {
 ///
 /// So the plane's two moves are answered at their own size instead. An eviction drops the hits of
 /// the lines it took, an append scans the lines it brought, and the lines between the two — which
-/// is nearly always all of them — are not read at all. A changed pattern, a different pane and a
-/// plane that has been emptied all still cost a full scan, because for those there is genuinely
-/// nothing to carry: `previous` is what the caller passes only while the question has not changed.
+/// is nearly always all of them — are not read at all.
+///
+/// **And a changed question is answered at a bounded size too** (ticket 51). A pattern, a toggle,
+/// a new pane or an emptied plane has nothing to carry, and reading the whole plane for it on the
+/// keystroke's frame was the pause the reader felt once per character typed. So a fresh scan owes
+/// the whole window, and each call reads the newest `budget_lines` of what is still owed and moves
+/// the cursor ([`HistoryScan`]'s `unread_through`) past them. The caller decides the budget: the
+/// keystroke and each turn after it pass [`SEARCH_HISTORY_SLICE`], a published frame passes `0`
+/// and only carries, and [`scan_history`] / [`scan_history_after`] pass `usize::MAX`.
 ///
 /// # Document order, and adjacency
 ///
-/// The result is the retained tail of the previous answer followed by the new lines' hits, and ids
-/// ascend front to back, so the list stays in document order without being sorted — which
-/// `SearchState::install`, `first_at_or_after` and the walk all read. One line's hits also stay
-/// **adjacent**, because a line is either kept whole or scanned whole and never both:
-/// `SearchHighlights::new` groups by adjacency before it sorts, so a line arriving in two pieces
-/// would leave one piece unpainted.
+/// The result is the walk's new slice, then the retained tail of the previous answer, then the new
+/// lines' hits. Ids ascend front to back and the slice is the newest run of the owed prefix, so
+/// the list stays in document order without being sorted — which `SearchState::install`,
+/// `first_at_or_after` and the walk all read. One line's hits also stay **adjacent**, because a
+/// line is either kept whole or scanned whole and never both: `SearchHighlights::new` groups by
+/// adjacency before it sorts, so a line arriving in two pieces would leave one piece unpainted.
 ///
 /// # What the caller owes
 ///
-/// `previous` must be a scan of **this** transcript. A `TranscriptId` names a line inside one
-/// store's counter and nothing wider — a pane whose shell is restarted begins again at 1 and hands
-/// those ids to different text — so no comparison of two windows can discover that the plane
-/// underneath was replaced, and a check here that pretended to would be a guard that cannot go red.
-/// The one place that knows is the one that does the replacing: `Runtime::restart_shell` drops the
-/// cache, and `refresh_search` passes `previous` only for the same seat and the same query.
+/// `previous` must be a scan of **this** transcript and of **this** question. A `TranscriptId`
+/// names a line inside one store's counter and nothing wider — a pane whose shell is restarted
+/// begins again at 1 and hands those ids to different text — so no comparison of two windows can
+/// discover that the plane underneath was replaced, and a check here that pretended to would be a
+/// guard that cannot go red. The one place that knows is the one that does the replacing:
+/// `Runtime::restart_shell` drops the cache, and `refresh_search` passes `previous` only for the
+/// same seat and the same query. That is also the whole of a walk's cancellation: a new question
+/// is a `None` here, and the old cursor is never read again.
 #[must_use]
-pub fn scan_history_after(
+pub fn scan_history_slice(
     compiled: &CompiledSearch,
     transcript: &TranscriptStore,
     previous: Option<&HistoryScan>,
+    budget_lines: usize,
 ) -> HistoryRescan {
     let frozen = transcript.frozen();
     let window = HistoryWindow::of(transcript);
-    let step = previous.and_then(|previous| {
-        previous
-            .window
-            .step_to(window)
-            .map(|step| (&previous.hits, step))
-    });
-    let Some((carried, (oldest_kept, newest_scanned))) = step else {
-        return HistoryRescan {
-            scan: HistoryScan {
-                window,
-                hits: scan_history(compiled, transcript),
-            },
-            lines_scanned: window.len,
-        };
+    let step =
+        previous.and_then(|previous| previous.window.step_to(window).map(|step| (previous, step)));
+    let (mut hits, owed_through, appended) = match step {
+        Some((previous, (oldest_kept, newest_scanned))) => {
+            // The evicted lines' hits are a **prefix** of the carried list: hits are in document
+            // order and document order is id order, so everything on a line older than the new
+            // front stands in front of everything that survives. `SearchLine`'s own ordering puts
+            // `History` before the other two planes, so this comparison says "an older history
+            // line" for any hit a history scan can hold.
+            let dropped = previous
+                .hits
+                .partition_point(|hit| hit.line < SearchLine::History(oldest_kept));
+            let mut hits = previous.hits[dropped..].to_vec();
+            // And the appended lines are a **suffix**, for the same reason — so finding them costs
+            // their own number and not the plane's.
+            let appended = frozen
+                .iter()
+                .rev()
+                .take_while(|line| line.id > newest_scanned)
+                .count();
+            for line in frozen.range(frozen.len() - appended..) {
+                push_frozen_hits(&mut hits, compiled, line);
+            }
+            // What the walk still owes is what it owed, less whatever the eviction took off the
+            // front of it; a cursor the new front has passed owes nothing at all.
+            let owed = previous
+                .unread_through
+                .filter(|through| *through >= oldest_kept);
+            (hits, owed, appended)
+        }
+        // Nothing to carry: the whole window is owed.
+        None => (Vec::new(), window.back, 0),
     };
-    // The evicted lines' hits are a **prefix** of the carried list: hits are in document order and
-    // document order is id order, so everything on a line older than the new front stands in front
-    // of everything that survives. `SearchLine`'s own ordering puts `History` before the other two
-    // planes, so this comparison says "an older history line" for any hit a history scan can hold.
-    let dropped = carried.partition_point(|hit| hit.line < SearchLine::History(oldest_kept));
-    let mut hits = carried[dropped..].to_vec();
-    // And the appended lines are a **suffix**, for the same reason — so finding them costs their
-    // own number and not the plane's.
-    let appended = frozen
-        .iter()
-        .rev()
-        .take_while(|line| line.id > newest_scanned)
-        .count();
-    for line in frozen.range(frozen.len() - appended..) {
-        push_frozen_hits(&mut hits, compiled, line);
+    let mut lines_scanned = appended;
+    let mut unread_through = owed_through;
+    if let Some(through) = owed_through {
+        // The owed lines are a prefix of the plane ending at the cursor; the slice is its newest
+        // `budget_lines`, read front to back so that its hits come out in document order.
+        let owed = frozen.partition_point(|line| line.id <= through);
+        let start = owed.saturating_sub(budget_lines);
+        if start < owed {
+            let mut slice = Vec::new();
+            for line in frozen.range(start..owed) {
+                push_frozen_hits(&mut slice, compiled, line);
+            }
+            lines_scanned += owed - start;
+            hits.splice(0..0, slice);
+        }
+        unread_through = start
+            .checked_sub(1)
+            .map(|newest_unread| frozen[newest_unread].id);
     }
     HistoryRescan {
-        scan: HistoryScan { window, hits },
-        lines_scanned: appended,
+        scan: HistoryScan {
+            window,
+            hits,
+            unread_through,
+        },
+        lines_scanned,
     }
 }
 
@@ -2145,6 +2270,201 @@ mod tests {
         assert_eq!(after.scan.hits(), scan_history(&compiled, &restarted));
     }
 
+    // ── the walk (ticket 51) ────────────────────────────────────────────────
+
+    /// Where the eye is, for a walk test: the live bottom, or the head of one line of the plane.
+    fn eye_on(store: &TranscriptStore, rng: &mut Rng) -> Option<ContentAnchor> {
+        let frozen = store.frozen();
+        if rng.below(3) == 0 || frozen.is_empty() {
+            return None;
+        }
+        let line = &frozen[rng.below(frozen.len() as u64) as usize];
+        Some(ContentAnchor::History {
+            id: line.id,
+            offset: GraphemeOffset(0),
+            bias: Bias::Before,
+            generation: line.source_generation,
+        })
+    }
+
+    /// Whether a hit list is in document order — what `install`, `first_at_or_after` and the walk
+    /// read without sorting.
+    fn in_document_order(hits: &[Hit]) -> bool {
+        hits.windows(2)
+            .all(|pair| (pair[0].line, pair[0].start) <= (pair[1].line, pair[1].start))
+    }
+
+    /// RED (51) — **A walk finished in slices finds exactly what one scan from scratch finds, with
+    /// lines appended and evicted between the slices, and makes the same match current.**
+    ///
+    /// The keystroke reads one slice and each turn after it one more, while the shell goes on
+    /// printing and the quota goes on evicting — and a published frame, which carries the plane's
+    /// moves but reads no slice, can stand between any two of them. `scan_history` is the
+    /// definition; the walk is allowed to be slower to arrive and nothing else. The current match
+    /// is the other half: until the reader walks, every slice re-decides it from where the eye is
+    /// (B58's reader-caused rule), so a finished walk leaves it where a scan from scratch installed
+    /// with the same `from` puts it. Every step also keeps the list in document order with one
+    /// line's hits adjacent, which the highlighter and the walk read without sorting.
+    ///
+    /// MUTATION: keep_current on partial installs before the reader walks (`keeps_current`
+    /// answering `!asked` alone) — the current match stays on the first slice's pick and the last
+    /// assertion goes red for every seed whose older lines hold a hit.
+    #[test]
+    fn a_walk_finished_in_slices_finds_what_one_scan_finds_and_makes_the_same_match_current() {
+        let compiled = engine_for("cat", SearchFlags::default());
+        let words = ["cat", "dog", "cat-cat", "concatenate", ""];
+        for seed in [0x5117_0051_u64, 0xfeed_face_dead_beef, 7, 0x0bad_cafe, 42] {
+            let mut rng = Rng(seed);
+            let mut store = growing_store();
+            for _ in 0..(200 + rng.below(300)) {
+                freeze(&mut store, words[rng.below(words.len() as u64) as usize]);
+            }
+            let from = eye_on(&store, &mut rng);
+            let budget = 1 + rng.below(40) as usize;
+            let mut state = SearchState::default();
+            state.open(SeatId(1));
+            state.field_mut().insert("cat");
+
+            // The keystroke: one slice, the current match from the eye.
+            let mut rescan = scan_history_slice(&compiled, &store, None, budget);
+            assert!(
+                rescan.lines_scanned <= budget,
+                "seed {seed:#x}: the keystroke read more"
+            );
+            let keep = state.keeps_current(true, false);
+            state.install(rescan.scan.hits().to_vec(), None, keep, from.as_ref());
+
+            let mut turns = 0;
+            while !rescan.scan.is_complete() {
+                let mut appended = 0;
+                match rng.below(4) {
+                    0 => {
+                        for _ in 0..=rng.below(4) {
+                            freeze(&mut store, words[rng.below(words.len() as u64) as usize]);
+                            appended += 1;
+                        }
+                    }
+                    1 => {
+                        store.evict_oldest(rng.below(2 * budget as u64) as usize);
+                    }
+                    _ => {}
+                }
+                // A turn reads a slice; a publish between two turns reads none.
+                let this_budget = if rng.below(3) == 0 { 0 } else { budget };
+                let previous = rescan.scan;
+                rescan = scan_history_slice(&compiled, &store, Some(&previous), this_budget);
+                assert!(
+                    rescan.lines_scanned <= appended + this_budget,
+                    "seed {seed:#x}, turn {turns}: a step read more than it was allowed"
+                );
+                assert!(in_document_order(rescan.scan.hits()), "seed {seed:#x}");
+                assert!(
+                    lines_are_unbroken_runs(rescan.scan.hits()),
+                    "seed {seed:#x}"
+                );
+                let keep = state.keeps_current(false, previous.is_complete());
+                state.install(rescan.scan.hits().to_vec(), None, keep, from.as_ref());
+                turns += 1;
+                assert!(turns < 100_000, "seed {seed:#x}: the walk never finished");
+            }
+
+            let full = scan_history(&compiled, &store);
+            assert_eq!(
+                rescan.scan.hits(),
+                full.as_slice(),
+                "seed {seed:#x}: the finished walk is not the answer"
+            );
+            let mut fresh = SearchState::default();
+            fresh.open(SeatId(1));
+            fresh.field_mut().insert("cat");
+            fresh.install(full, None, false, from.as_ref());
+            assert_eq!(
+                state.current(),
+                fresh.current(),
+                "seed {seed:#x}: the finished walk made another match current"
+            );
+            assert_eq!(state.counter(), fresh.counter(), "seed {seed:#x}");
+        }
+    }
+
+    /// RED (51) — **A reader who has walked is not moved by the slices arriving behind them.**
+    ///
+    /// The other half of B58 over a walk: `Enter` on the first slice's answer is the reader choosing
+    /// a match, and the older lines arriving a turn later are output as far as that choice is
+    /// concerned — the match stays, found again by identity, while the count grows under it.
+    ///
+    /// MUTATION: drop `self.walked = true` from `SearchState::step` — the next slice re-decides the
+    /// match from the eye and the reader is thrown back to the first hit.
+    #[test]
+    fn a_reader_who_has_walked_is_not_moved_by_the_slices_arriving_behind_them() {
+        let compiled = engine_for("cat", SearchFlags::default());
+        let mut store = growing_store();
+        for index in 0..40 {
+            freeze(&mut store, if index % 2 == 0 { "cat" } else { "dog" });
+        }
+        let mut state = SearchState::default();
+        state.open(SeatId(1));
+        state.field_mut().insert("cat");
+        let first = scan_history_slice(&compiled, &store, None, 10);
+        state.install(
+            first.scan.hits().to_vec(),
+            None,
+            state.keeps_current(true, false),
+            None,
+        );
+        assert_eq!(
+            state.counter(),
+            "1/5",
+            "the newest ten lines hold five hits"
+        );
+        state.step(true);
+        let standing = state.current().cloned().expect("a current match");
+
+        let second = scan_history_slice(&compiled, &store, Some(&first.scan), 10);
+        state.install(
+            second.scan.hits().to_vec(),
+            None,
+            state.keeps_current(false, first.scan.is_complete()),
+            None,
+        );
+        assert!(
+            state.current().is_some_and(|hit| hit.is(&standing)),
+            "the reader's match, found again by identity"
+        );
+        assert_eq!(state.counter(), "7/10", "the count grew behind the reader");
+    }
+
+    /// PIN (51) — **a walk's cursor survives the plane's two moves**: lines appended during a walk
+    /// are read once, as appends, and never owed; lines evicted from under the cursor are owed no
+    /// longer. The two cases the property test above reaches only by chance, stated.
+    #[test]
+    fn a_walk_owes_neither_the_lines_that_froze_during_it_nor_the_ones_evicted_from_under_it() {
+        let compiled = engine_for("cat", SearchFlags::default());
+        let mut store = growing_store();
+        for _ in 0..30 {
+            freeze(&mut store, "cat");
+        }
+        let first = scan_history_slice(&compiled, &store, None, 10);
+        assert_eq!(first.lines_scanned, 10);
+        assert!(!first.scan.is_complete());
+
+        // Five lines freeze; a publish reads them and nothing owed.
+        for _ in 0..5 {
+            freeze(&mut store, "cat");
+        }
+        let carried = scan_history_slice(&compiled, &store, Some(&first.scan), 0);
+        assert_eq!(carried.lines_scanned, 5, "the appends, and no slice");
+        assert_eq!(carried.scan.hits().len(), 15);
+
+        // Twenty-five lines are evicted: the twenty still owed and five read ones. Nothing is
+        // owed any more, and the walk is over without reading another line.
+        store.evict_oldest(25);
+        let evicted = scan_history_slice(&compiled, &store, Some(&carried.scan), 10);
+        assert_eq!(evicted.lines_scanned, 0);
+        assert!(evicted.scan.is_complete());
+        assert_eq!(evicted.scan.hits(), scan_history(&compiled, &store));
+    }
+
     /// PIN — **the three keyboard toggles are VS Code's, and they are the only three.**
     ///
     /// The mock-up gives the toggles a click and no key at all (B74), so this is the one place in
@@ -2839,6 +3159,68 @@ mod tests {
             history.len(),
             volatile.len(),
         );
+    }
+
+    /// MEASUREMENT (51) — **what one slice of history costs, against what the whole plane cost**,
+    /// over 100,000 generated lines: the first character and the fifth of a query, plain and as a
+    /// pattern. What [`SEARCH_HISTORY_SLICE`] was sized from and what the ticket's report quotes.
+    ///
+    /// The only assertion is the bound itself; the numbers are printed. `history_us / lines` is the
+    /// same ratio `BT_PERF_TRACE search_scan` prints, taken here because the ticket forbids
+    /// launching the application to take it. The test profile is `opt-level = 1`; a release
+    /// build, the more optimised of the two, was not measured.
+    #[test]
+    fn a_slice_of_history_costs_a_quarter_of_a_frame() {
+        let mut transcript = TranscriptStore::new(NonZeroUsize::new(200_000).unwrap());
+        for index in 0..100_000u32 {
+            transcript.capture(CapturedRow::plain(
+                &format!("2026-08-16 12:00:00 worker {index} finished task in {index} ms with cat"),
+                false,
+            ));
+        }
+        let plain = SearchFlags::default();
+        let pattern = SearchFlags {
+            regex: true,
+            ..SearchFlags::default()
+        };
+        for (label, flags, text) in [
+            ("plain, first character", plain, "f"),
+            ("plain, fifth character", plain, "finis"),
+            ("regex, first character", pattern, "f"),
+            ("regex, fifth character", pattern, "fin.s"),
+        ] {
+            let compiled = engine_for(text, flags);
+            let started = Instant::now();
+            let whole = scan_history_slice(&compiled, &transcript, None, usize::MAX);
+            let whole_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            let slice = scan_history_slice(&compiled, &transcript, None, SEARCH_HISTORY_SLICE);
+            let slice_elapsed = started.elapsed();
+
+            let mut state = SearchState::default();
+            state.open(SeatId(1));
+            state.field_mut().insert(text);
+            let started = Instant::now();
+            state.install(whole.scan.hits().to_vec(), None, false, None);
+            let whole_install = started.elapsed();
+            let started = Instant::now();
+            state.install(slice.scan.hits().to_vec(), None, false, None);
+            let slice_install = started.elapsed();
+
+            assert!(slice.lines_scanned <= SEARCH_HISTORY_SLICE);
+            let ns_per_line = whole_elapsed.as_nanos() as f64 / whole.lines_scanned as f64;
+            println!(
+                "S51 {label} `{text}`: whole plane {} lines -> {} hits in {whole_elapsed:?} \
+                 (+ install {whole_install:?}); one slice {} lines -> {} hits in {slice_elapsed:?} \
+                 (+ install {slice_install:?}); {ns_per_line:.0} ns/line, so 4.17 ms reads {:.0} lines",
+                whole.lines_scanned,
+                whole.scan.hits().len(),
+                slice.lines_scanned,
+                slice.scan.hits().len(),
+                4_170_000.0 / ns_per_line,
+            );
+        }
     }
 }
 
