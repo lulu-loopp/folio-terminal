@@ -22,6 +22,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Changed
 
 - Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.
+- Git panel and graph spacing, corners, captions, badges and icons now match the rest of the window.
 - Glance-card head spacing, drag-tag padding and spacing, and peek-tag line height now match the other floating tags.
 - When Folio stops responding for half a second or more while a web page
   opens, the line it writes to `diagnostics.log` now names the step that took
