@@ -21,6 +21,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.
 - Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.
 - Git panel and graph spacing, corners, captions, badges and icons now match the rest of the window.
 - Glance-card head spacing, drag-tag padding and spacing, and peek-tag line height now match the other floating tags.

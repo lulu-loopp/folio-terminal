@@ -893,7 +893,7 @@ impl Seats {
     /// The whole map at once, and the `bool` is the caller's gate on a re-solve —
     /// [`Self::set_notices`]'s contract exactly, for its reason: an address row
     /// arriving where a breadcrumb row stood changes the pane's height (the
-    /// breadcrumb takes the foot's twenty-eight and the address adds its own),
+    /// breadcrumb takes the foot's strip height and the address adds its own),
     /// so a change here is a layout change.
     pub fn set_rails(&mut self, rails: BTreeMap<SeatId, PreviewRailKind>) -> bool {
         let changed = self.rails != rails;
@@ -6904,14 +6904,8 @@ fn caption_glyph_logical_px(mark: ChromeMark) -> f32 {
 /// `.tab:hover .tab-files { opacity: .6 }` — the middle rung of the tab's own
 /// reveal ladder (H76/H104).
 pub const TAB_FILES_TRIGGER_REVEAL: f32 = 0.6;
-/// `.pane:hover .panehead .pane-files { opacity: .7 }` — the middle rung of the
-/// reveal ladder, where the pane is hovered but the control itself is not.
-///
-/// `.tab`'s own ladder rests at `.6` instead (mock-up 763). Two numbers for what
-/// looks like one idea, and the mock-up writes both: a pane head is already a
-/// quiet surface, while a tab is a lit one, so the same apparent weight costs a
-/// different alpha on each.
-pub const PANE_HEAD_TRIGGER_REVEAL: f32 = 0.7;
+/// UI-SPEC.md C1: hover-revealed controls share the 0.6 resting opacity.
+pub const PANE_HEAD_TRIGGER_REVEAL: f32 = 0.6;
 
 // ── the lone pane's corner ghost (user ruling 2026-08-20, DESIGN §7.1.6i A) ──
 //
@@ -15388,8 +15382,8 @@ pub const FILES_TREE_PADDING_BOTTOM_LOGICAL_PX: f32 = 8.0;
 pub const FILES_ROW_HEIGHT_LOGICAL_PX: f32 = 24.0;
 /// `.frow { padding: 0 6px }` — and the `6` of C31's `6 + depth * 14`.
 pub const FILES_ROW_PADDING_X_LOGICAL_PX: f32 = 6.0;
-/// `.frow { gap: 6px }`, between triangle, icon and name.
-pub const FILES_ROW_GAP_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC.md G1: the icon-to-label gap is 8, including triangle, icon and name.
+pub const FILES_ROW_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.frow { border-radius: 5px }` — the hover and selection pill.
 pub const FILES_ROW_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// The `14` of C31: one level of depth, in pixels.
@@ -15407,8 +15401,8 @@ pub const FILES_TREE_FONT_LOGICAL_PX: f32 = 13.0;
 /// where a list went — and they used to run at 120 and 140 for no reason either
 /// file could state. One rhythm for one gesture ([`bt_render::motion`]).
 pub const FILES_ROW_TRI_TURN_MS: u64 = bt_render::MOTION_BASE_MS;
-/// `.files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px }` (C32).
-pub const FILES_ROW_FOCUS_RING_LOGICAL_PX: f32 = 1.5;
+/// UI-SPEC.md F1: the files-row focus ring uses the shared 2-point width.
+pub const FILES_ROW_FOCUS_RING_LOGICAL_PX: f32 = 2.0;
 /// `.files-root { padding: 2px 5px; margin: 0 -3px }` — the two together are the
 /// 2px the button's fill reaches past its own text (B15).
 pub const FILES_ROOT_BUTTON_INSET_LOGICAL_PX: f32 = 2.0;
@@ -15491,14 +15485,11 @@ pub fn files_root_name_width(
 // flyout's" — and it is the same role deliberately: the head names the leaf and
 // changes root, the foot says where you actually are and gives it to the OS.
 //
-// Its numbers are *not* the float foot's, and the mock-up writes both: this one
-// is 28px tall with 12px of padding on both sides, the float's is 30px with 10
-// and 18, because the float has a resize grip living in its bottom-right corner
-// and a docked column does not.
+// UI-SPEC.md H5 gives both feet the strip height. Side padding remains 12
+// here; the float uses 10 and 18 for the resize grip in its trailing corner.
 
-/// `.files-pane .files-foot { height: 28px }`, border included — the same
-/// `box-sizing: border-box` reading the pane head is built on.
-pub const FILES_FOOT_BAR_LOGICAL_PX: f32 = 28.0;
+/// UI-SPEC.md H5: a 30-point strip, border included, like the pane head and segment bar.
+pub const FILES_FOOT_BAR_LOGICAL_PX: f32 = 30.0;
 /// `border-top: 1px solid var(--border-soft)`, the head's hairline read from the
 /// other end of the pane. Written as the head's own constant rather than as a
 /// second `1.0`, because they are one declaration's worth of separation and the
@@ -15506,8 +15497,8 @@ pub const FILES_FOOT_BAR_LOGICAL_PX: f32 = 28.0;
 pub const FILES_FOOT_EDGE_LOGICAL_PX: f32 = SEAT_TITLE_EDGE_LOGICAL_PX;
 /// `.files-pane .files-foot { padding: 0 12px }`.
 pub const FILES_FOOT_PADDING_X_LOGICAL_PX: f32 = 12.0;
-/// `.files-pane .files-foot { gap: 6px }`, between the mark and the path.
-pub const FILES_FOOT_GAP_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC.md G1: the mark and path use the shared 8-point icon-to-label gap.
+pub const FILES_FOOT_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.files-pane .files-foot .foot-ico { width: 13px; height: 13px }`.
 pub const FILES_FOOT_MARK_LOGICAL_PX: f32 = 13.0;
 /// `.files-pane .files-foot { font-size: 11px }`.
@@ -15587,9 +15578,7 @@ pub const PREVIEW_TOOL_BOX_LOGICAL_PX: f32 = 22.0;
 pub const PREVIEW_TOOL_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.pv-tool svg { width: 13px; height: 13px }`.
 pub const PREVIEW_TOOL_GLYPH_LOGICAL_PX: f32 = 13.0;
-/// `.pane:hover .pv-tool { opacity: .7 }` — the resting rung of the same reveal
-/// ladder `.pane-files` climbs (P21), and the reason it is a separate constant
-/// from [`PANE_HEAD_TRIGGER_REVEAL`] is only that the mock-up writes it twice.
+/// UI-SPEC.md C1: preview tools share the pane trigger's 0.6 reveal opacity.
 pub const PREVIEW_TOOL_REVEAL: f32 = PANE_HEAD_TRIGGER_REVEAL;
 /// `.pv-nav svg { width: 11px; height: 11px }` — the three navigation buttons
 /// carry a smaller glyph than the tools beside them, in the same 22px box.
@@ -16232,7 +16221,7 @@ pub fn preview_head_geometry(
 // One band, two fillings, and the reason they are one band rather than two
 // surfaces is the reason the head's own run is one function: the row's height,
 // its hairline and the pane geometry that has to give way for it are identical,
-// and a second copy of "the seat less its head less twenty-eight" is the
+// and a second copy of "the seat less its head less the strip" is the
 // off-by-a-hairline `preview_body_viewport`'s own note is about.
 //
 // What each filling carries is the ruling's, verbatim:
@@ -16253,7 +16242,7 @@ pub fn preview_head_geometry(
 // you approach it cannot be aimed at — the same sentence `PREVIEW_NAV_REST`
 // already makes about the three buttons that used to be upstairs.
 
-/// The rail's height, border included — **the foot's own twenty-eight** (P33).
+/// The rail's height, border included — **the foot's own thirty** (UI-SPEC.md H5).
 ///
 /// One number and not a new one: this row and the path strip along the bottom
 /// are the same piece of furniture answering the same question from the two ends
@@ -16286,11 +16275,10 @@ pub const PREVIEW_RAIL_NAV_GLYPH_LOGICAL_PX: f32 = PREVIEW_NAV_GLYPH_LOGICAL_PX;
 pub const PREVIEW_RAIL_FONT_LOGICAL_PX: f32 = 12.0;
 /// `.pv-addr { padding: 0 10px }` — the address's own inset inside its field.
 pub const PREVIEW_ADDRESS_PAD_X_LOGICAL_PX: f32 = 10.0;
-/// `.pv-addr { height: 20px }` — the field's box, which is the row's twenty-eight
-/// less four of breathing room on each side.
+/// The address field remains 20 points tall inside the strip (UI-SPEC.md R12).
 pub const PREVIEW_ADDRESS_HEIGHT_LOGICAL_PX: f32 = 20.0;
-/// `.pv-addr { border-radius: 5px }`.
-pub const PREVIEW_ADDRESS_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// UI-SPEC.md R12: the 20-point address chip shares the crumb radius, 4.
+pub const PREVIEW_ADDRESS_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// `.crumb { padding: 2px 5px }` — the horizontal half; the vertical half is
 /// spent by [`PREVIEW_CRUMB_HEIGHT_LOGICAL_PX`].
 pub const PREVIEW_CRUMB_PAD_X_LOGICAL_PX: f32 = 5.0;
@@ -16868,7 +16856,7 @@ pub enum PreviewRailPart {
 /// the band that lands on no control is [`PreviewRailPart::Band`], because the
 /// row stands between a drag handle and a document and a press falling through
 /// it would either drag the pane by something that is not its head or land in a
-/// document twenty-eight pixels below where it was aimed.
+/// document thirty pixels below where it was aimed.
 #[must_use]
 pub fn preview_rail_part(
     geometry: &PreviewRailGeometry,
@@ -17562,9 +17550,8 @@ pub const FILES_SEG_PADDING_X_LOGICAL_PX: f32 = 12.0;
 pub const FILES_SEG_PADDING_TOP_LOGICAL_PX: f32 = 8.0;
 /// `.fseg { gap: 14px }`.
 pub const FILES_SEG_GAP_LOGICAL_PX: f32 = 14.0;
-/// `.fseg button { font-size: 11.5px }` — the pane head's own size, because the
-/// switch is chrome and not content.
-pub const FILES_SEG_FONT_LOGICAL_PX: f32 = 11.5;
+/// UI-SPEC.md T5: the Files/Git words use the 11-point caption size.
+pub const FILES_SEG_FONT_LOGICAL_PX: f32 = 11.0;
 /// `.fseg button { padding: 2px 1px 6px }` — the one horizontal pixel each side,
 /// which is what the underline is drawn across.
 pub const FILES_SEG_BUTTON_PADDING_X_LOGICAL_PX: f32 = 1.0;
@@ -18220,7 +18207,7 @@ pub fn files_body_rect(
 /// sentence about itself.
 /// **`seats` is here for the rail** (user ruling 2026-08-24): a preview wearing
 /// a breadcrumb row has no foot at all — the row took the path over — and its
-/// bottom twenty-eight pixels are document. Asking `pane_foot_geometry` here
+/// bottom thirty pixels are document. Asking `pane_foot_geometry` here
 /// while the paint asks [`preview_pane_geometry`] would be exactly the invisible
 /// button this module's standing law is about, one strip lower.
 #[must_use]
@@ -18797,8 +18784,7 @@ pub(crate) fn push_files_tree(
                 if selected { ink.selected } else { ink.hover },
             ));
         }
-        // `.files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px
-        // var(--accent) }` — the ring is the whole of what tells you an arrow key
+        // UI-SPEC.md F1: the 2-point accent ring tells you an arrow key
         // belongs to this list rather than to the shell beside it, so it is drawn
         // on the selection and only while the list is showing that it has the
         // keyboard. **`:focus-visible`, not `:focus`** — see `focus_ring`.
@@ -20782,10 +20768,8 @@ const PREVIEW_CARD_GAP_LOGICAL_PX: f32 = 10.0;
 const PREVIEW_CARD_PADDING_LOGICAL_PX: f32 = 16.0;
 /// `.pv-unknown { font-size: 12.5px }`.
 const PREVIEW_CARD_FONT_LOGICAL_PX: f32 = 12.5;
-/// `.pv-blank .pvb-detail { font: 11.5px/1.5 Consolas, … }` — the fact line
-/// (§7.7 ④), a shade smaller than the sentence and set in the monospace face
-/// this window writes every other quotable fact in.
-const PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX: f32 = 11.5;
+/// UI-SPEC.md T5: the monospace fact line uses the 11-point caption size.
+const PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX: f32 = 11.0;
 /// `.pv-unknown button { font-size: 12px }`.
 pub const PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX: f32 = 12.0;
 /// `.pv-unknown button { padding: 5px 12px }`, and the 1px border around it.
@@ -21207,14 +21191,8 @@ pub fn preview_play_button_sprites(
     sprites
 }
 
-/// The speaker's glyph inside its box — twelve, between the `×`'s eight and the
-/// pin's thirteen.
-///
-/// A speaker is a silhouette rather than a rule: outlined at the `×`'s eight it
-/// is a cone two pens wide with an arc beside it, which resolves into a blot.
-/// It stops short of the pin's thirteen because the pin has to survive a
-/// forty-five degree turn and this never turns.
-const WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX: f32 = 12.0;
+/// UI-SPEC.md I2: the speaker uses the nearest icons::MarkSlot size, 13.
+const WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX: f32 = 13.0;
 
 /// **The speaker in one tab's row**, in either strip (user ruling 2026-08-27;
 /// `docs/DESIGN.md` §7.23 ⑩).
@@ -22500,6 +22478,86 @@ mod tests {
     use bt_persist::{
         SESSION_SCHEMA_VERSION, SessionV1, TabV1, read_session, write_session_atomic,
     };
+
+    /// RED (26) — **Pane and files chrome follows the shared UI values.**
+    ///
+    /// The baseline uses separate gaps, heights, captions and control values.
+    /// UI-SPEC.md gives each role one rule; collect every mismatch so BASE
+    /// reports each changed value, including private cross-module numeric rules.
+    /// MUTATION: restore FILES_ROW_GAP_LOGICAL_PX to 6.0.
+    /// MUTATION: restore FILES_FOOT_GAP_LOGICAL_PX to 6.0.
+    /// MUTATION: restore FILES_FOOT_BAR_LOGICAL_PX to 28.0.
+    /// MUTATION: restore FILES_SEG_FONT_LOGICAL_PX to 11.5.
+    /// MUTATION: restore PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX to 11.5.
+    /// MUTATION: restore WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX to 12.0.
+    /// MUTATION: restore FILES_ROW_FOCUS_RING_LOGICAL_PX to 1.5.
+    /// MUTATION: restore PREVIEW_ADDRESS_RADIUS_LOGICAL_PX to 5.0.
+    /// MUTATION: restore PANE_HEAD_TRIGGER_REVEAL to 0.7.
+    #[test]
+    fn ui_spec_pane_head_rest_values_follow_the_rule() {
+        let rules = [
+            (
+                FILES_ROW_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G1: FILES_ROW_GAP_LOGICAL_PX",
+            ),
+            (
+                FILES_FOOT_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G1: FILES_FOOT_GAP_LOGICAL_PX",
+            ),
+            (
+                FILES_FOOT_BAR_LOGICAL_PX,
+                SEAT_TITLE_BAR_LOGICAL_PX,
+                "UI-SPEC.md H5: FILES_FOOT_BAR_LOGICAL_PX",
+            ),
+            (
+                FILES_SEG_FONT_LOGICAL_PX,
+                11.0,
+                "UI-SPEC.md T5 caption: FILES_SEG_FONT_LOGICAL_PX",
+            ),
+            (
+                PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX,
+                11.0,
+                "UI-SPEC.md T5 caption: PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX",
+            ),
+            (
+                WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX,
+                crate::icons::MarkSlot::CompactHead.house_box_logical_px(),
+                "UI-SPEC.md I2 icons::MarkSlot: WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX",
+            ),
+            (
+                FILES_ROW_FOCUS_RING_LOGICAL_PX,
+                2.0,
+                "UI-SPEC.md F1 settings::FOCUS_RING_WIDTH_LOGICAL_PX / first_run::FOCUS_RING_WIDTH_LOGICAL_PX: FILES_ROW_FOCUS_RING_LOGICAL_PX",
+            ),
+            (
+                PREVIEW_ADDRESS_RADIUS_LOGICAL_PX,
+                PREVIEW_CRUMB_RADIUS_LOGICAL_PX,
+                "UI-SPEC.md R12: PREVIEW_ADDRESS_RADIUS_LOGICAL_PX",
+            ),
+            (
+                PANE_HEAD_TRIGGER_REVEAL,
+                TAB_FILES_TRIGGER_REVEAL,
+                "UI-SPEC.md C1: PANE_HEAD_TRIGGER_REVEAL",
+            ),
+            (
+                FILES_FOOT_BAR_LOGICAL_PX,
+                FILES_SEG_BAR_LOGICAL_PX,
+                "UI-SPEC.md H5: FILES_SEG_BAR_LOGICAL_PX",
+            ),
+            (
+                PANE_HEAD_TRIGGER_REVEAL,
+                FILES_ROOT_CHEVRON_OPACITY,
+                "UI-SPEC.md C1: FILES_ROOT_CHEVRON_OPACITY",
+            ),
+        ];
+        let deviations: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, rule, _)| actual != rule)
+            .collect();
+        assert!(deviations.is_empty(), "{deviations:?}");
+    }
 
     /// RED (ticket 19) — **the pane head's `⌄`, the preview switch and the
     /// files root button stand in the tool box every other head control uses,
@@ -24395,7 +24453,7 @@ mod tests {
     /// its body is shortened by exactly the strip's height.
     ///
     /// The second half is the assertion that matters: the day a foot appears,
-    /// every reader of "the seat less its head" is wrong by 28 pixels at once.
+    /// every reader of "the seat less its head" is wrong by 30 pixels at once.
     ///
     /// **Exactly one strip, and this is the one** (user ruling, 2026-08-15).
     /// There were two for a while — a read-only bar of the same 28 pixels stood
@@ -24461,7 +24519,7 @@ mod tests {
     /// a page that already had a row of address. **So a rail of either kind
     /// retires the foot, and a pane with a rail keeps exactly the body it had.**
     ///
-    /// And the foot really is gone, not merely undrawn: the bottom twenty-eight
+    /// And the foot really is gone, not merely undrawn: the bottom thirty
     /// pixels of such a pane are document, and a hit test still answering
     /// `PreviewFoot` there is the invisible button this module's standing law is
     /// about.
@@ -24473,7 +24531,7 @@ mod tests {
     ///
     /// MUTATIONS:
     /// ① subtract the rail without retiring the foot — the document loses
-    ///    fifty-six pixels to chrome and the height equalities go red;
+    ///    sixty pixels to chrome and the height equalities go red;
     /// ② retire the foot for a breadcrumb only — the page's arm goes red again,
     ///    with the number the report was about;
     /// ③ leave `seats` out of `hit_files_foot` and answer from
@@ -24493,7 +24551,7 @@ mod tests {
             let railed = preview_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
             assert_eq!(
                 railed.height, footed.height,
-                "{kind:?}: the row takes the foot's twenty-eight and gives none \
+                "{kind:?}: the row takes the foot's thirty and gives none \
                  of the document away"
             );
             assert_eq!(
@@ -30864,14 +30922,14 @@ mod tests {",
         }
     }
 
-    /// PIN — the foot is the mock-up's, declaration for declaration.
+    /// PIN — the foot follows UI-SPEC.md and its shared geometry metrics.
     ///
-    /// Every number here is one the mock-up writes at 529-536, and they are
+    /// UI-SPEC.md H5/G1 sets the height and gap; the other foot metrics are
     /// asserted separately because any one of them can be right while the others
-    /// are not: a 28px strip with 10px padding is still wrong, and it is wrong in
+    /// are not: a 30px strip with 10px padding is still wrong, and it is wrong in
     /// a way only a ruler catches.
     #[test]
-    fn the_foot_is_twenty_eight_pixels_of_hairline_padding_mark_and_path() {
+    fn the_foot_is_thirty_pixels_of_hairline_padding_mark_and_path() {
         let rect = [0.0, 0.0, 260.0, 600.0];
         for scale in [1.0_f32, 1.5, 2.0] {
             let rect = [rect[0], rect[1], rect[2] * scale, rect[3] * scale];
@@ -30879,7 +30937,7 @@ mod tests {",
             assert_eq!(
                 geometry.foot[3] - geometry.foot[1],
                 (FILES_FOOT_BAR_LOGICAL_PX * scale).round(),
-                "{scale}: `height: 28px`, border included"
+                "{scale}: UI-SPEC.md H5: height 30, border included"
             );
             assert_eq!(
                 geometry.foot[3], rect[3],
@@ -30912,7 +30970,7 @@ mod tests {",
             assert_eq!(
                 geometry.foot_path[0] - geometry.foot_mark[2],
                 FILES_FOOT_GAP_LOGICAL_PX * scale,
-                "{scale}: `gap: 6px`"
+                "{scale}: UI-SPEC.md G1: gap 8"
             );
             // Centred in the flex row, which is the strip below its hairline.
             let above = geometry.foot_mark[1] - geometry.foot_edge[3];
@@ -31133,7 +31191,7 @@ mod tests {",
             "with no folder to open and so no mark offering to"
         );
         // And the sentence in the body is centred in the *body*, not in a pane
-        // whose bottom 28 pixels belong to the foot.
+        // whose bottom 30 pixels belong to the foot.
         let notice = chrome
             .labels
             .iter()
@@ -35899,10 +35957,9 @@ mod tests {",
             }
         }
 
-        // The owner's own capture, in numbers (diagnosis, 2026-09-20): a preview
-        // head at 2.0 whose pane begins at 560 put its zoom mark at 624–650 and
-        // started the name at 624 — one `x` for two drawings. The mark has not
-        // moved; the name now starts one gap after it.
+        // The 2026-09-20 diagnosis pinned a preview head at 2.0 beginning at
+        // 560. UI-SPEC.md G3 (ticket 26) makes each gap 8: the zoom mark now
+        // spans 626–652, and the name starts at 668, one scaled gap later.
         let head = pane_head_geometry(
             [560.0, 100.0, 1_900.0, 900.0],
             SeatKind::Preview,
@@ -35912,9 +35969,9 @@ mod tests {",
         );
         assert_eq!(
             head.zoom_mark.map(|mark| [mark[0], mark[2]]),
-            Some([624.0, 650.0])
+            Some([626.0, 652.0])
         );
-        assert_eq!(head.title[0], 664.0);
+        assert_eq!(head.title[0], 668.0);
     }
 
     /// **And the press lands where the drawing says** — the same fix read

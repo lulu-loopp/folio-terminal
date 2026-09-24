@@ -2775,8 +2775,8 @@ pub const FOCUS_CARD_WAIT_HALO_OPACITY: f32 = 0.24;
 /// `.fc-head { padding: 5px 8px }`.
 pub const FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX: f32 = 8.0;
 pub const FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX: f32 = 5.0;
-/// `.fc-head { gap: 6px }` — between the mark, the name and the trailing run.
-pub const FOCUS_CARD_HEAD_GAP_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC.md G1: the focus-card head uses the shared 8-point icon-to-label gap.
+pub const FOCUS_CARD_HEAD_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.fc-head { font-size: 11px }` — a card's name.
 ///
 /// Two steps under the strip's 13px tab title, because a card says the same
@@ -3004,8 +3004,8 @@ pub const HEAD_TITLE_TRACKING_EM: f32 = 0.04;
 /// The inset between a title bar's edge and its first item
 /// (`.panehead { padding: 0 6px 0 12px }`).
 pub const SEAT_TITLE_PADDING_LOGICAL_PX: f32 = 12.0;
-/// `.panehead { gap: 7px }` — between the mark and the title.
-pub const SEAT_TITLE_GAP_LOGICAL_PX: f32 = 7.0;
+/// UI-SPEC.md G3: the pane mark and title use the shared 8-point icon-to-label gap.
+pub const SEAT_TITLE_GAP_LOGICAL_PX: f32 = 8.0;
 /// The other half of `.panehead { padding: 0 6px 0 12px }`: the inset the
 /// trailing control run stops at.
 ///
@@ -3663,6 +3663,34 @@ mod tests {
             (8.0, 10.0),
             "UI-SPEC.md G3/S9; tooltip::PEEK_PADDING_X_LOGICAL_PX"
         );
+    }
+
+    /// RED (26) — **Pane and files chrome follows the shared UI values.**
+    ///
+    /// The baseline uses separate gaps, heights, captions and control values.
+    /// UI-SPEC.md gives each role one rule; collect every mismatch so BASE
+    /// reports each changed value, including private cross-module numeric rules.
+    /// MUTATION: restore FOCUS_CARD_HEAD_GAP_LOGICAL_PX to 6.0.
+    /// MUTATION: restore SEAT_TITLE_GAP_LOGICAL_PX to 7.0.
+    #[test]
+    fn ui_spec_pane_head_rest_values_follow_the_rule() {
+        let rules = [
+            (
+                FOCUS_CARD_HEAD_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G1: FOCUS_CARD_HEAD_GAP_LOGICAL_PX",
+            ),
+            (
+                SEAT_TITLE_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G3: SEAT_TITLE_GAP_LOGICAL_PX",
+            ),
+        ];
+        let deviations: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, rule, _)| actual != rule)
+            .collect();
+        assert!(deviations.is_empty(), "{deviations:?}");
     }
 
     /// RED (ticket 19) — **every head title is 11, and the rail's section
