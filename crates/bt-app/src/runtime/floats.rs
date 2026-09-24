@@ -1082,11 +1082,7 @@ impl Runtime<'_> {
     /// Exhaustive on the six rather than taking a closure, because which
     /// builder draws which surface is the one thing that differs, and a seventh
     /// with a band of its own must not reach this without saying so.
-    pub(in crate::runtime) fn stage_menu(
-        &mut self,
-        popup: Popup,
-        now: Instant,
-    ) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn stage_menu(&mut self, popup: Popup, now: Instant) -> marks::Band {
         let paint = match popup {
             Popup::File => self.file_menu_layer(),
             Popup::Pane => self.pane_menu_layer(),
@@ -1098,10 +1094,15 @@ impl Runtime<'_> {
             // itself: see [`ModalBand`].
             Popup::Profile | Popup::Root | Popup::GraphFilter | Popup::Preview => MenuPaint::none(),
         };
-        let mut layers = self.stage(Layered::Popup(popup), paint.menu, Some(paint.travel), now);
+        let mut layers = self.stage(
+            Layered::Popup(popup),
+            paint.menu.into(),
+            Some(paint.travel),
+            now,
+        );
         if let Some((submenu, travel)) = paint.child {
-            let child = self.stage(Layered::Submenu(popup), submenu, Some(travel), now);
-            layers.extend(child);
+            let child = self.stage(Layered::Submenu(popup), submenu.into(), Some(travel), now);
+            layers.append(child);
         }
         layers
     }
@@ -3112,11 +3113,7 @@ impl Runtime<'_> {
     /// this function knows is which window is where inside its own family, and
     /// adding the two here is what makes [`WindowRuntime::float_hole_level`] an
     /// index into the one flattened list.
-    pub(in crate::runtime) fn float_layer(
-        &mut self,
-        now: Instant,
-        below: usize,
-    ) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn float_layer(&mut self, now: Instant, below: usize) -> marks::Band {
         let ids: Vec<float::FloatId> = self.window.float.drawn().map(|win| win.epoch).collect();
         // Rebuilt from nothing on every pass, exactly as `git_pages_shown` is:
         // it is a record of what this frame drew, and a stale entry in it is a
@@ -3134,11 +3131,26 @@ impl Runtime<'_> {
         self.window
             .git_graphs_shown
             .retain(|surface, _| !matches!(surface, PreviewSurface::Float(_)));
-        let mut layers = Vec::new();
+        let scale = self.window.renderer.scale_factor() as f32;
+        let mut layers = marks::Band::default();
         for id in ids {
             let Some(window) = self.float_window(id, now) else {
                 continue;
             };
+            // **The window's fade, as one surface** (ticket 46): every layer
+            // this window puts down below — its face, the slot for a recording,
+            // its scroll bars, the ▶, the recording's bar and the disk notice —
+            // drawn whole and put back once, rather than each wearing the fade in
+            // its own opacity. Its rise stays in the frame it was built at
+            // (`risen_frame`), which every reader of where this window is — the
+            // press router, the page's hole, the recording's box — reads too.
+            let opacity = self
+                .window
+                .float
+                .drawn()
+                .find(|win| win.epoch == id)
+                .map_or(1.0, |win| self.float_fade_of(win, now, scale).opacity);
+            let mut surface = marks::Band::default();
             // **The window's own scroll bar, on the layer directly above it**
             // (user ruling, 2026-08-14). Not further up, because a window in
             // front has to cover this one whole — bar included; and not on the
@@ -3146,18 +3158,19 @@ impl Runtime<'_> {
             // document it carries (see [`scroll_bar_layer`]).
             //
             // It fades with the window it belongs to, for the reason the tenant
-            // does: `opacity` here is the CSS declaration on the element the
-            // layer is, and a bar that stayed at full strength through an
-            // entrance would be a scrollbar arriving before its window.
-            let opacity = window.opacity;
+            // does: the window's `opacity` is the CSS declaration on the element
+            // the whole surface is, and a bar that stayed at full strength
+            // through an entrance would be a scrollbar arriving before its
+            // window.
+            //
             // **Where this window lands in the one flattened list** — written
             // before the push, because that is the slot the push is about to
             // take. A page this float is carrying has its hole punched directly
             // above this layer and under the bar beside it (§7.14c).
             self.window
                 .float_hole_level
-                .insert(id, below + layers.len());
-            layers.push(window);
+                .insert(id, below + layers.len() + surface.len());
+            surface.layers.push(window);
             // **And a slot of its own for a recording, directly over that
             // face** (route B slice ②; §7.44 ③, found on the machine
             // 2026-08-28).
@@ -3179,8 +3192,8 @@ impl Runtime<'_> {
             // draw call and no quad — see `marks::OverlayLayer::default`.
             self.window
                 .float_video_level
-                .insert(id, below + layers.len());
-            layers.push(marks::OverlayLayer::default());
+                .insert(id, below + layers.len() + surface.len());
+            surface.layers.push(marks::OverlayLayer::default());
             // **And the recording's control bar, on the same terms** (route B
             // slice ②; §7.44 ②). Above this window's own layer for the scroll
             // bar's reason exactly — a layer paints its quads before the
@@ -3198,17 +3211,18 @@ impl Runtime<'_> {
             // layer paints its quads before whatever it carries, and below the
             // next window, because a float in front covers this one whole.
             let notice = self.float_notice_layer(id);
-            layers.extend(
-                self.preview_float_bar_layers(id)
-                    .into_iter()
-                    .chain(play)
-                    .chain(bar)
-                    .chain(notice)
-                    .map(|mut bar| {
-                        bar.opacity = opacity;
-                        bar
-                    }),
-            );
+            surface
+                .layers
+                .extend(self.preview_float_bar_layers(id).into_iter().chain(play));
+            // The recording's bar keeps its own fade inside the window's — the
+            // two multiply, where writing the window's over the bar's (as this
+            // did, the audit's F6) gave the bar's letters the window's fade and
+            // threw its own away.
+            if let Some(bar) = bar {
+                surface.append(bar);
+            }
+            surface.layers.extend(notice);
+            layers.append(surface.faded(opacity, [0.0, 0.0]));
         }
         layers
     }

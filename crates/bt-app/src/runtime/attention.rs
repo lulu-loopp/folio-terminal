@@ -89,14 +89,14 @@ impl Runtime<'_> {
     /// is measured here, beside the renderer, because only the font can say how
     /// wide a line is — and measuring it twice is how the drawn `×` and the
     /// pressable `×` drift apart.
-    pub(in crate::runtime) fn toast_layer(&mut self) -> Vec<marks::OverlayLayer> {
+    pub(in crate::runtime) fn toast_layer(&mut self) -> marks::Band {
         // Recorded at the end and only on the path that paints, so the debt is
         // against what is *on screen* — [`Self::tooltip_layer`]'s own note.
         self.window.toasts_drawn = Vec::new();
         self.window.toast_layouts = Vec::new();
         self.window.toast_pointer_drawn = toast::ToastPointer::default();
         if self.window.toasts.is_empty() {
-            return Vec::new();
+            return marks::Band::default();
         }
         let now = Instant::now();
         let scale = self.window.renderer.scale_factor() as f32;

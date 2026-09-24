@@ -4580,6 +4580,9 @@ pub struct GpuContext {
     /// The same again, cross-faded by the pass's blend constant, for a ground on
     /// a floating layer that carries its own opacity — see [`OverlayGround`].
     ground_fade_rect_pipeline: wgpu::RenderPipeline,
+    /// How a fading overlay surface goes back onto the frame — see
+    /// [`OverlayGroup`].
+    group_pipelines: GroupPipelines,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
     math_samplers: MathSamplers,
@@ -5006,6 +5009,11 @@ fn configure_window_surface(
         .find(wgpu::TextureFormat::is_srgb)
         .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
     gpu.accept_format(config.format)?;
+    // **The same frame, seen as bytes** (overlay groups, 2026-09-24): a fading
+    // surface is put back through a view of the swapchain without its sRGB
+    // suffix, so its blend runs on encoded values as CSS `opacity` does. Every
+    // other draw goes on through the sRGB view, unchanged.
+    config.view_formats = vec![config.format.remove_srgb_suffix()];
     // The gate, before the surface is configured rather than after: a
     // visual target that cannot be `PreMultiplied` is not this program's
     // window, and configuring it anyway would leave a swapchain on screen
@@ -5115,6 +5123,17 @@ pub struct WindowRenderer {
     /// cover the dialog in every channel, not just in the one it happens to draw
     /// its own surface with — see [`OverlayLayer`].
     overlay_layers: Vec<OverlayLayer>,
+    /// **The fading surfaces among those layers** — spans of `overlay_layers`,
+    /// each drawn whole and composited once while it fades or travels. See
+    /// [`OverlayGroup`].
+    overlay_groups: Vec<OverlayGroup>,
+    /// The textures a fading surface is drawn into, one per surface fading at
+    /// once. Emptied on the first frame nothing fades, so a window at rest holds
+    /// none; made again, at the frame's size, on the frame a fade begins.
+    group_targets: Vec<GroupTarget>,
+    /// How many surfaces the last frame put back through a texture — the
+    /// witness that a frame did or did not take the group path.
+    groups_composited: u32,
     /// One text-renderer pair per Terminal seat, grown on demand — the same
     /// shape, and for the same reason, as
     /// [`WindowRenderer::overlay_text_renderers`]: a `TextRenderer` holds
@@ -5804,24 +5823,30 @@ pub struct OverlayLayer {
     pub quads: Vec<OverlayQuad>,
     pub labels: Vec<ChromeLabel>,
     pub icons: Vec<ChromeIcon>,
-    /// The layer's own `opacity`, `0.0 ..= 1.0` — CSS `opacity` on the element
-    /// this layer *is*, which is why it lives here and not on each fill.
+    /// **A multiplier folded into every primitive of this layer**, `0.0 ..= 1.0`
+    /// — and not the way a surface fades. A surface fades as an
+    /// [`OverlayGroup`].
     ///
-    /// A layer is already the mock-up's `z-index` in this pipeline's terms (see
-    /// above); `.tip { opacity: 0; transition: opacity .09s }` asks it to be the
-    /// mock-up's `opacity` too, and for the same reason. A fading popup is one
-    /// thing fading, not a fill and a hairline and a caption that each happen to
-    /// be fading at the same rate: the moment they are separate the caller has to
-    /// remember to fade all three, and the one it forgets is the one nobody looks
-    /// at until it is wrong.
+    /// The fold multiplies each fill's alpha, each mark's opacity and each
+    /// letter's alpha separately, and every one of them is then blended onto
+    /// the frame in linear light. That is right only for a layer whose
+    /// primitives never overlap each other — a formula's source face fading in
+    /// over the picture it replaces, which is letters and nothing else. It is
+    /// wrong for a floating plate, and the fade audit of 2026-09-23 measured
+    /// how wrong: `settings::push_float_window` lays the face over the whole
+    /// frame, the `--border` hairline over the whole frame, and the face again
+    /// one border in, so folded per primitive the hairline shows through the
+    /// interior at `0.094·a·(1 − a)` of white. The sentence that stood here
+    /// called that "under 2.5% of an already-invisible ink"; in alpha it is,
+    /// and in linear light over `#2A2A2A` it is `#3B3B3B` at `a = .5` — a plate
+    /// mid-fade brighter than it will ever be at rest, by more than its whole
+    /// lift off the ground. And because the blend is linear, the letters reach
+    /// most of their contrast long before the plate and the shadow reach theirs.
     ///
-    /// CSS composites the element into a group and fades the group once, which
-    /// this pipeline has no offscreen buffer to do; the fold is per primitive
-    /// instead. The two answers differ only where a layer overlaps itself — a
-    /// hairline showing faintly through the face laid over it — and only while
-    /// `opacity` is strictly between 0 and 1. At the `--border` alphas the
-    /// palette actually uses (.088/.094) the widest gap that opens is under 2.5%
-    /// of an already-invisible ink, and it closes as the fade lands.
+    /// So a surface that fades — a tip, a menu, a card, a toast, a float, the
+    /// rail's fold, the drag ghost — keeps this at `1.0` and hands its fade to
+    /// the renderer as a group, which is drawn whole and composited once, on
+    /// encoded bytes, exactly as CSS `opacity` is.
     pub opacity: f32,
     /// A scrolled **document** inside this layer (P43's second tenant).
     ///
@@ -5986,6 +6011,118 @@ impl OverlayLayer {
             })
             .collect()
     }
+}
+
+/// **One fading surface of the overlay** — CSS `opacity` (and a `transform:
+/// translate`) on the element a run of layers *is* (`docs/DESIGN.md`,
+/// 2026-09-24; the fade audit of 2026-09-23).
+///
+/// A span of the list [`WindowRenderer::set_modal_overlay`] is given, handed in
+/// beside it rather than folded into it, because that list's indices are
+/// already load-bearing — [`WebHole::above`] and a video's
+/// `VideoStage::Overlay(n)` both name a layer by its place — and a group moves
+/// no layer. Spans may nest (a video bar fading inside a card that is fading)
+/// and must not otherwise overlap; nested opacities multiply, because the inner
+/// surface is composited into the outer one before the outer one is composited
+/// into the frame.
+///
+/// **At rest a group is nothing.** A group whose opacity draws as `255/255` and
+/// whose offset is zero whole pixels is drawn exactly as its layers always were,
+/// straight onto the frame, byte for byte. Only while it fades or travels is it
+/// drawn at full strength into a texture of its own and put back once, through
+/// a non-sRGB view of the frame, so the blend happens on encoded bytes: the
+/// plate, its hairline, its shadow and its letters arrive together, which the
+/// old per-primitive fold in linear light could not do (see
+/// [`OverlayLayer::opacity`]).
+///
+/// **A ground inside a group cross-fades.** A pixel an [`OverlayGround`] laid
+/// down is the window itself, not something laid on it, so on the way back it
+/// is lerped against what stands under the group, alpha included — the
+/// one-translucency ruling [`create_ground_fade_rect_pipeline`] states for a
+/// lone ground, kept for the whole surface. Every other pixel is composited
+/// over. That is the rail's fold, and it is a property of the pixels rather
+/// than of the group, so the group carries no switch for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OverlayGroup {
+    /// The layers this surface is made of, as indices into the overlay list.
+    pub layers: std::ops::Range<usize>,
+    /// `0.0 ..= 1.0`. Drawn in whole 1/255 steps, the resolution of the frame.
+    pub opacity: f32,
+    /// Physical pixels the whole surface is displaced by, `[dx, dy]`. Drawn in
+    /// whole pixels: a surface in flight moves by the pixel, never smears.
+    pub offset: [f32; 2],
+}
+
+impl OverlayGroup {
+    /// The opacity this group is drawn at, in the frame's own 1/255 steps.
+    #[must_use]
+    pub fn drawn_opacity(&self) -> u8 {
+        (self.opacity.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
+    /// The offset this group is drawn at, in whole physical pixels.
+    #[must_use]
+    pub fn drawn_offset(&self) -> [i32; 2] {
+        [self.offset[0].round() as i32, self.offset[1].round() as i32]
+    }
+
+    /// Whether this surface is standing still at full strength — the state in
+    /// which it is drawn exactly as it would be with no group at all.
+    #[must_use]
+    pub fn at_rest(&self) -> bool {
+        self.drawn_opacity() == u8::MAX && self.drawn_offset() == [0, 0]
+    }
+
+    /// This group with its opacity and offset put in the steps they are drawn
+    /// in, so that two groups that draw the same picture compare equal.
+    #[must_use]
+    fn quantised(self) -> Self {
+        let [dx, dy] = self.drawn_offset();
+        Self {
+            opacity: f32::from(self.drawn_opacity()) / 255.0,
+            offset: [dx as f32, dy as f32],
+            ..self
+        }
+    }
+}
+
+/// **Where each overlay layer stands on the glass, groups included** — one
+/// [`OverlayLayer::opaque_bounds`] per layer, displaced by every group it is
+/// in and absent while any of those groups is drawn at nothing.
+///
+/// The question `OverlayLayer::opaque_bounds` answers about a layer alone,
+/// asked of the layer where it is actually drawn. A surface's fade and travel
+/// live on its group now rather than in its layers, so a reader of the layers
+/// alone would take a menu leaving at opacity zero for a surface, and a menu
+/// arriving four pixels short of its place for one already there.
+#[must_use]
+pub fn overlay_layer_bounds(
+    layers: &[OverlayLayer],
+    groups: &[OverlayGroup],
+) -> Vec<Option<[f32; 4]>> {
+    layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| {
+            let mut offset = [0.0_f32; 2];
+            for group in groups.iter().filter(|group| group.layers.contains(&index)) {
+                if group.drawn_opacity() == 0 {
+                    return None;
+                }
+                let [dx, dy] = group.drawn_offset();
+                offset[0] += dx as f32;
+                offset[1] += dy as f32;
+            }
+            layer.opaque_bounds().map(|[left, top, right, bottom]| {
+                [
+                    left + offset[0],
+                    top + offset[1],
+                    right + offset[0],
+                    bottom + offset[1],
+                ]
+            })
+        })
+        .collect()
 }
 
 /// The fills a rounded rectangle is made of: whole runs where it covers a pixel
@@ -6441,6 +6578,9 @@ struct DeviceResources {
     rect_pipeline: wgpu::RenderPipeline,
     ground_rect_pipeline: wgpu::RenderPipeline,
     ground_fade_rect_pipeline: wgpu::RenderPipeline,
+    /// How a fading overlay surface goes back onto the frame — see
+    /// [`OverlayGroup`].
+    group_pipelines: GroupPipelines,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
     math_samplers: MathSamplers,
@@ -6509,6 +6649,7 @@ impl DeviceResources {
         let rect_pipeline = create_rect_pipeline(device, format);
         let ground_rect_pipeline = create_ground_rect_pipeline(device, format);
         let ground_fade_rect_pipeline = create_ground_fade_rect_pipeline(device, format);
+        let group_pipelines = create_group_pipelines(device, format);
         let (math_pipeline, math_bind_group_layout, math_samplers) =
             create_math_pipeline(device, format);
         let (background_pipeline, background_bind_group_layout, background_sampler) =
@@ -6525,6 +6666,7 @@ impl DeviceResources {
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
+            group_pipelines,
             math_pipeline,
             math_bind_group_layout,
             math_samplers,
@@ -6772,6 +6914,7 @@ impl GpuContext {
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
+            group_pipelines,
             math_pipeline,
             math_bind_group_layout,
             math_samplers,
@@ -6798,6 +6941,7 @@ impl GpuContext {
         self.rect_pipeline = rect_pipeline;
         self.ground_rect_pipeline = ground_rect_pipeline;
         self.ground_fade_rect_pipeline = ground_fade_rect_pipeline;
+        self.group_pipelines = group_pipelines;
         self.math_pipeline = math_pipeline;
         self.math_bind_group_layout = math_bind_group_layout;
         self.math_samplers = math_samplers;
@@ -6998,6 +7142,7 @@ impl GpuContext {
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
+            group_pipelines,
             math_pipeline,
             math_bind_group_layout,
             math_samplers,
@@ -7034,6 +7179,7 @@ impl GpuContext {
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
+            group_pipelines,
             math_pipeline,
             math_bind_group_layout,
             math_samplers,
@@ -7912,7 +8058,7 @@ impl WindowRenderer {
                         format: self.config.format,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                             | wgpu::TextureUsages::COPY_SRC,
-                        view_formats: &[],
+                        view_formats: &[self.config.format.remove_srgb_suffix()],
                     }));
                 self.configured_size = (self.config.width, self.config.height);
             }
@@ -7966,6 +8112,9 @@ impl WindowRenderer {
                 )
             })
             .collect();
+        // The fading surfaces' textures were the old device's; the next frame
+        // that fades makes its own on this one.
+        self.group_targets.clear();
         self.max_texture_dimension_2d = gpu.max_texture_dimension_2d;
         Ok(())
     }
@@ -8004,7 +8153,9 @@ impl WindowRenderer {
             // that has a swapchain nothing, because a swapchain has no such
             // texture.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            // Its bytes-view beside it, as a swapchain's is — see
+            // `configure_window_surface`.
+            view_formats: &[format.remove_srgb_suffix()],
         });
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -8015,7 +8166,7 @@ impl WindowRenderer {
             desired_maximum_frame_latency: 1,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             color_space: wgpu::SurfaceColorSpace::Auto,
-            view_formats: Vec::new(),
+            view_formats: vec![format.remove_srgb_suffix()],
         };
         Self::assemble(
             gpu,
@@ -8102,6 +8253,9 @@ impl WindowRenderer {
             chrome_icons: Vec::new(),
             web_holes: Vec::new(),
             overlay_layers: Vec::new(),
+            overlay_groups: Vec::new(),
+            group_targets: Vec::new(),
+            groups_composited: 0,
             seat_slots,
             text_viewport,
             chrome_text_renderer,
@@ -9025,14 +9179,60 @@ impl WindowRenderer {
     /// (DESIGN §7.1.5: a modal is a window-level stance, not a property of the
     /// terminal's content), so `ViewportFrame` equality and the replay contracts
     /// stay untouched by a visible dialog.
-    pub fn set_modal_overlay(&mut self, layers: Vec<OverlayLayer>) -> bool {
-        let changed = self.overlay_layers != layers;
+    ///
+    /// `groups` are the surfaces among `layers` that fade or travel as one
+    /// piece — see [`OverlayGroup`]. They are kept in the steps they are drawn
+    /// in, so a fade whose next sample draws the same picture is not a change.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, on a span that runs past the list or that partly
+    /// overlaps another: a surface is a run of layers, and two runs that share
+    /// some layers and not others are not two surfaces anybody drew.
+    pub fn set_modal_overlay(
+        &mut self,
+        layers: Vec<OverlayLayer>,
+        groups: Vec<OverlayGroup>,
+    ) -> bool {
+        let groups: Vec<OverlayGroup> = groups
+            .into_iter()
+            .filter(|group| !group.layers.is_empty())
+            .map(OverlayGroup::quantised)
+            .collect();
+        debug_assert!(
+            groups.iter().all(|group| group.layers.end <= layers.len()),
+            "an overlay group names a layer past the end of the list"
+        );
+        debug_assert!(
+            groups.iter().all(|a| groups.iter().all(|b| {
+                let (a, b) = (&a.layers, &b.layers);
+                a.end <= b.start
+                    || b.end <= a.start
+                    || (a.start <= b.start && b.end <= a.end)
+                    || (b.start <= a.start && a.end <= b.end)
+            })),
+            "two overlay groups partly overlap: spans must nest or stand apart"
+        );
+        let changed = self.overlay_layers != layers || self.overlay_groups != groups;
         self.overlay_layers = layers;
+        self.overlay_groups = groups;
         self.retained_revision = self
             .retained_revision
             .checked_add(u64::from(changed))
             .expect("renderer revision exhausted");
         changed
+    }
+
+    /// **How many fading surfaces the last frame drew apart and put back** —
+    /// zero on every frame whose groups all stand at rest, which is every frame
+    /// under reduced motion.
+    ///
+    /// The witness a test reads to know the group path was or was not taken:
+    /// the picture alone cannot say, because at rest the two roads draw the
+    /// same bytes by design.
+    #[must_use]
+    pub fn overlay_groups_composited(&self) -> u32 {
+        self.groups_composited
     }
 
     /// How wide `text` will be when drawn as a plain [`ChromeLabel`] at
@@ -10147,6 +10347,26 @@ impl WindowRenderer {
                 || layer.icon_buffer.is_some()
                 || layer.text_prepared
         });
+        // **Which surfaces fade this frame** — see [`OverlayGroup`]. Flat on
+        // every frame nothing fades or travels, and then everything below draws
+        // exactly the command stream it drew before groups existed.
+        let plan = GroupPlan::new(&self.overlay_groups, overlay_draws.len());
+        // **A page cannot fade** (the fade audit, §6 ②). A web page is a native
+        // view composed under this whole surface, seen through a hole; wgpu can
+        // no more fade it than it can draw it, so a hole inside a surface that
+        // is fading would leave the page standing solid while its window
+        // dissolved around it. It cannot happen today — a preview float never
+        // fades (`float_fade_of`) and a glance card over a page draws text — and
+        // this says so where the day it could would be seen.
+        debug_assert!(
+            self.overlay_groups
+                .iter()
+                .filter(|group| !group.at_rest())
+                .all(|group| group.layers.clone().all(|index| overlay_draws
+                    .get(index)
+                    .is_none_or(|layer| layer.hole_count == 0))),
+            "a web page's hole inside a fading overlay surface: a native view cannot be faded"
+        );
         let rectangles_prepared_at = Instant::now();
         // **The last gate, and the only one that stands in front of the
         // swapchain.** Everything above is staging; below it the surface is
@@ -10218,6 +10438,80 @@ impl WindowRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Folio frame"),
             });
+        let surface = (self.config.width, self.config.height);
+        // **Every fading surface, drawn whole into a texture of its own, before
+        // the frame's pass opens** (overlay groups, 2026-09-24) — so that the
+        // pass is broken only where a surface is put back, never to fill one.
+        // Innermost first: a surface standing inside another is put back into
+        // the outer one's texture before the outer one is put back anywhere.
+        self.group_targets.retain(|target| target.size == surface);
+        if plan.groups.is_empty() {
+            self.group_targets.clear();
+        }
+        while self.group_targets.len() < plan.groups.len() {
+            let target = GroupTarget::new(gpu, self.config.format, surface);
+            self.group_targets.push(target);
+        }
+        let video = video_vertex_buffer
+            .as_ref()
+            .map(|buffer| (buffer, video_draws.as_slice()));
+        let mut groups_composited = 0_u32;
+        if overlay_has_work {
+            for index in (0..plan.groups.len()).rev() {
+                let target = &self.group_targets[index];
+                let mut pass = Some(
+                    begin_overlay_pass(
+                        &mut encoder,
+                        &target.colour,
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        "overlay group pass",
+                        surface,
+                    )
+                    .forget_lifetime(),
+                );
+                for item in plan.items(plan.groups[index].layers.clone(), Some(index)) {
+                    match item {
+                        GroupItem::Layer(layer) => {
+                            let pass = pass.get_or_insert_with(|| {
+                                begin_overlay_pass(
+                                    &mut encoder,
+                                    &target.colour,
+                                    wgpu::LoadOp::Load,
+                                    "overlay group pass",
+                                    surface,
+                                )
+                                .forget_lifetime()
+                            });
+                            self.draw_overlay_layer(
+                                pass,
+                                gpu,
+                                &overlay_draws[layer],
+                                layer,
+                                video,
+                                surface,
+                            )?;
+                        }
+                        GroupItem::Group(child) => {
+                            drop(pass.take());
+                            self.composite_group(
+                                &mut encoder,
+                                gpu,
+                                &plan,
+                                child,
+                                &target.bytes,
+                                surface,
+                            );
+                            groups_composited += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let overlay_items = plan.items(0..overlay_draws.len(), None);
+        let frame_layers = overlay_items
+            .iter()
+            .take_while(|item| matches!(item, GroupItem::Layer(_)))
+            .count();
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Folio terminal pass"),
@@ -10600,78 +10894,65 @@ impl WindowRenderer {
                     SeatViewport::whole(self.config.width, self.config.height),
                     (self.config.width, self.config.height),
                 );
-                // Bottom layer first, and each one's three channels closed before
-                // the next one's open: this loop *is* the overlay's z-order, and
-                // it is the reason a picker's popup covers the row under it
-                // whether that row drew itself as a fill, a mark or a caption.
-                for (index, layer) in overlay_draws.iter().enumerate() {
-                    // The grounds first, as they are in the chrome's own pass and
-                    // for the same reason: a ground is the surface the rest of
-                    // this layer is struck on. The blend constant is this layer's
-                    // opacity, which is the whole of how a floating ground fades
-                    // — see [`create_ground_fade_rect_pipeline`].
-                    if let Some(buffer) = layer.ground_buffer.as_ref() {
-                        let fade = f64::from(layer.ground_opacity);
-                        pass.set_pipeline(&gpu.ground_fade_rect_pipeline);
-                        pass.set_blend_constant(wgpu::Color {
-                            r: fade,
-                            g: fade,
-                            b: fade,
-                            a: fade,
+                // Bottom layer first, and each one's channels closed before the
+                // next one's open: this loop *is* the overlay's z-order, and it
+                // is the reason a picker's popup covers the row under it whether
+                // that row drew itself as a fill, a mark or a caption. It runs
+                // up to the first surface that is fading; on a frame with none
+                // that is every layer, in this pass, as it always was.
+                for item in &overlay_items[..frame_layers] {
+                    let GroupItem::Layer(index) = *item else {
+                        unreachable!("the frame's own run is layers by construction");
+                    };
+                    self.draw_overlay_layer(
+                        &mut pass,
+                        gpu,
+                        &overlay_draws[index],
+                        index,
+                        video,
+                        surface,
+                    )?;
+                }
+            }
+        }
+        // **The rest of the overlay, from the first fading surface up**: each
+        // surface put back through the frame's bytes-view, and the layers
+        // between and above them drawn in a pass resumed on the frame as it now
+        // stands. Nothing here runs on a frame with no surface fading.
+        if overlay_has_work && frame_layers < overlay_items.len() {
+            let bytes = self.bytes_view(&acquired);
+            let mut pass: Option<wgpu::RenderPass<'static>> = None;
+            for item in &overlay_items[frame_layers..] {
+                match *item {
+                    GroupItem::Layer(index) => {
+                        let pass = pass.get_or_insert_with(|| {
+                            begin_overlay_pass(
+                                &mut encoder,
+                                &view,
+                                wgpu::LoadOp::Load,
+                                "Folio overlay pass",
+                                surface,
+                            )
+                            .forget_lifetime()
                         });
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        pass.draw(0..6, 0..layer.ground_count);
-                    }
-                    // **A video playing in this floating window**, over its
-                    // ground and under everything it draws on top (route B slice
-                    // ②; §7.44 ③). Here and not in the seat's slot because a
-                    // float's face is opaque and a video under it is a video
-                    // nobody sees; here and not last of everything because a
-                    // float stacked over this one has to cover it, which is the
-                    // whole reason this loop is the z-order.
-                    if let Some(vertex_buffer) = video_vertex_buffer.as_ref() {
-                        draw_video_stage(
-                            &mut pass,
+                        self.draw_overlay_layer(
+                            pass,
                             gpu,
-                            vertex_buffer,
-                            &video_draws,
-                            VideoStage::Overlay(index),
-                            (self.config.width, self.config.height),
-                        );
+                            &overlay_draws[index],
+                            index,
+                            video,
+                            surface,
+                        )?;
                     }
-                    if let Some(buffer) = layer.rect_buffer.as_ref() {
-                        pass.set_pipeline(&gpu.rect_pipeline);
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        pass.draw(0..6, 0..layer.rect_count);
-                    }
-                    // **And then the part of this layer that is not there**
-                    // (§7.14c): a float carrying a page has just painted its own
-                    // face across the rectangle the page lives in, and the page
-                    // is composed *under* this whole surface. So the hole is
-                    // punched here — over this layer's ground and its fills, and
-                    // under its marks, its captions and every layer above it,
-                    // which are all things that legitimately stand over a page.
-                    if let Some(buffer) = layer.hole_buffer.as_ref() {
-                        pass.set_pipeline(&gpu.ground_rect_pipeline);
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        pass.draw(0..6, 0..layer.hole_count);
-                    }
-                    if let Some(buffer) = layer.icon_buffer.as_ref() {
-                        pass.set_pipeline(&gpu.math_pipeline);
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        for draw in &layer.icon_draws {
-                            pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
-                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                        }
-                    }
-                    if layer.text_prepared {
-                        self.overlay_text_renderers[index]
-                            .render(&gpu.atlas, &self.text_viewport, &mut pass)
-                            .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                    GroupItem::Group(group) => {
+                        drop(pass.take());
+                        self.composite_group(&mut encoder, gpu, &plan, group, &bytes, surface);
+                        groups_composited += 1;
                     }
                 }
             }
         }
+        self.groups_composited = groups_composited;
         let encoded_at = Instant::now();
         let command_buffer = encoder.finish();
         phase(PresentPhase::QueueSubmit);
@@ -11625,7 +11906,7 @@ impl WindowRenderer {
                     dimension: wgpu::TextureDimension::D2,
                     format: self.config.format,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
+                    view_formats: &[self.config.format.remove_srgb_suffix()],
                 });
             }
         }
@@ -11679,6 +11960,206 @@ impl WindowRenderer {
             // `Unavailable` means — and the skip it turns into is the right
             // answer, because the picture is unchanged and still owed.
             FrameTarget::Surrendered => SurfaceAcquisition::Failed(SurfaceFailure::Unavailable),
+        }
+    }
+
+    /// Draw one prepared overlay layer into the pass that is open — every channel,
+    /// in the order the overlay's z-order is built on.
+    ///
+    /// One function because the same layer is drawn by one of three passes — the
+    /// frame's own, a resumed one after a fading surface was put back, or a fading
+    /// surface's texture — and three copies of five channels would be three
+    /// chances to draw them in two orders.
+    fn draw_overlay_layer(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        gpu: &GpuContext,
+        layer: &PreparedOverlayLayer,
+        index: usize,
+        video: Option<(&wgpu::Buffer, &[VideoDraw])>,
+        surface: (u32, u32),
+    ) -> Result<(), RenderError> {
+        // The grounds first, as they are in the chrome's own pass and for the same
+        // reason: a ground is the surface the rest of this layer is struck on. The
+        // blend constant is this layer's opacity, which is the whole of how a
+        // floating ground fades — see [`create_ground_fade_rect_pipeline`].
+        if let Some(buffer) = layer.ground_buffer.as_ref() {
+            let fade = f64::from(layer.ground_opacity);
+            pass.set_pipeline(&gpu.ground_fade_rect_pipeline);
+            pass.set_blend_constant(wgpu::Color {
+                r: fade,
+                g: fade,
+                b: fade,
+                a: fade,
+            });
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..layer.ground_count);
+        }
+        // **A video playing in this floating window**, over its ground and under
+        // everything it draws on top (route B slice ②; §7.44 ③). Here and not in
+        // the seat's slot because a float's face is opaque and a video under it is
+        // a video nobody sees; here and not last of everything because a float
+        // stacked over this one has to cover it, which is the whole reason the
+        // layer order is the z-order. Drawn wherever the layer is drawn, so a video
+        // on a fading surface fades with it.
+        if let Some((vertex_buffer, draws)) = video {
+            draw_video_stage(
+                pass,
+                gpu,
+                vertex_buffer,
+                draws,
+                VideoStage::Overlay(index),
+                surface,
+            );
+        }
+        if let Some(buffer) = layer.rect_buffer.as_ref() {
+            pass.set_pipeline(&gpu.rect_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..layer.rect_count);
+        }
+        // **And then the part of this layer that is not there** (§7.14c): a float
+        // carrying a page has just painted its own face across the rectangle the
+        // page lives in, and the page is composed *under* this whole surface. So
+        // the hole is punched here — over this layer's ground and its fills, and
+        // under its marks, its captions and every layer above it, which are all
+        // things that legitimately stand over a page.
+        if let Some(buffer) = layer.hole_buffer.as_ref() {
+            pass.set_pipeline(&gpu.ground_rect_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..layer.hole_count);
+        }
+        if let Some(buffer) = layer.icon_buffer.as_ref() {
+            pass.set_pipeline(&gpu.math_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            for draw in &layer.icon_draws {
+                pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
+                pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+            }
+        }
+        if layer.text_prepared {
+            self.overlay_text_renderers[index]
+                .render(&gpu.atlas, &self.text_viewport, pass)
+                .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// **The frame seen as bytes** — the view of this frame's attachment
+    /// without its sRGB suffix, which a fading surface is put back through (see
+    /// [`OverlayGroup`]). Both kinds of target are made with that view format
+    /// allowed: the swapchain in `configure_window_surface`, the offscreen
+    /// texture where it is made.
+    fn bytes_view(&self, acquired: &AcquiredFrame) -> wgpu::TextureView {
+        let descriptor = wgpu::TextureViewDescriptor {
+            format: Some(self.config.format.remove_srgb_suffix()),
+            ..wgpu::TextureViewDescriptor::default()
+        };
+        match acquired {
+            AcquiredFrame::Swapchain(frame) => frame.texture.create_view(&descriptor),
+            AcquiredFrame::Offscreen => {
+                let FrameTarget::Offscreen(texture) = &self.target else {
+                    unreachable!("an offscreen frame is only acquired from an offscreen target");
+                };
+                texture.create_view(&descriptor)
+            }
+        }
+    }
+
+    /// **Put one fading surface back** — group `index` of `plan`, from the
+    /// texture it was drawn into onto `target`, a bytes-view, at the group's
+    /// opacity and whole-pixel offset (see `group.wgsl`).
+    ///
+    /// The surface's own grounds are cut out of the part put back *over* and
+    /// put back by cross-fade instead: a ground is the window, not something on
+    /// it (see [`OverlayGroup`]). Grounds of a surface nested inside this one
+    /// are not cut out: that surface was put back into this texture already and
+    /// is, to this one, what it has become.
+    fn composite_group(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        gpu: &GpuContext,
+        plan: &GroupPlan,
+        index: usize,
+        target: &wgpu::TextureView,
+        surface: (u32, u32),
+    ) {
+        let group = &plan.groups[index];
+        let source = &self.group_targets[index];
+        let [dx, dy] = group.offset;
+        let (dx, dy) = (dx as f32, dy as f32);
+        let (width, height) = (surface.0 as f32, surface.1 as f32);
+        // Every pixel whose texel is on the texture: the frame, moved by the
+        // offset, cut to the frame.
+        let bounds = [
+            dx.max(0.0),
+            dy.max(0.0),
+            (width + dx).min(width),
+            (height + dy).min(height),
+        ];
+        if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
+            return;
+        }
+        let grounds: Vec<[f32; 4]> = plan
+            .items(group.layers.clone(), Some(index))
+            .into_iter()
+            .filter_map(|item| match item {
+                GroupItem::Layer(layer) => self.overlay_layers.get(layer),
+                GroupItem::Group(_) => None,
+            })
+            .flat_map(|layer| layer.grounds.iter())
+            .map(|ground| {
+                let [left, top, right, bottom] = ground.rect;
+                [left + dx, top + dy, right + dx, bottom + dy]
+            })
+            .collect();
+        let over = rects_outside(bounds, &grounds);
+        let cross_fade = if grounds.is_empty() {
+            Vec::new()
+        } else {
+            rects_outside(bounds, &over)
+        };
+        let mut instances = group_instances(&over, group.offset, group.opacity, surface);
+        instances.extend(group_instances(
+            &cross_fade,
+            group.offset,
+            group.opacity,
+            surface,
+        ));
+        if instances.is_empty() {
+            return;
+        }
+        let buffer = gpu.vertex_buffer("overlay group composite", instances.as_slice());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("overlay group composite"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        let over_count = over.len() as u32;
+        if over_count > 0 {
+            pass.set_pipeline(&gpu.group_pipelines.over);
+            pass.set_bind_group(0, &source.decoded, &[]);
+            pass.draw(0..6, 0..over_count);
+        }
+        if !cross_fade.is_empty() {
+            let fade = f64::from(group.opacity);
+            pass.set_pipeline(&gpu.group_pipelines.cross_fade);
+            pass.set_bind_group(0, &source.raw, &[]);
+            pass.set_blend_constant(wgpu::Color {
+                r: fade,
+                g: fade,
+                b: fade,
+                a: fade,
+            });
+            pass.draw(0..6, over_count..instances.len() as u32);
         }
     }
 
@@ -16654,6 +17135,116 @@ fn ground_fade_blend() -> wgpu::BlendState {
     }
 }
 
+/// One rectangle of a fading surface put back on the frame — see `group.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct GroupInstance {
+    /// The rectangle in clip space, the rect pipeline's own encoding.
+    rect: [f32; 4],
+    /// The group's whole-pixel offset: the texel is the pixel minus this.
+    offset: [f32; 2],
+    opacity: f32,
+}
+
+/// **How a fading surface goes back onto the frame** — the two pipelines of
+/// `group.wgsl` and the one texture binding they share.
+///
+/// Built against the frame's format *without* its sRGB suffix, and that is the
+/// whole point: a pass on that view blends the bytes as they are stored, which
+/// is what a browser does with `opacity`, while every other pipeline in this
+/// crate blends on the sRGB view, in linear light.
+struct GroupPipelines {
+    layout: wgpu::BindGroupLayout,
+    /// Everything a surface lays *on* the window: `src + dst·(1 − αs)`, the
+    /// source already multiplied by the group's opacity.
+    over: wgpu::RenderPipeline,
+    /// A ground's pixels: `src + dst·(1 − o)`, with `o` the blend constant — the
+    /// lerp [`ground_fade_blend`] is, on encoded bytes.
+    cross_fade: wgpu::RenderPipeline,
+}
+
+fn create_group_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> GroupPipelines {
+    let target = format.remove_srgb_suffix();
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("overlay group texture layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("overlay group shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("group.wgsl").into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("overlay group pipeline layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = |label: &str, entry: &str, blend: wgpu::BlendState| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vertex"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<GroupInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4,
+                        1 => Float32x2,
+                        2 => Float32,
+                    ],
+                })],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some(entry),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target,
+                    blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+    let cross_fade = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusConstant,
+        operation: wgpu::BlendOperation::Add,
+    };
+    GroupPipelines {
+        over: pipeline(
+            "overlay group over",
+            "over",
+            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+        ),
+        cross_fade: pipeline(
+            "overlay group cross-fade",
+            "cross_fade",
+            wgpu::BlendState {
+                color: cross_fade,
+                alpha: cross_fade,
+            },
+        ),
+        layout,
+    }
+}
+
 fn create_rect_pipeline_with_blend(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -17381,6 +17972,287 @@ fn indexed_color(index: u8) -> [u8; 3] {
 /// The viewport is set to the whole surface every time. A layer's box is already
 /// in the window's own coordinates — the caller may be inside a seat's viewport
 /// or a float's, and neither is the space these quads were computed in.
+/// **A texture one fading surface is drawn into** — see [`OverlayGroup`].
+///
+/// The size of the frame and in the frame's format, so that every overlay
+/// pipeline draws into it unchanged and at the frame's own coordinates: a
+/// glyph's clip space, a scissor and the video mask's framebuffer position all
+/// speak window pixels, and a texture cut to the surface's bounds would have had
+/// to teach each of them an origin.
+struct GroupTarget {
+    size: (u32, u32),
+    /// The sRGB view: what the surface is drawn into, and what `over` loads —
+    /// decoded to linear light, premultiplied.
+    colour: wgpu::TextureView,
+    /// The view without the sRGB suffix: what a surface nested inside this one
+    /// is put back through, and what `cross_fade` loads — the stored bytes.
+    bytes: wgpu::TextureView,
+    decoded: wgpu::BindGroup,
+    raw: wgpu::BindGroup,
+}
+
+impl GroupTarget {
+    fn new(gpu: &GpuContext, format: wgpu::TextureFormat, size: (u32, u32)) -> Self {
+        let bytes_format = format.remove_srgb_suffix();
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("overlay group texture"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[bytes_format],
+        });
+        let colour = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bytes = texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(bytes_format),
+            ..wgpu::TextureViewDescriptor::default()
+        });
+        let bind = |label: &str, view: &wgpu::TextureView| {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &gpu.group_pipelines.layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                }],
+            })
+        };
+        let decoded = bind("overlay group, decoded", &colour);
+        let raw = bind("overlay group, raw", &bytes);
+        Self {
+            size,
+            colour,
+            bytes,
+            decoded,
+            raw,
+        }
+    }
+}
+
+/// One group as it is drawn this frame: every span naming the same layers
+/// folded into one.
+///
+/// Two groups over the same layers are one surface faded twice — a tip still
+/// fading in when its departure begins — and compositing it at `o₁` and then
+/// at `o₂` is compositing it at `o₁·o₂`, exactly, grounds included. Folding them
+/// here is that identity, and it leaves nesting to mean what it looks like:
+/// one surface standing inside another.
+#[derive(Clone, Debug, PartialEq)]
+struct DrawnGroup {
+    layers: std::ops::Range<usize>,
+    opacity: f32,
+    offset: [i32; 2],
+}
+
+impl DrawnGroup {
+    fn at_rest(&self) -> bool {
+        self.opacity >= 1.0 && self.offset == [0, 0]
+    }
+}
+
+/// What one run of the overlay is made of, in drawing order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GroupItem {
+    /// A layer drawn straight onto whatever this run is being drawn into.
+    Layer(usize),
+    /// A surface drawn into its own texture and put back here — an index into
+    /// [`GroupPlan::groups`].
+    Group(usize),
+}
+
+/// **Which fading surfaces are drawn apart this frame, and in what order** —
+/// the whole of the group decision, taken once per frame from the spans.
+///
+/// A group at rest is not in it at all: its layers are drawn where they stand,
+/// which is what makes a frame with nothing fading the frame this renderer drew
+/// before groups existed. A group drawn at nothing is not in it either, and
+/// neither are its layers: a surface at opacity zero is not on the glass.
+#[derive(Debug, Default)]
+struct GroupPlan {
+    /// The surfaces drawn apart, sorted by first layer and, among those, widest
+    /// first.
+    groups: Vec<DrawnGroup>,
+    /// Layers inside a surface drawn at nothing.
+    hidden: Vec<std::ops::Range<usize>>,
+}
+
+impl GroupPlan {
+    fn new(groups: &[OverlayGroup], layer_count: usize) -> Self {
+        let mut drawn: Vec<DrawnGroup> = Vec::new();
+        for group in groups {
+            let layers = group.layers.start.min(layer_count)..group.layers.end.min(layer_count);
+            if layers.is_empty() {
+                continue;
+            }
+            let opacity = f32::from(group.drawn_opacity()) / 255.0;
+            let [dx, dy] = group.drawn_offset();
+            match drawn.iter_mut().find(|held| held.layers == layers) {
+                Some(held) => {
+                    held.opacity *= opacity;
+                    held.offset = [held.offset[0] + dx, held.offset[1] + dy];
+                }
+                None => drawn.push(DrawnGroup {
+                    layers,
+                    opacity,
+                    offset: [dx, dy],
+                }),
+            }
+        }
+        let hidden = drawn
+            .iter()
+            .filter(|group| group.opacity <= 0.0)
+            .map(|group| group.layers.clone())
+            .collect();
+        drawn.retain(|group| !group.at_rest() && group.opacity > 0.0);
+        drawn.sort_by(|a, b| {
+            a.layers
+                .start
+                .cmp(&b.layers.start)
+                .then(b.layers.end.cmp(&a.layers.end))
+        });
+        Self {
+            groups: drawn,
+            hidden,
+        }
+    }
+
+    fn hidden(&self, layer: usize) -> bool {
+        self.hidden.iter().any(|range| range.contains(&layer))
+    }
+
+    /// The items of `range`, which is either the whole overlay (`inside: None`)
+    /// or the span of group `inside` itself.
+    fn items(&self, range: std::ops::Range<usize>, inside: Option<usize>) -> Vec<GroupItem> {
+        let mut items = Vec::new();
+        let mut at = range.start;
+        while at < range.end {
+            let child = self
+                .groups
+                .iter()
+                .enumerate()
+                .filter(|(index, group)| {
+                    Some(*index) != inside
+                        && group.layers.start == at
+                        && group.layers.end <= range.end
+                })
+                .max_by_key(|(_, group)| group.layers.end)
+                .map(|(index, _)| index);
+            match child {
+                Some(index) => {
+                    items.push(GroupItem::Group(index));
+                    at = self.groups[index].layers.end;
+                }
+                None => {
+                    if !self.hidden(at) {
+                        items.push(GroupItem::Layer(at));
+                    }
+                    at += 1;
+                }
+            }
+        }
+        items
+    }
+}
+
+/// `bounds` less every rectangle in `cut`, as rectangles — for the part of a
+/// group that composites *over* the frame once its grounds are taken out.
+///
+/// Cut into horizontal slabs at every edge in play and, inside each slab, into
+/// the runs no cut covers. Each piece reuses the very `f32` edges it was cut
+/// from, so a piece and the ground beside it rasterise to a partition of the
+/// pixels between them: no pixel is put back twice, and none is missed.
+fn rects_outside(bounds: [f32; 4], cut: &[[f32; 4]]) -> Vec<[f32; 4]> {
+    let cut: Vec<[f32; 4]> = cut
+        .iter()
+        .filter_map(|rect| crop_to(*rect, bounds))
+        .collect();
+    if cut.is_empty() {
+        return vec![bounds];
+    }
+    let mut edges: Vec<f32> = vec![bounds[1], bounds[3]];
+    for rect in &cut {
+        edges.push(rect[1]);
+        edges.push(rect[3]);
+    }
+    edges.sort_by(f32::total_cmp);
+    edges.dedup();
+    let mut pieces = Vec::new();
+    for slab in edges.windows(2) {
+        let (top, bottom) = (slab[0], slab[1]);
+        let mut covered: Vec<(f32, f32)> = cut
+            .iter()
+            .filter(|rect| rect[1] <= top && rect[3] >= bottom)
+            .map(|rect| (rect[0], rect[2]))
+            .collect();
+        covered.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut left = bounds[0];
+        for (from, to) in covered {
+            if from > left {
+                pieces.push([left, top, from, bottom]);
+            }
+            left = left.max(to);
+        }
+        if left < bounds[2] {
+            pieces.push([left, top, bounds[2], bottom]);
+        }
+    }
+    pieces
+}
+
+/// A group's pieces in clip space, ready for `group.wgsl`.
+fn group_instances(
+    rects: &[[f32; 4]],
+    offset: [i32; 2],
+    opacity: f32,
+    surface: (u32, u32),
+) -> Vec<GroupInstance> {
+    rects
+        .iter()
+        .map(|rect| GroupInstance {
+            rect: surface_pixel_rect_with_alpha(*rect, [0, 0, 0], 0.0, surface.0, surface.1).rect,
+            offset: [offset[0] as f32, offset[1] as f32],
+            opacity,
+        })
+        .collect()
+}
+
+/// Open a pass over `view` with the overlay's whole-surface viewport and
+/// scissor — the state the overlay loop has always drawn in.
+fn begin_overlay_pass<'encoder>(
+    encoder: &'encoder mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
+    label: &str,
+    surface: (u32, u32),
+) -> wgpu::RenderPass<'encoder> {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    pass.set_viewport(0.0, 0.0, surface.0 as f32, surface.1 as f32, 0.0, 1.0);
+    set_scissor(
+        &mut pass,
+        SeatViewport::whole(surface.0, surface.1),
+        surface,
+    );
+    pass
+}
+
 fn draw_video_stage(
     pass: &mut wgpu::RenderPass<'_>,
     gpu: &GpuContext,
@@ -24929,7 +25801,7 @@ mod tests {
              report's window"
         );
         window.set_chrome(Vec::new(), fixture.chrome, Vec::new());
-        window.set_modal_overlay(vec![fixture.cards]);
+        window.set_modal_overlay(vec![fixture.cards], Vec::new());
         window.set_preview_bodies(vec![fixture.page]);
 
         let outcome = window
@@ -25019,7 +25891,7 @@ mod tests {
         let mut in_another_ink = stress_label(text.clone(), RECT, FONT_PX, None, false);
         in_another_ink.color = [12, 200, 90];
         overlay.labels.push(in_another_ink);
-        window.set_modal_overlay(vec![overlay]);
+        window.set_modal_overlay(vec![overlay], Vec::new());
         // And the same characters at the same size on a page, in the same face —
         // a different shaper, a different lane, and the same fonts underneath.
         window.set_preview_bodies(vec![PreviewBody {
@@ -26294,59 +27166,62 @@ mod tests {
             height: HEIGHT,
         };
         let frame = single_cell_cursor_frame(window.base_metrics());
-        window.set_modal_overlay(vec![OverlayLayer {
-            quads: vec![
-                OverlayQuad {
-                    rect: FACE,
-                    color: [24, 24, 28],
-                    alpha: 1.0,
-                },
-                OverlayQuad {
-                    rect: RULE,
-                    color: [0, 0, 255],
-                    alpha: 1.0,
-                },
-            ],
-            labels: vec![ChromeLabel {
-                mono: false,
-                text: "CONVENTIONS.md".to_owned(),
-                rect: HEAD,
-                font_size_px: 18.0,
-                color: HEAD_INK,
-                align_right: false,
-                align_center: false,
-                letter_spacing_em: 0.0,
-                weight: ChromeLabelWeight::Regular,
-                tabular_numerals: false,
-                clip: None,
-            }],
-            body: Some(PreviewBody {
-                clip: BODY,
-                quads: Vec::new(),
-                paragraphs: vec![PreviewParagraph {
-                    runs: vec![PreviewRun {
-                        text: "every session reads this once".to_owned(),
-                        color: WORD_INK,
-                        mono: false,
-                        bold: false,
-                        italic: false,
-                        font_scale: 1.0,
-                        inline_box_px: None,
-                    }],
-                    rect: [BODY[0], BODY[1] + 4.0, BODY[2], BODY[1] + 28.0],
-                    font_size_px: 15.0,
-                    line_height_px: 22.0,
-                    wrap: true,
-                    letter_spacing_em: 0.0,
+        window.set_modal_overlay(
+            vec![OverlayLayer {
+                quads: vec![
+                    OverlayQuad {
+                        rect: FACE,
+                        color: [24, 24, 28],
+                        alpha: 1.0,
+                    },
+                    OverlayQuad {
+                        rect: RULE,
+                        color: [0, 0, 255],
+                        alpha: 1.0,
+                    },
+                ],
+                labels: vec![ChromeLabel {
+                    mono: false,
+                    text: "CONVENTIONS.md".to_owned(),
+                    rect: HEAD,
+                    font_size_px: 18.0,
+                    color: HEAD_INK,
                     align_right: false,
                     align_center: false,
-                    cell_advance: None,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
                 }],
-                blocks: Vec::new(),
-                rasters: Vec::new(),
-            }),
-            ..OverlayLayer::default()
-        }]);
+                body: Some(PreviewBody {
+                    clip: BODY,
+                    quads: Vec::new(),
+                    paragraphs: vec![PreviewParagraph {
+                        runs: vec![PreviewRun {
+                            text: "every session reads this once".to_owned(),
+                            color: WORD_INK,
+                            mono: false,
+                            bold: false,
+                            italic: false,
+                            font_scale: 1.0,
+                            inline_box_px: None,
+                        }],
+                        rect: [BODY[0], BODY[1] + 4.0, BODY[2], BODY[1] + 28.0],
+                        font_size_px: 15.0,
+                        line_height_px: 22.0,
+                        wrap: true,
+                        letter_spacing_em: 0.0,
+                        align_right: false,
+                        align_center: false,
+                        cell_advance: None,
+                    }],
+                    blocks: Vec::new(),
+                    rasters: Vec::new(),
+                }),
+                ..OverlayLayer::default()
+            }],
+            Vec::new(),
+        );
         let outcome = window
             .present_frame(
                 &mut gpu,
@@ -29898,13 +30773,14 @@ mod tests {
                 View::Raw,
                 "the overlay layer's hole draw",
             );
+            // The one function every pass that draws an overlay layer calls —
+            // the frame's own, a resumed one above a fading surface, and a
+            // fading surface's texture (overlay groups, 2026-09-24) — once per
+            // layer, which is what the loop over the stack used to be.
             let loop_ = only(
-                needle!(Pattern::text(concat!(
-                    "for (index, layer) in ",
-                    "overlay_draws.iter().enumerate()"
-                ))),
+                needle!(Pattern::text(concat!("fn draw_", "overlay_layer("))),
                 View::Raw,
-                "the overlay stack's own loop",
+                "the one drawer of an overlay layer",
             );
             assert!(
                 ground < hole,
@@ -29915,6 +30791,549 @@ mod tests {
                 loop_ < hole,
                 "the layer holes are not punched inside the stack's loop, so \
                  they cannot stand between two layers at all"
+            );
+        }
+    }
+
+    /// **Overlay group opacity, composited like CSS** (ticket 46; the fade
+    /// audit of 2026-09-23, its §6 red gates). Every pixel here is read back
+    /// from a real frame on the software adapter, over a ground this module lays
+    /// down itself, so the numbers are the audit's own: `#1B1B1B` under a
+    /// `#2A2A2A` plate, a `#E3E3E3` letter, the `--border` hairline at 24/255.
+    mod overlay_groups {
+        use std::sync::Arc;
+
+        use super::*;
+
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 320;
+        const HEIGHT: u32 = 240;
+        const GROUND: [u8; 3] = [0x1B, 0x1B, 0x1B];
+        const PLATE: [u8; 3] = [0x2A, 0x2A, 0x2A];
+        const INK: [u8; 3] = [0xE3, 0xE3, 0xE3];
+        /// The card's frame, and the point inside it where nothing but the
+        /// plate is drawn.
+        const CARD: [f32; 4] = [60.0, 50.0, 260.0, 190.0];
+        const INTERIOR: (u32, u32) = (72, 60);
+        /// Where the letter stands, clear of `INTERIOR`.
+        const LETTER: [f32; 4] = [120.0, 70.0, 220.0, 180.0];
+
+        /// Layer 0: the frame's ground, laid down by this module so that every
+        /// expected value is arithmetic on bytes it chose.
+        fn ground_layer() -> OverlayLayer {
+            OverlayLayer {
+                quads: vec![OverlayQuad {
+                    rect: [0.0, 0.0, WIDTH as f32, HEIGHT as f32],
+                    color: GROUND,
+                    alpha: 1.0,
+                }],
+                ..OverlayLayer::default()
+            }
+        }
+
+        /// A floating plate as `settings::push_float_window` draws one: a
+        /// shadow band outside the frame, the face over the whole frame, the
+        /// `--border` hairline over the whole frame, the face again one border
+        /// in — and a letter on it.
+        fn card_layer() -> OverlayLayer {
+            let [left, top, right, bottom] = CARD;
+            OverlayLayer {
+                quads: vec![
+                    OverlayQuad {
+                        rect: [left - 6.0, top - 6.0, right + 6.0, bottom + 6.0],
+                        color: [0, 0, 0],
+                        alpha: 0.3,
+                    },
+                    OverlayQuad {
+                        rect: CARD,
+                        color: PLATE,
+                        alpha: 1.0,
+                    },
+                    OverlayQuad {
+                        rect: CARD,
+                        color: [255, 255, 255],
+                        alpha: 24.0 / 255.0,
+                    },
+                    OverlayQuad {
+                        rect: [left + 1.0, top + 1.0, right - 1.0, bottom - 1.0],
+                        color: PLATE,
+                        alpha: 1.0,
+                    },
+                ],
+                labels: vec![ChromeLabel {
+                    mono: false,
+                    text: "I".to_owned(),
+                    rect: LETTER,
+                    font_size_px: 96.0,
+                    color: INK,
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
+                }],
+                ..OverlayLayer::default()
+            }
+        }
+
+        fn group(layers: std::ops::Range<usize>, opacity: f32) -> OverlayGroup {
+            OverlayGroup {
+                layers,
+                opacity,
+                offset: [0.0, 0.0],
+            }
+        }
+
+        fn window(gpu: &mut GpuContext) -> WindowRenderer {
+            WindowRenderer::offscreen(gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window")
+        }
+
+        fn present(window: &mut WindowRenderer, gpu: &mut GpuContext) -> Vec<[u8; 4]> {
+            let seat = SeatViewport::whole(WIDTH, HEIGHT);
+            let frame = single_cell_cursor_frame(window.base_metrics());
+            window
+                .present_frame(
+                    gpu,
+                    &[SeatFrame {
+                        metrics: window.base_metrics(),
+                        seat,
+                        clip: seat,
+                        frame: &frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("one frame");
+            window.read_back(gpu).expect("the frame reads back")
+        }
+
+        /// The red channel of a BGRA pixel — every ink here is a grey.
+        fn at(pixels: &[[u8; 4]], (x, y): (u32, u32)) -> u8 {
+            pixels[(y * WIDTH + x) as usize][2]
+        }
+
+        fn brightest(pixels: &[[u8; 4]], rect: [f32; 4]) -> u8 {
+            let mut most = 0;
+            for y in rect[1] as u32..rect[3] as u32 {
+                for x in rect[0] as u32..rect[2] as u32 {
+                    most = most.max(at(pixels, (x, y)));
+                }
+            }
+            most
+        }
+
+        fn digest(pixels: &[[u8; 4]]) -> u64 {
+            let mut state = FNV_1A_64_OFFSET_BASIS;
+            for pixel in pixels {
+                fnv_write(&mut state, pixel);
+            }
+            state
+        }
+
+        /// The card at rest, with no group and with none in play: the frame
+        /// this renderer drew before groups existed.
+        ///
+        /// Recorded on BASE `883143d5` on the software adapter, through
+        /// BASE's own `set_modal_overlay(layers)`: see the ticket 46 report.
+        const AT_REST_ON_BASE: u64 = 0x2e17_cdb3_09f1_9400;
+
+        /// RED (46) — **a card fading at one half reads as CSS `opacity` on the
+        /// whole card, not as its parts faded one by one.**
+        ///
+        /// The audit's gate (a). Folded into each primitive and blended in linear
+        /// light — BASE's fade, drawn here first as the contrast — the hairline
+        /// shows through the face laid over it and the plate comes out `#3B`,
+        /// brighter mid-fade than it ever is at rest, while the letter is
+        /// already `#AB`. Drawn whole and composited once on encoded bytes, the
+        /// plate is `#22` (half-way from `#1B` to `#2A`) and the letter `#7F`
+        /// (half-way from `#1B` to `#E3`), which is what a browser draws for
+        /// `.card { opacity: .5 }`.
+        ///
+        /// MUTATION: make `DrawnGroup::at_rest` answer `true` and the group is
+        /// drawn straight onto the frame at full strength — the plate reads
+        /// `#2A` and the letter `#E3`.
+        #[test]
+        fn a_card_fading_at_one_half_reads_as_css_opacity_on_the_whole_card() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+
+            let mut folded = card_layer();
+            folded.opacity = 0.5;
+            window.set_modal_overlay(vec![ground_layer(), folded], Vec::new());
+            let base = present(&mut window, &mut gpu);
+            let (plate, letter) = (at(&base, INTERIOR), brightest(&base, LETTER));
+            assert!(
+                plate >= 0x38 && letter >= 0xA8,
+                "folded per primitive the plate overshoots and the letter leads \
+                 (the audit's #3B / #AB); read {plate:#04x} / {letter:#04x}"
+            );
+
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], vec![group(1..2, 0.5)]);
+            let pixels = present(&mut window, &mut gpu);
+            let (plate, letter) = (at(&pixels, INTERIOR), brightest(&pixels, LETTER));
+            assert!(
+                (0x21..=0x23).contains(&plate),
+                "the plate at one half should be #22 (CSS), read {plate:#04x}"
+            );
+            assert!(
+                (0x7E..=0x80).contains(&letter),
+                "a #E3 letter at one half should be #7F (CSS), read {letter:#04x}"
+            );
+            assert_eq!(window.overlay_groups_composited(), 1);
+        }
+
+        /// PIN (46) — **a surface at rest draws the bytes it drew before groups
+        /// existed**, group or no group.
+        ///
+        /// The audit's gate (b). At opacity 1 and no offset the group path is
+        /// never taken, so a window with nothing fading pays nothing and shows
+        /// nothing new: the frame with the card's span declared is the frame
+        /// without it, and both are BASE's frame, byte for byte (the digest was
+        /// read on BASE, on this adapter, from this fixture). The frame's own
+        /// target now allows a bytes-view beside its sRGB one; this also pins
+        /// that allowing it changed no byte.
+        ///
+        /// MUTATION: make `DrawnGroup::at_rest` answer `false` and the card is
+        /// put back through a texture at opacity 1 — its shadow and its
+        /// antialiased edges blended on encoded bytes rather than in linear
+        /// light — and the digests part.
+        #[test]
+        fn a_surface_at_rest_draws_the_same_bytes_as_before_groups_existed() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], Vec::new());
+            let plain = present(&mut window, &mut gpu);
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], vec![group(1..2, 1.0)]);
+            let grouped = present(&mut window, &mut gpu);
+            eprintln!("BT_OVERLAY_GROUP at_rest_digest={:016x}", digest(&plain));
+            assert_eq!(window.overlay_groups_composited(), 0);
+            assert!(plain == grouped, "a group at rest changed the frame");
+            assert_eq!(
+                digest(&plain),
+                AT_REST_ON_BASE,
+                "the frame at rest is not BASE's frame"
+            );
+        }
+
+        /// RED (46) — **a group whose opacity draws as 255/255 and whose offset
+        /// is under half a pixel is at rest, and never takes the group path.**
+        ///
+        /// The audit's gate (c), the renderer's half: reduced motion hands every
+        /// surface opacity 1 and no travel (the producers' half is pinned in
+        /// `bt-app`), and what that must buy is the frame's own command stream —
+        /// no texture, no composite, no pass broken. A curve settling through
+        /// its last 1/255 is at rest by the same rule, which is the rule
+        /// `Passages::drawn` already counts frame debt by.
+        ///
+        /// MUTATION: drop `drawn.retain(..)` in `GroupPlan::new` and every
+        /// declared span is composited, at rest or not.
+        #[test]
+        fn a_group_at_rest_never_takes_the_group_path() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let settled = OverlayGroup {
+                layers: 1..2,
+                opacity: 0.999,
+                offset: [0.3, -0.4],
+            };
+            assert!(settled.at_rest());
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], vec![settled]);
+            let _ = present(&mut window, &mut gpu);
+            assert_eq!(window.overlay_groups_composited(), 0);
+            assert!(
+                window.group_targets.is_empty(),
+                "a window with nothing fading holds no group texture"
+            );
+        }
+
+        /// RED (46) — **a web page's hole inside a fading surface is a defect
+        /// the debug build names.**
+        ///
+        /// The audit's gate (d). A page is a native view composed under this
+        /// whole surface and seen through a hole; nothing wgpu draws can fade
+        /// it, so a hole inside a fading span would leave the page standing
+        /// solid while its window dissolved round it. No producer builds one
+        /// (a preview float never fades; a glance card over a page draws text),
+        /// and this is where the day one does is caught.
+        ///
+        /// MUTATION: delete the `debug_assert!` beside `GroupPlan::new` in
+        /// `compose_frame` and the frame is drawn without a word.
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic(expected = "a web page's hole inside a fading overlay surface")]
+        fn a_web_hole_inside_a_fading_surface_panics_in_a_debug_build() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window = window(&mut gpu);
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], vec![group(1..2, 0.5)]);
+            window.set_web_holes(vec![WebHole {
+                rect: [80.0, 80.0, 200.0, 160.0],
+                above: Some(1),
+            }]);
+            let _ = present(&mut window, &mut gpu);
+        }
+
+        /// RED (46) — **a video playing on a fading card fades with it.**
+        ///
+        /// The audit's gate (e), and its F1: `Runtime::video_layers` hands
+        /// every picture opacity 1, so on BASE a recording on the glance card
+        /// stood at full strength from the card's first frame. A video on an
+        /// overlay layer is drawn wherever that layer is drawn, so inside a
+        /// span it is drawn into the surface's texture and put back with the
+        /// rest of the card: pure green at one half over `#1B` is `#0E8D0E`.
+        ///
+        /// MUTATION: draw the `VideoStage::Overlay` stages in the frame's own
+        /// pass only (drop the `video` argument of the group pass's
+        /// `draw_overlay_layer`) and the picture is missing from the card, or,
+        /// with the group path dropped, at full strength on it.
+        #[test]
+        fn a_video_playing_on_a_fading_card_fades_with_it() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let slot = SeatViewport {
+                x: 80,
+                y: 70,
+                width: 60,
+                height: 40,
+            };
+            // The card's slot is a layer of its own, above the plate — the shape
+            // `file_peek::build` gives a card with a recording on it.
+            window.set_modal_overlay(
+                vec![ground_layer(), card_layer(), OverlayLayer::default()],
+                vec![group(1..3, 0.5)],
+            );
+            window.set_video_layers(vec![VideoLayer {
+                stage: VideoStage::Overlay(2),
+                key: "a recording on the card".to_owned(),
+                box_: slot,
+                clip: slot,
+                frame: Some(VideoFrameUpload {
+                    bgra: Arc::from(vec![0_u8, 255, 0, 255].into_boxed_slice()),
+                    width_px: 1,
+                    height_px: 1,
+                    generation: 1,
+                }),
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+            }]);
+            let pixels = present(&mut window, &mut gpu);
+            let [blue, green, red, _] = pixels[(90 * WIDTH + 110) as usize];
+            assert!(
+                (0x8C..=0x8E).contains(&green) && (0x0D..=0x0F).contains(&red),
+                "green at one half over #1B should read #0E8D0E, read \
+                 r={red:#04x} g={green:#04x} b={blue:#04x}"
+            );
+        }
+
+        /// RED (46) — **spans nest, and a surface fading inside a fading
+        /// surface is faded by both.**
+        ///
+        /// The audit's gate (g): a video bar fading on a card that is itself
+        /// fading. The inner surface is put back into the outer one's texture
+        /// before the outer one is put back into the frame, which is exactly
+        /// CSS's nesting: a white bar at one half on the plate is `#94`
+        /// inside the card, and the card at one half over `#1B` makes it `#58`
+        /// — the bar's own contribution a quarter, the product of the two.
+        ///
+        /// MUTATION: skip `GroupItem::Group` items inside a group's own pass
+        /// (put back only the outermost surfaces) and the bar vanishes; draw
+        /// the inner span's layers directly instead and it reads `#91`.
+        #[test]
+        fn nested_spans_multiply() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let bar = OverlayLayer {
+                quads: vec![OverlayQuad {
+                    rect: [80.0, 150.0, 240.0, 175.0],
+                    color: [255, 255, 255],
+                    alpha: 1.0,
+                }],
+                ..OverlayLayer::default()
+            };
+            window.set_modal_overlay(
+                vec![ground_layer(), card_layer(), bar],
+                vec![group(1..3, 0.5), group(2..3, 0.5)],
+            );
+            let pixels = present(&mut window, &mut gpu);
+            let plate = at(&pixels, INTERIOR);
+            let bar = at(&pixels, (90, 160));
+            assert!(
+                (0x21..=0x23).contains(&plate),
+                "the plate at one half should be #22, read {plate:#04x}"
+            );
+            assert!(
+                (0x57..=0x59).contains(&bar),
+                "a white bar at one half on a card at one half should be #58, \
+                 read {bar:#04x}"
+            );
+            assert_eq!(window.overlay_groups_composited(), 2);
+        }
+
+        /// RED (46) — **a ground inside a fading surface cross-fades, and the
+        /// frame beside it is left alone.**
+        ///
+        /// The rail's fold: its panel is a ground — the window itself at that
+        /// place — and its shade falls outside the panel, across the panes. The
+        /// panel's pixels are lerped against what stands under the group, so a
+        /// `#2A` panel at one half over `#1B` is `#22`; the shade is composited
+        /// over, so black at one half, faded to a half again, takes a quarter
+        /// off `#1B`; and a pixel the surface never touched is `#1B` exactly.
+        /// A constant cross-fade over the whole surface (the audit's first
+        /// sketch of `CrossFade`) would have darkened that pixel to `#0E`.
+        ///
+        /// MUTATION: put the grounds back with the `over` pipeline (drop the
+        /// cut in `composite_group`) and the panel keeps its `(1 − o·αs)`
+        /// arithmetic — still `#22` on an opaque window, so the pin on the
+        /// untouched pixel is the one that carries it; route the whole
+        /// surface through `cross_fade` and that pixel reads `#0E`.
+        #[test]
+        fn a_ground_in_a_fading_surface_cross_fades_and_the_frame_beside_it_is_untouched() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let rail = OverlayLayer {
+                grounds: vec![OverlayGround {
+                    rect: [0.0, 0.0, 100.0, HEIGHT as f32],
+                    color: PLATE,
+                }],
+                quads: vec![OverlayQuad {
+                    rect: [100.0, 0.0, 140.0, HEIGHT as f32],
+                    color: [0, 0, 0],
+                    alpha: 0.5,
+                }],
+                ..OverlayLayer::default()
+            };
+            window.set_modal_overlay(vec![ground_layer(), rail], vec![group(1..2, 0.5)]);
+            let pixels = present(&mut window, &mut gpu);
+            let (panel, shade, untouched) = (
+                at(&pixels, (50, 120)),
+                at(&pixels, (120, 120)),
+                at(&pixels, (250, 120)),
+            );
+            assert!(
+                (0x21..=0x23).contains(&panel),
+                "the panel at one half should be #22, read {panel:#04x}"
+            );
+            assert!(
+                (0x13..=0x15).contains(&shade),
+                "black at a quarter over #1B should be #14, read {shade:#04x}"
+            );
+            assert_eq!(
+                untouched, 0x1B,
+                "a pixel the fading surface never touched was changed"
+            );
+        }
+
+        /// PIN (46) — **a group's offset moves the whole surface by whole
+        /// pixels.** A menu four pixels short of its place is the menu, four
+        /// pixels up: the plate's top edge row reads the plate at `top + dy`
+        /// and the ground one row above it.
+        ///
+        /// MUTATION: drop `input.offset` from `texel` in `group.wgsl` and the
+        /// surface is drawn in place.
+        #[test]
+        fn an_offset_moves_the_whole_surface_by_whole_pixels() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            window.set_modal_overlay(
+                vec![ground_layer(), card_layer()],
+                vec![OverlayGroup {
+                    layers: 1..2,
+                    opacity: 0.5,
+                    offset: [0.0, -4.0],
+                }],
+            );
+            let pixels = present(&mut window, &mut gpu);
+            let top = CARD[1] as u32;
+            let x = INTERIOR.0;
+            assert!(
+                (0x21..=0x23).contains(&at(&pixels, (x, top - 4 + 2))),
+                "the plate was not moved up by four"
+            );
+            assert!(
+                at(&pixels, (x, CARD[3] as u32 - 2)) < 0x1B,
+                "the plate's old bottom rows should now show the shadow under it"
+            );
+        }
+
+        /// PIN (46) — **the part of a surface put back over, and the part put
+        /// back by cross-fade, share every pixel exactly once.**
+        #[test]
+        fn the_pieces_outside_the_grounds_and_the_grounds_partition_the_frame() {
+            let bounds = [0.0, 0.0, 50.0, 40.0];
+            let cut = [[10.0, 5.0, 30.0, 20.0], [25.0, 15.0, 45.0, 35.0]];
+            let over = rects_outside(bounds, &cut);
+            let cross = rects_outside(bounds, &over);
+            let covers = |rects: &[[f32; 4]], x: f32, y: f32| {
+                rects
+                    .iter()
+                    .filter(|r| r[0] <= x && x < r[2] && r[1] <= y && y < r[3])
+                    .count()
+            };
+            for y in 0..40 {
+                for x in 0..50 {
+                    let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let in_cut = cut
+                        .iter()
+                        .any(|r| r[0] <= x && x < r[2] && r[1] <= y && y < r[3]);
+                    assert_eq!(covers(&over, x, y), usize::from(!in_cut), "over at {x},{y}");
+                    assert_eq!(
+                        covers(&cross, x, y),
+                        usize::from(in_cut),
+                        "cross at {x},{y}"
+                    );
+                }
+            }
+        }
+
+        /// PIN (46) — **where a layer stands is where its groups put it**: a
+        /// layer inside a surface drawn at nothing stands nowhere, and a layer
+        /// inside a travelling one stands moved.
+        #[test]
+        fn a_layers_bounds_follow_its_groups() {
+            let layers = vec![card_layer(), card_layer()];
+            let bounds = overlay_layer_bounds(
+                &layers,
+                &[
+                    OverlayGroup {
+                        layers: 0..1,
+                        opacity: 0.0,
+                        offset: [0.0, 0.0],
+                    },
+                    OverlayGroup {
+                        layers: 1..2,
+                        opacity: 0.5,
+                        offset: [3.0, -4.0],
+                    },
+                ],
+            );
+            assert_eq!(bounds[0], None);
+            let alone = card_layer().opaque_bounds().expect("the card stands");
+            assert_eq!(
+                bounds[1],
+                Some([
+                    alone[0] + 3.0,
+                    alone[1] - 4.0,
+                    alone[2] + 3.0,
+                    alone[3] - 4.0
+                ])
             );
         }
     }
@@ -31539,7 +32958,7 @@ mod tests {
             let mut gpu = on_this_machines_adapter(FORMAT);
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
-            window.set_modal_overlay(a_sentence_this_window_keeps());
+            window.set_modal_overlay(a_sentence_this_window_keeps(), Vec::new());
             let frame = single_cell_cursor_frame(window.base_metrics());
 
             one_frame(&mut window, &mut gpu, &frame).expect("the frame before the loss");
@@ -31768,8 +33187,8 @@ mod tests {
                 WindowRenderer::offscreen(&mut gpu, 320, 200, 1.0, FORMAT).expect("first window");
             let mut second =
                 WindowRenderer::offscreen(&mut gpu, 240, 160, 2.0, FORMAT).expect("second window");
-            first.set_modal_overlay(a_sentence_this_window_keeps());
-            second.set_modal_overlay(a_sentence_this_window_keeps());
+            first.set_modal_overlay(a_sentence_this_window_keeps(), Vec::new());
+            second.set_modal_overlay(a_sentence_this_window_keeps(), Vec::new());
             let frame = single_cell_cursor_frame(first.base_metrics());
             one_frame(&mut first, &mut gpu, &frame).expect("the first window's frame");
             one_frame(&mut second, &mut gpu, &frame).expect("the second window's frame");
@@ -31921,7 +33340,7 @@ mod tests {
             let mut gpu = on_this_machines_adapter(FORMAT);
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, 320, 200, 1.0, FORMAT).expect("a window");
-            window.set_modal_overlay(a_sentence_this_window_keeps());
+            window.set_modal_overlay(a_sentence_this_window_keeps(), Vec::new());
             let frame = single_cell_cursor_frame(window.base_metrics());
             one_frame(&mut window, &mut gpu, &frame).expect("the frame before the loss");
             let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));

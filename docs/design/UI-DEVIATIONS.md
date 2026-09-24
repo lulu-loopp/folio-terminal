@@ -15,7 +15,7 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 - **Platform:** every deviation is in code shared by the Windows and macOS builds, so every row applies to **both**.
 - **Rulings of 2026-09-22 folded in:** the icon-to-label gap is 8 everywhere (G1–G3); every head title is 11 (T1). The terminal pane's resting radius (0) and the two boolean controls (combo in Settings, switch on the first-run card) are rules as they stand and produce no rows.
 
-**Totals: 6 deviations, touching 6 constants.** A 0 · B 3 · C 1 · D 2.
+**Totals: 0 deviations, touching 0 constants.** A 0 · B 0 · C 0 · D 0.
 
 ---
 
@@ -28,22 +28,16 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 
 | # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
 |---|---|---|---|---|---|---|
-| 17 | S2 | Web sheet ("download not replayed") padding | `websheet.rs::PADDING_LOGICAL_PX` | 22 on all sides | 20 top / 22 sides / 16 bottom | Dialog padding (`restore.rs::DIALOG_PADDING_*`, `first_run.rs::PADDING_*`). |
-| 18 | E2 | Web sheet shadow | `websheet.rs::SHADOW_SPREAD_LOGICAL_PX` | 24 (u8) | 3 | `theme.rs::FLOAT_WINDOW_SHADOW_LOGICAL_PX`. |
-| 19 | R2 | Web sheet radius | `websheet.rs::RADIUS_LOGICAL_PX` | 8 | 10 | Dialog (`theme.rs::FLOAT_WINDOW_RADIUS_LOGICAL_PX`). The web sheet is scrimmed and modal. |
 
 ## Class C: barely visible
 
 | # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
 |---|---|---|---|---|---|---|
-| 25 | T5 | Other 11.5-pt captions: web sheet detail | `websheet.rs::DETAIL_FONT_LOGICAL_PX` | 11.5 | 11 | Caption (17 constants at 11). With T1, 11.5 leaves the product. |
 
 ## Class D: invisible (tidying only)
 
 | # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
 |---|---|---|---|---|---|---|
-| 38 | R8 | 22-pt boxes: web sheet close | `websheet.rs::CLOSE_RADIUS_LOGICAL_PX` | 6 | 5 | Tool box radius (`seats.rs::PREVIEW_TOOL_RADIUS_LOGICAL_PX` and 11 more). |
-| 43 | T10 | Float-tag line height | `websheet.rs::LINE_HEIGHT` | 1.5 | 1.4 | `CHROME_LINE_HEIGHT` in `toast.rs`, `tooltip.rs`, `peek_strip.rs`, `seats.rs`. Slight when text wraps. |
 
 ---
 
@@ -55,7 +49,7 @@ Each group is one ticket. A row whose constants live in several files is split a
 - **Settings** (`settings.rs`): I1, T2, H1 and the Settings members of T3/T4 fixed in ticket 17; S10, R9 and the Settings members of T5/T6/S8 fixed in ticket 24. No Settings members remain open.
 - **First-run** (`first_run.rs`): H4 fixed in ticket 21; S3 and T8 fixed in ticket 28. No first-run members remain open.
 - **Git panel + graph** (`git_panel.rs`, `git_graph.rs`): class-A members fixed in ticket 18; remaining members fixed in ticket 25 (listed below).
-- **Web sheet** (`websheet.rs`): S2, E2, R2; the `websheet.rs` members of T5, R8, T10.
+- **Web sheet** (`websheet.rs`): S2, E2, R2 and the web-sheet members of T5, R8, T10 fixed in ticket 30. No web-sheet members remain open.
 - **Pane head, files column, float window** (`seats.rs`, `theme.rs`, `float.rs`): class-A members fixed in ticket 19; H5, S5, F1, C1, R12 and the group members of G1, G3, T5 and I2 fixed in ticket 26 (listed below).
 - **Menus** (`profiles.rs`): T7 fixed in ticket 22; G2 fixed in ticket 29. No menu members remain open.
 - **Palette** (`palette.rs`): T3/T4 fixed in ticket 20; R3 and the palette members of G3 fixed in ticket 27. No palette members remain open.
@@ -115,6 +109,15 @@ Each group is one ticket. A row whose constants live in several files is split a
 ## Fixed in ticket 29
 
 - Row 15 / G2: `profiles.rs::ITEM_GAP_LOGICAL_PX` fixed at 8; row closed.
+
+## Fixed in ticket 30
+
+- Row 17 / S2: `websheet.rs::PADDING_LOGICAL_PX` split into `PADDING_TOP_LOGICAL_PX` (20), `PADDING_X_LOGICAL_PX` (22), and `PADDING_BOTTOM_LOGICAL_PX` (16); row closed.
+- Row 18 / E2: `websheet.rs::SHADOW_SPREAD_LOGICAL_PX` fixed at 3 logical pixels; row closed.
+- Row 19 / R2: `websheet.rs::RADIUS_LOGICAL_PX` fixed at 10; row closed.
+- Row 25 / T5: `websheet.rs::DETAIL_FONT_LOGICAL_PX` fixed at 11; restore member remains open.
+- Row 38 / R8: `websheet.rs::CLOSE_RADIUS_LOGICAL_PX` fixed at 5; other members remain open.
+- Row 43 / T10: `websheet.rs::LINE_HEIGHT` fixed at 1.4; row closed.
 
 ## Fixed in ticket 31
 

@@ -204,7 +204,7 @@ impl Runtime<'_> {
             .palette
             .as_ref()
             .map_or(0, palette::PaletteState::selected);
-        let layers = palette::build(&layout, &bt_render::chrome_palette(), selected, 1.0);
+        let layers = palette::build(&layout, &bt_render::chrome_palette(), selected);
         // The very box that was drawn, kept for the `&self` press router.
         self.window.palette_layout = Some(layout);
         // It travels down, because it arrives from above the reader's line of

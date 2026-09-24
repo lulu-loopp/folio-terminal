@@ -4901,14 +4901,14 @@ impl Runtime<'_> {
     /// One layer per playing pane, or none at all, which is the ordinary cost of
     /// this band on the overwhelming majority of frames: the map is empty and
     /// this is one iteration over nothing.
-    pub(in crate::runtime) fn preview_seat_video_bars(&self) -> Vec<marks::OverlayLayer> {
-        let mut layers = Vec::new();
+    pub(in crate::runtime) fn preview_seat_video_bars(&self) -> marks::Band {
+        let mut layers = marks::Band::default();
         for (surface, _) in self.window.video.iter() {
             if !matches!(surface, PreviewSurface::Seat(_)) {
                 continue;
             }
-            if let Some(layer) = self.video_bar_layer(surface) {
-                layers.push(layer);
+            if let Some(bar) = self.video_bar_layer(surface) {
+                layers.append(bar);
             }
         }
         layers
@@ -4925,12 +4925,12 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn video_bar_layer(
         &self,
         surface: PreviewSurface,
-    ) -> Option<marks::OverlayLayer> {
+    ) -> Option<marks::Band> {
         let seat = self.window.video.get(surface)?;
         let scale = self.window.renderer.scale_factor() as f32;
         let now = Instant::now();
         let shape = self.video_shape_of(surface, scale, now)?;
-        let layer = seat.bar(
+        let bar = seat.bar(
             shape.rect(),
             scale,
             now,
@@ -4938,7 +4938,7 @@ impl Runtime<'_> {
             &bt_render::chrome_palette(),
             self.video_meta_of(surface),
         );
-        (!layer.quads.is_empty()).then_some(layer)
+        (!bar.is_empty()).then_some(bar)
     }
 
     /// **Measure what every playing surface's bar says about its file** — once a
@@ -11304,7 +11304,7 @@ impl Runtime<'_> {
         id: float::FloatId,
         now: Instant,
     ) -> Option<marks::OverlayLayer> {
-        let (geometry, fade) = self.float_geometry_of(id)?;
+        let (geometry, _) = self.float_geometry_of(id)?;
         let scale = self.window.renderer.scale_factor() as f32;
         let surface = PreviewSurface::Float(id);
         let mode = self.window.float.drawn().find(|win| win.epoch == id)?.mode;
@@ -11577,7 +11577,6 @@ impl Runtime<'_> {
             body,
             scale,
             &palette,
-            fade,
         );
         // **The confirmation is the news pill's now** (owner's ruling
         // 2026-09-12; §7.1.3x ②). It was a bubble in this corner from the

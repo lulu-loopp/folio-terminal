@@ -1179,10 +1179,13 @@ pub fn float_hit(
 /// still has to rise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FloatFade {
-    /// `0.0 ..= 1.0`, the layer's own opacity.
+    /// `0.0 ..= 1.0` — the opacity the whole window is drawn at, as one
+    /// surface (`Runtime::float_layer` hands it to the renderer as the window's
+    /// group; ticket 46).
     pub opacity: f32,
     /// Physical pixels the frame is still displaced *upward* by — `flyIn`'s
-    /// `translateY(-5px)` on its way to `none`.
+    /// `translateY(-5px)` on its way to `none`. Zero on the way out: nothing
+    /// travels on exit (UI-SPEC §7).
     pub rise: f32,
     /// Whether another frame is owed.
     pub moving: bool,
@@ -1205,7 +1208,17 @@ fn fade(elapsed: Duration, reverse: bool, motion: Motion, scale: f32) -> FloatFa
     let forward = if reverse { 1.0 - eased } else { eased };
     FloatFade {
         opacity: forward,
-        rise: (1.0 - forward) * FLOAT_WINDOW_RISE_LOGICAL_PX * scale,
+        // **The way out is a pure fade** (the fade audit's F3, ticket 46).
+        // `flyOut` in the mock-up is the literal reverse of `flyIn`, and this
+        // followed it — the window climbed four pixels as it went. UI-SPEC §7
+        // and `motion.rs` say otherwise for every surface in the window
+        // ("nothing travels on exit"), and the spec is the rule: a window that
+        // is leaving is not going anywhere.
+        rise: if reverse {
+            0.0
+        } else {
+            (1.0 - forward) * FLOAT_WINDOW_RISE_LOGICAL_PX * scale
+        },
         moving: progress < 1.0,
     }
 }
@@ -2084,7 +2097,6 @@ pub fn build(
     body: FloatBody,
     scale: f32,
     palette: &ChromePalette,
-    fade: FloatFade,
 ) -> OverlayLayer {
     let FloatChrome {
         mode,
@@ -2415,11 +2427,12 @@ pub fn build(
             palette.dialog_muted_text,
         ));
     }
+    // At full strength: the window's fade is the surface's, handed to the
+    // renderer round every layer the window is made of (`Runtime::float_layer`).
     OverlayLayer {
         quads,
         labels,
         sprites,
-        opacity: fade.opacity.clamp(0.0, 1.0),
         ..OverlayLayer::default()
     }
 }
@@ -3249,11 +3262,6 @@ mod tests {
             },
             SCALE,
             &palette,
-            FloatFade {
-                opacity: 1.0,
-                rise: 0.0,
-                moving: false,
-            },
         );
         let corner = [geometry.foot[0] + 0.5, geometry.foot[3] - 0.5];
         let offending: Vec<_> = layer
@@ -4314,9 +4322,17 @@ mod tests {
         assert!(!leaving.moving);
     }
 
-    /// The entrance rises into place, and the exit falls back the way it came.
+    /// RED (46) — **the entrance rises into place, and the exit only fades.**
+    ///
+    /// The fade audit's F3: `fade(reverse)` returned `(1 − forward)·4` of rise,
+    /// so a window on its way out climbed four pixels as it faded — against
+    /// UI-SPEC §7's "nothing travels on exit" and `motion.rs`'s "Nothing
+    /// travels on the way out".
+    ///
+    /// MUTATION: give the reverse arm of `fade` its `(1 − forward)` rise back
+    /// and the half-way sample below is two pixels up.
     #[test]
-    fn the_entrance_rises_and_the_exit_reverses_it() {
+    fn the_entrance_rises_and_the_exit_only_fades() {
         let now = Instant::now();
         let mut host = FloatHost::default();
         let peek = open_peek(&mut host, TAB, now);
@@ -4347,6 +4363,16 @@ mod tests {
         assert_eq!(
             leaving.opacity, 1.0,
             "the exit starts where the entrance ended"
+        );
+        let halfway = host.drawn().next().expect("closing").fade(
+            now + FLOAT_ANIMATION + FLOAT_ANIMATION / 2,
+            Motion::Full,
+            SCALE,
+        );
+        assert!(halfway.opacity > 0.0 && halfway.opacity < 1.0);
+        assert_eq!(
+            halfway.rise, 0.0,
+            "a window that is leaving does not travel"
         );
     }
 
@@ -4685,11 +4711,6 @@ mod tests {
             FloatBody::default(),
             SCALE,
             &palette,
-            FloatFade {
-                opacity: 1.0,
-                rise: 0.0,
-                moving: false,
-            },
         );
         assert!(
             !layer

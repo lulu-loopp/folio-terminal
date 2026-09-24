@@ -1819,9 +1819,11 @@ pub struct OverlayLayer {
     pub quads: Vec<OverlayQuad>,
     pub labels: Vec<ChromeLabel>,
     pub sprites: Vec<ChromeSprite>,
-    /// The layer's own `opacity` — see [`bt_render::OverlayLayer::opacity`]. It
-    /// rides through the rasterizer untouched: how faded a layer is has nothing
-    /// to do with which marks it names.
+    /// A multiplier folded into every primitive of this layer — see
+    /// [`bt_render::OverlayLayer::opacity`], and why a surface that fades does
+    /// not use it: it fades as a [`Band`]'s group. It rides through the
+    /// rasterizer untouched: how faded a layer is has nothing to do with which
+    /// marks it names.
     pub opacity: f32,
     /// A scrolled document inside this layer — see
     /// [`bt_render::OverlayLayer::body`]. The preview float is the one tenant
@@ -1872,6 +1874,90 @@ impl OverlayLayer {
             && self.sprites.is_empty()
             && self.images.is_empty())
             || self.opacity <= 0.0
+    }
+}
+
+/// **A run of the overlay, and the surfaces in it that fade or travel as one
+/// piece** — [`OverlayLayer`]s with the [`bt_render::OverlayGroup`] spans over
+/// them (ticket 46; the fade audit of 2026-09-23).
+///
+/// A surface's fade used to be written into its layers — every layer's own
+/// opacity multiplied, every rectangle moved — and the renderer then faded each
+/// fill, mark and letter separately, in linear light: the plate overshot and the
+/// letters arrived before it. A band says instead *which layers are one
+/// surface* and at what opacity and offset that surface stands, and leaves the
+/// layers exactly as their builder drew them. The renderer draws such a surface
+/// whole and composites it once, as CSS `opacity` does.
+///
+/// The spans are indices into `layers`; an enclosing span is listed before the
+/// spans it encloses, and [`Band::append`] keeps them pointing at the same
+/// layers when bands are stacked.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Band {
+    pub layers: Vec<OverlayLayer>,
+    pub groups: Vec<bt_render::OverlayGroup>,
+}
+
+impl From<Vec<OverlayLayer>> for Band {
+    /// Layers standing where they were drawn, with nothing fading.
+    fn from(layers: Vec<OverlayLayer>) -> Self {
+        Self {
+            layers,
+            groups: Vec::new(),
+        }
+    }
+}
+
+impl Band {
+    /// `layers` as one surface, at `opacity` and displaced by `offset`
+    /// physical pixels.
+    #[must_use]
+    pub fn surface(layers: Vec<OverlayLayer>, opacity: f32, offset: [f32; 2]) -> Self {
+        Self::from(layers).faded(opacity, offset)
+    }
+
+    /// **This whole band as one surface**, faded and moved round whatever
+    /// surfaces it already holds — which then fade inside it, and multiply.
+    /// An empty band stays empty: there is no surface to fade.
+    #[must_use]
+    pub fn faded(mut self, opacity: f32, offset: [f32; 2]) -> Self {
+        if !self.layers.is_empty() {
+            self.groups.insert(
+                0,
+                bt_render::OverlayGroup {
+                    layers: 0..self.layers.len(),
+                    opacity,
+                    offset,
+                },
+            );
+        }
+        self
+    }
+
+    /// Stack `other` on top of this band, its spans moved to name the same
+    /// layers in the longer list.
+    pub fn append(&mut self, other: Band) {
+        let base = self.layers.len();
+        self.layers.extend(other.layers);
+        self.groups.extend(
+            other
+                .groups
+                .into_iter()
+                .map(|group| bt_render::OverlayGroup {
+                    layers: group.layers.start + base..group.layers.end + base,
+                    ..group
+                }),
+        );
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.layers.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
     }
 }
 

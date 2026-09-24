@@ -28,10 +28,13 @@ All notable changes to Folio are recorded here. The format follows
 ### Changed
 
 - Search, video controls, notices, toasts, tab previews, restore lists and close buttons now use the same text sizes, spacing and corners as the rest of the window.
+- The download notice uses the same padding, shadow, corners and text sizing as other dialogs and floating notices.
 - Right-click and drop-down menus use the same icon-to-label spacing as Settings.
 - The first-run card uses the same window-edge spacing and title line height as other dialogs.
 - Command palette rows use the same corners and icon spacing as other lists.
 - Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.
+- Tooltips, cards, menus and other fading surfaces now fade as one piece, so
+  their edges and text no longer arrive before their plates.
 - Bold text in a terminal font that has no bold style is now drawn heavier in
   that same font, instead of looking like the text around it.
 - Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.

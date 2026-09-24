@@ -30437,12 +30437,9 @@ fn pane_fade_veil_layers(
 /// pane, which is a step lower still — a menu, a dialog or a tip that is somehow
 /// up while the layout is changing must cover it, because those surfaces are the
 /// window talking to you and the veil is the window rearranging itself.
-fn ground_overlay_layers(
-    veil: Vec<marks::OverlayLayer>,
-    dock: Vec<marks::OverlayLayer>,
-) -> Vec<marks::OverlayLayer> {
-    let mut layers = veil;
-    layers.extend(dock);
+fn ground_overlay_layers(veil: Vec<marks::OverlayLayer>, dock: marks::Band) -> marks::Band {
+    let mut layers = marks::Band::from(veil);
+    layers.append(dock);
     layers
 }
 
@@ -30469,7 +30466,7 @@ struct OverlayStack {
     /// entitled to cover it, starting with the rail. A float's bar is not here:
     /// it has to stand above its own window and below the next one, so it rides
     /// in [`Self::float`] beside the window it belongs to.
-    preview_bars: Vec<marks::OverlayLayer>,
+    preview_bars: marks::Band,
     /// **A docked preview pane's video control bar** (route B slice ②,
     /// 2026-08-28; §7.44 ②), beside the scroll bar above it and on its argument:
     /// it belongs *to* a pane rather than floating over the window, so every
@@ -30484,7 +30481,7 @@ struct OverlayStack {
     /// A float's bar and a card's are not here. Each has to stand above its own
     /// surface and below the next one, so they ride beside the layer they belong
     /// to — in [`Self::float`] and in [`Self::file_peek`].
-    video_bars: Vec<marks::OverlayLayer>,
+    video_bars: marks::Band,
     /// **A terminal pane's scroll thumb** (P2-9 slice 1), beside the preview's
     /// bar and on its argument: it belongs *to* a pane rather than floating over
     /// the window, and every surface above is entitled to cover it.
@@ -30496,7 +30493,7 @@ struct OverlayStack {
     /// statement rather than a fix: the rail is a list of places you can go and
     /// the thumb is where you are, and if the lane arithmetic were ever broken
     /// the rail is the one that should be seen to survive.
-    terminal_bars: Vec<marks::OverlayLayer>,
+    terminal_bars: marks::Band,
     /// `.cmdrail { z-index: 5 }` — **a terminal pane's command marks**, beside
     /// the preview's bar and for its argument.
     ///
@@ -30512,7 +30509,7 @@ struct OverlayStack {
     /// never be up together — a seat is a terminal or a preview — so the order
     /// between them is bookkeeping. The jump's row flash rides here too: it is a
     /// band across one pane's own rows, drawn by the gesture that scrolled them.
-    command_rail: Vec<marks::OverlayLayer>,
+    command_rail: marks::Band,
     /// **A hovered formula band's two marks** (owner's ruling 2026-09-14 ②) —
     /// `#i-code`/`#i-eye` and `#i-copy`, on the pill a pointer or a press lays
     /// under them.
@@ -30530,10 +30527,10 @@ struct OverlayStack {
     /// a band runs to the pane's right edge and the rail is a column down it, so
     /// a mark clamped against that edge would otherwise have a tick printed
     /// through it.
-    formula_tools: Vec<marks::OverlayLayer>,
+    formula_tools: marks::Band,
     /// `.rail { z-index: 15 }` — chrome that floats over the panes and over
     /// nothing else. Every surface below is entitled to cover it.
-    rail: Vec<marks::OverlayLayer>,
+    rail: marks::Band,
     /// **Whatever is in motion in one of the three lists** — a tab in the strip,
     /// a row in the rail, a card in the focus column (§7.1.6b″; Claude's shape,
     /// user-approved 2026-08-24).
@@ -30558,11 +30555,11 @@ struct OverlayStack {
     /// carrying — while what flies here is the row itself. Making the ghost
     /// opaque would hide the strip you are aiming at with a copy of the thing
     /// you are aiming.
-    flight: Vec<marks::OverlayLayer>,
+    flight: marks::Band,
     /// The arriving panes' veil and the dock drawing (`#dock-shift` 24,
     /// `#dock-preview` 25) — drawings *on* the layout rather than surfaces over
     /// the window. See [`ground_overlay_layers`].
-    ground: Vec<marks::OverlayLayer>,
+    ground: marks::Band,
     /// `.srchbar { z-index: 30 }` — **the in-pane search capsule** (§7.1.5d).
     ///
     /// Between the ground drawings (24/25) and the split schematic (35), which
@@ -30584,7 +30581,7 @@ struct OverlayStack {
     ///
     /// One per pane and not a singleton: the offer is about one shell's startup
     /// file, and two PowerShell panes in one tab each owe their own.
-    pane_notices: Vec<marks::OverlayLayer>,
+    pane_notices: marks::Band,
     /// **The download sheet** (§7.7 ④, W2 slice ④) — the one failure card that
     /// stands *over* a page rather than instead of one.
     ///
@@ -30598,16 +30595,16 @@ struct OverlayStack {
     /// composed under wgpu and the transparency hole is punched over everything
     /// the seats draw (§7.8 ②), so a card painted into the pane's own chrome
     /// would be erased by the very page it is standing on.
-    web_sheet: Vec<marks::OverlayLayer>,
+    web_sheet: marks::Band,
     /// One layer, and there is at most one of it — the singleton (mock 8515)
     /// showing up in the z-order. Two capsules would need an order between them,
     /// and there is no order because there is one search.
-    search: Vec<marks::OverlayLayer>,
+    search: marks::Band,
     /// `.layout-peek { z-index: 35 }` — the split schematic.
-    layout_peek: Vec<marks::OverlayLayer>,
+    layout_peek: marks::Band,
     /// `#files-flyout` — a floating window. It covers the panes, the rail and
     /// the schematic, because it is a *place* rather than a moment.
-    float: Vec<marks::OverlayLayer>,
+    float: marks::Band,
     /// The modal family: the settings panel, the restore prompt, the profile
     /// picker, the root menu — every surface you summon, do something with, and
     /// dismiss. Mutually exclusive with each other by construction (one
@@ -30630,34 +30627,34 @@ struct OverlayStack {
     /// the window you could not press was drawn on top, which is the worse half
     /// of the pair: a surface that takes no input and hides what does. Moving the
     /// paint under the modal is what makes the two say the same thing.
-    modal: Vec<marks::OverlayLayer>,
+    modal: marks::Band,
     /// `#file-menu { z-index: 60 }` — above the float because it is very often
     /// raised on a row *inside* it (K146), and above the modal family for the
     /// same reason it is not in their exclusive chain: it is about whatever is
     /// under it.
-    file_menu: Vec<marks::OverlayLayer>,
+    file_menu: marks::Band,
     /// The pane head's own menu, on `#file-menu`'s level and for its reason: it
     /// is about whatever is under it. The two can never be up together (E61 —
     /// the opener closes the others), so their order between themselves is
     /// bookkeeping rather than a claim.
-    pane_menu: Vec<marks::OverlayLayer>,
+    pane_menu: marks::Band,
     /// The git context menus (v2 ④), on the same level and by the same
     /// argument: it is raised over a row and is about that row. It cannot be up
     /// beside either of the two above it — [`Popup::ALL`] is the rule — so where
     /// it sits among them is bookkeeping.
-    git_menu: Vec<marks::OverlayLayer>,
+    git_menu: marks::Band,
     /// The terminal's own context menu (ticket #62), on the same level and by
     /// the same argument a third time: it is raised over a pane and is about
     /// that pane. [`Popup::ALL`] keeps it from ever being up beside the three
     /// above it, so its place among them is bookkeeping.
-    term_menu: Vec<marks::OverlayLayer>,
+    term_menu: marks::Band,
     /// **A tab's own context menu** (丙2), on the same level and by the same
     /// argument a fourth time: it is raised over a tab and is about that tab.
     /// It is the one menu in this family drawn over the *strip* rather than over
     /// the stage, which changes nothing about where it sits — a menu is above
     /// everything it is about — and [`Popup::ALL`] keeps it from ever being up
     /// beside the four above it.
-    tab_menu: Vec<marks::OverlayLayer>,
+    tab_menu: marks::Band,
     /// **The command palette** (DESIGN.md §7.55), on the same level as the
     /// menus and by a fifth reading of the same argument: it is a surface over
     /// the stage, and [`Popup::ALL`] keeps it from ever being up beside any of
@@ -30665,7 +30662,7 @@ struct OverlayStack {
     /// is about the *window* rather than about the thing it was raised on —
     /// there is nothing under it that it grew out of, so there is nothing under
     /// it it must not cover.
-    palette: Vec<marks::OverlayLayer>,
+    palette: marks::Band,
     /// The notices (user ruling, 2026-08-16) — **above every menu and below the
     /// tip.**
     ///
@@ -30682,7 +30679,7 @@ struct OverlayStack {
     /// reason [`Self::modal`] spells out: a modal means MODAL, and the two
     /// surfaces that are painted over it are surfaces that cannot be open while
     /// it is.
-    toast: Vec<marks::OverlayLayer>,
+    toast: marks::Band,
     /// **The card a held modifier raises** (§7.1.5e′) — above the notices and
     /// below the tip.
     ///
@@ -30705,7 +30702,7 @@ struct OverlayStack {
     /// states `keyboard_input` answers long before `Shortcuts::lookup` is asked,
     /// so every chord the card would list does nothing — and a list of verbs that
     /// would not fire is the one thing this surface must never be.
-    key_hint: Vec<marks::OverlayLayer>,
+    key_hint: marks::Band,
     /// **The Cards column's first-arrival bubble** (§7.21).
     ///
     /// *Above the key hint*, and the two can only meet in one way: a reader who
@@ -30725,11 +30722,11 @@ struct OverlayStack {
     /// window-anchored toast stands. It wins, for four seconds, because a
     /// receipt that is covered can be read again by doing the thing again and
     /// this sentence cannot.
-    card_hint: Vec<marks::OverlayLayer>,
+    card_hint: marks::Band,
     /// `.tip { z-index: 60 }` — the one surface in this window that is never
     /// covered, because it is the only one whose whole job is to explain what is
     /// under it.
-    tooltip: Vec<marks::OverlayLayer>,
+    tooltip: marks::Band,
     /// `.file-peek { z-index: 70 }` — **above the pinned float** (P143: "z-index
     /// above the pinned flyout (60) — flyout rows peek too"), and above the tip
     /// with it, which is the mock-up's own 70-against-60.
@@ -30740,11 +30737,11 @@ struct OverlayStack {
     /// argument for putting a drawing this large on top — a window it covered
     /// would still be entirely reachable, because the pointer is what dismisses
     /// the card.
-    file_peek: Vec<marks::OverlayLayer>,
+    file_peek: marks::Band,
     /// `z-index: 100` — above even the tip. During a drag, what is under the
     /// pointer *is* the ghost; in practice the two never meet, because a drag
     /// empties the tip's anchor list (J117).
-    drag_ghost: Vec<marks::OverlayLayer>,
+    drag_ghost: marks::Band,
     /// **The ring another window's menu is pointing at** (B9, user ruling
     /// 2026-08-25) — the topmost thing this window draws, and the only one that
     /// is not about anything inside it.
@@ -30754,7 +30751,7 @@ struct OverlayStack {
     /// would be honest to let cover it. It costs nothing to put on top, because
     /// like the peek card it takes no input at all — it is a mark, not a
     /// surface, and the pointer is in another window entirely.
-    window_ring: Vec<marks::OverlayLayer>,
+    window_ring: marks::Band,
 }
 
 impl OverlayStack {
@@ -30807,7 +30804,7 @@ impl OverlayStack {
             + self.layout_peek.len()
     }
 
-    fn flattened(self) -> Vec<marks::OverlayLayer> {
+    fn flattened(self) -> marks::Band {
         let Self {
             preview_bars,
             video_bars,
@@ -30867,8 +30864,10 @@ impl OverlayStack {
             window_ring,
         ]
         .into_iter()
-        .flatten()
-        .collect()
+        .fold(marks::Band::default(), |mut stack, band| {
+            stack.append(band);
+            stack
+        })
     }
 }
 
@@ -31154,14 +31153,22 @@ fn dump_focus_thumb_frame(
 /// *behind* a pane head's caption came from the first and one in front of it from
 /// the second, and reading one file with both in it settles that without a second
 /// run.
-fn dump_overlay_frame(layers: &[marks::OverlayLayer]) {
+fn dump_overlay_frame(band: &marks::Band) {
     let Some(path) = diagnostics::named_file(std::env::var_os("BT_CHROME_DUMP")) else {
         return;
     };
     use std::fmt::Write as _;
+    let layers = &band.layers;
     let mut out = String::new();
     let ink = |color: [u8; 3]| format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]);
     let _ = writeln!(out, "=== overlay frame: {} layers", layers.len());
+    for group in &band.groups {
+        let _ = writeln!(
+            out,
+            "group  {:?} opacity={:.3} offset={:?}",
+            group.layers, group.opacity, group.offset
+        );
+    }
     for (index, layer) in layers.iter().enumerate() {
         let _ = writeln!(
             out,
@@ -42382,10 +42389,10 @@ impl Runtime<'_> {
     fn stage(
         &mut self,
         band: Layered,
-        layers: Vec<marks::OverlayLayer>,
+        layers: marks::Band,
         travel: Option<Travel>,
         now: Instant,
-    ) -> Vec<marks::OverlayLayer> {
+    ) -> marks::Band {
         let scale = self.window.renderer.scale_factor() as f32;
         let motion = self.app.motion;
         self.window
@@ -42394,12 +42401,7 @@ impl Runtime<'_> {
     }
 
     /// The same for a surface that fades itself in and only wants the way out.
-    fn stage_departure(
-        &mut self,
-        band: Layered,
-        layers: Vec<marks::OverlayLayer>,
-        now: Instant,
-    ) -> Vec<marks::OverlayLayer> {
+    fn stage_departure(&mut self, band: Layered, layers: marks::Band, now: Instant) -> marks::Band {
         let motion = self.app.motion;
         self.window
             .passages
@@ -53213,8 +53215,10 @@ mod file_peek_fade_tests {
     /// opacity to `file_peek::build` alone and the third fails: the card's face
     /// would fade while the scroll bar beside its document, the ▶ on a recording
     /// and that recording's control bar stood at full strength over a card that
-    /// is not there yet. Assign the opacity instead of multiplying it in and a
-    /// layer faded for a reason of its own loses that reason. Drop the frame-debt
+    /// is not there yet. Fold the opacity into each layer again (ticket 46) and
+    /// the card fades in parts, in linear light — the plate overshooting and the
+    /// letters leading — and a layer faded for a reason of its own has that
+    /// reason written over or multiplied by hand. Drop the frame-debt
     /// question from `advance_file_peek` and nothing wakes the loop to finish the
     /// 90ms a motionless hand started.
     #[test]
@@ -53233,12 +53237,12 @@ mod file_peek_fade_tests {
 
         let layer = method_body("Runtime", "file_peek_layer");
         assert!(
-            layer.contains("for layer in &mut layers {"),
-            "the fade is folded over every layer the card put down"
+            layer.contains("layers.faded(opacity, [0.0, 0.0])"),
+            "the fade is one surface round every layer the card put down"
         );
         assert!(
-            layer.contains("layer.opacity *= opacity;"),
-            "and multiplied into whatever each layer already carried"
+            !layer.contains(".opacity *=") && !layer.contains(".opacity ="),
+            "and no layer wears it in its own opacity: a layer faded for a reason              of its own keeps that reason as a surface inside this one"
         );
 
         assert!(
@@ -66215,10 +66219,10 @@ mod floated_page_tests {
         // One layer per group, each wearing an opacity nothing else has: a
         // marker the flattened list can be read back through.
         let mark = |opacity: f32| {
-            vec![marks::OverlayLayer {
+            marks::Band::from(vec![marks::OverlayLayer {
                 opacity,
                 ..marks::OverlayLayer::default()
-            }]
+            }])
         };
         const FLOAT: f32 = 0.11;
         let stack = super::OverlayStack {
@@ -66253,7 +66257,7 @@ mod floated_page_tests {
         let below = stack.below_the_floats();
         let layers = stack.flattened();
         assert_eq!(
-            layers.get(below).map(|layer| layer.opacity),
+            layers.layers.get(below).map(|layer| layer.opacity),
             Some(FLOAT),
             "the offset a float's hole is spelled against does not land on the \
              first float layer, so every floated page's hole is punched over \
@@ -68442,14 +68446,15 @@ fn rail_change_strands_its_popups(from: seats::RailState, to: seats::RailState) 
 /// one thing: "chrome fills are opaque by construction" is true of a hairline,
 /// a hover pill and a landing wash, and false of the panel they are struck on.
 ///
-/// **The layer's own opacity is still the fold** — `.rail { transition: …
+/// **The surface's opacity is still the fold** — `.rail { transition: …
 /// opacity .18s ease }` with `.window.rail-collapsed .rail { opacity: 0 }`
 /// (mock-up 814/823). CSS `opacity` on the element the layer *is*, so the panel
 /// and everything standing in it leave together rather than the ground going
-/// while the icons stay. It reaches the ground channel as a blend constant
-/// rather than as a source alpha — see [`bt_render::OverlayGround`] — which is
-/// what lets a *fading* panel still be glass instead of going opaque on its way
-/// out.
+/// while the icons stay — and since ticket 46 literally together: the band is
+/// one [`bt_render::OverlayGroup`], drawn whole and put back once. Its ground
+/// is put back by cross-fade rather than over — see [`bt_render::OverlayGroup`]
+/// — which is what lets a *fading* panel still be glass instead of going opaque
+/// on its way out.
 ///
 /// Red gate: send the grounds through the quad channel as this used to and the
 /// pin below finds the rail's panel among the fills; drop the fold and a
@@ -68470,19 +68475,19 @@ fn panel_opacity(state: seats::RailState, fold: f32) -> f32 {
     if state.draws_focus_rail() { 1.0 } else { fold }
 }
 
-fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> Vec<marks::OverlayLayer> {
+fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> marks::Band {
     if rail.quads.is_empty()
         && rail.labels.is_empty()
         && rail.sprites.is_empty()
         && rail.images.is_empty()
     {
-        return Vec::new();
+        return marks::Band::default();
     }
     let (grounds, quads): (Vec<bt_render::ChromeQuad>, Vec<bt_render::ChromeQuad>) = rail
         .quads
         .iter()
         .partition(|quad| quad.surface == bt_render::ChromeSurface::Ground);
-    vec![marks::OverlayLayer {
+    let panel = marks::OverlayLayer {
         grounds: grounds
             .into_iter()
             .map(|quad| bt_render::OverlayGround {
@@ -68505,9 +68510,13 @@ fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> Vec<marks::Overla
         // channel *after* the column's own marks, which is the order they must
         // paint in: a picture is content and the marks around it are chrome.
         images: rail.images.clone(),
-        opacity: fold.clamp(0.0, 1.0),
         ..marks::OverlayLayer::default()
-    }]
+    };
+    // The fold is the panel's CSS `opacity`, so it is the surface's: the panel
+    // and everything standing in it drawn whole and put back once (ticket 46).
+    // The ground cross-fades on the way back — it is the window — and the shade
+    // it casts on the panes is laid over them; see `bt_render::OverlayGroup`.
+    marks::Band::surface(vec![panel], fold.clamp(0.0, 1.0), [0.0, 0.0])
 }
 
 /// **The one place a chosen (layout, sidebar mode) pair becomes a `RailState`.**

@@ -1247,13 +1247,14 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
 
 /// The palette as one overlay layer.
 ///
-/// One layer, so it carries one fade — [`crate::keyhint::build`]'s own reason.
+/// One layer, so it fades as one — and the fade is the band's
+/// (`Popup::Palette` through `arrival::Passages`), which is why this takes no
+/// opacity: its only caller passed `1.0` (the fade audit's F5).
 #[must_use]
 pub fn build(
     layout: &PaletteLayout,
     palette: &ChromePalette,
     selected: usize,
-    opacity: f32,
 ) -> Vec<OverlayLayer> {
     let scale = layout.scale;
     let px = |logical: f32| logical * scale;
@@ -1283,7 +1284,6 @@ pub fn build(
 
     let mut layer = OverlayLayer {
         quads,
-        opacity,
         ..OverlayLayer::default()
     };
 
@@ -2587,7 +2587,7 @@ mod list_tests {
             &mut ten_per_char,
         );
         let colours = bt_render::chrome_palette();
-        let painted = super::build(&layout, &colours, 0, 1.0);
+        let painted = super::build(&layout, &colours, 0);
         let layer = painted.first().expect("one layer, one fade");
         let list = layout.list;
         // The row the selection is on is the top one, and half of it is above

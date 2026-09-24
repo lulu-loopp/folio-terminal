@@ -17,7 +17,8 @@ below). Two obligations follow:
 The file began as the 2026-09-21 structure review's debt list (D-1…D-18, kept
 below with their IDs and text). On 2026-09-23 it gained the ledger columns and
 every debt the repository already recorded elsewhere (D-19…D-63); on
-2026-09-24, two rows found by the 0.4.5 drafts (D-64, D-65). It is
+2026-09-24, two rows found by the 0.4.5 drafts (D-64, D-65) and one artefact
+ticket 46 introduced (D-66). It is
 **ordered by consequence, not by severity** — nothing here is a bug; each row is
 a shape that makes the next hundred tickets more expensive, and the cost it
 charges is the one the project named: *what must be read to finish one ticket
@@ -54,10 +55,10 @@ they answer "what does this machine do" — not by debt.
 |---|---:|---:|---:|
 | 0.4.5 | 9 | 5 | 4 |
 | 0.4.6 | 39 | 39 | 0 |
-| 0.4.7 | 13 | 13 | 0 |
+| 0.4.7 | 14 | 14 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
 | already repaid | 1 | 0 | 1 |
-| **total** | **65** | **61** | **4** |
+| **total** | **66** | **62** | **4** |
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -162,6 +163,7 @@ ledger's.
 | D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | none yet | 0.4.6 | open |
 | D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open — narrowed by ticket 43: the phases are named in the stall self-report; the remaining cost is the engine's own thread-affine work (§5.3 row 21) ruled 2026-09-24: warm the engine at a quiet moment — follow-up warm-up, ticket 54 |
 | D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.7 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.7 before the 0.5 restyle, and the row closes with it | open |
+| D-66 | a fading surface's translucent pixels step at the landing frame: composited on encoded bytes while it fades, blended in linear light at rest — on the light theme the tip's shadow lightens at its darkest pixel from about `#DB` to `#EE` as the fade lands | ticket 46's report (Findings); the 2026-09-23 fade audit, §7 | none yet | 0.4.7 — the L variant (all overlay translucency in encoded space, with D-65), which removes the step | open |
 
 ---
 
@@ -1063,7 +1065,7 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
 
 ---
 
-## D-64…D-65 — the rows added on 2026-09-24
+## D-64…D-66 — the rows added on 2026-09-24
 
 - **D-64 · a web page's open holds the window thread.** A stall self-report on
   the next89 candidate recorded two holds while a web preview opened: 4,099 ms
@@ -1115,3 +1117,14 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
   non-sRGB view of the swapchain, byte-identical at rest; **the L variant
   (0.4.7)** — the whole overlay pass in encoded space (glyphon `ColorMode::Web`),
   so the 0.5 restyle compares like with like. The row closes with the second.
+- **D-66 · a fading surface steps at the frame it lands on.** Added by ticket 46
+  (`bt_render::OverlayGroup`), which composites a fading surface on encoded bytes
+  and draws it straight onto the frame, in linear light, once it is at rest — so
+  the byte-identical-at-rest guarantee holds. Opaque pixels meet at the landing;
+  translucent ones (shadows, antialiased edges) do not, because the two blends
+  disagree over an unknown ground (the audit's §7 table). On the dark theme the
+  step is at most about 1.5 ΔL* and invisible; on the light theme the tip's shadow
+  at its darkest pixel goes from about `#DB` on the last fade frame to `#EE` at
+  rest, a visible lightening as the fade lands. Owed: the L variant — the whole
+  overlay pass in encoded space — after which the fade and the rest are one
+  arithmetic. 0.4.6, by the coordinator's ruling on ticket 46.
