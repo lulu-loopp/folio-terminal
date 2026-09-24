@@ -473,6 +473,13 @@ is ruled by the project owner**, who rules UI.
 **Status.** open. The inventory and the two fixed points are in
 `docs/ARCHITECTURE.md` §8.
 
+**Inventory rows, added by the tickets that add a case (the owner rules the
+table; these rows only record what exists).**
+
+| added | message kind | urgency | modality | surface | where the surface is absent |
+|---|---|---|---|---|---|
+| 2026-09-24, ticket 37 | persistent pane state — a terminal pane's text size while it is not 100 % | non-urgent | non-modal | the existing pane-head control (a slot of `seats::PaneHeadGeometry`); a click resets it | open (owner) — a lone terminal and a narrow head wear no head |
+
 **Ledger.** source: K-3 · C-4 · ticket: none yet · version: 0.4.6 — the owner rules the table first · status: open.
 
 ---
