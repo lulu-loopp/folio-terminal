@@ -25,6 +25,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- The first-run card uses the same window-edge spacing and title line height as other dialogs.
 - Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.
 - Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.
 - Git panel and graph spacing, corners, captions, badges and icons now match the rest of the window.

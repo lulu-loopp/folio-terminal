@@ -15,7 +15,7 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 - **Platform:** every deviation is in code shared by the Windows and macOS builds, so every row applies to **both**.
 - **Rulings of 2026-09-22 folded in:** the icon-to-label gap is 8 everywhere (G1–G3); every head title is 11 (T1). The terminal pane's resting radius (0) and the two boolean controls (combo in Settings, switch on the first-run card) are rules as they stand and produce no rows.
 
-**Totals: 23 deviations, touching 33 constants.** A 0 · B 7 · C 8 · D 8.
+**Totals: 21 deviations, touching 31 constants.** A 0 · B 6 · C 7 · D 8.
 
 ---
 
@@ -34,7 +34,6 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 | 19 | R2 | Web sheet radius | `websheet.rs::RADIUS_LOGICAL_PX` | 8 | 10 | Dialog (`theme.rs::FLOAT_WINDOW_RADIUS_LOGICAL_PX`). The web sheet is scrimmed and modal. |
 | 20 | T9 | Search capsule field text | `search.rs::FIELD_FONT_LOGICAL_PX` | 12 | 13 | Field (`settings.rs::FIELD_FONT_LOGICAL_PX`). |
 | 21 | H6 | Video bar | `video_seat.rs::VIDEO_BAR_HEIGHT_LOGICAL_PX` | 34 | 30 | Strip (`theme.rs::SEAT_TITLE_BAR_LOGICAL_PX`, `notice.rs::BAR_HEIGHT_LOGICAL_PX`, `seats.rs::FILES_SEG_BAR_LOGICAL_PX`). |
-| 23 | S3 | First-run card to window edge | `first_run.rs::SURFACE_MARGIN_LOGICAL_PX` | 34 | 24 | Centred overlay (`palette.rs::PALETTE_EDGE_MARGIN_LOGICAL_PX`, `websheet.rs::MARGIN_LOGICAL_PX`). Seen in small windows. |
 
 ## Class C: barely visible
 
@@ -46,7 +45,6 @@ Every row is a place where a surface does not use its rule's value. Bringing a r
 | 28 | G3 | Icon-to-label gap: palette dot, palette row | `palette.rs::DOT_GAP_LOGICAL_PX`, `palette.rs::ROW_GAP_LOGICAL_PX` | 7, 9 | 8 | One icon-to-label gap everywhere (ruled 2026-09-22). 1 pt each. |
 | 29 | S8 | Row text inset: restore list | `restore.rs::ROW_PADDING_X_LOGICAL_PX` | 8 | 10 | `profiles.rs::ITEM_PADDING_X_LOGICAL_PX`, `settings.rs::ITEM_PADDING_X_LOGICAL_PX`, `palette.rs::ROW_PADDING_X_LOGICAL_PX`, `theme.rs::RAIL_TAB_PADDING_LEFT_LOGICAL_PX`. |
 | 31 | R3 | Command palette rows | `palette.rs::ROW_RADIUS_LOGICAL_PX` | 7 | 6 | List row. The `restore.rs` constant with the same name is 6. |
-| 33 | T8 | First-run title line box | `first_run.rs::TITLE_LINE_LOGICAL_PX` | 21 | 18 | The same 15-pt title sits on `restore.rs::TITLE_LINE_LOGICAL_PX` 18. |
 | 37 | S7 | Video bar side padding | `video_seat.rs::BAR_PADDING_X_LOGICAL_PX` | 10 | 12 | Strip leading. |
 
 ## Class D: invisible (tidying only)
@@ -70,7 +68,7 @@ Each group is one ticket. A row whose constants live in several files is split a
 
 - **Float-tag family** (`tooltip.rs`, `file_peek.rs`, the drag ghost in `theme.rs`): E1, S1, R1 fixed in ticket 16; remaining members fixed in ticket 23 (listed below).
 - **Settings** (`settings.rs`): I1, T2, H1 and the Settings members of T3/T4 fixed in ticket 17; S10, R9 and the Settings members of T5/T6/S8 fixed in ticket 24. No Settings members remain open.
-- **First-run** (`first_run.rs`): H4, S3, T8.
+- **First-run** (`first_run.rs`): H4 fixed in ticket 21; S3 and T8 fixed in ticket 28. No first-run members remain open.
 - **Git panel + graph** (`git_panel.rs`, `git_graph.rs`): class-A members fixed in ticket 18; remaining members fixed in ticket 25 (listed below).
 - **Web sheet** (`websheet.rs`): S2, E2, R2; the `websheet.rs` members of T5, R8, T10.
 - **Pane head, files column, float window** (`seats.rs`, `theme.rs`, `float.rs`): class-A members fixed in ticket 19; H5, S5, F1, C1, R12 and the group members of G1, G3, T5 and I2 fixed in ticket 26 (listed below).
@@ -118,3 +116,8 @@ Each group is one ticket. A row whose constants live in several files is split a
 - Row 34 / F1: `seats.rs::FILES_ROW_FOCUS_RING_LOGICAL_PX` fixed at 2; row closed.
 - Row 48 / R12: `seats.rs::PREVIEW_ADDRESS_RADIUS_LOGICAL_PX` fixed at 4; row closed.
 - Row 49 / C1: `seats.rs::PANE_HEAD_TRIGGER_REVEAL` fixed at 0.6; row closed.
+
+## Fixed in ticket 28
+
+- Row 23 / S3: `first_run.rs::SURFACE_MARGIN_LOGICAL_PX` fixed at 24; row closed.
+- Row 33 / T8: `first_run.rs::TITLE_LINE_LOGICAL_PX` fixed at 18; row closed.

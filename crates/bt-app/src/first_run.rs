@@ -910,7 +910,8 @@ const WIDTH_RATIO: f32 = 0.92;
 
 /// How much of the window's height the card may take. The head and the foot are
 /// pinned inside whatever is left and the body between them scrolls.
-const SURFACE_MARGIN_LOGICAL_PX: f32 = 34.0;
+/// UI-SPEC.md S3: the centred-overlay margin, shared with the palette.
+const SURFACE_MARGIN_LOGICAL_PX: f32 = 24.0;
 
 /// 20 and not `.restore`'s 22: the mark's line box is taller than a bare title,
 /// so the optical top of the card is a couple of pixels lower than the metric
@@ -925,7 +926,8 @@ const MARK_LOGICAL_PX: f32 = 22.0;
 const MARK_GAP_LOGICAL_PX: f32 = 10.0;
 
 const TITLE_FONT_LOGICAL_PX: f32 = 15.0;
-const TITLE_LINE_LOGICAL_PX: f32 = 21.0;
+/// The dialog title line box from UI-SPEC.md T8 (restore::TITLE_LINE_LOGICAL_PX).
+const TITLE_LINE_LOGICAL_PX: f32 = 18.0;
 /// **18, and then the first row.** v3's 16 under a bare title; the header is one
 /// line taller in feel now that a mark stands on it, so the step under it grows
 /// with it.
@@ -2007,6 +2009,58 @@ mod tests {
         );
     }
 
+    /// RED (28) — **The first-run margin and title line follow their shared rules.**
+    ///
+    /// S3 uses the centred-overlay margin; T8 uses the restore title line.
+    /// The restore constant is private, so its rule value is pinned here.
+    /// MUTATION: restore SURFACE_MARGIN_LOGICAL_PX to 34.0.
+    /// MUTATION: restore TITLE_LINE_LOGICAL_PX to 21.0.
+    #[test]
+    fn ui_spec_first_run_rest_values_follow_the_rule() {
+        assert_eq!(
+            SURFACE_MARGIN_LOGICAL_PX,
+            crate::palette::PALETTE_EDGE_MARGIN_LOGICAL_PX,
+            "S3: centred overlay margin"
+        );
+        assert_eq!(
+            TITLE_LINE_LOGICAL_PX, 18.0,
+            "T8: restore::TITLE_LINE_LOGICAL_PX"
+        );
+    }
+
+    /// RED (28) — **A short first-run card keeps the centred-overlay edge margin.**
+    ///
+    /// Exercise the real layout at each supported scale with enough rows to
+    /// fill the available height, including its physical-pixel rounding.
+    /// MUTATION: restore SURFACE_MARGIN_LOGICAL_PX to 34.0.
+    #[test]
+    fn the_first_run_card_keeps_the_centred_overlay_margin_in_a_short_window() {
+        let content = measured(&rows(&every_row()));
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let height = 320.0 * scale;
+            let placed = layout(&content, 640.0 * scale, height, scale, 0.0);
+            let margin = crate::palette::PALETTE_EDGE_MARGIN_LOGICAL_PX * scale;
+            assert!((placed.frame[1] - margin).abs() <= 0.5, "top at {scale}");
+            assert!(
+                (height - placed.frame[3] - margin).abs() <= 0.5,
+                "bottom at {scale}"
+            );
+        }
+    }
+
+    /// RED (28) — **The first-run title occupies the restore title's line height.**
+    ///
+    /// Pin the box produced by layout, including scale, rather than only the token.
+    /// MUTATION: restore TITLE_LINE_LOGICAL_PX to 21.0.
+    #[test]
+    fn the_first_run_title_uses_the_restore_title_line_height() {
+        let content = measured(&rows(&every_row()));
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let placed = layout(&content, 640.0 * scale, 480.0 * scale, scale, 0.0);
+            assert_eq!(placed.title.1[3] - placed.title.1[1], 18.0 * scale);
+        }
+    }
+
     /// A machine with everything: Windows 11 with the package beside the
     /// executable, all three agents on the path, none of them configured yet.
     fn every_row() -> Machine {
@@ -3029,7 +3083,13 @@ mod tests {
     #[test]
     fn a_press_anywhere_on_a_row_is_a_press_on_its_switch_and_the_fade_ends_it() {
         let content = measured(&rows(&every_row()));
-        let placed = layout(&content, SHORT_SURFACE.0, SHORT_SURFACE.1, SCALE, 0.0);
+        // Ticket 28 (`UI-SPEC.md` S3) took 10 pt off the card's window-edge
+        // margin, which at this scale hands the card 30 px more room in the
+        // same window; this probe needs the last row's switch to still reach
+        // below the footer, so its window is 30 px shorter than the shared
+        // short fixture.
+        let surface = (SHORT_SURFACE.0, SHORT_SURFACE.1 - 30.0);
+        let placed = layout(&content, surface.0, surface.1, SCALE, 0.0);
         let middle = |rect: [f32; 4]| {
             (
                 f64::from((rect[0] + rect[2]) / 2.0),
