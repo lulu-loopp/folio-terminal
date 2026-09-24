@@ -47,7 +47,8 @@
 //!
 //! # Its ground
 //!
-//! `--menu` with a hairline, an 8px round and the menu's own shadow, and that is
+//! `--menu` with a hairline, a dialog round and the standard floating shadow,
+//! following UI-SPEC R2/E2. The opaque ground is
 //! measured rather than chosen (§7.7 ④): with only a scrim, the page's body
 //! reads *through* the card's sentences, the two runs of text interleave, and a
 //! notice becomes one more line of the document instead of the answer to a verb
@@ -59,13 +60,14 @@ use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad, roun
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
 use crate::seats::ChromeTarget;
 
-/// The card's round — the menu's 8, not a floating window's 10. It is a panel
-/// laid on one pane, not a window opened over the desk.
-const RADIUS_LOGICAL_PX: f32 = 8.0;
+/// UI-SPEC R2: the dialog round, matching FLOAT_WINDOW_RADIUS_LOGICAL_PX.
+const RADIUS_LOGICAL_PX: f32 = 10.0;
 /// How far the card is inset from the seat's body on every side, at most.
 const MARGIN_LOGICAL_PX: f32 = 24.0;
-/// The card's own padding.
-const PADDING_LOGICAL_PX: f32 = 22.0;
+/// UI-SPEC S2: dialog padding, matching first_run and restore.
+const PADDING_TOP_LOGICAL_PX: f32 = 20.0;
+const PADDING_X_LOGICAL_PX: f32 = 22.0;
+const PADDING_BOTTOM_LOGICAL_PX: f32 = 16.0;
 /// The widest the card is allowed to grow. `38ch` at the sentence's size is what
 /// `.pv-blank .pvb-say { max-width: 38ch }` asks for, and a line longer than
 /// that is a paragraph rather than a sentence.
@@ -77,9 +79,8 @@ const GAP_LOGICAL_PX: f32 = 10.0;
 const MARK_LOGICAL_PX: f32 = 30.0;
 /// `.pv-blank { font-size: 12.5px }`.
 const SAY_FONT_LOGICAL_PX: f32 = 12.5;
-/// `.pv-blank .pvb-detail { font: 11.5px/1.5 … monospace }` — the fact, in the
-/// face this window writes facts in everywhere else.
-const DETAIL_FONT_LOGICAL_PX: f32 = 11.5;
+/// UI-SPEC T5: caption size, in the face this window writes facts in.
+const DETAIL_FONT_LOGICAL_PX: f32 = 11.0;
 /// `.pv-blank button { font-size: 12px }`.
 const VERB_FONT_LOGICAL_PX: f32 = 12.0;
 /// `.pv-blank button { padding: 5px 12px }`.
@@ -87,18 +88,14 @@ const VERB_PADDING_X_LOGICAL_PX: f32 = 12.0;
 const VERB_PADDING_Y_LOGICAL_PX: f32 = 5.0;
 /// `.pv-blank button { border-radius: 6px }`.
 const VERB_RADIUS_LOGICAL_PX: f32 = 6.0;
-/// The line box a sentence or a fact gets, as a multiple of its size — the
-/// card's own `line-height: 1.5`.
-const LINE_HEIGHT: f32 = 1.5;
-/// The `×`'s box and its round — the notice strip's `.pn-x { width: 22px;
-/// height: 22px; border-radius: 6px }`, quoted rather than chosen so that a
-/// reader who has met one close in this window has met them all. The glyph
-/// inside it is not a number here: it comes from the slot table, like every
-/// other drawing this window puts in a box.
+/// UI-SPEC T10: float-tag line height, matching CHROME_LINE_HEIGHT.
+const LINE_HEIGHT: f32 = 1.4;
+/// The close box keeps the notice strip's size; its glyph uses the slot table.
 const CLOSE_BOX_LOGICAL_PX: f32 = 22.0;
-const CLOSE_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC R8: the tool-box round, matching PREVIEW_TOOL_RADIUS_LOGICAL_PX.
+const CLOSE_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// How far the `×` sits in from the card's own corner. Less than the card's
-/// [`PADDING_LOGICAL_PX`], because the padding is the *text* column's inset and
+/// [`PADDING_X_LOGICAL_PX`], because the padding is the *text* column's inset and
 /// a corner control that honoured it would read as part of the sentence's block
 /// rather than as the card's own furniture.
 const CLOSE_INSET_LOGICAL_PX: f32 = 8.0;
@@ -122,7 +119,7 @@ pub fn say_width(body: [f32; 4], scale: f32) -> f32 {
     let px = |logical: f32| logical * scale;
     let margin = px(MARGIN_LOGICAL_PX).round();
     let available = (body[2] - body[0] - margin * 2.0).max(1.0);
-    (available.min(px(MAX_WIDTH_LOGICAL_PX)).max(1.0) - px(PADDING_LOGICAL_PX).round() * 2.0)
+    (available.min(px(MAX_WIDTH_LOGICAL_PX)).max(1.0) - px(PADDING_X_LOGICAL_PX).round() * 2.0)
         .max(1.0)
 }
 
@@ -169,7 +166,9 @@ pub fn lay_out(
     scale: f32,
 ) -> SheetLayout {
     let px = |logical: f32| logical * scale;
-    let padding = px(PADDING_LOGICAL_PX).round();
+    let padding_top = px(PADDING_TOP_LOGICAL_PX).round();
+    let padding_x = px(PADDING_X_LOGICAL_PX).round();
+    let padding_bottom = px(PADDING_BOTTOM_LOGICAL_PX).round();
     let gap = px(GAP_LOGICAL_PX).round();
     let mark = px(MARK_LOGICAL_PX).round().max(1.0);
     let say_line = (px(SAY_FONT_LOGICAL_PX) * LINE_HEIGHT).round().max(1.0);
@@ -195,7 +194,7 @@ pub fn lay_out(
         + if has_detail { gap + detail_line } else { 0.0 }
         + gap
         + verb_height;
-    let height = content_height + padding * 2.0;
+    let height = content_height + padding_top + padding_bottom;
     let centre_x = ((body[0] + body[2]) / 2.0).round();
     let top = ((body[1] + body[3] - height) / 2.0).round().max(body[1]);
     let frame = [
@@ -204,9 +203,9 @@ pub fn lay_out(
         centre_x + (width / 2.0).round(),
         top + height,
     ];
-    let column_left = frame[0] + padding;
-    let column_right = frame[2] - padding;
-    let mark_top = frame[1] + padding;
+    let column_left = frame[0] + padding_x;
+    let column_right = frame[2] - padding_x;
+    let mark_top = frame[1] + padding_top;
     let say_top = mark_top + mark + gap;
     let say_bottom = say_top + say_line * says;
     let detail_top = say_bottom + gap;
@@ -420,9 +419,9 @@ pub fn build(
 
 /// `.pv-blank > svg { opacity: .5 }`.
 const MARK_OPACITY: f32 = 0.5;
-/// The menu's own lift, in logical pixels — `0 16px 48px` reduced to the one
-/// spread `push_float_window` samples the falloff over.
-const SHADOW_SPREAD_LOGICAL_PX: u8 = 24;
+/// UI-SPEC E2: logical-pixel reach, matching FLOAT_WINDOW_SHADOW_LOGICAL_PX.
+/// `push_float_window` samples its falloff over this scaled spread.
+const SHADOW_SPREAD_LOGICAL_PX: u8 = 3;
 
 /// Which part of a sheet the pointer is on.
 ///
@@ -469,6 +468,69 @@ fn centred_in(box_: [f32; 4], size: f32) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (30) — **The web sheet follows the dialog and float-tag values.**
+    ///
+    /// Compare product constants with their existing authorities, without
+    /// coupling the test to the prose ledger.
+    /// MUTATION: restore SHADOW_SPREAD_LOGICAL_PX to 24.
+    /// MUTATION: restore RADIUS_LOGICAL_PX to 8.0.
+    /// MUTATION: restore DETAIL_FONT_LOGICAL_PX to 11.5.
+    /// MUTATION: restore CLOSE_RADIUS_LOGICAL_PX to 6.0.
+    /// MUTATION: restore LINE_HEIGHT to 1.5.
+    #[test]
+    fn ui_spec_websheet_values_follow_the_rule() {
+        let values = [
+            (
+                f32::from(SHADOW_SPREAD_LOGICAL_PX),
+                bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX,
+            ),
+            (RADIUS_LOGICAL_PX, bt_render::FLOAT_WINDOW_RADIUS_LOGICAL_PX),
+            (DETAIL_FONT_LOGICAL_PX, crate::settings::CAP_FONT_LOGICAL_PX),
+            (
+                CLOSE_RADIUS_LOGICAL_PX,
+                crate::seats::PREVIEW_TOOL_RADIUS_LOGICAL_PX,
+            ),
+            (LINE_HEIGHT, crate::seats::CHROME_LINE_HEIGHT),
+        ];
+        assert_eq!(
+            values.map(|(actual, _)| actual),
+            values.map(|(_, rule)| rule),
+            "UI-SPEC E2/R2/T5/R8/T10"
+        );
+    }
+
+    /// RED (30) — **The sheet lays out dialog padding on each side.**
+    ///
+    /// Exercise the real layout and wrapping width at all four display scales.
+    /// The first-run and restore padding constants are private.
+    /// MUTATION: restore PADDING_TOP_LOGICAL_PX to 22.0.
+    /// MUTATION: restore PADDING_BOTTOM_LOGICAL_PX to 22.0.
+    #[test]
+    fn the_sheet_uses_dialog_padding_at_every_scale() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let laid = lay_out(BODY, 180.0 * scale, 2, true, scale);
+            assert_eq!(
+                laid.mark[1] - laid.frame[1],
+                (20.0 * scale).round(),
+                "S2: first_run::PADDING_TOP_LOGICAL_PX"
+            );
+            assert_eq!(
+                laid.frame[3] - laid.verb[3],
+                (16.0 * scale).round(),
+                "S2: first_run::PADDING_BOTTOM_LOGICAL_PX"
+            );
+            assert_eq!(
+                laid.say[0][0] - laid.frame[0],
+                (22.0 * scale).round(),
+                "S2: first_run::PADDING_X_LOGICAL_PX"
+            );
+            assert_eq!(laid.frame[2] - laid.say[0][2], (22.0 * scale).round());
+            // The centred frame rounds each half-width separately, so an odd
+            // pixel width can gain one pixel; wrapping keeps its original width.
+            assert!((say_width(BODY, scale) - (laid.say[0][2] - laid.say[0][0])).abs() <= 1.0);
+        }
+    }
 
     const BODY: [f32; 4] = [960.0, 88.0, 1920.0, 1150.0];
 
