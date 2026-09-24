@@ -27,6 +27,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- Right-click and drop-down menus use the same icon-to-label spacing as Settings.
 - Command palette rows use the same corners and icon spacing as other lists.
 - Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.
 - Bold text in a terminal font that has no bold style is now drawn heavier in

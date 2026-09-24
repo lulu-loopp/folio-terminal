@@ -81,8 +81,8 @@ const MENU_EDGE_MARGIN_LOGICAL_PX: f32 = 8.0;
 const ITEM_HEIGHT_LOGICAL_PX: f32 = 29.5;
 const ITEM_RADIUS_LOGICAL_PX: f32 = 5.0;
 const ITEM_PADDING_X_LOGICAL_PX: f32 = 10.0;
-/// `.profile-item { gap: 10px }`.
-const ITEM_GAP_LOGICAL_PX: f32 = 10.0;
+/// UI-SPEC.md G2: the icon-to-label gap is 8 everywhere.
+const ITEM_GAP_LOGICAL_PX: f32 = 8.0;
 const ITEM_FONT_LOGICAL_PX: f32 = 13.0;
 /// `.profile-item .ticon { width: 14px }` — the column. The mark inside it is
 /// the strip's own 15px `.pmark`, centred, exactly as the flex box centres it.
@@ -6140,7 +6140,7 @@ fn push_row(
     // other trailing thing measures from where the pin stops.
     let pin_claim = row.pin.map_or(0.0, |_| row_pin_claim(scale));
     // What the hint has already claimed, out of the row's trailing padding: its
-    // own measured width, and the `gap: 10px` between two flex items. A row with
+    // own measured width, and the UI-SPEC.md G2 gap between items. A row with
     // nothing to add gives the name the whole span, which is what every row did
     // before any of them had a hint long enough to collide.
     // The accelerator sits outside the hint, which is the order Windows draws
@@ -13672,6 +13672,55 @@ mod tests {
         assert_eq!(SECTION_LABEL_TRACKING_EM, 0.05, "UI-SPEC.md T7");
     }
 
+    /// RED (29) — **Every menu uses the ruled icon-to-label gap.**
+    ///
+    /// G2 sets the gap to 8, matching the private settings::ITEM_GAP_LOGICAL_PX.
+    /// Build the profile menu at all four scales to pin the label geometry
+    /// produced by the shared row painter as well as its owning constant.
+    ///
+    /// MUTATION: restore ITEM_GAP_LOGICAL_PX to 10.0.
+    #[test]
+    fn ui_spec_menus_rest_values_follow_the_rule() {
+        assert_eq!(
+            ITEM_GAP_LOGICAL_PX, 8.0,
+            "UI-SPEC.md G2: settings::ITEM_GAP_LOGICAL_PX is 8"
+        );
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let layout = layout(
+                anchor(scale),
+                MenuSide::Below,
+                &equipped(),
+                (960.0 * scale, 600.0 * scale),
+                scale,
+                NO_RECENT,
+                &chord_table(),
+                &mut fake_measure,
+            );
+            let layers = build(
+                &layout,
+                &equipped(),
+                fallback_profile(),
+                None,
+                NO_RECENT,
+                now(),
+                &crate::favicon::Favicons::default(),
+                &mut fake_measure,
+            );
+            let title = layers
+                .iter()
+                .flat_map(|layer| &layer.labels)
+                .find(|label| label.text == powershell_seven())
+                .expect("the profile row is named");
+            let column_right = layout.items[0][0]
+                + (ITEM_PADDING_X_LOGICAL_PX + ITEM_ICON_COLUMN_LOGICAL_PX) * scale;
+            assert_eq!(
+                title.rect[0] - column_right,
+                8.0 * scale,
+                "UI-SPEC.md G2: the label clears the icon column at scale {scale}"
+            );
+        }
+    }
+
     /// The one layer a popup with nothing inside it draws.
     fn one_layer(layers: Vec<OverlayLayer>) -> OverlayLayer {
         let [layer]: [OverlayLayer; 1] = layers
@@ -18006,7 +18055,7 @@ mod tests {
     ///
     /// The surface, its rows and its ink are checked elsewhere in this module;
     /// what this pins is the ruler — the numbers a redesign would have to change
-    /// deliberately rather than drift past.
+    /// deliberately rather than drift past. The gap follows UI-SPEC.md G2.
     #[test]
     fn the_menu_measures_what_the_stylesheet_says_it_measures() {
         assert_eq!(MENU_MIN_WIDTH_LOGICAL_PX, 180.0, "min-width: 180px");
@@ -18016,7 +18065,7 @@ mod tests {
         assert_eq!(MENU_EDGE_MARGIN_LOGICAL_PX, 8.0, "win.width - mw - 8");
         assert_eq!(ITEM_RADIUS_LOGICAL_PX, 5.0, ".profile-item radius 5px");
         assert_eq!(ITEM_PADDING_X_LOGICAL_PX, 10.0, "padding: 7px 10px");
-        assert_eq!(ITEM_GAP_LOGICAL_PX, 10.0, "gap: 10px");
+        assert_eq!(ITEM_GAP_LOGICAL_PX, 8.0, "UI-SPEC.md G2: icon-to-label gap");
         assert_eq!(ITEM_FONT_LOGICAL_PX, 13.0, "font-size: 13px");
         assert_eq!(
             ITEM_ICON_COLUMN_LOGICAL_PX, 14.0,
@@ -18157,7 +18206,7 @@ mod tests {
             ((mark.rect[0] + mark.rect[2]) / 2.0 - column_mid).abs() <= 0.5,
             "the mark is centred on its column, not aligned to it"
         );
-        // And the row's own label clears the column plus the row's 10px gap.
+        // And the label clears the column plus the UI-SPEC.md G2 gap of 8px.
         let title = labels
             .iter()
             .find(|label| label.text == powershell_seven())
