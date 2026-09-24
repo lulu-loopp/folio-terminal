@@ -725,6 +725,31 @@ pub fn forget_web_environment() {
     ENVIRONMENT.with(|cell| *cell.borrow_mut() = None);
 }
 
+/// **The options the process-wide environment is created with: the runtime's
+/// defaults, and the system's overlay scrollbars** (0.4.5 ticket 40; owner ruling
+/// 2026-09-23: the engine's setting, never page CSS).
+///
+/// A web pane drew Chromium's classic 17 px scrollbars beside Folio's own thin
+/// ones. The scrollbar belongs to the page, so a page that styles its own keeps
+/// it; what changes is the engine's default, through WebView2's documented
+/// `ScrollBarStyle` (`ICoreWebView2EnvironmentOptions8`,
+/// `COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY`: Windows 11's thin bar that
+/// fades while nothing scrolls). No browser command line is written for it.
+///
+/// **Which runtime reads it is the runtime's question.** This options object is
+/// this process's own (`webview2-com` implements every options interface on it),
+/// and the runtime is the side that asks: a runtime from 125.0.2535.41 on asks
+/// for `ICoreWebView2EnvironmentOptions8` and reads the style, an older one never
+/// asks and draws the classic bars. Either way nothing fails.
+#[cfg(windows)]
+fn environment_options() -> ICoreWebView2EnvironmentOptions {
+    let options = CoreWebView2EnvironmentOptions::default();
+    // The object is not yet shared with anybody, which is the whole of what the
+    // setter's `unsafe` asks.
+    unsafe { options.set_scroll_bar_style(COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY) };
+    options.into()
+}
+
 /// The runtime's version, asked of the loader rather than of the registry.
 ///
 /// The registry lies and the API does not: gate 7 removed the runtime and the
@@ -1453,8 +1478,10 @@ impl WebHost {
         // on this window's own glass — so the argument has nothing left to
         // permit, and a command line kept "in case" is a command line nobody
         // re-reads.
-        let options: ICoreWebView2EnvironmentOptions =
-            CoreWebView2EnvironmentOptions::default().into();
+        //
+        // The overlay scrollbars (0.4.5 ticket 40) are an option on the
+        // environment, not an argument: see [`environment_options`].
+        let options = environment_options();
         unsafe {
             CreateCoreWebView2EnvironmentWithOptions(
                 PCWSTR::null(),
@@ -3362,6 +3389,123 @@ mod engine_settings_tests {
         let count = named.len();
         named.dedup();
         assert_eq!(named.len(), count, "two switches share one method name");
+    }
+
+    /// Every option an environment is created with, read back through the COM
+    /// interfaces the runtime itself reads them through, in a fixed order: the
+    /// command line first, the scrollbar style last.
+    fn read_back(options: &ICoreWebView2EnvironmentOptions) -> Vec<(&'static str, String)> {
+        fn text(get: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> String {
+            let mut value = PWSTR::null();
+            get(&mut value).expect("the options answer");
+            take_pwstr(value)
+        }
+        fn flag(get: impl FnOnce(*mut BOOL) -> windows::core::Result<()>) -> String {
+            let mut value = BOOL::default();
+            get(&mut value).expect("the options answer");
+            value.as_bool().to_string()
+        }
+        let two: ICoreWebView2EnvironmentOptions2 = options.cast().expect("options 2");
+        let three: ICoreWebView2EnvironmentOptions3 = options.cast().expect("options 3");
+        let four: ICoreWebView2EnvironmentOptions4 = options.cast().expect("options 4");
+        let five: ICoreWebView2EnvironmentOptions5 = options.cast().expect("options 5");
+        let six: ICoreWebView2EnvironmentOptions6 = options.cast().expect("options 6");
+        let seven: ICoreWebView2EnvironmentOptions7 = options.cast().expect("options 7");
+        let eight: ICoreWebView2EnvironmentOptions8 = options.cast().expect("options 8");
+        let mut schemes = 0u32;
+        let mut registrations = std::ptr::null_mut();
+        unsafe { four.GetCustomSchemeRegistrations(&mut schemes, &mut registrations) }
+            .expect("the options answer");
+        let mut search = COREWEBVIEW2_CHANNEL_SEARCH_KIND::default();
+        unsafe { seven.ChannelSearchKind(&mut search) }.expect("the options answer");
+        let mut channels = COREWEBVIEW2_RELEASE_CHANNELS::default();
+        unsafe { seven.ReleaseChannels(&mut channels) }.expect("the options answer");
+        let mut scrollbars = COREWEBVIEW2_SCROLLBAR_STYLE::default();
+        unsafe { eight.ScrollBarStyle(&mut scrollbars) }.expect("the options answer");
+        vec![
+            (
+                "AdditionalBrowserArguments",
+                text(|value| unsafe { options.AdditionalBrowserArguments(value) }),
+            ),
+            ("Language", text(|value| unsafe { options.Language(value) })),
+            (
+                "TargetCompatibleBrowserVersion",
+                text(|value| unsafe { options.TargetCompatibleBrowserVersion(value) }),
+            ),
+            (
+                "AllowSingleSignOnUsingOSPrimaryAccount",
+                flag(|value| unsafe { options.AllowSingleSignOnUsingOSPrimaryAccount(value) }),
+            ),
+            (
+                "ExclusiveUserDataFolderAccess",
+                flag(|value| unsafe { two.ExclusiveUserDataFolderAccess(value) }),
+            ),
+            (
+                "IsCustomCrashReportingEnabled",
+                flag(|value| unsafe { three.IsCustomCrashReportingEnabled(value) }),
+            ),
+            ("CustomSchemeRegistrations", schemes.to_string()),
+            (
+                "EnableTrackingPrevention",
+                flag(|value| unsafe { five.EnableTrackingPrevention(value) }),
+            ),
+            (
+                "AreBrowserExtensionsEnabled",
+                flag(|value| unsafe { six.AreBrowserExtensionsEnabled(value) }),
+            ),
+            ("ChannelSearchKind", search.0.to_string()),
+            ("ReleaseChannels", channels.0.to_string()),
+            ("ScrollBarStyle", scrollbars.0.to_string()),
+        ]
+    }
+
+    /// RED (0.4.5 ticket 40) — **the environment asks the engine for its overlay
+    /// scrollbars, and passes no browser arguments.**
+    ///
+    /// A web pane on Windows drew Chromium's classic 17 px bars beside Folio's own
+    /// thin ones. The owner ruled (2026-09-23) that the fix is the engine's
+    /// setting and never CSS put into a page; the engine's documented setting is
+    /// `ScrollBarStyle`, so the one option that may differ from the runtime's
+    /// defaults is that one, and the browser command line stays empty (route B's
+    /// claim, held in source by `the_environment_is_created_with_no_browser_arguments_at_all`).
+    /// This runs the real producer — `environment_options`, the value
+    /// `request_environment` hands to `CreateCoreWebView2EnvironmentWithOptions`
+    /// — and reads it back the way the runtime does, through the options
+    /// interfaces, next to a default-built set.
+    ///
+    /// MUTATION: drop the `set_scroll_bar_style` line from `environment_options`
+    /// and the style comes back as `COREWEBVIEW2_SCROLLBAR_STYLE_DEFAULT`.
+    #[test]
+    fn the_environment_asks_for_the_overlay_scrollbars_and_for_no_browser_arguments() {
+        let built = read_back(&environment_options());
+        let default = read_back(&CoreWebView2EnvironmentOptions::default().into());
+        let last = built.len() - 1;
+        assert_eq!(
+            built[last],
+            (
+                "ScrollBarStyle",
+                COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY.0.to_string()
+            ),
+            "the engine is asked for the overlay scrollbars"
+        );
+        assert_eq!(
+            default[last],
+            (
+                "ScrollBarStyle",
+                COREWEBVIEW2_SCROLLBAR_STYLE_DEFAULT.0.to_string()
+            ),
+            "which is not what the runtime would have chosen by itself"
+        );
+        assert_eq!(
+            built[0],
+            ("AdditionalBrowserArguments", String::new()),
+            "and the browser command line is empty"
+        );
+        assert_eq!(
+            built[..last],
+            default[..last],
+            "nothing but the scrollbar style differs from the runtime's defaults"
+        );
     }
 }
 
