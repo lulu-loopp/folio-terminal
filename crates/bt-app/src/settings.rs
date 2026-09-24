@@ -153,9 +153,10 @@ const CONTENT_PADDING_X_LOGICAL_PX: f32 = 22.0;
 /// Ten is the rail's own `padding-top`, which is the argument for the number
 /// rather than a taste for more air: the body has two columns, they begin at the
 /// same y, and content that scrolls disappears under the same inset the words
-/// beside it start at. The mock-up is written back to `padding: 10px 22px 18px`.
+/// beside it start at. Bottom padding follows `UI-SPEC.md` S10.
 const CONTENT_PADDING_TOP_LOGICAL_PX: f32 = 10.0;
-const CONTENT_PADDING_BOTTOM_LOGICAL_PX: f32 = 18.0;
+/// Dialog bottom padding (UI-SPEC.md S10).
+const CONTENT_PADDING_BOTTOM_LOGICAL_PX: f32 = 16.0;
 
 // ── `.group-label` ─────────────────────────────────────────────────────────
 const GROUP_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
@@ -575,8 +576,8 @@ const MENU_ACT_GAP_LOGICAL_PX: f32 = 1.0;
 /// or not, because a popup that grew when the pointer crossed a row would be a
 /// list that moves under the pointer.
 const MENU_ACT_INSET_LOGICAL_PX: f32 = 12.0;
-/// `.ci-act { border-radius: 4px }`, the ground one wears under the pointer.
-const MENU_ACT_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// Tool-box radius (`UI-SPEC.md` R9), the ground one wears under the pointer.
+const MENU_ACT_RADIUS_LOGICAL_PX: f32 = 5.0;
 // `.combo-item .ci-act svg { width: 12px }` and `.ci-del svg { width: 10px }` —
 // **two numbers and one optical size**, which is the compact head slot's whole
 // derivation arrived at by hand on one row: the pencil is drawn on a sixteen
@@ -648,7 +649,7 @@ const NAV_WIDTH_LOGICAL_PX: f32 = 168.0;
 /// Above the first item — the `.group-label`'s own first `margin-top`, so the
 /// rail's first word sits on the same line as the page's first heading.
 const NAV_PADDING_TOP_LOGICAL_PX: f32 = 10.0;
-/// Below the last, matching `.content`'s own bottom padding.
+/// Below the last navigation item; the rail keeps its own bottom padding.
 const NAV_PADDING_BOTTOM_LOGICAL_PX: f32 = 18.0;
 /// The rail's own gutters, inside which the item pills sit.
 const NAV_PADDING_X_LOGICAL_PX: f32 = 10.0;
@@ -656,9 +657,8 @@ const NAV_ITEM_HEIGHT_LOGICAL_PX: f32 = 30.0;
 const NAV_ITEM_GAP_LOGICAL_PX: f32 = 2.0;
 /// The round every control in this dialog wears.
 const NAV_ITEM_RADIUS_LOGICAL_PX: f32 = 6.0;
-/// `.combo > button`'s own left padding, so the rail's words and the page's
-/// pickers start their text the same distance inside their boxes.
-const NAV_ITEM_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
+/// Selectable-row text inset (`UI-SPEC.md` S8), shared with menu items.
+const NAV_ITEM_PADDING_LEFT_LOGICAL_PX: f32 = 10.0;
 /// Primary text (`UI-SPEC.md` T4) — the same size every menu item, tree row,
 /// tab, button and combo uses.
 const NAV_ITEM_FONT_LOGICAL_PX: f32 = 13.0;
@@ -693,7 +693,8 @@ pub(crate) const CAP_HEIGHT_LOGICAL_PX: f32 = 20.0;
 pub(crate) const CAP_RADIUS_LOGICAL_PX: f32 = 4.0;
 pub(crate) const CAP_PADDING_X_LOGICAL_PX: f32 = 6.0;
 pub(crate) const CAP_GAP_LOGICAL_PX: f32 = 4.0;
-pub(crate) const CAP_FONT_LOGICAL_PX: f32 = 11.5;
+/// Caption size (`UI-SPEC.md` T5), also used by key and card hints.
+pub(crate) const CAP_FONT_LOGICAL_PX: f32 = 11.0;
 /// A cap is never narrower than it is tall: a single letter in a box a third of
 /// its height wide reads as a sliver, not as a key.
 pub(crate) const CAP_MIN_WIDTH_LOGICAL_PX: f32 = CAP_HEIGHT_LOGICAL_PX;
@@ -792,10 +793,11 @@ const PROFILE_ACT_PADDING_X_LOGICAL_PX: f32 = 6.0;
 /// `.pf-act { font-size: 12.5px }` — a hair under the dialog buttons, because
 /// this run is trim on a row and not a verb of the page.
 const PROFILE_ACT_FONT_LOGICAL_PX: f32 = 12.5;
-/// `.pf-badge` — `margin-left: 8px; padding: 1px 6px; font-size: 10.5px`.
+/// `.pf-badge` — `margin-left: 8px; padding: 1px 6px`.
 const PROFILE_BADGE_MARGIN_LEFT_LOGICAL_PX: f32 = 8.0;
 const PROFILE_BADGE_PADDING_X_LOGICAL_PX: f32 = 6.0;
-const PROFILE_BADGE_FONT_LOGICAL_PX: f32 = 10.5;
+/// Badge size (`UI-SPEC.md` T6), shared with the window-tab badge.
+const PROFILE_BADGE_FONT_LOGICAL_PX: f32 = 10.0;
 const PROFILE_BADGE_HEIGHT_LOGICAL_PX: f32 = 15.0;
 const PROFILE_BADGE_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// `.pf-badge { letter-spacing: .05em }`, the group label's own tracking —
@@ -15709,6 +15711,50 @@ thread_local! {
 mod tests {
     use super::*;
 
+    /// RED (24) — **Settings key caps, badges, row insets, dialog padding and
+    /// row-menu corners follow their UI roles.**
+    ///
+    /// UI-SPEC.md T5/T6/S8/S10/R9 replace the five remaining Settings
+    /// deviations. Restore's bottom-padding constant is private, so that
+    /// assertion cites its rule instead of widening the constant's visibility.
+    ///
+    /// MUTATION: restore CAP_FONT_LOGICAL_PX to 11.5.
+    /// MUTATION: restore PROFILE_BADGE_FONT_LOGICAL_PX to 10.5.
+    /// MUTATION: restore NAV_ITEM_PADDING_LEFT_LOGICAL_PX to 12.0.
+    /// MUTATION: restore CONTENT_PADDING_BOTTOM_LOGICAL_PX to 18.0.
+    /// MUTATION: restore MENU_ACT_RADIUS_LOGICAL_PX to 4.0.
+    #[test]
+    fn ui_spec_settings_rest_values_follow_the_rule() {
+        let rules = [
+            (CAP_FONT_LOGICAL_PX, 11.0, "UI-SPEC.md T5: caption"),
+            (
+                PROFILE_BADGE_FONT_LOGICAL_PX,
+                bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+                "UI-SPEC.md T6: theme::WINDOW_TAB_BADGE_FONT_LOGICAL_PX",
+            ),
+            (
+                NAV_ITEM_PADDING_LEFT_LOGICAL_PX,
+                ITEM_PADDING_X_LOGICAL_PX,
+                "UI-SPEC.md S8: settings::ITEM_PADDING_X_LOGICAL_PX",
+            ),
+            (
+                CONTENT_PADDING_BOTTOM_LOGICAL_PX,
+                16.0,
+                "UI-SPEC.md S10: restore::DIALOG_PADDING_BOTTOM_LOGICAL_PX",
+            ),
+            (
+                MENU_ACT_RADIUS_LOGICAL_PX,
+                crate::seats::PREVIEW_TOOL_RADIUS_LOGICAL_PX,
+                "UI-SPEC.md R9: seats::PREVIEW_TOOL_RADIUS_LOGICAL_PX",
+            ),
+        ];
+        let deviations: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, rule, _)| actual != rule)
+            .collect();
+        assert!(deviations.is_empty(), "Settings deviations: {deviations:?}");
+    }
+
     /// RED (ticket 17) — **every Settings combo wears the same `⌄` every
     /// other drop-down opener wears, the dialog title and the combo
     /// drop-down rows are on the primary scale, and the row titles and nav
@@ -16890,7 +16936,8 @@ mod tests {
     /// A page's closing verb and the air above it: `14 + 27.5`.
     const FOOT_ADVANCE: f32 = 41.5;
 
-    /// One page's own height at scale 1: `10 + (10 + 13 + 2) + rows * 54 + 18` —
+    /// One page's own height at scale 1: `10 + (10 + 13 + 2) + rows * 54 + 16` —
+    /// the 16 being the UI-SPEC bottom padding ticket 24 restored (it was 18) —
     /// the content's two paddings and its one heading around the rows.
     ///
     /// **One heading, never more** since the rail arrived: a page holds one
@@ -16901,7 +16948,7 @@ mod tests {
     /// mock-up's own anchor measurement moved by eight: a scrollport cut a
     /// hairline under the header sliced a row's title against the dialog's lid.
     fn page_height(rows: usize) -> f32 {
-        53.0 + ROW_HEIGHT * rows as f32
+        51.0 + ROW_HEIGHT * rows as f32
     }
 
     /// The same page ending in an open `Advanced` group: its heading row, and
@@ -21017,7 +21064,8 @@ mod tests {
     ///
     /// The height is not a guess: it is `1 + 56 + content + 1` — two hairlines,
     /// the header's `16 + 30 + 10`, and a content box of
-    /// `2 + 10 + 13 + 2 + rows * (11 + 32 + 11) + 18`, plus `16 + 13 + 2` for
+    /// `2 + 10 + 13 + 2 + rows * (11 + 32 + 11) + 16` (the 16 is the UI-SPEC bottom
+    /// padding ticket 24 restored; it was 18), plus `16 + 13 + 2` for
     /// every heading after the first. The mock-up's own renderer reported 211 for
     /// the two rows under one heading this dialog first shipped with, which is
     /// [`dialog_height`] at `(2, 1)` and the number the formula is anchored on.
@@ -21030,11 +21078,11 @@ mod tests {
     fn the_dialog_lands_where_the_mock_up_puts_it() {
         assert_eq!(
             dialog_height(2),
-            219.0,
+            217.0,
             "the mock-up's own measurement of two rows under one heading — 211 \
              when `.content` had 2px of top padding, and eight more since \
              §7.1.6c-5 gave the scrollport an inset a scrolled row can \
-             disappear under"
+             disappear under, and two fewer since ticket 24 took the bottom \n             padding back to the spec's 16"
         );
         let placed = open(1.0, false);
         assert_eq!(width(placed.frame), 720.0, "min(720px, 92%) at 1280 wide");

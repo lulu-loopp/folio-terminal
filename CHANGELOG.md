@@ -14,6 +14,7 @@ All notable changes to Folio are recorded here. The format follows
   Folio passes the title on at most once a frame.
 ### Changed
 
+- Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.
 - Glance-card head spacing, drag-tag padding and spacing, and peek-tag line height now match the other floating tags.
 
 ## 0.4.4-preview — 2026-09-24
