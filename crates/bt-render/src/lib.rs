@@ -25776,7 +25776,8 @@ mod tests {
 
     /// A frame of `rows` rows of text, cell for cell, projected at `metrics` — narrow ASCII, a
     /// CJK ideograph and an emoji written as their lead cell and spacer, the three shaping lanes a
-    /// terminal draws (ticket 37).
+    /// terminal draws (ticket 37). Windows-only like the two GPU tests that use it.
+    #[cfg(target_os = "windows")]
     fn mixed_text_frame(
         metrics: CellMetrics,
         columns: u32,
