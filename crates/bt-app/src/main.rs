@@ -51459,6 +51459,97 @@ mod hold_station_tests {
         );
     }
 
+    /// RED (43) — **every phase of a web page coming up is entered around the
+    /// call it names, and gives the caller's name back.**
+    ///
+    /// The vocabulary test in `hang_watch` holds the words; this holds where
+    /// they are said. A station entered beside its call rather than around it
+    /// names the wrong milliseconds, and one entered with `enter` and no `at`
+    /// keeps the rest of `drive_web_page` under its own name — so every one of
+    /// them is a `during`, whose closure is the call and nothing else.
+    ///
+    /// MUTATION: unwrap `self.host.install(compositor, page, generation)` from
+    /// its `during` in `WebSeat::step` and the install burst is charged to
+    /// `drive_web_page` again.
+    #[test]
+    fn every_phase_of_a_web_page_coming_up_is_entered_around_its_call() {
+        for (owner, name, station, call) in [
+            (
+                "WebSeat",
+                "start_environment",
+                "WebEnvironment",
+                "self.host.request_environment(",
+            ),
+            (
+                "WebSeat",
+                "step",
+                "WebController",
+                "self.host.request_controller(",
+            ),
+            (
+                "WebSeat",
+                "step",
+                "WebVisual",
+                "compositor.attach_web_visual(",
+            ),
+            ("WebSeat", "step", "WebInstall", "self.host.install("),
+            ("WebSeat", "step", "WebFloor", "self.stand_on_the_floor("),
+            ("WebSeat", "step", "WebNavigate", "self.host.navigate("),
+        ] {
+            // Read with the whitespace taken out, so a closure `rustfmt` chose
+            // to break over lines is the same closure.
+            let body: String = method_body(owner, name)
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect();
+            let opened = format!("hang_watch::during(hang_watch::Station::{station},||");
+            assert_eq!(
+                body.matches(opened.as_str()).count(),
+                1,
+                "{owner}::{name} does not name `{station}` exactly once"
+            );
+            // The closure is the call and nothing else, so the first brace that
+            // closes after the station opens is the closure's own.
+            let scope = &body[first_at(&body, &opened)..];
+            let closed = first_at(scope, "}");
+            assert!(
+                scope[..closed].contains(call),
+                "`{station}` in {owner}::{name} does not stand around `{call}`:\n{}",
+                &scope[..closed]
+            );
+            assert_eq!(
+                body.matches(call).count(),
+                1,
+                "{owner}::{name} reaches `{call}` somewhere its station does not cover"
+            );
+        }
+    }
+
+    /// RED (43) — **a handler that has returned hands the thread to the pump's
+    /// name, not its own.**
+    ///
+    /// The last statement of `window_event` and of `user_event` is the pump's
+    /// station. Without it, the time the platform spends between two handlers —
+    /// which is where WebView2's callbacks and its in-process work run — was
+    /// charged to `window_event` after an event and to whatever stood before
+    /// the wake after a worker's answer.
+    ///
+    /// MUTATION: delete `hang_watch::at(hang_watch::Station::Pump);` from the
+    /// foot of `window_event`.
+    #[test]
+    fn a_handler_that_has_returned_hands_the_thread_to_the_pump() {
+        for name in ["window_event", "user_event"] {
+            let body = trait_method_body("FolioApp", "ApplicationHandler", name);
+            let pump = "hang_watch::at(hang_watch::Station::Pump);";
+            assert_eq!(body.matches(pump).count(), 1, "{name} never names the pump");
+            let after = body[first_at(body, pump) + pump.len()..].trim();
+            assert_eq!(
+                after, "}",
+                "{name} does work after handing the thread to the pump:\n{after}"
+            );
+        }
+    }
+
     /// **Every kind the dispatcher answers names its own handler**
     /// (T-WINDOW-EVENT-STATIONS).
     ///
@@ -62208,6 +62299,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if let Err(error) = applied {
             self.fail(event_loop, error);
         }
+        // **And the pump's until the next handler**, on `window_event`'s own
+        // reasoning (ticket 43): this wake has been answered, and the engine
+        // whose callback sent it may still be working on this thread.
+        hang_watch::at(hang_watch::Station::Pump);
     }
 
     fn window_event(
@@ -62630,6 +62725,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 self.fail(event_loop, error);
             }
         });
+        // **And the pump's from here until the next handler** (ticket 43). The
+        // event has been answered; what the thread does before winit hands it
+        // anything else is the platform's own loop and whatever runs on it —
+        // WebView2's callbacks and its in-process half among them. Left at
+        // `Event`, that time read as `window_event` on the 2026-09-23 report.
+        hang_watch::at(hang_watch::Station::Pump);
     }
 
     /// **The pulse, the turn, and the note of where this thread is going.**
