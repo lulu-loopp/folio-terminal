@@ -3283,7 +3283,8 @@ impl<K: Eq + Hash, V> ByteLru<K, V> {
         self.indices.len()
     }
 
-    #[cfg(test)]
+    /// Windows only (ticket 55, D-62): its only readers are Windows-gated tests.
+    #[cfg(all(test, target_os = "windows"))]
     fn is_empty(&self) -> bool {
         self.indices.is_empty()
     }
@@ -7416,7 +7417,9 @@ impl GpuContext {
     /// The poll is what fires the callback, and its own answer is nothing to go
     /// on: polling a device that has just been destroyed is expected to fail,
     /// and the fact the test is after is the latch.
-    #[cfg(test)]
+    ///
+    /// Windows only (ticket 55, D-62): its only readers are Windows-gated tests.
+    #[cfg(all(test, target_os = "windows"))]
     fn lose_the_device_on_purpose(&self) {
         self.device.destroy();
         let _ = self.device.poll(wgpu::PollType::Wait {
@@ -13691,7 +13694,9 @@ fn shape_chrome_measurement_with_cjk(
 /// and not of the label: a caption does not decide how faded the popup carrying
 /// it is, and a per-label field would ask all thirty-odd construction sites to
 /// answer a question only their layer can.
-#[cfg(test)]
+///
+/// Windows only (ticket 55, D-62): its only readers are Windows-gated tests.
+#[cfg(all(test, target_os = "windows"))]
 fn shape_chrome_labels(
     font_system: &mut FontSystem,
     labels: &[ChromeLabel],
@@ -15574,6 +15579,13 @@ fn drop_faces_with_no_scalable_em(db: &mut glyphon::fontdb::Database) -> usize {
 /// Deliberately **no symbol or emoji face on this list.** An ideograph that
 /// reached one would be a mistake, and the shaper's `.notdef` box is a better
 /// report of that mistake than a plausible-looking wrong glyph.
+///
+/// **Windows only, like every reader it has** (ticket 55, D-62):
+/// [`FolioFallback`], `platform_cjk_fallback_families`' Windows arm and the
+/// Windows-gated tests. A Mac asks `MACOS_CJK_FALLBACK_FAMILIES` and any other
+/// desktop asks `OTHER_CJK_FALLBACK_FAMILIES`, so compiled there this list was a
+/// constant nobody read.
+#[cfg(target_os = "windows")]
 const CJK_FALLBACK_FAMILIES: [&str; 11] = [
     "Microsoft YaHei UI",
     "Microsoft YaHei",
@@ -15641,6 +15653,12 @@ const OTHER_CJK_FALLBACK_FAMILIES: [&str; 4] = [
 /// address space and no pages. That is what lets this list grow past the three
 /// files it used to hold without giving up the "never enumerate Fonts/" rule the
 /// loader exists to keep.
+///
+/// **Windows only** (ticket 55, D-62): the one reader is the Windows
+/// `terminal_font_system`, which loads from `%WINDIR%\Fonts`. A Mac names no
+/// files — its database is the whole system library, for the `AssetsV2` reason
+/// `drop_faces_with_no_scalable_em` gives.
+#[cfg(target_os = "windows")]
 const CJK_FALLBACK_FONT_FILES: [&str; 9] = [
     "msyh.ttc",
     "msyhbd.ttc",
@@ -15757,6 +15775,11 @@ fn terminal_font_system() -> FontSystem {
 /// mean enumerating `Fonts/` at startup — the cost this whole loader exists to
 /// avoid. A machine with Inter installed therefore renders the second entry,
 /// which is what a browser would do if Inter were absent there too.
+///
+/// **Windows only** (ticket 55, D-62), under the same `cfg` as its readers,
+/// `load_chrome_sans_family` and the Windows-gated chrome tests; a Mac's chrome
+/// face is chosen by family, from `MACOS_CHROME_SANS_FAMILIES`, not by file.
+#[cfg(target_os = "windows")]
 const CHROME_SANS_FONT_FILES: [&str; 2] = ["SegUIVar.ttf", "segoeui.ttf"];
 
 /// Load the chrome's UI face and make it the answer to `Family::SansSerif`.
@@ -19968,6 +19991,8 @@ mod tests {
         )
     }
 
+    /// Windows only (ticket 55, D-62): its only reader is a Windows-gated test.
+    #[cfg(target_os = "windows")]
     fn shape_row_for_test_with_cjk(
         cells: &[CapturedCell],
         font_system: &mut FontSystem,
@@ -20051,6 +20076,8 @@ mod tests {
             .collect()
     }
 
+    /// Windows only (ticket 55, D-62): its only readers are Windows-gated tests.
+    #[cfg(target_os = "windows")]
     fn raster_content(font_system: &mut FontSystem, buffer: &Buffer) -> glyphon::SwashContent {
         let glyph = first_layout_glyph(buffer);
         SwashCache::new()
@@ -20059,6 +20086,8 @@ mod tests {
             .content
     }
 
+    /// Windows only (ticket 55, D-62): its only reader is a Windows-gated test.
+    #[cfg(target_os = "windows")]
     fn occupied_width_px(font_system: &mut FontSystem, buffer: &Buffer) -> f32 {
         let glyphs = buffer
             .layout_runs()
@@ -22778,6 +22807,9 @@ mod tests {
     /// This machine's adapter, on a device that will not make a texture wider
     /// than `ceiling` — see [`GpuContext::headless_under_a_texture_ceiling`] for
     /// why a soak is allowed to ask for a smaller roof than the machine has.
+    ///
+    /// Windows only (ticket 55, D-62): its only readers are Windows-gated tests.
+    #[cfg(target_os = "windows")]
     fn on_a_device_whose_textures_stop_at(
         format: wgpu::TextureFormat,
         ceiling: u32,
@@ -25482,8 +25514,12 @@ mod tests {
     /// Deterministic because a ceiling measured against a different page each
     /// run is not a measurement. The generator is xorshift64, seeded per
     /// surface, so every lane's text is the same text on every machine.
+    ///
+    /// Windows only (ticket 55, D-62): its only readers are Windows-gated tests.
+    #[cfg(target_os = "windows")]
     struct HanStream(u64);
 
+    #[cfg(target_os = "windows")]
     impl HanStream {
         const POOL: u32 = 2500;
 
@@ -25510,6 +25546,9 @@ mod tests {
     }
 
     /// A chrome label with nothing but its text, box, size and clip named.
+    ///
+    /// Windows only (ticket 55, D-62): its only readers are Windows-gated tests.
+    #[cfg(target_os = "windows")]
     fn stress_label(
         text: String,
         rect: [f32; 4],
@@ -25547,6 +25586,9 @@ mod tests {
     /// It is a fixture and not a screenshot, so it is allowed to be honest about
     /// what it leaves out: the icons, the fills and the hairlines cost the atlas
     /// nothing, so none of them are here.
+    ///
+    /// Windows only (ticket 55, D-62), with `chinese_four_k_frame`, its one maker.
+    #[cfg(target_os = "windows")]
     struct ChineseFourK {
         seat: SeatViewport,
         frame: ViewportFrame,
@@ -28311,6 +28353,11 @@ mod tests {
     /// reads the constant rather than shaping anything, because the order is a
     /// ruling and a machine that happens to lack the first three faces would
     /// still have to keep it.
+    ///
+    /// Windows only since ticket 55 (D-62), with the chain it reads: the chain
+    /// is Windows' own, and elsewhere it is not compiled at all. The suite runs
+    /// on Windows only in any case (CI's `gpu` job); a Mac and Linux only check it.
+    #[cfg(target_os = "windows")]
     #[test]
     fn the_cjk_chain_puts_simplified_first_and_the_bitmap_serif_last() {
         let index = |family: &str| {
@@ -32620,6 +32667,9 @@ mod tests {
         use super::*;
         use std::{cell::Cell, rc::Rc};
 
+        /// Windows only (ticket 55, D-62): its only readers are the
+        /// Windows-gated tests below.
+        #[cfg(target_os = "windows")]
         const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
         /// A device that is gone until somebody gets it back, and the ledger of
@@ -32868,7 +32918,8 @@ mod tests {
         }
 
         /// The ink of the one label these tests draw, counted off the readback.
-        /// `[b, g, r, a]`.
+        /// `[b, g, r, a]`. Windows only (ticket 55, D-62), with the tests that read it.
+        #[cfg(target_os = "windows")]
         fn ink_pixels(pixels: &[[u8; 4]]) -> usize {
             pixels
                 .iter()
@@ -32883,7 +32934,9 @@ mod tests {
                 .count()
         }
 
-        /// One red label, said once and never said again.
+        /// One red label, said once and never said again. Windows only (ticket
+        /// 55, D-62), with the tests that read it.
+        #[cfg(target_os = "windows")]
         fn a_sentence_this_window_keeps() -> Vec<OverlayLayer> {
             vec![OverlayLayer {
                 labels: vec![ChromeLabel {
@@ -32903,6 +32956,8 @@ mod tests {
             }]
         }
 
+        /// Windows only (ticket 55, D-62), with the tests that read it.
+        #[cfg(target_os = "windows")]
         fn one_frame(
             window: &mut WindowRenderer,
             gpu: &mut GpuContext,
