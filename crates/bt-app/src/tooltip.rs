@@ -428,6 +428,9 @@ pub enum TooltipAnchorId {
     /// meaning something else. It is a padlock now and it registers too — see
     /// [`Self::PreviewLock`].)
     PreviewBrowser(bt_layout::SeatId),
+    /// **A terminal pane head's text-size mark** (ticket 37): the reset verb's name, and the
+    /// effective size when the clamp drew the pane at a size its percentage does not say.
+    PaneTextSize(bt_layout::SeatId),
     /// **One control of a preview head's own run** (user ruling 2026-08-27 —
     /// 「头/轨上每一枚可点的东西都必须有 tooltip,且由注册表守着」).
     ///

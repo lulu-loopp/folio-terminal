@@ -133,6 +133,26 @@ pub(crate) fn pointer_chord_held_on(modifiers: ModifiersState, platform: HostPla
     is_command_chord_on(modifiers, platform)
 }
 
+/// **Whether a wheel notch wears the text-size gesture's modifier, and only it** (ticket 37):
+/// `Ctrl` on Windows, `⌘` on a Mac — [`pointer_chord_held_on`] — with nothing else held.
+///
+/// Exact, because a blind "Ctrl is down" also takes `Ctrl+Alt` (the pair Windows reports AltGr
+/// as) and `Ctrl+Shift`, and each of those already has a meaning on the wheel: `Alt` aims a card's
+/// window, `Shift` is §7.1.5f's "this notch is the window's, not the program's". So Shift, Alt and
+/// the platform's other modifier ([`is_terminal_chord_on`]: Super here, Control on a Mac) each
+/// hand the notch back to the routes it had. Built on the two questions this file already answers
+/// per platform, so there is no second reading of which key is which.
+///
+/// On a named platform, for [`is_command_chord_on`]'s reason: a test on either machine asks about
+/// the other.
+#[must_use]
+pub(crate) fn text_size_wheel_held_on(modifiers: ModifiersState, platform: HostPlatform) -> bool {
+    pointer_chord_held_on(modifiers, platform)
+        && !modifiers.shift_key()
+        && !modifiers.alt_key()
+        && !is_terminal_chord_on(modifiers, platform)
+}
+
 /// **What button this press is**, once the platform's own secondary-click
 /// convention has been applied to what winit reported.
 ///

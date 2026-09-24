@@ -125,6 +125,16 @@ pub(crate) enum Action {
     /// zoom is one field on one tab, the pane head draws which way it is set, and
     /// a separate "restore" key would be a second truth about the same field.
     ZoomPane,
+    /// **One rung larger on the text-size ladder, for the pane holding the keyboard** (ticket 37).
+    ///
+    /// Not "zoom": [`Self::ZoomPane`] already means *this pane fills the tab*, and the verb that
+    /// changes a pane's type size never says the word. The three text-size rows reach the one
+    /// mutation door, `Runtime::step_pane_text_scale`.
+    TextLarger,
+    /// One rung smaller (ticket 37).
+    TextSmaller,
+    /// Back to 100 % (ticket 37) — the same verb a click on the pane head's indicator is.
+    TextActualSize,
     /// Open this tab's files column, or close the one it already has.
     FilesPane,
     /// Turn a files column's page over: tree to repository, repository to tree.
@@ -406,6 +416,24 @@ pub(crate) enum Scope {
     /// other: `AreBrowserAcceleratorKeysEnabled` is not in this build's
     /// bindings, so a key the table does not take is a key the engine keeps.
     SearchHost,
+    /// Only while a **terminal** holds the keyboard — either screen (ticket 37).
+    ///
+    /// [`Self::TerminalPrimary`] without its second half, and the difference is the point: a
+    /// pane's text size is the same fact on the alternate screen as on the scrollback — `vim` at
+    /// 150 % is still a terminal at 150 % — so these rows do not give the key back to a
+    /// full-screen program. The condition is `keyboard_owner_is_a_shell` and nothing looser:
+    /// not "the focused leaf is not a preview", because a files tree, the search field, a menu,
+    /// a rename box or a modal can hold the keyboard while the focused leaf is still a shell, and
+    /// a size key pressed in any of them is not a key pressed at the terminal. A page holding the
+    /// keyboard is outside it too, so a page keeps `Ctrl+=` / `Ctrl+-` / `Ctrl+0` for its own
+    /// zoom (`webhost::claimable_chords` asks this same predicate).
+    ///
+    /// **The documented exception** (owner ruling 2026-09-23, Q1): on Windows the three rows
+    /// wear bare `Ctrl` — the browser's keys — against the rule that `Ctrl` is the terminal's.
+    /// Folio's encoder spells none of `-`, `=` and `0` as a control byte
+    /// (`input::control_byte`), so on the chords it produces the rows take no byte from the
+    /// program; `docs/RULES.md` row 27 records the exception.
+    Terminal,
     /// Only while a **hosted page** holds the keyboard (§7.7, W2 slice ④).
     ///
     /// Its own scope and not [`Self::Preview`], because a web seat is a preview
@@ -454,6 +482,13 @@ pub(crate) struct Focus {
     /// Never true without [`Self::preview`] — a web seat is a preview seat, and
     /// the two flags are a kind and a content class rather than two places.
     pub(crate) web_page: bool,
+    /// **Whether a terminal holds the keyboard**, on either screen (ticket 37) — the whole of
+    /// [`Scope::Terminal`].
+    ///
+    /// `keyboard_owner_is_a_shell`, read as it is for the caret's blink and the IME: true exactly
+    /// when a keystroke would otherwise reach a shell, and false while a tree, a field, a menu, a
+    /// modal, a preview or a page has it. Never false where [`Self::terminal_primary`] is true.
+    pub(crate) terminal: bool,
 }
 
 impl Scope {
@@ -480,6 +515,7 @@ impl Scope {
             // surfaces have no one word between them — so it names the thing
             // that is true of both: there is something here to search.
             Self::SearchHost => Some(Text::ShortcutScopeSearchHost),
+            Self::Terminal => Some(Text::ShortcutScopeTerminal),
         }
     }
 
@@ -499,6 +535,7 @@ impl Scope {
             Self::SearchOpen => focus.search_open,
             Self::WebPage => focus.web_page,
             Self::SearchHost => focus.terminal_primary || focus.web_page,
+            Self::Terminal => focus.terminal,
         }
     }
 }
@@ -792,6 +829,26 @@ impl Binding {
             chord: Some(chord),
             mac,
             scope: Scope::TerminalPrimary,
+            surfaced: true,
+        }
+    }
+
+    /// A row in force only while a terminal holds the keyboard, on either screen (ticket 37).
+    const fn terminal(
+        id: &'static str,
+        title: Text,
+        action: Action,
+        chord: Chord,
+        mac: Option<Chord>,
+    ) -> Self {
+        Self {
+            id,
+            title,
+            family: None,
+            action,
+            chord: Some(chord),
+            mac,
+            scope: Scope::Terminal,
             surfaced: true,
         }
     }
@@ -1286,6 +1343,33 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::ZoomPane,
         Chord::new(CTRL_SHIFT, character("x")),
         mac(CMD_SHIFT, character("x")),
+    ),
+    // **The pane's own text size** (ticket 37; owner ruling on Q1, 2026-09-23): the browser's
+    // keys, `Ctrl+=` / `Ctrl+-` / `Ctrl+0` on Windows and `Cmd+=` / `Cmd+-` / `Cmd+0` on a Mac,
+    // in force only while a terminal holds the keyboard ([`Scope::Terminal`]). Bare `Ctrl` is a
+    // documented terminal-scoped exception to discipline (1): none of the three keys is a letter
+    // of the control-code alphabet, and the encoder spells none of them as a byte. A page keeps
+    // all three for its own zoom, because the scope is out of force over one.
+    Binding::terminal(
+        "text-larger",
+        Text::ShortcutTextLarger,
+        Action::TextLarger,
+        Chord::new(CTRL, character("=")),
+        mac(CMD, character("=")),
+    ),
+    Binding::terminal(
+        "text-smaller",
+        Text::ShortcutTextSmaller,
+        Action::TextSmaller,
+        Chord::new(CTRL, character("-")),
+        mac(CMD, character("-")),
+    ),
+    Binding::terminal(
+        "text-actual-size",
+        Text::ShortcutTextActualSize,
+        Action::TextActualSize,
+        Chord::new(CTRL, character("0")),
+        mac(CMD, character("0")),
     ),
     // **`Ctrl+Shift+B`, and pointedly not the mock-up's `Ctrl+B`.**
     //
@@ -2797,40 +2881,55 @@ impl Binding {
 /// the capsule had one host; the capsule now has two, and the second is a page.
 /// A *document* preview still cannot have one — `web_page` is what tells the two
 /// apart — so the state that was added is the page's and not the whole kind's.
-const REACHABLE_FOCUS: [Focus; 6] = [
+const REACHABLE_FOCUS: [Focus; 7] = [
+    // A terminal on its alternate screen (ticket 37): the keyboard is a shell's, and the
+    // scrollback rows are out of force.
     Focus {
         preview: false,
         terminal_primary: false,
+        terminal: true,
+        search_open: false,
+        web_page: false,
+    },
+    Focus {
+        preview: false,
+        terminal_primary: false,
+        terminal: false,
         search_open: false,
         web_page: false,
     },
     Focus {
         preview: true,
         terminal_primary: false,
+        terminal: false,
         search_open: false,
         web_page: false,
     },
     Focus {
         preview: true,
         terminal_primary: false,
+        terminal: false,
         search_open: false,
         web_page: true,
     },
     Focus {
         preview: true,
         terminal_primary: false,
+        terminal: false,
         search_open: true,
         web_page: true,
     },
     Focus {
         preview: false,
         terminal_primary: true,
+        terminal: true,
         search_open: false,
         web_page: false,
     },
     Focus {
         preview: false,
         terminal_primary: true,
+        terminal: true,
         search_open: true,
         web_page: false,
     },
@@ -3261,6 +3360,7 @@ mod tests {
             Focus {
                 preview: true,
                 terminal_primary: false,
+                terminal: false,
                 search_open: false,
                 web_page: false,
             },
@@ -3277,6 +3377,7 @@ mod tests {
             Focus {
                 preview: true,
                 terminal_primary: false,
+                terminal: false,
                 search_open: false,
                 web_page: true,
             },
@@ -3292,6 +3393,7 @@ mod tests {
             Focus {
                 preview: true,
                 terminal_primary: false,
+                terminal: false,
                 search_open: true,
                 web_page: true,
             },
@@ -3307,6 +3409,7 @@ mod tests {
             Focus {
                 preview: false,
                 terminal_primary: true,
+                terminal: true,
                 search_open: false,
                 web_page: false,
             },
@@ -3323,6 +3426,7 @@ mod tests {
             Focus {
                 preview: false,
                 terminal_primary: true,
+                terminal: true,
                 search_open: true,
                 web_page: false,
             },
@@ -3708,6 +3812,7 @@ mod tests {
         let on_a_page = Focus {
             preview: true,
             terminal_primary: false,
+            terminal: false,
             search_open: false,
             web_page: true,
         };
@@ -3936,6 +4041,7 @@ mod tests {
         let terminal = Focus {
             preview: false,
             terminal_primary: true,
+            terminal: true,
             search_open: false,
             web_page: false,
         };
@@ -4144,7 +4250,10 @@ mod tests {
         // **Two more on 2026-09-10** (ticket T3): `undo-preview` and
         // `redo-preview`, the preview editor's history keys — 27 single
         // actions and 43 rows.
-        assert_eq!(BINDINGS.len(), 43);
+        // **Three more on 2026-09-24** (ticket 37): `text-larger`, `text-smaller`
+        // and `text-actual-size`, a pane's own text size — 30 single actions and
+        // 46 rows.
+        assert_eq!(BINDINGS.len(), 46);
         assert_eq!(
             BINDINGS
                 .iter()
@@ -4977,6 +5086,7 @@ mod tests {
         let searching = Focus {
             preview: false,
             terminal_primary: true,
+            terminal: true,
             search_open: true,
             web_page: false,
         };
@@ -5165,6 +5275,7 @@ mod tests {
         let on_scrollback = Focus {
             preview: false,
             terminal_primary: true,
+            terminal: true,
             search_open: false,
             web_page: false,
         };
@@ -5718,24 +5829,37 @@ mod tests {
                 Scope::Preview | Scope::PreviewDocument => Focus {
                     preview: true,
                     terminal_primary: false,
+                    terminal: false,
                     search_open: false,
                     web_page: false,
                 },
                 Scope::TerminalPrimary => Focus {
                     preview: false,
                     terminal_primary: true,
+                    terminal: true,
+                    search_open: false,
+                    web_page: false,
+                },
+                // The alternate screen: the one focus `Terminal` holds and `TerminalPrimary`
+                // does not.
+                Scope::Terminal => Focus {
+                    preview: false,
+                    terminal_primary: false,
+                    terminal: true,
                     search_open: false,
                     web_page: false,
                 },
                 Scope::SearchOpen => Focus {
                     preview: false,
                     terminal_primary: true,
+                    terminal: true,
                     search_open: true,
                     web_page: false,
                 },
                 Scope::SearchHost => Focus {
                     preview: false,
                     terminal_primary: true,
+                    terminal: true,
                     search_open: false,
                     web_page: false,
                 },
@@ -5745,6 +5869,7 @@ mod tests {
                 Scope::WebPage => Focus {
                     preview: true,
                     terminal_primary: false,
+                    terminal: false,
                     search_open: true,
                     web_page: true,
                 },
@@ -5765,6 +5890,7 @@ mod tests {
     const ON_A_TERMINAL: Focus = Focus {
         preview: false,
         terminal_primary: true,
+        terminal: true,
         search_open: false,
         web_page: false,
     };
@@ -5823,6 +5949,7 @@ mod tests {
             Focus {
                 preview: true,
                 terminal_primary: false,
+                terminal: false,
                 search_open: false,
                 web_page: true,
             },
@@ -6772,6 +6899,9 @@ mod tests {
         ("split-vertical", "Alt+Shift+="),
         ("duplicate-pane-split", "Ctrl+Shift+D"),
         ("zoom-pane", "Ctrl+Shift+X"),
+        ("text-larger", "Ctrl+="),
+        ("text-smaller", "Ctrl+-"),
+        ("text-actual-size", "Ctrl+0"),
         ("files-pane", "Ctrl+Shift+B"),
         ("git-page", "Ctrl+Shift+G"),
         ("open-settings", "Ctrl+,"),
@@ -6836,6 +6966,9 @@ mod tests {
         ("split-vertical", "Cmd+D"),
         ("duplicate-pane-split", "Shift+Cmd+U"),
         ("zoom-pane", "Shift+Cmd+X"),
+        ("text-larger", "Cmd+="),
+        ("text-smaller", "Cmd+-"),
+        ("text-actual-size", "Cmd+0"),
         ("files-pane", "Shift+Cmd+B"),
         ("git-page", "Shift+Cmd+R"),
         ("open-settings", "Cmd+,"),

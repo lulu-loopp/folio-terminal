@@ -18,6 +18,16 @@ pub(crate) struct SeatSignature {
     pub viewport: SeatViewport,
     pub clip: SeatViewport,
     pub focused: bool,
+    /// **The metrics the seat's picture is drawn at** (ticket 37).
+    ///
+    /// A pane's text size is part of what is on the glass: a size step that leaves the integer
+    /// grid unchanged is still a new picture, and a gate that compared everything but the cell
+    /// would call it the old one and present nothing. The frame's own `layout_key` carries the
+    /// face size too, so [`pictures_match`] already tells the two apart; this names the metrics
+    /// the renderer is handed beside the frame, so the record of what reached the glass is a
+    /// record of both halves of the pair. An observation, like the rest of this record — the
+    /// pane's rung has one owner and it is not here.
+    pub metrics: bt_render::CellMetrics,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -129,6 +139,7 @@ mod tests {
                 viewport,
                 clip: viewport,
                 focused: true,
+                metrics: crate::fixture_cell_metrics(1.0, 16.0),
             }],
             window_visible: true,
             native_pages: Vec::new(),

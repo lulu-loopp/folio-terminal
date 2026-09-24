@@ -5116,7 +5116,8 @@ fn a_new_selection_leaves_no_other_pane_of_the_tab_wearing_one() {
 }
 
 /// Every combination of the three facts [`wheel_route`] turns on.
-fn every_wheel_situation() -> impl Iterator<Item = (bool, bt_term::TerminalModes, bool)> {
+pub(crate) fn every_wheel_situation() -> impl Iterator<Item = (bool, bt_term::TerminalModes, bool)>
+{
     use bt_term::{MouseTracking, TerminalModes};
     let trackings = [
         MouseTracking::Off,
@@ -5176,6 +5177,18 @@ fn every_wheel_situation() -> impl Iterator<Item = (bool, bt_term::TerminalModes
 /// unfocused pane — and the sweep goes red. Gate the [`WheelRoute::MouseReport`]
 /// arm on `!modes.alternate_screen`, which is the shape "bytes only to the
 /// main screen" would take, and it goes red on every tracked TUI.
+///
+/// EXTENDED (37) — **the text-size rung stands ahead of this table**: the sweep is run a second
+/// time with the gesture's exact modifier and with its near misses, through
+/// `wheel_steps_text_size`, the decision `Runtime::mouse_wheel` asks before the math-block pan
+/// and `wheel_route`. Not red on base — the decision did not exist there, and `mouse_wheel` cannot
+/// be driven without a window — so its order in `mouse_wheel` is pinned separately
+/// (`text_size_tests::ctrl_wheel_over_a_formula_steps_the_pane_and_does_not_pan_the_formula`).
+///
+/// MUTATION: build `input::text_size_wheel_held_on` on `modifiers.control_key()` alone — the
+/// `Ctrl+Alt` near miss and the Mac's Control go red; drop the `y != 0` half of
+/// `wheel_steps_text_size` — nothing here, but the horizontal-only case in
+/// `text_size_tests::six_twenty_pixel_reports_are_one_step_and_a_reversal_at_the_top_steps_down_once`.
 #[test]
 fn a_wheel_notch_belongs_to_the_pane_it_is_over_on_either_screen() {
     use bt_term::{MouseTracking, TerminalModes};
@@ -5243,6 +5256,53 @@ fn a_wheel_notch_belongs_to_the_pane_it_is_over_on_either_screen() {
         ),
         "a tracked main screen and a tracked alternate screen answer alike"
     );
+
+    // **And the text-size rung ahead of it** (ticket 37, `docs/RULES.md` row 28): the same
+    // sixty-four situations, each turned with the gesture's own modifier added and with each of
+    // its near misses. With the exact modifier — `Ctrl` alone on Windows, `⌘` alone on a Mac —
+    // every situation is a size step, whatever the pane is doing: a tracked program does not get
+    // the report, a displaced review does not scroll, a mute full-screen program does not keep
+    // it. With `Ctrl+Alt`, with Shift beside it, or with the other platform's key, every
+    // situation answers exactly what the matrix above says it answers, which is the original
+    // table kept unchanged for every gesture that is not a size gesture.
+    use bt_platform::HostPlatform::{MacOs, Windows};
+    use winit::keyboard::ModifiersState as Held;
+    let notch = MouseScrollDelta::LineDelta(0.0, 1.0);
+    let mut turned = 0;
+    for (shift, modes, scrolled) in every_wheel_situation() {
+        let shift_held = if shift { Held::SHIFT } else { Held::empty() };
+        for (platform, exact, near_misses) in [
+            (
+                Windows,
+                Held::CONTROL,
+                [Held::CONTROL | Held::ALT, Held::SUPER],
+            ),
+            (MacOs, Held::SUPER, [Held::SUPER | Held::ALT, Held::CONTROL]),
+        ] {
+            let answer = |held: Held| {
+                (!wheel_steps_text_size(held, platform, notch))
+                    .then(|| wheel_route(held.shift_key(), modes, scrolled))
+            };
+            turned += 1;
+            assert_eq!(
+                answer(exact | shift_held),
+                if shift {
+                    Some(wheel_route(shift, modes, scrolled))
+                } else {
+                    None
+                },
+                "{platform:?} exact modifier, shift={shift} modes={modes:?} scrolled={scrolled}"
+            );
+            for held in near_misses {
+                assert_eq!(
+                    answer(held | shift_held),
+                    Some(wheel_route(shift, modes, scrolled)),
+                    "{platform:?} {held:?} keeps the original route, shift={shift}                      modes={modes:?} scrolled={scrolled}"
+                );
+            }
+        }
+    }
+    assert_eq!(turned, 128, "every situation, on both platforms");
 }
 
 /// **`Shift` does not gain a third meaning; a pane gains a second axis**
@@ -8804,7 +8864,7 @@ fn one_alt_wheel_over_a_card_writes_its_entry_its_rail_its_aim_and_its_route() {
 fn the_scale_change_arm_restates_the_cards_columns_scroll() {
     let body = method_body("Runtime", "apply_scale_factor");
     let read = body
-        .find("let measured_at = self.window.renderer.metrics().scale_factor;")
+        .find("let measured_at = self.window.renderer.scale_factor();")
         .expect("the scale the panel's lists were measured at is read");
     let remeasured = body
         .find(".update_scale_factor(&mut self.app.gpu, scale_factor)")
@@ -18683,6 +18743,7 @@ fn the_retired_preview_chord_reaches_the_shell_like_any_other_key() {
             shortcuts::Focus {
                 preview: false,
                 terminal_primary: true,
+                terminal: true,
                 search_open: false,
                 web_page: false,
             },
@@ -18696,6 +18757,7 @@ fn the_retired_preview_chord_reaches_the_shell_like_any_other_key() {
             shortcuts::Focus {
                 preview: true,
                 terminal_primary: false,
+                terminal: false,
                 search_open: false,
                 web_page: false,
             },
@@ -37753,7 +37815,7 @@ fn every_file_opens_in_the_preview_and_a_rootless_column_opens_nothing() {
 }
 
 /// One lone-terminal tab holding exactly this shell.
-fn tab_holding(leaf: LeafSession) -> TabState {
+pub(crate) fn tab_holding(leaf: LeafSession) -> TabState {
     let seats = seats::Seats::lone_terminal();
     let identity = seats.identity();
     let (layout, overflow) = cross_solve(&seats);
@@ -41553,7 +41615,7 @@ const CROSS_DPI: u32 = 1_000;
 const CROSS_W: u32 = 1_600;
 const CROSS_H: u32 = 900;
 
-fn cross_metrics() -> SeatMetrics {
+pub(crate) fn cross_metrics() -> SeatMetrics {
     seats::seat_metrics(CROSS_DPI)
 }
 
@@ -41569,7 +41631,7 @@ fn cross_view() -> LogicalRect {
 
 /// The window's contribution, supplied by hand: the real solver against a
 /// real viewport (red line L10 — nothing here invents a rectangle).
-fn cross_solve(seats: &seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>) {
+pub(crate) fn cross_solve(seats: &seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>) {
     (
         seats
             .solve(cross_view(), &cross_metrics(), SizePolicy::Lawful)
@@ -41845,7 +41907,7 @@ fn card_restore_boundary_discards_overflow_before_reversal() {
 /// `pty: None` — this is the same shell-less mode `BT_PROBE_INPUT` uses, so
 /// nothing here spawns a ConPTY, and the scrollback is still a real
 /// `DualPlaneSession`'s.
-fn leaf_saying(text: &str) -> LeafSession {
+pub(crate) fn leaf_saying(text: &str) -> LeafSession {
     let columns = NonZeroU32::new(40).unwrap();
     let rows = NonZeroU32::new(4).unwrap();
     let mut session = DualPlaneSession::with_quotas_and_cell_height(
@@ -41898,6 +41960,12 @@ fn leaf_saying(text: &str) -> LeafSession {
         // is one no arriving message can match, which is the honest shape of that.
         attention_capability: String::new(),
         projection,
+        // A fixture is a new view, so it is at 100 % (ticket 37), at the default face measured
+        // by the production service. Its session keeps the fixture's own 22-pixel rows; a test
+        // that needs the two to agree applies these through `apply_leaf_metrics`.
+        text_scale: TextScale::ACTUAL,
+        metrics: fixture_cell_metrics(1.0, 16.0),
+        presented_metrics: fixture_cell_metrics(1.0, 16.0),
         thumb_awake: Instant::now(),
         column_awake: Instant::now(),
         grid,
@@ -41957,7 +42025,7 @@ fn cross_seats(panes: usize) -> seats::Seats {
 }
 
 /// A tab of `texts.len()` panes, each shell saying its own word.
-fn cross_tab(id: u64, texts: &[&str]) -> TabState {
+pub(crate) fn cross_tab(id: u64, texts: &[&str]) -> TabState {
     let seats = cross_seats(texts.len());
     let terminals = seats.terminals();
     let sessions: BTreeMap<SeatId, LeafSession> = terminals
@@ -42840,7 +42908,7 @@ fn a_drag_is_measured_from_its_own_panes_body_and_stays_inside_it() {
 
 /// `commit_layout_drop`'s two lines that do not need a window: build the
 /// plan the preview drew, adopt exactly it (D4), and answer the renaming.
-fn cross_merge(
+pub(crate) fn cross_merge(
     source: &seats::Seats,
     target: &mut TabState,
     aim: seats::LayoutAim,
@@ -50587,6 +50655,7 @@ fn the_first_mark_reserves_the_room_once_and_the_alternate_screen_keeps_it() {
     let physical = PhysicalSize::new(body.width, body.height);
     let unreserved = metrics.grid_for_pixels(body.width, body.height);
     let mut leaf = leaf_saying("");
+    apply_leaf_metrics(&mut leaf, metrics);
     let mut heard = 0;
     let mut step = |leaf: &mut LeafSession, bytes: &str| -> bool {
         leaf.session
@@ -50595,7 +50664,7 @@ fn the_first_mark_reserves_the_room_once_and_the_alternate_screen_keeps_it() {
         if leaf.hear_first_mark() {
             heard += 1;
         }
-        let next = leaf.grid_for(&metrics, body);
+        let next = leaf.grid_for(body);
         schedule_leaf_grid_change(
             leaf,
             next,
@@ -50693,7 +50762,9 @@ fn every_seat_to_grid_site_asks_the_one_function() {
 /// Re-solve the tab's focused pane into `body`, as every road that re-solves the panes does.
 fn resolve_focused_pane(tab: &mut TabState, metrics: &bt_render::CellMetrics, body: SeatViewport) {
     let leaf = tab.focused_mut().expect("the tab holds a shell");
-    let next = leaf.grid_for(metrics, body);
+    // The pane at these metrics (ticket 37: a pane's grid is solved at its own metrics).
+    apply_leaf_metrics(leaf, *metrics);
+    let next = leaf.grid_for(body);
     schedule_leaf_grid_change(
         leaf,
         next,
@@ -50707,7 +50778,7 @@ fn resolve_focused_pane(tab: &mut TabState, metrics: &bt_render::CellMetrics, bo
 }
 
 /// The frame the tab's focused pane composes now.
-fn focused_frame(tab: &mut TabState) -> ViewportFrame {
+pub(crate) fn focused_frame(tab: &mut TabState) -> ViewportFrame {
     let leaf = tab.focused_mut().expect("the tab holds a shell");
     leaf.session.refresh_projection(&mut leaf.projection);
     leaf.session

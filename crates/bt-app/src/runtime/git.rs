@@ -768,7 +768,7 @@ impl Runtime<'_> {
     /// than a rebuild, for `scroll_git_panel`'s stated reason: the row the
     /// keyboard just moved to is a row in the list the reader is looking at.
     fn reveal_git_row(&mut self, seat: SeatId, index: usize) {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(page) = self.window.git_pages_shown.get(&seat) else {
             return;
         };
@@ -1788,7 +1788,7 @@ impl Runtime<'_> {
 
     /// Scroll a graph until one of its rows is whole on screen (V14).
     fn reveal_graph_row(&mut self, surface: PreviewSurface, index: usize) {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return;
         };
@@ -1957,7 +1957,7 @@ impl Runtime<'_> {
         let Some(content) = self.window.git_graphs_shown.get(&surface) else {
             return Ok(());
         };
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let extent = (content.total_rows.max(1)) as f32;
         let travel = self.vertical_wheel_travel(delta, extent);
         let stored = self.window.tabs[tab]
@@ -2230,7 +2230,7 @@ impl Runtime<'_> {
     /// pages, scrolls and is rebuilt by every repository answer.
     pub(in crate::runtime) fn git_menu_layout(&mut self) -> Option<profiles::GitMenuLayout> {
         let draw = self.git_menu_draw()?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -2347,7 +2347,7 @@ impl Runtime<'_> {
                                 rect,
                                 content.lane_width,
                                 content.columns,
-                                self.window.renderer.metrics().scale_factor as f32,
+                                self.window.renderer.scale_factor() as f32,
                                 position.x as f32,
                                 position.y as f32,
                             )
@@ -2402,7 +2402,7 @@ impl Runtime<'_> {
 
     /// Where one row of a graph is drawn, this frame.
     fn graph_row_rect(&self, surface: PreviewSurface, index: usize) -> Option<[f32; 4]> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let content = self.window.git_graphs_shown.get(&surface)?;
         let body = self.preview_surface_body_rect(surface, scale)?;
         Some(git_graph::graph_geometry(body, content, scale).row_rect(index))
@@ -3296,7 +3296,7 @@ impl Runtime<'_> {
         &self,
         surface: PreviewSurface,
     ) -> Option<git_graph::GraphToolbarRects> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let content = self.window.git_graphs_shown.get(&surface)?;
         let body = self.preview_surface_body_rect(surface, scale)?;
         let geometry = git_graph::graph_geometry(body, content, scale);
@@ -3345,7 +3345,7 @@ impl Runtime<'_> {
         let surface = self.window.graph_filter_menu.as_ref()?.surface;
         let anchor = self.graph_filter_menu_stand(surface)?;
         let rows = profiles::git_filter_rows(&self.graph_filter_branches(surface));
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -4492,7 +4492,7 @@ impl Runtime<'_> {
         };
         let body = geometry.body;
         let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(page) = self.window.float_git_pages_shown.get(&id) else {
             return Ok(());
         };
@@ -4537,7 +4537,7 @@ impl Runtime<'_> {
         delta: MouseScrollDelta,
     ) -> Result<()> {
         let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(page) = self.window.git_pages_shown.get(&seat) else {
             return Ok(());
         };

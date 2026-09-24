@@ -1487,7 +1487,7 @@ impl Runtime<'_> {
         &mut self,
         names: &BTreeMap<SeatId, String>,
     ) -> BTreeMap<SeatId, f32> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let focus = self.seats.focus();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
@@ -1791,7 +1791,7 @@ impl Runtime<'_> {
     /// `New file…` was invented for and the one case it could not be reached in.
     /// Which sentences still decline is [`seats::files_ground_at`]'s answer.
     fn files_ground_under(&self, position: PhysicalPosition<f64>) -> Option<FileMenuTarget> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let seat = seats::files_ground_at(
             &self.seat_layout,
             &self.files_tree_contents(),
@@ -1998,7 +1998,7 @@ impl Runtime<'_> {
         now: Instant,
     ) -> Option<marks::OverlayLayer> {
         let (geometry, fade) = self.float_geometry_of(id)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let motion = self.app.motion;
         let (mode, root) = {
             let win = self.window.float.drawn().find(|win| win.epoch == id)?;
@@ -2233,12 +2233,13 @@ impl Runtime<'_> {
         // top to bottom, found no room on either side, and did the only thing
         // its last resort allows: a window the height of its own strip — the
         // bare bar at the foot of the window the report shows.
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let anchor = seats::full_pane_rect(&self.seat_layout, seat).and_then(|rect| {
             seats::pane_head_geometry(
                 rect,
                 bt_layout::SeatKind::Files,
                 self.seat_layout.seat_is_on_stage(seat),
+                false,
                 scale,
             )
             .float
@@ -2471,7 +2472,7 @@ impl Runtime<'_> {
     /// keypress scroll the whole list, which is the same list moving under your
     /// eyes for no reason.
     fn reveal_files_row(&mut self, seat: SeatId, key: &str) {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let trees = self.files_tree_contents();
         let Some(tree) = trees.get(&seat) else {
             return;
@@ -2511,7 +2512,7 @@ impl Runtime<'_> {
         delta: MouseScrollDelta,
     ) -> Result<()> {
         let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let rows = self
             .files_tree_contents()
             .get(&seat)

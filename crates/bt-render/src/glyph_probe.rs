@@ -361,7 +361,7 @@ impl GlyphFixture {
             alpha: self.ground_alpha,
             ..crate::WindowGround::opaque()
         });
-        let metrics = window.metrics();
+        let metrics = window.base_metrics();
         let frame = self.frame(metrics);
         let seat = SeatViewport::whole(self.width, self.height);
         let _ = window.set_seat_viewport(seat);
@@ -372,6 +372,7 @@ impl GlyphFixture {
                 seat,
                 clip: seat,
                 frame: &frame,
+                metrics,
                 focused: true,
             }],
             FrameTrigger {

@@ -85,7 +85,7 @@ impl Runtime<'_> {
     /// four `max`es and one row of additions — cheaper than deciding whether it is stale.
     pub(in crate::runtime) fn search_capsule(&mut self) -> Option<search::Capsule> {
         let seat = self.window.search.seat()?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (rect, head) = seats::search_capsule_host(&self.seats, &self.seat_layout, seat, scale)?;
         let counter = self.window.search.counter();
         let width = self.window.renderer.measure_chrome_text(
@@ -494,7 +494,7 @@ impl Runtime<'_> {
         let Some(anchor) = self.window.search.current().map(|hit| hit.anchor.clone()) else {
             return Ok(());
         };
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
         else {
             return Ok(());
@@ -708,7 +708,7 @@ impl Runtime<'_> {
             "{before}{preedit}{}",
             &typed[before.len().min(typed.len())..]
         );
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let font = search::FIELD_FONT_LOGICAL_PX * scale;
         let caret_x = self.window.renderer.measure_chrome_text(
             &mut self.app.gpu,
@@ -729,7 +729,7 @@ impl Runtime<'_> {
             return Vec::new();
         };
         self.window.search_layout = Some(capsule);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let palette = bt_render::chrome_palette();
         let counter = self.window.search.counter();
         let flags = self.window.search.flags();

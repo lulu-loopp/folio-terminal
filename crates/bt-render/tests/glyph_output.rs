@@ -59,7 +59,7 @@ fn draw(fixture: GlyphFixture) -> Drawn {
     let pixels = window.read_back(&gpu).expect("the frame reads back");
     Drawn {
         pixels,
-        metrics: window.metrics(),
+        metrics: window.base_metrics(),
     }
 }
 

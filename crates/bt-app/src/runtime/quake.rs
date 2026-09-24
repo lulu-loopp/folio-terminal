@@ -44,7 +44,7 @@ impl Runtime<'_> {
         // `a_summon_is_placed_by_one_function_and_main_does_not_do_the_geometry`.
         let screen = quake::SummonScreen::under_the_pointer(
             native,
-            self.window.renderer.metrics().dpi_milli().get() * 96 / 1000,
+            self.window.renderer.dpi_milli().get() * 96 / 1000,
         );
         let settings = self.app.settings_store.loaded();
         let rect = self.app.quake.placement(&screen, settings);

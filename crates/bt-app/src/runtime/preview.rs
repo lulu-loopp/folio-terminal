@@ -54,6 +54,7 @@ use crate::{
     video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
     wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
 };
+use crate::{LeafView, TextScale};
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -412,12 +413,16 @@ impl Runtime<'_> {
     /// `None` only when `source` is not a table, which cannot happen for a proven block and is
     /// answered honestly rather than asserted: the source travels through the transcript, and a
     /// function that took an unparseable one on trust would be a panic waiting for a reflow.
+    ///
+    /// `font_size_px` is the face size of the pane the table is shown in (ticket 37) — a
+    /// terminal table is set in its pane's own text, at its pane's own size.
     pub(in crate::runtime) fn build_table_block(
         &mut self,
         source: &str,
+        font_size_px: f32,
     ) -> Option<table_block::TableBlock> {
         let span = bt_detect::table::from_resolved_source(source)?;
-        let metrics = table_block::metrics(self.window.renderer.metrics().font_size_px);
+        let metrics = table_block::metrics(font_size_px);
         let palette = bt_render::chrome_palette();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         Some(table_block::build(
@@ -788,6 +793,7 @@ impl Runtime<'_> {
             rect,
             bt_layout::SeatKind::Preview,
             self.seat_layout.seat_is_on_stage(seat),
+            false,
             scale,
         );
         let name_box = seats::preview_head_geometry(&head, scale, tools).name;
@@ -2194,7 +2200,7 @@ impl Runtime<'_> {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, [f32; 4])> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (x, y) = (position.x as f32, position.y as f32);
         self.window
             .float
@@ -3384,7 +3390,7 @@ impl Runtime<'_> {
         &mut self,
         anchors: &mut tooltip::TooltipAnchors,
     ) {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // **Every rail on the glass and not only the tree's** (§7.7 ⑩ 欠账,
         // 2026-08-25). A `⧉` does not stop needing a word for what it copies
         // because the pane it stood in was torn into a window, and the anchor id
@@ -3949,7 +3955,7 @@ impl Runtime<'_> {
     /// The file verbs are not lost; they belong to `Open ⌄`, which is the
     /// control that is about this document.
     fn open_preview_crumb_menu(&mut self, surface: PreviewSurface) -> Result<()> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(geometry) = self.rail_geometry(surface, scale) else {
             return Ok(());
         };
@@ -4015,7 +4021,7 @@ impl Runtime<'_> {
         &mut self,
         surface: PreviewSurface,
     ) -> Result<()> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(pill) = self
             .rail_geometry(surface, scale)
             .and_then(|rail| rail.open)
@@ -4233,7 +4239,7 @@ impl Runtime<'_> {
         body: [f32; 4],
         delta: MouseScrollDelta,
     ) -> Result<()> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // **A report the platform already put on the x axis is sideways, and it
         // needs no modifier to say so** (user ruling, 2026-09-07). A tilt wheel
         // and a touchpad's second finger have been arriving here since this
@@ -4403,7 +4409,7 @@ impl Runtime<'_> {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, usize, preview::ScrollBar)> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (surface, body) = self.preview_block_surface_at(position)?;
         let pane = self.preview_pane(surface)?;
         let PreviewDocument::Markdown { blocks, layout, .. } = &pane.doc else {
@@ -4535,7 +4541,7 @@ impl Runtime<'_> {
     /// panes in the tree, and they belong at the very bottom of the overlay —
     /// see [`OverlayStack::preview_bars`].
     pub(in crate::runtime) fn preview_seat_bar_layers(&self) -> Vec<marks::OverlayLayer> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         self.seats
             .preview_seats()
             .into_iter()
@@ -4588,7 +4594,7 @@ impl Runtime<'_> {
     /// it was drawn, which is the one defect a control bar cannot have.
     fn video_bar_layout_of(&self, surface: PreviewSurface) -> Option<video_seat::BarLayout> {
         let seat = self.window.video.get(surface)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let now = Instant::now();
         if seat.presence(now, self.app.motion).opacity <= 0.0 {
             return None;
@@ -4614,7 +4620,7 @@ impl Runtime<'_> {
         if self.window.video.get(surface).is_some() {
             return None;
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (body, path) = match surface {
             // A docked pane's button is cut by the chrome pass, hit-tested by
             // `seats::hit_preview_play`, and is not this function's to answer a
@@ -4644,7 +4650,7 @@ impl Runtime<'_> {
         surface: PreviewSurface,
     ) -> Option<marks::OverlayLayer> {
         let button = self.video_play_button_of(surface)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let hovered = self
             .window
             .pointer_position
@@ -4775,7 +4781,7 @@ impl Runtime<'_> {
         surface: PreviewSurface,
         at: [f32; 2],
     ) -> Result<bool> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let now = Instant::now();
         let Some(shape) = self.video_shape_of(surface, scale, now) else {
             return Ok(false);
@@ -4855,7 +4861,7 @@ impl Runtime<'_> {
     /// "the pointer is somewhere else" is the fact that ends a reveal and a seat
     /// that was never told it would hold its bar up for ever.
     pub(in crate::runtime) fn note_video_hover(&mut self, position: Option<PhysicalPosition<f64>>) {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let now = Instant::now();
         let at = position.map(|at| [at.x as f32, at.y as f32]);
         let shapes: Vec<(PreviewSurface, [f32; 4])> = self
@@ -4922,7 +4928,7 @@ impl Runtime<'_> {
         surface: PreviewSurface,
     ) -> Option<marks::OverlayLayer> {
         let seat = self.window.video.get(surface)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let now = Instant::now();
         let shape = self.video_shape_of(surface, scale, now)?;
         let layer = seat.bar(
@@ -4944,7 +4950,7 @@ impl Runtime<'_> {
     /// drawn at, which decides where the speed button stands and is therefore
     /// what the hit test has to be resolved against.
     pub(in crate::runtime) fn measure_video_meta(&mut self) {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let font = video_seat::bar_font_logical_px() * scale;
         let surfaces: Vec<PreviewSurface> = self
             .window
@@ -4983,7 +4989,7 @@ impl Runtime<'_> {
         &self,
         id: float::FloatId,
     ) -> Vec<marks::OverlayLayer> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let surface = PreviewSurface::Float(id);
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return Vec::new();
@@ -5001,7 +5007,7 @@ impl Runtime<'_> {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, preview::ScrollBar)> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let at = [position.x as f32, position.y as f32];
         let (surface, body) = self.preview_surface_at(position)?;
         // **The vertical one first**, which decides the one place the two can
@@ -5065,7 +5071,7 @@ impl Runtime<'_> {
         let Some(drag) = self.preview_body_drag else {
             return Ok(false);
         };
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // The gesture's own surface, not the one under the pointer: a hand that
         // has left the pane it took hold in is still holding that pane's thumb.
         let Some(body) = self.preview_surface_body_rect(drag.surface, scale) else {
@@ -5405,7 +5411,7 @@ impl Runtime<'_> {
         surface: PreviewSurface,
         position: PhysicalPosition<f64>,
     ) -> Option<usize> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (x, y) = (position.x as f32, position.y as f32);
         // **Every monospace source block on the glass**, not only the caret's:
         // a selection can draw several blocks as source (2026-09-23), and none
@@ -5894,7 +5900,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let scale = self.window.renderer.metrics().scale_factor;
+        let scale = self.window.renderer.scale_factor();
         let Some(drag) = self.preview_text_drag.as_mut() else {
             return Ok(false);
         };
@@ -6118,7 +6124,7 @@ impl Runtime<'_> {
     /// that colour. Asking whether the pointer is inside the box that was just
     /// computed is the general form of that check, and it costs one comparison.
     fn preview_hex_at(&self, position: PhysicalPosition<f64>) -> Option<PreviewHexHover> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (surface, body) = self.preview_surface_at(position)?;
         let content = self
             .preview_buffer_on(surface)
@@ -6228,7 +6234,7 @@ impl Runtime<'_> {
         let Some(drag) = self.preview_block_drag else {
             return Ok(false);
         };
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // The gesture's own surface, not the one under the pointer: a hand that
         // has left the pane it took hold in is still holding that pane's thumb.
         // Asked of `preview_document_box` rather than of the tree, because the
@@ -6657,7 +6663,7 @@ impl Runtime<'_> {
             self.set_preview_image_zoom(surface, zoomed)?;
             return Ok(true);
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             // A seat with no body to scroll still owns the key: there is no
             // terminal under it either way.
@@ -6766,7 +6772,7 @@ impl Runtime<'_> {
     /// is one door there.
     pub(in crate::runtime) fn preview_ime_cursor_area(&self) -> Option<ImeCursorArea> {
         let surface = self.preview_keyboard_surface()?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let body = self.preview_surface_body_rect(surface, scale)?;
         // **On a rendered page the box comes from the source block** (T5 ②,
         // §7.1.3t), for [`Self::reveal_live_markdown_caret`]'s reason: the
@@ -6945,7 +6951,7 @@ impl Runtime<'_> {
         // neighbouring block or in the gap between them — and the next parse
         // makes whichever it is the source block.
         let stepped = if self.preview_shows_live_markdown(surface) {
-            let scale = self.window.renderer.metrics().scale_factor as f32;
+            let scale = self.window.renderer.scale_factor() as f32;
             let prose = self
                 .preview_pane(surface)
                 .and_then(|pane| pane.md_prose.as_ref());
@@ -7164,7 +7170,7 @@ impl Runtime<'_> {
 
     /// How many lines this surface's edit surface can show — what a page is.
     fn preview_page_rows(&self, surface: PreviewSurface) -> usize {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return 1;
         };
@@ -7179,7 +7185,7 @@ impl Runtime<'_> {
     /// which is what every text field does and the only behaviour that makes
     /// holding Down look like reading rather than like jumping.
     fn reveal_preview_caret(&mut self, surface: PreviewSurface) {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return;
         };
@@ -7537,7 +7543,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // **A press inside a face that edits is asking to edit** (T2 ③,
         // 2026-09-10) — asked *above* the gate below, because for a file the
         // glance read only the head of, that gate is exactly what this buys the
@@ -7684,7 +7690,7 @@ impl Runtime<'_> {
         let Some(surface) = self.preview_selecting else {
             return Ok(false);
         };
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return Ok(false);
         };
@@ -7799,7 +7805,7 @@ impl Runtime<'_> {
     /// with nothing in it — until some unrelated event rebuilt it, which on the
     /// glass is a blank pane that one notch of the wheel fixes for good.
     fn heal_preview_scroll(&mut self) -> bool {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let mut moved = false;
         for surface in self.preview_surfaces() {
             let Some(body) = self.preview_surface_body_rect(surface, scale) else {
@@ -8698,7 +8704,7 @@ impl Runtime<'_> {
     /// size into the frame's cost, which is exactly what the head read exists to
     /// keep out of it.
     fn build_preview_body(&mut self, surface: PreviewSurface) -> Option<bt_render::PreviewBody> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             // The seat has no solved rectangle this pass — which is a body that
             // is not drawn at all, and on screen is a pane showing its head, its
@@ -8723,7 +8729,7 @@ impl Runtime<'_> {
         surface: PreviewSurface,
         body: [f32; 4],
     ) -> Option<bt_render::PreviewBody> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // A picture's own lane draws the pixels; what is left for this surface
         // is the sentence under them (mock-up 4955).
         if self
@@ -9636,7 +9642,7 @@ impl Runtime<'_> {
         surface: PreviewSurface,
     ) -> Option<([f32; 4], [u32; 2])> {
         let (width, height) = self.preview_pane(surface)?.image.as_ref()?.native?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let body = self.preview_surface_body_rect(surface, scale)?;
         (width > 0 && height > 0).then_some((body, [width, height]))
     }
@@ -9853,7 +9859,7 @@ impl Runtime<'_> {
     ///   face is opaque and a card stands over every seat — see
     ///   [`bt_render::VideoStage`].
     fn video_layers(&self, animations: &[DrawnAnimation]) -> Vec<bt_render::VideoLayer> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let now = Instant::now();
         let mut layers = Vec::new();
         for (surface, seat) in self.window.video.iter() {
@@ -9929,7 +9935,7 @@ impl Runtime<'_> {
     /// A surface that is playing a *recording* is skipped: it cannot be both,
     /// and the seat has already spoken for it.
     fn drawn_animations(&self) -> Vec<DrawnAnimation> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let now = Instant::now();
         let mut drawn = Vec::new();
         for surface in self.animated_surfaces() {
@@ -10362,7 +10368,7 @@ impl Runtime<'_> {
             self.hide_preview_picture(surface);
             return None;
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // **U8 — a seat's box travels with its pane's tween**, and carries the
         // crop a FLIP needs; a float's is its window's body, which does not
         // animate, because a window is not a pane and does not fly to a slot.
@@ -11067,12 +11073,13 @@ impl Runtime<'_> {
         &self,
         seat: SeatId,
     ) -> Option<([f32; 4], Vec<profiles::PreviewMenuItem>)> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         let head = seats::pane_head_geometry(
             rect,
             bt_layout::SeatKind::Preview,
             self.seat_layout.seat_is_on_stage(seat),
+            false,
             scale,
         );
         let furniture = seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat));
@@ -11097,7 +11104,7 @@ impl Runtime<'_> {
     ) -> Option<profiles::PreviewMenuLayout> {
         let seat = self.preview_menu_seat()?;
         let (anchor, items) = self.preview_menu_stand(seat)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -11217,7 +11224,7 @@ impl Runtime<'_> {
     /// drawn in, by one derivation and not by two that agree today. It is the
     /// hit test's own derivation, down to the stored measurement.
     pub(in crate::runtime) fn preview_browser_box(&self, seat: SeatId) -> Option<[f32; 4]> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         // **On the rail since 2026-08-24.** The derivation is the same one — the
         // paint's, down to the stored measurement — and only the row changed:
@@ -11236,7 +11243,7 @@ impl Runtime<'_> {
         seat: SeatId,
         verb: WebHeadVerb,
     ) -> Option<[f32; 4]> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         // **Three of the four moved down** (user ruling 2026-08-24), so the tip
         // asks whichever row the button is drawn in — one derivation each, and
@@ -11255,6 +11262,7 @@ impl Runtime<'_> {
                     rect,
                     bt_layout::SeatKind::Preview,
                     self.seat_layout.seat_is_on_stage(seat),
+                    false,
                     scale,
                 );
                 seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).devtools
@@ -11298,7 +11306,7 @@ impl Runtime<'_> {
         now: Instant,
     ) -> Option<marks::OverlayLayer> {
         let (geometry, fade) = self.float_geometry_of(id)?;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let surface = PreviewSurface::Float(id);
         let mode = self.window.float.drawn().find(|win| win.epoch == id)?.mode;
         // The head's caption and the foot's path, off whatever this window is
@@ -11688,7 +11696,7 @@ impl Runtime<'_> {
             let leaf = self.leaf_here(seat);
             self.window.web.contains_key(&leaf).then_some(leaf)
         };
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let viewport = self.float_viewport();
         // The button's own box, read while the head it stands in is still on
         // screen: the window hangs off the control that summoned it, which is
@@ -11698,6 +11706,7 @@ impl Runtime<'_> {
                 rect,
                 bt_layout::SeatKind::Preview,
                 self.seat_layout.seat_is_on_stage(seat),
+                false,
                 scale,
             );
             seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).popout
@@ -11749,8 +11758,10 @@ impl Runtime<'_> {
             // The **default** profile, which is what a stand-in is: it is not
             // inherited from anything, because the pane it replaces was never
             // running a shell to inherit from.
+            // A stand-in is a new view, so it starts at 100 % (ticket 37).
+            let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
             let session = create_leaf_session(
-                &self.window.renderer,
+                view,
                 body,
                 LeafId {
                     tab: self.window.tabs[self.window.active_tab].id,
@@ -12065,7 +12076,7 @@ impl Runtime<'_> {
             self.mouse_trace(|| format!("settle_preview_goto leave=no-body line={line}"));
             return;
         };
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             // The surface has no rectangle yet, so it has no rows to count.
             self.mouse_trace(|| format!("settle_preview_goto leave=no-rect line={line}"));
@@ -12184,7 +12195,7 @@ impl Runtime<'_> {
         // in FLIP and a float on its way in or out. Both are cheap to ask — a
         // walk of the panes that hold a tween, which is almost always none, and
         // of the floats that are drawn, which is almost always none.
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let boxes_are_moving = self.window.pane_motion.is_animating(now, self.app.motion)
             || self.window.float.is_animating(now, self.app.motion, scale);
         // **And what they were doing at the last decision**, because the frame a
@@ -12448,7 +12459,7 @@ impl Runtime<'_> {
         // fading in the arrival register, and only this reading knows it is
         // there. `drawn` is empty under reduced motion, so a window that asked
         // for stillness settles this debt once and never again.
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let passing = self.window.passages.drawn(now, motion, scale);
         if self.window.passages_drawn != passing {
             self.window.passages_drawn = passing;
@@ -13580,7 +13591,12 @@ impl Runtime<'_> {
                             .last_presented_frame
                             .as_ref()?
                     };
-                    Some((body, frame))
+                    // Retained frames, so the metrics they were presented at (ticket 37).
+                    let metrics = self.window.tabs[active]
+                        .sessions
+                        .get(&seat)?
+                        .presented_metrics;
+                    Some((body, frame, metrics))
                 };
                 let trace = self.math_band_trace_for_present(frame_for);
                 let placement = hang_watch::during(hang_watch::Station::RedrawOverlay, || {
@@ -13600,13 +13616,21 @@ impl Runtime<'_> {
             // The retained picture is the same picture, but the palette and the type size under it may
             // have moved since it was presented — a theme switch re-presents without re-projecting.
             // So the pictures are re-checked here for the same reason the tweens are re-sampled.
+            // Each retained frame with the metrics it was presented at (ticket 37).
+            let tab = &self.window.tabs[self.window.active_tab];
+            let focused_presented = tab
+                .sessions
+                .get(&tab.focused_leaf)
+                .map(|leaf| leaf.presented_metrics);
             let table_sources = Self::table_sources(
-                self.window.last_presented_frame.iter().chain(
-                    self.window.tabs[self.window.active_tab]
-                        .sessions
-                        .values()
-                        .filter_map(|leaf| leaf.last_presented_frame.as_ref()),
-                ),
+                self.window
+                    .last_presented_frame
+                    .iter()
+                    .zip(focused_presented)
+                    .chain(tab.sessions.values().filter_map(|leaf| {
+                        Some((leaf.last_presented_frame.as_ref()?, leaf.presented_metrics))
+                    })),
+                self.app.gpu.font_environment_epoch(),
             );
             hang_watch::during(hang_watch::Station::RedrawTables, || {
                 self.refresh_table_paints(&table_sources)

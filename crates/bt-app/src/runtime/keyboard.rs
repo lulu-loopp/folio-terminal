@@ -1,6 +1,7 @@
 //! `keyboard` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::TextStep;
 use crate::{
     ImeCaretSource, ImeOwner, KeyboardOwner, LeafId, NewWindowPlan, NoticeHost, PreviewSurface,
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
@@ -46,7 +47,7 @@ impl Runtime<'_> {
         };
         let lines = self.app.shortcuts.hint_lines(held, self.shortcut_focus());
         let caps = shortcuts::live_caps(held);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let Some(layout) = keyhint::place(
@@ -431,6 +432,17 @@ impl Runtime<'_> {
             // answers for wherever the keyboard is, which is the same rule
             // `close-pane` one arm up already follows.
             shortcuts::Action::ZoomPane => self.toggle_pane_zoom(self.focused_leaf),
+            // The pane holding the keyboard, through the one door (ticket 37). The rows are in
+            // force only while a terminal holds it, so the focused leaf is that terminal.
+            shortcuts::Action::TextLarger => {
+                self.step_pane_text_scale(self.focused_leaf, TextStep::Larger, 1)
+            }
+            shortcuts::Action::TextSmaller => {
+                self.step_pane_text_scale(self.focused_leaf, TextStep::Smaller, 1)
+            }
+            shortcuts::Action::TextActualSize => {
+                self.step_pane_text_scale(self.focused_leaf, TextStep::Actual, 1)
+            }
             // The keyboard door onto the files column, and the `˅` menu's
             // `Files pane` row is the mouse one. Both are `toggle_files_pane`,
             // so neither can drift into meaning something the other does not.
@@ -706,7 +718,7 @@ impl Runtime<'_> {
     /// window the candidate list may not cover, and a rectangle inset by the
     /// caret's own four pixels is four pixels of the field the list would sit on.
     fn field_ime_caret(&mut self, owner: ImeOwner) -> Option<ImeCursorArea> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let line = match owner {
             ImeOwner::Rename => self.window.rename_caret_line?,
             ImeOwner::GraphSearch => {
@@ -766,12 +778,16 @@ impl Runtime<'_> {
             // and each of them used to drag the candidate window back to the
             // grid's caret — under the pointer's own reading, the candidate list
             // would sit over the shell while the letters went into the file.
-            ImeCaretSource::TerminalCursor => grid.map(|frame| {
-                window_ime_cursor_area(
-                    self.window.renderer.seat_viewport(),
-                    self.window.renderer.ime_cursor_area(frame),
-                )
-            }),
+            // `grid` is the focused pane's frame, composed this pass at that pane's own metrics
+            // (ticket 37), so the caret rectangle is measured in the same cells.
+            ImeCaretSource::TerminalCursor => grid
+                .zip(self.focused().map(|leaf| leaf.metrics))
+                .map(|(frame, metrics)| {
+                    window_ime_cursor_area(
+                        self.window.renderer.seat_viewport(),
+                        self.window.renderer.ime_cursor_area(metrics, frame),
+                    )
+                }),
         };
         let Some(area) = area else {
             return;

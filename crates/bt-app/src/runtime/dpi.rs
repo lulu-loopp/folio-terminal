@@ -2,12 +2,13 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    ResizeReanchor, Runtime, card_trace, cell_width_subpixels, dpi_snapshot, earliest_deadline,
+    ResizeReanchor, Runtime, card_trace, dpi_snapshot, earliest_deadline,
     ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
     files_float_content_height, float, hang_watch, log_dpi_snapshot, presentation_physical_size,
     release_due_leaf_resize, resize_worth_solving, scale_factors_match, seats,
     take_psreadline_resize_reanchor_input, trace_sink, trace_surface_size_clamp, write_pty_input,
 };
+use crate::{apply_tabs_leaf_metrics, pane_cell_metrics};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_render::{FrameSource, FrameTrigger};
@@ -32,7 +33,7 @@ impl Runtime<'_> {
         if self.window.float.is_empty() {
             return false;
         }
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let viewport = self.float_viewport();
         let git_panel_on = self.git_panel_on();
         // Read every window's answer first, then write them: the read wants the
@@ -473,7 +474,7 @@ impl Runtime<'_> {
         // arrives here, and a card's height is answerable to both — so the same
         // station is written again with the scale it has now on both sides,
         // which is what makes the pair readable as one move.
-        let scale = self.window.renderer.metrics().scale_factor;
+        let scale = self.window.renderer.scale_factor();
         self.trace_card_scale(card_trace::why::RECTANGLE_SETTLED, scale, scale);
         self.sync_math_layout_key();
         self.publish_frame(FrameTrigger {
@@ -547,12 +548,12 @@ impl Runtime<'_> {
         log_dpi_snapshot(
             stage,
             snapshot,
-            Some(self.window.renderer.metrics().scale_factor),
+            Some(self.window.renderer.scale_factor()),
             self.window.renderer.presentation_geometry(),
             physical,
         );
         if scale_factors_match(
-            self.window.renderer.metrics().scale_factor,
+            self.window.renderer.scale_factor(),
             snapshot.authoritative_scale,
         ) {
             return Ok(false);
@@ -595,10 +596,24 @@ impl Runtime<'_> {
         Ok(true)
     }
 
+    /// **Every terminal pane of every tab, re-derived and re-applied** (ticket 37) — the one walk
+    /// a display change, a Settings change and a tab arriving from another window take.
+    ///
+    /// Each leaf keeps its rung; its metrics are derived again by [`pane_cell_metrics`] from the
+    /// rung, the Settings size the device now holds and this window's scale, and put on it by
+    /// [`apply_leaf_metrics`]. The grids are the caller's to re-solve afterwards, through the
+    /// resize road they already take.
+    pub(crate) fn apply_every_leaf_metrics(&mut self) -> Result<()> {
+        let (gpu, renderer) = (&mut self.app.gpu, &self.window.renderer);
+        apply_tabs_leaf_metrics(&mut self.window.tabs, |scale| {
+            pane_cell_metrics(gpu, renderer, scale)
+        })
+    }
+
     fn apply_scale_factor(&mut self, scale_factor: f64) -> Result<()> {
         // **The scale the panel's two lists were last measured against**, read
         // before the renderer forgets it — see [`Self::restate_panel_scroll`].
-        let measured_at = self.window.renderer.metrics().scale_factor;
+        let measured_at = self.window.renderer.scale_factor();
         let metrics = self
             .window
             .renderer
@@ -613,18 +628,11 @@ impl Runtime<'_> {
         self.restate_panel_scroll(measured_at, scale_factor);
         // Every shell in every tab: a DPI change is a fact about the display, so
         // no screen anywhere in the window is exempt from it.
-        for tab in &mut self.window.tabs {
-            for (_, leaf) in tab.leaves_mut() {
-                leaf.session
-                    .set_cell_height_subpixels(metrics.cell_height_subpixels());
-                leaf.session
-                    .set_cell_width_subpixels(cell_width_subpixels(metrics));
-                leaf.session
-                    .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
-                leaf.session
-                    .set_font_size_subpixels(metrics.font_size_subpixels());
-            }
-        }
+        //
+        // **Each at its own size, re-derived at the new scale** (ticket 37): the rung is the
+        // pane's and did not move; what moved is the scale it is measured at, so every leaf goes
+        // through the one derivation and the one apply operation.
+        self.apply_every_leaf_metrics()?;
         // **And every page this window hosts** (§7.8 ⑨). The same sentence, said
         // to the one kind of content in this window that computes its own
         // pixels. A WebView2 controller in composition hosting has no window of

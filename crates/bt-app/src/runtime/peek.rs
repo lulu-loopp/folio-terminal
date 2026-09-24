@@ -147,7 +147,7 @@ impl Runtime<'_> {
         };
         let now = Instant::now();
         let motion = self.app.motion;
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // The peek hangs off the row the pointer is on, and *which* geometry
         // holds that row is the same question `chrome_target_at` already asks
@@ -587,7 +587,7 @@ impl Runtime<'_> {
                 Some(self.row_geometry(host)?.row_rect(index))
             }
             RowHost::Git(seat) => {
-                let scale = self.window.renderer.metrics().scale_factor as f32;
+                let scale = self.window.renderer.scale_factor() as f32;
                 let rect = seats::files_pane_rect(&self.seat_layout, seat)?;
                 let body = seats::files_pane_geometry(rect, scale, true).body;
                 let page = self.window.git_pages_shown.get(&seat)?;
@@ -1049,7 +1049,7 @@ impl Runtime<'_> {
     fn peek_anchor(&self, peek: &FilePeek) -> file_peek::PeekAnchor {
         let card = match peek.host {
             RowHost::Float(id) => {
-                let scale = self.window.renderer.metrics().scale_factor as f32;
+                let scale = self.window.renderer.scale_factor() as f32;
                 let now = Instant::now();
                 self.window
                     .float
@@ -1541,7 +1541,7 @@ impl Runtime<'_> {
             bt_platform::host_platform(),
             profiles::home_directory(&bt_pty::SystemShellEnvironment).as_deref(),
         );
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // How tall the document really is, kept whole: the card's body is the
         // *capped* height, and the scroll bar's arithmetic needs the uncapped one
         // to know what share of it is showing.
@@ -2232,7 +2232,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let scale = self.window.renderer.metrics().scale_factor;
+        let scale = self.window.renderer.scale_factor();
         let Some(press) = self.window.file_peek_press.as_mut() else {
             return Ok(false);
         };
@@ -2287,7 +2287,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         let body_height = peek.body.map_or(0.0, |body| body[3] - body[1]);
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let viewport = self.float_viewport();
         // The window's own opening size, from the same door a pop-out asks:
         // min(64vh, 520) around whatever body it is given. The card's body is
@@ -2419,7 +2419,7 @@ impl Runtime<'_> {
             PreviewSurface::Peek,
             preview::ScrollAxis::Vertical,
             body,
-            self.window.renderer.metrics().scale_factor as f32,
+            self.window.renderer.scale_factor() as f32,
         )
     }
 
@@ -2631,7 +2631,7 @@ impl Runtime<'_> {
             &self.seats,
             &self.seat_layout,
             seat,
-            self.window.renderer.metrics().scale_factor as f32,
+            self.window.renderer.scale_factor() as f32,
         )
     }
 

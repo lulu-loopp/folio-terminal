@@ -20,6 +20,7 @@ use crate::{
     web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
     write_pty_input,
 };
+use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::SeatId;
@@ -83,7 +84,7 @@ impl Runtime<'_> {
                 (pointer, mark, mark_logical, mark_color, text)
             }
         };
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // Only the font knows how wide a line is, so the measuring happens here,
         // beside the renderer, exactly as the tip's and the badge's do.
         let width = self.window.renderer.measure_chrome_text(
@@ -692,7 +693,7 @@ impl Runtime<'_> {
     /// display frame — that is where the pacing belongs, and the name of this
     /// method says which side of the line it is on.
     pub(in crate::runtime) fn service_drag_autoscroll(&mut self, now: Instant) -> Result<()> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let motion = self.app.motion;
         let Some((run, scroll, pointer)) = self.drag_autoscroll_aim(now) else {
             return Ok(());
@@ -761,7 +762,7 @@ impl Runtime<'_> {
     /// a second for as long as it stays there: [`seats::autoscroll_speed`]
     /// answers `0.0` there, and the clock and the deadline read the same answer.
     pub(in crate::runtime) fn drag_autoscroll_deadline(&self, now: Instant) -> Option<Instant> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let (run, scroll, pointer) = self.drag_autoscroll_aim(now)?;
         let speed =
             seats::autoscroll_speed(&run, scroll, (pointer.x, pointer.y), scale, self.app.motion);
@@ -852,7 +853,7 @@ impl Runtime<'_> {
         // The clocks below are the *peek*'s alone, and it is asked for by name:
         // with several windows on screen the frame that decides the grace has to
         // be the transient one's, not whichever float is frontmost.
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let Some(frame) = self.window.float.peek().map(|win| win.frame) else {
             return Ok(());
         };
@@ -1205,7 +1206,7 @@ impl Runtime<'_> {
     /// `resize_float_to_content`'s `height: auto` — is switched off by the very
     /// drag step that follows, before any tick can run it.
     fn promote_float_head_press(&mut self, position: PhysicalPosition<f64>) {
-        let scale = self.window.renderer.metrics().scale_factor;
+        let scale = self.window.renderer.scale_factor();
         let Some(press) = self.window.float_head_press.as_mut() else {
             return;
         };
@@ -1240,7 +1241,7 @@ impl Runtime<'_> {
         let Some(drag) = self.window.float_drag else {
             return Ok(false);
         };
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let viewport = self.float_viewport();
         let pointer = [position.x as f32, position.y as f32];
         let Some(win) = self.window.float.live_mut(drag.win) else {
@@ -1332,7 +1333,7 @@ impl Runtime<'_> {
     /// `web_page_at`, neither of which comes through here; this is only about the
     /// panes underneath.
     pub(in crate::runtime) fn pointer_over_a_float(&self, position: PhysicalPosition<f64>) -> bool {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         let now = Instant::now();
         let (x, y) = (position.x as f32, position.y as f32);
         self.window.float.drawn().any(|win| {
@@ -1363,11 +1364,9 @@ impl Runtime<'_> {
     }
 
     fn forwarded_mouse_hit(&self) -> Option<bt_render::GridHit> {
-        let (_, position, frame) = self.pane_hit_context()?;
+        let (seat, position, frame) = self.pane_hit_context()?;
         let hit = self
-            .window
-            .renderer
-            .metrics()
+            .pane_frame_metrics(seat)?
             .hit_test_frame(frame, position.x, position.y)?;
         Some(live_viewport_mouse_hit(frame, hit))
     }
@@ -1386,9 +1385,7 @@ impl Runtime<'_> {
             return None;
         }
         let hit = self
-            .window
-            .renderer
-            .metrics()
+            .pane_frame_metrics(seat)?
             .hit_test_frame(frame, position.x, position.y)?;
         Some(live_viewport_mouse_hit(frame, hit))
     }
@@ -2000,7 +1997,7 @@ impl Runtime<'_> {
         // has already returned above if a resize is in flight, so neither branch
         // below can be reached while one is — "one gesture owns the pointer at a
         // time", and the ordering is what says so.
-        let scale = self.window.renderer.metrics().scale_factor;
+        let scale = self.window.renderer.scale_factor();
         if self
             .window
             .tab_press
@@ -2556,7 +2553,7 @@ impl Runtime<'_> {
         position: PhysicalPosition<f64>,
         seam: &mut Option<usize>,
     ) -> Option<DropLanding> {
-        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.scale_factor() as f32;
         // **The seam latch is cleared here and set in exactly one place below**
         // (user ruling 2026-09-06). A hand that has left the tab list altogether
         // — for the layout, for another window's glass, for its own home ground
@@ -3346,7 +3343,7 @@ impl Runtime<'_> {
                     .presentation_geometry()
                     .swapchain_size
                     .0 as f32,
-                self.window.renderer.metrics().scale_factor as f32,
+                self.window.renderer.scale_factor() as f32,
                 self.platform_chrome(),
                 self.window.tabs.len(),
                 self.window.tab_scroll,
@@ -3796,6 +3793,12 @@ impl Runtime<'_> {
                     self.toggle_preview_menu(seat)?;
                 }
             }
+            // **The text-size mark is the `text-actual-size` verb** (ticket 37): the pane goes
+            // back to 100 % through the one door every other size gesture takes.
+            seats::ChromeTarget::PaneTextSize(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.step_pane_text_scale(seat, TextStep::Actual, 1)?;
+            }
             seats::ChromeTarget::FilesRoot(seat) => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
@@ -3957,7 +3960,7 @@ impl Runtime<'_> {
             format!(
                 "mouse_input state={state:?} button={button:?} pointer={pointer} \
                  metrics_scale={} swapchain_size={}x{} inner_size={}x{} route={}",
-                self.window.renderer.metrics().scale_factor,
+                self.window.renderer.scale_factor(),
                 presentation.swapchain_size.0,
                 presentation.swapchain_size.1,
                 inner.width,
@@ -5315,6 +5318,10 @@ impl Runtime<'_> {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        // **The text-size carry leaves the window on every notch** (ticket 37) and goes back only
+        // if the text-size rung below spends this one: a notch taken by any other route — another
+        // surface, no modifier, another modifier — ends the gesture the carry belonged to.
+        let text_size_carry = self.window.text_size_aim.take();
         // **The wheel road's opening station** (`BT_MOUSE_TRACE`, §7.60), which
         // is `mouse_input`'s own opening station said in the wheel's words and
         // for its reason exactly: everything a report about a *resized* window
@@ -5331,7 +5338,7 @@ impl Runtime<'_> {
                 pointer_last_seen: self.window.pointer_last_seen.map(|at| (at.x, at.y)),
                 swapchain: presentation.swapchain_size,
                 inner: (inner.width, inner.height),
-                metrics_scale: self.window.renderer.metrics().scale_factor,
+                metrics_scale: self.window.renderer.scale_factor(),
                 flushed: delta,
                 notches: wheel_zoom_notches(delta),
                 events: self.window.wheel_events,
@@ -5524,7 +5531,7 @@ impl Runtime<'_> {
                     .presentation_geometry()
                     .swapchain_size
                     .0 as f32,
-                self.window.renderer.metrics().scale_factor as f32,
+                self.window.renderer.scale_factor() as f32,
                 self.platform_chrome(),
                 self.window.tabs.len(),
                 position.x,
@@ -5542,7 +5549,7 @@ impl Runtime<'_> {
         if let Some(position) = self.window.pointer_position
             && let Some((seat, body)) = seats::files_body_at(
                 &self.seat_layout,
-                self.window.renderer.metrics().scale_factor as f32,
+                self.window.renderer.scale_factor() as f32,
                 self.git_panel_on(),
                 position.x,
                 position.y,
@@ -5685,6 +5692,38 @@ impl Runtime<'_> {
         );
         // Scrolling moves the content the flyout was anchored to; the transient peek dissolves.
         self.dismiss_peek()?;
+        // **The text-size rung** (ticket 37; `docs/RULES.md` row 28): the exact `Ctrl` (`⌘` on a
+        // Mac) over a terminal steps that pane's text size. After terminal targeting — the pane
+        // the road already chose, the focused-leaf fallback included — and **before** the
+        // math-block pan and `wheel_route`, so a formula under the pointer cannot swallow the
+        // gesture and a program reading the mouse does not get the report: the `Ctrl` bit of an
+        // SGR wheel report is not delivered on either screen. Only the vertical component
+        // steps; a report with none falls through to the routes below. Keyboard focus does not
+        // move.
+        if wheel_steps_text_size(self.window.modifiers, bt_platform::host_platform(), delta) {
+            let at = LeafId {
+                tab: self.window.tabs[self.window.active_tab].id,
+                seat: target_seat,
+            };
+            let rung = self.leaf(target_seat).text_scale;
+            let (step, count) = TextSizeAim::notch(
+                text_size_carry,
+                &mut self.window.text_size_aim,
+                at,
+                delta,
+                rung,
+            );
+            self.mouse_trace(|| {
+                format!(
+                    "wheel_route taken=text-size at=terminal seat={target_seat:?} \
+                     seat_from={seat_from} step={step:?} count={count}"
+                )
+            });
+            if count == 0 {
+                return Ok(());
+            }
+            return self.step_pane_text_scale(target_seat, step, count);
+        }
         // One physical event, two currencies. Local routes scroll by exact subpixels (stage C of
         // the pixel-scroll plan); forwarding routes speak whole wheel lines because that is the
         // application protocol. Route is decided first, then only that route's accumulator moves.
@@ -5783,7 +5822,7 @@ impl Runtime<'_> {
                 // application applies its own lines-per-event step, so multiplying by the Windows
                 // wheel setting had TUIs (user report 2026-08-01: Claude Code transcript) scrolling
                 // three times too far per notch.
-                let notches = self.take_forward_wheel_notches(delta);
+                let notches = self.take_forward_wheel_notches(target_seat, delta);
                 if notches == 0 {
                     self.mouse_trace(|| "wheel_pty leave=no-whole-notch".to_owned());
                     return Ok(());
@@ -5860,6 +5899,7 @@ impl Runtime<'_> {
     /// number of rows and rows are per pane. Reading the focused leaf's count
     /// would send a hovered half-height pane a full window's worth of arrows.
     fn take_forward_wheel_lines(&mut self, seat: SeatId, delta: MouseScrollDelta) -> i32 {
+        self.forward_wheel_remainders_for(seat);
         match delta {
             MouseScrollDelta::LineDelta(_, y) => {
                 let multiplier =
@@ -5872,16 +5912,39 @@ impl Runtime<'_> {
             }
             MouseScrollDelta::PixelDelta(position) => {
                 self.window.pixel_wheel_remainder += position.y;
-                let cell_px = self.window.renderer.metrics().cell_height_px as f64;
+                // The addressed pane's own row (ticket 37): a pane at 150 % owes a line of
+                // arrows for every 150 %-tall row of travel, not for every window-sized one.
+                let cell_px = self.leaf(seat).metrics.cell_height_px as f64;
                 drain_whole_units(&mut self.window.pixel_wheel_remainder, cell_px) as i32
             }
+        }
+    }
+
+    /// **The forwarding remainders belong to one pane** (ticket 37).
+    ///
+    /// A fraction of a row turned over one pane is a fraction of *that* pane's row; carried to a
+    /// pane at another text size it would be a fraction of a different length. So the three
+    /// forwarding remainders start from nothing whenever the addressed pane changes. The
+    /// currencies already keep apart — lines, notches and pixels each have their own.
+    fn forward_wheel_remainders_for(&mut self, seat: SeatId) {
+        let active = self.window.tabs[self.window.active_tab].id;
+        let target = LeafId { tab: active, seat };
+        if self.window.forward_wheel_target != Some(target) {
+            self.window.forward_wheel_target = Some(target);
+            self.window.line_wheel_remainder = 0.0;
+            self.window.notch_wheel_remainder = 0.0;
+            self.window.pixel_wheel_remainder = 0.0;
         }
     }
 
     /// Per-notch quantization for the mouse-protocol route: one wheel report per detent, the
     /// xterm convention every TUI calibrates its own scroll step against. Trackpad pixel deltas
     /// emit one report per accrued cell height of travel.
-    fn take_forward_wheel_notches(&mut self, delta: MouseScrollDelta) -> i32 {
+    ///
+    /// `seat` is the pane being addressed (ticket 37): a trackpad's report per accrued cell height
+    /// is per *that* pane's cell.
+    fn take_forward_wheel_notches(&mut self, seat: SeatId, delta: MouseScrollDelta) -> i32 {
+        self.forward_wheel_remainders_for(seat);
         match delta {
             MouseScrollDelta::LineDelta(_, y) => {
                 self.window.notch_wheel_remainder += f64::from(y);
@@ -5889,7 +5952,7 @@ impl Runtime<'_> {
             }
             MouseScrollDelta::PixelDelta(position) => {
                 self.window.pixel_wheel_remainder += position.y;
-                let cell_px = self.window.renderer.metrics().cell_height_px as f64;
+                let cell_px = self.leaf(seat).metrics.cell_height_px as f64;
                 drain_whole_units(&mut self.window.pixel_wheel_remainder, cell_px) as i32
             }
         }
@@ -5940,7 +6003,8 @@ impl Runtime<'_> {
         {
             return None;
         }
-        let metrics = self.window.renderer.metrics();
+        // The pane's own cell (ticket 37): a column is as wide as this pane draws it.
+        let metrics = self.leaf(seat).metrics;
         let cell_width = f64::from(metrics.cell_width_px).max(1.0);
         let travel = match delta {
             MouseScrollDelta::LineDelta(x, y) => {

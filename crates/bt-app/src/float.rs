@@ -2988,6 +2988,7 @@ mod tests {
                 *pane,
                 bt_layout::SeatKind::Terminal,
                 false,
+                false,
                 HIDPI,
             )
             .files
@@ -5006,10 +5007,15 @@ mod tests {
             "anchored to the whole column there is no room on either side of it, and the last resort is a strip — the bug"
         );
 
-        let button =
-            crate::seats::pane_head_geometry(column, bt_layout::SeatKind::Files, false, HIDPI)
-                .float
-                .expect("a files head offers its pop-out button");
+        let button = crate::seats::pane_head_geometry(
+            column,
+            bt_layout::SeatKind::Files,
+            false,
+            false,
+            HIDPI,
+        )
+        .float
+        .expect("a files head offers its pop-out button");
         let anchored_to_button = float_placement(button, size, viewport, HIDPI);
         let frame = clamp_pinned(anchored_to_button, viewport, HIDPI);
         assert_eq!(
