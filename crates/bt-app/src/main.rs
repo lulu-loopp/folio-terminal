@@ -21631,9 +21631,14 @@ struct RailJumpLanding {
 ///
 /// So the scan is split by plane, and the history half is split again by *how much of it moved*.
 /// The two volatile planes are re-scanned every time the search is asked, because fifty rows cost
-/// microseconds. History is carried forward through [`search::scan_history_after`]: a line
+/// microseconds. History is carried forward through [`search::scan_history_slice`]: a line
 /// freezing costs that one line, an eviction costs dropping its hits, and only a changed question —
-/// a pattern, a toggle, another pane — is worth reading the plane again.
+/// a pattern, a toggle, another pane — is worth reading the plane again. **And since ticket 51 even
+/// that is read a slice at a time**: the keystroke's frame reads the newest
+/// [`search::SEARCH_HISTORY_SLICE`] lines, and `Runtime::advance_search_scan` reads one more slice
+/// per turn until the walk is complete. A cache whose `history` is partial is a walk in progress;
+/// replacing the cache for a new question, another seat or a restarted shell, or dropping it with
+/// the capsule, is the whole of a walk's cancellation.
 ///
 /// **That is the whole of this ticket.** Under the old key — length, both end ids and the store's
 /// generation — every one of those was equally invalidating, so a shell printing while the capsule
@@ -21652,6 +21657,124 @@ struct SearchScanCache {
     /// The hits the two volatile planes held, kept so a rescan that found the same ones can decide
     /// that nothing happened and leave the current match — and the highlight buffers — alone.
     volatile_hits: Vec<search::Hit>,
+}
+
+impl SearchScanCache {
+    /// Whether this answer is still being walked — some of its history is owed. What
+    /// `Runtime::advance_search_scan` continues and what the turn's wake fold wakes for.
+    fn walking(&self) -> bool {
+        !self.history.is_complete()
+    }
+}
+
+/// **Which road a search refresh came by** (B58, ticket 51) — which decides how much history it
+/// may read and whether it presents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SearchRefresh {
+    /// The reader changed the question, flipped a toggle or opened the capsule. Reads the volatile
+    /// planes and one slice of history, re-decides the current match from where the eye is, and
+    /// asks for a frame.
+    Asked,
+    /// The turn's clock continuing a walk still in progress (`Runtime::advance_search_scan`). One
+    /// more slice, the current match by [`search::SearchState::keeps_current`], and a frame —
+    /// nothing else would draw the hits it found.
+    Walk,
+    /// A frame being published (`Runtime::publish_frame_inner`). Carries the plane's appends and
+    /// evictions and **moves no walk's cursor**: a keystroke's frame and a walk's turn each read
+    /// their one slice, and the publish they cause must not read a second. Never asks for a frame,
+    /// since one is already being built.
+    Output,
+}
+
+impl SearchRefresh {
+    /// How many owed history lines this road may read.
+    fn walk_budget(self) -> usize {
+        match self {
+            Self::Asked | Self::Walk => search::SEARCH_HISTORY_SLICE,
+            Self::Output => 0,
+        }
+    }
+}
+
+/// One terminal pane's search, re-asked — what [`rescan_leaf_for_search`] found and what the
+/// refresh decides from it.
+struct LeafSearchRescan {
+    /// The answer, as the cache that replaces the previous one.
+    cache: SearchScanCache,
+    /// Frozen lines the pattern was run over — see [`search::HistoryRescan::lines_scanned`].
+    lines_scanned: usize,
+    /// Microseconds the history half took, when timed.
+    history_us: u128,
+    /// How many live rows were scanned.
+    live_rows: usize,
+    /// The previous cache answered the same question over the same lines, and the volatile planes
+    /// found the same hits: nothing a reader could see has changed.
+    unchanged: bool,
+    /// The previous cache answered the same question and its walk was complete — B58's "output
+    /// caused this" half, as [`search::SearchState::keeps_current`] reads it.
+    carried_complete: bool,
+}
+
+/// **Re-ask one terminal pane's search** — the scan half of `Runtime::refresh_search`, a free
+/// function so the budget each road may spend can be pinned over a real leaf.
+///
+/// `cache` is carried only while it is an answer to **the same question**: the same seat and the
+/// same [`WindowRuntime::search_revision`]. Anything else — a new query, a flipped toggle, another
+/// pane — starts a new walk, and the old cursor is never read again. The history half reads at
+/// most [`SearchRefresh::walk_budget`] owed lines on top of whatever froze since the last scan.
+fn rescan_leaf_for_search(
+    compiled: &bt_transcript::search::CompiledSearch,
+    leaf: &LeafSession,
+    seat: SeatId,
+    revision: u64,
+    cache: Option<&SearchScanCache>,
+    road: SearchRefresh,
+    timed: bool,
+) -> LeafSearchRescan {
+    let transcript = leaf.session.transcript();
+    // **The previous answer, and only while it is an answer to the same question.** Seat and
+    // revision are what "the same question" means here; the plane having moved under it is not a
+    // reason to throw it away, it is the reason it is passed in.
+    let previous = cache.filter(|cache| cache.seat == seat && cache.revision == revision);
+    let started = timed.then(Instant::now);
+    let history = search::scan_history_slice(
+        compiled,
+        transcript,
+        previous.map(|cache| &cache.history),
+        road.walk_budget(),
+    );
+    let history_us = started.map_or(0, |at| at.elapsed().as_micros());
+    // The two volatile planes, every time: fifty rows of grid and whatever has scrolled out but not
+    // frozen. Their cost is a property of the screen, so re-scanning them unconditionally is what
+    // buys "the word you are typing is findable the instant it is echoed".
+    let live: Vec<search::LiveRow> = leaf
+        .session
+        .live_rows()
+        .iter()
+        .enumerate()
+        .map(|(row, captured)| search::live_row(row as u32, &captured.cells))
+        .collect();
+    let volatile_hits =
+        search::scan_volatile(compiled, transcript, &live, leaf.session.grid_generation());
+    // Nothing happened when the question, the lines read and the volatile hits are all the ones the
+    // last scan saw. `reads_as` stands in for the history hits because it is what they are a
+    // function of — and it moves with a walk's cursor, so a slice is never mistaken for nothing.
+    let unchanged = previous.is_some_and(|cache| {
+        cache.history.reads_as(&history.scan) && cache.volatile_hits == volatile_hits
+    });
+    LeafSearchRescan {
+        lines_scanned: history.lines_scanned,
+        history_us,
+        live_rows: live.len(),
+        unchanged,
+        carried_complete: previous.is_some_and(|cache| cache.history.is_complete()),
+        cache: SearchScanCache {
+            seat,
+            revision,
+            history: history.scan,
+            volatile_hits,
+        },
+    }
 }
 
 /// Which way a keyboard walk of the command marks goes.

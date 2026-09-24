@@ -18,6 +18,8 @@ All notable changes to Folio are recorded here. The format follows
   where its window is; it asks once.
 - A program that keeps changing its window title no longer slows typing;
   Folio passes the title on at most once a frame.
+- Typing in the find box stays quick in a pane with a long history; matches
+  further back fill in over the next few frames.
 
 ### Changed
 
