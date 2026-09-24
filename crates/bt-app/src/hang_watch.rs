@@ -321,7 +321,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 206;
+const STATION_COUNT: usize = 207;
 
 #[path = "hang_watch_detail.rs"]
 mod detail;
@@ -954,6 +954,12 @@ pub enum Station {
     /// divide. Time here is the platform's own loop and anything that runs on
     /// it: winit, the engine, a hook another program installed.
     Pump = 205,
+    /// `settings::monospace_family_files`, from `apply_stored_terminal_font` —
+    /// the face `settings.json` names, looked up by its name before the first
+    /// grid is measured and whenever the face changes (ticket 50). Before the
+    /// font list has landed this is one family asked of the system font
+    /// collection; after, a row of that list.
+    FontLookup = 206,
 }
 
 impl Station {
@@ -1167,6 +1173,7 @@ impl Station {
             Self::WebFloor => "stand_on_the_floor",
             Self::WebNavigate => "WebHost::navigate",
             Self::Pump => "message pump",
+            Self::FontLookup => "font family lookup",
         }
     }
 
@@ -1394,6 +1401,7 @@ impl Station {
             203 => Self::WebFloor,
             204 => Self::WebNavigate,
             205 => Self::Pump,
+            206 => Self::FontLookup,
             _ => Self::Starting,
         }
     }

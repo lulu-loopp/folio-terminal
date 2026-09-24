@@ -48,12 +48,13 @@
 //! # The thread
 //!
 //! CoreText is a C API over the font database, not AppKit: nothing here owns a
-//! view and nothing here is the main thread's. Apple's *Thread Safety Summary*
-//! rule for what it does not list applies — "in most cases, you can use these
-//! classes from any thread as long as you use them from only one thread at a
-//! time" — and this is called from one place, `settings::monospace_families`,
-//! behind a lock of its own. See `handoff::macos_handoff`'s header for the same
-//! statement made about `NSWorkspace`.
+//! view and nothing here is the main thread's. Since ticket 50 two threads call
+//! in at once: the walk runs on `bt-app`'s font lane, and the lookup of one
+//! family by name ([`monospace_family_named`]) on the window thread at launch.
+//! That is within CoreText's own contract — its overview states that every
+//! individual Core Text function is thread-safe and that font objects may be
+//! used by several threads simultaneously — and the two share no object: each
+//! call makes its own collection or descriptor and drops it before returning.
 
 use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFString, CFType};
 use objc2_core_text::{
@@ -75,6 +76,33 @@ use crate::MonospaceFamily;
 #[must_use]
 pub fn monospace_font_families() -> Vec<MonospaceFamily> {
     crate::order_monospace_families(collect_monospace_families())
+}
+
+/// **One family, looked up by its name** — the CoreText twin of the Windows
+/// arm's `FindFamilyName` door (ticket 50).
+///
+/// A descriptor carrying only `kCTFontFamilyNameAttribute`, matched against the
+/// font database: CoreText answers with the one descriptor it prefers for that
+/// family, or — when the family is not installed — with whatever it falls back
+/// to, which is why the answer's own family name is compared with the one asked
+/// for. The row is built by [`monospace_family_entry`], the same derivation the
+/// walk makes for every face it keeps, so a family is monospaced here exactly
+/// when it is a row of [`monospace_font_families`], and its `files` are empty
+/// for the reason this module's header gives.
+#[must_use]
+pub fn monospace_family_named(name: &str) -> Option<MonospaceFamily> {
+    let wanted = CFString::from_str(name);
+    // SAFETY: a CoreText constant string, read for the length of the call that
+    // copies it into the dictionary.
+    let key: &CFString = unsafe { kCTFontFamilyNameAttribute };
+    let attributes = CFDictionary::<CFString, CFString>::from_slices(&[key], &[&*wanted]);
+    // SAFETY: the dictionary is keyed by a CoreText attribute name and holds a
+    // string under it, which is the type that attribute is documented to take.
+    let descriptor = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
+    // SAFETY: the descriptor above is live and no mandatory attributes are
+    // passed; the match comes back owned or not at all.
+    let matched = unsafe { descriptor.matching_font_descriptor(None) }?;
+    monospace_family_entry(&matched).filter(|family| family.name.eq_ignore_ascii_case(name))
 }
 
 /// Every visible CJK family, read once on the font worker.
@@ -191,25 +219,28 @@ fn collect_monospace_families() -> Vec<MonospaceFamily> {
     // as an array of them is reading it as what it holds.
     let descriptors: &CFArray<CTFontDescriptor> = unsafe { descriptors.cast_unchecked() };
 
-    let mut families = Vec::new();
-    for descriptor in descriptors.iter() {
-        if !is_monospaced(&descriptor) {
-            continue;
-        }
-        let Some(name) = family_name(&descriptor) else {
-            continue;
-        };
-        if name.starts_with('.') || name.trim().is_empty() {
-            continue;
-        }
-        families.push(MonospaceFamily {
-            name,
-            // Nothing to load: `bt-render`'s macOS font system already holds
-            // every installed face. See this module's own header.
-            files: Vec::new(),
-        });
+    descriptors
+        .iter()
+        .filter_map(|descriptor| monospace_family_entry(&descriptor))
+        .collect()
+}
+
+/// **One face as a picker row**, or `None` when it is not one: the one
+/// derivation the walk and the lookup by name share (`CONVENTIONS` §十 rule 9).
+fn monospace_family_entry(descriptor: &CTFontDescriptor) -> Option<MonospaceFamily> {
+    if !is_monospaced(descriptor) {
+        return None;
     }
-    families
+    let name = family_name(descriptor)?;
+    if name.starts_with('.') || name.trim().is_empty() {
+        return None;
+    }
+    Some(MonospaceFamily {
+        name,
+        // Nothing to load: `bt-render`'s macOS font system already holds
+        // every installed face. See this module's own header.
+        files: Vec::new(),
+    })
 }
 
 /// Whether this face's own traits carry the monospace bit.
