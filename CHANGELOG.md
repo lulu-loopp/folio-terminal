@@ -6,7 +6,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+
+- Glance-card head spacing, drag-tag padding and spacing, and peek-tag line height now match the other floating tags.
 
 ## 0.4.4-preview — 2026-09-24
 

@@ -21197,8 +21197,8 @@ pub(crate) const CHROME_LINE_HEIGHT: f32 = 1.4;
 /// The drag ghost's box and the two things standing in it, in physical pixels
 /// (J114).
 ///
-/// `.drag-ghost` is a two-item flex row — `mark + name`, `gap: 7px`,
-/// `align-items: center` — inside `padding: 5px 12px` and a 1px border, so the
+/// The drag ghost is a two-item flex row — mark and name, eight pixels apart
+/// (UI-SPEC.md G3), inside 5px by 10px padding (S9) and a 1px border, so the
 /// box shrink-wraps whatever is in it and there is no wrapping, no ellipsis and
 /// no width bound. That last part is the mock-up's, not an omission here: the
 /// label is a short name by construction (`seat_short_caption`), and a ghost
@@ -38873,7 +38873,12 @@ mod tests {",
     // U4: the drag ghost (J114, J115, J116)
     // ---------------------------------------------------------------------
 
-    /// `.drag-ghost` is a shrink-wrapped flex row, so every number in its box is
+    /// RED (23) — **the drag ghost spends the single-line tag's padding and gap.**
+    ///
+    /// MUTATION: restore DRAG_GHOST_GAP_LOGICAL_PX to 7.0.
+    /// MUTATION: restore DRAG_GHOST_PADDING_X_LOGICAL_PX to 12.0.
+    ///
+    /// UI-SPEC.md G3/S9: the ghost is a shrink-wrapped flex row; its box is
     /// the sum of a declaration and its contents — and the contents are a 15px
     /// mark and one line of 12.5px text.
     ///
@@ -38882,12 +38887,12 @@ mod tests {",
     /// take the row's height off the mark instead of off the taller of the two.
     /// Each of the four assertions below fails on exactly one of them.
     #[test]
-    fn the_ghost_shrink_wraps_its_mark_and_its_name_inside_the_mockups_padding() {
+    fn the_ghost_shrink_wraps_its_mark_and_its_name_inside_the_float_tags_padding() {
         let ghost = drag_ghost_layout([100.0, 200.0], 15.0, 60.0, 1.0, None);
-        // 12 + 1 either side, 15 of mark, 7 of gap, 60 of text.
+        // Single-line tag padding plus border on either side, then mark, gap and text.
         assert_eq!(
             ghost.frame[2] - ghost.frame[0],
-            2.0 * (12.0 + 1.0) + 15.0 + 7.0 + 60.0,
+            2.0 * (crate::tooltip::PEEK_PADDING_X_LOGICAL_PX + 1.0) + 15.0 + 8.0 + 60.0,
             "border + padding on both sides, then mark, gap and name"
         );
         // The row is `max(15, round(12.5 × 1.4)) = 18`, not the mark's 15.
@@ -38899,12 +38904,12 @@ mod tests {",
         );
         assert_eq!(
             ghost.mark[0],
-            ghost.frame[0] + 1.0 + 12.0,
+            ghost.frame[0] + 1.0 + crate::tooltip::PEEK_PADDING_X_LOGICAL_PX,
             "the mark stands at the leading padding, inside the border"
         );
         assert_eq!(
             ghost.label[0],
-            ghost.mark[2] + 7.0,
+            ghost.mark[2] + 8.0,
             "and the name one gap after it"
         );
         // Both are centred on the row rather than on boxes of their own — to
