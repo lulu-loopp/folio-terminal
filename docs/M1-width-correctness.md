@@ -50,7 +50,7 @@ Committed text 的最终 pen-x 由 grid 列唯一决定：第 `n` 格的起笔�
 环境：Windows `10.0.26200.8875`；`System32/conhost.exe` FileVersion/ProductVersion `10.0.26100.1`；Windows PowerShell `5.1.26100.8875`。可复现探针：
 
 ```text
-cargo run -p bt-pty --bin bt-conpty-width-probe --locked
+cargo run -p bt-corpus --bin bt-conpty-width-probe --locked
 ```
 
 探针通过真实 `portable-pty` native ConPTY 启动 PowerShell，先回答启动时 ConPTY 发来的 DSR `ESC [ 6 n`，然后以 Console API 写入每个序列并读取 `Console.CursorLeft`。宽度流完整打印为 `width_raw_hex` / `width_raw_debug`，旧验收等价序列打印为 `acceptance_raw_hex` / `acceptance_raw_debug`，摘要为：

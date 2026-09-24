@@ -34,6 +34,14 @@ pub(crate) struct Harness {
     pub width: f32,
     pub scale: f32,
     pub offsets: Vec<f32>,
+    /// What the last [`Self::rebuild`]'s realize pass said it measured.
+    pub realized: usize,
+    /// **Where the caret's selection is anchored**, when it has one: the next
+    /// rebuild with a caret draws every block from here to the caret as source,
+    /// through the window's own producers ([`preview_live::source_span`],
+    /// [`SourceBlocks::build`]). `None` is a collapsed caret, which the
+    /// harness has always drawn as its one block.
+    pub select_from: Option<usize>,
     cache: preview_wrap::WindowCache,
     intrinsic: MarkdownIntrinsicCache,
     measure: Cpu,
@@ -53,6 +61,8 @@ impl Default for Harness {
             width: 800.0,
             scale: 1.0,
             offsets: Vec::new(),
+            realized: 0,
+            select_from: None,
             cache: preview_wrap::WindowCache::default(),
             intrinsic: MarkdownIntrinsicCache::default(),
             measure: Cpu::default(),
@@ -79,34 +89,56 @@ impl Harness {
         drop(timer);
         let timer = preview_typing::Timer::new("layout");
         let mut anchor = edits.and_then(|_| capture(&old, self.view, &mut self.measure));
-        let source = caret.and_then(|at| {
-            preview_typing::source_at(text, &blocks, &ranges, at).or_else(|| {
-                let index = preview_live::caret_seat(text, &ranges, at).block()?;
-                let raw = preview_live::block_source(text, &ranges[index]).to_owned();
-                let metrics = seats::preview_text_metrics(self.scale);
-                let advance = self.measure.width(
-                    &[bt_render::PreviewRun {
-                        text: "M".into(),
-                        color: [0; 3],
-                        mono: true,
-                        bold: false,
-                        italic: false,
-                        font_scale: 1.0,
-                        inline_box_px: None,
-                    }],
-                    metrics.font_size,
-                    metrics.line_height,
-                );
-                Some(Box::new(MarkdownCaretBlock::Mono(MarkdownSourceBlock {
-                    index,
-                    range: ranges[index].clone(),
-                    lines: preview_edit::display_lines(&raw),
-                    text: raw,
-                    font_size: metrics.font_size,
-                    line_height: metrics.line_height,
-                    advance,
-                })))
-            })
+        let selected = caret.zip(self.select_from).map(|(at, from)| {
+            let metrics = seats::preview_text_metrics(self.scale);
+            let advance = self.measure.width(
+                &[bt_render::PreviewRun {
+                    text: "M".into(),
+                    color: [0; 3],
+                    mono: true,
+                    bold: false,
+                    italic: false,
+                    font_scale: 1.0,
+                    inline_box_px: None,
+                }],
+                metrics.font_size,
+                metrics.line_height,
+            );
+            preview_live::source_span(text, &ranges, &blocks, from.min(at)..from.max(at), at)
+                .map_or_else(SourceBlocks::default, |span| {
+                    SourceBlocks::build(text, &span, &blocks, &ranges, self.scale, advance)
+                })
+        });
+        let source = selected.unwrap_or_else(|| {
+            SourceBlocks::from(caret.and_then(|at| {
+                preview_typing::source_at(text, &blocks, &ranges, at).or_else(|| {
+                    let index = preview_live::caret_seat(text, &ranges, at).block()?;
+                    let raw = preview_live::block_source(text, &ranges[index]).to_owned();
+                    let metrics = seats::preview_text_metrics(self.scale);
+                    let advance = self.measure.width(
+                        &[bt_render::PreviewRun {
+                            text: "M".into(),
+                            color: [0; 3],
+                            mono: true,
+                            bold: false,
+                            italic: false,
+                            font_scale: 1.0,
+                            inline_box_px: None,
+                        }],
+                        metrics.font_size,
+                        metrics.line_height,
+                    );
+                    Some(Box::new(MarkdownCaretBlock::Mono(MarkdownSourceBlock {
+                        index,
+                        range: ranges[index].clone(),
+                        lines: preview_edit::display_lines(&raw),
+                        text: raw,
+                        font_size: metrics.font_size,
+                        line_height: metrics.line_height,
+                        advance,
+                    })))
+                })
+            }))
         });
         let frame = preview_wrap::Frame::new(self.width, self.scale, 0);
         let mut pass = self.cache.prepare(&old, edits.is_some(), frame);
@@ -115,7 +147,7 @@ impl Harness {
             blocks: &blocks,
             ranges: &ranges,
             content: text,
-            source: source.as_deref(),
+            source: &source,
             frame,
             edits,
             art_changed: false,
@@ -126,21 +158,15 @@ impl Harness {
             } = &old
         {
             state.remap_anchor(anchor, old_ranges, &ranges, edits.unwrap_or_default());
-            anchor.remap_text(
-                source.as_deref(),
-                &blocks,
-                &ranges,
-                &maps,
-                edits.unwrap_or_default(),
-            );
+            anchor.remap_text(&source, &blocks, &ranges, &maps, edits.unwrap_or_default());
         }
         self.view.padding = frame.metrics().padding_y;
         let math = DocumentMath::default();
         let pictures = DocumentPictures::default();
         let palette = bt_render::chrome_palette();
-        Realize {
+        self.realized = Realize {
             blocks: &blocks,
-            source: source.as_deref(),
+            source: &source,
             art: PageArt {
                 math: &math,
                 pictures: &pictures,
@@ -210,7 +236,7 @@ impl Harness {
         if Arc::make_mut(wrap).viewport.pending(layout, self.view) {
             Realize {
                 blocks,
-                source: source.as_deref(),
+                source,
                 art: PageArt {
                     math,
                     pictures,
@@ -294,6 +320,67 @@ fn viewport_open_bounds_prose_and_intrinsics() {
     }
 }
 
+/// RED (preview report 2026-09-23, C1) — **a realize pass reports the blocks
+/// it measured, and a caret crossing into another block measures two.**
+///
+/// The count is the `realized=` of `BT_PREVIEW_TRACE`'s `reflow` line, which
+/// is the number that says whether a table flipping to its source cost the
+/// window two blocks' work or the page's. Held against the test-only counter
+/// the pass already kept, so the two cannot come to disagree; and the flip on
+/// a settled page is the two blocks whose face changed — the one the caret
+/// left and the one it entered — and nothing else.
+///
+/// MUTATION: return `0` from `Realize::ensure` (or stop counting in it) and the
+/// trace reports a flip that measured nothing.
+#[test]
+fn a_realize_pass_reports_the_blocks_it_measured() {
+    let text = fixture(40);
+    let mut h = Harness::default();
+    let (_, ranges) = preview::parse_markdown_ranged(&text);
+    reset();
+    h.rebuild(text.clone(), None, Some(ranges[1].start));
+    assert_eq!(h.realized, work("realized blocks"), "a cold open");
+    assert!(h.realized > 2);
+    // The window's no-parse arm hands the geometry pass the edits since the
+    // key being replaced, which for a caret move is none at all.
+    reset();
+    h.rebuild(text.clone(), Some(&[]), Some(ranges[3].start));
+    assert_eq!(h.realized, work("realized blocks"), "a flip");
+    assert_eq!(
+        h.realized, 2,
+        "the block the caret left and the block it entered, and no other",
+    );
+    // **A selection reaching two more blocks measures those two** (owner's
+    // ruling 2026-09-23): blocks 3, 4 and 5 are source, and 3 already was.
+    h.select_from = Some(ranges[3].start + 1);
+    reset();
+    h.rebuild(text.clone(), Some(&[]), Some(ranges[5].start + 1));
+    assert_eq!(h.realized, work("realized blocks"), "a widened span");
+    assert_eq!(
+        h.realized, 2,
+        "the two blocks the selection reached into, and not the one it began in",
+    );
+    let PreviewDocument::Markdown { source, .. } = &h.doc else {
+        panic!()
+    };
+    assert_eq!(
+        source
+            .iter()
+            .map(MarkdownCaretBlock::index)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5],
+    );
+    // And letting go of it puts the two back.
+    h.select_from = None;
+    reset();
+    h.rebuild(text, Some(&[]), Some(ranges[5].start + 1));
+    assert_eq!(h.realized, work("realized blocks"), "a cleared selection");
+    assert_eq!(
+        h.realized, 2,
+        "blocks 3 and 4 go back to rendered; 5, the caret's, stays source",
+    );
+}
+
 /// Mutation: let parse-key equality bypass viewport realization, or visit all blocks.
 #[test]
 fn viewport_scroll_and_height_realize_only_new_blocks() {
@@ -353,7 +440,7 @@ fn viewport_corrections_above_preserve_anchor_and_caret_text() {
             };
             let p = preview_wrap::anchor_paragraphs(
                 &blocks[anchor.index],
-                source.as_deref(),
+                source.get(anchor.index),
                 &h.layout().get(anchor.index).unwrap(),
                 wrap.frame.unwrap(),
                 PageArt {
@@ -474,7 +561,7 @@ fn viewport_width_and_scale_preserve_text_with_affinity() {
     };
     let paragraphs = preview_wrap::anchor_paragraphs(
         &blocks[after.index],
-        source.as_deref(),
+        source.get(after.index),
         &h.layout().get(after.index).unwrap(),
         wrap.frame.unwrap(),
         PageArt {
@@ -600,7 +687,7 @@ fn viewport_append_and_split_keep_the_anchored_source_text() {
         panic!()
     };
     mapped.remap_text(
-        source.as_deref(),
+        source,
         blocks,
         ranges,
         maps,
@@ -612,7 +699,7 @@ fn viewport_append_and_split_keep_the_anchored_source_text() {
     );
     let paragraphs = preview_wrap::anchor_paragraphs(
         &blocks[current.index],
-        source.as_deref(),
+        source.get(current.index),
         &h.layout().get(current.index).unwrap(),
         wrap.frame.unwrap(),
         PageArt {

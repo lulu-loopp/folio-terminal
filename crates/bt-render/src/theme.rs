@@ -2325,6 +2325,15 @@ pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 30.0;
 /// nine-pixel tick that grows to twenty-seven under the pointer would cover it.
 /// Eight is the mock-up's own `thin` gutter, which is what its `right: 11px`
 /// (this, plus a three-pixel gap) was derived from.
+///
+/// **The grid enforces this now** (owner, 2026-09-23: decoration never covers
+/// text). A pane that has a command rail is given a grid whose last column ends
+/// left of the rail's *resting* band — the nine-pixel tick with its padding,
+/// inboard of this lane — so no resting tick covers a glyph; the twenty-seven-pixel
+/// crest may still reach over the last column while the pointer is on the rail,
+/// which the ruling accepts. The arithmetic lives in `bt-app`'s `cmdrail`, which
+/// owns the rail; this crate's `CellMetrics::grid_for_pixels` is handed the width
+/// that is left.
 pub const TERMINAL_SCROLL_LANE_LOGICAL_PX: f32 = 8.0;
 /// The self-drawn window title bar (`--titleh`).
 pub const WINDOW_TITLE_BAR_LOGICAL_PX: f32 = 40.0;
@@ -2639,8 +2648,10 @@ pub const RAIL_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
 /// A ratio would have been the wrong thing to store — `normal` is resolved from
 /// the font's own ascent/descent/line-gap, so it is a measurement, not a rule.
 pub const RAIL_LABEL_LINE_LOGICAL_PX: f32 = 13.0;
-/// `.rail .label { letter-spacing: .04em }`, as a fraction of the font size.
-pub const RAIL_LABEL_TRACKING_EM: f32 = 0.04;
+/// The section-label tracking (`UI-SPEC.md` T7; `settings.rs::GROUP_LABEL_TRACKING_EM`,
+/// private in `bt-app`), not the mock-up's own
+/// `.rail .label { letter-spacing: .04em }`.
+pub const RAIL_LABEL_TRACKING_EM: f32 = 0.05;
 /// `.rail .label { padding: 4px 10px 6px }`.
 pub const RAIL_LABEL_PADDING_TOP_LOGICAL_PX: f32 = 4.0;
 pub const RAIL_LABEL_PADDING_X_LOGICAL_PX: f32 = 10.0;
@@ -2764,8 +2775,8 @@ pub const FOCUS_CARD_WAIT_HALO_OPACITY: f32 = 0.24;
 /// `.fc-head { padding: 5px 8px }`.
 pub const FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX: f32 = 8.0;
 pub const FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX: f32 = 5.0;
-/// `.fc-head { gap: 6px }` — between the mark, the name and the trailing run.
-pub const FOCUS_CARD_HEAD_GAP_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC.md G1: the focus-card head uses the shared 8-point icon-to-label gap.
+pub const FOCUS_CARD_HEAD_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.fc-head { font-size: 11px }` — a card's name.
 ///
 /// Two steps under the strip's 13px tab title, because a card says the same
@@ -2959,8 +2970,11 @@ pub const FOCUS_MINI_SEAM_LOGICAL_PX: f32 = 1.0;
 // `focus_thumb`: the four gates and the 10 Hz ceiling bound the *rate*, and the
 // row count is bounded by the card's own height, which is bounded by this file.
 
-/// A seat title's font size (`.panehead { font-size: 11.5px }`).
-pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;
+/// A seat title's font size — every head title is 11 (ruled 2026-09-22;
+/// `UI-SPEC.md` T1), not the mock-up's own `.panehead { font-size: 11.5px }`.
+/// The float and glance heads already draw [`HEAD_TITLE_FONT_LOGICAL_PX`]
+/// below.
+pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = HEAD_TITLE_FONT_LOGICAL_PX;
 
 /// **The one typeface a file-name head wears** — whether it is drawn on a hover
 /// preview card (`bt_app::file_peek`) or on the header of the pinned float that
@@ -2990,8 +3004,8 @@ pub const HEAD_TITLE_TRACKING_EM: f32 = 0.04;
 /// The inset between a title bar's edge and its first item
 /// (`.panehead { padding: 0 6px 0 12px }`).
 pub const SEAT_TITLE_PADDING_LOGICAL_PX: f32 = 12.0;
-/// `.panehead { gap: 7px }` — between the mark and the title.
-pub const SEAT_TITLE_GAP_LOGICAL_PX: f32 = 7.0;
+/// UI-SPEC.md G3: the pane mark and title use the shared 8-point icon-to-label gap.
+pub const SEAT_TITLE_GAP_LOGICAL_PX: f32 = 8.0;
 /// The other half of `.panehead { padding: 0 6px 0 12px }`: the inset the
 /// trailing control run stops at.
 ///
@@ -3146,12 +3160,12 @@ pub const FLOAT_WINDOW_RISE_LOGICAL_PX: f32 = crate::motion::MOTION_TRAVEL_LOGIC
 pub const DRAG_GHOST_RADIUS_LOGICAL_PX: f32 = 7.0;
 /// `.drag-ghost { border: 1px solid var(--border) }`.
 pub const DRAG_GHOST_BORDER_LOGICAL_PX: f32 = 1.0;
-/// `.drag-ghost { padding: 5px 12px }` — the horizontal half.
-pub const DRAG_GHOST_PADDING_X_LOGICAL_PX: f32 = 12.0;
-/// `.drag-ghost { padding: 5px 12px }` — the vertical half.
+/// UI-SPEC.md S9: ten logical pixels at each side, like a single-line tag.
+pub const DRAG_GHOST_PADDING_X_LOGICAL_PX: f32 = 10.0;
+/// UI-SPEC.md section 3: five logical pixels above and below a single-line tag.
 pub const DRAG_GHOST_PADDING_Y_LOGICAL_PX: f32 = 5.0;
-/// `.drag-ghost { gap: 7px }` — between the mark and the name.
-pub const DRAG_GHOST_GAP_LOGICAL_PX: f32 = 7.0;
+/// UI-SPEC.md G3: eight logical pixels between the mark and the name.
+pub const DRAG_GHOST_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.drag-ghost { font-size: 12.5px }`.
 pub const DRAG_GHOST_FONT_LOGICAL_PX: f32 = 12.5;
 /// How far below and to the right of the pointer the ghost hangs — `g.style.left
@@ -3635,6 +3649,69 @@ fn ansi_16_rgb_for(theme: Theme) -> [[u8; 3]; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (23) — **the drag ghost uses the float-tag gap and side padding.**
+    ///
+    /// UI-SPEC.md G3 sets every icon-to-label gap to eight; S9 uses the
+    /// single-line tag's tooltip::PEEK_PADDING_X_LOGICAL_PX, in bt-app.
+    /// MUTATION: restore DRAG_GHOST_GAP_LOGICAL_PX to 7.0.
+    /// MUTATION: restore DRAG_GHOST_PADDING_X_LOGICAL_PX to 12.0.
+    #[test]
+    fn ui_spec_float_tag_rest_values_follow_the_rule() {
+        assert_eq!(
+            (DRAG_GHOST_GAP_LOGICAL_PX, DRAG_GHOST_PADDING_X_LOGICAL_PX),
+            (8.0, 10.0),
+            "UI-SPEC.md G3/S9; tooltip::PEEK_PADDING_X_LOGICAL_PX"
+        );
+    }
+
+    /// RED (26) — **Pane and files chrome follows the shared UI values.**
+    ///
+    /// The baseline uses separate gaps, heights, captions and control values.
+    /// UI-SPEC.md gives each role one rule; collect every mismatch so BASE
+    /// reports each changed value, including private cross-module numeric rules.
+    /// MUTATION: restore FOCUS_CARD_HEAD_GAP_LOGICAL_PX to 6.0.
+    /// MUTATION: restore SEAT_TITLE_GAP_LOGICAL_PX to 7.0.
+    #[test]
+    fn ui_spec_pane_head_rest_values_follow_the_rule() {
+        let rules = [
+            (
+                FOCUS_CARD_HEAD_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G1: FOCUS_CARD_HEAD_GAP_LOGICAL_PX",
+            ),
+            (
+                SEAT_TITLE_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G3: SEAT_TITLE_GAP_LOGICAL_PX",
+            ),
+        ];
+        let deviations: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, rule, _)| actual != rule)
+            .collect();
+        assert!(deviations.is_empty(), "{deviations:?}");
+    }
+
+    /// RED (ticket 19) — **every head title is 11, and the rail's section
+    /// label carries the same tracking Settings and the git page do.**
+    ///
+    /// `UI-SPEC.md` T1 (ruled 2026-09-22: "Every head title is 11") and T7:
+    /// the pane head's title used to sit at 11.5, half a point above
+    /// [`HEAD_TITLE_FONT_LOGICAL_PX`] (the float and glance heads' own), and
+    /// the rail label's tracking used to sit at 0.04 against the section-label
+    /// scale's 0.05.
+    ///
+    /// MUTATION: revert `SEAT_TITLE_FONT_LOGICAL_PX` or
+    /// `RAIL_LABEL_TRACKING_EM` to a literal and this goes red.
+    #[test]
+    fn ui_spec_pane_head_class_a_values_follow_the_rule() {
+        assert_eq!(
+            SEAT_TITLE_FONT_LOGICAL_PX, HEAD_TITLE_FONT_LOGICAL_PX,
+            "UI-SPEC.md T1"
+        );
+        assert_eq!(RAIL_LABEL_TRACKING_EM, 0.05, "UI-SPEC.md T7");
+    }
 
     #[test]
     fn cursor_style_snapshot_survives_one_writer_for_200_frames() {

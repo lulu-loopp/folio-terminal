@@ -99,7 +99,9 @@ use std::{
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
+    time::Duration,
 };
 
 use bt_platform::msix::{self, PACKAGE_FILE_NAME};
@@ -755,6 +757,311 @@ pub fn removal_for(state: &PackageState) -> Removal<'_> {
 /// no business claiming to be the one over there.
 fn is_this_executable(exe: &Path) -> bool {
     std::env::current_exe().is_ok_and(|ours| same_path(exe, &ours))
+}
+
+// ── `--remove-explorer-menu`: the mark taken back off, with no window ───────
+//
+// Everything above this line is reached from a window: a row somebody is
+// looking at, or a launch that is about to open one. This section is the other
+// door. Folio writes two things outside its own folder and `%APPDATA%` — the
+// sparse package's registration and the classic registry verb — and until this
+// flag existed the only way to undo either was the switch inside a program that
+// a package manager's uninstall is in the middle of deleting. The general rule
+// it answers: everything this product writes outside its own folder has a
+// non-interactive way to undo it, owned by the module that wrote it.
+//
+// So the decisions here are not new ones. Which registrations exist is
+// `read_state` and `bt_platform::read_context_menu`; whether one is this copy's
+// is `classify` and `bt_platform::explorer_reassert_wanted`, the same two owners
+// the launch-time repair and the Settings row already ask. What this section
+// adds is the direction — off — and one sentence saying what it did.
+
+/// **What `--remove-explorer-menu` does about one of the two registrations.**
+///
+/// The same four answers for both stores, because the question is the same one
+/// in both: is there a registration, is it this copy's to take away, and did the
+/// machine answer at all. The clause each of them contributes to the flag's one
+/// line is written where the store is read, because only there is there a path
+/// or a reason to name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MenuRemoval {
+    /// Nothing of ours is registered there. The ordinary answer on a machine
+    /// that never switched the row on, and the answer on every machine that is
+    /// not Windows.
+    Nothing,
+    /// A registration this copy may take away: one that serves this folder and
+    /// this executable, **or** one whose `folio.exe` is no longer on the disk.
+    ///
+    /// The second half is the repair rather than a liberty taken: a registration
+    /// pointing at nothing is answered by nobody, no installer will ever notice
+    /// it, and a menu item that opens nothing is exactly the state this flag
+    /// exists to clear.
+    Remove,
+    /// A registration another copy of Folio is still answering — its `folio.exe`
+    /// is on the disk and is not this file. Left exactly as it is.
+    AnotherCopy,
+    /// The machine would not say what is registered, so nothing may be claimed
+    /// about it and nothing is removed (R2-20's reading, in the one direction
+    /// where being wrong is silent).
+    Unanswerable,
+}
+
+/// **What the flag does about the sparse package**, as a function of the state
+/// and of the disk, so the whole table can be read without a deployment
+/// database.
+///
+/// Three of the four answers are [`removal_for`]'s and are not decided again
+/// here: that function already owns what a press on `Off` may do about each
+/// state, including the two that must not be reported as success. What this adds
+/// is the one question the switch does not ask, because a press names *this*
+/// Folio by hand and a package manager's uninstall hook does not: whether the
+/// registration belongs to another copy that is still installed. That question
+/// is `bt_platform::explorer_reassert_wanted`'s, shared word for word with the
+/// classic entry and with both launch-time repairs — there is no second reading
+/// of "is it ours" in this file.
+///
+/// `on_disk` and `ours` are handed in for [`reassert_wanted`]'s reason: the rule
+/// is then a function of its inputs and a test can ask it about a machine it is
+/// not running on.
+#[must_use]
+pub fn package_removal(
+    state: &PackageState,
+    on_disk: impl Fn(&Path) -> bool,
+    ours: impl Fn(&Path) -> bool,
+) -> MenuRemoval {
+    match removal_for(state) {
+        Removal::Unanswerable => MenuRemoval::Unanswerable,
+        Removal::AlreadyGone => MenuRemoval::Nothing,
+        Removal::Remove(_) => {
+            // `Current` is this folder and this file by construction
+            // ([`classify`]), so there is nobody else's copy to ask about. Only
+            // a registration that names another folder — or this folder with a
+            // `folio.exe` in it that is not this file — reaches the shared rule.
+            let PackageState::Elsewhere { at, .. } = state else {
+                return MenuRemoval::Remove;
+            };
+            let there = package_exe_in(at);
+            if bt_platform::explorer_reassert_wanted([bt_platform::RegisteredExe {
+                on_disk: on_disk(&there),
+                ours: ours(&there),
+            }]) {
+                MenuRemoval::Remove
+            } else {
+                MenuRemoval::AnotherCopy
+            }
+        }
+    }
+}
+
+/// **How long the whole flag may take before it reports failure instead of
+/// waiting.**
+///
+/// A deployment call is a blocking round trip into somebody else's service and
+/// the module header's own note says it is one to three seconds on a good day.
+/// On a bad day it is a service that does not answer, and this flag runs inside
+/// a package manager's uninstall: a hang here is an uninstall that never
+/// finishes, on a machine whose owner is watching a progress bar.
+///
+/// Sixty seconds is the bound and it is deliberately generous — a real removal
+/// that took forty seconds and was killed at thirty would leave the machine in
+/// the state this flag exists to clear. What the bound buys is that the
+/// **uninstall** ends, with a line saying nothing is known to have been removed
+/// and a non-zero code, rather than not ending.
+pub const REMOVAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What one registration's removal came to: its clause in the flag's one line,
+/// and whether a removal was attempted and refused.
+///
+/// The `bool` and not an error type, because the only thing above here that acts
+/// on it is the exit code, and the reason itself has already gone to standard
+/// error where a package manager's log keeps it.
+pub struct MenuFate {
+    /// The clause this registration contributes to the one line.
+    pub said: String,
+    /// Whether a removal was attempted and the machine refused it — the one
+    /// thing that makes this flag exit non-zero. A registration left alone on
+    /// purpose, and a machine that would not say what it holds, are both `false`:
+    /// nothing was attempted, so nothing failed.
+    pub refused: bool,
+}
+
+impl MenuFate {
+    /// A registration nothing was tried on, and why.
+    pub(crate) fn left(said: impl Into<String>) -> Self {
+        Self {
+            said: said.into(),
+            refused: false,
+        }
+    }
+
+    /// A removal that was attempted: what the machine answered decides both the
+    /// clause and the exit code.
+    ///
+    /// **The reason goes to standard error and the clause does not carry it.**
+    /// The line on standard output is one line by contract, and a deployment's
+    /// refusal is a paragraph of somebody else's prose; a caller reading the log
+    /// gets both, in the two places each belongs.
+    pub(crate) fn attempted(what: &str, outcome: Result<(), String>) -> Self {
+        match outcome {
+            Ok(()) => Self::left(format!("{what} was removed")),
+            Err(reason) => {
+                eprintln!(
+                    "folio {}: {what} could not be removed — {reason}",
+                    crate::cli::REMOVE_EXPLORER_MENU_FLAG
+                );
+                Self {
+                    said: format!("{what} could not be removed"),
+                    refused: true,
+                }
+            }
+        }
+    }
+}
+
+/// The one line `--remove-explorer-menu` prints and the code it exits with.
+pub struct MenuRemovalReport {
+    /// One line of English, on standard output. **Log text and not UI**: what
+    /// reads it is a package manager's transcript, and a line that changed
+    /// language with the reader's settings would be a line nobody could grep.
+    pub line: String,
+    /// `0` for every machine that was left the way the caller asked — including
+    /// one with nothing to remove, and one holding another copy's registration.
+    /// Non-zero only where a removal was attempted and the machine refused it.
+    pub exit_code: i32,
+}
+
+/// **Take every Explorer-menu registration that belongs to this copy of Folio
+/// off this machine, and say in one line what happened.**
+///
+/// Answered on a thread of its own with the caller waiting on
+/// [`REMOVAL_TIMEOUT`], which is the whole of the bound: everything that can
+/// block — the deployment query, the deployment removal, the four registry opens
+/// — is on the other side of one channel, so there is one number to state and
+/// one place it is enforced. A worker that is still inside somebody else's
+/// service when the bound expires is left there; this process is about to leave,
+/// and a deployment that lands afterwards lands on a machine nobody is waiting
+/// on.
+#[must_use]
+pub fn remove_from_explorer_menu() -> MenuRemovalReport {
+    let (answered, waiting) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = answered.send(both_registrations_removed());
+    });
+    waiting.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
+        let seconds = REMOVAL_TIMEOUT.as_secs();
+        eprintln!(
+            "folio {}: nothing answered within {seconds} seconds",
+            crate::cli::REMOVE_EXPLORER_MENU_FLAG
+        );
+        MenuRemovalReport {
+            line: format!(
+                "Folio Explorer menu: nothing answered within {seconds} seconds, \
+                 so nothing is known to have been removed."
+            ),
+            exit_code: 1,
+        }
+    })
+}
+
+/// Both stores, in one sentence. The package first, because it is the one on the
+/// page Windows curates and therefore the one a reader would look for.
+fn both_registrations_removed() -> MenuRemovalReport {
+    let package = package_taken_off();
+    let classic = crate::context_menu::classic_taken_off();
+    MenuRemovalReport {
+        line: format!("Folio Explorer menu: {}; {}.", package.said, classic.said),
+        exit_code: i32::from(package.refused || classic.refused),
+    }
+}
+
+/// The package half: read the machine, decide, and act on the decision.
+fn package_taken_off() -> MenuFate {
+    let state = read_state();
+    match package_removal(&state, |exe| exe.is_file(), is_this_executable) {
+        MenuRemoval::Nothing => MenuFate::left("no first-page package was registered"),
+        MenuRemoval::Unanswerable => MenuFate::left(
+            "Windows would not say whether a first-page package is registered, so none was removed",
+        ),
+        MenuRemoval::AnotherCopy => MenuFate::left(match &state {
+            PackageState::Elsewhere { at, .. } => format!(
+                "the first-page package was left registered for {}, where another Folio still is",
+                at.display()
+            ),
+            // `AnotherCopy` is only ever reached through `Elsewhere` — see
+            // `package_removal`. The sentence without the folder is the same
+            // claim, said by a branch that cannot run.
+            _ => "the first-page package was left registered for another Folio".to_owned(),
+        }),
+        MenuRemoval::Remove => match state.full_name() {
+            Some(full_name) => {
+                MenuFate::attempted("the first-page package", msix::remove(full_name))
+            }
+            // Unreachable by construction: `MenuRemoval::Remove` comes from
+            // `Removal::Remove`, which `removal_for` builds out of this very
+            // name. Said rather than unwrapped, because a removal that cannot
+            // name what it would remove has removed nothing and must not report
+            // that it did.
+            None => {
+                MenuFate::left("Windows would not name the first-page package, so none was removed")
+            }
+        },
+    }
+}
+
+/// Structured results for the common cleanup door. The narrow flag keeps its old transcript.
+pub(crate) enum CleanupRegistration {
+    Removed,
+    Absent,
+    Other(PathBuf),
+    Refused(String),
+}
+
+pub(crate) fn cleanup_registrations() -> Vec<(&'static str, CleanupRegistration)> {
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(vec![
+            ("Explorer sparse package (per-copy)", cleanup_package()),
+            (
+                "Explorer classic verbs (per-copy)",
+                crate::context_menu::cleanup_classic(),
+            ),
+        ]);
+    });
+    receive.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
+        vec![(
+            "Explorer registrations (per-copy)",
+            CleanupRegistration::Refused(format!(
+                "{} ({}s)",
+                crate::i18n::Text::CleanupSystemUnknown.text(),
+                REMOVAL_TIMEOUT.as_secs()
+            )),
+        )]
+    })
+}
+
+fn cleanup_package() -> CleanupRegistration {
+    let state = read_state();
+    match package_removal(&state, |exe| exe.is_file(), is_this_executable) {
+        MenuRemoval::Nothing => CleanupRegistration::Absent,
+        MenuRemoval::Unanswerable => {
+            CleanupRegistration::Refused(crate::i18n::Text::CleanupSystemUnknown.text().to_owned())
+        }
+        MenuRemoval::AnotherCopy => match state {
+            PackageState::Elsewhere { at, .. } => CleanupRegistration::Other(package_exe_in(&at)),
+            _ => CleanupRegistration::Refused(
+                crate::i18n::Text::CleanupSystemUnknown.text().to_owned(),
+            ),
+        },
+        MenuRemoval::Remove => match state.full_name() {
+            Some(name) => match msix::remove(name) {
+                Ok(()) => CleanupRegistration::Removed,
+                Err(reason) => CleanupRegistration::Refused(reason),
+            },
+            None => CleanupRegistration::Refused(
+                crate::i18n::Text::CleanupSystemUnknown.text().to_owned(),
+            ),
+        },
+    }
 }
 
 /// Ask the machine, and repair a registration that names another folder.
@@ -1742,6 +2049,124 @@ mod tests {
         assert_eq!(
             Text::ExplorerCommandVerb.in_lang(crate::i18n::Lang::Chinese),
             "在 Folio 中打开"
+        );
+    }
+
+    /// **RED (A1/A5) — the whole table of what `--remove-explorer-menu` does
+    /// about the package, over every state a machine can be in.**
+    ///
+    /// Three claims live here and each of them is a way for the flag to be
+    /// wrong. ① A registration that serves this folder and this file is removed —
+    /// without this the flag does nothing and the entry a package manager just
+    /// orphaned stays on the reader's first page for ever. ② A registration
+    /// whose `folio.exe` is **gone** is removed as well: it is answered by
+    /// nobody, and it is the exact state an uninstall leaves. ③ A registration
+    /// whose `folio.exe` is still on the disk and is not this file belongs to
+    /// another copy of Folio and is left alone — this is the blocking one (B1),
+    /// and it is the case the withdrawn `pre_uninstall` script got wrong by
+    /// removing unconditionally on a machine that has two copies.
+    ///
+    /// And the two the removal must never read as "there is nothing there"
+    /// (R2-20): a state nobody has answered yet, and a deployment database that
+    /// refused the question. Reporting either as success puts `0` in a package
+    /// manager's log over a menu item that is still on the first page.
+    ///
+    /// MUTATION: answer `Remove` for `Elsewhere` without asking the shared rule
+    /// and case ③ goes red, which is this copy taking a menu item off a Folio
+    /// that is answering it. Fold `Unreadable` into `Absent` and the last case
+    /// goes red.
+    #[test]
+    fn the_flag_removes_this_copys_registration_and_a_registration_nobody_answers() {
+        const THERE: &str = r"D:\Other\Folio";
+        let elsewhere = || PackageState::Elsewhere {
+            full_name: "WeiyiShi.Folio_1.0.0.0_x64__abc".to_owned(),
+            at: PathBuf::from(THERE),
+        };
+        let cases: [(&str, PackageState, bool, bool, MenuRemoval); 8] = [
+            (
+                "nobody has asked yet",
+                PackageState::Unknown,
+                false,
+                false,
+                MenuRemoval::Unanswerable,
+            ),
+            (
+                "Windows would not say",
+                PackageState::Unreadable,
+                false,
+                false,
+                MenuRemoval::Unanswerable,
+            ),
+            (
+                "no first page on this Windows",
+                PackageState::Unsupported,
+                false,
+                false,
+                MenuRemoval::Nothing,
+            ),
+            (
+                "nothing registered",
+                PackageState::Absent,
+                false,
+                false,
+                MenuRemoval::Nothing,
+            ),
+            (
+                "ours, serving this folder",
+                PackageState::Current {
+                    full_name: "WeiyiShi.Folio_1.0.0.0_x64__abc".to_owned(),
+                },
+                false,
+                false,
+                MenuRemoval::Remove,
+            ),
+            (
+                "another folder, and a live Folio in it",
+                elsewhere(),
+                true,
+                false,
+                MenuRemoval::AnotherCopy,
+            ),
+            (
+                "another folder, and nothing in it",
+                elsewhere(),
+                false,
+                false,
+                MenuRemoval::Remove,
+            ),
+            (
+                "another folder, reached back to this very file",
+                elsewhere(),
+                true,
+                true,
+                MenuRemoval::Remove,
+            ),
+        ];
+        for (what, state, on_disk, ours, expected) in cases {
+            assert_eq!(
+                package_removal(&state, |_| on_disk, |_| ours),
+                expected,
+                "{what}"
+            );
+        }
+
+        // **And the file it asks about is the one the registration would run** —
+        // the folder it names plus the program the manifest names, and not this
+        // process's own executable. A rule that asked about the wrong path would
+        // pass every case above by accident.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let _ = package_removal(
+            &elsewhere(),
+            |exe| {
+                asked.borrow_mut().push(exe.to_path_buf());
+                false
+            },
+            |_| false,
+        );
+        assert_eq!(
+            asked.into_inner(),
+            vec![package_exe_in(Path::new(THERE))],
+            "the question is about the registration's own folio.exe"
         );
     }
 }

@@ -125,6 +125,7 @@ fn frozen_line(text: String, styles: Vec<StyleSpan>) -> FrozenLine {
         styles,
         shell_marks: Vec::new(),
         wrap_split: false,
+        command_output_write: false,
     }
 }
 

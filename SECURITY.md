@@ -152,13 +152,16 @@ status bar. Developer tools are on, because the head carries a verb for them.
 
 All of that is applied in the same step that installs the four refusal surfaces,
 before anything navigates, and every call in it propagates its failure — including
-the cast to the settings interface the two autofill switches live on. A runtime
+the cast to the settings interface the two autofill switches live on. The colour
+scheme a page is told to prefer (`prefers-color-scheme`, the profile's
+`PreferredColorScheme`) is set in that same step; it is a preference the page may
+ignore, and nothing is injected into a page to force one. A runtime
 too old to answer it is a preview that does not open, not a preview that opens
 with a form-filling profile nobody asked for.
 
 **Subframes are not run through the navigation gate, and this is deliberate.**
-Folio attaches `NavigationStarting`, which fires for the top-level document only.
-It does not attach `FrameNavigationStarting` or `WebResourceRequested`.
+Folio attaches `NavigationStarting`, which fires for the top-level document only,
+and the rule it asks is asked about nothing else.
 
 The reason is that the gate is a rule about **what this seat was asked to show**,
 and a subframe is part of how a page is composed rather than a place the seat was
@@ -168,17 +171,41 @@ parts of viewers. Every one of those is refused by the top-level rule, so runnin
 subframes through it would not tighten a boundary — it would refuse the page's own
 structure and call it security.
 
-What actually bounds what a subframe can do to your machine is the four refusal
-surfaces above, and every one of them is registered on the WebView2 instance rather
-than on a frame: a subframe cannot open a window, start a download, obtain a
-permission, or launch an external scheme. Beyond that, a subframe is subject to the
-same origin policy the engine enforces for any browser.
+**A second rule is asked about everything the document names.**
+`FrameNavigationStarting` and `WebResourceRequested` — the latter with a filter over
+every resource context — are registered in the same step as the surfaces above, and
+both ask what this seat was opened for. A page opened from the files column is
+answered as a browser answers a `file://` page: it may fetch from the network, and
+its requests for files on this machine are left to the engine's own rule for a
+local page; the host's own blank page fetches
+nothing at all; a page you browsed to may fetch from the network and touches no
+`file:`. A share on another machine is refused on every seat. `data:`, `blob:`, the two empty documents a frame is made of and
+the parts the engine builds its own viewers out of pass on every seat. A refused
+request is answered with an empty 403 rather than dropped, so the document gets the
+answer a server would have given it.
 
-The boundary this leaves open, stated plainly: **a page Folio shows you can load
+What bounds what a subframe can do to your machine is the four refusal surfaces
+above, and every one of them is registered on the WebView2 instance rather than on a
+frame: a subframe cannot open a window, start a download, obtain a permission, or
+launch an external scheme. Beyond that, a subframe is subject to the same origin
+policy the engine enforces for any browser.
+
+The boundary this leaves open, stated plainly: **a page you browsed to can load
 subresources and subframes from any `http`/`https` origin it likes, and Folio does
-not see or filter those requests.** That is the behaviour of a web view; it is not
-a proxy or a content blocker. If that matters for what you are previewing, do not
-preview it.
+not filter those requests.** That is the behaviour of a web view; it is not a proxy
+or a content blocker. If that matters for what you are previewing, do not preview
+it.
+
+### A local document
+
+A local `.html` runs its scripts here and reaches the network, as it would in a
+browser. Which files on this machine it can read is the web engine's own rule for a
+local page, and Folio adds none: what its markup names loads — on Windows any local
+file, as in Edge; on macOS the page's own folder and the folders under it, as in
+Safari — and the engine refuses a page script's `fetch` or `XMLHttpRequest` of a
+local file, as both browsers do. Folio refuses shares on other machines, new windows,
+downloads, permissions and external schemes. Treat an HTML file from a stranger as you would in a browser.
+Markdown and text are drawn by Folio itself and run nothing.
 
 ## Diagnostics
 
@@ -195,6 +222,15 @@ preview it.
   read but not written to the file. Addresses and run state are still in there, so
   read a report before you attach it to anything.
 - `%TEMP%\bt-app-panic.log` is appended to by the panic hook.
+
+## The settings export
+
+**Settings > About > Export…** writes one file holding `settings.json`,
+`profiles.json`, `keybindings.json` and your colour schemes. A profile's command
+line and its environment rows are in it as you wrote them — if one holds a token,
+so does the export. It is a plain JSON file with nothing hidden in it; read it
+before you share it. **Import…** reads only the file you choose, and each part
+goes through the checks the same file gets when it is edited by hand.
 
 ## Environment variables
 
@@ -214,6 +250,10 @@ checked against the source by a test.
   the settings gear; it downloads nothing. Settings > General > **Update check**,
   or `"update_check": false` in `settings.json`, switches it off. The only other
   thing that reaches the network is a page you asked the preview to open, fetched
-  by WebView2.
+  by WebView2 — and a link you `Ctrl`/`⌘`+click, which Folio hands to the system:
+  a web address to your browser, a network share (`\\server\share\…`) to Windows,
+  which opens it from inside Folio's process, and a link of any other scheme to
+  whatever is registered for it. A share is never read, probed or asked about
+  before that click.
 - Nothing is read from, or written to, a working directory or a repository as
   configuration.

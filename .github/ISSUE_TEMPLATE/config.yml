@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: An idea, or a feature you would like
+    url: https://github.com/lulu-loopp/folio-terminal/discussions/categories/ideas
+    about: Ideas and feature requests are talked through in Discussions; an issue is for something that is broken.
+  - name: A question about using Folio
+    url: https://github.com/lulu-loopp/folio-terminal/discussions/categories/q-a
+    about: Ask here — an answer in Discussions can be found by the next person with the same question.

@@ -67,15 +67,75 @@ pub const LIVE_MATH_STABLE_INTERVAL: Duration = Duration::from_millis(200);
 /// It is context, not an inference: an opener older than this tail is unknowable at this layer.
 const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
 const MAX_OFFSCREEN_RECORDS: usize = 128;
-/// Whether a printed path names anything on this disk — the whole of what `verified` means for a
-/// file this window has no other reason to open (§7.1.5j).
+/// **What the disk said about one path the terminal named** — the ledger's value, and the one
+/// authority on "is this a real, readable, local path" (§7.1.5j, audit 3 C-2).
 ///
-/// **The only filesystem question this feature asks, and it is asked on a worker.** A folder counts:
-/// the routing table has an arm for one, so "is it there" and "what is it" are two questions and
-/// only the first is asked here.
+/// Every field is an answer a *worker* brought back. The window thread reads this and asks the
+/// filesystem nothing: a hover that stats a mapped network drive freezes the window for the
+/// operating system's own timeout, which is the defect this type exists to close.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PathVerdict {
+    /// Something is there under that name.
+    pub exists: bool,
+    /// And it is a folder. Asked in the same `metadata` call `exists` is read from, because the
+    /// routing table has an arm for a folder and a second question would be a second answer.
+    pub directory: bool,
+    /// Its size, off that same call — what the glance card prints, so the card costs the window
+    /// thread nothing either (§7.29 ⑬).
+    pub bytes: Option<u64>,
+    /// **The finished name a hand-off door gives the operating system** —
+    /// [`bt_platform::resolved_for_a_door`], which is the doors' own transform and not a second
+    /// reading of it: `..` folded, the spelling settled, and the verbatim prefix `canonicalize`
+    /// writes on Windows taken back off.
+    ///
+    /// `None` when the platform would not resolve it. A door handed `None` uses the printed
+    /// spelling, which is what it had before this existed.
+    pub door_ready: Option<PathBuf>,
+    /// **Whether opening it would run it** — the execute bit on a filesystem that has one, and an
+    /// application bundle's own name (owner ruling 2026-09-21).
+    ///
+    /// The one fact the macOS hand-off asks that is neither existence nor folder-ness:
+    /// `macos_handoff::opening_it_would_run_it` refuses any file whose mode carries `0o111`, and
+    /// it used to ask a `metadata` of its own on the thread that paints. It is a fact about the
+    /// file, so it is answered here, beside the other three, off the same `metadata` call.
+    ///
+    /// Always `false` on Windows, where "would opening it run it" is a question about the
+    /// *association* and is answered by `bt_platform::names_a_program` from the name.
+    pub executable: bool,
+}
+
+impl PathVerdict {
+    /// **The answer for a name this window did not go and look at, or looked at and did not
+    /// find** — which are one answer, because they were one answer on `main`: `path_exists`
+    /// returned `false` for both.
+    #[must_use]
+    pub const fn absent() -> Self {
+        Self {
+            exists: false,
+            directory: false,
+            bytes: None,
+            door_ready: None,
+            executable: false,
+        }
+    }
+}
+
+/// **What the disk says about a printed path** — `main`'s own question, asked on a worker
+/// (audit 3 C-2; owner rulings 2026-09-21).
 ///
-/// `metadata` follows links, so a symlink pointing at nothing answers `false` — a name whose target
-/// cannot be opened is not a name this window may promise to open.
+/// **The same calls in the same order that stood on the window thread**, and that is the whole of
+/// the design. Between 2026-09-20 and 2026-09-21 this walked the path component by component,
+/// re-asking locality at every reparse point; that mechanism `main` never had, and three things
+/// that are live links on `main` died in it — a WSL path through a Linux symlink (`read_link`
+/// cannot decode `IO_REPARSE_TAG_LX_SYMLINK`), an intermediate junction into a live share, and a
+/// spelling carrying `..`. It is withdrawn. A long or odd chain of links behaves exactly as it
+/// does on `main`, because on both it is the operating system answering.
+///
+/// So: the trailing-dot rule, then the one lexical-plus-one-hop predicate
+/// [`bt_transcript::paths::may_read_unasked_through_links`] — the same predicate `path_exists`
+/// put here before — then one `metadata`. Two things ride along that `main` computed at *click*
+/// time, on the thread that paints, and that is the only reason they are here: the canonical name
+/// its reveal and open doors resolved, and the execute bit its macOS door read.
 ///
 /// **A name Win32 cannot hold is not there, and asking about one answers about a different name**
 /// (user ruling 2026-09-05, §7.30 row 58). Windows normalizes a path before the filesystem ever
@@ -86,22 +146,84 @@ const MAX_OFFSCREEN_RECORDS: usize = 128;
 /// settle the longer one, which is precisely what let a sentence's full stop into the reference the
 /// demo rehearsal photographed. The honest answer is the one below: no Win32 filesystem holds a
 /// name whose last component ends in a dot or a space, so no such name is there.
+#[must_use]
+pub fn verify_path(path: &Path) -> PathVerdict {
+    // **Literally `main`'s question**, and it is the same function rather than the same lines
+    // written twice: [`path_exists`] is what stood on the window thread, unchanged.
+    if !path_exists(path) {
+        return PathVerdict::absent();
+    }
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return PathVerdict::absent();
+    };
+    let door_ready = bt_platform::resolved_for_a_door(path);
+    // Asked of the name the door opens, not the one that was printed: a link called `editor`
+    // that lands on `Thing.app` is a bundle, and `main`'s door judged the resolved name.
+    let executable = opening_it_would_run_it(door_ready.as_deref().unwrap_or(path), &metadata);
+    PathVerdict {
+        exists: true,
+        directory: metadata.is_dir(),
+        bytes: (!metadata.is_dir()).then_some(metadata.len()),
+        // **The finished name a hand-off door hands over**, produced by the doors' own function
+        // rather than by a second reading of what they do — `canonicalize` *and* the verbatim
+        // prefix taken off, which is the pair `reveal_arguments` has always spent together. A raw
+        // canonical is a name Explorer, the shape gate and the argument builder all refuse.
+        door_ready,
+        executable,
+    }
+}
+
+/// **Whether opening it would run it** — `macos_handoff::opening_it_would_run_it`'s rule, asked
+/// where the `metadata` already is (owner ruling 2026-09-21).
 ///
-/// It is a statement about what this platform can name and not a spelling rule, which is why it is
-/// asked of `cfg!(windows)` rather than of the string alone: on a filesystem that really can hold
-/// `notes.md.`, `notes.md.` is a file and §7.30's longest reading wins it.
+/// Byte for byte the rule that door applied to the same two facts: a bundle is a directory whose
+/// name ends in `.app`, and everything else is the execute bit. It lives beside the mode bits
+/// rather than in `bt-platform` because this is the call that has them — the door's own copy
+/// stat-ed the file a second time, on the thread that paints.
+#[cfg(unix)]
+fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if metadata.is_dir() {
+        return path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"));
+    }
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+/// The same question on a filesystem with no mode bits: there, "would opening it run it" is about
+/// the *association*, and `bt_platform::names_a_program` answers it from the name exactly as it
+/// does on `main`.
+#[cfg(not(unix))]
+fn opening_it_would_run_it(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    let _ = (path, metadata);
+    false
+}
+
+/// **Whether a printed path names anything on this disk** — the whole of what `verified` means for
+/// a file this window has no other reason to open (§7.1.5j).
+///
+/// The body `main` runs on the window thread, unchanged and still the primitive: [`verify_path`]
+/// calls *this*, so "the same question, on a worker" is true by construction rather than by two
+/// readings agreeing.
+///
+/// **A name Win32 cannot hold is not there, and asking about one answers about a different name**
+/// (user ruling 2026-09-05, §7.30 row 58). Windows normalizes a path before the filesystem ever
+/// sees it, and part of that normalization is taking the trailing dots and spaces off its last
+/// component: a name whose last component ends in a dot reaches the disk with the dot taken off,
+/// and comes back "yes" on the
+/// strength of a file with another name. §7.30 has the disk arbitrate between a token's readings,
+/// longest first — so an answer that is really about the *shorter* reading must never be allowed to
+/// settle the longer one.
+#[must_use]
 pub fn path_exists(path: &Path) -> bool {
     if cfg!(windows) && win32_would_trim_the_name(path) {
         return false;
     }
     // **A name this window may not read is not a name it goes looking for** (route C of the
-    // untrusted-path audit, 2026-09-08). `metadata` follows a link before it answers, so a
-    // drive-rooted name whose junction points at `\\server\share` was verified by dialling that
-    // server — from a worker, off text a child process printed, with no click anywhere. The
-    // question is asked of the link and never of what it points at, so this costs a local stat and
-    // reaches no network. `PathNamer::ThisWindow`: the spelling reaching here has already been
-    // translated out of the pane's own namespace by `PrintedPathLinks`, which is where the pane's
-    // half of the rule is asked.
+    // untrusted-path audit, 2026-09-08). `PathNamer::ThisWindow`: the spelling reaching here has
+    // already been translated out of the pane's own namespace by `PrintedPathLinks`, which is
+    // where the pane's half of the rule is asked.
     if !bt_transcript::paths::may_read_unasked_through_links(
         path,
         bt_transcript::paths::PathNamer::ThisWindow,
@@ -545,6 +667,12 @@ struct LiveRowStability {
     settled_revision: Option<u64>,
     candidate_signature: Option<u64>,
     content_fingerprint: Option<CapturedRowFingerprint>,
+    /// The `revision` at which this row's printed names were last read for the path ledger
+    /// (§7.1.5k 丙, owner ruling 2026-09-20). A watermark and not a second copy of the fact: the
+    /// row changed exactly when `revision != path_pass_revision`, and
+    /// [`DualPlaneSession::absorb_printed_path_probes`] closes the gap the moment it has read it,
+    /// so one printing is one question however many frames are drawn over it.
+    path_pass_revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -815,6 +943,10 @@ struct AlternateRepaintSnapshot {
     dormant_decorations: Vec<LiveDecorationRecord>,
     invalidation_count: u64,
     snapshot_boundary: bool,
+    /// `DualPlaneSession::live_content_revision` when this snapshot was taken. While it still
+    /// matches, `inputs` is not a memory of the grid: it *is* the grid, and every record proven
+    /// since was proven in its coordinates.
+    live_content_revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -826,7 +958,12 @@ struct PendingLiveArtifactHandoff {
     detection_revision: DetectionRevision,
     candidate_staging: StagingId,
     candidate_start: Option<TranscriptId>,
-    expected_frozen_lines: u64,
+    /// How many **grid rows** the live detector proved this occurrence on. It is not a count of the
+    /// transcript lines they freeze into and must never be used as one: a source row too long for
+    /// the pane spends two grid rows and still freezes as a single line. It says when every proven
+    /// row has been captured, and — because a line takes at least one row — how far ahead of the
+    /// first frozen line the last one could conceivably be.
+    expected_source_rows: usize,
     /// The face the live occurrence is wearing, re-read at every capture — the last capture is
     /// the one that freezes its final row, so there is no frame on which the reader could turn the
     /// block over after this was last refreshed.
@@ -866,6 +1003,13 @@ pub enum ResizeTraceKind {
         rows: u32,
     },
     PtyResizeRequest {
+        columns: u32,
+        rows: u32,
+    },
+    /// The gesture settled on the size the child already holds, so the child was told nothing.
+    /// The displayed grid still reflowed through every width the hand passed through, so this
+    /// closes a real transaction — see [`DualPlaneSession::mark_resize_settled_unchanged_at`].
+    ChildSizeUnchanged {
         columns: u32,
         rows: u32,
     },
@@ -917,6 +1061,21 @@ pub struct ResizeTraceEvent {
     pub ordinal: u64,
     pub elapsed_micros: u64,
     pub kind: ResizeTraceKind,
+}
+
+/// How a settled gesture ended: whether the child was given a new size.
+///
+/// **Stated by the window, never inferred here.** A session has no idea what size the child holds
+/// — `conpty_grid` is the window's own record of what it last told it — so the two endings arrive
+/// through two named doors ([`DualPlaneSession::mark_pty_resize_requested_at`] and
+/// [`DualPlaneSession::mark_resize_settled_unchanged_at`]) rather than as a guess made from the
+/// numbers. Both close the transaction; they differ only in the line they leave in
+/// `BT_RESIZE_TRACE`, because everything else a settlement does is about this session's own grid,
+/// which reflowed either way.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResizeEnding {
+    ChildResized,
+    ChildSizeUnchanged,
 }
 
 impl fmt::Display for SessionError {
@@ -1165,6 +1324,19 @@ pub struct MathTogglePresentation {
     /// How solid the picture is drawn, in thousandths — `1000` at the typeset face and `0` at the
     /// source, with the source text drawn over the same band at what is left.
     pub picture_opacity_milli: u16,
+    /// The travelling face: 0 is rendered, 1000 is source. This owns geometry
+    /// progress independently of the document's discrete display choice.
+    pub face_milli: u16,
+    /// The source endpoint already measured with the rows at the press.
+    pub source_width_cells: u32,
+}
+
+/// Facts accumulated while slices share one drain turn. No bytes are buffered here.
+#[derive(Default)]
+struct FeedTurn {
+    fed: bool,
+    primary_reprint_boundary: bool,
+    cursor_memory_reprint_boundary: bool,
 }
 
 /// Per-session actor core. It is the serialized owner required by DESIGN.md §1.3 and composes
@@ -1211,6 +1383,35 @@ pub struct DualPlaneSession {
     live_screen: ScreenId,
     cursor_logical_line_memory: Option<CursorLogicalLineMemory>,
     shell_phases: BTreeMap<ScreenId, ShellIntegrationPhase>,
+    /// **How many commands this session watched start on this screen it has not watched end** — a
+    /// `C` raises it, that command's `D` lowers it, and nothing else touches it.
+    ///
+    /// The phase cannot answer this, and that is the whole reason this exists: a phase is one
+    /// value, so a nested program's `A` overwrites `Output` and the phase then says the screen is
+    /// at a prompt while the command that program is running inside has not ended. For marks that
+    /// is the right answer and is deliberately permissive — `docs/DESIGN.md` line 2338 rules a
+    /// nested shell running its own cycle indistinguishable from a program printing one, and
+    /// lets both draw. For the one consumer that puts bytes into the child it is the wrong answer,
+    /// so [`Self::shell_prompt_opened_in_order`] asks this instead.
+    ///
+    /// Zero for every screen no `C` has been seen on, which is every screen with no integration.
+    /// A shell that reports `C` and never `D` leaves it standing, and loses the chord rather than
+    /// aiming it at whatever is reading — the safe side of a question bytes cannot settle.
+    shell_commands_running: BTreeMap<ScreenId, u32>,
+    /// **The screens whose open input region was opened by a `B` that stood in a prompt this
+    /// session watched an `A` begin** — the other half of [`Self::shell_prompt_opened_in_order`].
+    ///
+    /// Written at every `B` and nowhere else: in, when the phase it arrived in was `Prompt`; out,
+    /// when it was anything else. A duplicate `B` inside an open region returns before either,
+    /// which is right — the region is the one the first `B` opened. Every marker that closes a
+    /// region (`A`, `C`, `D`) leaves this alone, because the predicate asks about a region that is
+    /// open and a closed one cannot be read through it.
+    ///
+    /// Without it the floor was two markers, not three: `D` is accepted from any phase and the
+    /// count floors at zero, so `OSC 133;D` followed by `OSC 133;B` — twenty bytes, no `A` —
+    /// earned the chord. A prompt is `A` then `B`, and every integration this product ships emits
+    /// them in that order, so asking for the `A` costs nothing and makes the name honest.
+    shell_prompt_cycle_in_order: BTreeSet<ScreenId>,
     /// The screens whose shell has claimed the authority to **replace** the cursor-line heuristic —
     /// which is a narrower claim than "has emitted OSC 133", and the difference is the whole of
     /// this field.
@@ -1296,6 +1497,8 @@ pub struct DualPlaneSession {
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
+    /// Admission resumes at the first refused row, independently of detection signatures.
+    live_admission_row: u32,
     /// This session's copy of the `INLINE_IMAGE_BANDS` policy bit. A field rather than a bare
     /// `const` read for one reason: a policy that switches a whole code path off must stay
     /// *exercisable*, or the path rots between the ruling and its reversal. Every band mechanism
@@ -1342,16 +1545,23 @@ pub struct DualPlaneSession {
     table_bands: bool,
     inline_image_tasks: VecDeque<InlineImageTask>,
     local_image_path_tasks: VecDeque<InlineImageTask>,
-    /// What the disk has answered about the printed paths this pane has drawn (§7.1.5j): `true`
-    /// for a name that is on the disk — file or folder alike — and `false` for one that is not.
+    /// What the disk has answered about the printed paths this pane has drawn (§7.1.5j), and
+    /// **the single owner of "is this a real, readable, local path"** (audit 3 C-2): whether
+    /// anything is there, whether it is a folder, how large it is, and whose machine it stands on.
     ///
-    /// Both answers are kept, because a "no" is as much an answer as a "yes" and re-asking it every
+    /// Every reader of those four facts reads them here. The window thread has no second way to
+    /// ask, which is the whole of the rule this ledger now carries: a hover, a press, a pointing
+    /// finger and a glance card decide from [`PathVerdict`] alone and put no question to a
+    /// filesystem, because a path that came out of program output may name a mapped drive whose
+    /// server is gone and the answer costs the redirector's own timeout.
+    ///
+    /// Every answer is kept, because a "no" is as much an answer as a "yes" and re-asking it every
     /// frame is what would make a screenful of prose cost a screenful of syscalls. What is *not*
-    /// kept is any notion of when it was asked: a verdict stands until it is evicted, so a file
-    /// created after this pane asked about it stays unlinked until its name is printed again from a
-    /// pane that has not asked. That is the same honesty the image ledger has and the same
-    /// limitation; see §7.1.5j's own left-out list.
-    path_verdicts: BTreeMap<PathBuf, bool>,
+    /// kept is any notion of *when* it was asked — there is no clock in here — but a "no" is not
+    /// permanent either: it stands until the program **prints that name again**, which is the one
+    /// thing that says the question is worth putting to the disk a second time (owner ruling
+    /// 2026-09-20; see [`Self::expire_denied_paths`] for the whole of it).
+    path_verdicts: BTreeMap<PathBuf, PathVerdict>,
     /// Insertion order over `path_verdicts`, so the ledger can be held to a size without asking a
     /// clock. Oldest question out first.
     path_verdict_order: VecDeque<PathBuf>,
@@ -1364,6 +1574,15 @@ pub struct DualPlaneSession {
     /// What this pane last told its projection, kept so the telling is free on the frames where
     /// nothing has changed — which is nearly all of them.
     printed_path_links: bt_transcript::paths::PrintedPathLinks,
+    /// The same ledger **with the denials left out**: what a name deserves when it is met in text
+    /// this pane has just printed (owner ruling 2026-09-20).
+    ///
+    /// Derived from `path_verdicts` in the same breath as its twin above and by the same
+    /// constructor, so the two can never disagree about a directory, a namespace or a yes. It holds
+    /// only the yeses, which is what makes a re-ask honest in both directions: a file already seen
+    /// is still a link and is not asked about again, while a name the disk denied is read as one
+    /// nobody has been to the disk for — because, for *this* printing, nobody has.
+    reprinted_path_links: bt_transcript::paths::PrintedPathLinks,
     /// Which spelling of an absolute path the shell in this pane prints (T-3, 2026-09-07).
     ///
     /// Pushed in by the spawn, exactly as [`Self::set_spawn_directory`] is and for the same reason:
@@ -1400,6 +1619,33 @@ pub struct DualPlaneSession {
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
     next_live_occurrence_id: u64,
     offscreen_decorations: VecDeque<LiveDecorationRecord>,
+    /// What the last off-band re-anchor pass was asked, when it could give nothing back.
+    ///
+    /// "Can this record be re-anchored on this grid" is a pure function of the grid and the record,
+    /// so asking it twice about the same grid is asking it twice. `restore_offscreen_decorations`
+    /// runs from every feed turn and its only early-out was an empty queue, so one record whose
+    /// source is nowhere on the screen — the state the owner's recording sat in, six of them at
+    /// once — paid a full detection context, a parser prefix walk and a detector re-run on every
+    /// read, which under a program that repaints per keystroke is every keystroke.
+    ///
+    /// Not a retry count and not a clock: a record whose source may legitimately scroll back into
+    /// view has to be found the moment it does, and both of those would eventually stop looking.
+    /// This remembers the question instead, and asks it again the moment any part of the question
+    /// moves. See [`LiveGridAnswer`].
+    offscreen_restore_memo: OffBandRestoreMemo,
+    /// How many times the off-band re-anchor has actually read the grid.
+    ///
+    /// Instrumentation, and the only honest currency for "this is asked once per change and not
+    /// once per read": the pass returns the same answer either way, so nothing about the frame can
+    /// tell the two apart. Its sibling `live_detection_count` counts scans, which a skipped pass
+    /// does not schedule.
+    offscreen_restore_pass_count: u64,
+    /// The whole-grid detection the live detector itself would run, kept for as long as its answer
+    /// cannot have changed. Both the bounded re-detection a repaint window's close arms and the
+    /// off-band re-anchor's ownership question read it, so one grid is scanned once however many
+    /// closes and restores that grid sees.
+    live_grid_blocks_memo: Option<(LiveGridAnswer, Vec<LiveDetectionTask>)>,
+    feed_turn: Option<FeedTurn>,
     alternate_repaint_snapshot: Option<AlternateRepaintSnapshot>,
     alternate_repaint_in_progress: bool,
     /// True while a primary-screen in-stream transcript reprint is in flight (a clear+home /
@@ -1446,6 +1692,16 @@ pub struct DualPlaneSession {
     frozen_detection_count: u64,
     live_detection_count: u64,
     live_invalidation_count: u64,
+    /// **How many times a live row's content has actually changed** — bumped once per row by
+    /// [`Self::observe_live_damage`], and only where the row's own fingerprint says the cells are
+    /// not the cells it had. Damage alone will not do: a full-screen program rewrites every row
+    /// every frame and the vendor reports every one of them, so a counter driven by damage would
+    /// move on a frame that painted the same picture.
+    ///
+    /// It is what a repaint window compares itself against. A window is a promise about one
+    /// particular grid — the one its snapshot describes — and the promise holds only while that
+    /// grid is still the grid on the glass. See [`Self::settle_feed_turn`].
+    live_content_revision: u64,
     math_failure_validate_count: u64,
     math_failure_convert_count: u64,
     math_failure_compile_count: u64,
@@ -1454,6 +1710,91 @@ pub struct DualPlaneSession {
     /// return — zero hot-path cost. See `trace_decorations`.
     decor_trace: Option<PathBuf>,
     decor_trace_frame: u64,
+}
+
+/// **Everything the live detector's answer about this grid is a function of.**
+///
+/// The detector is given a list of input lines and a parser checkpoint to start from, and it is a
+/// pure function of the two plus its options: the same three give the same blocks, at the same
+/// rows, every time. So this names the three in the currency this session already keeps, and two
+/// answers derived from equal keys are the same answer.
+///
+/// Field by field, because each is here for a reason and a missing one is a stale picture:
+/// `content_revision` moves when a live row's cells are not the cells it had (and only then — a
+/// program rewriting its screen with the bytes it already had changes nothing); `generation` when
+/// the grid itself is replaced, which a reflow does without a byte arriving; `detection_revision`
+/// when detection is invalidated wholesale; `options` and `layout` because they are what the scan
+/// is run with; `screen` because the two screens have different inputs entirely; `history_lines`
+/// and `history_tail` because the primary screen's inputs begin with the transcript's last lines,
+/// which freezing appends to and eviction takes from; and the two checkpoints because they are the
+/// state the scan starts in, which a boundary resets and a scroll advances without touching a cell.
+///
+/// **`command_output` is the one input to a row's `site` that is not on the row.** Each row's site
+/// is read off its own cells — the per-cell provenance flag, which the row fingerprint hashes, so a
+/// cell whose claim changed moves `content_revision` — but only *after* this session has decided
+/// that a shell speaks for this screen at all (`shell_integration_is_authoritative`, asked once for
+/// the whole grid in `live_detection_context`). That decision flips when an OSC 133 marker is
+/// heard, and a marker writes no cell, so nothing else here moves with it while every row on the
+/// screen changes what it is eligible to be. It is kept as the fact itself rather than as a counter
+/// bumped beside it, because a bool that is read where it is written cannot fall out of step.
+///
+/// **The three cell metrics are here for the value, not for the answer.** No part of the scan's
+/// verdict reads them; they are copied into every task it returns, and a memo hands those tasks
+/// back whole. `set_cell_width_subpixels` and its two siblings are public and do not touch
+/// `layout_key`, so without them a task could be handed out carrying metrics from before a font
+/// change. Nothing reads them there today, which is exactly the reason to close it now.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LiveGridAnswer {
+    screen: ScreenId,
+    content_revision: u64,
+    generation: GridGeneration,
+    detection_revision: DetectionRevision,
+    layout: LayoutKey,
+    options: DetectionOptions,
+    history_lines: usize,
+    history_tail: Option<TranscriptId>,
+    frozen_context: DetectionContext,
+    alternate_context: DetectionContext,
+    command_output: bool,
+    cell_width_subpixels: NonZeroI64,
+    cell_height_subpixels: NonZeroI64,
+    ascii_baseline_subpixels: Option<NonZeroI64>,
+}
+
+/// The question the last fruitless off-band re-anchor pass was asked.
+///
+/// The grid's own answer key, and the two things about this session's records that the pass also
+/// reads: which records are waiting, and which rows the resident ones already hold — a match is
+/// refused on a row another record occupies, so a resident record leaving its rows can turn a "no"
+/// into a "yes" without one cell changing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct OffBandRestoreMemo {
+    /// `None` until a pass has actually been run and left something waiting.
+    answer: Option<LiveGridAnswer>,
+    queued: Vec<LiveMathOccurrenceId>,
+    occupied: Vec<(u32, u32)>,
+}
+
+impl OffBandRestoreMemo {
+    /// Would this pass be asked the same question it was asked last time? Compared in place: the
+    /// two lists are walked against the live ones rather than collected again, so the skip this
+    /// whole memo exists for costs no allocation at all.
+    fn still_holds(
+        &self,
+        answer: &LiveGridAnswer,
+        queued: &VecDeque<LiveDecorationRecord>,
+        resident: &BTreeMap<u32, LiveDecorationRecord>,
+    ) -> bool {
+        self.answer.as_ref() == Some(answer)
+            && self
+                .queued
+                .iter()
+                .copied()
+                .eq(queued.iter().map(|record| record.identity.occurrence_id))
+            && self.occupied.iter().copied().eq(resident
+                .values()
+                .map(|record| (record.band_start_row, record.band_end_row)))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1705,6 +2046,8 @@ impl DualPlaneSession {
             live_screen: ScreenId::Primary,
             cursor_logical_line_memory: None,
             shell_phases: BTreeMap::new(),
+            shell_commands_running: BTreeMap::new(),
+            shell_prompt_cycle_in_order: BTreeSet::new(),
             shell_region_screens: BTreeSet::new(),
             working_directory: None,
             window_title: None,
@@ -1726,6 +2069,7 @@ impl DualPlaneSession {
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
+            live_admission_row: 0,
             inline_image_bands: INLINE_IMAGE_BANDS,
             // Formulas render unless the user says otherwise; the app pushes the persisted
             // setting in right after construction.
@@ -1738,6 +2082,7 @@ impl DualPlaneSession {
             path_verify_tasks: VecDeque::new(),
             path_verify_in_flight: BTreeSet::new(),
             printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
+            reprinted_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             path_namespace: bt_transcript::paths::PrintedPathNamespace::default(),
             printed_path_budget_full: false,
             spawn_directory: None,
@@ -1751,6 +2096,10 @@ impl DualPlaneSession {
             live_decorations: BTreeMap::new(),
             next_live_occurrence_id: 1,
             offscreen_decorations: VecDeque::new(),
+            offscreen_restore_memo: OffBandRestoreMemo::default(),
+            offscreen_restore_pass_count: 0,
+            live_grid_blocks_memo: None,
+            feed_turn: None,
             alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
             primary_repaint_in_progress: false,
@@ -1766,6 +2115,7 @@ impl DualPlaneSession {
             frozen_detection_count: 0,
             live_detection_count: 0,
             live_invalidation_count: 0,
+            live_content_revision: 0,
             math_failure_validate_count: 0,
             math_failure_convert_count: 0,
             math_failure_compile_count: 0,
@@ -2180,6 +2530,18 @@ impl DualPlaneSession {
         self.math_layout_options
     }
 
+    /// Install `options`, and re-detect if the *detector's* answer to any question changes.
+    ///
+    /// Most of this struct is presentation — how tall a block may stand, how much air is around it
+    /// — and a pane that changes its mind about those keeps every verdict it holds. Two fields are
+    /// not: `restore_stripped_environment_newlines` and `reject_claude_code_jump_chip_overlay` are
+    /// read by [`Self::detection_options`], so a record proven under the old answer carries a
+    /// `render_source` the new answer would not have produced, and leaving it standing would show
+    /// a repaired formula to a reader who has just switched the repair off.
+    ///
+    /// The condition is asked of [`Self::detection_options`] itself rather than of a list of field
+    /// names kept beside it, because a third detection field added later would be added there and
+    /// nowhere else — and a list that has to be remembered is a list that goes stale.
     pub fn set_math_layout_options(&mut self, options: MathLayoutOptions) {
         if self.math_layout_options.detect_image_paths && !options.detect_image_paths {
             let retired = self
@@ -2192,7 +2554,13 @@ impl DualPlaneSession {
                 .collect::<BTreeSet<_>>();
             self.retire_inline_images(&retired);
         }
+        let detected_under = self.detection_options();
         self.math_layout_options = options;
+        if self.detection_options() != detected_under {
+            self.redetect(DetectionRevision(
+                self.detection_revision.0.saturating_add(1),
+            ));
+        }
     }
 
     fn detection_options(&self) -> DetectionOptions {
@@ -2262,6 +2630,12 @@ impl DualPlaneSession {
 
     pub fn frozen_detection_count(&self) -> u64 {
         self.frozen_detection_count
+    }
+
+    /// How many times the off-band re-anchor has read the grid, as opposed to how many times it was
+    /// called. The two used to be the same number; see [`Self::restore_offscreen_decorations`].
+    pub fn offscreen_restore_pass_count(&self) -> u64 {
+        self.offscreen_restore_pass_count
     }
 
     pub fn inline_image_records(&self) -> Vec<InlineImageRecordView> {
@@ -2450,7 +2824,79 @@ impl DualPlaneSession {
         for path in projection.take_printed_path_probes() {
             self.ask_about_path(path);
         }
+        // The other half of the question (owner ruling 2026-09-20): the frame above reports names
+        // **nobody has answered**, and a name the disk denied is not one of them. What makes a
+        // denial worth asking again is the program printing the name anew, which this reads off the
+        // rows that changed — and then marks as read, so one printing is one question.
+        for path in self.paths_named_on_freshly_printed_rows() {
+            self.ask_about_reprinted_path(path);
+        }
+        for row in &mut self.live_rows {
+            row.path_pass_revision = row.revision;
+        }
         self.path_verify_tasks.len().saturating_sub(before)
+    }
+
+    /// Every path named on a live row whose cells have changed since the last pass read them,
+    /// judged against the ledger **with the denials left out** (owner ruling 2026-09-20).
+    ///
+    /// *Freshly printed* is [`LiveRowStability::revision`] — the per-row fingerprint
+    /// [`Self::observe_live_damage`] already compares, and the evidence authority this workspace
+    /// settled on for "the cells moved" (§4.6, 2026-09-06). That is what keeps the rule from being
+    /// a timer in disguise: a full-screen agent rewriting its viewport with the bytes it already
+    /// had changes no fingerprint, so it bumps no revision, so it asks nothing — however many
+    /// frames it draws. A row whose text genuinely changed and still spells the name did print it
+    /// again, and costs one question.
+    ///
+    /// The scan is the frame's own — [`bt_transcript::paths::PrintedPathLinks::links_in`], over the
+    /// same WRAPLINE-joined logical lines [`Self::for_each_live_logical_line`] hands every other
+    /// path reader — so there is no second opinion here about what text names a file, only a second
+    /// ledger to read it against.
+    ///
+    /// Free twice over when there is nothing to re-ask, and both gates are integer comparisons over
+    /// state this session already holds: a pane with no denial on its books returns before it looks
+    /// at the grid, and so does a grid on which no row has moved since the last pass. Only past
+    /// both does anything read a cell, and then it is one walk of the live rows — the same shape
+    /// and the same order as the projection's own path scan.
+    ///
+    /// **Bounded to the live grid**, which is where a program prints. A name that scrolled into
+    /// history between two frames is not re-asked from there — the frame's own probe has exactly
+    /// the same window, and widening one without the other would buy nothing.
+    ///
+    /// **One logical line at a time, so a denial rejoined across an application newline (§7.1.5k ②)
+    /// is not re-asked.** The chain walk that finds those lives in the frame, over the same rows,
+    /// and the honest way to reach it from here is to let it see this reading of the ledger — not
+    /// to write a second chain walk beside it and have two opinions about where a reference ends.
+    /// A name cut by the right margin and denied therefore still waits for a command boundary; a
+    /// name printed whole, which is nearly all of them, does not.
+    fn paths_named_on_freshly_printed_rows(&self) -> BTreeSet<PathBuf> {
+        let mut named = BTreeSet::new();
+        if !self.path_verdicts.values().any(|verdict| !verdict.exists)
+            || !self
+                .live_rows
+                .iter()
+                .any(|row| row.revision != row.path_pass_revision)
+        {
+            return named;
+        }
+        let live_rows = &self.live_rows;
+        let ledger = &self.reprinted_path_links;
+        self.for_each_live_logical_line(|text, segments| {
+            let freshly_printed = segments.iter().any(|segment| {
+                live_rows
+                    .get(segment.row as usize)
+                    .is_some_and(|row| row.revision != row.path_pass_revision)
+            });
+            if !freshly_printed {
+                return;
+            }
+            // The edge gate (§7.1.5k ①) belongs to the frame, which knows where the last drawn cell
+            // of the line is; this pass is only deciding *what is worth a question*, and a name cut
+            // by the right margin is answered by the frame's own rejoin once the ledger lets it
+            // through. Asking about it here costs one `metadata` call and unblocks that rejoin.
+            ledger.links_in(text, None, &mut named);
+        });
+        named
     }
 
     /// Put one printed path in front of the worker, unless it is already answered or already
@@ -2461,10 +2907,63 @@ impl DualPlaneSession {
     /// **oldest** question is dropped, so a pane that has just scrolled a thousand new paths past
     /// spends its budget on the ones still on the screen.
     fn ask_about_path(&mut self, path: PathBuf) {
-        if self.path_verdicts.contains_key(&path)
-            || self.path_verify_in_flight.contains(&path)
-            || self.path_verify_tasks.contains(&path)
+        if self.path_verdicts.contains_key(&path) {
+            return;
+        }
+        self.queue_path_question(path);
+    }
+
+    /// The same, for a name this pane has just **printed again** (owner ruling 2026-09-20): a
+    /// standing "no" is no longer a reason to stay quiet, and a standing "yes" still is.
+    ///
+    /// A yes is never re-asked — a file that has been seen once is linked, and a link that turns
+    /// out to be gone is answered by the click's own re-check (§7.1.5k 丁) — so re-asking the yeses
+    /// would double the traffic of every repainting screen to buy nothing.
+    fn ask_about_reprinted_path(&mut self, path: PathBuf) {
+        if self
+            .path_verdicts
+            .get(&path)
+            .is_some_and(|verdict| verdict.exists)
         {
+            return;
+        }
+        self.queue_path_question(path);
+    }
+
+    /// **Put the target of a link the window met in front of the worker** (audit 3 C-2).
+    ///
+    /// An `OSC 8` target is the one shape of reference that never went through the printed-path
+    /// scan: the program declared it, the cell carries it verbatim, and until this door existed
+    /// nobody had asked the disk anything about it — so the window thread asked, on the pointer's
+    /// own event, and a mapped drive froze it. This is that question, put where every other one is
+    /// put, and the routing table simply has no link until it is answered.
+    ///
+    /// Idempotent through [`Self::ask_about_path`]: an answered name, a queued one and one a
+    /// worker is holding all cost nothing, which is what makes it safe on every pointer move.
+    pub fn ask_about_link_target(&mut self, path: PathBuf) {
+        self.ask_about_path(path);
+    }
+
+    /// **The same question, asked again although this pane already holds an answer** (closure
+    /// re-review B-1').
+    ///
+    /// A "yes" is never re-asked, on the argument written at [`Self::expire_denied_paths`] that a
+    /// link which turns out to be gone is answered by *the click's own re-check*. That re-check
+    /// used to be the `metadata` the reveal made on the window thread, and audit 3 C-2 took it
+    /// off that thread — so the press is the re-check now, and this is the door it asks through.
+    ///
+    /// One question per press and not one per frame: the de-duplication that is skipped is the
+    /// **verdict**, while queued and in-flight still refuse, so a reader leaning on the button
+    /// cannot put more than one question out at a time.
+    pub fn re_ask_about_link_target(&mut self, path: PathBuf) {
+        self.queue_path_question(path);
+    }
+
+    /// The one door into the bounded question queue. In flight and queued are both "already asked",
+    /// which is what holds a re-ask to one question however fast the row that carries the name is
+    /// being rewritten: the second printing finds the first one's question still out.
+    fn queue_path_question(&mut self, path: PathBuf) {
+        if self.path_verify_in_flight.contains(&path) || self.path_verify_tasks.contains(&path) {
             return;
         }
         if self.path_verify_tasks.len() == PATH_VERIFY_QUEUE_CAP {
@@ -2484,13 +2983,14 @@ impl DualPlaneSession {
     /// which only another projection can collect — without that arm a screen whose first budget's
     /// worth of names all come back "no" would end the conversation there and leave a real file
     /// further down permanently unasked about (§7.1.5j, user report 2026-08-23).
-    pub fn complete_path_verification(&mut self, path: PathBuf, exists: bool) -> bool {
+    pub fn complete_path_verification(&mut self, path: PathBuf, verdict: PathVerdict) -> bool {
+        let exists = verdict.exists;
         self.path_verify_in_flight.remove(&path);
         self.path_verify_tasks.retain(|queued| *queued != path);
-        if self.path_verdicts.get(&path) == Some(&exists) {
+        if self.path_verdicts.get(&path) == Some(&verdict) {
             return self.printed_path_budget_full;
         }
-        if self.path_verdicts.insert(path.clone(), exists).is_none() {
+        if self.path_verdicts.insert(path.clone(), verdict).is_none() {
             self.path_verdict_order.push_back(path);
         }
         while self.path_verdict_order.len() > PATH_VERDICT_LEDGER_CAP {
@@ -2509,7 +3009,21 @@ impl DualPlaneSession {
     /// Whether the disk has told this pane that a printed path is real — the `verified` bit of
     /// §7.1.5j, and the twin of [`Self::image_path_is_verified`] for every other kind of file.
     pub fn path_is_verified(&self, path: &Path) -> bool {
-        self.path_verdicts.get(path) == Some(&true)
+        self.path_verdicts
+            .get(path)
+            .is_some_and(|verdict| verdict.exists)
+    }
+
+    /// **Everything this window is allowed to know about a path a program named** — the ledger
+    /// read that stands where a filesystem call used to (audit 3 C-2).
+    ///
+    /// `None` is not "no": it is *nobody has asked yet*, and the routing table's answer for one is
+    /// that the reference is not a link. The question is put by
+    /// [`Self::ask_about_link_target`] on the same event, and the answer arrives a worker hop
+    /// later with a frame of its own.
+    #[must_use]
+    pub fn path_verdict(&self, path: &Path) -> Option<PathVerdict> {
+        self.path_verdicts.get(path).cloned()
     }
 
     /// **Forget every "no" in this pane's ledger** (user ruling 2026-08-25, §7.1.5k 丙).
@@ -2523,9 +3037,9 @@ impl DualPlaneSession {
     /// sits on screen, real on disk, and permanently unlinked in the pane that watched it appear.
     ///
     /// **The boundary is a command, not a clock and not a frame.** What has to be true for a "no"
-    /// to have gone stale is that the disk may have changed, and the one thing this window knows
-    /// about that is which of its commands have ended: `OSC 133 D` on the primary screen is the
-    /// shell saying *the thing you were running is over*. So a verdict is re-asked once per
+    /// to have gone stale is that the disk may have changed, and one of the two things this window
+    /// knows about that is which of its commands have ended: `OSC 133 D` on the primary screen is
+    /// the shell saying *the thing you were running is over*. So a verdict is re-asked once per
     /// command rather than once per frame — which is the difference between one question per
     /// printed name per command and one per name per 16 milliseconds, and is why the three budgets
     /// (256 a pass, 512 queued, 4096 remembered) are untouched by this: the steady state of a
@@ -2536,22 +3050,48 @@ impl DualPlaneSession {
     /// is 丁, and it lives in the five-armed router). Re-asking the yeses would double the traffic
     /// to buy nothing.
     ///
-    /// **A pane with no shell integration keeps its "no"s for ever, and that is on purpose**
-    /// (§7.1.5b's degraded path). A root process that does not report its commands never tells this
-    /// window a command ended, and the honest substitutes are all worse than the limitation: a
-    /// timer would re-ask a screenful of dead names on a pane nobody is touching, and inferring a
-    /// boundary from the shape of the output is a guess that fires in the middle of a build as
-    /// readily as at the end of one. So such a pane behaves exactly as every pane did before this
-    /// ruling, and the way out of it is shell integration — which is the same answer §7.1.5b gives
-    /// for busy detection, for the same reason.
+    /// **Where that re-check lives, since audit 3 C-2** (closure re-review, 2026-09-21): it was
+    /// the `metadata` the reveal made on the window thread, and that call is gone. The press is
+    /// the re-check now — [`Self::re_ask_about_link_target`], put by the press going down, so the
+    /// answer is back before the release acts and a held "yes" over a file that has since been
+    /// deleted cannot open a file manager on a folder nobody named.
+    ///
+    /// # The other boundary: a name printed again (owner ruling 2026-09-20)
+    ///
+    /// Until 2026-09-20 this comment ended by recording a limitation as a decision: *a pane with no
+    /// shell integration keeps its "no"s for ever, and that is on purpose.* The reasoning was that
+    /// a root process which never reports a command boundary leaves nothing honest to expire on,
+    /// and that both substitutes are worse than the gap — a timer re-asks a screenful of dead names
+    /// on a pane nobody is touching, and a guess at the shape of the output fires in the middle of
+    /// a build as readily as at the end of one. Both of those are still true, and neither is what
+    /// changed.
+    ///
+    /// What changed is the premise underneath, which the owner photographed on candidate next83: a
+    /// pane whose foreground program is a TUI agent running for hours **never ends a command at
+    /// all**. The agent printed `D:\…\menus.html` before the file existed, the disk said no, and
+    /// minutes later it printed the same name again over the finished file — dark, and permanently
+    /// dark. Announcing a file and then writing it is not an edge case of this product; it is what
+    /// agents do all day, and it is now the main scenario.
+    ///
+    /// So there is a second boundary, and it is neither of the two that were rejected: **a name
+    /// that was answered "no" is asked again when the program prints it again.** The signal is the
+    /// program's own act of printing — read off the per-row fingerprint that already owns "the
+    /// cells changed" (§4.6, 2026-09-06), in [`Self::paths_named_on_freshly_printed_rows`] — so a
+    /// repaint of an unchanged row is not a printing, and a screen that sits still is still free.
+    /// The bound comes from the rule itself and not from a rate limit: a full-screen agent
+    /// rewriting its viewport with the bytes it already had asks nothing however fast it draws.
+    ///
+    /// The two boundaries do different work and both stay. This one empties the ledger of denials
+    /// wholesale, because a command that ended could have created any of those files whether or not
+    /// their names are still on the screen; that one asks about exactly the name that was printed.
     ///
     /// Answers `true` when something actually left, so the caller can skip the rebuild on the
     /// commands — the great majority — that denied nothing.
     fn expire_denied_paths(&mut self) -> bool {
-        if !self.path_verdicts.values().any(|exists| !exists) {
+        if !self.path_verdicts.values().any(|verdict| !verdict.exists) {
             return false;
         }
-        self.path_verdicts.retain(|_, exists| *exists);
+        self.path_verdicts.retain(|_, verdict| verdict.exists);
         self.path_verdict_order
             .retain(|path| self.path_verdicts.contains_key(path));
         self.rebuild_printed_path_links();
@@ -2559,17 +3099,35 @@ impl DualPlaneSession {
     }
 
     fn rebuild_printed_path_links(&mut self) {
+        let directory = self.reference_directory().map(Path::to_path_buf);
+        // The namespace the spawn pushed, plus the one thing only the shell could say (§7.30's
+        // `~`). Composed here rather than written back into the pushed value, so the profile's own
+        // answer stays the profile's and a re-push cannot lose the report.
+        let namespace = self
+            .path_namespace
+            .with_shell_home(self.shell_home.as_deref());
         // The whole ledger travels, both answers in it: a "no" is what stops the projection from
         // asking about the same dead name on every frame it draws (§7.1.5j).
         self.printed_path_links = bt_transcript::paths::PrintedPathLinks::in_namespace(
-            self.reference_directory().map(Path::to_path_buf),
-            self.path_verdicts.clone(),
-            // The namespace the spawn pushed, plus the one thing only the shell could say
-            // (§7.30's `~`). Composed here rather than written back into the pushed value, so the
-            // profile's own answer stays the profile's and a re-push cannot lose the report.
-            &self
-                .path_namespace
-                .with_shell_home(self.shell_home.as_deref()),
+            directory.clone(),
+            self.path_verdicts
+                .iter()
+                .map(|(path, verdict)| (path.clone(), verdict.exists))
+                .collect(),
+            &namespace,
+        );
+        // And the same ledger for text this pane has **just printed**, which is the one reading in
+        // which a standing "no" is not an answer (owner ruling 2026-09-20). Built here, beside its
+        // twin and from the same three inputs, so neither can drift from the other about a
+        // directory, a namespace or a yes.
+        self.reprinted_path_links = bt_transcript::paths::PrintedPathLinks::in_namespace(
+            directory,
+            self.path_verdicts
+                .iter()
+                .filter(|(_, verdict)| verdict.exists)
+                .map(|(path, verdict)| (path.clone(), verdict.exists))
+                .collect(),
+            &namespace,
         );
     }
 
@@ -2870,6 +3428,24 @@ impl DualPlaneSession {
         self.feed_at(bytes, Instant::now())
     }
 
+    /// Group successive feeds into one drain turn. Call `end_feed_turn` even on an error,
+    /// before publishing or running other session work. Standalone feeds need no markers.
+    /// Parsing still happens per slice; only repaint settlement waits for the turn's end.
+    pub fn begin_feed_turn(&mut self) {
+        assert!(self.feed_turn.is_none(), "feed turns must not nest");
+        self.feed_turn = Some(FeedTurn::default());
+    }
+
+    /// Settle a sliced read once. DEC 2026 retains its own buffer and deadline across turns;
+    /// ending a turn never forces a synchronized update to commit.
+    pub fn end_feed_turn(&mut self) {
+        if let Some(turn) = self.feed_turn.take()
+            && turn.fed
+        {
+            self.settle_feed_turn(turn);
+        }
+    }
+
     /// Deterministic replay entry point. Production callers normally use `feed`; integration tests
     /// can supply a monotonic timestamp without sleeping through the resize silence window.
     pub fn feed_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
@@ -2942,6 +3518,7 @@ impl DualPlaneSession {
         }
         let result = (|| {
             for chunk in bytes.chunks(PARSE_QUANTUM) {
+                self.state_write_provenance();
                 // The quantum is a *budget*, not the unit a fact is read in. The
                 // adapter hands back a segment at a time and pauses at every
                 // shell-integration marker (`TerminalAdapter::feed`), so a
@@ -2957,6 +3534,7 @@ impl DualPlaneSession {
                     if !self.terminal.stream_paused() {
                         break;
                     }
+                    self.state_write_provenance();
                     events = self.terminal.resume_stream();
                 }
             }
@@ -2972,38 +3550,132 @@ impl DualPlaneSession {
             self.primary_repaint_dirty = false;
             self.primary_reprint_history_floor = None;
             self.invalidate_all_live_decorations();
-        } else if self.synchronized_update_deadline().is_none() {
-            if let Some(snapshot) = self.alternate_repaint_snapshot.take() {
-                self.finish_alternate_repaint(snapshot);
+            if let Some(turn) = &mut self.feed_turn {
+                *turn = FeedTurn::default();
             }
-            if let Some(snapshot) = self.primary_repaint_snapshot.take() {
-                self.finish_primary_repaint(snapshot, false);
+            if self.resize_epoch.is_active() {
+                self.stage_resize_history();
+            }
+        } else {
+            let facts = FeedTurn {
+                fed: true,
+                primary_reprint_boundary,
+                cursor_memory_reprint_boundary,
+            };
+            if let Some(turn) = &mut self.feed_turn {
+                turn.fed = true;
+                turn.primary_reprint_boundary |= facts.primary_reprint_boundary;
+                turn.cursor_memory_reprint_boundary |= facts.cursor_memory_reprint_boundary;
+            } else {
+                self.settle_feed_turn(facts);
             }
         }
+        result
+    }
+
+    /// Tell the terminal whether the bytes it is about to parse are a command's output, so that
+    /// every cell they print records it.
+    ///
+    /// **Provenance is a fact about a write, so it is stated before the write and stamped by it.**
+    /// The adapter pauses the stream at every shell-integration marker, so one segment is
+    /// homogeneous: `C` and `D` have already been applied when the next segment starts, and no
+    /// write inside a segment can straddle the two answers. Everything downstream — the fold in
+    /// [`Self::live_detection_context`], the cells a scroll or a reflow moves, the row a prompt
+    /// reprints byte for byte — then follows from the cells alone.
+    ///
+    /// Said before every segment rather than only when it changes, because the cost is a field
+    /// store and the failure of forgetting is a prompt wearing a retired command's eligibility.
+    ///
+    /// **Both screens are stated, because a segment can change screens inside itself.** A marker
+    /// ends a segment; `ESC[?1049l` does not, and it is how a pager or an editor hands the screen
+    /// back in the middle of the command that ran it. The answer for the screen that comes back is
+    /// this session's answer *for that screen* — the command is still running, so the primary
+    /// screen's output after the swap is that command's output — and the two values are already
+    /// kept apart here, one phase per screen. The terminal holds them the same way and takes up
+    /// the one belonging to the screen that is showing; nothing has to be restated at the swap,
+    /// which is the only form of this rule that cannot miss a road into one.
+    fn state_write_provenance(&mut self) {
+        self.terminal.set_write_provenance(
+            self.screen_is_inside_command_output(ScreenId::Primary),
+            self.screen_is_inside_command_output(ScreenId::Alternate),
+        );
+    }
+
+    /// Is this screen, right now, inside an output region that a shell this session trusts opened?
+    fn screen_is_inside_command_output(&self, screen: ScreenId) -> bool {
+        self.shell_integration_is_authoritative(screen)
+            && matches!(
+                self.shell_phases.get(&screen),
+                Some(ShellIntegrationPhase::Output(_))
+            )
+    }
+
+    fn settle_feed_turn(&mut self, turn: FeedTurn) {
+        // **A repaint window lives as long as the grid it snapshotted, not as long as some block is
+        // buffering.** Both are true for the ordinary DEC 2026 repaint — the block withholds every
+        // cell, so the grid under the window cannot move — and that is why "is a block still open"
+        // stood in for the real condition for so long. It stops being true in one read: a producer
+        // that ends one frame's block and begins the next one's in the same drain
+        // (`… ESU`, `BSU`, `HOME`, …) leaves a deadline standing here while the first block's cells
+        // are already on the glass. The window was then held open, over a snapshot of a grid that
+        // no longer exists, and two things followed from it. Detection between reads proves blocks
+        // in the *new* grid's coordinates, and the close pushed them through the old grid's delta a
+        // second time — with two identical blocks on screen the first lands on the second's rows and
+        // the second is lost. And a record whose source was rewritten by those very cells was never
+        // judged against them, so its raster went on being painted over text it does not match,
+        // which is the one thing this window may never do.
+        //
+        // So the window settles the moment its grid moves, against the cells that are on the glass
+        // now — every record verified and reseated by the same projection an ESU would have run —
+        // and a block that is still buffering afterwards opens a *new* window over the grid that
+        // commit just settled. A carried record is then in the snapshot's coordinates by
+        // construction, and no frame is published between a commit and its verification.
+        let revision = self.live_content_revision;
+        let settled = self.synchronized_update_deadline().is_none();
+        let outlived = |snapshot: &AlternateRepaintSnapshot| {
+            settled || snapshot.live_content_revision != revision
+        };
+        if self
+            .alternate_repaint_snapshot
+            .as_ref()
+            .is_some_and(outlived)
+            && let Some(snapshot) = self.alternate_repaint_snapshot.take()
+        {
+            self.finish_alternate_repaint(snapshot);
+        }
+        if self.primary_repaint_snapshot.as_ref().is_some_and(outlived)
+            && let Some(snapshot) = self.primary_repaint_snapshot.take()
+        {
+            self.finish_primary_repaint(snapshot, false);
+        }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
-        if result.is_ok() {
-            // Re-seat already-known path occurrences immediately after an atomic repaint. New
-            // candidates and retirement still wait for the ordinary stability gate below.
-            self.reconcile_live_image_paths(false, &vec![false; self.live_rows.len()]);
-            self.restore_offscreen_decorations();
-            self.reconcile_primary_reprint_presentation_hold(primary_reprint_boundary);
-            // The reprint has landed and its records are re-anchored: end preservation unless a
-            // synchronized update is still buffering the repaint (its damage arrives at the commit).
-            if self.synchronized_update_deadline().is_none() {
-                self.primary_repaint_in_progress = false;
-                self.primary_reprint_history_floor = None;
-            }
-            // An open synchronized repaint still publishes the pre-transaction grid. Its boundary
-            // invalidated the old cursor line above, so do not immediately memorize that stale
-            // cursor again; ESU or the parser timeout records the committed cursor instead.
-            if !(cursor_memory_reprint_boundary && self.synchronized_update_deadline().is_some()) {
-                self.remember_visible_cursor_logical_line();
-            }
+        // Re-seat already-known paths and records only after the whole repaint has landed.
+        self.reconcile_live_image_paths(false, &vec![false; self.live_rows.len()]);
+        self.restore_offscreen_decorations();
+        self.reconcile_primary_reprint_presentation_hold(turn.primary_reprint_boundary);
+        if self.synchronized_update_deadline().is_none() {
+            self.primary_repaint_in_progress = false;
+            self.primary_reprint_history_floor = None;
+        }
+        // The block that is still buffering gets its own window, over the settled grid — taken
+        // after the off-band queue has been offered back, so its snapshot is the whole census. The
+        // primary side re-snapshots on its next feed (`feed_at`) while `primary_repaint_in_progress`
+        // stands; alternate has to do it here, because `begin_alternate_repaint` reads the bytes of
+        // a read and the read that would reopen this window has already gone by.
+        if self.alternate_repaint_snapshot.is_none()
+            && turn.cursor_memory_reprint_boundary
+            && self.synchronized_update_deadline().is_some()
+        {
+            self.alternate_repaint_snapshot = self.snapshot_alternate_repaint(true);
+            self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
+        }
+        // A buffering synchronized update still exposes the pre-transaction cursor.
+        if !(turn.cursor_memory_reprint_boundary && self.synchronized_update_deadline().is_some()) {
+            self.remember_visible_cursor_logical_line();
         }
         if self.resize_epoch.is_active() {
             self.stage_resize_history();
         }
-        result
     }
 
     /// `Clear screen` (§7.1.6, §7.1.6l): **the rows above the cursor go, the row the cursor is on
@@ -3199,6 +3871,16 @@ impl DualPlaneSession {
         ];
         let apply_result = self.apply_events(events, observed_at);
         self.alternate_repaint_in_progress = false;
+        // **A reflow is not the program printing** (owner ruling 2026-09-20). Every row of the
+        // rebuilt grid has just had its fingerprint written for the first time, so every one of
+        // them would read as freshly printed and a resize would re-ask about every denied name on
+        // the screen — a window drag would be a burst of disk traffic, which is exactly the shape
+        // the 2026-08-23 budget ruling exists to refuse. The reflowed text was already read at the
+        // revision it came from; marking it read here says so. Whatever the program prints *after*
+        // the reflow moves these revisions on again and is asked about normally.
+        for row in &mut self.live_rows {
+            row.path_pass_revision = row.revision;
+        }
         if let Err(error) = apply_result {
             if plan.begin_transaction {
                 self.stage_resize_history();
@@ -3255,7 +3937,42 @@ impl DualPlaneSession {
                 self.retire_marks_with_stale_anchors();
             }
         }
+        self.rebase_open_repaint_windows();
         Ok(())
+    }
+
+    /// **A reflow ends the grid an open repaint window snapshotted, exactly as a commit does.**
+    ///
+    /// A window is a promise about one particular grid, and it keeps that promise by comparing the
+    /// records it holds against the cells the snapshot describes. A resize replaces those cells
+    /// without a byte arriving: it takes a snapshot of its own, reflows, and reprojects every record
+    /// onto the new grid itself — so by the time this is called the records are already correctly
+    /// seated, in the *new* grid's coordinates. A window left open over that, still holding the
+    /// snapshot of the grid the reflow replaced, then ran the old grid's delta over them a second
+    /// time at its close. With two byte-identical blocks on screen the first lands on the second's
+    /// rows and the second is lost, on a screen whose text never changed between the reflow and the
+    /// close.
+    ///
+    /// Moving `live_content_revision` here would not be enough, and this is why: the comparison
+    /// would notice, but the snapshot the close then projected from would still be the old grid's.
+    /// The window is rebased instead — re-taken over the grid the reflow has just settled, keeping
+    /// the boundary it was opened with so its close still re-detects what it was going to. A window
+    /// with nothing left to preserve simply does not come back.
+    ///
+    /// Called after the reflow's own projection and off-band restore, never before: what this
+    /// snapshots has to be the answer that reflow arrived at.
+    fn rebase_open_repaint_windows(&mut self) {
+        if let Some(boundary) = self
+            .alternate_repaint_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.snapshot_boundary)
+        {
+            self.alternate_repaint_snapshot = self.snapshot_alternate_repaint(boundary);
+            self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
+        }
+        if self.primary_repaint_snapshot.is_some() {
+            self.primary_repaint_snapshot = self.snapshot_primary_repaint();
+        }
     }
 
     pub fn set_layout_key(&mut self, layout_key: LayoutKey) {
@@ -3276,6 +3993,15 @@ impl DualPlaneSession {
 
     pub fn synchronized_update_deadline(&self) -> Option<Instant> {
         self.terminal.synchronized_update_deadline()
+    }
+
+    /// **How many synchronized updates this pane has committed**, however they ended.
+    ///
+    /// Compared across a feed rather than read at an instant, because a block that opens and
+    /// commits inside one `read(2)` leaves the deadline `None` on both sides of that feed. See
+    /// [`TerminalAdapter::synchronized_update_commits`].
+    pub fn synchronized_update_commits(&self) -> u64 {
+        self.terminal.synchronized_update_commits()
     }
 
     /// Commit a DEC 2026 update when its parser-owned timeout expires without ESU.
@@ -3347,11 +4073,63 @@ impl DualPlaneSession {
         Ok(true)
     }
 
+    /// Whether a resize transaction is open, and therefore still owes one of the two settlements.
+    ///
+    /// The window asks this rather than working it out from grid numbers, because the transaction
+    /// is opened by [`Self::resize_at`] and lives here. A release that finds it open must settle,
+    /// even when nothing about that release moved a grid: the wobble it is ending reflowed this
+    /// pane through widths it no longer wears, and only a settlement closes what that opened.
+    pub fn resize_transaction_open(&self) -> bool {
+        self.resize_epoch.is_active()
+    }
+
+    /// **The gesture ended, and the child was told a new size.** One of the two endings a resize
+    /// transaction has; the other is [`Self::mark_resize_settled_unchanged_at`].
     pub fn mark_pty_resize_requested_at(
         &mut self,
         columns: NonZeroU32,
         rows: NonZeroU32,
         observed_at: Instant,
+    ) -> bool {
+        self.settle_resize_transaction(columns, rows, observed_at, ResizeEnding::ChildResized)
+    }
+
+    /// **The gesture ended on the size the child already holds, so it was told nothing.**
+    ///
+    /// The other ending, and it had none until 2026-09-17. A drag whose last wobble comes back to
+    /// the width ConPTY already has is an ordinary gesture — the hand moved, so
+    /// [`Self::resize_at`] reflowed this pane's grid through every width it passed and opened a
+    /// resize transaction for them — and yet no `ResizePseudoConsole` (no `TIOCSWINSZ` on Unix) is
+    /// owed at the end of it, because the child's size never moved. The window used to have
+    /// nowhere to say that, so it said nothing at all: `ResizeEpoch::final_request_sent` was never
+    /// called, `quiescence_deadline` stayed `None`, `is_quiescent_at` was false at every instant
+    /// there is, and the transaction could not be closed by anything. An open transaction withholds
+    /// every decoration scan there is (`ResizeEpoch::decorations_allowed`), so that pane never
+    /// typeset another formula for the rest of its life.
+    ///
+    /// **What it does is what the other door does, minus the child.** Everything below the two
+    /// trace lines is about this session's own grid, which reflowed: the canonical branch — the
+    /// fork that has only ever been given sizes the child was actually told, and is therefore
+    /// already at exactly this size — is installed over the path-dependent displayed branch,
+    /// anchors and semantic regions are re-seated against it, and the decorations projected across
+    /// it are re-anchored. The child is not written to here and is not written to by the window
+    /// for this ending either: conhost did not reflow, so PSReadLine's anchor is still the one it
+    /// drew with and no repair is owed (`commit_leaf_resize` records no debt for it).
+    pub fn mark_resize_settled_unchanged_at(
+        &mut self,
+        columns: NonZeroU32,
+        rows: NonZeroU32,
+        observed_at: Instant,
+    ) -> bool {
+        self.settle_resize_transaction(columns, rows, observed_at, ResizeEnding::ChildSizeUnchanged)
+    }
+
+    fn settle_resize_transaction(
+        &mut self,
+        columns: NonZeroU32,
+        rows: NonZeroU32,
+        observed_at: Instant,
+        ending: ResizeEnding,
     ) -> bool {
         let reconciled = self.resize_epoch.is_active();
         let reflow = if reconciled {
@@ -3365,12 +4143,27 @@ impl DualPlaneSession {
         let primary_reconcile = reconciled
             .then(|| self.snapshot_primary_resize_transition())
             .flatten();
+        // **Taken before the install, because that is the grid these records are standing on.**
+        // `reconcile_resize_transaction_to_viewport` replaces the grid and the parser with the ones
+        // the console host decided on, which is a reflow like any other; the alternate screen had no
+        // projection across it at all, so its pictures went at the reconcile and came back only at
+        // the next terminator, and every frame published in between showed LaTeX. Primary's own
+        // snapshot is taken here for the same reason and has been all along.
+        let alternate_reconcile = reconciled
+            .then(|| self.snapshot_alternate_repaint(false))
+            .flatten();
         self.resize_epoch.final_request_sent(observed_at);
         self.trace_resize_event(
             observed_at,
-            ResizeTraceKind::PtyResizeRequest {
-                columns: columns.get(),
-                rows: rows.get(),
+            match ending {
+                ResizeEnding::ChildResized => ResizeTraceKind::PtyResizeRequest {
+                    columns: columns.get(),
+                    rows: rows.get(),
+                },
+                ResizeEnding::ChildSizeUnchanged => ResizeTraceKind::ChildSizeUnchanged {
+                    columns: columns.get(),
+                    rows: rows.get(),
+                },
             },
         );
         let (history_before, history_after) =
@@ -3386,6 +4179,15 @@ impl DualPlaneSession {
             // marker decides whether its line-start coordinate is end-exclusive.
             self.reanchor_semantic_input_regions_after_resize();
             self.reanchor_semantic_output_regions_after_resize();
+            // Re-seat the alternate screen's records against the grid that was just installed, by
+            // the same projection `resize_at` runs after its own reflow. It comes before the window
+            // is rebased below, and the order is the whole point: a rebase re-takes the *snapshot*,
+            // and a snapshot of records that are still standing on the grid the host replaced is
+            // exactly what it must not be.
+            if let Some(snapshot) = alternate_reconcile {
+                self.finish_alternate_repaint(snapshot);
+                self.restore_offscreen_decorations();
+            }
             // The vendor reconcile can shift rows and always bumps the grid generation, which
             // strands the formulas `restore_offscreen_decorations` re-anchored inside `resize_at`
             // one generation behind the frame the app is about to publish. Re-anchor them against
@@ -3420,6 +4222,9 @@ impl DualPlaneSession {
             self.stage_resize_history();
             self.reseat_anchors_after_reflow(reflow);
             self.retire_marks_with_stale_anchors();
+            // The console host's reconcile is the second reflow of a resize transaction, and it ends
+            // the grid an open window snapshotted for exactly the reason the first one does.
+            self.rebase_open_repaint_windows();
         }
         reconciled
     }
@@ -3701,9 +4506,27 @@ impl DualPlaneSession {
             }
             !suppressed
         });
-        let scheduled = new_tasks.len();
+        // Detection consumes context in document order; only admission rotates. Retain the first
+        // refusal across signature changes so a repaint cannot put serviced rows ahead of it.
+        let split = new_tasks.partition_point(|task| task.candidate_row < self.live_admission_row);
+        new_tasks.rotate_left(split);
+        let mut first_refused = None;
+        let mut scheduled = 0usize;
         for task in new_tasks {
-            self.enqueue_live_task(task);
+            let candidate_row = task.candidate_row;
+            if self.enqueue_live_task(task) == EnqueueOutcome::Queued {
+                scheduled += 1;
+                continue;
+            }
+            first_refused.get_or_insert(candidate_row);
+            // Refused for want of room. The signature says "a task for this row is out", and none
+            // is, so it comes off and the next pass arms this row again.
+            if let Some(state) = self.live_rows.get_mut(candidate_row as usize) {
+                state.candidate_signature = None;
+            }
+        }
+        if let Some(row) = first_refused {
+            self.live_admission_row = row;
         }
         self.live_detection_count = self.live_detection_count.saturating_add(scheduled as u64);
         if scheduled != 0 && switched_on("BT_PERF_TRACE") {
@@ -3897,6 +4720,45 @@ impl DualPlaneSession {
         )
     }
 
+    /// **Is the live screen at a prompt this session watched the shell itself open, in order?**
+    ///
+    /// The one question asked before this window types at a child (audit 3, finding C-3). The
+    /// bytes it sends there are `ESC[24;8~`, the key `folio.ps1` binds `InvokePrompt` to, and
+    /// `bt_app::psreadline_resize_repaint_input` owes them after a ConPTY resize. Anything that is
+    /// not that shell's prompt is a program reading its own stdin, and this window's own record
+    /// says what those seven bytes do to one: GNU readline inserts what it cannot decode, so a
+    /// resize once typed `;8~` into a bash prompt and the next command died on a syntax error.
+    ///
+    /// Three facts, and a real prompt has all of them:
+    /// * an open input region — a `B` — which [`Self::shell_input_region_open`] answers;
+    /// * **a prompt around it**: that `B` stood in a cycle an `A` opened
+    ///   ([`Self::shell_prompt_cycle_in_order`]). Without this the floor was two markers — `D`
+    ///   from any phase, then `B` from `Finished`, twenty bytes and no `A` at all;
+    /// * **nothing running inside it**: no command this session watched start is still unfinished
+    ///   ([`Self::shell_commands_running`]). A nested program's prompt cycle is drawn, marked and
+    ///   typeset like any other — that is the design's ruling, `docs/DESIGN.md` line 2338 — and it
+    ///   is still not the shell whose keymap holds this binding.
+    ///
+    /// **What the bytes cannot prove, said once.** OSC 133 is in band and unauthenticated. The
+    /// floor is what a forger must write, and it is now the whole cycle: a `D` no `C` of this
+    /// session's asked for, an `A`, then a `B`. That is byte-for-byte the pane's own shell
+    /// returning to its prompt, and nothing in this stream — or anywhere else this window can see,
+    /// since a pane's integration is read from its start program's file name and never again —
+    /// tells the two apart. So this is not a proof and does not claim to be one; the proof would
+    /// be a nonce minted inside the integration script's own scope and carried on every mark,
+    /// which no child process can read and which is a change to the mark protocol, ledgered for a
+    /// later ticket. Where the answer is in doubt it is `false`, because a wrong `true` here types
+    /// into someone's command line and a wrong `false` costs one prompt redraw the shell would
+    /// have done itself.
+    pub fn shell_prompt_opened_in_order(&self) -> bool {
+        self.shell_input_region_open()
+            && self.shell_prompt_cycle_in_order.contains(&self.live_screen)
+            && self
+                .shell_commands_running
+                .get(&self.live_screen)
+                .is_none_or(|running| *running == 0)
+    }
+
     /// Is the live screen sitting inside an open OSC 133 input region that currently holds typed
     /// content?
     ///
@@ -4084,6 +4946,33 @@ impl DualPlaneSession {
                 if matches!(phase, Some(ShellIntegrationPhase::Input(_))) {
                     return;
                 }
+                // **A `B` standing inside a running command still opens a region, and it is still
+                // not a prompt this window types at** (audit 3, finding C-3).
+                //
+                // The order is deliberately not checked here, and there are two reasons pointing
+                // the same way. `a_prompt_closes_an_output_region_that_never_saw_its_command_
+                // finish` is the first: a command killed mid-flight leaves an output region whose
+                // frontier is the cursor, and this `B` is one of the two markers that seal it —
+                // refusing it would leave that region annexing every row the shell wrote
+                // afterwards, prompt included. `docs/DESIGN.md` line 2338 is the second: marks are
+                // permissive because a program printing a whole cycle cannot be told from a nested
+                // shell speaking the protocol, and the failure that ruling accepts is a picture,
+                // with nothing executed.
+                //
+                // The order is checked where bytes leave for the child instead, once, in
+                // [`Self::shell_prompt_opened_in_order`]: it reads
+                // [`Self::shell_commands_running`] and answers `false` for exactly this `B`,
+                // because the `C` that started the command it stands in has had no `D`.
+                //
+                // **Whether this region is the one a prompt opened**, recorded here because here
+                // is where the phase before it can still be read. See
+                // [`Self::shell_prompt_cycle_in_order`]; it changes nothing a mark or a decoration
+                // asks for.
+                if matches!(phase, Some(ShellIntegrationPhase::Prompt)) {
+                    self.shell_prompt_cycle_in_order.insert(screen);
+                } else {
+                    self.shell_prompt_cycle_in_order.remove(&screen);
+                }
                 // `B` without an intervening `A` or `D` — a shell that skips markers still tells us
                 // here that the command being typed is not output.
                 self.close_open_semantic_output_region(screen, point);
@@ -4127,6 +5016,37 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Input(region));
             }
             ShellIntegrationMarker::CommandExecuted => {
+                // **A `C` is heard only inside a prompt cycle this session watched open.**
+                //
+                // OSC 133 is in band and unauthenticated: these bytes are a claim by whoever wrote
+                // them, and a program — or a file with the escape in it, reaching the screen
+                // through `cat` — can write the same bytes the shell writes. Nothing here can
+                // establish *who* emitted a marker, and pretending otherwise would be worse than
+                // saying so. What can be checked is the **order**, and one order is worth
+                // refusing: a `C` that stands in no prompt cycle at all. On a screen where the
+                // phase is `None` nothing has ever spoken — a pane with no shell integration
+                // installed — and a `C` there used to create this session's authority over that
+                // screen out of nothing, which is the whole of the machinery a lone forged marker
+                // needed to have the text after it typeset. `Finished` is the same statement
+                // between two commands: the last one ended at `D` and no prompt has begun.
+                //
+                // `Prompt` and `Input` are both accepted, not `Input` alone. A shell that reports
+                // `A`, `C` and `D` and never `B` is a shell whose command line this session simply
+                // does not know the extent of, and refusing it would cost it every formula while
+                // closing nothing: a stream that can forge a `C` can forge the `B` before it just
+                // as cheaply. `Output` keeps the repeated-`C` rule below exactly as it was — a
+                // second `C` inside a command's own output re-opens the region it was already
+                // stamping, and no cell's claim changes either way.
+                if !matches!(
+                    phase,
+                    Some(
+                        ShellIntegrationPhase::Prompt
+                            | ShellIntegrationPhase::Input(_)
+                            | ShellIntegrationPhase::Output(_)
+                    )
+                ) {
+                    return;
+                }
                 // Primary only, on the same terms as the command-mark ledger three lines below and
                 // the prompt/finished arms around it (§7.1.5c: alt-screen 一律不记). A full-screen
                 // program running its own command cycle on its own canvas is describing that
@@ -4134,6 +5054,16 @@ impl DualPlaneSession {
                 // redraw claim the shell had started something.
                 if screen == ScreenId::Primary {
                     self.working = true;
+                }
+                // One more command this session has watched start. See
+                // [`Self::shell_commands_running`]. A repeated `C` *inside* a command's own output
+                // is the same command re-stamping its region — the rule below — and starts
+                // nothing, so it does not count; what counts is a `C` that stands at a prompt,
+                // which is what a nested shell's own cycle produces and what a forged one would
+                // have to produce to be counted at all.
+                if !matches!(phase, Some(ShellIntegrationPhase::Output(_))) {
+                    let running = self.shell_commands_running.entry(screen).or_default();
+                    *running = running.saturating_add(1);
                 }
                 self.failure_exit_code = None;
                 self.progress = None;
@@ -4179,6 +5109,12 @@ impl DualPlaneSession {
                     // shell's command boundary, and it is not this ledger's either.
                     // See `Session::expire_denied_paths`.
                     self.expire_denied_paths();
+                }
+                // One command fewer is running here. Saturating, because a `D` nobody's `C` asked
+                // for is a statement this session never watched become true — see
+                // [`Self::shell_commands_running`] — and the floor is what keeps the count a count.
+                if let Some(running) = self.shell_commands_running.get_mut(&screen) {
+                    *running = running.saturating_sub(1);
                 }
                 if let Some(exit_code) = exit_code.filter(|code| *code != 0) {
                     self.failure_exit_code = Some(exit_code);
@@ -4430,13 +5366,25 @@ impl DualPlaneSession {
         }
     }
 
-    /// Drop the regions that described the alternate screen once that screen is gone.
+    /// Drop what described the alternate screen once that screen is gone.
     ///
     /// The alternate screen keeps no history, so an alternate region can never be retired by a
     /// line leaving the transcript - there is no line. Leaving one behind means a full-screen
     /// program that speaks OSC 133 adds regions to this session on every run of itself and none of
     /// them ever go.
+    ///
+    /// **The phase and the authority go with the regions, because they describe the same canvas.**
+    /// A canvas is discarded when the primary screen comes back, and the next `?1049h` resets it,
+    /// so a program that re-enters starts on a surface nothing has been said about. Keeping a
+    /// phase of `Output` past that left the claim standing on a canvas whose region had been
+    /// deleted, and an unmarked program's first screenful of drawing wore the last program's
+    /// command (review 2026-09-17 second pass, F3 P2).
     fn retire_alternate_semantic_regions(&mut self) {
+        self.shell_phases.remove(&ScreenId::Alternate);
+        self.shell_commands_running.remove(&ScreenId::Alternate);
+        self.shell_prompt_cycle_in_order
+            .remove(&ScreenId::Alternate);
+        self.shell_region_screens.remove(&ScreenId::Alternate);
         let input = self
             .semantic_input_regions
             .iter()
@@ -4868,62 +5816,17 @@ impl DualPlaneSession {
             })
     }
 
-    /// Is this whole live extent inside one OSC 133 `C..D` command-output region?
+    /// The inline site of a frozen line, as it was recorded when the line froze.
     ///
-    /// **Coverage, not overlap** — and that is the one place this deliberately departs from
-    /// `semantic_input_overlaps_live` it otherwise mirrors. The input query withdraws a decoration,
-    /// so touching the command anywhere is reason enough and erring wide is safe. This query
-    /// *grants* the right to read a lone `$` as mathematics, so erring wide is the failure itself:
-    /// a row that is half output and half the prompt printed after `D` would otherwise be handed to
-    /// the disambiguator as proven output.
-    ///
-    /// `end` is the exclusive end of the extent, which is what lets a `D` landing exactly at
-    /// end-of-text on the final output row still cover that row.
-    ///
-    /// No shell integration on this screen means no region, and therefore `false`: an unmarked
-    /// screen is `InlineMathSite::Ineligible` in its entirety, which is scheme A's stated price.
-    fn command_output_covers_live(
-        &self,
-        screen: ScreenId,
-        start: GridPoint,
-        end: GridPoint,
-    ) -> bool {
-        if !self.shell_integration_is_authoritative(screen) {
-            return false;
-        }
-        let anchor = |point| ContentAnchor::Live {
-            screen,
-            point,
-            bias: Bias::Before,
-            generation: self.grid_generation,
-        };
-        self.command_output_covers(&anchor(start), &anchor(end))
-    }
-
-    /// The same question asked of a frozen line: is the whole line inside a command-output region?
-    ///
-    /// A transcript line already is the WRAPLINE merge, so there is nothing to widen — the extent
-    /// is the line, from its first grapheme to one past its last.
-    fn command_output_covers_history(&self, id: TranscriptId) -> bool {
-        if !self.shell_integration_is_authoritative(ScreenId::Primary) {
-            return false;
-        }
-        let Some(line) = self.document.entries().get(&id).map(|entry| &entry.line) else {
-            return false;
-        };
-        let anchor = |offset| ContentAnchor::History {
-            id,
-            offset,
-            bias: Bias::Before,
-            generation: line.source_generation,
-        };
-        let end = GraphemeOffset(
-            u32::try_from(line.grapheme_boundaries.len().saturating_sub(1)).unwrap_or(u32::MAX),
-        );
-        self.command_output_covers(&anchor(GraphemeOffset(0)), &anchor(end))
-    }
-
-    /// The inline site of a frozen line.
+    /// This reads [`bt_doc::HistoryEntry::inline_site`]; it does not ask the OSC 133 bookkeeping again.
+    /// The bookkeeping is live state and the line is not: a region is retired when the prompt line
+    /// it starts on is evicted, when a reflow declines to re-seat one of its anchors, or when the
+    /// marks behind it go stale, and every one of those leaves the output lines below it resident,
+    /// unchanged, and still carrying formulas. Re-deriving the site would answer `Ineligible` for
+    /// all of them, so an inline formula would revert to `$…$` the first time a width change tore
+    /// its raster down and asked for it to be armed again — which is precisely the bug this
+    /// records its way out of. Whether the site was provable is settled once, in
+    /// [`Self::schedule_detection`].
     ///
     /// Always [`ScreenId::Primary`]: the transcript is the primary screen's scrollback and nothing
     /// else ever enters it — an alternate screen keeps no history, which is why
@@ -4931,44 +5834,10 @@ impl DualPlaneSession {
     /// alternate-screen site cannot arise here, and a frozen line is eligible on OSC 133 evidence
     /// or not at all.
     fn history_inline_site(&self, id: TranscriptId) -> InlineMathSite {
-        inline_math_site(ScreenId::Primary, self.command_output_covers_history(id))
-    }
-
-    fn command_output_covers(&self, start: &ContentAnchor, end: &ContentAnchor) -> bool {
-        self.semantic_output_regions
-            .iter()
-            .any(|(&region_index, region)| {
-                let Ok(region_start) = self.document.anchor(region.start) else {
-                    return false;
-                };
-                let region_end = if !region.closed
-                    && region.screen == self.live_screen
-                    && self.shell_phases.get(&region.screen)
-                        == Some(&ShellIntegrationPhase::Output(region_index))
-                {
-                    // An open region's frontier is the cursor, exactly as an open input region's
-                    // is: the cell the cursor stands on has not been printed yet, so the span stays
-                    // half-open there too.
-                    ContentAnchor::Live {
-                        screen: region.screen,
-                        point: {
-                            let cursor = self.terminal.cursor();
-                            GridPoint {
-                                row: cursor.row,
-                                column: cursor.column,
-                            }
-                        },
-                        bias: Bias::Before,
-                        generation: self.grid_generation,
-                    }
-                } else {
-                    let Ok(end) = self.document.anchor(region.end) else {
-                        return false;
-                    };
-                    end.clone()
-                };
-                selection_covers(start, end, region_start, &region_end)
-            })
+        self.document
+            .entries()
+            .get(&id)
+            .map_or(InlineMathSite::Ineligible, |entry| entry.inline_site)
     }
 
     /// The visible text a semantic region currently covers, or `None` when the region cannot be
@@ -5687,10 +6556,8 @@ impl DualPlaneSession {
                 self.semantic_input_overlaps_live(record.screen, record.start, record.end)
                     .then_some(*row)
             })
-            .collect::<Vec<_>>();
-        for row in retired_live {
-            self.live_decorations.remove(&row);
-        }
+            .collect::<BTreeSet<_>>();
+        self.retire_live_decorations(|row, _| retired_live.contains(&row));
         let suppressed_frozen = self
             .decorations
             .keys()
@@ -5749,19 +6616,24 @@ impl DualPlaneSession {
                     }),
             );
         }
+        // Asked once for the whole grid rather than per row: no authoritative integration means no
+        // row on this screen can be a command's output, which is the rule `inline_math_site` is
+        // written around and the only thing the per-cell provenance is read against.
+        let command_output = self.shell_integration_is_authoritative(self.live_screen);
         let grid_inputs = (0..self.live_rows.len()).filter_map(|row| {
             self.terminal.visible_row(row as u32).map(|captured| {
                 // Detection reads these rows joined into logical lines, so each row contributes the
                 // text the logical line holds — a continuation keeps the space the wrap fell on.
                 let (text, cell_boundaries) = captured_row_logical_text_and_boundaries(&captured);
                 let row = row as u32;
-                // The row's own extent, from its first cell to one past its last. Asking about
-                // exactly the cells this input carries is what keeps the verdict per-row: a row is
-                // command output only if all of it is.
-                let extent_end = GridPoint {
-                    row,
-                    column: cell_boundaries.last().map_or(0, |(_, column)| *column),
-                };
+                // The site is read off the cells, which is where the writes that made them
+                // recorded it. Nothing is derived here and nothing is remembered: a cell carries
+                // its own provenance through every scroll, insertion, deletion and reflow that
+                // moves it, so this answer is as current as the grid is.
+                //
+                // **Every cell of text must say a command wrote it**, rather than no cell saying
+                // one did not. Read the other way round, text that reached a cell by a road nobody
+                // stamped would pass — and the roads into a cell are the whole vendored terminal.
                 LiveDetectionInput {
                     source: LiveDetectionSource::Grid {
                         row,
@@ -5772,11 +6644,11 @@ impl DualPlaneSession {
                     captured_columns: captured.captured_columns,
                     site: inline_math_site(
                         self.live_screen,
-                        self.command_output_covers_live(
-                            self.live_screen,
-                            GridPoint { row, column: 0 },
-                            extent_end,
-                        ),
+                        command_output
+                            && !captured
+                                .cells
+                                .iter()
+                                .any(bt_transcript::CapturedCell::carries_unclaimed_text),
                     ),
                     cell_boundaries,
                 }
@@ -5890,11 +6762,12 @@ impl DualPlaneSession {
                 dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
                 invalidation_count: self.live_invalidation_count,
                 snapshot_boundary,
+                live_content_revision: self.live_content_revision,
             }
         })
     }
 
-    fn finish_alternate_repaint(&mut self, snapshot: AlternateRepaintSnapshot) {
+    fn finish_alternate_repaint(&mut self, mut snapshot: AlternateRepaintSnapshot) {
         if self.live_screen != ScreenId::Alternate || !self.terminal.modes().alternate_screen {
             return;
         }
@@ -5924,9 +6797,39 @@ impl DualPlaneSession {
         let mut unresolved = Vec::new();
         self.offscreen_decorations.clear();
 
-        for record in snapshot
+        // **The snapshot is a floor, not the census.** It is taken when the repaint window opens and
+        // the window can stay open for several reads — for the whole of a DEC 2026 block, or for a
+        // repaint the operating system split — and detection goes on running inside it. Every block
+        // proven during the window is resident by the time the window closes and is in no snapshot,
+        // so rebuilding `live_decorations` from the snapshot alone destroyed exactly those: on the
+        // owner's recording of 2026-09-17 each repaint's close wiped every formula the repaint
+        // before it had proven, and the screen went back to LaTeX until the detector and the
+        // rasteriser had done the whole job again. They are projected here beside the snapshot's
+        // own, and they come first, because where they say they are is the newer answer.
+        //
+        // The snapshot's own copy of an occurrence that is still held is dropped where it lies,
+        // rather than skipped by a set built for the purpose: a `BTreeSet` and the `Vec` that had to
+        // be collected behind it are two structures per close whose only job is to answer a question
+        // about a handful of records, and `Vec::retain` answers it in place. Both lists are bounded
+        // by what fits on a screen and by `MAX_OFFSCREEN_RECORDS`, so the walk is a few dozen `u64`
+        // comparisons and never an allocation.
+        let carried = std::mem::take(&mut self.live_decorations);
+        let held = |record: &LiveDecorationRecord,
+                    carried: &BTreeMap<u32, LiveDecorationRecord>| {
+            carried
+                .values()
+                .any(|held| held.identity.occurrence_id == record.identity.occurrence_id)
+        };
+        snapshot
             .decorations
-            .into_iter()
+            .retain(|record| !held(record, &carried));
+        snapshot
+            .dormant_decorations
+            .retain(|record| !held(record, &carried));
+
+        for record in carried
+            .into_values()
+            .chain(snapshot.decorations)
             .chain(snapshot.dormant_decorations)
         {
             if row_mappings.is_empty() {
@@ -5960,51 +6863,58 @@ impl DualPlaneSession {
         }
 
         if snapshot.snapshot_boundary && !unresolved.is_empty() {
-            let detected = self.bounded_alternate_repaint_detection(
-                Arc::clone(&current_inputs),
-                current_initial_context.clone(),
+            let pending = std::mem::take(&mut unresolved);
+            unresolved = self.live_grid_owned_blocks(
+                &current_inputs,
+                &current_initial_context,
+                |session, detected| {
+                    let mut still_unresolved = Vec::new();
+                    for record in pending {
+                        let matches = detected
+                            .iter()
+                            .filter(|task| task.span.render_equivalent(&record.span))
+                            .collect::<Vec<_>>();
+                        let [task] = matches.as_slice() else {
+                            still_unresolved.push(record);
+                            continue;
+                        };
+                        let delta = i64::from(task.start.row)
+                            .saturating_sub(record.placement.logical_band_start)
+                            .saturating_sub(i64::from(record.identity.source_start_offset));
+                        let Some(mut record) = shift_live_record(
+                            &record,
+                            delta,
+                            session.grid_generation,
+                            session.detection_revision,
+                            session.layout_key,
+                            current_initial_context.clone(),
+                            Arc::clone(&current_inputs),
+                        ) else {
+                            still_unresolved.push(record);
+                            continue;
+                        };
+                        if record.end.row != task.end.row
+                            || !alternate_borrowed_band_is_clear(
+                                &record,
+                                &current_inputs,
+                                &occupied,
+                            )
+                        {
+                            still_unresolved.push(record);
+                            continue;
+                        }
+                        record.start = task.start;
+                        record.end = task.end;
+                        record.span = task.span.clone();
+                        if let Some(record) =
+                            insert_nonoverlapping_live_record(&mut preserved, &mut occupied, record)
+                        {
+                            still_unresolved.push(record);
+                        }
+                    }
+                    still_unresolved
+                },
             );
-            let mut still_unresolved = Vec::new();
-            for record in unresolved {
-                let matches = detected
-                    .iter()
-                    .filter(|task| task.span.render_equivalent(&record.span))
-                    .collect::<Vec<_>>();
-                let [task] = matches.as_slice() else {
-                    still_unresolved.push(record);
-                    continue;
-                };
-                let delta = i64::from(task.start.row)
-                    .saturating_sub(record.placement.logical_band_start)
-                    .saturating_sub(i64::from(record.identity.source_start_offset));
-                let Some(mut record) = shift_live_record(
-                    &record,
-                    delta,
-                    self.grid_generation,
-                    self.detection_revision,
-                    self.layout_key,
-                    current_initial_context.clone(),
-                    Arc::clone(&current_inputs),
-                ) else {
-                    still_unresolved.push(record);
-                    continue;
-                };
-                if record.end.row != task.end.row
-                    || !alternate_borrowed_band_is_clear(&record, &current_inputs, &occupied)
-                {
-                    still_unresolved.push(record);
-                    continue;
-                }
-                record.start = task.start;
-                record.end = task.end;
-                record.span = task.span.clone();
-                if let Some(record) =
-                    insert_nonoverlapping_live_record(&mut preserved, &mut occupied, record)
-                {
-                    still_unresolved.push(record);
-                }
-            }
-            unresolved = still_unresolved;
         }
 
         self.live_invalidation_count = snapshot.invalidation_count;
@@ -6044,11 +6954,66 @@ impl DualPlaneSession {
         }
     }
 
-    fn bounded_alternate_repaint_detection(
+    /// The grid's own answer key, asked as cheaply as it can be: not one row is read and nothing is
+    /// allocated. See [`LiveGridAnswer`] for why each field is in it.
+    fn live_grid_answer(&self) -> LiveGridAnswer {
+        let entries = self.document.entries();
+        LiveGridAnswer {
+            screen: self.live_screen,
+            content_revision: self.live_content_revision,
+            generation: self.grid_generation,
+            detection_revision: self.detection_revision,
+            layout: self.layout_key,
+            options: self.detection_options(),
+            history_lines: entries.len(),
+            history_tail: entries.keys().next_back().copied(),
+            frozen_context: self.frozen_detection_context.clone(),
+            alternate_context: self.alternate_detection_context.clone(),
+            command_output: self.shell_integration_is_authoritative(self.live_screen),
+            cell_width_subpixels: self.cell_width_subpixels,
+            cell_height_subpixels: self.cell_height_subpixels,
+            ascii_baseline_subpixels: self.ascii_baseline_subpixels,
+        }
+    }
+
+    /// **What the live detector, reading this whole grid, owns — read once per grid.**
+    ///
+    /// This is the scan itself: every row the prefilter arms, resolved against the complete input
+    /// list and the real parser checkpoint, which is what lets it make the clip-witness and
+    /// phantom-opener decisions that only a reader of the whole line list can make. Two callers ask
+    /// it — the bounded re-detection a repaint window's close arms for records projection could not
+    /// place, and the off-band re-anchor's ownership question — and they ask it about the same grid
+    /// over and over: a close per read, a restore per feed turn. It is a pure function of the
+    /// inputs, the checkpoint and the options, so the answer is kept for exactly as long as all
+    /// three stand still, and a program repainting its screen with the bytes it already had asks it
+    /// once rather than once a keystroke.
+    /// The list is *lent* to `read_them` and put back, rather than handed over: it is a screenful
+    /// of resolved detection tasks, and copying it out per caller would be its own cost per close.
+    /// `read_them` cannot change the answer either — nothing it does feeds a byte to the grid, moves
+    /// the cursor or reflows — so the key taken before it is still the key afterwards.
+    fn live_grid_owned_blocks<T>(
+        &mut self,
+        inputs: &Arc<[LiveDetectionInput]>,
+        initial_context: &DetectionContext,
+        read_them: impl FnOnce(&mut Self, &[LiveDetectionTask]) -> T,
+    ) -> T {
+        let answer = self.live_grid_answer();
+        let blocks = match self.live_grid_blocks_memo.take() {
+            Some((remembered, blocks)) if remembered == answer => blocks,
+            _ => self.scan_live_grid(inputs, initial_context),
+        };
+        let read = read_them(self, &blocks);
+        self.live_grid_blocks_memo = Some((answer, blocks));
+        read
+    }
+
+    fn scan_live_grid(
         &self,
-        inputs: Arc<[LiveDetectionInput]>,
-        initial_context: DetectionContext,
+        inputs: &Arc<[LiveDetectionInput]>,
+        initial_context: &DetectionContext,
     ) -> Vec<LiveDetectionTask> {
+        let inputs = Arc::clone(inputs);
+        let initial_context = initial_context.clone();
         let armed = inputs
             .iter()
             .any(|input| may_arm_math(input.text.trim(), self.inline_math_bands, || input.site))
@@ -6115,6 +7080,7 @@ impl DualPlaneSession {
             dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
             invalidation_count: self.live_invalidation_count,
             snapshot_boundary: true,
+            live_content_revision: self.live_content_revision,
         })
     }
 
@@ -6529,112 +7495,179 @@ impl DualPlaneSession {
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(dropped);
     }
 
+    /// **Ask the grid once, not once a read.**
+    ///
+    /// This runs from every feed turn, and whether a record can be re-anchored is a pure function
+    /// of the grid and the record — so a record that could not be placed on this grid cannot be
+    /// placed on it a read later either, and every part of the asking is expensive: the whole grid
+    /// read into a fresh detection context, a parser walk over it, a substring search per record
+    /// and the detector's own verdict on what that search found. One record whose source is nowhere
+    /// on the screen paid all of it on every read, which under a program that repaints per
+    /// keystroke is every keystroke; the owner's recording sat with six.
+    ///
+    /// The memo is the question, not a countdown: no retry limit and no clock, because a record
+    /// whose source may legitimately scroll back into view has to be found in the very read that
+    /// brings it back, and both of those would eventually stop looking. [`LiveGridAnswer`] names
+    /// what the grid's half of the question is made of, and the queue and the resident bands are
+    /// the rest of it — a match is refused on a row another record holds, so a resident record
+    /// leaving its rows can turn a "no" into a "yes" with no cell changing.
+    ///
+    /// **And the question the door asks is the detector's own whole-grid answer, because nothing
+    /// less is the detector's answer.** `exact_live_source_match` is a substring search: it says
+    /// the bytes are on the grid and where they are, and nothing about whether that makes a block.
+    /// Something has to say the second thing, and a second copy of the detector's rules written
+    /// here drifts — it did, as a whitespace test, which refused a list item, a heading and a
+    /// single-line environment with trailing punctuation, and accepted a line indented four columns
+    /// that CommonMark calls code. The repair after that asked the detector, but over the rows the
+    /// match had found and with a checkpoint from a prefix walker, and *that* is still not the
+    /// detector's answer: the real scan reads the whole line list, and the two decisions it makes
+    /// by reading ahead — a `$$` consumed as a clipped closer whose opener is above the window, and
+    /// a phantom opener abandoned when the blocks below re-synchronise — cannot be made by a walker
+    /// that sees one line at a time and must stay that way for its own job. Where they part, they
+    /// part in the direction that matters: rows `x=y`, `$$`, an opening fence, `code`, `$$x^2$$`
+    /// and a closing fence give a scan that disowns row 4 as fenced and a walker that opens
+    /// `Dollars` at row 1 and never sees the fence at all, so the door seated a picture over text
+    /// the detector does not read as that block. The whole-grid scan is what decides ownership
+    /// here now, with the rows it owns each block at, and the walker's checkpoint and the
+    /// extent-limited re-run are gone: one rule, one owner. Its cost is one scan per grid, shared
+    /// with the bounded re-detection through [`Self::live_grid_owned_blocks`], where before it was
+    /// a bounded scan per record per read.
     fn restore_offscreen_decorations(&mut self) {
         if self.offscreen_decorations.is_empty() {
             return;
         }
+        let answer = self.live_grid_answer();
+        if self.offscreen_restore_memo.still_holds(
+            &answer,
+            &self.offscreen_decorations,
+            &self.live_decorations,
+        ) {
+            return;
+        }
+        self.offscreen_restore_pass_count = self.offscreen_restore_pass_count.saturating_add(1);
         let inputs = self.live_detection_context();
         let initial_context = self.live_initial_detection_context(&inputs);
-        let prefixes = live_grid_parser_prefixes(&inputs, initial_context.clone());
-        let mut occupied = self
-            .live_decorations
-            .values()
-            .flat_map(|record| record.band_start_row..=record.band_end_row)
-            .collect::<BTreeSet<_>>();
-        let mut remaining = VecDeque::new();
-        let mut relayout_tasks = Vec::new();
-        while let Some(mut record) = self.offscreen_decorations.pop_front() {
-            let Some((start, end, segments)) =
-                exact_live_source_match(&record.span.original_source, &inputs, &occupied)
-            else {
-                remaining.push_back(record);
-                continue;
-            };
-            if prefixes
-                .get(&start.row)
-                .is_some_and(DetectionContext::is_commonmark_code)
-            {
-                remaining.push_back(record);
-                continue;
-            }
-            let Some(logical_band_start) =
-                i64::from(start.row).checked_sub(i64::from(record.identity.source_start_offset))
-            else {
-                remaining.push_back(record);
-                continue;
-            };
-            let Some(logical_band_end) = logical_band_start
-                .checked_add(i64::from(record.identity.band_rows.saturating_sub(1)))
-            else {
-                remaining.push_back(record);
-                continue;
-            };
-            let Ok(band_start_row) = u32::try_from(logical_band_start) else {
-                remaining.push_back(record);
-                continue;
-            };
-            let Ok(band_end_row) = u32::try_from(logical_band_end) else {
-                remaining.push_back(record);
-                continue;
-            };
-            record.start = start;
-            record.end = end;
-            record.band_start_row = band_start_row;
-            record.band_end_row = band_end_row;
-            record.clipped_top_rows = 0;
-            record.clipped_bottom_rows = 0;
-            // The re-anchor proved this occurrence's *complete* source inside the live grid, so no
-            // part of it is frozen any more: a prefix carried over from the anchor it lost would
-            // name history lines this placement does not span.
-            record.frozen_prefix.clear();
-            record.staging_prefix.clear();
-            record.placement.logical_band_start = logical_band_start;
-            record.placement.occluded_source_rows = 0;
-            record.placement.occluded_visible_rows.clear();
-            record.generation = self.grid_generation;
-            record.detection_revision = self.detection_revision;
-            if record.rendered_layout != self.layout_key
-                && let Some(artifact) = record.artifact.take()
-            {
-                record.stale_artifact = Some(StaleArtifact {
-                    artifact,
-                    rendered_layout: record.rendered_layout,
-                });
-            }
-            record.layout = self.layout_key;
-            record.initial_context = initial_context.clone();
-            record.inputs = Arc::clone(&inputs);
-            record.span = record.identity.span.clone();
-            record.span.cell_segments = segments;
-            if record.artifact.is_none() && record.stale_artifact.is_some() {
-                relayout_tasks.push(LiveDetectionTask {
-                    candidate_row: record.end.row,
-                    screen: record.screen,
-                    grid_generation: record.generation,
-                    detection_revision: record.detection_revision,
-                    layout: record.layout,
-                    cell_width_subpixels: self.cell_width_subpixels.get(),
-                    cell_height_subpixels: self.cell_height_subpixels.get(),
-                    ascii_baseline_subpixels: self
-                        .ascii_baseline_subpixels
-                        .map_or(0, NonZeroI64::get),
-                    options: self.detection_options(),
-                    initial_context: record.initial_context.clone(),
-                    inputs: Arc::clone(&record.inputs),
-                    start: record.start,
-                    end: record.end,
-                    band_start_row: record.band_start_row,
-                    band_end_row: record.band_end_row,
-                    span: record.span.clone(),
-                    detection_complete: true,
-                    resolved: true,
-                    refused_table_rows: Vec::new(),
-                });
-            }
-            occupied.extend(record.band_start_row..=record.band_end_row);
-            self.live_decorations.insert(record.start.row, record);
-        }
-        self.offscreen_decorations = remaining;
+        let relayout_tasks =
+            self.live_grid_owned_blocks(&inputs, &initial_context, |session, owned| {
+                let mut occupied = session
+                    .live_decorations
+                    .values()
+                    .flat_map(|record| record.band_start_row..=record.band_end_row)
+                    .collect::<BTreeSet<_>>();
+                let mut remaining = VecDeque::new();
+                let mut relayout_tasks = Vec::new();
+                while let Some(mut record) = session.offscreen_decorations.pop_front() {
+                    let Some((start, end, segments)) =
+                        exact_live_source_match(&record.span.original_source, &inputs, &occupied)
+                    else {
+                        remaining.push_back(record);
+                        continue;
+                    };
+                    // The scan owns this block, at these rows, from this source — or the match the
+                    // substring search found is not this block and no picture goes on it.
+                    if !owned
+                        .iter()
+                        .any(|task| live_scan_owns_record_at(task, &record, start, end))
+                    {
+                        remaining.push_back(record);
+                        continue;
+                    }
+                    // **The band is the extent that was just matched, and the identity is re-based
+                    // onto it.** `band_rows` and the two source offsets are physical row counts of
+                    // the grid this occurrence was *proven* on, so a re-wrap makes every one of
+                    // them stale together: the old length reached past the new closing row and
+                    // blanked the ordinary text under the block, and an expression built from the
+                    // offsets instead is the same staleness in a different digit. A fresh detection
+                    // of this occurrence would own exactly its source extent
+                    // (`size_resolved_live_task_band`), so that is what a restore installs.
+                    //
+                    // Re-basing the identity is the other half and not a tidy-up:
+                    // `project_live_record` reads `source_rows[i].band_offset` and the span's
+                    // live-grid rows as offsets from the band's top, so leaving them measured
+                    // against a band that no longer exists would move every later projection of
+                    // this record by the difference.
+                    if !rebase_identity_onto_match(&mut record, start, end, &segments, &inputs) {
+                        remaining.push_back(record);
+                        continue;
+                    }
+                    let logical_band_start = i64::from(start.row);
+                    record.start = start;
+                    record.end = end;
+                    record.band_start_row = start.row;
+                    record.band_end_row = end.row;
+                    record.clipped_top_rows = 0;
+                    record.clipped_bottom_rows = 0;
+                    // The re-anchor proved this occurrence's *complete* source inside the live
+                    // grid, so no part of it is frozen any more: a prefix carried over from the
+                    // anchor it lost would name history lines this placement does not span.
+                    record.frozen_prefix.clear();
+                    record.staging_prefix.clear();
+                    record.placement.logical_band_start = logical_band_start;
+                    record.placement.occluded_source_rows = 0;
+                    record.placement.occluded_visible_rows.clear();
+                    record.generation = session.grid_generation;
+                    record.detection_revision = session.detection_revision;
+                    if record.rendered_layout != session.layout_key
+                        && let Some(artifact) = record.artifact.take()
+                    {
+                        record.stale_artifact = Some(StaleArtifact {
+                            artifact,
+                            rendered_layout: record.rendered_layout,
+                        });
+                    }
+                    record.layout = session.layout_key;
+                    record.initial_context = initial_context.clone();
+                    record.inputs = Arc::clone(&inputs);
+                    record.span = record.identity.span.clone();
+                    record.span.cell_segments = segments;
+                    if record.artifact.is_none() && record.stale_artifact.is_some() {
+                        relayout_tasks.push(LiveDetectionTask {
+                            candidate_row: record.end.row,
+                            screen: record.screen,
+                            grid_generation: record.generation,
+                            detection_revision: record.detection_revision,
+                            layout: record.layout,
+                            cell_width_subpixels: session.cell_width_subpixels.get(),
+                            cell_height_subpixels: session.cell_height_subpixels.get(),
+                            ascii_baseline_subpixels: session
+                                .ascii_baseline_subpixels
+                                .map_or(0, NonZeroI64::get),
+                            options: session.detection_options(),
+                            initial_context: record.initial_context.clone(),
+                            inputs: Arc::clone(&record.inputs),
+                            start: record.start,
+                            end: record.end,
+                            band_start_row: record.band_start_row,
+                            band_end_row: record.band_end_row,
+                            span: record.span.clone(),
+                            detection_complete: true,
+                            resolved: true,
+                            refused_table_rows: Vec::new(),
+                        });
+                    }
+                    occupied.extend(record.band_start_row..=record.band_end_row);
+                    session.live_decorations.insert(record.start.row, record);
+                }
+                session.offscreen_decorations = remaining;
+                relayout_tasks
+            });
+        // Remember what was asked. The two lists are refilled in the buffers the last pass left
+        // behind rather than collected afresh, so a pane sitting on an unresolvable record asks for
+        // no memory at all after its first pass.
+        let memo = &mut self.offscreen_restore_memo;
+        memo.answer = Some(answer);
+        memo.queued.clear();
+        memo.queued.extend(
+            self.offscreen_decorations
+                .iter()
+                .map(|record| record.identity.occurrence_id),
+        );
+        memo.occupied.clear();
+        memo.occupied.extend(
+            self.live_decorations
+                .values()
+                .map(|record| (record.band_start_row, record.band_end_row)),
+        );
         for task in relayout_tasks {
             self.enqueue_live_task(task);
         }
@@ -6713,6 +7746,11 @@ impl DualPlaneSession {
             state.last_damage_at = Some(observed_at);
             state.settled_revision = None;
             state.candidate_signature = None;
+            // Counted here, above every suppression below it, because it is a fact about the glass
+            // and not about what this session decided to do with it: a repaint window that skips
+            // the invalidation is exactly the case that has to know the cells moved.
+            self.live_content_revision = self.live_content_revision.wrapping_add(1);
+            self.rearm_live_bands_containing(row);
             // Suppression: inside a repaint window the proven raster keeps rendering over the rows
             // being rewritten instead of the record being torn down (and its source flashing
             // through). Alternate suppresses across a boundary repaint; primary suppresses across an
@@ -6731,6 +7769,38 @@ impl DualPlaneSession {
                 continue;
             }
             self.invalidate_live_row(row);
+        }
+    }
+
+    /// **A row that changed voids every answer that was derived from it.**
+    ///
+    /// Detection arms on a block's *opener* and marks that row with a signature meaning "a task for
+    /// this row is already out". `observe_live_damage` clears the signature of the row it is
+    /// looking at, which is the whole story when a block's opener is what changed — and none of it
+    /// when a producer rewrites a formula's body where it stands, leaving the two `$$` rows holding
+    /// the bytes they already had. Nothing then cleared the opener, so the replacement formula was
+    /// never asked about: the old picture went (correctly, its source is gone) and no new one ever
+    /// came. The signature cannot catch this on its own either, because the context it hashes is the
+    /// rows that may contain math and a plain body row is not one of them.
+    ///
+    /// A record's band is exactly the set of rows its answer was read from, so it is exactly the set
+    /// to re-arm. Said here, above the suppression a repaint window applies, because suppression is
+    /// about not tearing the *record* down while the screen is half-painted — it was never about
+    /// pretending the row did not change. A record that survives the window has its signature put
+    /// back by `finish_alternate_repaint` / `finish_primary_repaint`, which is that close's way of
+    /// saying the answer is still good; a record that does not survive leaves its rows armed, and
+    /// whatever is there now gets asked about.
+    ///
+    /// No allocation: the resident records are walked in place, and there are as many of them as
+    /// there are blocks on one screen.
+    fn rearm_live_bands_containing(&mut self, row: u32) {
+        let live_rows = &mut self.live_rows;
+        for record in self
+            .live_decorations
+            .values()
+            .filter(|record| record.band_start_row <= row && row <= record.band_end_row)
+        {
+            rearm_live_row_band(live_rows, record.band_start_row, record.band_end_row);
         }
     }
 
@@ -6769,6 +7839,60 @@ impl DualPlaneSession {
         }
     }
 
+    /// **A record retired for cause is retired from every copy of the census this session is
+    /// holding, and an open repaint window is holding one.**
+    ///
+    /// A window's snapshot is a clone of `live_decorations` taken when the window opened, and its
+    /// close projects that clone back onto the settled grid. So a removal that only reaches
+    /// `live_decorations` is undone a few reads later: the record is not among the carried, the
+    /// carried-first de-duplication has nothing to match it against, and projection's exact-row
+    /// proof *passes* — the whole point of these removals is that the rows are unchanged and the
+    /// verdict about them is not. The shell said those rows are the command line, or the detector
+    /// read them again and refused the block, or a frozen rendering superseded it; and at the
+    /// window's close the raster went back over them anyway. That is the one thing a window may
+    /// never do.
+    ///
+    /// Every removal that is a *verdict* comes through here, and the verdict is applied to the
+    /// window's floor as well as to the resident census. Damage-driven invalidation deliberately
+    /// does not: tearing a record down because its rows were rewritten is exactly what suppression
+    /// exists to defer, and `finish_*_repaint` re-judges those records against the settled grid.
+    ///
+    /// The off-band queue is struck by the same id for the same reason — a retired occurrence must
+    /// not come back through the re-anchor either — and both snapshot lists are struck, because a
+    /// record that was off-band when the window opened was cloned into `dormant_decorations` and
+    /// may since have been re-anchored into `live_decorations`.
+    ///
+    /// No allocation unless something is actually retired: `Vec::new` does not allocate, and these
+    /// doors say "nothing to retire" on almost every call.
+    fn retire_live_decorations(
+        &mut self,
+        mut doomed: impl FnMut(u32, &LiveDecorationRecord) -> bool,
+    ) {
+        let mut retired = Vec::new();
+        self.live_decorations.retain(|row, record| {
+            if doomed(*row, record) {
+                retired.push(record.identity.occurrence_id);
+                false
+            } else {
+                true
+            }
+        });
+        if retired.is_empty() {
+            return;
+        }
+        let struck =
+            |record: &LiveDecorationRecord| !retired.contains(&record.identity.occurrence_id);
+        for snapshot in self
+            .primary_repaint_snapshot
+            .iter_mut()
+            .chain(self.alternate_repaint_snapshot.iter_mut())
+        {
+            snapshot.decorations.retain(struck);
+            snapshot.dormant_decorations.retain(struck);
+        }
+        self.offscreen_decorations.retain(struck);
+    }
+
     fn invalidate_all_live_decorations(&mut self) {
         if self.primary_resize_preservation_active() {
             // During a primary resize transaction a wipe (reflow, reflow-capture into history, or a
@@ -6792,7 +7916,18 @@ impl DualPlaneSession {
         }
     }
 
-    fn enqueue_live_task(&mut self, task: LiveDetectionTask) {
+    /// Queue one live scan, or refuse it because the queue is full.
+    ///
+    /// **A full queue refuses the newcomer; it never drops what it is already holding.** Dropping
+    /// the oldest entry was silent in a way the caller could not see: a row is skipped while its
+    /// `candidate_signature` says a task for it is out, and the dropped task took no signature with
+    /// it, so the row was never armed again. One PTY write of dense formula output arms every row in
+    /// a single pass, so a burst past the cap left its first rows at source indefinitely.
+    ///
+    /// The caller clears refused signatures and resumes admission at the first refusal on the
+    /// next pass. This bounded round-robin cursor survives context-signature changes, so repeatedly
+    /// rearmed rows cannot overtake waiting rows, and admission also returns to a changing head.
+    fn enqueue_live_task(&mut self, task: LiveDetectionTask) -> EnqueueOutcome {
         if let Some(index) = self
             .live_tasks
             .iter()
@@ -6801,9 +7936,10 @@ impl DualPlaneSession {
             self.live_tasks.remove(index);
         }
         if self.live_tasks.len() == WORKER_QUEUE_CAP {
-            self.live_tasks.pop_front();
+            return EnqueueOutcome::RetryOnIdle;
         }
         self.live_tasks.push_back(task);
+        EnqueueOutcome::Queued
     }
 
     pub fn run_workers(&mut self) {
@@ -6818,7 +7954,8 @@ impl DualPlaneSession {
                             if resolve_live_detection_task(&mut task) {
                                 let artifact = live_placeholder(&task);
                                 size_resolved_live_task_band(&mut task);
-                                self.apply_live_worker_completion(task, Some(artifact), None);
+                                let _ =
+                                    self.apply_live_worker_completion(task, Some(artifact), None);
                             }
                         }
                     },
@@ -6831,8 +7968,8 @@ impl DualPlaneSession {
                         self.complete_inline_image_scale(scaled);
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let exists = path_exists(&path);
-                        self.complete_path_verification(path, exists);
+                        let verdict = verify_path(&path);
+                        self.complete_path_verification(path, verdict);
                     }
                 }
             }
@@ -7103,9 +8240,52 @@ impl DualPlaneSession {
             task.band_start_row = task.start.row;
             task.band_end_row = task.end.row;
         }
-        let accepted = self.apply_live_worker_completion(task.clone(), artifact, failure_reason);
-        if !accepted {
+        let outcome = self.apply_live_worker_completion(task.clone(), artifact, failure_reason);
+        let accepted = outcome.is_none();
+        if let Some(reason) = outcome {
             self.stale_results = self.stale_results.saturating_add(1);
+            // **A scan refused because its rows changed under it re-asks the question.** This is the
+            // same sentence `rearm_live_bands_containing` says about a resident record, said about
+            // work that is still in flight — and it has to be said separately, because before the
+            // first completion lands there is no record, only the scan, and the scan is the only
+            // thing that knows which rows its answer was read from. A producer that rewrites a
+            // formula's body while the first scan of that block is still out leaves the two `$$`
+            // rows holding the bytes they already had, so the opener went on claiming an answer was
+            // out for it while the answer was being thrown away here. Nothing asked again and the
+            // formula stayed at source for as long as the screen did.
+            //
+            // Only this refusal. The rest already re-arm wholesale where they happen — a screen
+            // switch rebuilds every row's state, `redetect` and `invalidate_layout` clear every
+            // signature, a reflow replaces `live_rows` outright — and `NoLongerDetected` means the
+            // rows still hold their bytes, so whatever changed the verdict changed a row the context
+            // signature hashes and the candidate is armed by that.
+            if reason == LiveCompletionRefusal::SourceChanged {
+                let (first, last) = live_task_dependency_rows(&task);
+                // A scan older than an answer that has already been accepted for these rows has
+                // nothing to re-ask: the record standing on them *is* the newer answer, and it got
+                // there by being read from the grid as it is now. The queue's own de-duplication
+                // only reaches candidates still waiting to go out, never work already with the
+                // renderer, so two scans of one band can be in flight at once and the loser arrives
+                // last. Re-arming for it would schedule a scan whose answer is already on the
+                // screen.
+                let answered = self
+                    .live_decorations
+                    .values()
+                    .any(|record| record.band_start_row <= first && last <= record.band_end_row);
+                if !answered {
+                    rearm_live_row_band_after_refusal(&mut self.live_rows, first, last);
+                }
+            }
+            // A refused completion used to leave nothing behind but a counter nobody prints, so a
+            // formula that stayed at source because its raster was thrown away looked in the trace
+            // exactly like a formula that was never scanned. It is the one outcome a recording of
+            // this defect needs to show, so it says so.
+            if switched_on("BT_PERF_TRACE") {
+                bt_viewport::trace::line(format!(
+                    "BT_PERF_TRACE live_math_result_dropped row={} candidate_row={} reason={reason}",
+                    task.start.row, task.candidate_row,
+                ));
+            }
         } else if switched_on("BT_PERF_TRACE")
             && let Some(elapsed) = render_time
         {
@@ -7146,45 +8326,59 @@ impl DualPlaneSession {
         }
     }
 
+    /// Apply one live completion, or say why it was refused. `None` is "applied".
     fn apply_live_worker_completion(
         &mut self,
         task: LiveDetectionTask,
         artifact: Option<PlaceholderArtifact>,
         failure_reason: Option<String>,
-    ) -> bool {
-        if task.screen != self.live_screen
-            || task.grid_generation != self.grid_generation
-            || task.detection_revision != self.detection_revision
-            || task.layout != self.layout_key
-        {
-            return false;
+    ) -> Option<LiveCompletionRefusal> {
+        if task.screen != self.live_screen {
+            return Some(LiveCompletionRefusal::Screen);
+        }
+        if task.grid_generation != self.grid_generation {
+            return Some(LiveCompletionRefusal::GridGeneration);
+        }
+        if task.detection_revision != self.detection_revision {
+            return Some(LiveCompletionRefusal::DetectionRevision);
+        }
+        if task.layout != self.layout_key {
+            return Some(LiveCompletionRefusal::Layout);
         }
         // Only the source rows and borrowed row band are byte/revision dependencies. The rest of
         // the 1,024-line detector snapshot is semantic context: rerunning detection below catches
         // fence/delimiter state changes without rejecting ordinary spinner or status-line churn.
         let current_inputs = self.live_detection_context();
-        if !live_task_is_current(&task, current_inputs) {
-            return false;
+        if let Some(refusal) = live_task_is_current(&task, current_inputs) {
+            return Some(refusal);
         }
         if !task.resolved {
-            self.live_decorations.retain(|_, record| {
-                !(record.start.row <= task.candidate_row && task.candidate_row <= record.end.row)
+            // **A candidate that merely falls inside another block's band proves nothing about that
+            // block.** A block is proven, and disproved, by the scan at the row that closes it —
+            // that row is `end.row`, set from the occurrence's last cell segment — so a candidate is
+            // a verdict on exactly the block that closes where it stands. Every delimiter-looking
+            // row arms, and a display block's own body rows look like delimiters
+            // (`\begin{pmatrix}...\end{pmatrix}` is an environment opener wherever it appears), so
+            // a rule phrased over the whole band let a body row's unresolved completion take the
+            // block above it down and made the block's survival a question of which completion
+            // landed last. A row whose *bytes* changed is a different matter and is torn down where
+            // that is known, in `invalidate_live_row`.
+            //
+            // The second clause is the live half of `retire_refused_table`, and for its reason: a
+            // table drawn from rows that were on the grid before this one arrived stands above the
+            // candidate rather than over it, so the first clause never reaches it.
+            self.retire_live_decorations(|row, record| {
+                record.end.row == task.candidate_row || task.refused_table_rows.contains(&row)
             });
-            // The live half of `retire_refused_table`, and for its reason: a table drawn from rows
-            // that were on the grid before this one arrived stands above the candidate rather than
-            // over it, so the retain above never reaches it.
-            for row in &task.refused_table_rows {
-                self.live_decorations.remove(row);
-            }
-            return true;
+            return None;
         }
         if self.semantic_input_overlaps_live(task.screen, task.start, task.end) {
-            self.live_decorations.remove(&task.start.row);
-            return true;
+            self.retire_live_decorations(|row, _| row == task.start.row);
+            return None;
         }
         if artifact.is_none() && failure_reason.is_none() {
-            self.live_decorations.remove(&task.start.row);
-            return true;
+            self.retire_live_decorations(|row, _| row == task.start.row);
+            return None;
         }
         if self.new_live_decoration_is_cursor_suppressed(&task) {
             if let Some(state) = self.live_rows.get_mut(task.candidate_row as usize) {
@@ -7193,7 +8387,7 @@ impl DualPlaneSession {
                 // leaves its WRAPLINE-linked logical line.
                 state.candidate_signature = None;
             }
-            return true;
+            return None;
         }
         // Instance state, carried across a re-detection of the block that is already standing on
         // this row: the same rows, the same source, the same mode is the same occurrence, and the
@@ -7215,13 +8409,14 @@ impl DualPlaneSession {
                     record.vertical_scroll_px,
                 )
             });
-        self.live_decorations
-            .retain(|_, record| record.end.row < task.start.row || record.start.row > task.end.row);
+        self.retire_live_decorations(|_, record| {
+            record.end.row >= task.start.row && record.start.row <= task.end.row
+        });
         let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
             remembered.unwrap_or((false, false, 0, 0));
         let occurrence_id = LiveMathOccurrenceId(self.next_live_occurrence_id);
         let Some(identity) = proven_live_occurrence(&task, occurrence_id) else {
-            return false;
+            return Some(LiveCompletionRefusal::Unproven);
         };
         let frozen_prefix = frozen_prefix_ids(&task.span);
         self.next_live_occurrence_id = self.next_live_occurrence_id.saturating_add(1);
@@ -7267,7 +8462,7 @@ impl DualPlaneSession {
                 failure_reason,
             },
         );
-        true
+        None
     }
 
     /// Take down a drawn table whose rows this scan has just proved are not a table after all.
@@ -7390,10 +8585,25 @@ impl DualPlaneSession {
         // sub-block; suppress any stale standalone render left on one — which the certified-frontier
         // recovery can now produce when the enclosing `$$` opener was a phantom until its forward
         // block landed — so the block's artifact does not double-render over an inner environment.
-        if applied && rendered {
+        //
+        // **However the render came back** (review 2026-09-18 round 2, P1). A block's extent is a
+        // fact of the *detection*: where it begins, where it ends and which rows it swallows are
+        // all settled before a raster is asked for, and a raster that could not be produced does
+        // not give any of them back. Requiring pixels here left a second `Failed` record standing
+        // *inside* a failed outer block -- the environment proven on its own before the enclosing
+        // delimiters were recovered from a phantom opener -- and two overlapping records is
+        // exactly what [`Self::block_that_owns`] cannot answer over: it walks back to the first
+        // current multi-row block and lets it decide, on the strength of blocks not overlapping.
+        // It met the inner one, saw it end before the outer's closing row, and said nothing owns
+        // that row; the closer then re-armed on every frame and bought a whole scan and a whole
+        // render attempt that failed the same way.
+        if applied {
             self.suppress_block_interior(task.transcript_id, task.block_end);
+        }
+        if applied && rendered {
             // The frozen pipeline has now paired this block on durable transcript ids. Any live
-            // record still bridging over those lines is a superseded duplicate of it.
+            // record still bridging over those lines is a superseded duplicate of it -- and that
+            // one *is* about the pixels: what supersedes a live bridge is a frozen raster.
             self.retire_stale_bridge_prefixes(false);
         }
         if applied {
@@ -8011,12 +9221,11 @@ impl DualPlaneSession {
     ///
     /// The document is untouched by this: the block is still the one entry with an artifact height
     /// it was, and [`Self::toggle_math_source`] is still the only thing that changes which rows
-    /// this session holds. What this moves is the two numbers a frame is built from — the band's
-    /// height, which the projection reads where it reads any artifact's, and how solid the picture
-    /// is drawn, which the placement carries to the renderer — so that the frame on which the
-    /// document really changes is the frame the last presented one already was.
+    /// this session holds. Presentation carries the travelling height, picture strength and face
+    /// progress, plus the source width already measured with its rows. The renderer derives the
+    /// changing band's dimensions from those facts; the document switches only at an endpoint.
     ///
-    /// `None` puts both back, which is what the end of the change and every interruption of it do.
+    /// `None` puts presentation back, which is what the end of the change and every interruption of it do.
     pub fn set_math_toggle_presentation(&mut self, presentation: Option<MathTogglePresentation>) {
         self.math_toggle = presentation;
     }
@@ -8698,12 +9907,15 @@ impl DualPlaneSession {
             // it. Beside the other presentation facts this loop stamps on a placement
             // (`toolbar_visible`, the interior scroll, the clip), because it is one of them: the
             // document says the block is a picture, and the gesture says how much of one.
-            let picture_opacity_milli = self
+            if let Some(presentation) = self
                 .math_toggle
                 .as_ref()
                 .filter(|presentation| presentation.anchor.same_block(&placement.anchor))
-                .map_or(1000, |presentation| presentation.picture_opacity_milli);
-            placement.picture_opacity_milli = picture_opacity_milli;
+            {
+                placement.picture_opacity_milli = presentation.picture_opacity_milli;
+                placement.face_milli = Some(presentation.face_milli);
+                placement.source_width_cells = presentation.source_width_cells;
+            }
             match &placement.anchor {
                 MathBlockAnchor::History { start, .. } => {
                     let Some(record) = self.decorations.get(start) else {
@@ -8819,6 +10031,7 @@ impl DualPlaneSession {
                 // drawn at any strength, and the one the change cross-fades is the Rendered
                 // placement it is replacing.
                 picture_opacity_milli: 1000,
+                face_milli: None,
                 // Filled in for every placement at once, after the last of them exists.
                 selection_spans: Vec::new(),
             });
@@ -8911,6 +10124,7 @@ impl DualPlaneSession {
                 // drawn at any strength, and the one the change cross-fades is the Rendered
                 // placement it is replacing.
                 picture_opacity_milli: 1000,
+                face_milli: None,
                 // Filled in for every placement at once, after the last of them exists.
                 selection_spans: Vec::new(),
             });
@@ -9006,6 +10220,7 @@ impl DualPlaneSession {
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
                     picture_opacity_milli: 1000,
+                    face_milli: None,
                     selection_spans: Vec::new(),
                 });
             }
@@ -9106,6 +10321,7 @@ impl DualPlaneSession {
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
                     picture_opacity_milli: 1000,
+                    face_milli: None,
                     selection_spans: Vec::new(),
                 });
             }
@@ -10515,8 +11731,7 @@ impl DualPlaneSession {
                 detection_revision: record.detection_revision,
                 candidate_staging,
                 candidate_start: None,
-                expected_frozen_lines: u64::try_from(record.identity.source_rows.len())
-                    .unwrap_or(u64::MAX),
+                expected_source_rows: record.identity.source_rows.len(),
                 show_source: record.show_source,
                 prefix_staging: captured_source
                     .iter()
@@ -10629,20 +11844,31 @@ impl DualPlaneSession {
                     return None;
                 }
                 let start = pending.candidate_start?;
-                let expected_end = start
-                    .0
-                    .checked_add(pending.expected_frozen_lines.saturating_sub(1))?;
-                (expected_end <= closing_id.0).then_some((index, start, expected_end))
+                // The occurrence is ready to cross when every row it was proven on has been
+                // captured and every captured row has frozen. Where it ends in history is then the
+                // line the last of those rows landed in — read off the lines that actually closed,
+                // never counted forward from the first, because rows and lines are not the same
+                // unit and a wrapped source row makes them differ.
+                if pending.prefix_staging.len() != pending.expected_source_rows
+                    || pending.finalized_prefix_staging != pending.prefix_staging.len()
+                {
+                    return None;
+                }
+                Some((index, start, pending.frozen_prefix.last()?.0))
             })
             .next();
         let Some((pending_index, candidate_start, expected_end)) = matured else {
+            self.expire_unreachable_live_handoffs(closing_id);
             return;
         };
 
-        // The live detector already proved that this artifact begins at candidate_start and spans
-        // exactly expected_frozen_lines detector inputs. Re-run the authoritative detector only
-        // over that closed candidate, never over unrelated frozen history. A mismatch expires the
-        // handoff; the normal frozen worker remains the source of truth.
+        // The live detector already proved that this artifact begins at candidate_start and that
+        // every row it was proven on has now frozen into the lines up to expected_end. Re-run the
+        // authoritative detector only over that closed candidate, never over unrelated frozen
+        // history. A mismatch expires the handoff; the normal frozen worker remains the source of
+        // truth. The equality below is not redundant: a candidate that completed while the layout
+        // or the detection revision had moved on is only looked at again once they match, and by
+        // then its last line is behind the one closing now.
         let block = (expected_end == closing_id.0)
             .then(|| {
                 detect_math_blocks_with_sites(
@@ -10724,15 +11950,52 @@ impl DualPlaneSession {
         self.retire_offscreen_records_replaced_by_frozen();
     }
 
+    /// **A candidate that did not finish freezing where it still could is not this occurrence.**
+    /// Its rows stopped arriving, or the text under them changed, and a pending kept past that point
+    /// would let some much later line that happens to read the same way prove a block it never was.
+    /// The bound is the occurrence's own proven row count, because a line occupies at least one grid
+    /// row: an occurrence proven on N rows cannot end more than N-1 lines after the one it starts
+    /// in. It is only ever a bound — [`Self::try_handoff_live_artifact`] takes the end from the
+    /// lines that actually closed.
+    fn expire_unreachable_live_handoffs(&mut self, closing_id: TranscriptId) {
+        self.pending_live_handoffs.retain(|pending| {
+            let Some(start) = pending.candidate_start else {
+                return true;
+            };
+            let furthest = start.0.saturating_add(
+                u64::try_from(pending.expected_source_rows.saturating_sub(1)).unwrap_or(u64::MAX),
+            );
+            closing_id.0 <= furthest
+        });
+    }
+
     fn schedule_detection(&mut self, id: TranscriptId) {
+        // Where the line stood in the command lifecycle is decided here, once, and written onto
+        // the line: this is the moment it enters history, so the region that proves it is alive
+        // and its anchors still resolve. Every later reader — the re-arm after a resize, the
+        // frozen worker's inputs, a re-seat that was declined — takes the record instead of asking
+        // the bookkeeping again. See [`bt_doc::HistoryEntry::inline_site`].
         let Some(entry) = self.document.entries().get(&id) else {
             return;
         };
-        let armed_for_math = may_arm_math(&entry.line.text, self.inline_math_bands, || {
-            inline_math_site(ScreenId::Primary, self.command_output_covers_history(id))
-        }) || may_arm_table(&entry.line.text, || {
-            self.history_line_above_continues_paragraph(id)
-        });
+        // Read off the line's own cells, which is where the writes that made them recorded it —
+        // the same fold the live grid takes of the same rows, so a line cannot change who wrote it
+        // by scrolling. Asking the OSC 133 bookkeeping where the line's coordinates fell is the
+        // thing this replaces: a closed region goes on covering the coordinates it closed over, so
+        // a prompt printed inside them was refused on the grid and accepted the moment it froze.
+        let site = inline_math_site(
+            ScreenId::Primary,
+            self.shell_integration_is_authoritative(ScreenId::Primary)
+                && entry.line.command_output_write,
+        );
+        self.document.set_inline_site(id, site);
+        let Some(entry) = self.document.entries().get(&id) else {
+            return;
+        };
+        let armed_for_math = may_arm_math(&entry.line.text, self.inline_math_bands, || site)
+            || may_arm_table(&entry.line.text, || {
+                self.history_line_above_continues_paragraph(id)
+            });
         let versions = VersionStamp {
             source: entry.line.source_generation,
             detection: self.detection_revision,
@@ -10895,10 +12158,8 @@ impl DualPlaneSession {
                 })
             })
             .map(|(start, _)| *start)
-            .collect::<Vec<_>>();
-        for start in superseded {
-            self.live_decorations.remove(&start);
-        }
+            .collect::<BTreeSet<_>>();
+        self.retire_live_decorations(|row, _| superseded.contains(&row));
         let document = &self.document;
         let snapshots = self
             .primary_repaint_snapshot
@@ -11161,6 +12422,14 @@ impl DualPlaneSession {
     /// would see the closing fragment alone and could not join anything, and whether a formula
     /// renders would depend on where the last `$$` happened to be. One line, and only for a
     /// candidate whose own text says it could be a closing fragment at all.
+    ///
+    /// **And that last question is the detector's, not one of this file's own.** It is asked
+    /// through `bt_detect::may_close_row_split_inline_math`, which is the join's own closer test
+    /// with the row above left out, so a pair the worker would join is a pair this window always
+    /// reaches back for. Re-deriving it here once cost the reported sentence its own formula: a
+    /// narrower reading refused the closing row for carrying a second, whole formula behind the
+    /// closer, the window opened at the closing row, and the fragment above was never in it
+    /// (release review 2026-09-17, X-6).
     fn frozen_inline_join_window_start(&self, candidate: TranscriptId) -> Option<TranscriptId> {
         if !self.inline_math_bands {
             return None;
@@ -11247,7 +12516,90 @@ impl DualPlaneSession {
         .then_some(inputs)
     }
 
+    /// **The block that already owns this row**, asked of the records and never of the picture
+    /// (owner's report 2026-09-18, review 2026-09-18 P1).
+    ///
+    /// A block is proven by its **closing** delimiter and never by its opener — the opener's own
+    /// window cannot see the end of it — so `apply_worker_completion` finishes on a candidate that
+    /// is not the record it completed, and hands that candidate back at
+    /// `DecorationLifecycle::None`, which is the *armed* state. While the block wears its picture
+    /// nothing came of that: the artifact covers its rows, their cells carry the block's own
+    /// anchor, and no row of it is a visible history id for the scheduler to find. The moment the
+    /// reader presses `‹›` every row is terminal text on its own id again, and the closing row
+    /// armed itself on every frame — a whole scan and a whole LaTeX raster per frame, rendered and
+    /// thrown away, for a window nobody was touching. Measured on the owner's machine: 638 renders
+    /// of one block at ~7ms apiece, which is the halting the change of face was reported for and
+    /// which left every other formula in the window queued behind it.
+    ///
+    /// **The record owns its rows whether or not the picture draws them.** A first attempt read
+    /// the ownership off `frame.math_blocks`, and the review's first probe is why that is not the
+    /// fact: `decorate_math_frame` needs the block's *opener* row on the frame, so a source face
+    /// scrolled two rows down publishes no placement at all while its body and its closing row are
+    /// both on screen — and the gate had nothing to refuse with. The record layer has no such
+    /// horizon: `block_end` names the last row this block covers, in transcript ids, and that is
+    /// true of a block with every row off screen.
+    ///
+    /// **`Ready` and `Failed` both answer, and nothing else does.** Both are computed from one
+    /// source at one layout key and one detector revision, and a change to any of the three puts
+    /// the owner back to `None` — so on that frame its closing row arms again and the block is
+    /// proven, or tried, afresh. That liveness is what this refusal must not cost: a formula that
+    /// could not be compiled at one scale is owed a look at the next one, and a block whose pixels
+    /// were measured for a window that has since been resized is owed a new raster. (Stale layout
+    /// pixels are not `Ready`: `DecorationRecord::layout_changed` demotes to `None`.)
+    ///
+    /// **Bounded by the same window a scan is.** The walk stops at the first *current* multi-row
+    /// block it meets, because blocks do not overlap — one that ends before this row is proof that
+    /// nothing earlier can span it — and otherwise at [`MAX_MATH_SOURCE_BYTES`], which is the cap
+    /// on how far back a block covering this row could possibly start. It is asked once per
+    /// candidate that is actually about to be armed, which is the same row `schedule_scan` is
+    /// already building a window of that size for, so the ordinary picture path — whose rows are
+    /// not visible ids at all — asks nothing and allocates nothing (release bar 4).
+    fn block_that_owns(&self, id: TranscriptId) -> Option<&DecorationRecord> {
+        let mut source_bytes = 0usize;
+        for (start, record) in self.decorations.range(..id).rev() {
+            if matches!(
+                record.decoration,
+                DecorationLifecycle::Ready | DecorationLifecycle::Failed
+            ) && let Some(end) = record.block_end
+                && end > *start
+            {
+                return (end >= id).then_some(record);
+            }
+            source_bytes = source_bytes
+                .saturating_add(
+                    self.document
+                        .entries()
+                        .get(start)
+                        .map_or(0, |entry| entry.line.text.len()),
+                )
+                .saturating_add(1);
+            if source_bytes > MAX_MATH_SOURCE_BYTES {
+                return None;
+            }
+        }
+        None
+    }
+
     fn schedule_scan(&mut self, candidate_id: TranscriptId) {
+        // **The cheapest question first** (review 2026-09-18 round 2, P2): a line that already has
+        // an answer of its own, or one in flight, is refused by the two record-level schedulers
+        // below whatever else is true of it, and asking them here rather than at the end is what
+        // keeps a screen of settled prose from paying for the ownership walk on every frame.
+        // `DecorationRecord::may_be_scanned` is their own condition, named rather than copied.
+        if self
+            .decorations
+            .get(&candidate_id)
+            .is_none_or(|record| !record.may_be_scanned())
+        {
+            return;
+        }
+        // **A row a proven block already owns is not a candidate of its own** — see
+        // [`Self::block_that_owns`], which is the whole of the reason. Ahead of everything below,
+        // because that is the cost this refusal exists to avoid: a scan window built out of the
+        // document's own lines, and behind it a worker that lays the formula out again.
+        if self.block_that_owns(candidate_id).is_some() {
+            return;
+        }
         let detection_options = self.detection_options();
         let Some(candidate_context) = self.frozen_detection_contexts.get(&candidate_id) else {
             return;
@@ -11921,6 +13273,12 @@ fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> Placeholder
             &task.span.render_source,
             task.versions.layout,
             task.versions.detection,
+            [
+                task.cell_width_subpixels,
+                task.cell_height_subpixels,
+                task.ascii_baseline_subpixels,
+            ],
+            &raster.inline_runs,
         ),
         kind: task.span.kind,
         block_end: task.block_end,
@@ -11944,6 +13302,12 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
             &task.span.render_source,
             task.layout,
             task.detection_revision,
+            [
+                task.cell_width_subpixels,
+                task.cell_height_subpixels,
+                task.ascii_baseline_subpixels,
+            ],
+            &raster.inline_runs,
         ),
         kind: task.span.kind,
         block_end: TranscriptId(0),
@@ -11958,12 +13322,35 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
     }
 }
 
+/// The name a raster is uploaded, cached and drawn under.
+///
+/// **It has to identify the whole recipe, because the renderer uploads by name and never looks at
+/// what it already holds.** For a display block the source is the recipe. For an inline composite
+/// it is not: the composite is one raster per logical line with each run blitted at an x that
+/// follows from the prose in front of it, while `render_source` is only the run sources joined with
+/// "; " — so two lines carrying the same formulas with prose of different widths named one texture,
+/// and whichever was admitted first supplied the picture for both. The second line then drew its
+/// later runs at the first line's offsets, over its own prose, with its own source cells already
+/// cleared.
+///
+/// So the runs' own geometry goes in: which run, how far into the raster, and how wide. That is the
+/// part of the recipe the source cannot imply, and it is deliberately the *geometry* rather than
+/// the prose — two lines whose prose differs but whose runs land in the same cells really are the
+/// same picture, and should go on sharing one.
+///
+/// `metrics` is the cell box the raster was fitted to — width, height and ASCII baseline in
+/// subpixels. They are the task's and not the layout's: a `LayoutKey` carries the font size, the
+/// DPI and the theme, and a caller may hand the session a different row height or baseline under
+/// one of those. The raster's own vertical placement follows from them, so they belong to the
+/// recipe.
 fn shared_math_artifact_key(
     kind: BlockKind,
     mode: MathMode,
     source: &str,
     layout: LayoutKey,
     detection: DetectionRevision,
+    metrics: [i64; 3],
+    inline_runs: &[InlineRunPlacement],
 ) -> String {
     let mut hasher = DefaultHasher::new();
     kind.hash(&mut hasher);
@@ -11971,6 +13358,12 @@ fn shared_math_artifact_key(
     source.hash(&mut hasher);
     layout.hash(&mut hasher);
     detection.hash(&mut hasher);
+    metrics.hash(&mut hasher);
+    for run in inline_runs {
+        run.run.hash(&mut hasher);
+        run.x_px.hash(&mut hasher);
+        run.width_px.hash(&mut hasher);
+    }
     format!("math:{:016x}", hasher.finish())
 }
 
@@ -11982,6 +13375,14 @@ fn live_placeholder(task: &LiveDetectionTask) -> PlaceholderArtifact {
             &task.span.render_source,
             task.layout,
             task.detection_revision,
+            [
+                task.cell_width_subpixels,
+                task.cell_height_subpixels,
+                task.ascii_baseline_subpixels,
+            ],
+            // A placeholder is one grey pixel and has no runs in it yet; its name is its own and is
+            // replaced whole by the raster's when the raster lands.
+            &[],
         ),
         kind: task.span.kind,
         block_end: TranscriptId(0),
@@ -12316,6 +13717,69 @@ fn proven_live_occurrence(
     })
 }
 
+/// Re-base a preserved occurrence's identity onto the extent it has just been matched at.
+///
+/// Every number in [`ProvenLiveOccurrence`] that is measured in rows is measured **relative to the
+/// band**, and a re-wrap gives the same source a different number of physical rows — so after a
+/// match at a new width, `band_rows`, both source offsets, each proven row's `band_offset` and each
+/// live-grid segment row are all describing a band that no longer exists. They are rebuilt here
+/// from the match itself: the rows are the ones the grid holds now, and the band is their extent.
+///
+/// What is deliberately *not* touched is the occurrence's birth — `occurrence_id`,
+/// `created_generation` and `created_start`. That is what makes two identical formulas two
+/// occurrences, and a reflow does not give a block a new identity, only new coordinates.
+///
+/// `false` when the grid cannot answer for one of the matched rows, which leaves the record parked
+/// rather than re-anchored on a half-rebuilt identity.
+fn rebase_identity_onto_match(
+    record: &mut LiveDecorationRecord,
+    start: GridPoint,
+    end: GridPoint,
+    segments: &[MathCellSegment],
+    inputs: &[LiveDetectionInput],
+) -> bool {
+    let Some(band_rows) = end
+        .row
+        .checked_sub(start.row)
+        .and_then(|rows| rows.checked_add(1))
+    else {
+        return false;
+    };
+    let mut source_rows = Vec::with_capacity(band_rows as usize);
+    for row in start.row..=end.row {
+        let Some(input) = live_grid_input(inputs, row) else {
+            return false;
+        };
+        source_rows.push(ProvenLiveRow {
+            band_offset: row - start.row,
+            text: input.text.clone(),
+            continues: input.continues,
+            cell_boundaries: input.cell_boundaries.clone(),
+        });
+    }
+    let mut span = record.identity.span.clone();
+    span.cell_segments = segments.to_vec();
+    for segment in &mut span.cell_segments {
+        if let MathSourceLine::LiveGrid(row) = &mut segment.source_line {
+            let Some(offset) = row.checked_sub(start.row) else {
+                return false;
+            };
+            *row = offset;
+        }
+    }
+    record.identity.band_rows = band_rows;
+    record.identity.source_start_offset = 0;
+    record.identity.source_end_offset = band_rows - 1;
+    record.identity.source_rows = source_rows;
+    record.identity.span = span;
+    true
+}
+
+/// Find a record's proven source in the live grid, and say where.
+///
+/// A substring search: it says the bytes are there and where they are, and nothing about whether
+/// this is a block. The whole-grid scan `DualPlaneSession::live_grid_owned_blocks` asks that, of
+/// the detector.
 fn exact_live_source_match(
     source: &str,
     inputs: &[LiveDetectionInput],
@@ -12791,6 +14255,31 @@ fn may_arm_table(text: &str, previous_continues_paragraph: impl FnOnce() -> bool
     bt_detect::table::is_row_shaped(text) && previous_continues_paragraph()
 }
 
+/// **Does this block the live scan owns *is* the record the re-anchor is holding, here?**
+///
+/// The five span fields are the ones a live occurrence is identified by everywhere else in this
+/// file — the bytes the renderer was given, the bytes the user typed, which delimiter opened it,
+/// display or inline, and math or table — and the rows are the rows: a scan that owns the same
+/// source somewhere else on the grid says nothing about the place the substring search found.
+/// Inline records go through the same test as display ones and always did: an inline line is one
+/// occurrence with its runs inside it, so there is one owned block per line either way, and the
+/// drift this test replaces is the scanner's whole-list reading, which decides a line's ownership
+/// whatever mode it is in.
+fn live_scan_owns_record_at(
+    task: &LiveDetectionTask,
+    record: &LiveDecorationRecord,
+    start: GridPoint,
+    end: GridPoint,
+) -> bool {
+    task.start.row == start.row
+        && task.end.row == end.row
+        && task.span.original_source == record.span.original_source
+        && task.span.render_source == record.span.render_source
+        && task.span.delimiter_kind == record.span.delimiter_kind
+        && task.span.mode == record.span.mode
+        && task.span.kind == record.span.kind
+}
+
 fn empty_live_math_span() -> MathSpan {
     MathSpan {
         byte_start: 0,
@@ -12804,49 +14293,6 @@ fn empty_live_math_span() -> MathSpan {
         inline_runs: Vec::new(),
         inline_joined_head: None,
     }
-}
-
-fn live_grid_parser_prefixes(
-    inputs: &[LiveDetectionInput],
-    mut context: DetectionContext,
-) -> BTreeMap<u32, DetectionContext> {
-    let mut prefixes = BTreeMap::new();
-    let mut logical_text = String::new();
-    let mut logical_rows = Vec::new();
-    let mut logical_prefix = context.clone();
-    let mut logical_id = 1_u64;
-    let mut active = false;
-
-    for input in inputs {
-        if !active {
-            logical_prefix = context.clone();
-            active = true;
-        }
-        logical_text.push_str(&input.text);
-        if let LiveDetectionSource::Grid { row, .. } = input.source {
-            logical_rows.push(row);
-        }
-        if input.continues {
-            continue;
-        }
-        for row in logical_rows.drain(..) {
-            prefixes.insert(row, logical_prefix.clone());
-        }
-        advance_detection_context(
-            &mut context,
-            TranscriptId(logical_id),
-            logical_text.as_str(),
-        );
-        logical_id = logical_id.saturating_add(1);
-        logical_text.clear();
-        active = false;
-    }
-    if active {
-        for row in logical_rows {
-            prefixes.insert(row, logical_prefix.clone());
-        }
-    }
-    prefixes
 }
 
 fn exact_row_content(left: &LiveDetectionInput, right: &LiveDetectionInput) -> bool {
@@ -13467,10 +14913,109 @@ fn insert_nonoverlapping_live_record(
     None
 }
 
+/// Why a live math completion was refused, in the words `BT_PERF_TRACE live_math_result_dropped`
+/// prints. A refusal is a normal outcome — the grid may have moved on while the raster was being
+/// made — but it is also how a formula silently stays at source, so each one is nameable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveCompletionRefusal {
+    /// The screen changed under the scan.
+    Screen,
+    /// The grid was reflowed or replaced.
+    GridGeneration,
+    /// Detection was invalidated wholesale.
+    DetectionRevision,
+    /// The font metrics or width changed, so the raster is the wrong size.
+    Layout,
+    /// One of the rows the block was proven from no longer holds the bytes it was scanned from.
+    SourceChanged,
+    /// The rows still hold their bytes, but the detector no longer finds this occurrence in them.
+    NoLongerDetected,
+    /// The occurrence could not be reduced to a proven placement on the grid.
+    Unproven,
+}
+
+impl std::fmt::Display for LiveCompletionRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let word = match self {
+            Self::Screen => "screen",
+            Self::GridGeneration => "grid-generation",
+            Self::DetectionRevision => "detection-revision",
+            Self::Layout => "layout",
+            Self::SourceChanged => "source-changed",
+            Self::NoLongerDetected => "no-longer-detected",
+            Self::Unproven => "unproven",
+        };
+        formatter.write_str(word)
+    }
+}
+
+/// Ask again about `first ..= last`.
+fn rearm_live_row_band(rows: &mut [LiveRowStability], first: u32, last: u32) {
+    for row in first..=last {
+        let Some(state) = rows.get_mut(row as usize) else {
+            continue;
+        };
+        state.candidate_signature = None;
+        state.settled_revision = None;
+    }
+}
+
+/// Ask again about `first ..= last`, and **give every row of the band the newest damage time in
+/// it**, because this ask is a *retry*.
+///
+/// A band is one answer read from several rows, and the stability interval is the rule that an
+/// answer is only worth asking for once its source has stopped moving. Applied to the row detection
+/// is armed on, it says nothing: that row is a delimiter, and a delimiter sits still while an agent
+/// streams the body between them in. So the opener read as stable while the thing its answer depends
+/// on was still arriving — the scan went out, came back describing a body that had moved on, was
+/// refused, re-armed the opener, and went out again, every frame for as long as the stream lasted.
+/// Measured 58 scans over 60 frames of a body changing every 16 ms, against 8 now, which is both
+/// `$$` rows looking once per interval.
+///
+/// **Only the retry, and the difference is the whole of it.** The re-arm `observe_live_damage` makes
+/// is not one: it is the first ask after a change, gated already by the changed row's own stability,
+/// and it happens once because the record is torn down in the same breath. Carrying the clock there
+/// as well made an ordinary unsynchronized repaint — which rewrites a band over several reads — wait
+/// a further interval after its last row landed, and one frame inside that wait published the
+/// complete source of a block with no picture on it. On the owner's unwrapped recording that was
+/// exactly one frame, and one is the number that matters. The clock is carried where the loop is,
+/// and nowhere else.
+fn rearm_live_row_band_after_refusal(rows: &mut [LiveRowStability], first: u32, last: u32) {
+    let newest = (first..=last)
+        .filter_map(|row| {
+            rows.get(row as usize)
+                .and_then(|state| state.last_damage_at)
+        })
+        .max();
+    rearm_live_row_band(rows, first, last);
+    if newest.is_some() {
+        for row in first..=last {
+            if let Some(state) = rows.get_mut(row as usize) {
+                state.last_damage_at = newest;
+            }
+        }
+    }
+}
+
+/// The rows one scan's answer was read from, together with the row it was armed on: the in-flight
+/// equivalent of a resident record's band, and wanted for the same thing — when an answer is thrown
+/// away because those rows no longer hold the bytes it read, these are the rows to ask about again.
+fn live_task_dependency_rows(task: &LiveDetectionTask) -> (u32, u32) {
+    if task.resolved {
+        (
+            task.band_start_row.min(task.candidate_row),
+            task.band_end_row.max(task.candidate_row),
+        )
+    } else {
+        (task.candidate_row, task.candidate_row)
+    }
+}
+
+/// `None` when the completion still describes the grid it was scanned from.
 fn live_task_is_current(
     task: &LiveDetectionTask,
     current_inputs: Arc<[LiveDetectionInput]>,
-) -> bool {
+) -> Option<LiveCompletionRefusal> {
     let dependency_start = if task.resolved {
         task.band_start_row
     } else {
@@ -13483,10 +15028,10 @@ fn live_task_is_current(
     };
     for row in dependency_start..=dependency_end {
         let Some(snapshot) = live_grid_input(&task.inputs, row) else {
-            return false;
+            return Some(LiveCompletionRefusal::SourceChanged);
         };
         let Some(current) = live_grid_input(&current_inputs, row) else {
-            return false;
+            return Some(LiveCompletionRefusal::SourceChanged);
         };
         let same_source = matches!(
             (snapshot.source, current.source),
@@ -13496,7 +15041,7 @@ fn live_task_is_current(
             ) if snapshot_row == current_row
         );
         if !same_source || snapshot.text != current.text {
-            return false;
+            return Some(LiveCompletionRefusal::SourceChanged);
         }
     }
 
@@ -13525,12 +15070,13 @@ fn live_task_is_current(
     current_task.resolved = false;
     let resolves_now = resolve_live_detection_task(&mut current_task);
     if !task.resolved {
-        return !resolves_now;
+        return resolves_now.then_some(LiveCompletionRefusal::NoLongerDetected);
     }
-    resolves_now
+    let same = resolves_now
         && current_task.start == task.start
         && current_task.end == task.end
-        && current_task.span == task.span
+        && current_task.span == task.span;
+    (!same).then_some(LiveCompletionRefusal::NoLongerDetected)
 }
 
 fn captured_row_text(row: &CapturedRow) -> String {
@@ -14269,7 +15815,13 @@ fn cropped_inline_artifact(
             None => rgba.resize(rgba.len() + width * 4, 0),
         }
     }
-    artifact.key = format!("{}#x{x0}", artifact.key);
+    // **Both edges, because a crop is named by the pixels it contains and not by where it starts.**
+    // The right edge comes from the runs this row actually carries, so two crops of one composite
+    // that begin at the same pixel can still hold different numbers of runs — a first row whose
+    // leading prose is one character wide and one whose is ten both start at zero and end
+    // elsewhere. The renderer uploads by name and never compares the tiles it holds against what
+    // the placement carries, so a name that leaves out the width is a name two pictures share.
+    artifact.key = format!("{}#x{x0}-{x1}", artifact.key);
     artifact.rgba = Arc::from(rgba);
     artifact.width_px = x1 - x0;
     artifact
@@ -14509,24 +16061,6 @@ fn selection_overlaps(
         .is_some_and(|order| order == std::cmp::Ordering::Less)
         && compare_selection_anchors(item_end, selection_start)
             .is_some_and(|order| order == std::cmp::Ordering::Greater)
-}
-
-/// Does `[selection_start, selection_end]` contain the *whole* of `[item_start, item_end]`?
-///
-/// The strict counterpart to [`selection_overlaps`], for the questions where partial contact is not
-/// enough. An incomparable pair — the alternate screen against the primary document namespace —
-/// answers `false`, so a span can no more be covered across a plane boundary than it can overlap
-/// one.
-fn selection_covers(
-    item_start: &ContentAnchor,
-    item_end: &ContentAnchor,
-    selection_start: &ContentAnchor,
-    selection_end: &ContentAnchor,
-) -> bool {
-    compare_selection_anchors(selection_start, item_start)
-        .is_some_and(|order| order != std::cmp::Ordering::Greater)
-        && compare_selection_anchors(item_end, selection_end)
-            .is_some_and(|order| order != std::cmp::Ordering::Greater)
 }
 
 fn trim_copy_line_end(text: &mut String) {
@@ -14977,6 +16511,41 @@ mod tests {
         );
     }
 
+    /// RED — **switching the row-break repair off has to reach the formulas already on screen.**
+    ///
+    /// A record proven while the repair was on carries a `render_source` with a separator the
+    /// terminal never received. Installing the new options without raising the detection revision
+    /// leaves that record standing, so the reader who just said "stop touching my formulas" goes
+    /// on looking at a repaired one until the block scrolls off and comes back.
+    ///
+    /// MUTATIONS: drop the revision bump in `set_math_layout_options` and the first assertion goes
+    /// red; bump it unconditionally and the second does, because a pane that only changed how tall
+    /// a block may stand would throw away every verdict it holds and re-scan its whole history.
+    #[test]
+    fn changing_a_detection_option_raises_the_detection_revision() {
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        let before = session.detection_revision;
+        session.set_math_layout_options(MathLayoutOptions {
+            restore_stripped_environment_newlines: false,
+            ..MathLayoutOptions::default()
+        });
+        assert!(
+            session.detection_revision.0 > before.0,
+            "the detector's answers were proven under options that no longer hold"
+        );
+
+        let unchanged = session.detection_revision;
+        session.set_math_layout_options(MathLayoutOptions {
+            restore_stripped_environment_newlines: false,
+            block_max_height_px: NonZeroU32::new(240),
+            ..MathLayoutOptions::default()
+        });
+        assert_eq!(
+            session.detection_revision, unchanged,
+            "a presentation-only change re-proves nothing"
+        );
+    }
+
     /// PIN (P2-9 slice 2) — **a pane retuned to a smaller capacity loses the oldest
     /// lines through the pipeline every other deletion goes through**, not through a
     /// second, shorter definition of what deleting history means.
@@ -15376,6 +16945,168 @@ mod tests {
         }));
     }
 
+    /// Continuing repaint must not reset a refused candidate's admission priority.
+    #[test]
+    fn live_queue_services_65_candidates_during_repaint() {
+        assert_live_queue_repaint_fairness(65);
+    }
+
+    #[test]
+    fn live_queue_services_130_candidates_during_repaint() {
+        assert_live_queue_repaint_fairness(130);
+    }
+
+    fn assert_live_queue_repaint_fairness(count: u32) {
+        let mut at = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(count + 2));
+        session.set_inline_math_bands(true);
+        let mut stream = String::from("\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07");
+        for row in 0..count {
+            stream.push_str(&format!("formula $x_{{{row}}}^2$ here\r\n"));
+        }
+        stream.push_str("\x1b]133;D;0\x07");
+        // Arm one row through ordinary output before the rest of the burst arrives.
+        let first_line_end = stream.find("\r\n").unwrap() + 2;
+        session
+            .feed_at(&stream.as_bytes()[..first_line_end], at)
+            .unwrap();
+        at += LIVE_MATH_STABLE_INTERVAL;
+        assert_eq!(session.advance_live_stability(at), 1);
+        assert_eq!(
+            session.live_tasks.len(),
+            1,
+            "the burst enters a partly-full queue"
+        );
+        session
+            .feed_at(&stream.as_bytes()[first_line_end..], at)
+            .unwrap();
+        assert_eq!(session.live_screen, ScreenId::Primary);
+        let inputs = session.live_detection_context();
+        for row in 0..count {
+            assert_eq!(
+                live_grid_input(&inputs, row).unwrap().site,
+                InlineMathSite::CommandOutput
+            );
+        }
+        let mut serviced = BTreeSet::new();
+        let mut latest = String::new();
+        for pass in 0..=8 {
+            if pass != 0 {
+                at += LIVE_MATH_STABLE_INTERVAL;
+                // The whole prompt cycle, as a shell that reprints one emits it. A `C` standing in
+                // no cycle at all is refused now, and a repaint that skipped `A` and `B` was never
+                // a stream a shell produces.
+                session.feed_at(
+                    format!("\x1b[1;1H\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b[2Kformula $y_{{{pass}}}^2$ here\x1b[{};1H\x1b]133;D;0\x07", count + 1).as_bytes(),
+                    at,
+                ).unwrap();
+            }
+            at += LIVE_MATH_STABLE_INTERVAL;
+            session.advance_live_stability(at);
+            assert_eq!(session.live_tasks.len(), crate::WORKER_QUEUE_CAP);
+            while let Some(mut task) = session.take_live_worker_task() {
+                assert!(
+                    resolve_live_detection_task(&mut task),
+                    "row {} must be an eligible inline formula",
+                    task.candidate_row
+                );
+                serviced.insert(task.candidate_row);
+                if task.candidate_row == 0 {
+                    latest = task.span.original_source.clone();
+                }
+                // Observe the scheduler handoff without growing display bands or changing the grid.
+                session.complete_live_worker_result(task, Err(MathRenderError::NotDetected));
+            }
+            if pass + 1 >= count.div_ceil(crate::WORKER_QUEUE_CAP as u32) {
+                assert_eq!(
+                    serviced.len(),
+                    count as usize,
+                    "every row must be serviced within one sweep, including during repaint"
+                );
+            }
+        }
+        assert_eq!(
+            serviced.len(),
+            count as usize,
+            "a changing head must not starve the tail"
+        );
+        // Once the last repaint stops, the latest head must also reach the worker within one sweep.
+        for _ in 0..count.div_ceil(crate::WORKER_QUEUE_CAP as u32) {
+            session.advance_live_stability(at);
+            while let Some(mut task) = session.take_live_worker_task() {
+                assert!(resolve_live_detection_task(&mut task));
+                if task.candidate_row == 0 {
+                    latest = task.span.original_source.clone();
+                }
+                session.complete_live_worker_result(task, Err(MathRenderError::NotDetected));
+            }
+        }
+        assert!(
+            latest.contains("y_{8}"),
+            "latest head was not serviced: {latest}"
+        );
+    }
+
+    /// A burst wider than the worker queue must not leave rows unscheduled forever.
+    ///
+    /// The frozen queue refuses the newcomer and remembers it (`retry_on_idle`); the live queue
+    /// dropped the oldest entry and said nothing — and the row it dropped kept the
+    /// `candidate_signature` that says "a task for this row is already out", so no later pass ever
+    /// armed it again. One PTY write of dense formula output arms every row in one pass, which is
+    /// how a report or a log of mathematics arrives, so the rows it drops stay as `$…$` for as long
+    /// as nothing else touches them.
+    ///
+    /// The invariant, which is what this asserts rather than any particular queue discipline: a row
+    /// is skipped only while a task for it is actually queued or in flight. Two sizes, because one
+    /// overflow could be absorbed by luck and two passes' worth cannot.
+    #[test]
+    fn every_candidate_of_a_burst_wider_than_the_worker_queue_is_serviced() {
+        for count in [65u32, 130] {
+            let started = Instant::now();
+            let mut stream = String::new();
+            for index in 0..count {
+                stream.push_str(&format!("$$x_{{{index}}}$$\r\n"));
+            }
+            stream.push_str("barrier");
+            let mut session = DualPlaneSession::new(nz(40), nz(count + 4));
+            session.feed_at(stream.as_bytes(), started).unwrap();
+
+            let raster = synthetic_raster(40, 40);
+            let mut serviced = BTreeSet::new();
+            let mut at = started + LIVE_MATH_STABLE_INTERVAL;
+            for pass in 0..=count {
+                let scheduled = session.advance_live_stability(at);
+                assert!(
+                    session.live_tasks.len() <= crate::WORKER_QUEUE_CAP,
+                    "the queue stays bounded"
+                );
+                let mut drained = 0;
+                while let Some(mut task) = session.take_live_worker_task() {
+                    serviced.insert(task.candidate_row);
+                    drained += 1;
+                    if resolve_live_detection_task(&mut task) {
+                        session.complete_live_worker_result(task, Ok(raster.clone()));
+                    } else {
+                        session
+                            .complete_live_worker_result(task, Err(MathRenderError::NotDetected));
+                    }
+                }
+                if scheduled == 0 && drained == 0 {
+                    break;
+                }
+                assert!(pass < count, "scheduling must reach quiescence");
+                at += Duration::from_millis(1);
+            }
+
+            assert_eq!(
+                serviced.len() as u32,
+                count,
+                "every formula row must be handed to the worker; {} of {count} never were",
+                count - serviced.len() as u32
+            );
+        }
+    }
+
     #[test]
     fn stopped_scrollback_schedules_only_visible_frozen_candidates() {
         const TOTAL_LINES: usize = 2_048;
@@ -15452,6 +17183,371 @@ mod tests {
         }));
     }
 
+    /// RED — **a block showing its `$$…$$` source face schedules nothing** (owner's report
+    /// 2026-09-18: the `‹›` change of face stutters).
+    ///
+    /// The scheduler arms a visible history line whose text carries a display delimiter, and the
+    /// row that *resolves* a block is its closing delimiter — so `apply_worker_completion` puts
+    /// that row back to `DecorationLifecycle::None`, which is the armed state. While the block
+    /// wears its picture the artifact covers those rows and none of them is a visible id of its
+    /// own, so nothing came of it. In the source face every row is terminal text again, the
+    /// closing row is visible on its own id, and it re-armed on every frame: one whole scan and
+    /// one whole LaTeX raster per frame, rendered and thrown away. The owner's trace carries 638
+    /// renders of one block at ~7ms apiece.
+    ///
+    /// The count and not a timing, for the arming ledger's reason: what the fix claims is that the
+    /// work stops, and "how many scans did the second frame ask for" is a number that reads the
+    /// same on an idle machine and under load.
+    ///
+    /// MUTATIONS: drop `block_that_owns`' refusal from `schedule_scan` and every pass past the
+    /// first renders the block again. Make the refusal unconditional — refuse the rows whatever
+    /// state the owner is in — and a block whose layout changed can never be proven afresh,
+    /// because the row that proves a block is its closing delimiter and never its opener.
+    #[test]
+    fn a_block_showing_its_source_face_asks_for_no_more_scans() {
+        let doc = [
+            "$$",
+            r"\nabla \times \mathbf{E} = -\frac{\partial \mathbf{B}}{\partial t}, \qquad",
+            r"\nabla \cdot \mathbf{B} = 0",
+            "$$",
+            "",
+            "tail1",
+            "tail2",
+            "tail3",
+            "tail4",
+            "tail5",
+            "tail6",
+            "end",
+        ]
+        .join("\r\n");
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        session.feed(doc.as_bytes()).unwrap();
+        while session.take_worker_task().is_some() {}
+        for record in session.decorations.values_mut() {
+            record.decoration = DecorationLifecycle::None;
+            record.artifact = None;
+            record.stale_artifact = None;
+        }
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let raster = synthetic_raster(40, 40);
+        let mut renders = Vec::new();
+        for pass in 0..6 {
+            // The press, on the frame after the block first reached the glass: the reader has
+            // asked to read the source the picture replaced.
+            if pass == 1 {
+                for record in session.decorations.values_mut() {
+                    if record.decoration == DecorationLifecycle::Ready {
+                        assert!(record.toggle_source(), "the block turns over");
+                    }
+                }
+            }
+            session.refresh_projection(&mut projection);
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            session.schedule_visible_artifacts(&frame);
+            let mut rendered = 0usize;
+            while let Some(mut task) = session.take_worker_task() {
+                if resolve_detection_task(&mut task) {
+                    session.complete_worker_result(task, Ok(raster.clone()));
+                    rendered += 1;
+                } else {
+                    session.complete_worker_task(task);
+                }
+            }
+            renders.push(rendered);
+        }
+        assert_eq!(
+            renders.first().copied(),
+            Some(1),
+            "the block is rastered once, when it is proven: {renders:?}"
+        );
+        assert!(
+            renders[1..].iter().all(|rendered| *rendered == 0),
+            "and never again for a face the reader turned over: {renders:?}"
+        );
+        assert!(
+            session
+                .decorations
+                .values()
+                .any(|record| record.decoration == DecorationLifecycle::Ready
+                    && record.show_source
+                    && record.artifact.is_some()),
+            "and the block still holds the picture it will turn back to"
+        );
+    }
+
+    /// RED — **a block that could not be drawn owns its rows whether or not a raster came back**
+    /// (review 2026-09-18 round 2, P1).
+    ///
+    /// `block_that_owns` walks back to the first *current* multi-row block and lets it decide,
+    /// because blocks do not overlap — one that ends before this row is proof that nothing earlier
+    /// spans it. That invariant is established by `suppress_block_interior`, and until now it was
+    /// established only on a completion that produced pixels: an outer `$$…$$` recovered from a
+    /// phantom opener owns ids 2..8, the `\begin{pmatrix}` environment inside it was proven first
+    /// and owns 4..7, and when the outer's render *fails* the inner was left standing as a second
+    /// `Failed` record inside the first. The walk from the outer's closing row then met 4..7,
+    /// which ends before it, and answered "nothing owns this" — so the closer re-armed for ever,
+    /// one whole scan and one whole render attempt per frame.
+    ///
+    /// A block's extent is a fact of the detection and not of the raster, so the body is settled
+    /// on every completion the record accepted.
+    ///
+    /// **`[2, 0, 0, 0, 0, 0]` and not `[1, 0, …]`**: the inner environment is a block in its own
+    /// right until the outer one is proven, so it is genuinely detected and tried once before the
+    /// recovery that swallows it. What must not happen is the second attempt, and every one after
+    /// it, on a screen nobody has touched.
+    ///
+    /// MUTATIONS: put `rendered` back in front of the suppression and this repeats
+    /// `[2, 1, 1, 1, 1, 1]`.
+    #[test]
+    fn a_failed_block_owns_its_rows_against_an_inner_record() {
+        let doc = [
+            "$$",
+            "$$",
+            "A=",
+            r"\begin{pmatrix}",
+            r"a & b\\",
+            "c & d",
+            r"\end{pmatrix}",
+            "$$",
+        ]
+        .iter()
+        .copied()
+        .chain((0..15).map(|_| "tail"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+        let mut session = DualPlaneSession::new(nz(100), nz(12));
+        session.feed(doc.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+
+        let attempt = |session: &mut DualPlaneSession, projection: &mut ViewportProjection| {
+            session.refresh_projection(projection);
+            let frame = session.viewport_frame(projection).unwrap();
+            session.schedule_visible_artifacts(&frame);
+            let mut attempted = 0usize;
+            while let Some(mut task) = session.take_worker_task() {
+                if resolve_detection_task(&mut task) {
+                    attempted += 1;
+                    session.complete_worker_result(
+                        task,
+                        Err(MathRenderError::Compile("r2".to_owned())),
+                    );
+                } else {
+                    session.complete_worker_task(task);
+                }
+            }
+            attempted
+        };
+        let attempts: Vec<usize> = (0..6)
+            .map(|_| attempt(&mut session, &mut projection))
+            .collect();
+        assert_eq!(
+            attempts,
+            vec![2, 0, 0, 0, 0, 0],
+            "an outer block whose render failed still owns the row that proves it"
+        );
+    }
+
+    /// RED — **a source face scrolled past its own opener asks for nothing either** (review
+    /// 2026-09-18, P1).
+    ///
+    /// The first attempt at this read the ownership off `frame.math_blocks`, and this is the probe
+    /// that says why the picture cannot be the evidence: `decorate_math_frame` needs the block's
+    /// *opening* row on the frame, so a source face scrolled two rows down publishes no placement
+    /// at all — while its body and its closing row are both on screen, both visible history ids of
+    /// their own, and the closing row therefore armed itself on every frame exactly as it did
+    /// before. The record has no such horizon: `block_end` names the last row the block covers in
+    /// transcript ids, and that is true of a block whose every row is off screen.
+    ///
+    /// The empty `math_blocks` is asserted here rather than left implied, because it is the whole
+    /// of the argument: a gate built on the picture has nothing to refuse with on this frame.
+    ///
+    /// MUTATIONS: drop the refusal from `schedule_scan` and this repeats `[1, 1, 1, 1, 1, 1]`.
+    #[test]
+    fn a_source_face_scrolled_past_its_opener_asks_for_no_more_scans() {
+        let doc = [
+            "$$",
+            r"\nabla \times \mathbf{E} = -\frac{\partial \mathbf{B}}{\partial t}, \qquad",
+            r"\nabla \cdot \mathbf{B} = 0",
+            "$$",
+            "",
+            "tail1",
+            "tail2",
+            "tail3",
+            "tail4",
+            "tail5",
+            "tail6",
+            "end",
+        ]
+        .join("\r\n");
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        session.feed(doc.as_bytes()).unwrap();
+        while session.take_worker_task().is_some() {}
+        for record in session.decorations.values_mut() {
+            record.decoration = DecorationLifecycle::None;
+            record.artifact = None;
+            record.stale_artifact = None;
+        }
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let raster = synthetic_raster(40, 40);
+
+        let drain = |session: &mut DualPlaneSession, projection: &mut ViewportProjection| {
+            session.refresh_projection(projection);
+            let frame = session.viewport_frame(projection).unwrap();
+            session.schedule_visible_artifacts(&frame);
+            let mut rendered = 0usize;
+            while let Some(mut task) = session.take_worker_task() {
+                if resolve_detection_task(&mut task) {
+                    session.complete_worker_result(task, Ok(raster.clone()));
+                    rendered += 1;
+                } else {
+                    session.complete_worker_task(task);
+                }
+            }
+            rendered
+        };
+        assert_eq!(
+            drain(&mut session, &mut projection),
+            1,
+            "the block is proven and rastered once"
+        );
+
+        for record in session.decorations.values_mut() {
+            if record.decoration == DecorationLifecycle::Ready {
+                assert!(record.toggle_source(), "the block turns over");
+            }
+        }
+        // Two rows down: the opener is above row zero, the body and the closing `$$` are not.
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_by_rows(-2);
+        session.refresh_projection(&mut projection);
+        let clipped = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            clipped.math_blocks.is_empty(),
+            "the picture cannot name a block whose opener it does not draw"
+        );
+
+        let renders: Vec<usize> = (0..6)
+            .map(|_| drain(&mut session, &mut projection))
+            .collect();
+        assert!(
+            renders.iter().all(|rendered| *rendered == 0),
+            "and the rows are still the block's, however little of it is on screen: {renders:?}"
+        );
+    }
+
+    /// RED — **a block whose render failed is asked once per revision, not once per frame**
+    /// (owner's report 2026-09-18, the same disease in the failure path).
+    ///
+    /// `record.fail` is terminal on the *owner* — `DecorationLifecycle::Failed`, and only a
+    /// layout, source or detector change undoes it — but the row that proves a block is its
+    /// closing delimiter, and that row is put back to `DecorationLifecycle::None` by
+    /// `apply_worker_completion` whatever the render came back with. A failed block draws no
+    /// artifact, so all of its rows are terminal text and every one of them is a visible id of its
+    /// own: the closing row re-armed on every frame and bought another whole scan and another
+    /// whole render attempt that failed the same way, for ever. There is no retry budget anywhere
+    /// to hold it — `schedule_retry_artifacts` answers queue pressure and nothing else.
+    ///
+    /// **And the revision is what re-asks it**, which is the half a plain refusal would break: a
+    /// formula that failed to compile at one scale may render at another, so the refusal is over
+    /// `Failed` *at the current versions* and a new layout key hands the block back.
+    ///
+    /// MUTATIONS: honour only `Ready` in `block_that_owns` and the failing block is tried again on
+    /// every frame. Take the closing row out of the running for good instead — suppress it when
+    /// the block resolves — and `frozen_inline_math_survives_window_resize` goes red, because the
+    /// row that proves a block is the row a new revision has to be able to arm.
+    #[test]
+    fn a_block_whose_render_failed_is_asked_once_per_revision() {
+        let doc = [
+            "$$",
+            r"\nabla \times \mathbf{E} = -\frac{\partial \mathbf{B}}{\partial t}, \qquad",
+            r"\nabla \cdot \mathbf{B} = 0",
+            "$$",
+            "",
+            "tail1",
+            "tail2",
+            "tail3",
+            "tail4",
+            "tail5",
+            "tail6",
+            "end",
+        ]
+        .join("\r\n");
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        session.feed(doc.as_bytes()).unwrap();
+        while session.take_worker_task().is_some() {}
+        for record in session.decorations.values_mut() {
+            record.decoration = DecorationLifecycle::None;
+            record.artifact = None;
+            record.stale_artifact = None;
+        }
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+
+        let mut attempts = Vec::new();
+        let attempt_once = |session: &mut DualPlaneSession, projection: &mut _| {
+            session.refresh_projection(projection);
+            let frame = session.viewport_frame(projection).unwrap();
+            session.schedule_visible_artifacts(&frame);
+            let mut attempted = 0usize;
+            while let Some(mut task) = session.take_worker_task() {
+                if resolve_detection_task(&mut task) {
+                    attempted += 1;
+                    session.complete_worker_result(
+                        task,
+                        Err(MathRenderError::Compile("synthetic".to_owned())),
+                    );
+                } else {
+                    session.complete_worker_task(task);
+                }
+            }
+            attempted
+        };
+        for _ in 0..6 {
+            attempts.push(attempt_once(&mut session, &mut projection));
+        }
+        assert_eq!(
+            attempts.first().copied(),
+            Some(1),
+            "the block is tried once, when it is proven: {attempts:?}"
+        );
+        assert!(
+            attempts[1..].iter().all(|tried| *tried == 0),
+            "and a render that failed is not tried again on the next frame: {attempts:?}"
+        );
+        assert!(
+            session
+                .decorations
+                .values()
+                .any(|record| record.decoration == DecorationLifecycle::Failed
+                    && record.failure_reason.is_some()),
+            "the failure is remembered on the record that owns the block"
+        );
+
+        // And the one thing it was computed from, changed: a formula that could not be drawn at
+        // this scale is owed a look at the next one.
+        let rescaled = LayoutKey {
+            dpi_milli: nz(2000),
+            ..session.layout_key()
+        };
+        session.set_layout_key(rescaled);
+        let mut moved = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut moved).unwrap();
+        moved.scroll_to_top();
+        assert_eq!(
+            attempt_once(&mut session, &mut moved),
+            1,
+            "a new layout hands the block back"
+        );
+    }
+
     #[test]
     fn visible_multiline_opener_schedules_its_offscreen_finalized_close_without_another_scroll() {
         let mut session = DualPlaneSession::new(nz(40), nz(2));
@@ -15518,14 +17614,18 @@ mod tests {
                 MathMode::Display,
                 "x",
                 layout,
-                DetectionRevision(1)
+                DetectionRevision(1),
+                [12, 24, 19],
+                &[]
             ),
             shared_math_artifact_key(
                 BlockKind::Math,
                 MathMode::Inline,
                 "x",
                 layout,
-                DetectionRevision(1)
+                DetectionRevision(1),
+                [12, 24, 19],
+                &[]
             ),
         );
         assert_ne!(
@@ -15534,14 +17634,18 @@ mod tests {
                 MathMode::Display,
                 "x",
                 layout,
-                DetectionRevision(1)
+                DetectionRevision(1),
+                [12, 24, 19],
+                &[]
             ),
             shared_math_artifact_key(
                 BlockKind::Table,
                 MathMode::Display,
                 "x",
                 layout,
-                DetectionRevision(1)
+                DetectionRevision(1),
+                [12, 24, 19],
+                &[]
             ),
             "two renderers reading the same bytes are two artifacts, not one cache entry"
         );
@@ -15661,6 +17765,52 @@ mod tests {
                 .is_some_and(|status| status.starts_with("Formula not rendered:"))
         );
         assert!(frame.cells.iter().any(|cell| cell.text == "$"));
+    }
+
+    #[test]
+    fn math_toggle_presentation_carries_face_progress_and_its_measured_source_width() {
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"$$x^2$$\r\nnext\r\ntail").unwrap();
+        let mut task = session.take_worker_task().unwrap();
+        assert!(resolve_detection_task(&mut task));
+        assert!(session.complete_worker_result(task, Ok(synthetic_raster(24, 35))));
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let anchor = frame.math_blocks[0].anchor.clone();
+        let faces = session.math_toggle_faces(&projection, &anchor).unwrap();
+        let height = (faces.rendered_height_subpixels + faces.source.height_subpixels) / 2;
+        session.set_math_toggle_presentation(Some(MathTogglePresentation {
+            anchor: anchor.clone(),
+            height_subpixels: height,
+            picture_opacity_milli: 600,
+            face_milli: 400,
+            source_width_cells: faces.source.width_cells,
+        }));
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let block = frame
+            .math_blocks
+            .iter()
+            .find(|p| p.anchor.same_block(&anchor))
+            .unwrap();
+        assert_eq!(block.display, MathBlockDisplay::Rendered);
+        assert_eq!(block.face_milli, Some(400));
+        assert_eq!(block.picture_opacity_milli, 600);
+        assert_eq!(block.source_width_cells, faces.source.width_cells);
+        assert_eq!(block.artifact.height_subpixels, height);
+        session.set_math_toggle_presentation(None);
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let block = frame
+            .math_blocks
+            .iter()
+            .find(|p| p.anchor.same_block(&anchor))
+            .unwrap();
+        assert_eq!(block.face_milli, None);
+        assert_eq!(block.source_width_cells, 0);
+        assert_eq!(block.picture_opacity_milli, 1000);
     }
 
     #[test]
@@ -17446,6 +19596,114 @@ mod tests {
         }
     }
 
+    /// RED — **a gesture that ends on the width the child already has still closes its
+    /// transaction, and writes the child nothing** (user report 2026-09-17).
+    ///
+    /// A drag whose last wobble comes back to the size ConPTY was told is an ordinary gesture: the
+    /// hand moved, so `resize_at` reflowed this pane's grid through every width it passed and
+    /// opened a resize transaction for them. What it is not is a size the child is owed, and the
+    /// window used to have no way to say that — so it said nothing, `final_request_sent` was never
+    /// called, `quiescence_deadline` stayed `None`, and `is_quiescent_at` was false at every
+    /// instant there is. The transaction never closed, `decorations_allowed` stayed false, and the
+    /// pane stopped scanning for formulas for the rest of its life: the reporter's two inline
+    /// formulas went back to source text and never came back, while every formula whose own row
+    /// the reflow left alone kept its picture.
+    ///
+    /// Math-free on purpose — the defect is the transaction, not the formula. `decorations_allowed`
+    /// is the one bit every decoration scan in this file is gated on.
+    ///
+    /// Red gate: delete `mark_resize_settled_unchanged_at`'s call and settle the second gesture
+    /// with nothing, which is what the window did. An hour later the transaction is still open.
+    #[test]
+    fn a_gesture_that_ends_on_the_childs_own_size_closes_its_transaction_in_silence() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        session.feed_at(b"one two three four", start).unwrap();
+        let _ = session.take_pty_writes();
+
+        // One ordinary gesture: the hand moves, the child is told, the transaction closes.
+        let told_at = start + Duration::from_millis(100);
+        session.resize_at(nz(44), nz(4), told_at).unwrap();
+        session.mark_pty_resize_requested_at(nz(44), nz(4), told_at);
+        let deadline = session
+            .resize_finish_deadline()
+            .expect("a settled gesture arms a quiescence deadline");
+        assert!(session.finish_resize_if_quiescent(deadline).unwrap());
+        assert!(session.resize_epoch.decorations_allowed());
+
+        // The wobble: away from the child's width and straight back to it.
+        let wobbled_at = deadline + Duration::from_millis(100);
+        session.resize_at(nz(43), nz(4), wobbled_at).unwrap();
+        session
+            .resize_at(nz(44), nz(4), wobbled_at + Duration::from_millis(17))
+            .unwrap();
+        assert!(
+            !session.resize_epoch.decorations_allowed(),
+            "the hand is mid-gesture, so the pane is right to withhold its scans"
+        );
+        assert_eq!(
+            session.resize_finish_deadline(),
+            None,
+            "and an unsettled gesture has no deadline at all -- which is what made this permanent"
+        );
+        assert!(
+            !session
+                .finish_resize_if_quiescent(wobbled_at + Duration::from_secs(3600))
+                .unwrap(),
+            "an hour of silence cannot close a gesture nobody has said has ended"
+        );
+
+        // The window says which ending it is: the child's size never moved.
+        let settled_at = wobbled_at + Duration::from_millis(217);
+        assert!(session.mark_resize_settled_unchanged_at(nz(44), nz(4), settled_at));
+        let deadline = session
+            .resize_finish_deadline()
+            .expect("this ending arms the same quiescence deadline the other one does");
+        assert!(
+            !session
+                .finish_resize_if_quiescent(deadline - Duration::from_millis(1))
+                .unwrap(),
+            "and waits out the same silence"
+        );
+        assert!(session.finish_resize_if_quiescent(deadline).unwrap());
+        assert!(
+            session.resize_epoch.decorations_allowed(),
+            "the transaction is over, so this pane scans for formulas again"
+        );
+        assert_eq!(
+            session.take_pty_writes(),
+            Vec::<Vec<u8>>::new(),
+            "the child was told nothing and asked nothing: settling is not a byte"
+        );
+        // `BT_RESIZE_TRACE` is read by a person answering "what did this window tell that shell",
+        // and each transaction's trace stands alone. This one told it nothing.
+        assert_eq!(
+            session
+                .resize_trace()
+                .iter()
+                .filter(|event| matches!(event.kind, ResizeTraceKind::PtyResizeRequest { .. }))
+                .count(),
+            0,
+            "a request nobody sent must not appear in the file as one"
+        );
+        assert_eq!(
+            session
+                .resize_trace()
+                .iter()
+                .filter(|event| matches!(event.kind, ResizeTraceKind::ChildSizeUnchanged { .. }))
+                .count(),
+            1,
+            "the ending this gesture had is named as itself"
+        );
+        assert!(
+            session
+                .resize_trace()
+                .iter()
+                .any(|event| event.kind == ResizeTraceKind::TransactionEnd),
+            "and the transaction is closed in the file as well as in the epoch"
+        );
+    }
+
     #[test]
     fn active_resize_epoch_never_exports_a_past_live_wake_deadline() {
         let start = Instant::now();
@@ -17752,10 +20010,9 @@ mod tests {
             .unwrap();
         let detections = session.live_detection_count();
         let before_inputs = session.live_detection_context();
-        let before_prefixes = live_grid_parser_prefixes(
-            &before_inputs,
-            session.live_initial_detection_context(&before_inputs),
-        );
+        // The checkpoint the scan of the first grid row starts from, which is what the two sides of
+        // this fixture have to disagree about for it to be measuring anything.
+        let before_prefix = session.live_initial_detection_context(&before_inputs);
 
         // Clear/home establishes a fresh Known prefix, while the original directional occurrence
         // was proven under an Ambiguous prefix. Exact prefix preservation therefore cannot prove
@@ -17768,11 +20025,8 @@ mod tests {
             )
             .unwrap();
         let after_inputs = session.live_detection_context();
-        let after_prefixes = live_grid_parser_prefixes(
-            &after_inputs,
-            session.live_initial_detection_context(&after_inputs),
-        );
-        assert_ne!(before_prefixes.get(&0), after_prefixes.get(&0));
+        let after_prefix = session.live_initial_detection_context(&after_inputs);
+        assert_ne!(before_prefix, after_prefix);
         let record = session.live_decorations.get(&0).unwrap();
         assert_eq!((record.band_start_row, record.band_end_row), (0, 0));
         assert_eq!(
@@ -19040,15 +21294,23 @@ mod tests {
         assert_eq!(before.math_blocks.len(), after.math_blocks.len());
     }
 
-    /// Batch ③ unbacked case (the audit's masking mechanism): a resize opens the preservation window,
-    /// then the reflow reprints the transcript with a stray unbalanced `$$` opener above the block —
-    /// the exact odd-parity poison the three audits name. The block's source `$$x$$` is still literally
-    /// on the grid, so the hold re-anchors and keeps rendering (display is UNCHANGED, the hold is
-    /// honest about the pixels), but the detector's global toggle is now off-phase and no longer PAIRS
-    /// it into a block. That divergence — a hold showing a formula the settled detector no longer
-    /// accounts — is reported exactly as `HeldUnbacked`, the observable the flash oracle cannot see.
+    /// Batch ③'s unbacked case, and **the answer to it has changed**: a resize opens the
+    /// preservation window, then the reflow reprints the transcript with a stray unbalanced `$$`
+    /// opener above the block — the exact odd-parity poison the three audits name. The block's
+    /// source is still literally on the grid, so the re-anchor's substring search still finds it;
+    /// but the detector's toggle is now off-phase and it no longer pairs those rows into a block at
+    /// all.
+    ///
+    /// This used to re-anchor anyway and go on painting, and the divergence was *reported* as
+    /// `HeldUnbacked` — a hold showing a formula the settled detector no longer accounts, named so
+    /// that an audit could see what the flash oracle cannot. The re-anchor now asks the detector
+    /// instead of a copy of its rules (`live_grid_owned_blocks`), and the detector, reading these
+    /// rows in the parity state the stray opener left, does not give the block back. So the hold is
+    /// refused, the rows show their source, and there is nothing left to report: a picture over
+    /// text the detector does not read as that block is the one thing this pane may not publish,
+    /// and reporting it was always second best to not doing it.
     #[test]
-    fn a_hold_over_a_parity_poisoned_block_is_reported_held_unbacked_without_changing_display() {
+    fn a_parity_poisoned_reprint_drops_the_hold_instead_of_masking_dead_detection() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(12));
         // A multi-line block whose opener and closer sit on separate rows — the shape a stray `$$`
@@ -19082,8 +21344,15 @@ mod tests {
             )
             .unwrap();
 
-        // Display behaviour is unchanged: the block's source `$$\ny=1\n$$` is still literally on the
-        // grid, so the hold re-anchors and keeps rendering its raster.
+        // The poison genuinely desynced the detector off the block the hold was showing.
+        assert!(
+            !session
+                .live_detection_ownership_ledger()
+                .owns_source(&held_source),
+            "the fixture did not poison the parity it set out to poison"
+        );
+
+        // So the re-anchor is refused and the rows show their source.
         let mut projection = session.new_projection(session.layout_key());
         session.refresh_projection(&mut projection);
         let frame = session.viewport_frame(&mut projection).unwrap();
@@ -19091,25 +21360,163 @@ mod tests {
             frame
                 .math_blocks
                 .iter()
-                .any(|block| block.display == MathBlockDisplay::Rendered),
-            "the hold must keep rendering the block — display is untouched by this batch"
+                .all(|block| block.display != MathBlockDisplay::Rendered),
+            "a hold was seated on rows the detector does not read as that block"
         );
 
-        // ...but the settled detector no longer Owns that block: reported as exactly one HeldUnbacked
-        // — a hold masking dead detection, the observable the flash oracle cannot see.
+        // And there is nothing left to report: the masking mechanism the audits named cannot arise
+        // through this door, because the hold never takes the rows.
         assert!(
-            !session
-                .live_detection_ownership_ledger()
-                .owns_source(&held_source),
-            "the poison genuinely desynced the detector off the block the hold is showing"
+            session.held_unbacked_records().is_empty(),
+            "a hold masking dead detection survived: {:?}",
+            session.held_unbacked_records()
         );
-        let unbacked = session.held_unbacked_records();
+    }
+
+    #[test]
+    fn a_single_slice_feed_turn_matches_a_standalone_feed() {
+        let start = Instant::now();
+        for alternate in [false, true] {
+            for repaint in [
+                b"\x1b[2J\x1b[Htop\r\n$$x$$\r\nbarrier".as_slice(),
+                b"\x1b[H\x1b[Ktop\r\n\x1b[K$$x$$\r\n\x1b[Kbarrier".as_slice(),
+                b"\x1b[?2026h\x1b[2J\x1b[Htop\r\n$$x$$\r\nbarrier\x1b[?2026l".as_slice(),
+                b"\x1b[2J\x1b[Hno formula\r\nbarrier".as_slice(),
+            ] {
+                let mut sessions = [
+                    DualPlaneSession::new(nz(40), nz(12)),
+                    DualPlaneSession::new(nz(40), nz(12)),
+                ];
+                for session in &mut sessions {
+                    if alternate {
+                        session.feed_at(b"\x1b[?1049h", start).unwrap();
+                    }
+                    session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+                    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+                    assert_eq!(
+                        complete_detected_live_tasks(session, synthetic_raster(40, 18)),
+                        1
+                    );
+                }
+                sessions[0]
+                    .feed_at(repaint, start + Duration::from_millis(250))
+                    .unwrap();
+                sessions[1].begin_feed_turn();
+                sessions[1]
+                    .feed_at(repaint, start + Duration::from_millis(250))
+                    .unwrap();
+                sessions[1].end_feed_turn();
+                let [plain, marked] = &mut sessions;
+                assert_eq!(
+                    plain.terminal.visible_text(),
+                    marked.terminal.visible_text()
+                );
+                assert_eq!(
+                    plain.live_invalidation_count,
+                    marked.live_invalidation_count
+                );
+                assert_eq!(plain.live_detection_count(), marked.live_detection_count());
+                assert_eq!(plain.screen_revision(), marked.screen_revision());
+                let mut plain_projection = plain.new_projection(plain.layout_key());
+                let mut marked_projection = marked.new_projection(marked.layout_key());
+                assert_eq!(
+                    plain.viewport_frame(&mut plain_projection).unwrap(),
+                    marked.viewport_frame(&mut marked_projection).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_feed_turn_does_not_commit_a_split_synchronized_update() {
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed(b"before").unwrap();
+        session.begin_feed_turn();
+        session.feed(b"\x1b[?2026h\x1b[2J\x1b[Hafter").unwrap();
+        let deadline = session.synchronized_update_deadline().unwrap();
+        session.feed(b" the redraw\x1b[?202").unwrap();
+        session.end_feed_turn();
+        assert_eq!(session.terminal.visible_text()[0], "before");
+        assert_eq!(session.synchronized_update_deadline(), Some(deadline));
+        assert!(session.primary_repaint_in_progress);
+        session.begin_feed_turn();
+        session.feed(b"6l").unwrap();
+        session.end_feed_turn();
+        assert_eq!(session.terminal.visible_text()[0], "after the redraw");
+        assert!(session.synchronized_update_deadline().is_none());
+        assert!(!session.primary_repaint_in_progress);
+
+        // An unterminated update still uses the parser's existing 150 ms deadline.
+        session.begin_feed_turn();
+        session.feed(b"\x1b[?2026h\rtimeout\x1b[K").unwrap();
+        let deadline = session.synchronized_update_deadline().unwrap();
+        session.end_feed_turn();
+        assert_eq!(session.terminal.visible_text()[0], "after the redraw");
+        assert!(session.finish_synchronized_update(deadline).unwrap());
+        assert_eq!(session.terminal.visible_text()[0], "timeout");
+        assert!(session.synchronized_update_deadline().is_none());
+    }
+
+    #[test]
+    fn sliced_repaint_turn_keeps_both_formula_records_and_rasters() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(16));
+        let source = b"$$x$$\r\nbarrier\r\n\r\n$$y$$\r\ntail";
+        session.feed_at(source, start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
-            unbacked.len(),
-            1,
-            "the masked-dead-detection strand must surface exactly once"
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            2
         );
-        assert_eq!(unbacked[0].original_source, held_source);
+        let records: Vec<_> = session
+            .live_decorations
+            .values()
+            .map(|record| {
+                (
+                    record.identity.occurrence_id,
+                    record.artifact.clone().unwrap(),
+                )
+            })
+            .collect();
+        let invalidations = session.live_invalidation_count;
+        // A cursor-addressed redraw first restores its body, then inserts the header and
+        // repositions that body. NUL padding makes the boundary exactly the drain's 8 KiB.
+        let mut repaint = b"\x1b[2J\x1b[H".to_vec();
+        repaint.extend_from_slice(source);
+        repaint.resize(8 * 1024, 0);
+        repaint.extend_from_slice(b"\x1b[Htop\x1b[0K\r\n$$x$$\x1b[0K\r\nbarrier\x1b[0K\r\n\x1b[0K\r\n$$y$$\x1b[0K\r\ntail");
+        session.begin_feed_turn();
+        for slice in repaint.chunks(8 * 1024) {
+            session
+                .feed_at(slice, start + Duration::from_millis(50))
+                .unwrap();
+        }
+        session.end_feed_turn();
+        assert!(session.primary_repaint_snapshot.is_none());
+        assert!(!session.primary_repaint_in_progress);
+        assert_eq!(session.live_decorations.len(), 2);
+        assert_eq!(session.live_invalidation_count, invalidations);
+        for (occurrence, artifact) in records {
+            let record = session
+                .live_decorations
+                .values()
+                .find(|record| record.identity.occurrence_id == occurrence)
+                .expect("the same occurrence survives the sliced repaint");
+            assert!(Arc::ptr_eq(
+                &artifact.rgba,
+                &record.artifact.as_ref().unwrap().rgba
+            ));
+        }
+        assert!(session.take_worker_task().is_none());
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(frame.math_blocks.len(), 2);
+        assert!(
+            frame
+                .math_blocks
+                .iter()
+                .all(|block| block.display == MathBlockDisplay::Rendered)
+        );
     }
 
     #[test]
@@ -20187,6 +22594,129 @@ mod tests {
         assert_eq!(session.live_detection_count, detections);
         assert_eq!(session.frozen_detection_count, frozen_detections);
         assert_eq!(session.live_invalidation_count, invalidations);
+    }
+
+    /// What a whole occurrence scrolled into history left behind: the raster it held while it was
+    /// live, the one its frozen record carries now, and the detection counter either side of
+    /// running every task the scheduler still holds for those lines.
+    struct ScrolledIntoHistory {
+        live: Arc<[u8]>,
+        frozen: Option<Arc<[u8]>>,
+        detections_before: u64,
+        detections_after: u64,
+    }
+
+    /// Scroll a whole occurrence into history and report what it left behind. `rows_after` is how
+    /// many lines of ordinary output are printed to push every source row off the top of the grid.
+    fn hand_off_by_scrolling(
+        columns: u32,
+        rows: u32,
+        printed: &str,
+        rows_after: usize,
+    ) -> ScrolledIntoHistory {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(columns), nz(rows));
+        session.feed_at(printed.as_bytes(), start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
+            1,
+            "the fixture must typeset its block live before anything scrolls"
+        );
+        let live_artifact = session
+            .live_decorations
+            .values()
+            .find_map(|record| record.artifact.clone())
+            .expect("the live occurrence holds its own raster");
+
+        let mut tail = String::new();
+        for line in 0..rows_after {
+            tail.push_str(&format!("\r\nmore-{line}"));
+        }
+        session
+            .feed_at(tail.as_bytes(), start + Duration::from_millis(210))
+            .unwrap();
+        assert!(
+            session.live_decorations.is_empty(),
+            "the fixture must push every source row off the live grid"
+        );
+
+        // Whatever the scheduler still holds for these lines runs now, so a raster that only
+        // survived because nothing else had a chance to land is not mistaken for a handoff.
+        let frozen_detections = session.frozen_detection_count;
+        session.run_workers();
+        let frozen_artifact = session.decorations.values().find_map(|record| {
+            record
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.rgba.clone())
+        });
+        ScrolledIntoHistory {
+            live: live_artifact.rgba,
+            frozen: frozen_artifact,
+            detections_before: frozen_detections,
+            detections_after: session.frozen_detection_count,
+        }
+    }
+
+    /// **A wrapped source row costs the occurrence its handoff (owner's replay 2026-09-17).** The
+    /// live detector proves an occurrence on *grid rows*; history is made of *transcript lines*, and
+    /// a line too long for the pane spends two grid rows and freezes as one line. The handoff waited
+    /// for a closing id counted in rows, which for a wrapped occurrence names a line past the end of
+    /// the block, so the proof re-ran the detector over one line too many, found no block ending
+    /// there, and threw the raster away. Nothing is visible when it happens — a block's last row
+    /// leaves the viewport in the same event it leaves the live grid — but the picture is then
+    /// detected and rasterised a second time for no reason.
+    #[test]
+    fn a_block_whose_body_row_wraps_still_hands_its_raster_to_history() {
+        // Twelve columns, a sixteen-cell body: four proven grid rows, three transcript lines.
+        let scrolled = hand_off_by_scrolling(12, 8, "$$\r\ne^{i\\pi} + 1 = 0\r\n$$\r\ntail", 9);
+        let frozen = scrolled
+            .frozen
+            .expect("the frozen block must be born typeset");
+        assert!(
+            Arc::ptr_eq(&frozen, &scrolled.live),
+            "the frozen record must take over the live raster, not a fresh one"
+        );
+        assert_eq!(
+            scrolled.detections_after, scrolled.detections_before,
+            "a handed-off block owes history no detection of its own"
+        );
+    }
+
+    /// The control the wrapped case is measured against: the same block, the same scroll, at a width
+    /// that fits it. This one has always passed, and it is here so that a change which breaks the
+    /// handoff outright cannot be read as the wrapping fix working.
+    #[test]
+    fn a_block_that_fits_the_pane_hands_its_raster_to_history() {
+        let scrolled = hand_off_by_scrolling(40, 8, "$$\r\ne^{i\\pi} + 1 = 0\r\n$$\r\ntail", 9);
+        let frozen = scrolled
+            .frozen
+            .expect("the frozen block must be born typeset");
+        assert!(Arc::ptr_eq(&frozen, &scrolled.live));
+        assert_eq!(scrolled.detections_after, scrolled.detections_before);
+    }
+
+    /// Every wrapped line is one line, however many rows it took: a block with two long body lines
+    /// is off by two, not by one, so the arithmetic has to count what froze rather than subtract a
+    /// constant.
+    #[test]
+    fn a_block_whose_every_body_line_wraps_still_hands_its_raster_to_history() {
+        // Six proven grid rows, four transcript lines.
+        let scrolled = hand_off_by_scrolling(
+            12,
+            10,
+            "$$\r\ne^{i\\pi} + 1 = 0\r\n\\quad e^{i\\pi} + 1 = 0\r\n$$\r\ntail",
+            11,
+        );
+        let frozen = scrolled
+            .frozen
+            .expect("the frozen block must be born typeset");
+        assert!(
+            Arc::ptr_eq(&frozen, &scrolled.live),
+            "two wrapped body lines must not push the proof two lines past the block"
+        );
+        assert_eq!(scrolled.detections_after, scrolled.detections_before);
     }
 
     #[test]
@@ -21696,6 +24226,68 @@ mod tests {
         assert!(!projection.review_hold());
     }
 
+    /// RED — **a wobble settled where the child already was does not move a reader's place in
+    /// history** (Codex review 2026-09-17).
+    ///
+    /// The unchanged-size settlement does everything its sibling does — it installs the canonical
+    /// branch over the displayed one, re-seats every registered anchor and re-anchors the
+    /// decorations projected across it — and then `finish_resize_if_quiescent` clears the resize
+    /// hold. All of that happens under a view that is parked twenty rows up in scrollback, so all
+    /// of it has to leave that view exactly where it is.
+    ///
+    /// Red gate: settle the wobble with nothing. The hold never clears and the offset is pinned by
+    /// a transaction that is never going to end; re-anchor against the pre-wobble grid instead and
+    /// the reader is thrown to the bottom.
+    #[test]
+    fn a_wobble_settled_on_the_childs_own_size_leaves_a_reader_where_they_were() {
+        // The top presentation row, whichever plane it is drawn from -- a view parked in
+        // scrollback is looking at history, so `frame_row_text`'s live-row lookup cannot see it.
+        let top_row = |frame: &ViewportFrame| {
+            let columns = frame.columns.get() as usize;
+            (0..columns)
+                .map(|column| frame.cells[column].text.as_str())
+                .collect::<String>()
+        };
+        let (mut session, mut projection, _lines) = scrolled_review_session(10);
+        let before = session.viewport_frame(&mut projection).unwrap();
+        let top_line = top_row(&before);
+        assert_eq!(before.scroll_offset_rows, 20);
+
+        // One column out and back, which tells the child nothing: it is already at forty.
+        let at = Instant::now();
+        session.resize_at(nz(39), nz(10), at).unwrap();
+        session
+            .resize_at(nz(40), nz(10), at + Duration::from_millis(17))
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let during = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            during.scroll_offset_rows, 20,
+            "the reflow itself keeps the reader's place"
+        );
+
+        session.mark_resize_settled_unchanged_at(nz(40), nz(10), at + Duration::from_millis(217));
+        let deadline = session
+            .resize_finish_deadline()
+            .expect("the settlement arms the quiescence that ends the hold");
+        assert!(session.finish_resize_if_quiescent(deadline).unwrap());
+        session.refresh_projection(&mut projection);
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            after.scroll_offset_rows, 20,
+            "and settling the gesture does not move it either"
+        );
+        assert_eq!(
+            top_row(&after),
+            top_line,
+            "the same line is under the reader's eye before and after"
+        );
+        assert!(
+            !projection.review_hold(),
+            "the transaction is over, so presentation is not holding anything for it"
+        );
+    }
+
     #[test]
     fn a_user_clear_without_a_resize_snaps_to_the_empty_bottom_without_holding() {
         let (mut session, mut projection, _lines) = scrolled_review_session(10);
@@ -22054,8 +24646,8 @@ mod tests {
                     assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                 }
                 SessionDecorationTask::VerifyPath(path) => {
-                    let exists = path_exists(&path);
-                    session.complete_path_verification(path, exists);
+                    let verdict = verify_path(&path);
+                    session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
             }
@@ -23247,6 +25839,314 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// PIN (owner report 2026-09-21, on the 0.4.3 candidate) — **a printed path with spaces in it
+    /// is a link when the file is there**, walked from the printed row to the real disk.
+    ///
+    /// The report was `D:\Developer\trace\验收 next85\中文 说明.md`: no mark, no click, while the
+    /// same tree without the spaces was an ordinary link. The lexer's half of the fix is pinned in
+    /// `bt_transcript::paths` by `a_bare_path_is_read_across_the_spaces_a_filename_may_hold` — the
+    /// row offers the whole spelling first and one shorter reading per space behind it. **This is
+    /// the half that decides.** Readings settle nothing on their own; §7.30 has the disk arbitrate,
+    /// and what makes the long one the link here is that a real worker read a real filesystem and
+    /// found it. The second half of this test is the same printed line over a disk holding only the
+    /// short name, and it answers the other way with nothing changed but the files.
+    ///
+    /// MUTATION: take `token_end_across_spaces` back out of `detect_rooted_candidates` and the
+    /// first half goes red on its first assertion — the worker is never asked about `a b\c d.md` at
+    /// all, and the row is as blank as the owner photographed it.
+    #[test]
+    fn a_printed_path_with_spaces_is_a_link_when_the_file_is_there() {
+        // The disk that holds the long name: `<temp>\a b\c d.md`, two spaces inside one path.
+        let (directory, spare) = temporary_ordinary_file();
+        assert!(
+            !directory.to_string_lossy().contains(' '),
+            "the fixture's own directory must be spaceless, or the bound is spent before the name \
+             under test begins: {}",
+            directory.display()
+        );
+        let folder = directory.join("a b");
+        std::fs::create_dir(&folder).unwrap();
+        let long = folder.join("c d.md");
+        std::fs::write(&long, b"# c d\n").unwrap();
+        let short = directory.join("a");
+
+        let printed = format!("see {} for details", long.to_string_lossy());
+        let mut session = DualPlaneSession::new(nz(240), nz(6));
+        enable_path_detection(&mut session);
+        session.feed(format!("{printed}\r\n").as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        assert!(
+            session.path_is_verified(&long),
+            "the worker read the file whose name holds the spaces"
+        );
+        assert!(
+            !session.path_is_verified(&short),
+            "and nothing is called `a` on that disk, so the reading the space used to be the whole \
+             of is denied"
+        );
+        let hit = frame
+            .hyperlink_at(0, 4)
+            .expect("the name with the spaces in it is a link");
+        assert_eq!(
+            hit.uri,
+            bt_transcript::paths::local_path_to_file_uri(&long),
+            "the target is the whole name, spaces and all"
+        );
+        assert!(
+            frame
+                .hyperlink_at(0, 4 + long.to_string_lossy().chars().count() as u32 + 1)
+                .is_none(),
+            "and the prose behind it, which was read and denied, is not part of the link"
+        );
+
+        // The same line over a disk holding only the short name. Nothing about the text changes —
+        // the readings are the same readings in the same order — and the answer changes because
+        // the filesystem does.
+        let (other, other_spare) = temporary_ordinary_file();
+        let only_short = other.join("a");
+        std::fs::write(&only_short, b"a\n").unwrap();
+        let reversed = format!("see {}\\a b\\c d.md for details", other.to_string_lossy());
+        let mut session = DualPlaneSession::new(nz(240), nz(6));
+        enable_path_detection(&mut session);
+        session.feed(format!("{reversed}\r\n").as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        assert!(
+            session.path_is_verified(&only_short),
+            "the short reading is the one this disk holds"
+        );
+        assert!(
+            !session.path_is_verified(&other.join("a b").join("c d.md")),
+            "and the long one was asked about and denied"
+        );
+        let hit = frame
+            .hyperlink_at(0, 4)
+            .expect("the reading the disk holds is the link");
+        assert_eq!(
+            hit.uri,
+            bt_transcript::paths::local_path_to_file_uri(&only_short),
+            "longest first, and the longest one the disk holds is this one"
+        );
+
+        std::fs::remove_file(&only_short).unwrap();
+        std::fs::remove_file(&other_spare).unwrap();
+        std::fs::remove_dir(&other).unwrap();
+        std::fs::remove_file(&long).unwrap();
+        std::fs::remove_dir(&folder).unwrap();
+        std::fs::remove_file(&spare).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (owner report 2026-09-22, two screenshots off a restored Claude Code pane) — **a
+    /// relative directory printed with a trailing slash is a link**, walked from the printed row to
+    /// the real disk.
+    ///
+    /// Three lines wore no mark: `文件都在 mjx_experiments/umarm_can/media/：`,
+    /// `新写在 whydrift/models/；` and `产出 experiments/qx181_model_ladder/ 的`, each naming a
+    /// real directory of the pane's own folder — while `whydrift/models` on a row above, the same
+    /// folder spelled **without** the slash, was an ordinary dotted link. That contrast is the
+    /// whole of the report and it is why all four rows are here: one lexical difference, one
+    /// answer apart.
+    ///
+    /// The lexer's half is pinned in `bt_transcript::paths` by
+    /// `a_trailing_separator_is_not_the_evidence_a_bare_reference_is_admitted_on`. **This is the
+    /// half that decides**: a reading settles nothing until a real worker has read a real
+    /// filesystem, and a directory is what the disk reports here — `exists` and `directory`, which
+    /// is the verdict §7.1.5j has drawn a reference on since directories joined the scan.
+    ///
+    /// The two full-width marks behind the first two references need the 2026-09-22 seam entry to
+    /// reach the trailing-slash reading at all; the third has an ordinary space behind its slash
+    /// and needs no seam, which is what says the trailing separator was a cause of its own.
+    ///
+    /// The row is 75 columns and every line is shorter than that on purpose: §7.1.5k ①'s
+    /// truncation gate is not the subject here, and a reference standing on the row's last cell
+    /// would be pressed down for a reason that has nothing to do with the report.
+    ///
+    /// MUTATION: put `!candidate.ends_with(['/', '\\'])` back into `is_relative_reference` and the
+    /// three directory rows go dark exactly as photographed, while the fourth keeps its link.
+    #[test]
+    fn a_relative_directory_printed_with_a_trailing_slash_is_a_link() {
+        /// The reference's text and its target, read off one frame row: every cell of that row
+        /// carrying a link, in order. Wide spacers carry no text, so a CJK row reads as it prints.
+        fn linked_on(frame: &ViewportFrame, row: u32) -> Option<(String, String)> {
+            let columns = frame.columns.get() as usize;
+            let start = row as usize * columns;
+            let mut text = String::new();
+            let mut uri = None;
+            for cell in &frame.cells[start..start + columns] {
+                if let Some(link) = &cell.hyperlink {
+                    uri.get_or_insert_with(|| link.uri.to_string());
+                    text.push_str(&cell.text);
+                }
+            }
+            uri.map(|uri| (text, uri))
+        }
+
+        let (directory, spare) = temporary_ordinary_file();
+        let media = directory
+            .join("mjx_experiments")
+            .join("umarm_can")
+            .join("media");
+        let models = directory.join("whydrift").join("models");
+        let ladder = directory.join("experiments").join("qx181_model_ladder");
+        for folder in [&media, &models, &ladder] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+
+        let printed = [
+            "两项收尾都完成了，已推送。文件都在 mjx_experiments/umarm_can/media/：",
+            "Agent(Build model ladder L0-L2 in whydrift/models) Opus 5",
+            "新写在 whydrift/models/；每级要给出退化到下一级的参数极限",
+            "产出 experiments/qx181_model_ladder/ 的",
+        ];
+        let mut session = DualPlaneSession::new(nz(75), nz(8));
+        enable_path_detection(&mut session);
+        session
+            .feed(
+                format!(
+                    "\x1b]7;file:///{}\x07",
+                    directory.to_string_lossy().replace('\\', "/")
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        for line in printed {
+            assert!(
+                bt_unicode::text_width(line) < 75,
+                "the fixture's rows must not reach the last cell, or the truncation gate answers \
+                 instead of the rule under test: {line}"
+            );
+            session.feed(format!("{line}\r\n").as_bytes()).unwrap();
+        }
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        for folder in [&media, &models, &ladder] {
+            assert!(
+                session.path_is_verified(folder),
+                "the worker read the directory the line names: {}",
+                folder.display()
+            );
+        }
+
+        // The slash is part of what the reader points at, because the name as printed is the span.
+        assert_eq!(
+            linked_on(&frame, 0),
+            Some((
+                "mjx_experiments/umarm_can/media/".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(&media)
+            )),
+            "the reference behind the full-width colon is a link, slash and all"
+        );
+        // The contrast row, which was a link all along.
+        assert_eq!(
+            linked_on(&frame, 1),
+            Some((
+                "whydrift/models".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(&models)
+            ))
+        );
+        assert_eq!(
+            linked_on(&frame, 2),
+            Some((
+                "whydrift/models/".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(&models)
+            )),
+            "the same folder with the slash on it reaches the same place"
+        );
+        assert_eq!(
+            linked_on(&frame, 3),
+            Some((
+                "experiments/qx181_model_ladder/".to_owned(),
+                bt_transcript::paths::local_path_to_file_uri(&ladder)
+            )),
+            "and the one with an ordinary space behind the slash needs no seam at all"
+        );
+
+        std::fs::remove_dir_all(directory.join("mjx_experiments")).unwrap();
+        std::fs::remove_dir_all(directory.join("whydrift")).unwrap();
+        std::fs::remove_dir_all(directory.join("experiments")).unwrap();
+        std::fs::remove_file(&spare).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (owner report 2026-09-22) — **a full-width stop ends the name whatever follows it**,
+    /// walked from the printed row to the real disk.
+    ///
+    /// Claude Code printed `草稿在 <path>.md。18 条,每条三段:规则 /` with the path as an inline
+    /// code span, so the row carries the span's colour around the name and no space between
+    /// `.md` and `。18`. The file was on the disk and the row wore no mark: every reading the
+    /// lexer offered carried `。18`, because a seam required a non-ASCII character behind its
+    /// separator and the `1` is ASCII. `…md。十八条` was a link on the same commit.
+    ///
+    /// The lexer's half is pinned in `bt_transcript::paths` by
+    /// `a_non_ascii_separator_is_a_seam_whatever_follows_it`; this is the half that decides.
+    ///
+    /// MUTATION: drop `!character.is_ascii() ||` from `prose_seam_ends` and the row goes dark.
+    #[test]
+    fn a_printed_path_behind_a_full_width_stop_and_a_digit_is_a_link() {
+        /// The reference's text and its target, read off one frame row.
+        fn linked_on(frame: &ViewportFrame, row: u32) -> Option<(String, String)> {
+            let columns = frame.columns.get() as usize;
+            let start = row as usize * columns;
+            let mut text = String::new();
+            let mut uri = None;
+            for cell in &frame.cells[start..start + columns] {
+                if let Some(link) = &cell.hyperlink {
+                    uri.get_or_insert_with(|| link.uri.to_string());
+                    text.push_str(&cell.text);
+                }
+            }
+            uri.map(|uri| (text, uri))
+        }
+
+        let (directory, spare) = temporary_ordinary_file();
+        let draft = directory.join("engineering-playbook-draft-2026-09-21.md");
+        std::fs::write(&draft, b"# draft\n").unwrap();
+        let name = draft.to_string_lossy().into_owned();
+
+        let mut session = DualPlaneSession::new(nz(200), nz(8));
+        enable_path_detection(&mut session);
+        session
+            .feed(
+                format!(
+                    "\x1b]7;file:///{}\x07",
+                    directory.to_string_lossy().replace('\\', "/")
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        // Byte for byte as Claude Code emits it: the code span's truecolour around the name, the
+        // default foreground back, and the prose glued on behind.
+        let prose = "。18 条,每条三段:规则 /";
+        assert!(
+            bt_unicode::text_width(&format!("草稿在 {name}{prose}")) < 200,
+            "the row must not reach the last cell, or the truncation gate answers instead"
+        );
+        session
+            .feed(format!("草稿在 \x1b[38;2;177;185;249m{name}\x1b[39m{prose}\r\n").as_bytes())
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        assert!(session.path_is_verified(&draft));
+        assert_eq!(
+            linked_on(&frame, 0),
+            Some((
+                name.clone(),
+                bt_transcript::paths::local_path_to_file_uri(&draft)
+            )),
+            "the link is the name without the full-width stop, and it opens the file"
+        );
+
+        std::fs::remove_file(&draft).unwrap();
+        std::fs::remove_file(&spare).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
     /// PIN (user report 2026-08-21) — **a path the terminal wrapped is still one link**, asked of
     /// the real vendor grid rather than of a hand-built one.
     ///
@@ -23602,7 +26502,7 @@ mod tests {
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
                 asked.push(path.clone());
-                session.complete_path_verification(path, false);
+                session.complete_path_verification(path, PathVerdict::absent());
             }
         }
         asked
@@ -23742,8 +26642,8 @@ mod tests {
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
                     this_frame += 1;
-                    let exists = path_exists(&path);
-                    session.complete_path_verification(path, exists);
+                    let verdict = verify_path(&path);
+                    session.complete_path_verification(path, verdict);
                 }
             }
             asked.push(this_frame);
@@ -23816,8 +26716,8 @@ mod tests {
             session.absorb_printed_path_probes(&mut projection);
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
-                    let exists = path_exists(&path);
-                    session.complete_path_verification(path, exists);
+                    let verdict = verify_path(&path);
+                    session.complete_path_verification(path, verdict);
                 }
             }
         }
@@ -23886,8 +26786,8 @@ mod tests {
             owed = false;
             while let Some(task) = session.take_decoration_worker_task() {
                 if let SessionDecorationTask::VerifyPath(path) = task {
-                    let exists = path_exists(&path);
-                    owed |= session.complete_path_verification(path, exists);
+                    let verdict = verify_path(&path);
+                    owed |= session.complete_path_verification(path, verdict);
                 }
             }
         }
@@ -23931,8 +26831,8 @@ mod tests {
         session.absorb_printed_path_probes(projection);
         while let Some(task) = session.take_decoration_worker_task() {
             if let SessionDecorationTask::VerifyPath(path) = task {
-                let exists = path_exists(&path);
-                session.complete_path_verification(path, exists);
+                let verdict = verify_path(&path);
+                session.complete_path_verification(path, verdict);
             }
         }
     }
@@ -24047,8 +26947,11 @@ mod tests {
             .feed(b"\x1b[?1049h\x1b]133;D;0\x07\x1b[?1049l")
             .unwrap();
         assert_eq!(
-            session.path_verdicts.get(&absent),
-            Some(&false),
+            session
+                .path_verdicts
+                .get(&absent)
+                .map(|verdict| verdict.exists),
+            Some(false),
             "a TUI does not get to close a command it did not open, and it does not get to \
              empty this ledger either"
         );
@@ -24070,15 +26973,18 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
-    /// **A pane with no shell integration keeps its "no"s, and that is the ruling and not a gap**
-    /// (user ruling 2026-08-25; §7.1.5b's degraded path).
+    /// **Output that does not name it does not re-ask it** (owner ruling 2026-09-20).
     ///
-    /// A root process that does not report its commands never tells this window a command ended.
-    /// The honest substitutes are all worse than the limitation — a timer re-asks a screenful of
-    /// dead names on a pane nobody is touching, and inferring a boundary from the shape of the
-    /// output fires in the middle of a build as readily as at the end of one — so such a pane
-    /// behaves exactly as every pane did before this ruling, and the way out is shell integration.
-    /// That is the same answer §7.1.5b gives for busy detection, for the same reason.
+    /// The pane here has no shell integration at all, so no command ever ends and
+    /// [`DualPlaneSession::expire_denied_paths`] never runs. Ten screens of unrelated output go
+    /// past while the file quietly appears on the disk, and the name is not asked about again —
+    /// because *this* program printed something, not because it printed **that name**. The other
+    /// half of the ruling is the test below: print the name and the question comes back.
+    ///
+    /// Before 2026-09-20 this test stood for "a pane with no shell integration keeps its no's for
+    /// ever, and that is on purpose". That premise is gone; what survives it unchanged is the part
+    /// that was always right — a timer, and a guess at the shape of the output, are both worse than
+    /// the limitation they would lift.
     #[test]
     fn a_pane_without_shell_integration_keeps_every_verdict_it_has() {
         let (directory, _) = temporary_ordinary_file();
@@ -24118,6 +27024,309 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// An absolute directory under the system temp root that is **never created**. Everything under
+    /// it is a spelling and not a file: the tests below state every answer themselves through
+    /// [`settle_printed_paths_against`], so no disk is read and no clock is waited on.
+    fn unwritten_directory(tag: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "betterterminal-{tag}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    /// One frame of the app's own loop with the **disk replaced by what the test says is on it**:
+    /// project, collect the names, answer each one. Returns the names this pass asked about, in the
+    /// order it asked, and whether any answer owed the pane a frame.
+    ///
+    /// The sibling of [`settle_printed_paths`], which reads the real disk. This one exists because
+    /// the re-ask rule is a rule about **what the program printed**, and a test that created files
+    /// to prove it would be measuring a temporary directory instead.
+    fn settle_printed_paths_against(
+        session: &mut DualPlaneSession,
+        projection: &mut ViewportProjection,
+        on_disk: impl Fn(&Path) -> bool,
+    ) -> (Vec<PathBuf>, bool) {
+        session.viewport_frame(projection).unwrap();
+        session.absorb_printed_path_probes(projection);
+        let mut asked = Vec::new();
+        let mut owed = false;
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let SessionDecorationTask::VerifyPath(path) = task {
+                asked.push(path.clone());
+                let verdict = if on_disk(&path) {
+                    PathVerdict {
+                        exists: true,
+                        ..PathVerdict::absent()
+                    }
+                } else {
+                    PathVerdict::absent()
+                };
+                owed |= session.complete_path_verification(path, verdict);
+            }
+        }
+        (asked, owed)
+    }
+
+    /// Every distinct `file:` target the frame draws, in row order.
+    fn frame_file_links(frame: &ViewportFrame) -> Vec<String> {
+        let mut seen = Vec::new();
+        for row in 0..frame.rows.get() {
+            for column in 0..frame.columns.get() {
+                let Some(hit) = frame.hyperlink_at(row, column) else {
+                    continue;
+                };
+                if hit.uri.starts_with("file:") && !seen.contains(&hit.uri) {
+                    seen.push(hit.uri);
+                }
+            }
+        }
+        seen
+    }
+
+    /// **A name printed again is asked about again** (owner ruling 2026-09-20, re-ruling the
+    /// 2026-08-25 "a pane with no shell integration keeps its no's for ever").
+    ///
+    /// The photographed shape (owner, candidate next83): a pane whose foreground program is a TUI
+    /// agent that has been running for hours. It prints `I'll copy it to D:\…\menus.html` **before**
+    /// the file exists; the disk says no and the ledger remembers. Minutes later the file is there
+    /// and the agent prints the same name again — and, with the only expiry hanging on `OSC 133 D`,
+    /// that second printing raised no question at all, so the name stayed dark for the rest of that
+    /// pane's life. Announcing a file and then writing it is what an agent does all day, so the
+    /// premise of the old ruling — that a pane runs a shell whose commands end — stopped being the
+    /// product's main scenario.
+    ///
+    /// The signal is the program's own act of printing the name anew, which on this screen means a
+    /// row whose **cells changed** and now spell it. Two hundred projections of a screen nobody is
+    /// printing to sit between the two printings and cost nothing, which is the 2026-08-23 budget
+    /// ruling still standing: there is no clock here and no per-frame re-scan.
+    ///
+    /// No `OSC 133` anywhere, and no disk: every answer below is stated by the test.
+    ///
+    /// MUTATION: drop the `paths_named_on_freshly_printed_rows` arm of
+    /// [`DualPlaneSession::absorb_printed_path_probes`] and the last three assertions go red — the
+    /// file exists, its name is on the screen twice over, and nothing asks.
+    #[test]
+    fn a_name_printed_again_after_a_no_is_asked_about_again() {
+        let directory = unwritten_directory("printed-again");
+        let menus = directory.join("menus.html");
+
+        let mut session = DualPlaneSession::new(nz(200), nz(24));
+        enable_path_detection(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+
+        // The agent says where it is about to write. The file is not there yet.
+        session
+            .feed(format!("I'll copy it to {}\r\n", menus.display()).as_bytes())
+            .unwrap();
+        let (asked, _) = settle_printed_paths_against(&mut session, &mut projection, |_| false);
+        assert_eq!(
+            asked,
+            vec![menus.clone()],
+            "the first printing is a question"
+        );
+        assert!(!session.path_is_verified(&menus));
+
+        // Minutes of a pane nobody is printing to. The file arrives during them.
+        for pass in 0..200u32 {
+            let (asked, owed) =
+                settle_printed_paths_against(&mut session, &mut projection, |path| path == menus);
+            assert!(
+                asked.is_empty() && !owed,
+                "a screen that sits still costs nothing: pass {pass} asked {asked:?}"
+            );
+        }
+        assert!(
+            !session.path_is_verified(&menus),
+            "nothing was printed, so nothing was asked, so the standing verdict stands"
+        );
+
+        // The agent prints the same name again, now that it has written it.
+        session
+            .feed(format!("Wrote {}\r\n", menus.display()).as_bytes())
+            .unwrap();
+        let (asked, owed) =
+            settle_printed_paths_against(&mut session, &mut projection, |path| path == menus);
+        assert_eq!(
+            asked,
+            vec![menus.clone()],
+            "printed again is asked again — once"
+        );
+        assert!(
+            owed,
+            "a yes changes the picture, so the pane is owed a frame"
+        );
+        assert!(session.path_is_verified(&menus));
+
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            frame_file_links(&frame),
+            vec![bt_transcript::paths::local_path_to_file_uri(&menus)],
+            "and both printings of the name are the link the file deserves"
+        );
+    }
+
+    /// **A repaint of an unchanged row is not a printing** (owner ruling 2026-09-20).
+    ///
+    /// The bound the re-ask rule has to carry on its own, and the reason it is not a timer in
+    /// disguise: an agent's viewport is rewritten in full on every frame it draws, and a thousand
+    /// rewrites of the same bytes are one printing. The fact is owned where it already was — the
+    /// per-row fingerprint `observe_live_damage` compares (§4.6, 2026-09-06: "a row rewritten with
+    /// the bytes it already had did not change, whoever is looking at it") — so nothing here
+    /// measures the text a second way.
+    ///
+    /// MUTATION: re-ask on damage rather than on a changed fingerprint and this asks a thousand
+    /// times.
+    #[test]
+    fn a_thousand_repaints_of_the_same_row_ask_nothing() {
+        let directory = unwritten_directory("repaint-same");
+        let absent = directory.join("pending.html");
+        // The shape an agent's viewport has: a full-screen program addressing its own canvas and
+        // writing it from the top, over and over.
+        let screen = format!(
+            "\x1b[?1049h\x1b[2J\x1b[Hcopying to {}\r\n",
+            absent.display()
+        );
+
+        let mut session = DualPlaneSession::new(nz(160), nz(24));
+        enable_path_detection(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+
+        session.feed(screen.as_bytes()).unwrap();
+        let (asked, _) = settle_printed_paths_against(&mut session, &mut projection, |_| false);
+        assert_eq!(asked, vec![absent.clone()]);
+
+        let mut later = 0usize;
+        for _ in 0..1000u32 {
+            session.feed(screen.as_bytes()).unwrap();
+            let (asked, _) = settle_printed_paths_against(&mut session, &mut projection, |_| false);
+            later += asked.len();
+        }
+        assert_eq!(
+            later, 0,
+            "a thousand repaints of the same text asked {later} questions"
+        );
+    }
+
+    /// **A row that changes and still names it is a printing, and costs exactly one question**
+    /// (owner ruling 2026-09-20).
+    ///
+    /// The case between the two above: the program rewrote the row, and what it wrote still spells
+    /// the name. That is the program printing the name again — a progress line counting up beside a
+    /// file it is building is the shape — so it is one question per change, and the answer's own
+    /// in-flight bookkeeping is what keeps it to one.
+    #[test]
+    fn a_row_rewritten_around_the_same_name_asks_once_per_change() {
+        let directory = unwritten_directory("rewritten-around");
+        let absent = directory.join("bundle.js");
+
+        let mut session = DualPlaneSession::new(nz(160), nz(24));
+        enable_path_detection(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+
+        let mut per_change = Vec::new();
+        for percent in 0..8u32 {
+            session
+                .feed(
+                    format!(
+                        "\x1b[?1049h\x1b[2J\x1b[H{percent}0% {}\r\n",
+                        absent.display()
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            let (asked, _) = settle_printed_paths_against(&mut session, &mut projection, |_| false);
+            per_change.push(asked.len());
+        }
+        assert_eq!(
+            per_change,
+            vec![1; 8],
+            "one printing, one question — never two, never none"
+        );
+    }
+
+    /// **The three budgets are what bound a re-ask, exactly as they bound a first ask**
+    /// (owner ruling 2026-09-20; the 2026-08-23 budget ruling, untouched).
+    ///
+    /// Five thousand distinct names go past, every one of them denied, and every one of them
+    /// printed again. A re-ask enters the same bounded queue by the same door, so 512 questions may
+    /// be outstanding and 4096 verdicts may be remembered — no more, however many names a program
+    /// invents.
+    ///
+    /// The ledger stays **one entry per path**: a re-ask replaces the verdict it re-asks rather
+    /// than filing a second copy of the name, so the eviction order stays as long as the map.
+    #[test]
+    fn five_thousand_reprinted_denials_hold_every_budget() {
+        let directory = unwritten_directory("budgets");
+        let mut session = DualPlaneSession::new(nz(240), nz(24));
+        enable_path_detection(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+
+        let name = |index: u32| directory.join(format!("n{index:05}.out"));
+        for batch in 0..250u32 {
+            let rows = (0..20u32)
+                .map(|slot| format!("emitting {}", name(batch * 20 + slot).display()))
+                .collect::<Vec<_>>()
+                .join("\r\n");
+            session
+                .feed(format!("\x1b[?1049h\x1b[2J\x1b[H{rows}\r\n").as_bytes())
+                .unwrap();
+            session.viewport_frame(&mut projection).unwrap();
+            session.absorb_printed_path_probes(&mut projection);
+            assert!(
+                session.path_verify_tasks.len() <= PATH_VERIFY_QUEUE_CAP,
+                "batch {batch} queued {} questions",
+                session.path_verify_tasks.len()
+            );
+            while let Some(task) = session.take_decoration_worker_task() {
+                if let SessionDecorationTask::VerifyPath(path) = task {
+                    session.complete_path_verification(path, PathVerdict::absent());
+                }
+            }
+            assert!(
+                session.path_verdicts.len() <= PATH_VERDICT_LEDGER_CAP,
+                "batch {batch} remembered {} verdicts",
+                session.path_verdicts.len()
+            );
+            assert_eq!(
+                session.path_verdict_order.len(),
+                session.path_verdicts.len(),
+                "one entry per path, in both halves of the ledger"
+            );
+        }
+
+        // Every one of them printed again, and nobody answering: the queue is what holds.
+        for batch in 0..250u32 {
+            let rows = (0..20u32)
+                .map(|slot| format!("retry {batch} {}", name(batch * 20 + slot).display()))
+                .collect::<Vec<_>>()
+                .join("\r\n");
+            session
+                .feed(format!("\x1b[?1049h\x1b[2J\x1b[H{rows}\r\n").as_bytes())
+                .unwrap();
+            session.viewport_frame(&mut projection).unwrap();
+            session.absorb_printed_path_probes(&mut projection);
+            assert!(
+                session.path_verify_tasks.len() <= PATH_VERIFY_QUEUE_CAP,
+                "re-ask batch {batch} queued {} questions",
+                session.path_verify_tasks.len()
+            );
+            assert!(
+                session.path_verdicts.len() <= PATH_VERDICT_LEDGER_CAP,
+                "re-ask batch {batch} remembered {} verdicts",
+                session.path_verdicts.len()
+            );
+            assert_eq!(
+                session.path_verdict_order.len(),
+                session.path_verdicts.len(),
+                "a re-ask replaces its entry; it never files a second one"
+            );
+        }
+    }
+
     fn enable_path_detection(session: &mut DualPlaneSession) {
         session.set_math_layout_options(MathLayoutOptions {
             detect_image_paths: true,
@@ -24140,8 +27349,8 @@ mod tests {
                     session.complete_inline_image_scale(scale_inline_image(&task));
                 }
                 SessionDecorationTask::VerifyPath(path) => {
-                    let exists = path_exists(&path);
-                    session.complete_path_verification(path, exists);
+                    let verdict = verify_path(&path);
+                    session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
             }
@@ -26150,8 +29359,8 @@ mod tests {
                         assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let exists = path_exists(&path);
-                        session.complete_path_verification(path, exists);
+                        let verdict = verify_path(&path);
+                        session.complete_path_verification(path, verdict);
                     }
                     SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
                 }
@@ -26258,8 +29467,8 @@ mod tests {
                         assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                     }
                     SessionDecorationTask::VerifyPath(path) => {
-                        let exists = path_exists(&path);
-                        session.complete_path_verification(path, exists);
+                        let verdict = verify_path(&path);
+                        session.complete_path_verification(path, verdict);
                     }
                     SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
                 }
@@ -28299,6 +31508,1684 @@ mod tests {
         );
     }
 
+    /// The command output of the 2026-09-17 recording, in one burst: a short line whose formula
+    /// fits one grid row, and a long one the pane wraps into two. Both formulas of the wrapped line
+    /// sit on its first row, so what this fixture exercises is the *line* spanning two rows, not a
+    /// formula split across them (that is `a_formula_split_across_two_printed_rows_is_joined`).
+    /// **A crop is named by the pixels it contains, not by where it starts.**
+    ///
+    /// A composite the fold spreads over several rows is uploaded per row, cropped to the runs that
+    /// row carries, and the crop's name was the base key plus its left edge alone. The right edge
+    /// comes from those runs, so two rows of one composite that begin at the same pixel can hold
+    /// different numbers of runs and different widths — a first row whose leading prose is one
+    /// character wide and one whose is ten both begin at zero. They named one texture, and the
+    /// renderer uploads by name without comparing the tiles it already holds against the pixels the
+    /// placement is carrying (the reviewer measured 264 against 139 pixels under one key).
+    #[test]
+    fn two_crops_of_one_composite_are_two_textures_unless_they_are_the_same_pixels() {
+        let artifact = bt_viewport::ProjectedMathArtifact {
+            key: "math:0000000000000000".to_owned(),
+            end: TranscriptId(0),
+            rgba: Arc::from(vec![255_u8; 400 * 4]),
+            width_px: 400,
+            height_px: 1,
+            height_subpixels: SUBPIXELS_PER_PX,
+            baseline_subpixels: 0,
+            mode: MathMode::Inline,
+            kind: bt_viewport::RgbaArtifactKind::Math,
+            vertical_padding_subpixels: 0,
+            render_scale_milli: 1000,
+            source: String::new(),
+            inline_runs: Vec::new(),
+        };
+        let crop = |bounds: Option<(u32, u32)>| {
+            cropped_inline_artifact(
+                &artifact,
+                &InlineRowPlacement {
+                    row: 0,
+                    left_column: 0,
+                    cells: Vec::new(),
+                    crop_px: bounds,
+                    runs: Vec::new(),
+                },
+            )
+            .key
+        };
+        assert_ne!(
+            crop(Some((0, 264))),
+            crop(Some((0, 139))),
+            "two crops from the same left edge holding different pixels are two textures"
+        );
+        assert_eq!(
+            crop(Some((0, 264))),
+            crop(Some((0, 264))),
+            "and the same crop is the same texture"
+        );
+        assert_eq!(
+            crop(None),
+            artifact.key,
+            "an uncropped composite keeps the base name byte for byte"
+        );
+    }
+
+    /// **Two composites that are not the same picture may not be the same texture.**
+    ///
+    /// An inline composite is one raster per logical line, with each run blitted at an x that
+    /// follows from the prose in front of it. The artifact key carried the run *sources* joined
+    /// with "; " and nothing about where they sit, so two lines with the same formulas and prose of
+    /// different widths hashed the same — and the renderer uploads by key, never comparing what it
+    /// already holds against what the placement is carrying.
+    /// Whichever line was admitted first supplied the picture for both, so the second line drew its
+    /// `y` at the first line's offset, over its own prose, with its source cells already cleared.
+    ///
+    /// The key must name the whole recipe, and the geometry is the part the source cannot imply.
+    /// Prose is deliberately not in it: two lines whose prose differs but whose runs land in the
+    /// same cells are the same picture and should share it.
+    #[test]
+    fn two_inline_composites_with_different_run_offsets_do_not_share_a_texture() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n\
+                     a = $x^2$, b = $y^2$\r\n\
+                     a = $x^2$, and b = $y^2$\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            2,
+            "both lines must arm"
+        );
+        assert_eq!(complete_live_math_for_real(&mut session), 2);
+
+        let artifacts = session
+            .live_decorations
+            .values()
+            .filter_map(|record| record.artifact.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(
+            artifacts[0].inline_runs.len(),
+            2,
+            "the fixture must really put two runs on each line"
+        );
+        let offsets = artifacts
+            .iter()
+            .map(|artifact| artifact.inline_runs[1].x_px)
+            .collect::<Vec<_>>();
+        assert_ne!(
+            offsets[0], offsets[1],
+            "the fixture must really give the second run two different offsets"
+        );
+        assert_ne!(
+            artifacts[0].key, artifacts[1].key,
+            "two pictures that differ must not be one texture"
+        );
+    }
+
+    /// A display block that soft-wraps, with an ordinary row right under it.
+    ///
+    /// The body is long enough to need two rows at 20 columns and one at 40, so a width change
+    /// really does change how many physical rows the same source occupies — which is the whole
+    /// subject. The sentinel is the row the band must never reach.
+    const WRAPPING_BLOCK: &str = "$$\r\nx + y + z = a + b + c + d\r\n$$\r\nSENTINEL\r\n";
+
+    /// The one restored record, and what it now claims to own.
+    fn restored_band(session: &DualPlaneSession) -> (GridPoint, GridPoint, u32, u32) {
+        let record = session
+            .live_decorations
+            .values()
+            .next()
+            .expect("the preserved record is restored onto the reflowed grid");
+        (
+            record.start,
+            record.end,
+            record.band_start_row,
+            record.band_end_row,
+        )
+    }
+
+    /// The live row the sentinel is on, read off the grid rather than counted.
+    fn sentinel_row(session: &DualPlaneSession) -> u32 {
+        let inputs = session.live_detection_context();
+        (0..session.live_rows.len() as u32)
+            .find(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| input.text.contains("SENTINEL"))
+            })
+            .expect("the sentinel is on the grid")
+    }
+
+    /// **A preserved band owns the rows it was just matched at, never the rows it used to have.**
+    ///
+    /// A resize parks proven records off-band and `restore_offscreen_decorations` re-anchors each by
+    /// finding its complete source in the reflowed grid. It installed `start`/`end` from that new
+    /// match and then computed the band from `identity.band_rows` — a physical row count measured on
+    /// the grid the occurrence was *proven* on. Widening a soft-wrapped block shrinks its extent, so
+    /// the old length reached past the new closing delimiter and the viewport blanked the ordinary
+    /// rows under it; narrowing made `end.row` overshoot `band_end_row`, which the viewport refuses,
+    /// and the block showed source until a fresh result arrived. Both are published frames — the
+    /// record is back in `live_decorations` before `resize_at` returns — so a drag shows them.
+    ///
+    /// The two stored offsets are no better than the length: `band_rows`, `source_start_offset` and
+    /// `source_end_offset` are all measured in the old wrapping's rows, so an expression built from
+    /// them is stale in a different digit. The extent that was just matched is the only physical
+    /// ownership in the room, and it is what a fresh detection of this occurrence would install.
+    #[test]
+    fn a_preserved_band_owns_the_extent_it_was_matched_at_and_not_its_old_length() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(20), nz(10));
+        session.feed_at(WRAPPING_BLOCK.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1,
+            "the fixture must prove the block before anything is resized"
+        );
+        let (_, end, _, band_end) = restored_band(&session);
+        assert_eq!(
+            band_end, end.row,
+            "and it must start out owning exactly its own source"
+        );
+
+        // Widen, then narrow, then come back — with no completion delivered in between, so every
+        // assertion below is about a frame the drag really publishes.
+        for (step, columns) in [40u32, 20, 40, 20].into_iter().enumerate() {
+            let at = started + Duration::from_millis(210 * (step as u64 + 1));
+            session.resize_at(nz(columns), nz(10), at).unwrap();
+            session.set_layout_key(LayoutKey {
+                width_cells: nz(columns),
+                ..session.layout_key()
+            });
+            session.mark_pty_resize_requested_at(nz(columns), nz(10), at);
+
+            let (start, end, band_start, band_end) = restored_band(&session);
+            assert!(
+                band_end >= end.row,
+                "at {columns} columns the band must reach its own closing row: \
+                 band {band_start}..={band_end}, source {}..={}",
+                start.row,
+                end.row
+            );
+            assert_eq!(
+                (band_start, band_end),
+                (start.row, end.row),
+                "at {columns} columns the band is the extent that was matched"
+            );
+            let sentinel = sentinel_row(&session);
+            assert!(
+                sentinel > band_end,
+                "at {columns} columns the row under the block is not inside the band: \
+                 sentinel {sentinel}, band {band_start}..={band_end}"
+            );
+        }
+
+        // The last word goes to a result from the first width, delivered now. A stale answer is
+        // refused on its layout, and refusing it must not leave the band it was refused for behind.
+        let stale = LiveDetectionTask {
+            layout: LayoutKey {
+                width_cells: nz(40),
+                ..session.layout_key()
+            },
+            ..session
+                .live_decorations
+                .values()
+                .next()
+                .map(|record| LiveDetectionTask {
+                    candidate_row: record.end.row,
+                    screen: record.screen,
+                    grid_generation: record.generation,
+                    detection_revision: record.detection_revision,
+                    layout: record.layout,
+                    cell_width_subpixels: 0,
+                    cell_height_subpixels: 0,
+                    ascii_baseline_subpixels: 0,
+                    options: session.detection_options(),
+                    initial_context: record.initial_context.clone(),
+                    inputs: Arc::clone(&record.inputs),
+                    start: record.start,
+                    end: record.end,
+                    band_start_row: record.band_start_row,
+                    band_end_row: record.band_end_row,
+                    span: record.span.clone(),
+                    detection_complete: true,
+                    resolved: true,
+                    refused_table_rows: Vec::new(),
+                })
+                .expect("a record is standing")
+        };
+        assert!(
+            !session.complete_live_worker_result(stale, Ok(synthetic_raster(40, 40))),
+            "a result from the other width is refused"
+        );
+        let (start, end, band_start, band_end) = restored_band(&session);
+        assert_eq!((band_start, band_end), (start.row, end.row));
+        assert!(sentinel_row(&session) > band_end);
+    }
+
+    /// The other direction of the same agreement: a command's line does not *lose* its site at the
+    /// freeze either.
+    ///
+    /// Its region is evicted along with the prompt line it started on while the rows it printed are
+    /// still on the grid — ordinary retirement — so a rule that asks the bookkeeping has nothing
+    /// left to ask and answers `Ineligible`. The cells answer what they answered a moment earlier.
+    #[test]
+    fn a_retired_commands_line_does_not_lose_its_site_at_the_freeze() {
+        let started = Instant::now();
+        let one = NonZeroUsize::new(1).unwrap();
+        let mut session = DualPlaneSession::with_quotas(nz(60), nz(8), one, one);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\nt1\r\nt2\r\nt3\r\nt4\r\n\
+                     t5\r\nt6\r\nt7\r\n{ENERGY}{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        let inputs = session.live_detection_context();
+        let energy_row = (0..session.live_rows.len() as u32)
+            .find(|row| live_grid_input(&inputs, *row).is_some_and(|input| input.text == ENERGY))
+            .expect("the command's line is on the grid");
+        assert_eq!(
+            grid_site_at(&session, energy_row),
+            InlineMathSite::CommandOutput
+        );
+
+        // Scroll until the command's own line is the newest thing in the history, which with a
+        // quota of one line is the only moment it is there at all. The prompt line the region
+        // started on leaves long before that, which is the retirement this is about.
+        let mut frozen_site = None;
+        for _ in 0..16 {
+            session.feed_at(b"\r\n", started).unwrap();
+            if let Some(entry) = session
+                .document
+                .entries()
+                .values()
+                .find(|entry| entry.line.text == ENERGY)
+            {
+                assert!(
+                    session.semantic_output_regions.is_empty(),
+                    "the fixture must really have retired the region by now"
+                );
+                frozen_site = Some(entry.inline_site);
+                break;
+            }
+        }
+        assert_eq!(
+            frozen_site.expect("the command's line froze"),
+            InlineMathSite::CommandOutput,
+            "a line the command printed keeps its site when it scrolls, region or no region"
+        );
+    }
+
+    /// **A line freezes with the site its cells say, so the two planes cannot disagree about it.**
+    ///
+    /// The live plane reads provenance off the cells the write stamped. The frozen plane used to
+    /// ask the OSC 133 bookkeeping where the line's coordinates fell, and a closed region goes on
+    /// covering the coordinates it closed over — so a prompt that reprints a command's line byte for
+    /// byte was refused on the grid and then accepted the moment it scrolled into history, which is
+    /// the same defect crossing a plane boundary. One fact, read once, at the one moment the rows
+    /// are still in hand.
+    ///
+    /// The two lines here spell the same thing and differ only in who wrote them, which is the whole
+    /// point: nothing about the text can tell them apart, and nothing about where they sit can
+    /// either once the region has closed over both.
+    #[test]
+    fn a_line_freezes_with_the_site_its_own_cells_carry() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\na\r\n{ENERGY}\r\nb\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        // The next prompt prints the same line the command just printed, and prints it *inside* the
+        // rows the closed region covers — so a rule that asks where a line sits calls this output,
+        // and a rule that asks who wrote it does not.
+        session
+            .feed_at(
+                format!("\x1b[4;1H{PROMPT_A}{ENERGY}{PROMPT_B}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        // Both scroll into history.
+        session
+            .feed_at(b"\r\np\r\np\r\np\r\np\r\np\r\np\r\np\r\n", started)
+            .unwrap();
+
+        let frozen = session
+            .document
+            .entries()
+            .iter()
+            .filter(|(_, entry)| entry.line.text.contains("energy"))
+            .map(|(id, entry)| (*id, entry.inline_site))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            frozen.len(),
+            2,
+            "the fixture must freeze both lines: {:?}",
+            session
+                .document
+                .entries()
+                .values()
+                .map(|entry| entry.line.text.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            frozen[0].1,
+            InlineMathSite::CommandOutput,
+            "the line the command printed keeps its site into history"
+        );
+        assert_eq!(
+            frozen[1].1,
+            InlineMathSite::Ineligible,
+            "and the prompt that spells the same thing does not acquire one"
+        );
+    }
+
+    /// The site of one grid row, as the live scan sees it.
+    fn grid_site_at(session: &DualPlaneSession, row: u32) -> InlineMathSite {
+        live_grid_input(&session.live_detection_context(), row)
+            .map_or(InlineMathSite::Ineligible, |input| input.site)
+    }
+
+    /// Every row that carries text and that the scan would let a lone `$` be read on.
+    fn eligible_text_rows(session: &DualPlaneSession) -> Vec<u32> {
+        let inputs = session.live_detection_context();
+        (0..session.live_rows.len() as u32)
+            .filter(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| {
+                    !input.text.trim().is_empty() && input.site.permits_inline()
+                })
+            })
+            .collect()
+    }
+
+    const PROMPT_A: &str = "\x1b]133;A\x07";
+    const PROMPT_B: &str = "\x1b]133;B\x07";
+    const OUTPUT_C: &str = "\x1b]133;C\x07";
+    const OUTPUT_D: &str = "\x1b]133;D;0\x07";
+    const ENERGY: &str = "energy $E = mc^2$ here";
+    /// A whole prompt cycle and the newline that starts the command's first line of output, for
+    /// fixtures whose attack begins on a line a command has printed. A bare `C` would be refused
+    /// before any of it — see `a_command_start_that_stands_in_no_prompt_cycle_is_refused` — and a
+    /// negative fixture that never has a claim to launder proves nothing about laundering.
+    const CYCLE: &str = "\x1b]133;A\x07PS> \x1b]133;B\x07run\x1b]133;C\x07\r\n";
+
+    /// Drive one sequence into a fresh pane and count two things: how many of the rows carrying the
+    /// formula's text a lone `$` may be read on, and how many pictures actually reached the glass.
+    fn laundering_attempt(stream: &str) -> (usize, usize) {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        let inputs = session.live_detection_context();
+        let eligible = (0..session.live_rows.len() as u32)
+            .filter(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| {
+                    input.text.contains("nergy") && input.site.permits_inline()
+                })
+            })
+            .count();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        (eligible, rendered_inline_blocks(&frame).len())
+    }
+
+    /// **No road into a cell hands a prompt's text to a command.**
+    ///
+    /// The flag says a command's output put a cell's text there, and a line is a command's only
+    /// when *every* cell of text on it says so. That polarity is the whole defence, because the
+    /// roads into a cell are the whole of a terminal: this asks about the ones that were found by
+    /// attacking the first design, where the flag marked non-output writes and eligibility was its
+    /// absence — so anything unstamped passed. `DECALN`, a reset and the cells a shift creates put
+    /// text down without going near the stamp, and they all used to launder a prompt.
+    ///
+    /// A tab is the sharp one: it writes a cell by *leaving its character alone* when the cell is
+    /// occupied, so a tab walked along a prompt's own line is not a write and must not restate who
+    /// wrote what is already there. A combining mark is the other: it makes a cell's text partly
+    /// the writer's, so a prompt's accent takes a command's claim off the cell it lands on.
+    #[test]
+    fn no_road_into_a_cell_launders_a_prompt_into_a_command() {
+        let tabs = {
+            let mut tabs = format!("{PROMPT_A}{ENERGY}{OUTPUT_C}");
+            for column in 1..=ENERGY.len() {
+                tabs.push_str(&format!("\x1b[1;{column}H\t"));
+            }
+            tabs.push_str(&format!("\x1b[2;1H{OUTPUT_D}"));
+            tabs
+        };
+        let cases = [
+            ("a tab walked along every column of the prompt's line", tabs),
+            (
+                "a combining mark appended by the prompt",
+                format!("{CYCLE}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
+            ),
+            (
+                "a combining mark appended by the prompt, clustered",
+                format!("\x1b[?2027h{CYCLE}{ENERGY}{OUTPUT_D}{PROMPT_A}\u{301}"),
+            ),
+            (
+                "output overwriting part of a screen the prompt aligned",
+                format!(
+                    "{PROMPT_A}\x1b#8{OUTPUT_C}\x1b[1;1Henergy $\x1b[1;10H = mc^2$ here\x1b[K\r\n\
+                     {OUTPUT_D}"
+                ),
+            ),
+            (
+                "a screen the prompt aligned, with nothing else written",
+                format!("{CYCLE}{ENERGY}{OUTPUT_D}{PROMPT_A}\x1b#8"),
+            ),
+            (
+                "a repeat of the prompt's own last character",
+                format!("{PROMPT_A}energy $E = mc^2$ her{OUTPUT_C}\x1b[1b{OUTPUT_D}"),
+            ),
+            (
+                "an insert that shifts the prompt's cells sideways",
+                format!(
+                    "{PROMPT_A}energy $E = mc^2$ here{OUTPUT_C}\x1b[1;1H\x1b[4h \x1b[4l{OUTPUT_D}"
+                ),
+            ),
+            (
+                "an insert-character that shifts the prompt's cells sideways",
+                format!("{PROMPT_A}{ENERGY}{OUTPUT_C}\x1b[1;1H\x1b[1@{OUTPUT_D}"),
+            ),
+            (
+                "a delete-character that pulls the prompt's cells back",
+                format!("{PROMPT_A}x{ENERGY}{OUTPUT_C}\x1b[1;1H\x1b[1P{OUTPUT_D}"),
+            ),
+            (
+                "output overwriting only the spacer half of the prompt's wide character",
+                format!("{PROMPT_A}\u{4e2d}nergy $E = mc^2$ here{OUTPUT_C}\x1b[1;2He{OUTPUT_D}"),
+            ),
+        ];
+        for (name, stream) in cases {
+            assert_eq!(
+                laundering_attempt(&stream),
+                (0, 0),
+                "{name}: a prompt's line must stay the prompt's"
+            );
+        }
+
+        // And the controls, without which every assertion above could be satisfied by refusing
+        // everything. A reset is among them rather than among the attacks: it blanks the cells it
+        // clears, so it leaves no text behind to launder, and what a command prints afterwards is
+        // the command's exactly as it would be on a screen nobody had written on.
+        for (name, stream) in [
+            (
+                "a command's own line",
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY}\r\n{OUTPUT_D}"),
+            ),
+            (
+                "a command's own line after a reset",
+                format!("{PROMPT_A}{ENERGY}\x1bc{OUTPUT_C}\x1b[1;1H{ENERGY}\r\n{OUTPUT_D}"),
+            ),
+            // The two combining-mark arms, with the mark put there by the command that printed the
+            // line. Without these the arms above are satisfied by a fixture that never had a claim
+            // to lose: what they must show is that the *appender* is what decides, and that takes
+            // the same sequence twice with only the appender changed.
+            (
+                "a combining mark appended by the command itself",
+                format!("{CYCLE}{ENERGY}\u{301}{OUTPUT_D}"),
+            ),
+            (
+                "a combining mark appended by the command itself, clustered",
+                format!("\x1b[?2027h{CYCLE}{ENERGY}\u{301}{OUTPUT_D}"),
+            ),
+        ] {
+            assert_eq!(
+                laundering_attempt(&stream),
+                (1, 1),
+                "{name} is still typeset"
+            );
+        }
+    }
+
+    /// The same drive, carried on until every row of it has scrolled into history: how many frozen
+    /// lines carrying the formula's text a lone `$` may be read on, and how many pictures the
+    /// frozen scan resolved. The freeze folds the very cells the live plane reads, so a claim that
+    /// is wrong on one plane is wrong on both, and a fixture proven on only one proves half.
+    fn frozen_laundering_attempt(stream: &str) -> (usize, usize) {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        // The carriage return first: a fixture may leave the cursor in the middle of the row it
+        // is about to be asked about, and padding printed onto that row would answer for it.
+        session
+            .feed_at(
+                b"\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\n\
+                  pad\r\npad\r\n",
+                started,
+            )
+            .unwrap();
+        let frozen = session
+            .document
+            .entries()
+            .values()
+            .filter(|entry| entry.line.text.contains("nergy"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            frozen.len(),
+            1,
+            "the fixture must freeze the formula's line exactly once, or the site read below \
+             proves nothing: {:?}",
+            session
+                .document
+                .entries()
+                .values()
+                .map(|entry| entry.line.text.clone())
+                .collect::<Vec<_>>()
+        );
+        let eligible = usize::from(frozen[0].inline_site.permits_inline());
+        complete_frozen_math_for_real(&mut session);
+        let drawn = session
+            .decorations
+            .values()
+            .filter(|record| {
+                record
+                    .span
+                    .as_ref()
+                    .is_some_and(|span| span.mode == MathMode::Inline)
+            })
+            .count();
+        (eligible, drawn)
+    }
+
+    /// Drive a session's live math to the glass and count the inline pictures that reached it.
+    fn rendered_inline_block_count(session: &mut DualPlaneSession, started: Instant) -> usize {
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(session);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        rendered_inline_blocks(&frame).len()
+    }
+
+    /// Everything one stream leaves in history, once every row of it has scrolled off.
+    fn frozen_text(stream: &str) -> String {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        session
+            .feed_at(
+                b"\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\n\
+                  pad\r\npad\r\n",
+                started,
+            )
+            .unwrap();
+        session
+            .document
+            .entries()
+            .values()
+            .map(|entry| entry.line.text.as_str())
+            .collect()
+    }
+
+    /// Everything the terminal is showing, row by row.
+    fn grid_text(session: &DualPlaneSession) -> String {
+        (0..session.live_rows.len() as u32)
+            .map(|row| grid_row_text(session, row))
+            .collect()
+    }
+
+    /// The text the terminal is showing on one grid row, cell by cell.
+    fn grid_row_text(session: &DualPlaneSession, row: u32) -> String {
+        session
+            .terminal
+            .visible_row(row)
+            .expect("the fixture's row is on the grid")
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect()
+    }
+
+    /// **A cluster the terminal is still collecting is a copy of text on the grid, and the grid can
+    /// be rewritten under it** (review 2026-09-17 second pass, F1 P1).
+    ///
+    /// Under `DECSET 2027` the terminal keeps the cluster it is building so that the next mark can
+    /// extend it, and it checked the cursor, the pending wrap, the screen and Unicode continuation
+    /// before doing so — everything except whether the cell it remembers still holds that text.
+    /// `ECH` blanks a cell, a tab walks over one, `CSI S` scrolls the row out from under the
+    /// coordinate, and `DECSC`/`DECRC` puts the cursor back exactly where the cache expects it
+    /// afterwards. Extending the stale copy then wrote the old text again.
+    ///
+    /// That is two faults in one. **Erased text came back**, which is a terminal reading its own
+    /// screen wrong and is worth refusing on its own; and because a re-cut cluster is written
+    /// through the printing path, the resurrected text was dated by whoever was printing now — so
+    /// a command could restore a glyph the prompt had written, and be handed it.
+    #[test]
+    fn a_retained_cluster_is_not_written_again_over_the_text_that_replaced_it() {
+        let started = Instant::now();
+        // 59 columns of output put the prompt's glyph on the last column, which is where a width
+        // change has to relocate it and therefore where it is rebuilt from the cache.
+        let margin = "o".repeat(59);
+        // A save, the command reaching over to the cached cell to erase it and walk a tab across
+        // it, and the restore that puts the cursor back exactly where the cache is waiting. None of
+        // those three writes goes through the printing path, which is why the cache never noticed.
+        let reach = |cell: &str| format!("\x1b7{OUTPUT_C}\x1b[{cell}\x1b[X\t\x1b8");
+
+        // Codex's first reproduction, widening: the prompt's arrow in the last column, erased by
+        // the command and walked over by its tab, then asked to become two cells wide by the
+        // command's `U+FE0F`. It used to be rebuilt on the next row, wearing the claim of the
+        // blank the tab had just taken.
+        let mut erased = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut erased);
+        let widened = format!(
+            "\x1b[?2027h{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{OUTPUT_D}\
+             {PROMPT_A}\u{2194}{reach}\u{fe0f}energy $x^2$ here\r\n{OUTPUT_D}",
+            reach = reach("2;60H")
+        );
+        erased.feed_at(widened.as_bytes(), started).unwrap();
+        assert!(
+            !grid_text(&erased).contains('\u{2194}'),
+            "the erase removed that glyph, so nothing may put it back anywhere on the screen: {:?}",
+            grid_text(&erased)
+        );
+        assert_eq!(
+            rendered_inline_block_count(&mut erased, started),
+            1,
+            "and with the prompt's glyph gone for good this line really is the command's, so the \
+             fixture reaches a picture instead of proving its point by refusing everything"
+        );
+        assert!(
+            !frozen_text(&widened).contains('\u{2194}'),
+            "nor may it come back on the way into history, which folds the same cells"
+        );
+
+        // Codex's second reproduction, shrinking: the same reach, but the prompt's glyph is a wide
+        // watch that wrapped to the next row, so narrowing it relocates it *back* to the
+        // placeholder at the end of the row above.
+        let mut narrowed = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut narrowed);
+        let shrunk = format!(
+            "\x1b[?2027h{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{OUTPUT_D}\
+             {PROMPT_A}\u{231a}{reach}\u{fe0e}energy $x^2$ here\r\n{OUTPUT_D}",
+            reach = reach("3;1H")
+        );
+        narrowed.feed_at(shrunk.as_bytes(), started).unwrap();
+        assert!(
+            !grid_text(&narrowed).contains('\u{231a}'),
+            "a narrowing mark rebuilds the cluster in the other direction, and it may not bring \
+             the erased watch back with it: {:?}",
+            grid_text(&narrowed)
+        );
+        assert!(
+            !frozen_text(&shrunk).contains('\u{231a}'),
+            "nor into history"
+        );
+
+        // A scroll is the same staleness without an erase: `CSI S` moves every cell and leaves the
+        // cursor where it was, so the cached coordinate names another row's text. Rebuilding from
+        // the cache there does not resurrect a glyph — it *duplicates* one, because the real arrow
+        // is still on the screen, one row up.
+        let mut scrolled = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut scrolled);
+        scrolled
+            .feed_at(
+                format!(
+                    "\x1b[?2027h{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{OUTPUT_D}\
+                     {PROMPT_A}\u{2194}{OUTPUT_C}\x1b[S\u{fe0f}energy $x^2$ here\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_text(&scrolled).matches('\u{2194}').count(),
+            1,
+            "one arrow was written and one arrow is on the screen: {:?}",
+            grid_text(&scrolled)
+        );
+    }
+
+    /// **A cell's claim is the conjunction over every piece of text in it, and moving that text
+    /// does not re-date it** (review 2026-09-17, F1).
+    ///
+    /// Two writes keep text somebody else put on the grid while putting something of their own
+    /// beside it, and both used to stamp the whole cell with the current writer:
+    ///
+    /// * a grapheme that **changes width** is taken off the grid and written again through the
+    ///   printing path. At the right margin a one-cell base is relocated to the next row to make
+    ///   room for the second half, so a `U+FE0F` a command prints after a prompt's `↔` rebuilt the
+    ///   prompt's own glyph as the command's. The zero-width rule cannot see it: nothing is
+    ///   appended, the cluster is reconstructed.
+    /// * a **tab over a blank cell** replaces the base character and leaves the cell's zero-width
+    ///   marks where they are. A prompt's combining accent on a command's trailing space therefore
+    ///   survived as `"\t\u{301}"` with the command's claim on it — text that is half the prompt's,
+    ///   on a cell that says a command wrote all of it.
+    ///
+    /// Each fixture is driven on both planes, and each has a control differing only in *who* writes
+    /// the glyph, because an assertion that nothing is typeset is satisfied by a fixture that never
+    /// reaches a formula at all.
+    #[test]
+    fn re_cutting_and_partial_writes_carry_the_claim_of_the_text_they_keep() {
+        // 59 columns of output put the cursor on the last column of a 60-column pane, which is the
+        // one column where widening a glyph has to relocate it. Printable padding rather than
+        // spaces: a logical line that opens with a screenful of blanks is indented code to the
+        // scanner, and would refuse the control fixture for a reason that has nothing to do with
+        // provenance.
+        let margin = "o".repeat(59);
+        let relocated = |glyph_is_the_prompts: bool| {
+            let (leave, back) = if glyph_is_the_prompts {
+                (format!("{OUTPUT_D}{PROMPT_A}"), OUTPUT_C.to_string())
+            } else {
+                (String::new(), String::new())
+            };
+            format!(
+                "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{margin}{leave}\u{2194}{back}\
+                 \u{fe0f}energy $x^2$ here\r\n{OUTPUT_D}"
+            )
+        };
+        // `energy $E = mc^2$ here` is 22 columns, so its trailing space is column 23 (one-based),
+        // which is the cell the prompt's accent lands on and the cell the tab then rewrites.
+        let tabbed = |accent: &str| {
+            format!(
+                "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY} {OUTPUT_D}{PROMPT_A}{accent}\
+                 {OUTPUT_C}\x1b[2;23H\t{OUTPUT_D}"
+            )
+        };
+
+        for (name, stream) in [
+            (
+                "a prompt's glyph widened by the command that follows it",
+                relocated(true),
+            ),
+            (
+                "a tab over a blank cell the prompt hung an accent on",
+                tabbed("\u{301}"),
+            ),
+        ] {
+            assert_eq!(
+                laundering_attempt(&stream),
+                (0, 0),
+                "{name}: the cell holds text the prompt put there, so its line is the prompt's"
+            );
+            assert_eq!(
+                frozen_laundering_attempt(&stream),
+                (0, 0),
+                "{name}: and the freeze folds the same cells"
+            );
+        }
+
+        for (name, stream) in [
+            (
+                "the same widening, with the command writing the glyph too",
+                relocated(false),
+            ),
+            ("the same tab, over a cell nothing else wrote", tabbed("")),
+        ] {
+            assert_eq!(
+                laundering_attempt(&stream),
+                (1, 1),
+                "{name} is still typeset"
+            );
+            assert_eq!(
+                frozen_laundering_attempt(&stream),
+                (1, 1),
+                "{name} is still typeset once it is frozen"
+            );
+        }
+    }
+
+    /// R1 — **a prompt that reprints a command's line byte for byte must not be typeset.**
+    ///
+    /// The reviewed sequence, through ordinary `feed_at` with nothing reached into: a command's
+    /// output scrolls until the OSC 133 region is evicted along with the prompt line it started on,
+    /// and the shell then prints the identical text at the top of the screen as its own prompt.
+    /// Equality of cells proves content and never ownership, so the answer cannot come from
+    /// comparing the row against itself; and the region is gone, so it cannot come from there
+    /// either. It comes from the cells, which remember which write put them down.
+    #[test]
+    fn a_prompt_that_reprints_a_commands_line_byte_for_byte_is_not_typeset() {
+        let started = Instant::now();
+        let one = NonZeroUsize::new(1).unwrap();
+        let mut session = DualPlaneSession::with_quotas(nz(60), nz(8), one, one);
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\na\r\nb\r\nc\r\n{ENERGY}\r\n")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        session
+            .feed_at(
+                format!("tail1\r\ntail2\r\ntail3\r\ntail4\r\ntail5\r\ntail6\r\n{OUTPUT_D}")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            session.semantic_output_regions.is_empty(),
+            "the fixture must really evict the region, or this proves only that a closed region \
+             still covers the rows it closed over"
+        );
+
+        session
+            .feed_at(
+                format!("\x1b[1;1H{PROMPT_A}{ENERGY}{PROMPT_B}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_at(&session, 0),
+            InlineMathSite::Ineligible,
+            "the shell wrote this row, so nothing on it may be read as mathematics"
+        );
+
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        complete_live_math_for_real(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            rendered_inline_blocks(&frame).is_empty(),
+            "a prompt must not be typeset: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            frame_row_text(&frame, 0).contains('$'),
+            "and its source stays exactly as the shell printed it"
+        );
+    }
+
+    /// The other half of that fixture: a command's own line keeps its site once the region that
+    /// proved it has gone. Retirement here is ordinary — the region leaves with the prompt line it
+    /// started on — and the rows the command printed are still on the grid, unchanged, still
+    /// carrying their formulas.
+    #[test]
+    fn a_command_output_line_keeps_its_site_when_its_region_is_evicted() {
+        let started = Instant::now();
+        let one = NonZeroUsize::new(1).unwrap();
+        let mut session = DualPlaneSession::with_quotas(nz(60), nz(8), one, one);
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\na\r\nb\r\nc\r\n{ENERGY}\r\n")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_at(&session, 4),
+            InlineMathSite::CommandOutput,
+            "the fixture must really print the formula inside C..D"
+        );
+        session
+            .feed_at(
+                format!("t1\r\nt2\r\nt3\r\nt4\r\nt5\r\nt6\r\n{OUTPUT_D}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            session.semantic_output_regions.is_empty(),
+            "the fixture must really evict the region"
+        );
+        let inputs = session.live_detection_context();
+        let moved = (0..session.live_rows.len() as u32)
+            .find(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| input.text.contains("energy"))
+            })
+            .expect("the formula is still on the grid");
+        assert_eq!(
+            grid_site_at(&session, moved),
+            InlineMathSite::CommandOutput,
+            "a scroll moves the cells, and their provenance goes with them"
+        );
+    }
+
+    /// R2 — **a feed that splits at a carriage return must not lose the site.**
+    ///
+    /// An open region's frontier used to be the cursor, and `\r` parks the cursor at column zero,
+    /// before the end of the line just printed. A split there recorded the row ineligible, and the
+    /// `\n` and the `D` that followed changed no byte, so nothing ever corrected it. Provenance
+    /// stamped by the write itself has no frontier to fall short of.
+    #[test]
+    fn a_feed_split_at_a_carriage_return_does_not_lose_the_site() {
+        let head = format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY}\r");
+        let tail = format!("\n{OUTPUT_D}");
+        for split_after_cr in [true, false] {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            if split_after_cr {
+                session.feed_at(head.as_bytes(), started).unwrap();
+                session.feed_at(tail.as_bytes(), started).unwrap();
+            } else {
+                session
+                    .feed_at(format!("{head}{tail}").as_bytes(), started)
+                    .unwrap();
+            }
+            assert_eq!(
+                grid_site_at(&session, 1),
+                InlineMathSite::CommandOutput,
+                "split_after_cr={split_after_cr}"
+            );
+        }
+    }
+
+    /// The same defect reached inside one `feed`, by putting the carriage return on the last byte
+    /// of a parse quantum. NUL is ignored by the parser and writes no cell, so the padding is
+    /// geometry and nothing else.
+    #[test]
+    fn a_carriage_return_on_the_parse_quantum_boundary_does_not_lose_the_site() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        let head = format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY}\r");
+        let mut stream = vec![0u8; PARSE_QUANTUM - head.len()];
+        stream.extend_from_slice(head.as_bytes());
+        assert_eq!(
+            stream.len(),
+            PARSE_QUANTUM,
+            "the carriage return must land on the quantum's last byte"
+        );
+        stream.extend_from_slice(format!("\n{OUTPUT_D}").as_bytes());
+        session.feed_at(&stream, started).unwrap();
+        assert_eq!(grid_site_at(&session, 1), InlineMathSite::CommandOutput);
+    }
+
+    /// **No grid movement may leave a prompt row wearing a command's site.**
+    ///
+    /// Each of these rewrites or moves rows under an answer that was true of where they used to be:
+    /// an identical reprint, an erase and a reprint at home, a shorter prompt over an older output
+    /// row, the insert/delete/reverse-index family, the scroll pair, and a scroll region that
+    /// leaves rows fixed below it. A rule kept beside the grid has to name every one of them and
+    /// carry each exactly; a fact carried by the cell is moved by whatever moves the cell, and
+    /// there is nothing left to enumerate.
+    ///
+    /// The fixture prints one output line and one prompt line spelling the same thing, so the count
+    /// of rows a lone `$` may be read on is the whole assertion: one, wherever the movement has put
+    /// it, and never two.
+    #[test]
+    fn no_grid_movement_lets_a_prompt_row_wear_a_commands_site() {
+        // Row 0 carries the prompt and the command line, row 1 the command's output, and row 2 the
+        // next prompt — which spells exactly what the output spells. Nothing has moved yet, so the
+        // answer is the easy one and every design gets it right; each movement below is what turns
+        // an answer about where a row *was* into an answer about a row that is somewhere else.
+        let prologue = format!(
+            "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n{ENERGY}\r\n\
+             {OUTPUT_D}{PROMPT_A}{ENERGY}{PROMPT_B}"
+        );
+        for (name, movement, eligible) in [
+            ("nothing moves", String::new(), 1),
+            // The shell redraws its own line where its own line already was.
+            (
+                "an identical prompt reprint",
+                format!("\x1b[3;1H{ENERGY}"),
+                1,
+            ),
+            // Everything is erased, so every cell is unclaimed again and only the prompt writes.
+            (
+                "an erase and a reprint at home",
+                format!("\x1b[2J\x1b[H{PROMPT_A}{ENERGY}{PROMPT_B}"),
+                0,
+            ),
+            // A prompt that covers only part of the command's row still claims that row.
+            (
+                "a shorter prompt over the output row",
+                format!("\x1b[2;1H{PROMPT_A}energy $E = mc^2${PROMPT_B}"),
+                0,
+            ),
+            (
+                "an inserted line above both",
+                "\x1b[1;1H\x1b[L".to_string(),
+                1,
+            ),
+            ("the output line deleted", "\x1b[2;1H\x1b[M".to_string(), 0),
+            (
+                "a reverse index at the top",
+                "\x1b[1;1H\x1bM".to_string(),
+                1,
+            ),
+            // `CSI S` takes the top line, which is the command line rather than its output.
+            ("a scroll up", "\x1b[S".to_string(), 1),
+            ("a scroll down", "\x1b[T".to_string(), 1),
+            (
+                "a scroll up inside a region that leaves rows fixed below it",
+                "\x1b[1;3r\x1b[S\x1b[r".to_string(),
+                1,
+            ),
+            (
+                // This one pushes the prompt's row out of the region and leaves the command's.
+                "a scroll down inside a region that leaves rows fixed below it",
+                "\x1b[1;3r\x1b[T\x1b[r".to_string(),
+                1,
+            ),
+        ] {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(6));
+            seat_inline_metrics(&mut session);
+            session.feed_at(prologue.as_bytes(), started).unwrap();
+            assert_eq!(
+                eligible_text_rows(&session).len(),
+                1,
+                "{name}: the fixture must itself start with exactly the command's own row"
+            );
+            session.feed_at(movement.as_bytes(), started).unwrap();
+            assert_eq!(
+                eligible_text_rows(&session).len(),
+                eligible,
+                "{name}: rows a formula may be read on"
+            );
+        }
+    }
+
+    /// A height change takes a row off the bottom, and the row that survives keeps its own
+    /// provenance rather than inheriting the one that used to stand where it now stands.
+    #[test]
+    fn shrinking_the_grid_does_not_hand_a_prompt_the_output_rows_site() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(2));
+        seat_inline_metrics(&mut session);
+        // Row 0 is the prompt and row 1 the command's output, and the two spell the same thing.
+        session
+            .feed_at(
+                // The cursor ends on the upper line, which is what makes the vendor drop the lower
+                // one rather than scroll the upper one away (`grid/resize.rs`).
+                format!("{PROMPT_A}{ENERGY}{PROMPT_B}{OUTPUT_C}\r\n{ENERGY}{OUTPUT_D}\x1b[1;1H")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            eligible_text_rows(&session),
+            vec![1],
+            "the fixture must start with the command's row eligible and the prompt's not"
+        );
+        session
+            .resize_at(nz(60), nz(1), started + Duration::from_millis(210))
+            .unwrap();
+        // The vendor takes the row off the bottom, so what survives is the prompt's own row — with
+        // the command's text on it, which is the whole point of the fixture.
+        let inputs = session.live_detection_context();
+        assert!(
+            live_grid_input(&inputs, 0).is_some_and(|input| input.text.contains("energy")),
+            "the surviving row must still carry the formula, or this proves nothing"
+        );
+        assert!(
+            eligible_text_rows(&session).is_empty(),
+            "the prompt's row does not inherit the site of the row that used to stand under it: {:?}",
+            eligible_text_rows(&session)
+        );
+    }
+
+    const TWO_OUTPUT_LINES: &str = concat!(
+        "\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n",
+        "energy $E = mc^2$ here\r\n",
+        r"sums $\sum_{n=1}^{k} n$ and limits $\lim_{x \to 0} x$ hold for every one of the sequences that the table below prints",
+        "\r\n",
+    );
+
+    /// The prompt coming back: `D` closes the command's region and `A`/`B` open the next one.
+    const PROMPT_RETURNS: &str = "\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07";
+
+    /// Everything the session has queued, taken in one go so the caller can act between the scan
+    /// and its completion — which is the whole point of the two tests below.
+    fn take_live_worker_tasks(session: &mut DualPlaneSession) -> Vec<LiveDetectionTask> {
+        let mut tasks = Vec::new();
+        while let Some(task) = session.take_live_worker_task() {
+            tasks.push(task);
+        }
+        tasks
+    }
+
+    /// T-LIVE-INLINE-SITE-IS-REMEMBERED: a late inline result is judged on the site its row was
+    /// printed at, not on the OSC 133 regions as they stand when the raster comes back.
+    ///
+    /// `cat` of a small file hands the terminal its whole output and its `133;D` in one PTY burst —
+    /// 0.88 ms apart in the owner's 2026-09-17 recording — so **every** math result for it is a
+    /// late result: the command's region is always already closed by the time the first raster
+    /// exists. Anything that moves the region between the scan and its completion used to change
+    /// the verdict, and only for inline runs: display delimiters carry their own proof and no site
+    /// gates them, which is why the owner kept both `$$` blocks and lost the formulas around them.
+    /// A region retired outright is the sharpest form of that movement and the one a test can state
+    /// exactly — and it is not a contrived one, since a region is retired whenever the prompt line
+    /// it starts on is evicted or a reflow declines to re-seat one of its anchors.
+    ///
+    /// Two lines, because the failure was not uniform. The wrapped one is the fragile half: its
+    /// rows have to agree on one site or the whole line reads `Ineligible`, and it is the line that
+    /// carries two formulas, which is why the owner lost both of them at once.
+    #[test]
+    fn a_live_inline_run_keeps_its_site_after_the_prompt_returns() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(10));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(TWO_OUTPUT_LINES.as_bytes(), started)
+            .unwrap();
+        session.feed_at(PROMPT_RETURNS.as_bytes(), started).unwrap();
+        assert_eq!(
+            grid_site_of(&session, "energy"),
+            InlineMathSite::CommandOutput,
+            "the fixture must really put the short line inside C..D"
+        );
+        assert_eq!(
+            grid_site_of(&session, "sums "),
+            InlineMathSite::CommandOutput,
+            "and the first row of the wrapped line"
+        );
+        assert_eq!(
+            grid_site_of(&session, "the table below prints"),
+            InlineMathSite::CommandOutput,
+            "and its second row, which is a separate grid row — the fixture must really wrap"
+        );
+
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            2,
+            "both output lines carry `$...$` and must arm"
+        );
+        let tasks = take_live_worker_tasks(&mut session);
+        assert_eq!(tasks.len(), 2, "one scan per armed line");
+
+        // The rasters are in flight while the session goes on being a session: the next prompt has
+        // already returned above, and now a second command runs and prints. Nothing touches the two
+        // rows the rasters are for, and everything those rasters depend on — the rows, their bytes,
+        // the write that put them there — is exactly as it was when they were scanned.
+        session
+            .feed_at(
+                format!("next{OUTPUT_C}\r\nunrelated output\r\n{OUTPUT_D}{PROMPT_A}PS> {PROMPT_B}")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+
+        let engine = MathEngine::new();
+        let mut accepted = 0;
+        for mut task in tasks {
+            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            if session.complete_live_worker_result(task, result) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(
+            accepted, 2,
+            "a completion must be judged on the site its row was printed at, not on a region that \
+             has since been retired"
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(
+            blocks.len(),
+            2,
+            "one picture per line: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        let runs = blocks
+            .iter()
+            .map(|block| block.artifact.inline_runs.len())
+            .sum::<usize>();
+        assert_eq!(
+            runs, 3,
+            "three formulas: one on the short line and both of the wrapped line's"
+        );
+    }
+
+    /// The same line, re-wrapped: a width change must not cost it its formulas.
+    ///
+    /// Frame 240 of the recording, where the owner's first resize took the wrapped line's picture
+    /// down and left every other block standing. A reflow rebuilds every live row, so the site has
+    /// to be re-established at that boundary — where the resize path has just re-seated the regions
+    /// that prove it — rather than left to whichever completion asks next.
+    #[test]
+    fn a_wrapped_output_line_keeps_its_formulas_across_a_width_change() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(10));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(TWO_OUTPUT_LINES.as_bytes(), started)
+            .unwrap();
+        session.feed_at(PROMPT_RETURNS.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let engine = MathEngine::new();
+        for mut task in take_live_worker_tasks(&mut session) {
+            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            session.complete_live_worker_result(task, result);
+        }
+
+        let resized_at = started + Duration::from_millis(210);
+        session.resize_at(nz(70), nz(10), resized_at).unwrap();
+        session.set_layout_key(LayoutKey {
+            width_cells: nz(70),
+            ..session.layout_key()
+        });
+        session.mark_pty_resize_requested_at(nz(70), nz(10), resized_at);
+        assert_eq!(
+            grid_site_of(&session, "sums "),
+            InlineMathSite::CommandOutput,
+            "the reflowed first row of the wrapped line still sits where a command printed it"
+        );
+        assert_eq!(
+            grid_site_of(&session, "the table below prints"),
+            InlineMathSite::CommandOutput,
+            "and so does the row the new width wrapped it onto"
+        );
+
+        let finished_at = resized_at + Duration::from_millis(400);
+        assert!(
+            session.finish_resize_if_quiescent(finished_at).unwrap(),
+            "the transaction must close, or nothing is scheduled and this proves nothing"
+        );
+        session.advance_live_stability(finished_at + LIVE_MATH_STABLE_INTERVAL);
+        for mut task in take_live_worker_tasks(&mut session) {
+            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            session.complete_live_worker_result(task, result);
+        }
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let runs = rendered_inline_blocks(&frame)
+            .iter()
+            .map(|block| block.artifact.inline_runs.len())
+            .sum::<usize>();
+        assert_eq!(
+            runs,
+            3,
+            "every formula comes back after the re-wrap: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A candidate that falls inside another block's band proves nothing about that block.
+    ///
+    /// Every delimiter-looking row arms, and a display block's own body rows look like delimiters:
+    /// `\begin{pmatrix}...\end{pmatrix}` is an environment opener wherever it appears. One `cat` of
+    /// the owner's test file arms ten candidates for five occurrences for exactly this reason. Each
+    /// body row resolves to nothing — it is inside a `$$` block, so the scanner emits no occurrence
+    /// there — and an unresolved completion used to take down every decoration whose band merely
+    /// covered its row. Whether the matrix survived was then a question of which completion landed
+    /// last, which is the `math_blocks` 4 -> 3 dip at stderr.log:1012 of the recording.
+    #[test]
+    fn an_unresolved_body_row_completion_does_not_retire_the_block_that_covers_it() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(10));
+        session
+            .feed_at(
+                b"$$\r\n\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}\r\n$$\r\nbarrier",
+                started,
+            )
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let tasks = take_live_worker_tasks(&mut session);
+        let mut body_rows = Vec::new();
+        let mut resolved = 0;
+        for mut task in tasks {
+            if resolve_live_detection_task(&mut task) {
+                assert!(session.complete_live_worker_result(task, Ok(synthetic_raster(40, 40))));
+                resolved += 1;
+            } else {
+                body_rows.push(task);
+            }
+        }
+        assert_eq!(resolved, 1, "the `$$` block must be proven and standing");
+        assert_eq!(
+            session.live_decorations.len(),
+            1,
+            "and it must be the only live decoration"
+        );
+        let body = body_rows
+            .into_iter()
+            .find(|task| {
+                let row = task.candidate_row;
+                session
+                    .live_decorations
+                    .values()
+                    .any(|record| record.band_start_row < row && row < record.band_end_row)
+            })
+            .expect("the fixture must arm a body row inside the proven block's band");
+
+        assert!(
+            session.complete_live_worker_result(body, Err(MathRenderError::NotDetected)),
+            "the unresolved completion is still a current answer and is accepted as one"
+        );
+        assert_eq!(
+            session.live_decorations.len(),
+            1,
+            "a candidate inside the band is not a verdict on the block that spans it"
+        );
+    }
+
+    /// T-MATH-INLINE-WRAP-FROZEN: a split formula whose closing row also carries a whole formula.
+    ///
+    /// The detector always joined this pair. Its closer is the closing row's **first** `$`, and
+    /// everything past that dollar re-pairs from a clean state — which is precisely how the second
+    /// formula of the reported sentence survives the first one's split. The frozen scheduler asked
+    /// a narrower question than the detector's own: it reached one line back only for a closing row
+    /// whose `$` was the *only* one on it, so the very sentence that reported the defect
+    /// (2026-09-15) lost its quadratic formula because the density followed it on the same row.
+    /// The scan window then opened at the closing row, the fragment above was never in it, and the
+    /// half formula stayed raw source between two pictures (release review 2026-09-17, X-6).
+    ///
+    /// Driven through freezing, because that is where the two rules meet: the live grid keeps both
+    /// rows in front of the scanner whatever a window says, and a direct scanner test always hands
+    /// the pair over itself. Only the frozen scheduler decides what the worker gets to read.
+    #[test]
+    fn a_frozen_split_formula_reaches_its_opening_row_when_another_formula_follows() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(100), nz(8));
+        seat_inline_metrics(&mut session);
+        let stream = concat!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n",
+            r"Use the quadratic formula $x",
+            "\r\n",
+            r"= \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$, and the density $\varphi(x) = e^{-x^2/2}$.",
+            "\r\n",
+            r"The series $\sum_{n=1}^{\infty} \frac{1}{n^2}$ converges.",
+            "\r\n",
+        );
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        session
+            .feed_at("\r\npad".repeat(10).as_bytes(), started)
+            .unwrap();
+        let row_of = |session: &DualPlaneSession, prefix: &str| {
+            session
+                .document
+                .entries()
+                .iter()
+                .find(|(_, entry)| entry.line.text.starts_with(prefix))
+                .map(|(id, _)| *id)
+                .unwrap_or_else(|| panic!("{prefix:?} must freeze into history"))
+        };
+        let opening = row_of(&session, "Use the quadratic");
+        let closing = row_of(&session, r"= \frac{-b");
+        assert!(
+            opening < closing,
+            "the two halves must be adjacent frozen rows in printed order"
+        );
+
+        assert!(complete_frozen_math_for_real(&mut session) >= 2);
+        let span = session
+            .decoration(closing)
+            .and_then(|record| record.span.clone())
+            .expect("the closing row must carry a proven inline span");
+        assert_eq!(
+            span.mode,
+            MathMode::Inline,
+            "a Display span carrying no runs is the scheduler's own placeholder: the scan \
+             resolved to nothing, which is what losing the opening row looks like from here"
+        );
+        assert_eq!(
+            span.inline_runs
+                .iter()
+                .map(|run| run.source.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
+                r"\varphi(x) = e^{-x^2/2}",
+            ],
+            "the joined formula and the whole one after it are both runs of this row"
+        );
+        assert_eq!(
+            span.inline_joined_head
+                .as_ref()
+                .map(|head| head.text.as_str()),
+            Some("$x"),
+            "and the fragment left on the row above travels with them"
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            rendered_inline_blocks(&frame)
+                .iter()
+                .filter(|block| block.start == closing)
+                .count(),
+            1,
+            "one placement carries this row's runs"
+        );
+        assert_eq!(
+            rendered_inline_blocks(&frame).len(),
+            2,
+            "the split formula and the series below it are both pictures"
+        );
+        assert!(
+            !frame.cells.iter().any(|cell| cell.text.contains('$')),
+            "and no delimiter of either is left on the grid as source"
+        );
+    }
+
+    /// T-INLINE-SITE-IS-REMEMBERED: the site is a fact the line keeps, not a question re-asked.
+    ///
+    /// Any width change tears every frozen raster down (`DecorationRecord::layout_changed`) and the
+    /// re-arm then asks each line whether it may carry math again. Display math answers with its
+    /// own delimiters; inline math has nothing but its site. Re-derived, that site reads
+    /// `Ineligible` the moment the OSC 133 region behind the line has been retired — the prompt
+    /// line it started on was evicted, an anchor went stale, a reflow declined to re-seat one — and
+    /// the formula falls back to `$…$` for the rest of the session while the `$$` block beside it
+    /// stays typeset. Clearing the regions stands in for all of those, because every one of them
+    /// reaches this same state. The assertion has to be `Ready` with the record's own artifact: a
+    /// torn-down record keeps its span, so counting spans would step straight over the bug.
+    #[test]
+    fn a_frozen_inline_run_keeps_its_site_across_a_resize() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n\
+                  energy $E = mc^2$ here\r\n$$a+b$$\r\n\
+                  \x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07",
+                started,
+            )
+            .unwrap();
+        session
+            .feed_at(
+                b"\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\n",
+                started,
+            )
+            .unwrap();
+        assert!(complete_frozen_math_for_real(&mut session) >= 2);
+        let presentable = |session: &DualPlaneSession, mode: MathMode| {
+            session
+                .decorations
+                .values()
+                .filter(|record| {
+                    record.decoration == DecorationLifecycle::Ready
+                        && record.artifact.is_some()
+                        && record.span.as_ref().is_some_and(|span| span.mode == mode)
+                })
+                .count()
+        };
+        assert_eq!(
+            (
+                presentable(&session, MathMode::Inline),
+                presentable(&session, MathMode::Display),
+            ),
+            (1, 1),
+            "the fixture must typeset both formulas before the window moves"
+        );
+
+        // The text, the rasters and the transcript are untouched; only the bookkeeping a re-derived
+        // site would have been read from is gone.
+        session.semantic_output_regions.clear();
+
+        for (step, columns) in [50u32, 60].into_iter().enumerate() {
+            let resized_at = started + Duration::from_secs(1 + step as u64 * 4);
+            session.resize_at(nz(columns), nz(6), resized_at).unwrap();
+            session.set_layout_key(LayoutKey {
+                width_cells: nz(columns),
+                ..session.layout_key()
+            });
+            session.mark_pty_resize_requested_at(nz(columns), nz(6), resized_at);
+            assert!(
+                session
+                    .finish_resize_if_quiescent(resized_at + Duration::from_secs(2))
+                    .unwrap()
+            );
+            complete_frozen_math_for_real(&mut session);
+        }
+
+        assert_eq!(
+            (
+                presentable(&session, MathMode::Inline),
+                presentable(&session, MathMode::Display),
+            ),
+            (1, 1),
+            "the width went 60 → 50 → 60 and nothing else happened: the inline formula comes back \
+             typeset on the site its line was printed at"
+        );
+    }
+
+    /// T-INLINE-MATH-SURVIVES-RESIZE: real command output, frozen before the window rewraps it.
+    #[test]
+    fn frozen_inline_math_survives_window_resize() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(100), nz(24));
+        seat_inline_metrics(&mut session);
+        session.set_layout_key(LayoutKey {
+            line_wrapping: true,
+            ..session.layout_key()
+        });
+        let document = concat!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07type math-test.md\x1b]133;C\x07\r\n",
+            r"The integral $\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}$ shows up everywhere.",
+            "\r\n$$\r\n",
+            r"\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}",
+            "\r\n$$\r\n",
+            r"Euler: $e^{i\pi} + 1 = 0$. Matrix:",
+            "\r\n$$\r\n",
+            r"\begin{pmatrix}1 & 2 \\ 3 & 4\end{pmatrix}",
+            "\r\n$$\r\n",
+            r"The series $\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}$ converges.",
+            "\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07",
+        );
+        session.feed_at(document.as_bytes(), started).unwrap();
+        session
+            .feed_at("\r\npad".repeat(28).as_bytes(), started)
+            .unwrap();
+        assert!(complete_frozen_math_for_real(&mut session) >= 5);
+        let occurrences = session
+            .decorations
+            .iter()
+            .filter_map(|(id, record)| {
+                let span = record.span.as_ref()?;
+                frozen_artifact_and_scale(record)?;
+                Some((*id, span.clone()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|(_, span)| span.mode == MathMode::Inline)
+                .count(),
+            3
+        );
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|(_, span)| span.mode == MathMode::Display)
+                .count(),
+            2
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered_inline_blocks(&before).len(), 3);
+
+        let assert_pictures = |session: &DualPlaneSession, frame: &ViewportFrame| {
+            for (id, span) in &occurrences {
+                let record = session
+                    .decoration(*id)
+                    .expect("rewrap retains the transcript occurrence");
+                assert_eq!(record.span.as_ref(), Some(span));
+                assert!(frozen_artifact_and_scale(record).is_some());
+                assert!(
+                    frame.math_blocks.iter().any(|block| {
+                        block.start == *id && block.display == MathBlockDisplay::Rendered
+                    }),
+                    "the same occurrence must still have a picture"
+                );
+            }
+            assert_eq!(rendered_inline_blocks(frame).len(), 3);
+            assert_eq!(
+                frame
+                    .math_blocks
+                    .iter()
+                    .filter(|block| block.artifact.mode == MathMode::Display)
+                    .count(),
+                2
+            );
+            assert!(
+                !frame.cells.iter().any(|cell| cell.text.contains('$')),
+                "no formula's delimiters return as source"
+            );
+        };
+        assert_pictures(&session, &before);
+        for (step, columns) in [60, 100, 60].into_iter().enumerate() {
+            let resized_at = started + Duration::from_secs(1 + step as u64 * 4);
+            session.resize_at(nz(columns), nz(24), resized_at).unwrap();
+            session.refresh_projection(&mut projection);
+            // Measure the new live/staging extent before positioning the review viewport.
+            session.viewport_frame(&mut projection).unwrap();
+            projection.scroll_to_top();
+            let after = session.viewport_frame(&mut projection).unwrap();
+            assert_eq!(
+                after.columns.get(),
+                columns,
+                "frame must use the resized width"
+            );
+            assert_pictures(&session, &after);
+            let integral_rows = after.cell_anchors.chunks(columns as usize).filter(|row| {
+                row.iter().any(|cell| matches!(cell.start, ContentAnchor::History { id, .. } if id == occurrences[0].0))
+            }).count();
+            assert_eq!(
+                integral_rows,
+                if columns == 60 { 2 } else { 1 },
+                "the frozen integral sentence must really rewrap: first={:?}, layout={:?}, rows={:?}",
+                occurrences[0],
+                session.layout_key(),
+                after
+                    .cell_anchors
+                    .chunks(columns as usize)
+                    .map(|row| &row[0].start)
+                    .collect::<Vec<_>>()
+            );
+            session.mark_pty_resize_requested_at(nz(columns), nz(24), resized_at);
+            assert!(
+                session
+                    .finish_resize_if_quiescent(resized_at + Duration::from_secs(2))
+                    .unwrap()
+            );
+            session.schedule_visible_artifacts(&after);
+            complete_frozen_math_for_real(&mut session);
+            session.refresh_projection(&mut projection);
+            let settled = session.viewport_frame(&mut projection).unwrap();
+            assert_pictures(&session, &settled);
+        }
+    }
+
     /// PIN (slice 3): one over-wide run falls back to source alone; its neighbour still renders.
     ///
     /// The width rule — render in place if it fits, source if it does not — was correct and
@@ -28593,6 +33480,109 @@ mod tests {
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
         complete_live_math_for_real(&mut session);
         session
+    }
+
+    /// What the line reads as on the grid, row by row, with the blank tail cut off.
+    fn two_run_rows(session: &DualPlaneSession) -> Vec<String> {
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let columns = frame.columns.get() as usize;
+        (0..frame.row_map.len())
+            .map(|row| {
+                (0..columns)
+                    .map(|column| frame.cells[row * columns + column].text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .filter(|row| !row.is_empty())
+            .collect()
+    }
+
+    /// RED — **a gesture that wobbles back to the width the child already has must not cost a pane
+    /// its formulas** (user report 2026-09-17).
+    ///
+    /// The witness at the height this defect was reported from. A reflow moves the fold through a
+    /// line's runs, which is exactly the case a record cannot be re-anchored across: the sentence
+    /// drops to source for as long as the gesture lasts, which is right, and comes back when the
+    /// pane is allowed to scan again, which is the part that broke. A drag that ends one column
+    /// back where it started tells the child nothing — it is already at that width — and before
+    /// this fix the window had no way to say so, so the transaction that reflow opened was never
+    /// closed, `ResizeEpoch::decorations_allowed` stayed false, and this pane scanned for nothing
+    /// ever again. Both of the line's formulas sat as source text for the rest of its life, while
+    /// every formula whose own row the reflow left alone kept the picture it already had.
+    ///
+    /// Red gate: settle the wobble with nothing, the way the window used to. The last assertion
+    /// then reads `$x$ a-b-$` / `y$` however long the clock is run afterwards.
+    #[test]
+    fn a_gesture_that_wobbles_back_to_the_childs_width_keeps_the_lines_pictures() {
+        for alternate in [false, true] {
+            let mut session = two_run_session(9, alternate);
+            let pictures = |session: &DualPlaneSession| {
+                let mut projection = session.new_projection(session.layout_key());
+                let frame = session.viewport_frame(&mut projection).unwrap();
+                (
+                    rendered_inline_blocks(&frame).len(),
+                    frame.cells.iter().filter(|cell| cell.text == "$").count(),
+                )
+            };
+            assert_eq!(
+                pictures(&session),
+                (1, 0),
+                "alternate={alternate}: both runs are pictures at nine columns"
+            );
+            if !alternate {
+                assert_eq!(
+                    two_run_rows(&session),
+                    vec![">s".to_owned(), " a-b-".to_owned(), ">".to_owned()],
+                    "and this is the sentence the reader is looking at"
+                );
+            }
+
+            let at = Instant::now();
+            session.resize_at(nz(8), nz(20), at).unwrap();
+            session
+                .resize_at(nz(9), nz(20), at + Duration::from_millis(17))
+                .unwrap();
+            assert!(
+                !session.resize_epoch.decorations_allowed(),
+                "alternate={alternate}: a gesture is in progress, so withholding scans is right"
+            );
+            if !alternate {
+                assert_eq!(
+                    pictures(&session),
+                    (0, 4),
+                    "the fold moved through the runs, so the record is dropped while it lasts"
+                );
+                assert_eq!(
+                    two_run_rows(&session),
+                    vec![
+                        ">s".to_owned(),
+                        "$x$ a-b-$".to_owned(),
+                        "y$".to_owned(),
+                        ">".to_owned(),
+                    ],
+                    "which is the source text the reporter was left looking at"
+                );
+            }
+
+            // The window's word for this ending: the hand stopped on the width the child has.
+            let settled_at = at + Duration::from_millis(217);
+            session.mark_resize_settled_unchanged_at(nz(9), nz(20), settled_at);
+            let deadline = session
+                .resize_finish_deadline()
+                .expect("this ending arms a quiescence deadline like any other");
+            assert!(session.finish_resize_if_quiescent(deadline).unwrap());
+            assert!(session.resize_epoch.decorations_allowed());
+
+            session.advance_live_stability(deadline + LIVE_MATH_STABLE_INTERVAL);
+            complete_live_math_for_real(&mut session);
+            assert_eq!(
+                pictures(&session),
+                (1, 0),
+                "alternate={alternate}: and the line reads what it read before the hand moved"
+            );
+        }
     }
 
     /// The rendered inline blocks of a frame, as `(presentation row, run indices)`.
@@ -29571,6 +34561,621 @@ mod tests {
         assert!(
             !text.contains('$'),
             "the rendered run's source delimiters must be cleared from the grid: {text:?}"
+        );
+    }
+
+    /// Does the one row carrying this text hold any cell no command's output claims?
+    fn row_carries_unclaimed_text(session: &DualPlaneSession, needle: &str) -> bool {
+        let inputs = session.live_detection_context();
+        let rows = (0..session.live_rows.len() as u32)
+            .filter(|row| {
+                live_grid_input(&inputs, *row).is_some_and(|input| input.text.contains(needle))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the fixture must put {needle:?} on exactly one grid row: {:?}",
+            inputs.iter().map(|input| &input.text).collect::<Vec<_>>()
+        );
+        session
+            .terminal
+            .visible_row(rows[0])
+            .expect("the fixture's row is on the grid")
+            .cells
+            .iter()
+            .any(bt_transcript::CapturedCell::carries_unclaimed_text)
+    }
+
+    /// The whole of one command that runs a full-screen program: output, the swap out to the
+    /// program's own canvas, and output again after the program hands the screen back.
+    ///
+    /// ASCII throughout, so that every byte index in it is a place the stream may be cut.
+    fn pager_command_stream() -> String {
+        format!(
+            "{PROMPT_A}PS> {PROMPT_B}less{OUTPUT_C}\r\nfirst $x^2$ here\r\n\x1b[?1049h\
+             during $y^2$ here\r\n\x1b[?1049lafter $z^2$ here\r\n{OUTPUT_D}"
+        )
+    }
+
+    /// **A screen swap is a change of provenance, and it happens in the middle of a segment**
+    /// (review 2026-09-17, F3 — a false refusal in ordinary use).
+    ///
+    /// A segment ends at every shell-integration marker, so no *phase* can change inside one. A
+    /// screen can: `ESC[?1049l` is how a pager or an editor hands the screen back, and it carries
+    /// no marker, because the command that ran the program has not finished. One provenance value
+    /// therefore spanned the swap — the alternate screen's, where this session holds no output
+    /// state of its own — and everything the command printed after the program exited landed on
+    /// cells that claimed nothing. Inline formulas in a `git log` paged by `less`, in a build's
+    /// summary after `$EDITOR` closed: all of them stayed as source, for as long as this rule was
+    /// stated once per segment.
+    ///
+    /// The answer is kept per screen on both sides — one phase per screen here, one provenance per
+    /// screen in the terminal — so the swap exchanges them with the grids and nothing has to be
+    /// restated at a boundary somebody has to remember to find.
+    #[test]
+    fn output_printed_after_a_full_screen_program_exits_is_still_the_commands() {
+        let stream = pager_command_stream();
+        let bytes = stream.as_bytes();
+        // Every cut, including the two that are no cut at all: the defect was first seen with the
+        // swap and the output after it arriving in feeds of their own, and a rule about *when* an
+        // answer is stated has to hold however the reads happen to fall.
+        for split in 0..=bytes.len() {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            session.feed_at(&bytes[..split], started).unwrap();
+            session.feed_at(&bytes[split..], started).unwrap();
+
+            assert_eq!(
+                grid_site_of(&session, "first"),
+                InlineMathSite::CommandOutput,
+                "split={split}: output printed before the program started is the command's"
+            );
+            assert_eq!(
+                grid_site_of(&session, "after"),
+                InlineMathSite::CommandOutput,
+                "split={split}: the command is still running, so what it prints on the screen it \
+                 has just been handed back is still its output"
+            );
+            assert!(
+                !row_carries_unclaimed_text(&session, "after"),
+                "split={split}: and the claim is on the cells themselves"
+            );
+        }
+    }
+
+    /// **A synchronized update parks bytes, and a marker read over the top of them is read against
+    /// a screen that has not received them** (review 2026-09-17 second pass, F3 P1).
+    ///
+    /// DEC 2026 asks the terminal to hold a block of writes back and apply them all at once, and
+    /// the vendored parser does exactly that: the bytes sit in its buffer and are parsed at the
+    /// terminator, against whatever the terminal's state is *then*. The adapter meanwhile pauses
+    /// at every shell-integration marker, so a segment carries one phase — but the block's bytes
+    /// arrived under an earlier one, and were being written under a later one.
+    ///
+    /// Both directions are wrong and the second is the one ordinary use meets: a prompt drawn
+    /// inside a block that commits after `C` was typeset as output, and a command's own output
+    /// printed inside a block that commits after `D` and the next `A` — a program killed inside a
+    /// block it never closed, a prompt theme that wraps its drawing — was left as source. The
+    /// block is now committed where the order matters, at the marker.
+    #[test]
+    fn a_synchronized_update_is_written_before_the_marker_that_follows_it() {
+        let prompt_side =
+            format!("{PROMPT_A}\x1b[?2026h{ENERGY}\r\n{PROMPT_B}{OUTPUT_C}\x1b[?2026l{OUTPUT_D}");
+        let output_side = format!(
+            "{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\n\x1b[?2026h{ENERGY}\r\n{OUTPUT_D}{PROMPT_A}\
+             \x1b[?2026l"
+        );
+
+        for split in 0..=prompt_side.len() {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            session
+                .feed_at(&prompt_side.as_bytes()[..split], started)
+                .unwrap();
+            session
+                .feed_at(&prompt_side.as_bytes()[split..], started)
+                .unwrap();
+            assert_eq!(
+                grid_site_of(&session, "energy"),
+                InlineMathSite::Ineligible,
+                "split={split}: this text arrived while the shell was drawing its prompt, and a \
+                 block that commits after `C` does not make it the command's"
+            );
+        }
+        assert_eq!(
+            laundering_attempt(&prompt_side),
+            (0, 0),
+            "and none of it is typeset"
+        );
+        assert_eq!(
+            frozen_laundering_attempt(&prompt_side),
+            (0, 0),
+            "on either plane"
+        );
+
+        for split in 0..=output_side.len() {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(60), nz(8));
+            seat_inline_metrics(&mut session);
+            session
+                .feed_at(&output_side.as_bytes()[..split], started)
+                .unwrap();
+            session
+                .feed_at(&output_side.as_bytes()[split..], started)
+                .unwrap();
+            assert_eq!(
+                grid_site_of(&session, "energy"),
+                InlineMathSite::CommandOutput,
+                "split={split}: the command printed this before it ended, and a block that \
+                 commits after the next prompt does not take that away from it"
+            );
+        }
+        assert_eq!(
+            laundering_attempt(&output_side),
+            (1, 1),
+            "and it is typeset, which is the false refusal this closes"
+        );
+        assert_eq!(
+            frozen_laundering_attempt(&output_side),
+            (1, 1),
+            "on either plane"
+        );
+    }
+
+    /// A screen swap parked in the same block: the marker after it must name the screen the swap
+    /// left the terminal on, not the one the parser had not reached yet.
+    #[test]
+    fn a_marker_after_a_parked_screen_swap_names_the_screen_the_swap_left() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        // Stopped before the terminator, which is the whole point: the block is still open, and
+        // the prompt marker inside it has already been handed to the session.
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}pager{OUTPUT_C}\r\n\x1b[?1049h\x1b[?2026h\
+                     \x1b[?1049lafter $z^2$ here\r\n{PROMPT_A}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            !session.terminal.modes().alternate_screen,
+            "the parked swap back is applied before the marker after it is read"
+        );
+        assert_eq!(
+            session.shell_phases.get(&ScreenId::Primary),
+            Some(&ShellIntegrationPhase::Prompt),
+            "so the prompt the shell printed is the primary screen's prompt"
+        );
+        assert_eq!(
+            session.shell_phases.get(&ScreenId::Alternate),
+            None,
+            "and the canvas the pager gave back is told nothing about it"
+        );
+        session.feed_at(b"\x1b[?2026l", started).unwrap();
+        assert_eq!(
+            grid_site_of(&session, "after"),
+            InlineMathSite::CommandOutput,
+            "the command printed it on the screen it had just been handed back, inside a block"
+        );
+    }
+
+    /// The same command, stopped while the program still owns the screen: its canvas is eligible by
+    /// the alternate-screen policy and by nothing else, and the claim is not on those cells.
+    #[test]
+    fn the_canvas_a_program_owns_carries_no_command_of_its_own() {
+        let started = Instant::now();
+        let stream = pager_command_stream();
+        let head = stream
+            .split_once("\x1b[?1049l")
+            .expect("the fixture leaves the alternate screen exactly once")
+            .0;
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session.feed_at(head.as_bytes(), started).unwrap();
+
+        assert_eq!(
+            grid_site_of(&session, "during"),
+            InlineMathSite::AltScreenContent,
+            "a surface a full-screen program owns is eligible structurally, which this change \
+             leaves exactly where it found it"
+        );
+        assert!(
+            row_carries_unclaimed_text(&session, "during"),
+            "and it is eligible *without* the claim: this session knows nothing about who printed \
+             on a canvas it was told nothing about"
+        );
+    }
+
+    /// **A canvas carries the claims of a cycle it was told about, and only while it is that
+    /// canvas** (review 2026-09-17 second pass, F3 P2).
+    ///
+    /// The per-screen answer is not "the alternate screen claims nothing". A full-screen program
+    /// that speaks OSC 133 on its own canvas opens a cycle there, and what it prints between its
+    /// own `C` and `D` is that cycle's output as much as a shell's is on the primary screen — the
+    /// claim is about the marker state that was accepted for a screen, not about which screen it
+    /// is. What the canvas cannot do is borrow the primary screen's command, which is the arm
+    /// above this one.
+    ///
+    /// The half that was wrong is what survives leaving. A canvas is discarded when the primary
+    /// screen comes back and reset by the next `?1049h`, and the regions that described it are
+    /// retired with it — but its phase and its authority stayed, so a second program, speaking no
+    /// protocol at all, had its first screenful drawn onto cells wearing the first program's
+    /// command. Inline eligibility on that surface is the alternate-screen policy's answer and
+    /// never asks the claim, so what this fixes is the claim itself, where every other reader of
+    /// it finds it.
+    #[test]
+    fn a_canvas_carries_only_the_claims_of_a_cycle_it_was_told_about() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}tui{OUTPUT_C}\r\n\x1b[?1049h\
+                     {PROMPT_A}{PROMPT_B}{OUTPUT_C}zeta $z^2$ here\r\n"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            !row_carries_unclaimed_text(&session, "zeta"),
+            "the program ran its own cycle on its own canvas, and this is that cycle's output"
+        );
+
+        session
+            .feed_at(
+                b"\x1b[?1049l\x1b[?1049hqux $q^2$ here\r\n".as_slice(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            row_carries_unclaimed_text(&session, "qux"),
+            "the canvas that cycle was drawn on is gone, so the program that gets the next one \
+             starts from nothing"
+        );
+    }
+
+    /// A program that crashes without restoring the screen, and a shell that prints its next
+    /// prompt onto the canvas the program left behind.
+    ///
+    /// The tempting reading of F3 is that the command is still running, so everything is its
+    /// output until `D` — and under that reading the prompt below, and whatever the reader then
+    /// types at it, would carry the command's claim. The claim is per screen precisely because it
+    /// must not: what this session was told about the primary screen says nothing about a canvas
+    /// it was never told about. The row stays eligible by the alternate-screen policy, which is a
+    /// separate and structural answer, and the claim stays off it.
+    #[test]
+    fn a_prompt_that_returns_on_a_crashed_programs_canvas_claims_nothing() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}tui{OUTPUT_C}\r\n\x1b[?1049h{PROMPT_A}PS> \
+                     {PROMPT_B}energy $x^2$ here"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+
+        assert_eq!(
+            grid_site_of(&session, "energy"),
+            InlineMathSite::AltScreenContent,
+            "the canvas is eligible by policy, and the command's own region cannot reach it"
+        );
+        assert!(
+            row_carries_unclaimed_text(&session, "energy"),
+            "a command running on the primary screen claims nothing a shell writes on the \
+             alternate one"
+        );
+    }
+
+    /// Nested swaps, and the two modes this emulator does not implement.
+    ///
+    /// `1049` set twice is one swap and `1049` unset twice is one return, so the answer has to
+    /// come back on the first of the two — a count kept anywhere else would need a stack. `47` and
+    /// `1047` reach the unknown-mode branch in this vendored terminal (upstream implements neither)
+    /// and therefore move no screen at all, which is worth pinning: a rule that split the stream on
+    /// the bytes of a mode sequence rather than on the swap itself would answer differently here.
+    #[test]
+    fn nested_and_unimplemented_screen_modes_leave_the_claim_where_the_screen_is() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}pager{OUTPUT_C}\r\n\x1b[?1049h\x1b[?1049h\
+                     \x1b[?1049l\x1b[?1049lafter $z^2$ here\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&session, "after"),
+            InlineMathSite::CommandOutput,
+            "the second set and the second unset are no-ops, and the answer came back with the \
+             first unset"
+        );
+
+        let mut plain = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut plain);
+        plain
+            .feed_at(
+                format!(
+                    "{PROMPT_A}PS> {PROMPT_B}pager{OUTPUT_C}\r\n\x1b[?47h\x1b[?1047h\
+                     still $z^2$ here\r\n{OUTPUT_D}"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert!(
+            !plain.terminal.modes().alternate_screen,
+            "the fixture must really exercise modes this terminal does not implement"
+        );
+        assert_eq!(
+            grid_site_of(&plain, "still"),
+            InlineMathSite::CommandOutput,
+            "a mode that swaps no screen changes no answer"
+        );
+    }
+
+    /// **The order a marker stands in can be checked; who wrote it cannot** (review 2026-09-17,
+    /// F2).
+    ///
+    /// OSC 133 is an in-band protocol with no authentication: a `C` is a claim by whoever wrote
+    /// those bytes, and a program — or a file with the escape in it, reaching the screen through
+    /// `cat` — writes them exactly as a shell does. Nothing here can establish the producer, and
+    /// the consequence of being wrong is cosmetic: text drawn as a picture of itself, never an
+    /// action, with the source still on the grid and still what a copy yields.
+    ///
+    /// What is checkable is the order, and one order is refused: a `C` that stands in no prompt
+    /// cycle this session watched open. The two arms below are the two ways that happens — a
+    /// screen nothing has ever spoken on, which is a pane with no shell integration installed, and
+    /// the gap between one command's `D` and the next prompt's `A`. Both used to create this
+    /// session's authority over the screen out of the forged marker itself, which is the whole of
+    /// the machinery the text after it needed to be typeset.
+    ///
+    /// The other three arms are what the check must *not* cost, and the last of them is the honest
+    /// limit of all of this: a program that prints a whole `A…B…C` cycle is indistinguishable from
+    /// a nested shell that speaks the protocol, and is left alone deliberately.
+    #[test]
+    fn a_command_start_that_stands_in_no_prompt_cycle_is_refused() {
+        let started = Instant::now();
+
+        let mut bare = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut bare);
+        bare.feed_at(
+            format!("{OUTPUT_C}\r\n{ENERGY}\r\n{OUTPUT_D}").as_bytes(),
+            started,
+        )
+        .unwrap();
+        assert!(
+            !bare.shell_integration_is_authoritative(ScreenId::Primary),
+            "a marker nobody's prompt cycle accounts for cannot make this session authoritative \
+             over a screen"
+        );
+        assert!(
+            !bare.working,
+            "and it cannot start a command on the tab strip either"
+        );
+        assert_eq!(
+            grid_site_of(&bare, "energy"),
+            InlineMathSite::Ineligible,
+            "so what follows it is what it was before the escape arrived: text nobody claims"
+        );
+
+        let mut between = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut between);
+        between
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\nfirst line\r\n{OUTPUT_D}")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        between
+            .feed_at(format!("{OUTPUT_C}{ENERGY}\r\n").as_bytes(), started)
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&between, "energy"),
+            InlineMathSite::Ineligible,
+            "the last command ended at its `D` and no prompt has begun, so this `C` belongs to no \
+             command of this shell's"
+        );
+        between
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}run{OUTPUT_C}\r\nreal $x^2$ here\r\n").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&between, "real"),
+            InlineMathSite::CommandOutput,
+            "and the shell's own next command is heard exactly as before"
+        );
+
+        // A `C` inside a command's own output is the `cat` of a file carrying the escape, and it
+        // is left where it was: the region it re-opens is the same command's, and every cell it
+        // covers was already being stamped by the command that is running. The repeated-`C` rule
+        // that closes the stale region before opening the new one is unchanged.
+        let mut inside = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut inside);
+        inside
+            .feed_at(
+                format!("{PROMPT_A}PS> {PROMPT_B}cat{OUTPUT_C}\r\n{OUTPUT_C}{ENERGY}\r\n")
+                    .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&inside, "energy"),
+            InlineMathSite::CommandOutput,
+            "the command really was printing this line, whatever the escape in the middle of it \
+             said"
+        );
+
+        // A shell that reports `A`, `C` and `D` and never `B` keeps everything it had. Requiring
+        // the `B` as well would close nothing — a stream that can forge a `C` can forge a `B` —
+        // and would cost such a shell every formula it prints.
+        let mut without_b = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut without_b);
+        without_b
+            .feed_at(
+                format!("{PROMPT_A}PS> run\r\n{OUTPUT_C}{ENERGY}\r\n{OUTPUT_D}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&without_b, "energy"),
+            InlineMathSite::CommandOutput,
+            "the prompt cycle is open, which is all this check asks"
+        );
+
+        // **The limit, stated as a measurement.** These are the same bytes a shell sends, in the
+        // same order, and this session has no way to know they came from a program. It is where
+        // the guarantee ends, and the cost of being wrong here is a formula drawn over text.
+        assert_eq!(
+            laundering_attempt(&format!(
+                "{PROMPT_A}forged> {PROMPT_B}x{OUTPUT_C}\r\n{ENERGY}\r\n{OUTPUT_D}"
+            )),
+            (1, 1),
+            "a whole forged cycle is indistinguishable from a nested shell's own, by contract"
+        );
+    }
+
+    /// **The prompt this window may type at is a prompt with nothing running inside it** (audit 3,
+    /// finding C-3).
+    ///
+    /// A mark and a pty write are not owed to the same evidence. The marks stay where the ruling
+    /// above put them — a forged `B` opens a region, because refusing it would leave a killed
+    /// command's output region annexing the prompt after it, and because a nested shell's cycle is
+    /// the same bytes anyway. What the chord asks is narrower and is asked once: has this session
+    /// watched a command start that it has not watched end? While it has, the thing reading the
+    /// pty is that command — `ssh`, `python`, a nested shell — and `ESC[24;8~` is a key only
+    /// `folio.ps1`'s PSReadLine binds.
+    ///
+    /// The last arm is the honest limit: a program that prints `D`, `A`, `B` in order is
+    /// byte-for-byte the pane's own shell returning to its prompt, and nothing here can tell them
+    /// apart. What the check buys is that a forger must now write the whole cycle instead of one
+    /// byte in the middle of a command — the same limit `docs/DESIGN.md` line 2338 already
+    /// accepts for typesetting.
+    #[test]
+    fn a_prompt_with_a_command_running_inside_it_is_not_one_this_window_types_at() {
+        let started = Instant::now();
+
+        let mut real = DualPlaneSession::new(nz(80), nz(4));
+        real.feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", started)
+            .unwrap();
+        assert!(
+            real.shell_prompt_opened_in_order(),
+            "the shell's own prompt, opened in order, with nothing running in it"
+        );
+
+        let mut forged = DualPlaneSession::new(nz(80), nz(4));
+        forged
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07ssh host\r\x1b]133;C\x07\r\n",
+                started,
+            )
+            .unwrap();
+        forged.feed_at(b"motd\x1b]133;B\x07", started).unwrap();
+        assert!(
+            forged.shell_input_region_open(),
+            "the region still opens — the marks are permissive on purpose"
+        );
+        assert!(
+            !forged.shell_prompt_opened_in_order(),
+            "and the command that `B` was printed inside has not ended, so nothing is typed at it"
+        );
+
+        let mut nested = DualPlaneSession::new(nz(80), nz(4));
+        nested
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07pwsh\r\x1b]133;C\x07\r\n",
+                started,
+            )
+            .unwrap();
+        nested
+            .feed_at(b"\x1b]133;A\x07nested> \x1b]133;B\x07", started)
+            .unwrap();
+        assert!(
+            nested.shell_input_region_open(),
+            "a nested shell speaking the protocol gets its prompt marked like any other"
+        );
+        assert!(
+            !nested.shell_prompt_opened_in_order(),
+            "and is not typed at: the command it was started by is still running"
+        );
+        nested
+            .feed_at(
+                b"ls\r\x1b]133;C\x07\r\nfile\r\n\x1b]133;D;0\x07\x1b]133;A\x07nested> \x1b]133;B\x07",
+                started,
+            )
+            .unwrap();
+        assert!(
+            !nested.shell_prompt_opened_in_order(),
+            "the nested shell's own `D` answers its own `C`, not the command it runs inside"
+        );
+        nested
+            .feed_at(
+                b"exit\r\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07",
+                started,
+            )
+            .unwrap();
+        assert!(
+            nested.shell_prompt_opened_in_order(),
+            "the shell this window spawned is reading a line again"
+        );
+
+        // Two markers are not a prompt. `D` is accepted from any phase and the count floors at
+        // zero, so without the `A` this twenty-byte pair earned the chord.
+        let mut two_markers = DualPlaneSession::new(nz(80), nz(4));
+        two_markers
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07ssh host\r\x1b]133;C\x07\r\n",
+                started,
+            )
+            .unwrap();
+        two_markers
+            .feed_at(b"\x1b]133;D;0\x07\x1b]133;B\x07", started)
+            .unwrap();
+        assert!(
+            two_markers.shell_input_region_open(),
+            "the region opens, as it does for any `B`"
+        );
+        assert!(
+            !two_markers.shell_prompt_opened_in_order(),
+            "but no `A` opened a prompt around it, so this is not a prompt to type at"
+        );
+
+        // The limit, measured rather than claimed.
+        let mut whole_cycle = DualPlaneSession::new(nz(80), nz(4));
+        whole_cycle
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07ssh host\r\x1b]133;C\x07\r\n",
+                started,
+            )
+            .unwrap();
+        whole_cycle
+            .feed_at(b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07", started)
+            .unwrap();
+        assert!(
+            whole_cycle.shell_prompt_opened_in_order(),
+            "a whole forged `D, A, B` is the pane's own shell prompting again, by contract — \
+             bytes cannot settle this one and the chord is aimed by them"
         );
     }
 
@@ -31064,8 +36669,13 @@ mod tests {
     /// The other half of the criterion, and the half that keeps it a rule rather
     /// than a sweep: the modes the shell *does* use are not touched.
     ///
-    /// `2004` is PSReadLine's own — it turns bracketed paste on for itself and
-    /// would be broken by a prompt that cleared it. `1049` belongs to whoever put
+    /// `2004` is the line editor's own where it has one — GNU readline 8.1 and
+    /// later, zsh's ZLE and fish turn bracketed paste on at their own prompt,
+    /// and a prompt that cleared it would break their paste. (PSReadLine is not
+    /// one of them: no version Folio has measured — 2.0.0, 2.4.5, 2.4.6 — sets
+    /// it or parses its markers, which is why a PowerShell paste takes its own
+    /// road; 0.4.4 ticket 03, correcting the reason this doc gave until then.)
+    /// `1049` belongs to whoever put
     /// the alternate screen up, and a prompt is not evidence that they left.
     /// `1007` only means anything on the alternate screen and is inert on a
     /// prompt. `DECCKM` is a keyboard mode a line editor may well have set.

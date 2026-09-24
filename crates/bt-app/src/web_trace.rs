@@ -109,15 +109,16 @@ pub fn seat(page: bt_platform::PageVisual) -> String {
 
 /// A mint as one field: which arm, and the target it stands for.
 ///
-/// `Mint`'s own `Debug` would print the whole `File(String)`, which is the same
-/// URL the line already carries in `url=` — this says the *kind* and lets the
-/// two be compared at a glance, which is the entire question when a viewer asks
-/// for something a shade different from what was minted.
+/// `Mint`'s own `Debug` would print the whole parsed `File(…)` — the URL, the
+/// path and the tail — where the line already carries the same URL in `url=`;
+/// this says the *kind* and lets the two be compared at a glance, which is the
+/// entire question when a viewer asks for something a shade different from what
+/// was minted.
 pub fn mint(mint: &crate::webnav::Mint) -> String {
     match mint {
         crate::webnav::Mint::Nothing => String::from("nothing"),
         crate::webnav::Mint::Blank => String::from("blank"),
-        crate::webnav::Mint::File(url) => format!("file:{url}"),
+        crate::webnav::Mint::File(url) => format!("file:{}", url.as_str()),
     }
 }
 

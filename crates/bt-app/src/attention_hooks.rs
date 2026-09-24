@@ -35,6 +35,8 @@
 //! rule one layer down: the configuration on disk is the answer to "which rows does this machine
 //! have", so a user who edits it by hand gets a Folio that agrees with them.
 
+pub(crate) use crate::attention_ownership::Outcome;
+use crate::attention_ownership::{self as ownership, Decision};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -53,13 +55,8 @@ const SETTINGS_FILE: &str = "settings.json";
 /// The default directory's name beside the user's profile, for when the variable says nothing.
 const DEFAULT_DIRECTORY: &str = ".claude";
 
-/// The substring that marks a hook entry as ours.
-///
-/// The **verb and the family**, not the path to the executable: a user who moves Folio, or who runs
-/// two builds of it, still has one set of entries that this can recognise and take back out. An
-/// entry that does not contain this is somebody else's and is never touched, which is what makes
-/// uninstalling safe on a machine with hooks of its own.
-const MARK: &str = "attention claude-code:";
+// `hook_owner` decodes the executable operand. A Folio verb identifies the
+// integration family; only the operand establishes per-copy ownership.
 
 /// Whether this machine's user configuration already calls Folio.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +69,11 @@ pub(crate) enum State {
     /// There is a file and it could not be read as settings. **Not** "absent": writing over a file
     /// this build cannot parse would destroy configuration somebody wrote by hand.
     Unreadable,
+    /// There is a readable file and **this build will not edit it**, for the reason carried: it is
+    /// a link out of the agent's own folder, it is shared by hard links, or it is read-only. A row
+    /// that read `Off` about this would be offering a press that cannot happen, over hooks that
+    /// may be firing this minute (closure review R1).
+    Refused(&'static str),
 }
 
 /// The directory Claude Code keeps user configuration in, as **this environment** says it.
@@ -147,19 +149,75 @@ pub(crate) fn state() -> State {
     let Some(path) = settings_path() else {
         return State::Absent;
     };
-    match std::fs::read_to_string(&path) {
-        Err(_) => State::Absent,
-        Ok(text) if text.trim().is_empty() => State::Absent,
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(settings) if settings.is_object() => {
-                if declares_folio(&settings) {
-                    State::Installed
-                } else {
-                    State::Absent
-                }
+    let state = state_at(&path);
+    if state != State::Installed {
+        return state;
+    }
+    let Some(exe) = std::env::current_exe().ok() else {
+        return State::Unreadable;
+    };
+    let Ok(text) =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, path)
+    else {
+        return State::Unreadable;
+    };
+    let Some(value) = serde_json::from_str::<Value>(&text).ok() else {
+        return State::Unreadable;
+    };
+    if (owners(&value).unwrap_or_default())
+        .iter()
+        .any(|owner| crate::explorer_menu::same_path(owner, &exe))
+    {
+        State::Installed
+    } else {
+        State::Absent
+    }
+}
+
+/// **The settings row's two facts, out of one read of the file.**
+///
+/// Whether this copy's marks are in it, and — when this build will not edit it at all — the reason
+/// the row says in place of `Off`. Two answers to "what does the row show" derived from one
+/// `State` rather than two reads, because a second read is a second answer (closure review R1).
+#[must_use]
+pub(crate) fn row_state() -> (bool, Option<&'static str>) {
+    match state() {
+        State::Installed => (true, None),
+        State::Refused(reason) => (false, Some(reason)),
+        State::Absent | State::Unreadable => (false, None),
+    }
+}
+
+/// The same question about a named file, so a test can ask it without a settings file on the
+/// machine it runs on.
+#[must_use]
+fn state_at(path: &Path) -> State {
+    let config = match Config::resolve(path) {
+        Ok(config) => config,
+        // Read, and not ours to change. The row says which file it is looking at.
+        Err(Unresolved::Refused(reason)) => return State::Refused(reason),
+        Err(Unresolved::Unreadable) => return State::Unreadable,
+    };
+    let text = match config.standing() {
+        // Nothing there is the same answer to the only question being asked.
+        Standing::Nothing => return State::Absent,
+        // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
+        // offer to write over one this build never read. See [`standing`].
+        Standing::Unreadable => return State::Unreadable,
+        Standing::Text(text) => text,
+    };
+    if text.trim().is_empty() {
+        return State::Absent;
+    }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(settings) if settings.is_object() => {
+            if declares_folio(&settings) {
+                State::Installed
+            } else {
+                State::Absent
             }
-            _ => State::Unreadable,
-        },
+        }
+        _ => State::Unreadable,
     }
 }
 
@@ -172,7 +230,9 @@ pub(crate) fn installed_rows() -> Vec<MappingRow> {
     let Some(path) = settings_path() else {
         return Vec::new();
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, &path)
+    else {
         return Vec::new();
     };
     let Ok(settings) = serde_json::from_str::<Value>(&text) else {
@@ -220,12 +280,78 @@ fn group_is_ours(group: &Value) -> bool {
         .get("hooks")
         .and_then(Value::as_array)
         .is_some_and(|hooks| {
-            hooks.iter().any(|hook| {
-                hook.get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|command| command.contains(MARK))
-            })
+            hooks
+                .iter()
+                .any(|hook| hook_owner(hook).is_ok_and(|owner| owner.is_some()))
         })
+}
+
+/// The only decoder of Claude hook ownership, for both legacy and direct form.
+fn hook_owner(hook: &Value) -> Result<Option<PathBuf>, &'static str> {
+    let Some(command) = hook.get("command").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let owner = if let Some(args) = hook.get("args") {
+        ownership::direct_path(command, args, CLAUDE_CODE)?
+    } else {
+        ownership::legacy_path(command, CLAUDE_CODE)?
+    };
+    if owner.is_some()
+        && (hook.get("type").and_then(Value::as_str) != Some("command")
+            || hook.as_object().is_none_or(|o| {
+                o.keys()
+                    .any(|k| !["type", "command", "args", "async"].contains(&k.as_str()))
+            })
+            || hook.get("async").is_some_and(|v| !v.is_boolean()))
+    {
+        return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+    }
+    Ok(owner)
+}
+
+fn owners(settings: &Value) -> Result<Vec<PathBuf>, &'static str> {
+    let mut found = Vec::new();
+    let Some(hooks) = settings.get("hooks") else {
+        return Ok(found);
+    };
+    for groups in hooks
+        .as_object()
+        .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
+        .values()
+    {
+        for group in groups
+            .as_array()
+            .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
+        {
+            let rows = group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?;
+            for hook in rows {
+                if !hook.is_object() {
+                    return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+                }
+                // **Ownership is per entry.** An entry this build cannot decode is not Folio's: it
+                // is left exactly where it is, and it has no say over the entries beside it. One
+                // hand-written `"mytool attention claude-code:Stop"` used to refuse every edit to
+                // the whole file, install and remove alike — a second state nobody could get out
+                // of (closure review R4). The document's own shape, above and below, is still a
+                // refusal: that is a file this build cannot read, not an entry it cannot claim.
+                let Ok(Some(owner)) = hook_owner(hook) else {
+                    continue;
+                };
+                if group.as_object().is_none_or(|o| {
+                    o.keys()
+                        .any(|k| !["matcher", "hooks"].contains(&k.as_str()))
+                }) || group.get("matcher").is_some_and(|v| !v.is_string())
+                {
+                    return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+                }
+                found.push(owner);
+            }
+        }
+    }
+    Ok(found)
 }
 
 fn declares_folio(settings: &Value) -> bool {
@@ -243,93 +369,26 @@ pub(crate) fn rows_to_install() -> Vec<MappingRow> {
     attention_map::installed_rows(attention_map::ROWS, CLAUDE_CODE, |_| true)
 }
 
-/// One hook command line.
-///
-/// The executable is quoted and the event is the qualified `<family>:<event>` spelling, so the
-/// receiving end never has to work out which upstream a bare `Stop` came from.
-///
-/// **The payload is never interpolated**, and that clause has not moved: a command line carrying a
-/// hook payload would be a command line an upstream could put a quote character into. What the
-/// line may say is *where* the payload will be — `--json -`, standard input, which is where Claude
-/// Code writes it and where nothing has to be quoted at all.
-///
-/// It is said only for a row that has somewhere to look ([`attention_map::Words`]). Every other
-/// event's hook is spawned with nothing to read and reads nothing, which is what it did before.
-///
-/// # **What the hook is told, and what it is not** (M4-7)
-///
-/// The hook is **this executable**, on both platforms, and the endpoint it speaks to is nowhere in
-/// this line. That is not an omission: `folio attention` reads `FOLIO_ATTENTION_PIPE` and
-/// `FOLIO_ATTENTION` out of the environment it was started with, the pane's shell had both, and
-/// `claude` is that shell's child — so the address travels the way it has always travelled and a
-/// socket path travels it exactly as a pipe name did. Writing the endpoint into the line instead
-/// would pin a configuration file on disk to one *run* of one window, which is the thing the
-/// environment exists not to do.
-///
-/// So there is **no shell script and no `nc -U`** on the Unix side. A `#!/bin/sh` stub that piped
-/// a line into `nc` would be a second implementation of this wire — one that could not apply the
-/// frame bound, could not read the capability out of its own environment without re-deriving the
-/// grammar, and would be a second thing to keep in step with `bt_platform::attention_pipe`. What
-/// does change off Windows is only the **quoting**, below: the string is handed to `/bin/sh`, and
-/// a double-quoted word there is still expanded — a person whose home directory contains a `$` or
-/// a backtick would get a hook that ran the wrong program, or none.
-///
-/// `platform` is handed in rather than asked for, so that a Windows runner can read the line a
-/// Mac installs and the other way round — `install_into_on`'s reason, one layer down.
-#[must_use]
-pub(crate) fn command_for_on(exe: &Path, event: &str, platform: HostPlatform) -> String {
-    let mut command = format!(
-        "{} attention {CLAUDE_CODE}:{event}",
-        quoted_program(exe, platform)
-    );
+/// Direct argv, with stdin only for events whose mapping reads a payload.
+fn args_for(event: &str) -> Vec<String> {
+    let mut args = vec!["attention".to_owned(), format!("{CLAUDE_CODE}:{event}")];
     if attention_map::turn_end_row(CLAUDE_CODE, event).is_some_and(|row| row.words.are_somewhere())
     {
-        command.push_str(&format!(" --json {}", crate::cli::STDIN_PAYLOAD));
+        args.extend(["--json".to_owned(), crate::cli::STDIN_PAYLOAD.to_owned()]);
     }
-    command
+    args
 }
 
-/// **A program's path, quoted for the shell that is going to run this line.**
-///
-/// Two shells and two rules, and the second is the one this ticket added:
-///
-/// * Windows hands the string to `cmd`, where a double-quoted word is literal and the only
-///   character that could end it early is another double quote — which a Windows path cannot
-///   contain.
-/// * Everywhere else it is handed to `/bin/sh`, where a double-quoted word is **still expanded**:
-///   `$`, a backtick and a backslash all survive the quotes. A single-quoted word is the only
-///   literal one sh has, and the one character that ends it early is escaped the way sh spells it
-///   — close the quote, escape the quote, open it again.
-///
-/// Shared with [`crate::attention_copilot`]'s `bash` column, which is the same sentence to the same
-/// shell, so that one file's fix cannot leave the other's behind.
-#[must_use]
-pub(crate) fn quoted_program(exe: &Path, platform: HostPlatform) -> String {
-    let path = exe.display().to_string();
-    match platform {
-        HostPlatform::Windows => format!("\"{path}\""),
-        HostPlatform::MacOs | HostPlatform::OtherUnix => {
-            format!("'{}'", path.replace('\'', r"'\''"))
-        }
-    }
-}
-
-/// Write Folio's hooks into a settings value, replacing any it had before.
-///
-/// Returns whether anything changed, so that a press on an already-installed machine costs no write
-/// at all — the same reason `shell_integration` compares before it writes.
-///
-/// **Everything that is not ours is preserved**, including hook entries under the same event names:
-/// the removal below is by mark, and the insertion appends a group rather than replacing the array.
-pub(crate) fn install_into(settings: &mut Value, exe: &Path) -> bool {
+/// Mutate a validated document after `apply_at` has checked every owner and consent.
+/// User hook entries, including entries sharing a matcher group, survive.
+fn install_into(settings: &mut Value, exe: &Path) -> bool {
     install_into_on(settings, exe, bt_platform::host_platform())
 }
 
-/// The same write, for a named platform — the shell that will run these lines is the machine's, so
-/// a Windows runner can read the block a Mac installs and the other way round (M4-7).
-pub(crate) fn install_into_on(settings: &mut Value, exe: &Path, platform: HostPlatform) -> bool {
+/// Direct execution has the same shape on every platform.
+fn install_into_on(settings: &mut Value, exe: &Path, _platform: HostPlatform) -> bool {
     let before = settings.clone();
-    remove_from(settings);
+    remove_from(settings, exe, true);
     let object = match settings {
         Value::Object(object) => object,
         _ => {
@@ -360,10 +419,8 @@ pub(crate) fn install_into_on(settings: &mut Value, exe: &Path, platform: HostPl
         }
         let mut hook = Map::new();
         hook.insert("type".to_owned(), "command".into());
-        hook.insert(
-            "command".to_owned(),
-            command_for_on(exe, row.event, platform).into(),
-        );
+        hook.insert("command".to_owned(), exe.to_string_lossy().as_ref().into());
+        hook.insert("args".to_owned(), args_for(row.event).into());
         // **Every one of these is asynchronous**, and it is not an optimisation (plan §10.4.3).
         // `PermissionRequest` is a *synchronous decision gate* with a ten-minute timeout: a signal
         // hook that made it wait would put this program between the user and every approval Claude
@@ -386,7 +443,7 @@ pub(crate) fn install_into_on(settings: &mut Value, exe: &Path, platform: HostPl
 /// Symmetric with [`install_into`] and tested as such: install, remove, and the value is the one
 /// that went in — including a user's own hooks under the same event names, an empty `hooks` object
 /// they had written themselves, and the ordering of everything around it.
-pub(crate) fn remove_from(settings: &mut Value) -> bool {
+fn remove_from(settings: &mut Value, exe: &Path, takeover: bool) -> bool {
     let Some(object) = settings.as_object_mut() else {
         return false;
     };
@@ -400,7 +457,19 @@ pub(crate) fn remove_from(settings: &mut Value) -> bool {
             continue;
         };
         let before = groups.len();
-        groups.retain(|group| !group_is_ours(group));
+        groups.retain_mut(|group| {
+            let Some(rows) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            let count = rows.len();
+            rows.retain(|hook| {
+                !hook_owner(hook).ok().flatten().is_some_and(|owner| {
+                    takeover || ownership::other_live(&owner, exe) == Ok(false)
+                })
+            });
+            changed |= rows.len() != count;
+            !rows.is_empty() || count == 0
+        });
         changed |= groups.len() != before;
         // An event whose only entries were ours goes with them. An event that was empty before we
         // arrived stays empty, because we did not put it there.
@@ -415,30 +484,54 @@ pub(crate) fn remove_from(settings: &mut Value) -> bool {
     changed
 }
 
-/// What happened when the row was pressed.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Outcome {
-    /// Written. The file is now what [`State::Installed`] describes.
-    Installed,
-    /// Taken back out.
-    Removed,
-    /// Nothing to do — it was already in the state that was asked for.
-    Unchanged,
-    /// Refused, with the reason in the caller's own words.
-    Refused(&'static str),
-}
-
 /// Put Folio's hooks in, or take them out, on this machine.
 ///
 /// **The file is read, changed and written whole**, and a copy of what was there is kept beside it
 /// the first time each day — `shell_integration`'s rule, for `shell_integration`'s reason: this is
 /// somebody's own configuration file, and a build that could damage one had better be able to hand
 /// it back.
-pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
+pub(crate) fn apply(decision: Decision, exe: &Path) -> Outcome {
     let Some(path) = settings_path() else {
         return Outcome::Refused("no user configuration directory to write into");
     };
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    apply_at(&path, decision, exe, &crate::persist::storage_dir())
+}
+
+/// The same act on a named file — the seam the tests press, so that what they pin is this
+/// function and not a settings file belonging to whoever runs them.
+pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path) -> Outcome {
+    match Config::resolve(path) {
+        Ok(config) => apply_resolved(&config, decision, exe, data),
+        Err(Unresolved::Refused(reason)) => Outcome::Refused(reason),
+        Err(Unresolved::Unreadable) => Outcome::Refused(UNREADABLE),
+    }
+}
+
+/// The same act on a configuration this operation has already resolved.
+///
+/// **Everything below the entry takes this value.** The path was resolved once, at the top; the
+/// read, the dated copy and the replace all name that one answer, and there is no second
+/// resolution on this path for a repointed link to slip through (re-review B1).
+pub(crate) fn apply_resolved(
+    config: &Config,
+    decision: Decision,
+    exe: &Path,
+    data: &Path,
+) -> Outcome {
+    if let Err(reason) = ownership::stable_executable(Some(exe)) {
+        return Outcome::Refused(reason);
+    }
+    if !config.named().is_absolute() {
+        return Outcome::Refused(crate::i18n::Text::AgentHooksRootUnstable.text());
+    }
+    let install = decision.installs();
+    let existing = match config.standing() {
+        Standing::Text(text) => text,
+        // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
+        Standing::Nothing => String::new(),
+        // Refused rather than replaced, exactly as an unparseable file is.
+        Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+    };
     let mut settings = if existing.trim().is_empty() {
         Value::Object(Map::new())
     } else {
@@ -447,22 +540,46 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
             // Refused rather than replaced. A settings file this build cannot read is a settings
             // file somebody wrote, and overwriting it to add a convenience is not a trade anyone
             // agreed to.
-            _ => return Outcome::Refused("the settings file is not one this build can read"),
+            _ => return Outcome::Refused(UNREADABLE),
         }
+    };
+    let paths = match owners(&settings) {
+        Ok(paths) => paths,
+        Err(reason) => return Outcome::Refused(reason),
+    };
+    let others = match ownership::check(&paths, exe, &decision) {
+        Ok(others) => others,
+        Err(outcome) => return outcome,
     };
     let changed = if install {
         install_into(&mut settings, exe)
     } else {
-        remove_from(&mut settings)
+        remove_from(&mut settings, exe, false)
+    };
+    let _record = if install {
+        match ownership::record(
+            data,
+            config.named().parent().expect("absolute config"),
+            "claude",
+        ) {
+            Ok(lock) => Some(lock),
+            Err(reason) => return Outcome::Refused(reason),
+        }
+    } else {
+        None
     };
     if !changed {
-        return Outcome::Unchanged;
+        return if others.is_empty() {
+            Outcome::Unchanged
+        } else {
+            Outcome::LeftOther(others)
+        };
     }
     let text = match serde_json::to_string_pretty(&settings) {
         Ok(text) => text,
         Err(_) => return Outcome::Refused("the settings could not be written back"),
     };
-    match land(&path, &existing, "json", format!("{text}\n").as_bytes()) {
+    match config.land(&existing, "json", format!("{text}\n").as_bytes()) {
         Landing::Landed => {}
         Landing::NoDirectory => {
             return Outcome::Refused("the user configuration directory could not be created");
@@ -470,12 +587,17 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
         Landing::NoBackup => {
             return Outcome::Refused(NO_BACKUP);
         }
+        Landing::Changed => {
+            return Outcome::Refused(crate::i18n::Text::AgentConfigChanged.text());
+        }
         Landing::NotWritten => return Outcome::Refused("the settings file could not be written"),
     }
     if install {
         Outcome::Installed
-    } else {
+    } else if others.is_empty() {
         Outcome::Removed
+    } else {
+        Outcome::LeftOther(others)
     }
 }
 
@@ -486,6 +608,212 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
 pub(crate) const NO_BACKUP: &str =
     "a copy of your own file could not be kept, so nothing was written";
 
+/// What this module says about a settings file it could not read, whichever half could not read it.
+///
+/// One sentence for the byte that is not UTF-8 and for the document that is not JSON, because to
+/// the reader they are one fact: there is a file there, and this build is not going to guess at it.
+const UNREADABLE: &str = "the settings file is not one this build can read";
+
+/// **What is standing at a configuration file's path**, as the answer to "is there one".
+///
+/// The distinction between these three is the whole of the read side of [`land`]'s contract.
+/// `std::fs::read_to_string` fails the same way for a file that is not there and for one this
+/// build was not allowed to read, and an installer that took both for "there was nothing there"
+/// writes a whole fresh file over somebody's own — with no copy kept beside it, because `land` is
+/// given nothing to copy. Release audit 2026-09-16 (C-3): one non-UTF-8 byte in `config.toml` or
+/// `settings.json` is enough, the file is perfectly writable, and the loss is certain rather than
+/// a race. So the error kind is asked about, and everything that is not "no such file" refuses.
+pub(crate) enum Standing {
+    /// There is no file at that path. A write there creates one and destroys nothing.
+    Nothing,
+    /// The file's own text, as it reads today.
+    Text(String),
+    /// There is something at that path and this build could not read it. **Never written over.**
+    Unreadable,
+}
+
+/// Why a configuration path did not resolve to a file this build may edit.
+///
+/// Answered once per operation, by [`Config::resolve`], and never again below it.
+pub(crate) enum Unresolved {
+    /// The path could not be examined at all — an ancestor this account may not ask about. Not a
+    /// file this build declines to edit: one it could not look at.
+    Unreadable,
+    /// It resolves, it can be read, and **this build will not edit it** — it is a link out of the
+    /// agent's own folder, it is shared by hard links, or it is read-only. The sentence is the
+    /// filesystem predicate's own, because each of the three is a different thing to do about
+    /// (closure review R1).
+    Refused(&'static str),
+}
+
+/// **One resolution of one configuration path, carried through the whole of one operation.**
+///
+/// The re-review's blocking finding: the read resolved the path and took target A, and the write
+/// resolved it again on the way out. Between the two, the user's own junction can be repointed — a
+/// dotfiles `stow`, a profile switch, anything with write access to a link that is theirs — and
+/// the second answer is the one that writes. Folio would land a document derived from one file
+/// onto another, and keep a dated copy of the *other* file's bytes beside it.
+///
+/// So an operation asks **once**, at its own top, and everything below takes this value. Nothing
+/// under here is handed the configuration path at all: [`editable_target`] is private to this
+/// module and `Config::resolve` is its only caller, which is what makes a second resolution on
+/// that path a thing that cannot be written rather than a thing nobody happened to write.
+pub(crate) struct Config {
+    /// The path the agent's environment named. Kept for the one removal that has to take the name
+    /// away as well as the file, and for the record of where a mark was written.
+    named: PathBuf,
+    /// The file that path resolved to, once.
+    target: PathBuf,
+}
+
+impl Config {
+    /// Resolve a configuration path for one operation. **The only door.**
+    pub(crate) fn resolve(path: &Path) -> Result<Self, Unresolved> {
+        Self::resolve_with(path, editable_target)
+    }
+
+    /// The same, with the resolution handed in — the seam a test presses to prove that an
+    /// operation resolves once and that the read, the copy and the replace all name that answer.
+    /// A resolver that would answer differently the second time is never asked a second time.
+    pub(crate) fn resolve_with(
+        path: &Path,
+        resolve: impl FnOnce(&Path) -> Result<PathBuf, Unresolved>,
+    ) -> Result<Self, Unresolved> {
+        Ok(Self {
+            named: path.to_path_buf(),
+            target: resolve(path)?,
+        })
+    }
+
+    /// The path the environment named — never resolved again, only reported.
+    pub(crate) fn named(&self) -> &Path {
+        &self.named
+    }
+
+    /// Read a configuration file the way all three installers have to read one.
+    ///
+    /// Anything but [`std::io::ErrorKind::NotFound`] is [`Standing::Unreadable`]: a permission the
+    /// user's own ACL withholds, a sharing lock somebody else's editor holds, a byte that is not
+    /// UTF-8, a directory standing under the file's name. None of them is a file that is not
+    /// there, and that is the only state in which writing a fresh one loses nothing.
+    pub(crate) fn standing(&self) -> Standing {
+        match bt_platform::file_reads::read_to_string(
+            bt_platform::file_reads::Lane::Attention,
+            &self.target,
+        ) {
+            Ok(text) => Standing::Text(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Standing::Nothing,
+            Err(_) => Standing::Unreadable,
+        }
+    }
+
+    /// Take the resolved file out, under every name that delivers it.
+    ///
+    /// Copilot's whole-file removal: where this path is a link this build resolved, the target is
+    /// the file upstream loads — leaving it would leave Folio's hooks firing, and leaving the link
+    /// alone would leave upstream a name that loads nothing. The second removal is best effort
+    /// because the first may already have taken the only file there was.
+    pub(crate) fn remove_file(&self) -> std::io::Result<()> {
+        std::fs::remove_file(&self.target)?;
+        if self.target != self.named {
+            let _ = std::fs::remove_file(&self.named);
+        }
+        Ok(())
+    }
+}
+
+/// **Which file a configuration path names, for reading and for writing.**
+///
+/// Design §6.3 refuses to write *through* a link, and the T-A predicate enforces that by refusing
+/// any path with a link anywhere along it. Taken alone that rule strands the ordinary dotfiles
+/// machine — `~/.claude` junctioned onto a managed folder — in the one state this whole design
+/// exists to abolish: hooks installed by 0.4.2 still firing, a row reading `Off`, and no press
+/// that can take them out (closure review R1).
+///
+/// So the link is resolved **once, here**, and what comes back is bounded: the target must be a
+/// regular file inside the resolved directory the path names. Then Folio is not writing through a
+/// link at all — it is writing to a file it resolved itself, in the agent's own folder. A target
+/// that leaves that folder, a link that resolves to nothing, and every other answer the predicate
+/// gives (a hard link, a read-only file, a directory) are refused with their own reason, and the
+/// file is left byte-identical.
+/// **Private, and called from exactly one place** — [`Config::resolve`]. Anything below an
+/// operation's entry holds a [`Config`] and has no path to resolve a second time.
+fn editable_target(path: &Path) -> Result<PathBuf, Unresolved> {
+    let reason = match crate::shell_integration::profile_path_reason(path) {
+        Ok(None) => return Ok(path.to_path_buf()),
+        Ok(Some(reason)) => reason,
+        // The walk itself failed — an ancestor this account may not even ask about. That is not a
+        // file this build declines to edit, it is one it could not look at, and `Unreadable` has
+        // been the honest answer to it since the 2026-09-16 audit.
+        Err(_) => return Err(Unresolved::Unreadable),
+    };
+    if reason != crate::i18n::Text::ShellProfileLink {
+        return Err(Unresolved::Refused(agent_reason(reason)));
+    }
+    let root = path
+        .parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok());
+    let resolved = std::fs::canonicalize(path).ok();
+    let regular = resolved
+        .as_deref()
+        .and_then(|target| std::fs::symlink_metadata(target).ok())
+        .is_some_and(|metadata| metadata.is_file());
+    let target = linked_target(&Resolution {
+        root: root.as_deref(),
+        resolved: resolved.as_deref(),
+        regular,
+    })
+    .map_err(Unresolved::Refused)?;
+    // The resolved target carries no link of its own, so what this can still answer is a hard
+    // link, a read-only file or a directory — the refusals §6.3 keeps.
+    match crate::shell_integration::profile_path_reason(&target) {
+        Ok(None) => Ok(target),
+        Ok(Some(reason)) => Err(Unresolved::Refused(agent_reason(reason))),
+        Err(_) => Err(Unresolved::Unreadable),
+    }
+}
+
+/// The filesystem's answers about a linked path, handed to [`linked_target`] rather than asked for
+/// inside it — so the rule can be tested on an account that is not allowed to create a link.
+pub(crate) struct Resolution<'a> {
+    /// The directory the path names, resolved once. `None` when it does not resolve.
+    pub root: Option<&'a Path>,
+    /// What the path itself resolves to. `None` when it resolves to nothing.
+    pub resolved: Option<&'a Path>,
+    /// Whether that target is a regular file.
+    pub regular: bool,
+}
+
+/// **The file a link names, when Folio will edit it.**
+///
+/// One question with one answer: is the thing at the end of this link a regular file inside the
+/// directory the configuration path names? Everything else — a target somewhere else on the disk,
+/// a link to a directory, a link to nothing — is a link Folio will not write through, and says so.
+pub(crate) fn linked_target(facts: &Resolution) -> Result<PathBuf, &'static str> {
+    let refused = crate::i18n::Text::AgentConfigLink.text();
+    let (Some(root), Some(resolved)) = (facts.root, facts.resolved) else {
+        return Err(refused);
+    };
+    if facts.regular && resolved.starts_with(root) {
+        Ok(resolved.to_path_buf())
+    } else {
+        Err(refused)
+    }
+}
+
+/// The same three facts about an agent's configuration file rather than about a `$PROFILE`.
+///
+/// A sentence naming the wrong file is a sentence a reader acts on, so the profile's wording does
+/// not travel: the mapping is one to one, and nothing is flattened on the way.
+fn agent_reason(reason: crate::i18n::Text) -> &'static str {
+    match reason {
+        crate::i18n::Text::ShellProfileLink => crate::i18n::Text::AgentConfigLink,
+        crate::i18n::Text::ShellProfileHardLink => crate::i18n::Text::AgentConfigHardLink,
+        _ => crate::i18n::Text::AgentConfigReadOnly,
+    }
+    .text()
+}
+
 /// How far [`land`] got.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Landing {
@@ -495,6 +823,9 @@ pub(crate) enum Landing {
     NoDirectory,
     /// There was a file there and a copy of it could not be kept. **Nothing was written.**
     NoBackup,
+    /// The file changed between the read and the replace. **Nothing was written**, and no copy was
+    /// kept either: a backup of bytes nobody read is not a copy of anything.
+    Changed,
     /// The write itself failed. Whatever was there is still there, whole.
     NotWritten,
 }
@@ -519,89 +850,67 @@ pub(crate) enum Landing {
 /// otherwise overwrite the copy of what was there before the first one, which is the one copy that
 /// matters.
 ///
-/// ③ **A link is followed, and the file it names is what gets replaced.** `std::fs::write` follows
-/// a reparse point; an atomic replace does not, and would leave a regular file where the user had a
-/// symlink or a junction. A `~/.claude` kept in a dotfiles repository through a link is an ordinary
-/// setup and this must not break it — and refusing to install through one would refuse a legitimate
-/// machine while stopping nothing, because anything that could plant the link already runs as this
-/// user and could write the file directly (the same boundary
-/// [`bt_platform::attention_pipe`](../../bt-platform/src/attention_pipe.rs) draws, and `SECURITY.md`
-/// states). So the link is resolved, the real file is what is replaced, the backup lands beside the
-/// real file, and the resolution is written to `BT_ATTENTION_TRACE` when it changed the
-/// destination.
+/// ③ **The bytes go to the file [`editable_target`] resolved, and nowhere else.** A link is
+/// followed exactly once, by this build, and only to a regular file inside the folder the
+/// configuration path names; hard links, read-only paths and anything that is not a regular file
+/// are refused by the shared T-A filesystem predicate before reading and writing. A locked file
+/// fails without replacement. Revision 2 deliberately supersedes the former link-following policy,
+/// and closure review R1 is what bounds the resolution rather than abolishing it.
+///
+/// ④ **The bytes replaced are the bytes that were read.** The target is read again here, under
+/// the value this operation resolved, and a document that no longer matches what the caller was
+/// given is [`Landing::Changed`] rather than a write: `shell_integration::replace_profile` has
+/// compared a profile against what it read since T-A, for the same reason, and an agent's
+/// configuration is edited by the agent itself as readily as by a person.
 ///
 /// `extension` is the target's own extension — `settings.json` with `"json"` gives
 /// `settings.json.bak-20260827`. `existing` is what was read off the file, empty when there was
 /// nothing there.
-pub(crate) fn land(path: &Path, existing: &str, extension: &str, bytes: &[u8]) -> Landing {
-    let target = followed(path);
-    if target.as_path() != path {
-        crate::attention_trace::line(|| {
-            format!(
-                "install resolves target from={} to={}",
-                path.display(),
-                target.display()
-            )
-        });
-    }
-    if let Some(parent) = target.parent()
-        && !parent.as_os_str().is_empty()
-        && std::fs::create_dir_all(parent).is_err()
-    {
-        return Landing::NoDirectory;
-    }
-    if !existing.is_empty() {
-        let backup = target.with_extension(format!("{extension}.bak-{}", today()));
-        // `is_file` rather than `exists`: today's copy is skipped because it is
-        // already a copy, and anything else standing under that name is not one.
-        // A directory there would make `exists` answer "kept" about a copy that
-        // was never written.
-        if !backup.is_file() && std::fs::write(&backup, existing).is_err() {
-            return Landing::NoBackup;
-        }
-    }
-    if bt_persist::atomic_write(&target, bytes).is_err() {
-        return Landing::NotWritten;
-    }
-    Landing::Landed
-}
-
-/// The file a path actually names, with any reparse point on the way resolved.
-///
-/// The path itself when there is nothing there yet — there is no link to follow to a file that does
-/// not exist, and a directory reparse point on the way is followed by the filesystem itself when the
-/// file is created inside it. See [`land`] ③.
-fn followed(path: &Path) -> PathBuf {
-    match std::fs::canonicalize(path) {
-        Ok(resolved) => plain(&resolved),
-        Err(_) => path.to_path_buf(),
-    }
-}
-
-/// `\\?\D:\x` said as `D:\x` — the same file, spelled the way the person who set the variable
-/// spelled it.
-///
-/// `canonicalize` always answers in Windows' verbatim form, so without this every ordinary file
-/// would look to [`land`] like a path that had been resolved to somewhere else, and the line it
-/// writes to the trace would be about spelling rather than about the file. A verbatim path that is
-/// not a drive path — a device path, a UNC share — keeps its prefix, because for those the prefix
-/// is not decoration.
-fn plain(path: &Path) -> PathBuf {
-    let Some(text) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{rest}"));
-    }
-    if let Some(rest) = text.strip_prefix(r"\\?\") {
-        let mut characters = rest.chars();
-        if characters.next().is_some_and(|c| c.is_ascii_alphabetic())
-            && characters.next() == Some(':')
+impl Config {
+    pub(crate) fn land(&self, existing: &str, extension: &str, bytes: &[u8]) -> Landing {
+        let target = &self.target;
+        if let Some(parent) = target.parent()
+            && !parent.as_os_str().is_empty()
+            && std::fs::create_dir_all(parent).is_err()
         {
-            return PathBuf::from(rest);
+            return Landing::NoDirectory;
         }
+        match bt_platform::file_reads::read_to_string(
+            bt_platform::file_reads::Lane::Attention,
+            target,
+        ) {
+            Ok(now) if now != existing => return Landing::Changed,
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Landing::NotWritten;
+            }
+            Err(_) if !existing.is_empty() => return Landing::Changed,
+            _ => {}
+        }
+        if !existing.is_empty() {
+            let backup = target.with_extension(format!("{extension}.bak-{}", today()));
+            // `is_file` rather than `exists`: today's copy is skipped because it is
+            // already a copy, and anything else standing under that name is not one.
+            // A directory there would make `exists` answer "kept" about a copy that
+            // was never written.
+            if !backup.is_file() && std::fs::write(&backup, existing).is_err() {
+                return Landing::NoBackup;
+            }
+            // **Somebody else's file keeps its own metadata.** The rename behind `atomic_write`
+            // discards the target's ACL, creation time and alternate streams on Windows and takes this
+            // process's ownership and umask on Unix — which matters most for exactly the file this
+            // resolution reaches, one a dotfile manager shares (review R8). `shell_integration`'s
+            // writer has made this distinction since T-A: a file that exists is replaced, a file that
+            // does not is created.
+            if bt_persist::atomic_replace_preserving(target, bytes).is_err() {
+                return Landing::NotWritten;
+            }
+            return Landing::Landed;
+        }
+        if bt_persist::atomic_write(target, bytes).is_err() {
+            return Landing::NotWritten;
+        }
+        Landing::Landed
     }
-    path.to_path_buf()
 }
 
 /// `YYYYMMDD` for the backup's name, from the wall clock and nothing else.
@@ -639,8 +948,54 @@ mod tests {
     use super::*;
     use crate::attention::{MappedAction, Tier, WaitKind};
 
+    #[test]
+    fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-tests")
+            .join(concat!("hooks-", "two-copies"));
+        std::fs::create_dir_all(&root).unwrap();
+        // **Two folders, one file name.** An operand is Folio's only if its file name is one
+        // Folio installs itself under, which is how two real copies differ: same program, two
+        // places. The odd characters this fixture exists for move to the folder.
+        let a = root.join("A space $ ` ' 中文").join("folio.exe");
+        let b = root.join("B").join("folio.exe");
+        for copy in [&a, &b] {
+            std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            std::fs::write(copy, b"a copy of Folio").unwrap();
+        }
+        let path = root.join("settings.json");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(apply_to(&path, true, &a), Outcome::Installed);
+        let before = std::fs::read(&path).unwrap();
+        let result = apply_to(&path, true, &b);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "another live executable must require explicit take-over: {result:?}"
+        );
+        assert_ne!(result, Outcome::Installed);
+        let result = apply_to(&path, false, &b);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "cleanup must leave a live other owner: {result:?}"
+        );
+    }
+
+    fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
+        apply_at(
+            path,
+            install.into(),
+            exe,
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-test-marks/hooks")
+                .join(path.parent().unwrap().file_name().unwrap()),
+        )
+    }
+
     fn exe() -> PathBuf {
-        PathBuf::from(r"C:\Program Files\Folio\folio.exe")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-fixtures/Program Files/Folio/folio.exe")
     }
 
     fn installed() -> Value {
@@ -851,17 +1206,14 @@ mod tests {
         // written for: an entry recognised by the mark is recognised whatever follows it, and this
         // is the entry that has something following it.
         assert_eq!(
-            stop[1]["hooks"][0]["command"]
-                .as_str()
-                .expect("our command"),
-            command_for_on(&exe(), "Stop", HostPlatform::Windows)
+            stop[1]["hooks"][0]["command"],
+            exe().to_string_lossy().as_ref()
         );
-        assert!(
-            stop[1]["hooks"][0]["command"]
-                .as_str()
-                .is_some_and(|command| command.ends_with(" --json -"))
+        assert_eq!(
+            stop[1]["hooks"][0]["args"],
+            serde_json::json!(["attention", "claude-code:Stop", "--json", "-"])
         );
-        assert!(remove_from(&mut settings));
+        assert!(remove_from(&mut settings, &exe(), false));
         assert_eq!(
             settings, original,
             "uninstalling must hand back the file that was there, byte for byte in structure"
@@ -878,18 +1230,18 @@ mod tests {
             "an install that was already done is not a change"
         );
         assert_eq!(settings, after_first);
-        assert!(remove_from(&mut settings));
+        assert!(remove_from(&mut settings, &exe(), false));
         assert!(
-            !remove_from(&mut settings),
+            !remove_from(&mut settings, &exe(), false),
             "and neither is a removal of what is not there"
         );
     }
 
     /// Moving the executable is not a reason to lose track of the entries.
     #[test]
-    fn entries_are_recognised_by_what_they_do_not_by_where_folio_lives() {
+    fn a_dead_owner_can_be_replaced_after_moving_folio() {
         let mut settings = installed();
-        let moved = PathBuf::from(r"E:\portable\folio.exe");
+        let moved = exe().parent().unwrap().join("portable/folio.exe");
         assert!(
             install_into(&mut settings, &moved),
             "a rewrite from a new location is a change"
@@ -915,7 +1267,7 @@ mod tests {
             "a non-object is not an installation; the refusal to write is `apply`'s"
         );
         let mut array: Value = serde_json::from_str("[1,2,3]").expect("array");
-        assert!(!remove_from(&mut array));
+        assert!(!remove_from(&mut array, &exe(), false));
     }
 
     /// The command carries the family, so a bare `Stop` is never ambiguous.
@@ -929,34 +1281,16 @@ mod tests {
     #[test]
     fn every_command_says_which_upstream_it_speaks_for() {
         for row in rows_to_install() {
-            let command = command_for_on(&exe(), row.event, HostPlatform::Windows);
-            assert!(command.contains(MARK), "{command}");
-            assert!(
-                command.contains(&format!("{CLAUDE_CODE}:{}", row.event)),
-                "{command}"
-            );
+            let args = args_for(row.event);
+            assert_eq!(args[0], "attention");
+            assert_eq!(args[1], format!("{CLAUDE_CODE}:{}", row.event));
             let wants_payload = attention_map::turn_end_row(CLAUDE_CODE, row.event)
                 .is_some_and(|end| end.words.are_somewhere());
-            assert_eq!(
-                command.ends_with(&format!(" --json {}", crate::cli::STDIN_PAYLOAD)),
-                wants_payload,
-                "the payload is asked for where — and only where — a row has somewhere to look: \
-                 {command}"
-            );
-            // **The payload is never interpolated**, whichever way it is asked for. `-` is a name
-            // for a handle; a hook payload's own bytes have never been on a command line and the
-            // day they were, an upstream would be choosing this process's arguments.
-            assert!(
-                !command.contains('{'),
-                "a payload's bytes must never reach a command line: {command}"
-            );
+            assert_eq!(args.len() == 4, wants_payload);
+            if wants_payload {
+                assert_eq!(args[2..], ["--json", "-"]);
+            }
         }
-        // The one row this is about today, named, so that a table edit that silently drops it is a
-        // failure here rather than a notification that quietly goes back to saying nothing.
-        assert!(
-            command_for_on(&exe(), "Stop", HostPlatform::Windows).ends_with(" --json -"),
-            "`Stop` is the event whose payload names the transcript"
-        );
     }
 
     /// **The block this writes into somebody's own file, spelled out.**
@@ -984,22 +1318,9 @@ mod tests {
         );
     }
 
-    /// **RED — the same block on a Mac, and the only thing that moves is the quoting** (M4-7).
-    ///
-    /// The hook is this executable on both machines and the endpoint is in neither line: `folio
-    /// attention` reads `FOLIO_ATTENTION_PIPE` out of the environment the pane's shell gave it, and
-    /// a socket path travels that way exactly as a pipe name does. So there is no second document
-    /// to keep in step — one event list, one `async` on every row, one matcher where a matcher
-    /// belongs — and the one difference is the shell that will run the string.
-    ///
-    /// **`sh` is why it has to be a difference at all.** A double-quoted word in `sh` is still
-    /// expanded: `$`, a backtick and a backslash all survive it. A home directory with a `$` in it,
-    /// inside double quotes, is a hook that runs the wrong program or none — silently, on the one
-    /// machine nobody tests the installer on.
-    ///
-    /// MUTATION: hand the Windows quoting to the Mac arm and the last two assertions name it.
+    /// Direct execution is platform independent and never shell-quotes the operand.
     #[test]
-    fn the_block_a_mac_installs_is_the_same_block_quoted_for_sh() {
+    fn the_block_a_mac_installs_is_the_same_direct_exec_block() {
         let exe = Path::new("/Applications/Folio.app/Contents/MacOS/folio");
         let mut windows = Value::Object(Map::new());
         let mut mac = Value::Object(Map::new());
@@ -1018,27 +1339,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             "the two machines install the same events"
         );
-        for command in commands_of(&mac) {
-            assert!(command.contains(MARK), "{command}");
-            assert!(
-                command.starts_with("'/Applications/Folio.app/Contents/MacOS/folio' attention "),
-                "a Mac line is single-quoted, because sh expands a double-quoted word: {command}"
-            );
-            assert!(
-                !command.contains('"'),
-                "a double quote in an sh line is the expansion this avoids: {command}"
-            );
-        }
-        // The one character that ends an sh single-quoted word early, escaped the way sh spells it:
-        // close the quote, escape the quote, open it again.
         assert_eq!(
-            command_for_on(
-                Path::new("/Users/someone/it's here/folio"),
-                "Stop",
-                HostPlatform::MacOs
-            ),
-            r"'/Users/someone/it'\''s here/folio' attention claude-code:Stop --json -"
+            windows, mac,
+            "direct exec has identical structure on every platform"
         );
+        for command in commands_of(&mac) {
+            assert_eq!(command, "/Applications/Folio.app/Contents/MacOS/folio");
+        }
     }
 
     /// Every command line one install wrote, whatever event it hangs on.
@@ -1078,18 +1385,36 @@ mod tests {
         }
     }
 
+    /// Every name in a directory, sorted — what a reader who opened it would find.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the directory")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
     /// A scratch directory of this test's own. Never anywhere near a real `~/.claude`.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "folio-land-{name}-{}-{}",
-            std::process::id(),
-            today()
-        ));
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-tests")
+            .join(format!(
+                "folio-land-{name}-{}-{}",
+                std::process::id(),
+                today()
+            ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         // Resolved once, here: `%TEMP%` on a real machine can be a short name or sit behind a
         // link, and neither is what any of these tests is about.
-        followed(&dir)
+        std::fs::canonicalize(&dir).expect("scratch path")
     }
 
     /// RED — **the three installers write somebody else's configuration file whole or not at all.**
@@ -1143,10 +1468,15 @@ mod tests {
                 "{name} writes a configuration file behind `land`'s back"
             );
             assert!(
-                source.contains(concat!("attention_hooks::", "land(")),
-                "{name} must land its bytes through the one writer"
+                source.contains(concat!("config.", "land(")),
+                "{name} must land its bytes through the one writer, on the one resolution"
             );
         }
+    }
+
+    /// One resolution, the way an operation makes one, for a fixture that only wants to write.
+    fn resolved(path: &Path) -> Config {
+        Config::resolve(path).unwrap_or_else(|_| panic!("a plain file resolves to itself"))
     }
 
     /// RED — **a copy that cannot be kept refuses the install.**
@@ -1169,7 +1499,7 @@ mod tests {
         std::fs::create_dir(&blocked).expect("a directory in the copy's place");
 
         assert_eq!(
-            land(&target, &existing, "json", b"{}\n"),
+            resolved(&target).land(&existing, "json", b"{}\n"),
             Landing::NoBackup,
             "a copy that cannot be kept is a refusal"
         );
@@ -1190,22 +1520,11 @@ mod tests {
     fn what_lands_is_the_file_and_nothing_beside_it() {
         let dir = scratch("landed");
         let target = dir.join("settings.json");
-        assert_eq!(land(&target, "", "json", b"first\n"), Landing::Landed);
+        assert_eq!(
+            resolved(&target).land("", "json", b"first\n"),
+            Landing::Landed
+        );
         assert_eq!(std::fs::read_to_string(&target).expect("read"), "first\n");
-        let names = |dir: &Path| {
-            let mut names: Vec<String> = std::fs::read_dir(dir)
-                .expect("read the directory")
-                .map(|entry| {
-                    entry
-                        .expect("entry")
-                        .file_name()
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect();
-            names.sort();
-            names
-        };
         assert_eq!(
             names(&dir),
             vec!["settings.json".to_owned()],
@@ -1214,7 +1533,7 @@ mod tests {
 
         // A second landing over a file that was there keeps exactly one dated copy of it.
         assert_eq!(
-            land(&target, "first\n", "json", b"second\n"),
+            resolved(&target).land("first\n", "json", b"second\n"),
             Landing::Landed
         );
         assert_eq!(std::fs::read_to_string(&target).expect("read"), "second\n");
@@ -1232,7 +1551,7 @@ mod tests {
         // And a third keeps the *first* copy rather than a copy of the second, which is the one
         // that is worth having: it is what was there before this build touched anything today.
         assert_eq!(
-            land(&target, "second\n", "json", b"third\n"),
+            resolved(&target).land("second\n", "json", b"third\n"),
             Landing::Landed
         );
         assert_eq!(
@@ -1244,68 +1563,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// RED — **a link is followed, and what is replaced is the file it names.**
+    /// RED — **a settings file that could not be read is left byte for byte.**
     ///
-    /// [`land`] ③. `std::fs::write` followed a reparse point; the atomic replace this now goes
-    /// through does not, so without [`followed`] an install through a `~/.claude` kept in a
-    /// dotfiles repository would leave a regular file where the user had a link.
+    /// Release audit 2026-09-16 (C-3, the verifier's second site):
+    /// `read_to_string(&path).unwrap_or_default()` took a file this build was not allowed to read —
+    /// or one holding a single byte that is not UTF-8 — for a file that was not there. The empty
+    /// string it fell back to reads as "no settings at all", so an install wrote a whole new
+    /// document over somebody's own, and [`land`] was handed nothing to keep a copy of.
     ///
-    /// The property is asserted over [`followed`] rather than by making a symlink, because creating
-    /// one on Windows needs a privilege an ordinary test run does not have. What is pinned is that
-    /// a path that exists resolves to the same file and an absent one is handed back untouched —
-    /// which is the whole of the rule.
+    /// RED GATE: put the `unwrap_or_default` back and this file comes back as Folio's own.
     #[test]
-    fn a_path_that_exists_resolves_to_the_file_it_names() {
-        let dir = scratch("followed");
-        let absent = dir.join("not-here.json");
+    fn a_settings_file_that_could_not_be_read_is_never_written_over() {
+        let dir = scratch("unreadable");
+        let path = dir.join(SETTINGS_FILE);
+        // A Latin-1 byte inside a string: an ordinary file on an ordinary machine, and not UTF-8.
+        let theirs: &[u8] = b"{\"model\":\"caf\xe9\"}\n";
+        std::fs::write(&path, theirs).expect("the user's own file");
+
+        let installing = apply_to(&path, true, &exe());
+        assert_eq!(installing, Outcome::Refused(UNREADABLE));
+        assert_eq!(std::fs::read(&path).expect("still there"), theirs);
         assert_eq!(
-            followed(&absent),
-            absent,
-            "there is no link to follow to a file that is not there"
+            names(&dir),
+            vec![SETTINGS_FILE.to_owned()],
+            "nothing was written beside it either"
         );
-        let present = dir.join("settings.json");
-        std::fs::write(&present, "{}\n").expect("a file");
-        let resolved = followed(&present);
-        assert!(resolved.is_absolute());
+        // And the row drawn from it says so, rather than offering to write over it.
+        assert_eq!(state_at(&path), State::Unreadable);
+        // Taking it back out is refused for the same reason: this build cannot tell whose it is.
+        let taking_it_out = apply_to(&path, false, &exe());
+        assert_eq!(taking_it_out, Outcome::Refused(UNREADABLE));
+        assert_eq!(std::fs::read(&path).expect("still there"), theirs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file that is not there is the one state in which writing a fresh one loses nothing.**
+    #[test]
+    fn a_settings_file_that_is_not_there_is_the_one_that_gets_created() {
+        let dir = scratch("absent");
+        let path = dir.join(SETTINGS_FILE);
+        assert_eq!(state_at(&path), State::Absent);
+
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        assert_eq!(state_at(&path), State::Installed);
         assert_eq!(
-            std::fs::read_to_string(&resolved).expect("the same file"),
-            "{}\n"
-        );
-        // **And an ordinary file resolves to the path it was given.** RED GATE: drop [`plain`] and
-        // this fails — `canonicalize` answers `\\?\…` for every path on Windows, so `land` would
-        // report every install as one that had been sent somewhere else.
-        assert_eq!(
-            resolved, present,
-            "a file that is nothing but itself resolves to the name it was asked about"
+            names(&dir),
+            vec![SETTINGS_FILE.to_owned()],
+            "a first install leaves one file: no copy of nothing, no temporary"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// RED — the verbatim form and the plain form are the same file.
-    ///
-    /// Held on strings rather than on the filesystem, because what is being asserted is a spelling
-    /// rule and no file has to exist for it to be wrong.
+    /// **A file that is there is copied before it is changed**, and the copy is what was there.
     #[test]
-    fn a_verbatim_path_is_the_drive_path_it_spells() {
+    fn a_settings_file_that_is_there_is_copied_before_it_is_changed() {
+        let dir = scratch("copied");
+        let path = dir.join(SETTINGS_FILE);
+        let theirs = "{\n  \"model\": \"opus\"\n}\n";
+        std::fs::write(&path, theirs).expect("the user's own file");
+
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        let written = std::fs::read_to_string(&path).expect("read back");
+        assert!(written.contains("\"model\""), "{written}");
+        assert!(written.contains("claude-code:"), "{written}");
+        let backup = format!("{SETTINGS_FILE}.bak-{}", today());
+        assert_eq!(names(&dir), vec![SETTINGS_FILE.to_owned(), backup.clone()]);
         assert_eq!(
-            plain(Path::new(r"\\?\D:\Users\someone\.claude\settings.json")),
-            PathBuf::from(r"D:\Users\someone\.claude\settings.json")
+            std::fs::read_to_string(dir.join(&backup)).expect("the copy"),
+            theirs,
+            "the copy beside it is the file as it was"
         );
-        assert_eq!(
-            plain(Path::new(r"\\?\UNC\server\share\settings.json")),
-            PathBuf::from(r"\\server\share\settings.json")
-        );
-        // Not a drive path: the prefix is doing work and stays.
-        assert_eq!(
-            plain(Path::new(
-                r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x"
-            )),
-            PathBuf::from(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x")
-        );
-        // Nothing to strip.
-        assert_eq!(
-            plain(Path::new(r"D:\Users\someone\.claude\settings.json")),
-            PathBuf::from(r"D:\Users\someone\.claude\settings.json")
-        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

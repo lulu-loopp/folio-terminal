@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 use bt_layout::SeatId;
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad};
 
-use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
+use crate::marks::{Band, ChromeMark, ChromeSprite, OverlayLayer};
 use crate::settings::push_float_window;
 use crate::{EASE, LeafId, Motion, cubic_bezier};
 
@@ -453,6 +453,24 @@ impl Toast {
         self.hover_since.is_none().then(|| self.expires_at(now))
     }
 
+    /// **Whether this card is travelling at `now`** (review round 3,
+    /// 2026-09-18) — the half of [`Self::deadline`] that is a tween, stated as
+    /// arithmetic on this card's own epoch and on nothing else.
+    ///
+    /// A `match` and not an `||`, because the two ends are exclusive: a card
+    /// dismissed during its entrance is drawn by the exit branch of
+    /// [`Self::opacity`] alone, so an entrance that had not finished is over the
+    /// moment the exit begins. The span each end is bounded by is the span its
+    /// opacity is read against, which is what makes "it is still moving" and
+    /// "its opacity is still changing" one sentence rather than two that can
+    /// disagree.
+    fn is_moving(&self, now: Instant) -> bool {
+        match self.leaving {
+            Some((left, _)) => now.saturating_duration_since(left) < TOAST_EXIT,
+            None => now.saturating_duration_since(self.born) < TOAST_ENTER,
+        }
+    }
+
     /// Begin the exit, from wherever this card currently stands.
     fn depart(&mut self, now: Instant, motion: Motion) {
         if self.leaving.is_none() {
@@ -645,6 +663,34 @@ impl ToastHost {
             .iter()
             .filter_map(|toast| toast.deadline(now, motion))
             .min()
+    }
+
+    /// **Whether any card is actually in motion right now** (review 2026-09-18
+    /// round 2) — an entrance still climbing or an exit still running, and never
+    /// a life merely ticking down.
+    ///
+    /// [`Self::deadline`]'s own two tweens without its third clock, and the
+    /// distinction is the whole reason this is a second function: a notice
+    /// standing still for four seconds is *waiting*, not moving, and a window
+    /// that carried it on every frame composed for anything else would rebuild
+    /// its overlay for those four seconds at whatever rate a shell can print.
+    /// Under [`Motion::Reduced`] neither tween exists, so nothing here is ever
+    /// moving.
+    ///
+    /// **Each card answers from its own clock** (review round 3, 2026-09-18).
+    /// This asked whether an exit had *begun* — `leaving.is_some()` — which is a
+    /// flag, and the only thing that clears it is [`Self::retire_the_departed`]
+    /// reached through [`Self::advance`], which is behind the window's frame
+    /// gate. A neighbouring pane printing every five milliseconds refuses that
+    /// gate for as long as it keeps printing, so a card whose exit finished at
+    /// ninety milliseconds went on reporting itself in flight for ever and the
+    /// window rebuilt its overlay for it on every one of those presents: nine
+    /// hundred and eighty-three of a thousand of them after the card had faded
+    /// to nothing. Retirement may be delayed for ever without that being visible
+    /// here, because [`Toast::is_moving`] is arithmetic on the card's own epoch.
+    #[must_use]
+    pub fn is_animating(&self, now: Instant, motion: Motion) -> bool {
+        motion == Motion::Full && self.toasts.iter().any(|toast| toast.is_moving(now))
     }
 
     /// What should be on screen this instant: every card's id and its opacity.
@@ -1025,10 +1071,18 @@ pub struct ToastPointer {
     pub action: Option<ToastId>,
 }
 
-/// Paint the cards — **one layer each**, so each carries its own fade.
+/// Paint the cards — **one layer and one surface each**, so each carries its own
+/// fade and its own slide.
 ///
 /// One layer for all of them would mean one opacity for all of them, and the
 /// whole point of the host is that three cards are three independent clocks.
+///
+/// The fade and the slide are the card's surface, not its parts (ticket 46):
+/// each card is built where it rests and handed over as its own group, drawn
+/// whole and put back once at its opacity, moved by its slide — so the plate,
+/// its hairline, its shadow and its words arrive together. The card's layout is
+/// not shifted: the press router reads [`ToastLayout`] where the card rests, as
+/// it always did.
 #[must_use]
 pub fn build(
     layouts: &[ToastLayout],
@@ -1038,10 +1092,10 @@ pub fn build(
     scale: f32,
     now: Instant,
     motion: Motion,
-) -> Vec<OverlayLayer> {
+) -> Band {
     let px = |logical: f32| logical * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
-    let mut layers = Vec::new();
+    let mut layers = Band::default();
 
     for layout in layouts {
         let Some(toast) = host.toasts.iter().find(|toast| toast.id == layout.id) else {
@@ -1052,8 +1106,7 @@ pub fn build(
             continue;
         }
         let dy = (toast.slide(now, motion) * scale).round();
-        let mut card = layout.clone();
-        card.shift(dy);
+        let card = layout;
 
         let mut quads: Vec<OverlayQuad> = Vec::new();
         push_float_window(
@@ -1188,13 +1241,16 @@ pub fn build(
             });
         }
 
-        layers.push(OverlayLayer {
-            quads,
-            labels,
-            sprites,
+        layers.append(Band::surface(
+            vec![OverlayLayer {
+                quads,
+                labels,
+                sprites,
+                ..OverlayLayer::default()
+            }],
             opacity,
-            ..OverlayLayer::default()
-        });
+            [0.0, dy],
+        ));
     }
     layers
 }
@@ -1997,7 +2053,9 @@ mod tests {
         );
         // The second card is at zero on the frame it is born, so it draws nothing.
         assert_eq!(layers.len(), 1, "a card at zero is not a layer");
-        let layer = &layers[0];
+        let layer = &layers.layers[0];
+        assert_eq!(layers.groups.len(), 1, "one card, one surface");
+        assert!((layers.groups[0].opacity - 1.0).abs() < 0.001);
         assert!((layer.opacity - 1.0).abs() < 0.001);
         assert_eq!(layer.labels.len(), 2, "a title and one line");
         assert_eq!(layer.labels[0].weight, ChromeLabelWeight::Medium);
@@ -2050,7 +2108,7 @@ mod tests {
                 start,
                 Motion::Reduced,
             );
-            let marks: Vec<&ChromeSprite> = layers[0].sprites.iter().collect();
+            let marks: Vec<&ChromeSprite> = layers.layers[0].sprites.iter().collect();
             assert_eq!(marks.len(), 1, "{kind:?}: the dot and nothing else at rest");
             assert!(
                 matches!(marks[0].mark, ChromeMark::ControlPill { .. }),
@@ -2063,7 +2121,7 @@ mod tests {
                 "{kind:?}: six logical pixels across, {side}"
             );
             assert!(
-                !layers[0]
+                !layers.layers[0]
                     .sprites
                     .iter()
                     .any(|s| s.mark == ChromeMark::TabClose),
@@ -2088,9 +2146,10 @@ mod tests {
                 SCALE,
                 start + TOAST_ENTER,
                 Motion::Full,
-            )[0]
-            .sprites
-            .clone()
+            )
+            .layers[0]
+                .sprites
+                .clone()
         };
 
         assert_eq!(sprites(ToastPointer::default()).len(), 1, "the dot only");
@@ -2174,5 +2233,46 @@ mod tests {
             state,
             "and it moves with the fade"
         );
+    }
+
+    /// RED (46) — **a card slides and fades as one surface, and its parts are
+    /// drawn where it rests.**
+    ///
+    /// Each card is its own span: its opacity and its four-pixel slide are the
+    /// group's, and the quads, marks and words are built at the card's resting
+    /// place — so the plate, the hairline, the shadow and the words arrive
+    /// together (the fade audit's row 16), and the card's layout is the one the
+    /// press router reads, as it always was.
+    ///
+    /// MUTATION: shift the card by its slide again in `build` and the layers
+    /// drawn mid-entrance are not the layers drawn at rest.
+    #[test]
+    fn a_card_slides_and_fades_as_one_surface_drawn_where_it_rests() {
+        let palette = bt_render::chrome_palette();
+        let start = Instant::now();
+        let (host, _) = host_with(ToastKind::Error, ToastAnchor::Window, start);
+        let laid = placed(&host, None);
+        let paint = |at: Instant| {
+            build(
+                &laid,
+                &host,
+                ToastPointer::default(),
+                &palette,
+                SCALE,
+                at,
+                Motion::Full,
+            )
+        };
+        let arriving = paint(start + TOAST_ENTER / 3);
+        let rested = paint(start + TOAST_ENTER);
+        assert_eq!(arriving.groups.len(), 1, "one card, one surface");
+        let surface = &arriving.groups[0];
+        assert!(surface.opacity > 0.0 && surface.opacity < 1.0);
+        assert!(surface.offset[1] != 0.0, "the card is still sliding");
+        assert_eq!(
+            arriving.layers, rested.layers,
+            "the parts are drawn where the card rests; the surface is what moves"
+        );
+        assert_eq!(rested.groups[0].offset, [0.0, 0.0]);
     }
 }

@@ -803,6 +803,32 @@ pub struct CapturedCell {
     pub hyperlink: Option<CellHyperlink>,
     /// A terminal wide-character spacer has no source text of its own.
     pub wide_spacer: bool,
+    /// A shell command's output put this cell's text here — it was written between that command's
+    /// OSC 133 `C` and its `D`.
+    ///
+    /// **Provenance, not style.** It is a fact about the write and it rides on the cell because the
+    /// cell is the thing that moves: a scroll, a scroll region, `IL`/`DL`, `RI`, `CSI S`/`T`, a
+    /// reflow that re-cuts the row, all carry it without anything having to be kept in step.
+    ///
+    /// **It is the claim, and a reader asks for it rather than for its absence.** Text that arrived
+    /// by a road nobody stamped — `DECALN`, a reset, a cell a shift created, anything unaudited —
+    /// therefore claims nothing and is refused, which is the conservative direction to fail in.
+    pub command_output_write: bool,
+}
+
+impl CapturedCell {
+    /// Does this cell carry text that no command's output claims?
+    ///
+    /// The question a line's provenance is folded from, in one place so that the live grid and the
+    /// freeze cannot come to answer it differently. A wide-character spacer has no text of its own —
+    /// its base cell answers for the pair — and a blank cell carries none either, so an untouched
+    /// gap claims nothing in either direction and neither is asked.
+    #[must_use]
+    pub fn carries_unclaimed_text(&self) -> bool {
+        !self.wide_spacer
+            && !self.command_output_write
+            && !self.text.chars().all(char::is_whitespace)
+    }
 }
 
 impl CapturedCell {
@@ -904,6 +930,15 @@ pub struct FrozenLine {
     pub fragments: Vec<PhysicalFragment>,
     pub shell_marks: Vec<(u32, String)>,
     pub wrap_split: bool,
+    /// A shell command's output wrote every cell of this line that carries text — the fold of
+    /// [`CapturedCell::carries_unclaimed_text`] over all of its rows.
+    ///
+    /// **The frozen half of the same fact the live grid reads off the cells directly.** A line does
+    /// not change who wrote it by scrolling, and this is the last moment its cells are in hand, so
+    /// it is folded here rather than worked out afterwards from where the line's coordinates fell.
+    /// One cell of unclaimed text anywhere in the line answers for the whole of it, which is the
+    /// reading the live plane's own fold takes — the same predicate, asked once each.
+    pub command_output_write: bool,
 }
 
 impl FrozenLine {
@@ -923,6 +958,10 @@ impl FrozenLine {
     /// one rather than the 50x its text alone would suggest.
     #[must_use]
     pub fn resident_bytes(&self) -> usize {
+        // The ceiling's only walk, and therefore the only thing worth counting about
+        // it. See `weigh_ledger`.
+        #[cfg(test)]
+        crate::weigh_ledger::note();
         // The two targets are shared — one allocation serves every cell of a run and every row
         // the run crosses — so this counts what one line would need if it were the only holder.
         // That is the conservative reading, and the one the ceiling wants.
@@ -1381,7 +1420,10 @@ impl TranscriptStore {
     /// Costed at the rate it is called: the line-count arm is a subtraction, and
     /// the byte arm walks only the lines it is about to delete, which in steady
     /// state is one. On a pane that is inside both limits — every ordinary pane —
-    /// it is two comparisons and a return.
+    /// it is two comparisons and a return. That is counted rather than timed, by
+    /// `the_byte_ceiling_costs_an_ordinary_pane_nothing`: the weighings a capture
+    /// performs are the same two integers whether the store holds a thousand lines
+    /// or fifty thousand.
     fn enforce_frozen_limits(&mut self) -> Vec<TranscriptId> {
         let budget = self.frozen_byte_budget();
         let count_overflow = self.frozen.len().saturating_sub(self.frozen_quota);
@@ -1438,6 +1480,7 @@ fn normalize(
     let mut fragments = Vec::new();
     let mut shell_marks = Vec::new();
     let mut mappings = Vec::new();
+    let mut command_output_write = true;
 
     for staged in rows {
         let fragment_start = text.len() as u32;
@@ -1456,6 +1499,9 @@ fn normalize(
         if let Some(mark) = shell_mark {
             shell_marks.push((fragment_start, mark));
         }
+        // Over every cell the row arrived with, before the padding trim below, so that this asks
+        // exactly what the live plane asks of the same row.
+        command_output_write &= !cells.iter().any(CapturedCell::carries_unclaimed_text);
 
         // A WRAPLINE fragment owns every cell through its wrap boundary.  In particular a space
         // in the final column is source text, not padding; trimming it turns "find path" into
@@ -1514,9 +1560,146 @@ fn normalize(
             fragments,
             shell_marks,
             wrap_split,
+            command_output_write,
         },
         mappings,
     )
+}
+
+/// **Test-only: how many frozen lines this thread has weighed.**
+///
+/// [`FrozenLine::resident_bytes`] is the only walk the byte ceiling performs, and
+/// the claim `the_byte_ceiling_costs_an_ordinary_pane_nothing` protects is a count
+/// of it: one weighing for the line just frozen, one more for a line on its way
+/// out, and never one per line already resident.
+///
+/// It is a counter rather than a clock because the regression it exists to catch
+/// is invisible to both of the other instruments. Re-deriving the running sum —
+/// `self.frozen_bytes = self.frozen.iter().map(FrozenLine::resident_bytes).sum()`
+/// — is one line, is O(resident lines), and **allocates nothing**, so the heap
+/// ledger below cannot see it; and a wall clock can only see it on a machine that
+/// happens not to be busy. The number of weighings is the same integer in every
+/// run, on any machine, in any build.
+///
+/// Thread-local on purpose: the rest of this crate's tests are freezing lines on
+/// their own threads while a measured arm runs, and must not land in its total.
+#[cfg(test)]
+pub(crate) mod weigh_ledger {
+    use std::cell::Cell;
+
+    thread_local! {
+        static WEIGHINGS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// This thread's running total. The absolute value belongs to whatever else the
+    /// thread has already done, so a measurement is always the difference between
+    /// two readings.
+    pub(crate) fn read() -> u64 {
+        WEIGHINGS.with(Cell::get)
+    }
+
+    pub(crate) fn note() {
+        WEIGHINGS.with(|weighings| weighings.set(weighings.get().wrapping_add(1)));
+    }
+}
+
+/// **Test-only: the heap, counted per thread, underneath this crate's own unit
+/// tests.**
+///
+/// The other half of the ceiling's cost claim. [`weigh_ledger`] counts the one
+/// call the ceiling is allowed to make; this counts every allocation the thread
+/// makes, because "and nothing else" has no single call site to put a counter in —
+/// a ceiling that started collecting history into a `Vec`, or cloning a line to
+/// measure it, would be the heap and would be no particular function this file
+/// could have known to instrument in advance.
+///
+/// Modelled on `bt_term::session`'s ledger of the same name, for the same reason
+/// it was built: the heap draw does not move when the machine does.
+/// `#[cfg(test)]` keeps it to the lib's test binary — the shipped crate has no
+/// allocator of its own, and this crate has no integration test target whose
+/// allocator this could displace.
+///
+/// Thread-local on purpose, exactly as above.
+#[cfg(test)]
+pub(crate) mod heap_ledger {
+    use std::cell::Cell;
+
+    thread_local! {
+        static BYTES: Cell<u64> = const { Cell::new(0) };
+        static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One reading of this thread's heap. Absolute values belong to whatever else
+    /// the thread has done; a measurement is always a difference — see
+    /// [`Draw::since`].
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) struct Draw {
+        pub(crate) bytes: u64,
+        pub(crate) allocations: u64,
+    }
+
+    impl Draw {
+        /// What this thread has asked the allocator for since `before` was read.
+        pub(crate) fn since(self, before: Self) -> Self {
+            Self {
+                bytes: self.bytes - before.bytes,
+                allocations: self.allocations - before.allocations,
+            }
+        }
+    }
+
+    pub(crate) fn read() -> Draw {
+        Draw {
+            bytes: BYTES.with(Cell::get),
+            allocations: ALLOCATIONS.with(Cell::get),
+        }
+    }
+
+    fn charge(bytes: u64) {
+        BYTES.with(|counter| counter.set(counter.get().wrapping_add(bytes)));
+        ALLOCATIONS.with(|counter| counter.set(counter.get().wrapping_add(1)));
+    }
+
+    struct HeapCounter;
+
+    #[expect(
+        unsafe_code,
+        reason = "a global allocator has no safe form. Every method here forwards to \
+                  `std::alloc::System` with its arguments unchanged and adds nothing but two \
+                  thread-local counter bumps, so the safety contract is exactly System's."
+    )]
+    unsafe impl std::alloc::GlobalAlloc for HeapCounter {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            charge(layout.size() as u64);
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            charge(layout.size() as u64);
+            unsafe { std::alloc::System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(
+            &self,
+            ptr: *mut u8,
+            layout: std::alloc::Layout,
+            new_size: usize,
+        ) -> *mut u8 {
+            // A grow is charged for the growth only; a shrink returns memory and is charged
+            // nothing. Forwarding to System's own `realloc` matters for more than speed: routing
+            // it through `alloc` + copy + `dealloc` instead would change what every `Vec` in this
+            // binary does.
+            charge(new_size.saturating_sub(layout.size()) as u64);
+            unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static HEAP_COUNTER: HeapCounter = HeapCounter;
 }
 
 #[cfg(test)]
@@ -2035,47 +2218,142 @@ mod tests {
     }
 
     /// The ceiling has to be free on the pane that never meets it, because every
-    /// pane asks it once per frozen line forever.
+    /// pane asks it once per frozen line forever. What it may add to a freeze is one
+    /// comparison against a running sum, plus one `resident_bytes` weighing of the
+    /// line it is evicting — and `resident_bytes` is O(style runs) where `normalize`
+    /// was already O(cells). What it may never do is walk the history it is standing
+    /// on: no re-summing, no second pass, no allocation per resident line.
     ///
-    /// Two arms measured against each other in the same window: a store at its line
-    /// quota, evicting one line per capture with the ceiling nowhere near — the
-    /// ordinary pane — versus the same work with room to spare and no eviction at
-    /// all. What the ceiling adds to the first is one comparison against a running
-    /// sum plus one `resident_bytes` walk of the line being deleted, and
-    /// `resident_bytes` is O(style runs) where `normalize` was already O(cells).
+    /// **This used to be a ratio of two wall clocks and could not stay one.** It
+    /// timed a store at its line quota against the same store with room to spare and
+    /// gated the quotient at 2.0 — but the evicting arm honestly does more work than
+    /// the roomy one, so the honest quotient sits just under the gate and what
+    /// decides a release is whatever else the machine was doing. A shared CI runner
+    /// read 998.9 ms against 490.8 ms — 2.04x, red — on a branch that does not touch
+    /// this crate.
+    ///
+    /// The claim is a **shape**, and a shape can be counted. Three arms freeze the
+    /// same four thousand lines: two panes at their line quota, fifty times apart in
+    /// the history the ceiling is standing on, and one with room to spare that evicts
+    /// nothing. Measured 2026-09-17, and these are integers rather than samples — the
+    /// same in every run, on any machine, in any build:
+    ///
+    /// * **two weighings a capture at both quotas** — the line just frozen, and the
+    ///   line evicted to make room for it — against **one** in the arm that evicts
+    ///   nothing, which is the ceiling's early return costing exactly what it claims.
+    /// * **22 allocations and 6,772 B a capture, equal to the byte** across the fifty
+    ///   times difference in resident history (88,011 allocations and 27,088,768 B
+    ///   over each window).
+    ///
+    /// Both currencies are here because neither one sees the other's regression, and
+    /// the wall clock saw neither. Re-deriving the running sum —
+    /// `frozen.iter().map(FrozenLine::resident_bytes).sum()` in
+    /// `TranscriptStore::finalize` — does not move the heap draw by a single byte,
+    /// and takes the weighings to 1,002 and 50,002 a capture. Its mirror image, an
+    /// O(resident) walk that never weighs a line — collecting every line's width in
+    /// `TranscriptStore::enforce_frozen_limits` — leaves the weighings at two and
+    /// takes the draw from 14,780 B to 406,780 B a capture. **Both were run, and the old
+    /// quotient over the same arms reads 0.57 and 0.92: green, twice.** A cost
+    /// proportional to resident history slows the roomy arm *more* than the evicting
+    /// one, because the roomy arm is the one holding more history — so the ratio the
+    /// old gate watched moves the wrong way for the very regression it was guarding.
+    ///
+    /// The clock is still printed, because it is what a human reads to ask whether
+    /// this got slower. It is no longer what the test concludes from.
     #[test]
     fn the_byte_ceiling_costs_an_ordinary_pane_nothing() {
-        const LINES: usize = 100_000;
+        /// Captures inside the measured window, taken after the store already holds
+        /// everything it is going to hold.
+        const MEASURED: usize = 4_000;
 
-        fn drive(quota: usize) -> std::time::Duration {
+        struct Arm {
+            weighings: u64,
+            draw: heap_ledger::Draw,
+            elapsed: std::time::Duration,
+        }
+
+        /// One arm: fill a store whose capacity is `quota` lines with `resident` of
+        /// them, then freeze `MEASURED` more and report what those cost.
+        fn steady_state(quota: usize, resident: usize) -> Arm {
             let mut store = TranscriptStore::with_quotas(DEFAULT_STAGING_QUOTA, nz(quota));
             let row = CapturedRow::plain(
                 "cargo:rerun-if-changed=crates/bt-term/src/session.rs   ok  0.42s",
                 false,
             );
-            let started = std::time::Instant::now();
-            for _ in 0..LINES {
+            for _ in 0..resident {
                 store.capture(row.clone());
                 store.take_evictions();
             }
-            let measured = started.elapsed();
+            assert_eq!(
+                store.frozen().len(),
+                resident,
+                "the fill is what the measured window will be standing on"
+            );
+
+            // Read once the store is as deep as it will get: filling it is not what
+            // is being weighed.
+            let weighed_before = weigh_ledger::read();
+            let drawn_before = heap_ledger::read();
+            let started = std::time::Instant::now();
+            for _ in 0..MEASURED {
+                store.capture(row.clone());
+                store.take_evictions();
+            }
+            let arm = Arm {
+                elapsed: started.elapsed(),
+                weighings: weigh_ledger::read() - weighed_before,
+                draw: heap_ledger::read().since(drawn_before),
+            };
             assert!(store.frozen_bytes() <= store.frozen_byte_budget());
-            measured
+            arm
         }
 
-        // Warm the allocator and the branch predictor before either arm is timed.
-        drive(1_000);
-        let evicting = drive(1_000);
-        let roomy = drive(LINES + 1);
-        let overhead = evicting.as_secs_f64() / roomy.as_secs_f64();
-        eprintln!(
-            "CEILING_COST lines={LINES} at_quota={evicting:?} with_room={roomy:?} \
-             ratio={overhead:.2}"
+        // Two panes at their line quota, fifty times apart in how much history the
+        // ceiling is standing on, and one with room to spare that never evicts.
+        let small = steady_state(1_000, 1_000);
+        let large = steady_state(50_000, 50_000);
+        let roomy = steady_state(MEASURED + 1_001, 1_000);
+        for (name, arm) in [
+            ("quota=1k", &small),
+            ("quota=50k", &large),
+            ("roomy", &roomy),
+        ] {
+            eprintln!(
+                "CEILING_COST {name} captures={MEASURED} weighings_per_capture={} \
+                 allocations_per_capture={} bytes_per_capture={} elapsed={:?}",
+                arm.weighings as f64 / MEASURED as f64,
+                arm.draw.allocations as f64 / MEASURED as f64,
+                arm.draw.bytes as f64 / MEASURED as f64,
+                arm.elapsed,
+            );
+        }
+
+        assert_eq!(
+            small.weighings,
+            2 * MEASURED as u64,
+            "a capture at the quota weighs the line it freezes and the line it evicts, and \
+             nothing else"
         );
-        assert!(
-            overhead <= 2.0,
-            "freezing at the line quota costs {overhead:.2}x freezing with room to spare \
-             ({evicting:?} vs {roomy:?}); the ceiling is supposed to be a comparison"
+        assert_eq!(
+            large.weighings, small.weighings,
+            "fifty times the resident history must be weighed the same number of times: work \
+             per resident line is the regression this counts"
+        );
+        assert_eq!(
+            roomy.weighings, MEASURED as u64,
+            "a pane inside both limits evicts nothing, so the only weighing is the running \
+             sum's own"
+        );
+        assert_eq!(
+            large.draw.allocations, small.draw.allocations,
+            "the same captures against fifty times the history asked the allocator {} times \
+             against {}",
+            large.draw.allocations, small.draw.allocations,
+        );
+        assert_eq!(
+            large.draw.bytes, small.draw.bytes,
+            "the same captures against fifty times the history asked for {} B against {} B",
+            large.draw.bytes, small.draw.bytes,
         );
     }
 
@@ -2229,6 +2507,44 @@ mod tests {
                     "the byte the address stops before is the non-ASCII one, in `{text}`"
                 );
             }
+        }
+    }
+
+    /// PIN (2026-09-17, beside the printed-path scan's own promotion of the opening bracket to a
+    /// terminator) — **an address keeps its ASCII brackets, and that is not the same question.**
+    ///
+    /// [`paths::is_opening_delimiter`] reads `(` as the end of a *name* because the closing half of
+    /// the pair already ended one, so a filename carrying a bracket was unreadable either way. An
+    /// address is the other case on both counts: `)` is no terminator here, `(` is legal and
+    /// ordinary inside a path — every Wikipedia disambiguation link carries a balanced pair — and
+    /// [`release_url_tail`] already tells a closing bracket of the address's own from the one a
+    /// sentence wrapped it in by counting them. The mark the report arrived on needs nothing added
+    /// here either: `（` is non-ASCII, and every non-ASCII byte has terminated an address since
+    /// 2026-08-20 (the test above).
+    ///
+    /// [`paths::is_opening_delimiter`]: crate::paths
+    #[test]
+    fn an_address_keeps_the_brackets_a_filename_gives_up() {
+        for (text, expected) in [
+            (
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            ),
+            // The sentence's own bracket is still released, because it is the unbalanced one.
+            ("(https://example.test/a.md)", "https://example.test/a.md"),
+            // And the full-width bracket the printed-path scan was reported on needs no clause of
+            // its own: it is not ASCII.
+            ("https://example.test/x（见附件）", "https://example.test/x"),
+        ] {
+            let ranges = detect_http_urls(text);
+            assert_eq!(
+                ranges
+                    .iter()
+                    .map(|range| &text[range.byte_start..range.byte_end])
+                    .collect::<Vec<_>>(),
+                [expected],
+                "reading `{text}`"
+            );
         }
     }
 

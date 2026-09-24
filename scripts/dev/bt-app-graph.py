@@ -56,17 +56,55 @@ def uses(n,prefix=()):
     return [(path, path[-2] if path[-1]=='self' and len(path)>1 else path[-1])]
 
 # Source paths are physical-file nodes for the reproduction. Semantic contexts
-# follow external #[path] test modules, not their incidental file names.
-contexts={p:tuple(p[:-3].split('/')) for p in files}
-contexts['main.rs']=()
-contexts['attention_words/mod.rs']=('attention_words',)
-contexts['attention_words/tests.rs']=('attention_words','tests')
-contexts['focus_thumb_restore_tests.rs']=('focus_thumb','restore_tests')
-contexts['preview_viewport_tests.rs']=('preview_viewport','tests')
-whole_test={'attention_words/tests.rs','focus_thumb_restore_tests.rs','preview_viewport_tests.rs','preview_typing.rs','source_pin.rs'}
+# follow external #[path] test modules, not their incidental file names, and
+# both they and the wholly-test set are DERIVED from the module declarations
+# rather than listed by hand: a hand-written list goes stale the first time a
+# test module moves into a file of its own, and it did - five files were named
+# where twelve are wholly test (inventory 2026-09-21 §5.4).
+def declarations(p):
+    """(context path, #[path] value, cfg(test)) per bodyless `mod x;` in `p`."""
+    out=[]
+    def visit(n,ctx,test):
+        pending=[]
+        for c in n.named_children:
+            if c.type=='attribute_item': pending.append(txt(c)); continue
+            if c.type in {'line_comment','block_comment'}: continue
+            ct=test or any(re.search(r'cfg\s*\(\s*test\s*\)',a) for a in pending)
+            if c.type=='mod_item' and c.child_by_field_name('name'):
+                name=txt(c.child_by_field_name('name')); body=c.child_by_field_name('body')
+                if body is None:
+                    rel=next((m[1] for a in pending if (m:=re.search(r'path\s*=\s*"([^"]+)"',a))),None)
+                    out.append((ctx+(name,),rel,ct))
+                else: visit(body,ctx+(name,),ct)
+            pending=[]
+    visit(trees[p].root_node,(),False)
+    return out
+
+# `#[path]` on a module outside an inline block is relative to the directory of
+# the declaring file; a plain `mod x;` looks in that file's own module directory
+# (`` for the crate root, `foo/` for `foo.rs`, `a/` for `a/mod.rs`).
+contexts={'main.rs':()}; whole_test=set(); queue=[('main.rs',False)]
+while queue:
+    p,test=queue.pop()
+    here=p.rsplit('/',1)[0]+'/' if '/' in p else ''
+    moddir='' if p=='main.rs' else here if p.endswith('/mod.rs') else p[:-3]+'/'
+    for ctx,rel,ct in declarations(p):
+        child=next((q for q in (here+rel,) if rel and q in files),None) if rel else \
+              next((q for q in (moddir+ctx[-1]+'.rs',moddir+ctx[-1]+'/mod.rs') if q in files),None)
+        if child is None or child in contexts: continue
+        contexts[child]=contexts[p]+ctx
+        if test or ct: whole_test.add(child)
+        queue.append((child,test or ct))
+unreached=sorted(set(files)-set(contexts))
+for p in unreached: contexts[p]=tuple(p[:-3].split('/'))
 nodes={p.split('/')[0].removesuffix('.rs') for p in files if p!='main.rs'}
 def physical(p): return p.split('/')[0].removesuffix('.rs')
 def owner(path): return path[0] if path and path[0] in nodes else '@root'
+def node_of(p): return owner(contexts[p])
+# A file whose physical node is not its semantic owner is a phantom node in the
+# module graph; a node all of whose files are wholly test is not production.
+phantom={p for p in files if p!='main.rs' and physical(p)!=node_of(p)}
+test_only={n for n in nodes if all(p in whole_test for p in files if physical(p)==n)}
 
 records=[]; stats={}; stripped={}; prod={}; items={}; imports=[]
 skip={'line_comment','block_comment','string_literal','raw_string_literal','char_literal'}
@@ -161,16 +199,16 @@ weights={n:sum(s['lines']+1 for p,s in stats.items() if physical(p)==n) for n in
 # #[path] test files into their owners and removes phantom physical nodes.
 for kind,g in graphs.items():
     if not kind.startswith('regex'):
-        for p in ['focus_thumb_restore_tests.rs','preview_viewport_tests.rs']:
-            g.remove_node(physical(p))
+        for n in sorted({physical(p) for p in phantom}):
+            if n in g: g.remove_node(n)
     if kind.endswith('prod'):
-        for n in ['preview_typing','source_pin']: g.remove_node(n)
+        for n in sorted(test_only):
+            if n in g: g.remove_node(n)
 def report(g,kind):
     mass=weights.copy()
-    if not kind.startswith('regex'):
-        for p in ['focus_thumb_restore_tests.rs','preview_viewport_tests.rs']:
-            mass[owner(contexts[p])]+=mass[physical(p)]
     mass['@root']=stats['main.rs']['lines']+1
+    if not kind.startswith('regex'):
+        for p in sorted(phantom): mass[node_of(p)]+=mass[physical(p)]
     scc=sorted(nx.strongly_connected_components(g),key=lambda s:(len(s),sum(mass.get(n,0) for n in s)),reverse=True)
     cycles=set().union(*(s for s in scc if len(s)>1))
     blocked=set(cycles)
@@ -196,12 +234,14 @@ for n,ctx,test in items['main.rs']:
             if m.type=='function_item':
                 code=prod['main.rs'][m.start_byte:m.end_byte].decode()
                 methods.append({'name':txt(m.child_by_field_name('name')),'line':m.start_point.row+1,'lines':m.end_point.row-m.start_point.row+1,'window':sorted(set(re.findall(r'self\s*\.\s*window\s*\.\s*(\w+)',code))),'app':sorted(set(re.findall(r'self\s*\.\s*app\s*\.\s*(\w+)',code)))})
-out={'stats':stats,'cuts':cuts,'edges':evidence,'methods':methods,'root_aliases':aliases}
+out={'stats':stats,'cuts':cuts,'edges':evidence,'methods':methods,'root_aliases':aliases,'whole_test':sorted(whole_test),'phantom_nodes':sorted({physical(p) for p in phantom}),'test_only_nodes':sorted(test_only),'contexts':{p:list(c) for p,c in sorted(contexts.items())},'unreached':unreached}
 Path('target/bt-app-graph.json').write_text(json.dumps(out,indent=2),encoding='utf8')
 for k,cc in cuts.items():
     print(k)
     for label,v in cc.items(): print(label, 'nodes/edges',v['nodes'],v['edges'],'SCC',v['largest_count'],v['largest_lines'],'free',v['free_count'],v['free_lines'],'avoid-largest',v['avoid_largest_count'],v['avoid_largest_lines'])
 print('parse errors',[p for p,s in stats.items() if s['parse_errors']])
+print('wholly test',len(whole_test),sorted(whole_test))
+print('phantom nodes',sorted({physical(p) for p in phantom}),'test-only nodes',sorted(test_only),'unreached',unreached)
 print('source',len(files),sum(s['lines'] for s in stats.values()),'test lines',sum(s['test'] for s in stats.values()),'code',sum(s['code'] for s in stats.values()))
 print('main',stats['main.rs'],'methods',len(methods),'lines',sum(m['lines'] for m in methods),'tabs',sum('tabs' in m['window'] for m in methods))
 for kind in ['regex','syntax_prod','root_prod']:

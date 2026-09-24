@@ -54,6 +54,8 @@
 //! one would be a build with a second copy of somebody else's file. So it refuses, out loud, and the
 //! row stays where the machine actually is.
 
+pub(crate) use crate::attention_ownership::Outcome;
+use crate::attention_ownership::{self as ownership, Decision};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -73,6 +75,13 @@ const DEFAULT_DIRECTORY: &str = ".codex";
 
 /// The key codex spawns a program from at the end of a turn.
 const NOTIFY_KEY: &str = "notify";
+
+/// What this module says about a configuration file it could not read, whichever half could not
+/// read it.
+///
+/// One sentence for the byte that is not UTF-8 and for the document that is not TOML, because to
+/// the reader they are one fact: there is a file there, and this build is not going to guess at it.
+const UNREADABLE: &str = "the codex configuration file is not one this build can read";
 
 /// The event this build asks to be told about, in the wire's `<family>:<event>` spelling.
 ///
@@ -95,6 +104,10 @@ pub(crate) enum State {
     /// There is a file and it could not be read as TOML. **Not** "absent": writing over a file this
     /// build cannot parse would destroy configuration somebody wrote by hand.
     Unreadable,
+    /// There is a readable file and **this build will not edit it**, for the reason carried: a
+    /// link out of the agent's own folder, a file shared by hard links, or a read-only one. See
+    /// `attention_hooks::Standing::Refused`.
+    Refused(&'static str),
 }
 
 /// The directory codex keeps user configuration in, as **this environment** says it.
@@ -161,18 +174,76 @@ pub(crate) fn state() -> State {
     let Some(path) = config_path() else {
         return State::Absent;
     };
-    match std::fs::read_to_string(&path) {
-        Err(_) => State::Absent,
-        Ok(text) => match text.parse::<DocumentMut>() {
-            Ok(document) => {
-                if declares_folio(&document) {
-                    State::Installed
-                } else {
-                    State::Absent
-                }
+    let state = state_at(&path);
+    if state != State::Installed {
+        return state;
+    }
+    let Some(exe) = std::env::current_exe().ok() else {
+        return State::Unreadable;
+    };
+    let Ok(text) =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, path)
+    else {
+        return State::Unreadable;
+    };
+    let Some(value) = text.parse::<DocumentMut>().ok() else {
+        return State::Unreadable;
+    };
+    if (notify_owner(&value)
+        .ok()
+        .flatten()
+        .into_iter()
+        .collect::<Vec<_>>())
+    .iter()
+    .any(|owner| crate::explorer_menu::same_path(owner, &exe))
+    {
+        State::Installed
+    } else {
+        State::Absent
+    }
+}
+
+/// **The settings row's two facts, out of one read of the file.**
+///
+/// Whether this copy's marks are in it, and — when this build will not edit it at all — the reason
+/// the row says in place of `Off`. Two answers to "what does the row show" derived from one
+/// `State` rather than two reads, because a second read is a second answer (closure review R1).
+#[must_use]
+pub(crate) fn row_state() -> (bool, Option<&'static str>) {
+    match state() {
+        State::Installed => (true, None),
+        State::Refused(reason) => (false, Some(reason)),
+        State::Absent | State::Unreadable => (false, None),
+    }
+}
+
+/// The same question about a named file, so a test can ask it without a codex installation on the
+/// machine it runs on.
+#[must_use]
+fn state_at(path: &Path) -> State {
+    let config = match crate::attention_hooks::Config::resolve(path) {
+        Ok(config) => config,
+        // Read, and not ours to change. The row says which file it is looking at.
+        Err(crate::attention_hooks::Unresolved::Refused(reason)) => return State::Refused(reason),
+        Err(crate::attention_hooks::Unresolved::Unreadable) => return State::Unreadable,
+    };
+    let text = match config.standing() {
+        // No file is the same answer to the only question being asked.
+        crate::attention_hooks::Standing::Nothing => return State::Absent,
+        // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
+        // offer to write over one this build never read.
+        crate::attention_hooks::Standing::Unreadable => return State::Unreadable,
+        crate::attention_hooks::Standing::Text(text) => text,
+    };
+    match text.parse::<DocumentMut>() {
+        Ok(document) => {
+            if declares_folio(&document) {
+                State::Installed
+            } else {
+                State::Absent
             }
-            Err(_) => State::Unreadable,
-        },
+        }
+        Err(_) => State::Unreadable,
     }
 }
 
@@ -197,18 +268,35 @@ fn words_of(document: &DocumentMut) -> Option<Vec<String>> {
         .collect()
 }
 
-/// **Whether the `notify` standing in this document is one of ours.**
-///
-/// By the **verb and the family**, not by the path to the executable:
-/// [`attention_hooks::MARK`](crate::attention_hooks)'s rule, for its reason — a user who moves
-/// Folio, or who runs two builds of it, still has an entry this can recognise and take back out.
+/// Whether the exact Folio argv shape is present. `notify_owner` is the
+/// ownership decoder; all mutations additionally check its executable path.
 fn declares_folio(document: &DocumentMut) -> bool {
-    words_of(document).is_some_and(|words| {
-        words.iter().any(|word| word == ATTENTION_VERB)
-            && words
-                .iter()
-                .any(|word| word.starts_with(&format!("{CODEX}:")))
-    })
+    notify_owner(document).is_ok_and(|owner| owner.is_some())
+}
+
+/// The sole Codex attribution site: argv[0], with the exact Folio verb/event shape.
+fn notify_owner(document: &DocumentMut) -> Result<Option<PathBuf>, &'static str> {
+    if document.get(NOTIFY_KEY).is_none() {
+        return Ok(None);
+    }
+    let words = words_of(document).ok_or(UNREADABLE)?;
+    let folio = words.get(1).is_some_and(|word| word == ATTENTION_VERB)
+        && words
+            .get(2)
+            .is_some_and(|word| word.starts_with(&format!("{CODEX}:")));
+    if !folio {
+        return Ok(None);
+    }
+    // The verb said *a* Folio; the program's own name says whether it is one at all. A `notify` of
+    // somebody's own that speaks this verb is theirs, and `declares_somebody_else` then keeps this
+    // module's oldest promise about it (re-review B2).
+    let Some(owner) = ownership::folio_operand(&words[0]) else {
+        return Ok(None);
+    };
+    if words.len() != 4 || words[2] != format!("{CODEX}:{EVENT}") || words[3] != JSON_FLAG {
+        return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+    }
+    Ok(Some(owner))
 }
 
 /// **Whether somebody else's program is on the key.**
@@ -223,7 +311,7 @@ fn declares_somebody_else(document: &DocumentMut) -> bool {
 ///
 /// Returns whether anything changed, so that a press on an already-installed machine costs no write
 /// at all — `attention_hooks`'s rule, for `shell_integration`'s reason.
-pub(crate) fn install_into(document: &mut DocumentMut, exe: &Path) -> bool {
+fn install_into(document: &mut DocumentMut, exe: &Path) -> bool {
     if declares_somebody_else(document) {
         return false;
     }
@@ -232,10 +320,8 @@ pub(crate) fn install_into(document: &mut DocumentMut, exe: &Path) -> bool {
         array.push(word);
     }
     let written = Item::Value(Value::Array(array));
-    if document
-        .get(NOTIFY_KEY)
-        .is_some_and(|standing| standing.to_string() == written.to_string())
-    {
+    // Compare argv, not TOML decoration/quoting, so a disk round trip is a no-op.
+    if words_of(document).as_ref() == Some(&program_for(exe)) {
         return false;
     }
     document[NOTIFY_KEY] = written;
@@ -246,24 +332,15 @@ pub(crate) fn install_into(document: &mut DocumentMut, exe: &Path) -> bool {
 ///
 /// Symmetric with [`install_into`] and tested as such, byte for byte, on a document with the user's
 /// own comments and tables in it.
-pub(crate) fn remove_from(document: &mut DocumentMut) -> bool {
-    if !declares_folio(document) {
+fn remove_from(document: &mut DocumentMut, exe: &Path) -> bool {
+    if notify_owner(document)
+        .ok()
+        .flatten()
+        .is_none_or(|owner| ownership::other_live(&owner, exe) != Ok(false))
+    {
         return false;
     }
     document.remove(NOTIFY_KEY).is_some()
-}
-
-/// What happened when the row was pressed.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Outcome {
-    /// Written. The file is now what [`State::Installed`] describes.
-    Installed,
-    /// Taken back out.
-    Removed,
-    /// Nothing to do — it was already in the state that was asked for.
-    Unchanged,
-    /// Refused, with the reason in the caller's own words.
-    Refused(&'static str),
 }
 
 /// Put Folio's `notify` in, or take it out, on this machine.
@@ -271,38 +348,102 @@ pub(crate) enum Outcome {
 /// **The file is read, changed and written whole**, and a copy of what was there is kept beside it
 /// the first time each day — `attention_hooks`'s rule, for its reason: this is somebody's own
 /// configuration file, and a build that could damage one had better be able to hand it back.
-pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
+pub(crate) fn apply(decision: Decision, exe: &Path) -> Outcome {
     let Some(path) = config_path() else {
         return Outcome::Refused("no codex configuration directory to write into");
     };
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    apply_at(&path, decision, exe, &crate::persist::storage_dir())
+}
+
+/// The same act on a named file — the seam the tests press, so that what they pin is this function
+/// and not a `config.toml` belonging to whoever runs them.
+pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path) -> Outcome {
+    match crate::attention_hooks::Config::resolve(path) {
+        Ok(config) => apply_resolved(&config, decision, exe, data),
+        Err(crate::attention_hooks::Unresolved::Refused(reason)) => Outcome::Refused(reason),
+        Err(crate::attention_hooks::Unresolved::Unreadable) => Outcome::Refused(UNREADABLE),
+    }
+}
+
+/// The same act on a configuration this operation has already resolved.
+///
+/// **Everything below the entry takes this value.** The path was resolved once, at the top; the
+/// read, the dated copy, the replace and the removal all name that one answer, and there is no
+/// second resolution on this path for a repointed link to slip through (re-review B1).
+pub(crate) fn apply_resolved(
+    config: &crate::attention_hooks::Config,
+    decision: Decision,
+    exe: &Path,
+    data: &Path,
+) -> Outcome {
+    if let Err(reason) = ownership::stable_executable(Some(exe)) {
+        return Outcome::Refused(reason);
+    }
+    if !config.named().is_absolute() {
+        return Outcome::Refused(crate::i18n::Text::AgentHooksRootUnstable.text());
+    }
+    let install = decision.installs();
+    let existing = match config.standing() {
+        crate::attention_hooks::Standing::Text(text) => text,
+        // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
+        crate::attention_hooks::Standing::Nothing => String::new(),
+        // **A file that could not be read is never written over.** The empty string this used to
+        // fall back to parses as an empty document, so the refusal below never fired and the write
+        // went ahead over somebody's own configuration — release audit 2026-09-16 (C-3).
+        crate::attention_hooks::Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+    };
     let mut document = match existing.parse::<DocumentMut>() {
         Ok(document) => document,
         // Refused rather than replaced. A configuration file this build cannot read is a file
         // somebody wrote, and overwriting it to add a convenience is not a trade anyone agreed to.
-        Err(_) => {
-            return Outcome::Refused("the codex configuration file is not one this build can read");
-        }
+        Err(_) => return Outcome::Refused(UNREADABLE),
     };
+    if document.get(NOTIFY_KEY).is_some() && words_of(&document).is_none() {
+        return Outcome::Refused(UNREADABLE);
+    }
+    // **Ownership is per entry** (closure review R4), and this family's entry is the whole key: a
+    // `notify` wearing Folio's verb in a shape this build cannot decode is not Folio's, which is
+    // the answer [`declares_folio`] and [`remove_from`] have always given about it. An install
+    // over it is refused below as somebody else's program; a removal leaves it alone.
+    let paths = notify_owner(&document)
+        .ok()
+        .flatten()
+        .into_iter()
+        .collect::<Vec<_>>();
     if install && declares_somebody_else(&document) {
         return Outcome::Refused("codex already runs a notify program of your own");
     }
+    let others = match ownership::check(&paths, exe, &decision) {
+        Ok(others) => others,
+        Err(outcome) => return outcome,
+    };
     let changed = if install {
         install_into(&mut document, exe)
     } else {
-        remove_from(&mut document)
+        remove_from(&mut document, exe)
+    };
+    let _record = if install {
+        match ownership::record(
+            data,
+            config.named().parent().expect("absolute config"),
+            "codex",
+        ) {
+            Ok(lock) => Some(lock),
+            Err(reason) => return Outcome::Refused(reason),
+        }
+    } else {
+        None
     };
     if !changed {
-        return Outcome::Unchanged;
+        return if others.is_empty() {
+            Outcome::Unchanged
+        } else {
+            Outcome::LeftOther(others)
+        };
     }
-    // The atomic write, the backup that is a precondition and the link that is followed are all
+    // The atomic write, mandatory backup, and unsafe-path refusal are all
     // `attention_hooks::land`'s, said once for all three installers.
-    match crate::attention_hooks::land(
-        &path,
-        &existing,
-        "toml",
-        rendered(&document, &existing).as_bytes(),
-    ) {
+    match config.land(&existing, "toml", rendered(&document, &existing).as_bytes()) {
         crate::attention_hooks::Landing::Landed => {}
         crate::attention_hooks::Landing::NoDirectory => {
             return Outcome::Refused("the codex configuration directory could not be created");
@@ -310,14 +451,19 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
         crate::attention_hooks::Landing::NoBackup => {
             return Outcome::Refused(crate::attention_hooks::NO_BACKUP);
         }
+        crate::attention_hooks::Landing::Changed => {
+            return Outcome::Refused(crate::i18n::Text::AgentConfigChanged.text());
+        }
         crate::attention_hooks::Landing::NotWritten => {
             return Outcome::Refused("the codex configuration file could not be written");
         }
     }
     if install {
         Outcome::Installed
-    } else {
+    } else if others.is_empty() {
         Outcome::Removed
+    } else {
+        Outcome::LeftOther(others)
     }
 }
 
@@ -345,8 +491,54 @@ fn rendered(document: &DocumentMut, existing: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-tests")
+            .join(concat!("codex-", "two-copies"));
+        std::fs::create_dir_all(&root).unwrap();
+        // **Two folders, one file name.** An operand is Folio's only if its file name is one
+        // Folio installs itself under, which is how two real copies differ: same program, two
+        // places. The odd characters this fixture exists for move to the folder.
+        let a = root.join("A space $ ` ' 中文").join("folio.exe");
+        let b = root.join("B").join("folio.exe");
+        for copy in [&a, &b] {
+            std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            std::fs::write(copy, b"a copy of Folio").unwrap();
+        }
+        let path = root.join("config.toml");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(apply_to(&path, true, &a), Outcome::Installed);
+        let before = std::fs::read(&path).unwrap();
+        let result = apply_to(&path, true, &b);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "another live executable must require explicit take-over: {result:?}"
+        );
+        assert_ne!(result, Outcome::Installed);
+        let result = apply_to(&path, false, &b);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "cleanup must leave a live other owner: {result:?}"
+        );
+    }
+
+    fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
+        apply_at(
+            path,
+            install.into(),
+            exe,
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-test-marks/codex")
+                .join(path.parent().unwrap().file_name().unwrap()),
+        )
+    }
+
     fn exe() -> PathBuf {
-        PathBuf::from(r"C:\Program Files\Folio\folio.exe")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-fixtures/Program Files/Folio/folio.exe")
     }
 
     /// **The consent disclosure names the file this machine will write** —
@@ -490,7 +682,7 @@ mod tests {
             written["tui"]["notification_method"].as_str() == Some("bel"),
             "and the table that was there is still the table that was there"
         );
-        assert!(remove_from(&mut document));
+        assert!(remove_from(&mut document, &exe()));
         assert_eq!(
             document.to_string(),
             original,
@@ -521,7 +713,7 @@ mod tests {
                 "the line is in what gets written"
             );
             let mut back = installed.parse::<DocumentMut>().expect("what we wrote");
-            assert!(remove_from(&mut back));
+            assert!(remove_from(&mut back, &exe()));
             assert_eq!(
                 rendered(&back, &installed),
                 original,
@@ -538,25 +730,25 @@ mod tests {
             !install_into(&mut document, &exe()),
             "an install that was already done is not a change"
         );
-        assert!(remove_from(&mut document));
+        assert!(remove_from(&mut document, &exe()));
         assert!(
-            !remove_from(&mut document),
+            !remove_from(&mut document, &exe()),
             "and neither is a removal of what is not there"
         );
     }
 
     /// Moving the executable is not a reason to lose track of the entry.
     #[test]
-    fn the_entry_is_recognised_by_what_it_does_not_by_where_folio_lives() {
+    fn a_dead_owner_can_be_replaced_after_moving_folio() {
         let mut document = installed("");
-        let moved = PathBuf::from(r"E:\portable\folio.exe");
+        let moved = exe().parent().unwrap().join("portable/folio.exe");
         assert!(
             install_into(&mut document, &moved),
             "a rewrite from a new location is a change"
         );
         assert!(document.to_string().contains("portable"));
         assert_eq!(state_of(&document), State::Installed);
-        assert!(remove_from(&mut document));
+        assert!(remove_from(&mut document, &exe()));
         assert!(!document.to_string().contains(NOTIFY_KEY));
     }
 
@@ -570,7 +762,7 @@ mod tests {
             !install_into(&mut document, &exe()),
             "installing over somebody's own program is a deletion this build cannot undo"
         );
-        assert!(!remove_from(&mut document));
+        assert!(!remove_from(&mut document, &exe()));
         assert_eq!(document.to_string(), theirs);
     }
 
@@ -582,6 +774,109 @@ mod tests {
         // have made the row offer to write over it.
         let source = include_str!("attention_codex.rs");
         assert!(source.contains("is not one this build can read"));
+    }
+
+    /// RED — **a configuration file that could not be read is left byte for byte.**
+    ///
+    /// Release audit 2026-09-16 (C-3): `read_to_string(&path).unwrap_or_default()` took a file this
+    /// build was not allowed to read — or one holding a single byte that is not UTF-8 — for a file
+    /// that was not there. The empty string it fell back to parses as an empty document, so the
+    /// refusal below it never fired, and `land` was handed nothing to copy: the user's own
+    /// configuration was replaced by one `notify` line with no copy kept anywhere.
+    ///
+    /// RED GATE: put the `unwrap_or_default` back and this file comes back as Folio's own.
+    #[test]
+    fn a_configuration_file_that_could_not_be_read_is_never_written_over() {
+        let dir = scratch("unreadable");
+        let path = dir.join(CONFIG_FILE);
+        // A Latin-1 comment: an ordinary line on an ordinary machine, and not UTF-8.
+        let theirs: &[u8] = b"# caf\xe9\nmodel = \"gpt-5\"\n";
+        std::fs::write(&path, theirs).expect("the user's own file");
+
+        let installing = apply_to(&path, true, &exe());
+        assert_eq!(installing, Outcome::Refused(UNREADABLE));
+        assert_eq!(std::fs::read(&path).expect("still there"), theirs);
+        assert_eq!(
+            names(&dir),
+            vec![CONFIG_FILE.to_owned()],
+            "nothing was written beside it either"
+        );
+        // And the row drawn from it says so, rather than offering to write over it.
+        assert_eq!(state_at(&path), State::Unreadable);
+        // Taking it back out is refused for the same reason: this build cannot tell whose it is.
+        let taking_it_out = apply_to(&path, false, &exe());
+        assert_eq!(taking_it_out, Outcome::Refused(UNREADABLE));
+        assert_eq!(std::fs::read(&path).expect("still there"), theirs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file that is not there is the one state in which writing a fresh one loses nothing.**
+    #[test]
+    fn a_configuration_file_that_is_not_there_is_the_one_that_gets_created() {
+        let dir = scratch("absent");
+        let path = dir.join(CONFIG_FILE);
+        assert_eq!(state_at(&path), State::Absent);
+
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        assert_eq!(state_at(&path), State::Installed);
+        assert_eq!(
+            names(&dir),
+            vec![CONFIG_FILE.to_owned()],
+            "a first install leaves one file: no copy of nothing, no temporary"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file that is there is copied before it is changed**, and the copy is what was there.
+    #[test]
+    fn a_configuration_file_that_is_there_is_copied_before_it_is_changed() {
+        let dir = scratch("copied");
+        let path = dir.join(CONFIG_FILE);
+        let theirs = "# mine\nmodel = \"gpt-5\"\n";
+        std::fs::write(&path, theirs).expect("the user's own file");
+
+        assert_eq!(apply_to(&path, true, &exe()), Outcome::Installed);
+        let written = std::fs::read_to_string(&path).expect("read back");
+        assert!(written.contains("# mine"), "{written}");
+        assert!(written.contains(NOTIFY_KEY), "{written}");
+        let backup = format!("{CONFIG_FILE}.bak-{}", crate::attention_hooks::today());
+        assert_eq!(names(&dir), vec![CONFIG_FILE.to_owned(), backup.clone()]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&backup)).expect("the copy"),
+            theirs,
+            "the copy beside it is the file as it was"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scratch directory of this test's own. Never anywhere near a real `~/.codex`.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-tests")
+            .join(format!(
+                "folio-codex-{name}-{}-{}",
+                std::process::id(),
+                crate::attention_hooks::today()
+            ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// Every name in a directory, sorted — what a reader who opened it would find.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the directory")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
     }
 
     fn state_of(document: &DocumentMut) -> State {

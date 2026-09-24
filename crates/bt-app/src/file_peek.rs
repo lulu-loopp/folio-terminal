@@ -44,6 +44,16 @@
 //! keyboard can reach, and "read-only" now names that absence exactly instead of
 //! naming the absence of a hit test.
 //!
+//! **One press outside the document, since 2026-09-20: the foot.** The foot
+//! names the folder that holds the file ([`peek_foot_address`]), and pressing
+//! that address is about where the file lives rather than what is in it: a
+//! plain click finds the file in the files column and selects it, and `Ctrl`
+//! (`⌘` on a Mac) with a click shows it selected in Explorer or Finder
+//! ([`Press::Foot`]; the standing rule that a plain click stays in the window
+//! and the modifier hands it over). It moves the files column or asks the
+//! system, and never touches the file, so "read-only" is still true of the
+//! card's document.
+//!
 //! ## Which file it is about, while it is up
 //!
 //! The card is not nailed to the row that raised it. A pointer that comes to
@@ -98,9 +108,10 @@ pub const PEEK_MAX_HEIGHT_LOGICAL_PX: f32 = 264.0;
 pub const PEEK_RADIUS_LOGICAL_PX: f32 = 8.0;
 /// `.file-peek { border: 1px solid var(--border) }`.
 pub const PEEK_BORDER_LOGICAL_PX: f32 = 1.0;
-/// `box-shadow: 0 10px 28px` — the spread half, which is what this renderer's
-/// halo takes.
-pub const PEEK_SHADOW_LOGICAL_PX: f32 = 28.0;
+/// The float-tag family's shadow (`UI-SPEC.md` E1;
+/// [`bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX`]) — every other float's, not
+/// the mock-up's own `box-shadow: 0 10px 28px` spread half.
+pub const PEEK_SHADOW_LOGICAL_PX: f32 = bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX;
 
 /// `.fpeek-head { padding: 7px 10px 5px }` — the three sides that differ.
 pub const PEEK_HEAD_PADDING_TOP_LOGICAL_PX: f32 = 7.0;
@@ -117,8 +128,8 @@ pub const PEEK_HEAD_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
 /// and the weight and tracking beside it, spent where the name label is built in
 /// [`build`].
 pub const PEEK_HEAD_FONT_LOGICAL_PX: f32 = bt_render::HEAD_TITLE_FONT_LOGICAL_PX;
-/// `.fpeek-head { gap: 6px }`.
-pub const PEEK_HEAD_GAP_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC.md G1: eight logical pixels from an icon to its label.
+pub const PEEK_HEAD_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.pmark { width: 15px }` (mock-up 246), which is the head's file mark.
 pub const PEEK_MARK_LOGICAL_PX: f32 = 15.0;
 // `.fpeek-head .dirty { font-size: 9px }` is gone: the unsaved-edits dot is a
@@ -198,19 +209,73 @@ pub const PEEK_ROW_RISE_LOGICAL_PX: f32 = 8.0;
 /// The viewport safety margin the placement clamps to, on every side (6414-6420).
 pub const PEEK_VIEWPORT_MARGIN_LOGICAL_PX: f32 = 8.0;
 
-/// **The fixed sentence along the bottom** (6421).
+/// **The address of the folder that holds the file, along the bottom** (user
+/// ruling 2026-09-20).
 ///
-/// It never varies, and that is the point: the card exists to say "there is more
-/// of this behind a real gesture", and a foot whose words changed with the file
-/// would be a second thing to read.
+/// The mock-up's foot was a fixed sentence (6421) — "Enter / double-click opens
+/// the preview pane" — and the 2026-08-15 reading was that it never varies, so
+/// that the card had one thing fewer to read. The card then began rising over
+/// terminal references, where `Enter` does nothing, and the sentence became a
+/// promise the card could not keep. The strip now says where the file is: the
+/// folder, spelled as this platform spells one and as the files column's own
+/// foot spells it (`~` for a Mac or Linux home, nothing substituted on Windows —
+/// [`crate::home_shortened_path_on`], the breadcrumbs' rule).
 ///
-/// It keeps the strip's left hand. The right hand is the one place on this card
-/// that *does* change with the file (user ruling, 2026-08-15) — see
-/// [`crate::seats::dress_foot`] — and this sentence is what gives up the width
-/// when the two meet, because it is the half you have already read.
+/// **A string operation, never a disk call** — the parent of the path the card
+/// already holds — so the frame that draws the card asks nothing of a drive to
+/// write its foot. A composed document is on no disk and has no folder, and its
+/// foot is empty.
+///
+/// It keeps the strip's left hand. The right hand is the one place on the card
+/// whose words are news about the *buffer* (user ruling, 2026-08-15) — see
+/// [`crate::seats::dress_foot`] — and the address is what gives up the width
+/// when the two meet, from its middle ([`crate::seats::LeadCut::Middle`]).
 #[must_use]
-pub fn peek_foot_text() -> &'static str {
-    crate::i18n::Text::PeekFoot.text()
+pub fn peek_foot_address(
+    file: Option<&std::path::Path>,
+    platform: bt_platform::HostPlatform,
+    home: Option<&std::path::Path>,
+) -> String {
+    let Some(folder) = file.and_then(std::path::Path::parent) else {
+        return String::new();
+    };
+    crate::home_shortened_path_on(&folder.display().to_string(), platform, home).into_owned()
+}
+
+/// **Where a press on the foot's address lands** — the strip left of the
+/// standing fact, or `None` when there is no address to press.
+///
+/// The whole height of the strip and everything left of the notice, rather than
+/// the glyphs alone: an address cut in the middle is still one control, and a
+/// target that stopped at its last letter would be a control with holes in it —
+/// the head's own argument ([`PeekLayout::head`]). The notice keeps its end of
+/// the strip, and a press there is the face's.
+#[must_use]
+pub fn foot_address_box(layout: &PeekLayout, words: &crate::seats::FootWords) -> Option<[f32; 4]> {
+    if words.lead.is_empty() || words.flashing {
+        return None;
+    }
+    let right = if words.notice.is_empty() {
+        layout.foot[2]
+    } else {
+        words.lead_box[2]
+    };
+    Some([layout.foot[0], layout.foot[1], right, layout.foot[3]])
+}
+
+/// **Whether the pointer is on the foot's address** — the hover half of the
+/// press [`foot_address_box`] already answers (owner report 2026-09-23:
+/// 「我鼠标现在是hover在路径上的，他没有变色」).
+///
+/// One rectangle, two readers: the painter lights the strip with this, and the
+/// window asks it of the box the painter filed for the press, so the address
+/// lights exactly where a press on it would find the file and nowhere else. No
+/// address (a composed document, a flash) means nothing to light.
+#[must_use]
+pub fn over_foot(address: Option<[f32; 4]>, at: Option<[f32; 2]>) -> bool {
+    address
+        .zip(at)
+        .is_some_and(|(address, at)| contains(address, at))
 }
 
 /// The foot's own text run: the strip inside its horizontal padding.
@@ -381,8 +446,9 @@ pub fn life(row: [f32; 4], frame: [f32; 4], at: Option<[f32; 2]>, dragging: bool
 
 /// What a **left press** inside the card means.
 ///
-/// Three answers and no fourth, which is what keeps "read-only" true of a card
-/// the pointer can now reach. See [`Runtime::press_file_peek`] for the argument.
+/// None of them edits the document, which is what keeps "read-only" true of a
+/// card the pointer can now reach. See [`Runtime::press_file_peek`] for the
+/// argument.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Press {
     /// On the scroll thumb, this far into its own length.
@@ -397,6 +463,10 @@ pub enum Press {
     /// gesture is decided by whether the hand travels rather than by which
     /// button was pressed.
     Head,
+    /// **On the foot's folder address** (user ruling 2026-09-20): find the file
+    /// in the files column, or — under the hand-over modifier — show it in
+    /// Explorer or Finder. See [`foot_address_box`].
+    Foot,
     /// Anywhere else in the card: open the real preview pane.
     Open,
     /// Not the card's press at all.
@@ -404,17 +474,18 @@ pub enum Press {
 }
 
 /// [`Press`] for a press at `at` on a card standing at `frame`, whose head is
-/// `head`, wearing `bar`.
+/// `head`, whose foot's address stands in `foot`, wearing `bar`.
 ///
 /// **The thumb is asked first**, for the reason a text editor asks it first: a
 /// bar drawn inside a scrolling region is still a bar, and a press on it means
-/// the bar rather than the words behind it. The head is asked next and the door
-/// last, which is the order they are stacked in: the head is a band across the
-/// top of a face that is otherwise all door.
+/// the bar rather than the words behind it. The head and the foot's address are
+/// asked next and the door last, which is the order they are stacked in: two
+/// bands across the top and the bottom of a face that is otherwise all door.
 #[must_use]
 pub fn press_at(
     frame: [f32; 4],
     head: [f32; 4],
+    foot: Option<[f32; 4]>,
     bar: Option<&crate::preview::ScrollBar>,
     at: [f32; 2],
 ) -> Press {
@@ -424,6 +495,7 @@ pub fn press_at(
     match bar.filter(|bar| contains(bar.grab, at)) {
         Some(bar) => Press::Thumb((at[1] - bar.thumb[1]).clamp(0.0, bar.thumb[3] - bar.thumb[1])),
         None if contains(head, at) => Press::Head,
+        None if foot.is_some_and(|foot| contains(foot, at)) => Press::Foot,
         None => Press::Open,
     }
 }
@@ -1271,11 +1343,17 @@ pub fn layout(
 
 /// Paint the card — one layer, above the pinned float (P143: "z-index above the
 /// pinned flyout (60) — flyout rows peek too").
+///
+/// `pointer` is where the hand is, if it is in this window: the foot's address
+/// answers it the way every clickable strip in this window answers a hover
+/// ([`over_foot`]).
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     layout: &PeekLayout,
     content: &PeekContent,
     foot: &crate::seats::FootWords,
+    pointer: Option<[f32; 2]>,
     picture: Option<PeekPicture<'_>>,
     pages: &[PeekPage<'_>],
     palette: &ChromePalette,
@@ -1555,6 +1633,45 @@ pub fn build(
         ));
     }
 
+    // **The address lights under the hand** (owner report 2026-09-23), as the
+    // files column's foot and a float's foot do: `--hover` behind the whole
+    // press target and the words one ink up, because the whole strip left of
+    // the notice is the button (`foot_address_box`). Laid under the rule, and
+    // stopped at the face's own bottom corners for the float foot's reason — a
+    // square fill painted over a rounded window's curve. An edge the address
+    // shares with the card's interior (its top, and its right when a notice
+    // keeps the other end) is squared back off by a plain band.
+    let address = foot_address_box(layout, foot);
+    let foot_lit = over_foot(address, pointer);
+    if let Some(lit) = address.filter(|_| foot_lit) {
+        let radius =
+            (px(PEEK_RADIUS_LOGICAL_PX) - px(PEEK_BORDER_LOGICAL_PX).max(1.0).round()).max(0.0);
+        let band = |rect: [f32; 4]| OverlayQuad {
+            rect,
+            color: palette.menu_item_hover,
+            alpha: 1.0,
+        };
+        quads.extend(bt_render::rounded_overlay_fill(
+            lit,
+            radius,
+            palette.menu_item_hover,
+            1.0,
+        ));
+        quads.push(band([
+            lit[0],
+            lit[1],
+            lit[2],
+            (lit[1] + radius).min(lit[3]),
+        ]));
+        if lit[2] < layout.foot[2] {
+            quads.push(band([
+                (lit[2] - radius).max(lit[0]),
+                lit[1],
+                lit[2],
+                lit[3],
+            ]));
+        }
+    }
     // `border-top: 1px solid var(--border-soft)` over the foot.
     quads.push(OverlayQuad {
         rect: [
@@ -1566,15 +1683,19 @@ pub fn build(
         color: palette.menu_border,
         alpha: alpha(palette.menu_border_alpha),
     });
-    // The way out on the left, the standing fact on the right — the same strip
+    // The folder on the left, the standing fact on the right — the same strip
     // every other foot in this window now keeps (user ruling, 2026-08-15). The
-    // sentence is what yields, because it is the same sentence on every card and
-    // the phrase is the only thing on the strip that is news.
+    // address is what yields, from its middle (user ruling 2026-09-20), because
+    // the phrase is the only thing on the strip that is news about the buffer.
     labels.push(label(
         &foot.lead,
         foot.lead_box,
         px(PEEK_FOOT_FONT_LOGICAL_PX),
-        palette.body_hint_text,
+        if foot_lit {
+            palette.menu_item_text
+        } else {
+            palette.body_hint_text
+        },
     ));
     if !foot.notice.is_empty() {
         labels.push(ChromeLabel {
@@ -1675,6 +1796,27 @@ pub fn dwell<T: PartialEq + ?Sized>(over: Option<&T>, waiting: Option<&T>) -> Dw
 mod tests {
     use super::*;
 
+    /// RED (23) — **the glance head leaves eight pixels between its mark and name.**
+    ///
+    /// UI-SPEC.md G1 applies the icon-to-label rule to the real card layout.
+    /// MUTATION: restore PEEK_HEAD_GAP_LOGICAL_PX to 6.0.
+    #[test]
+    fn ui_spec_float_tag_rest_values_follow_the_rule() {
+        assert_eq!(PEEK_HEAD_GAP_LOGICAL_PX, 8.0, "UI-SPEC.md G1");
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let card = content(lines(2));
+            let laid = layout(
+                &card,
+                PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
+                (1600.0, 900.0),
+                ruler(&card.name, PEEK_HEAD_FONT_LOGICAL_PX) * scale,
+                ruler(&card.ftype, PEEK_TYPE_FONT_LOGICAL_PX) * scale,
+                scale,
+            );
+            assert_eq!(laid.name[0] - laid.mark[2], (8.0 * scale).round());
+        }
+    }
+
     const SCALE: f32 = 1.0;
 
     fn content(body: PeekBody) -> PeekContent {
@@ -1702,19 +1844,48 @@ mod tests {
         text.chars().count() as f32 * size / 2.0
     }
 
+    /// The folder every fixture card's file stands in.
+    const FOLDER: &str = r"C:\work\notes";
+
+    /// RED (ticket 16) — **the glance card's shadow is the float-tag family's,
+    /// not nine times wider than every other card's.**
+    ///
+    /// `UI-SPEC.md` E1: every float passes
+    /// [`bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX`] (3); the mock-up's own
+    /// `box-shadow: 0 10px 28px` spread half left this card at 28.
+    ///
+    /// MUTATION: revert `PEEK_SHADOW_LOGICAL_PX` to a literal and this goes red.
+    #[test]
+    fn ui_spec_float_tag_class_a_values_follow_the_rule() {
+        assert_eq!(
+            PEEK_SHADOW_LOGICAL_PX,
+            bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX,
+            "UI-SPEC.md E1"
+        );
+    }
+
     /// The card's foot, dressed the way [`crate::Runtime::file_peek_layer`]
-    /// dresses it — the fixed sentence, and whatever phrase is hung beside it.
+    /// dresses it — the file's folder, and whatever phrase is hung beside it.
     fn foot(layout: &PeekLayout, notice: &str) -> crate::seats::FootWords {
+        foot_at(layout, FOLDER, notice, SCALE)
+    }
+
+    fn foot_at(
+        layout: &PeekLayout,
+        folder: &str,
+        notice: &str,
+        scale: f32,
+    ) -> crate::seats::FootWords {
         crate::seats::dress_foot(
             crate::seats::FootDress {
                 dissolved: 0.0,
-                run: foot_run(layout, SCALE),
-                lead: peek_foot_text(),
+                run: foot_run(layout, scale),
+                lead: folder,
                 flash: None,
                 notice,
-                cut_left: false,
-                font_px: PEEK_FOOT_FONT_LOGICAL_PX * SCALE,
-                gap_px: crate::seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * SCALE,
+                cut: crate::seats::LeadCut::Middle,
+                font_px: PEEK_FOOT_FONT_LOGICAL_PX * scale,
+                gap_px: crate::seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
             },
             &mut ruler,
         )
@@ -1759,7 +1930,16 @@ mod tests {
             SCALE,
         );
         let gone_foot = foot(&gone_layout, "");
-        let layer = build(&gone_layout, &card, &gone_foot, None, &[], &palette, SCALE);
+        let layer = build(
+            &gone_layout,
+            &card,
+            &gone_foot,
+            None,
+            None,
+            &[],
+            &palette,
+            SCALE,
+        );
 
         let said = |words: &str| layer.labels.iter().find(|label| label.text == words);
         assert!(
@@ -1801,6 +1981,7 @@ mod tests {
             &typed_layout,
             &typed,
             &typed_foot,
+            None,
             None,
             &[],
             &palette,
@@ -1860,7 +2041,16 @@ mod tests {
             SCALE,
         );
         let card_foot = foot(&card_layout, "");
-        let card_layer = build(&card_layout, &card, &card_foot, None, &[], &palette, SCALE);
+        let card_layer = build(
+            &card_layout,
+            &card,
+            &card_foot,
+            None,
+            None,
+            &[],
+            &palette,
+            SCALE,
+        );
         let card_name = &card_layer.labels[0];
         assert_eq!(card_name.text, NAME, "the card's first label is the name");
 
@@ -1897,11 +2087,6 @@ mod tests {
             },
             SCALE,
             &palette,
-            crate::float::FloatFade {
-                opacity: 1.0,
-                rise: 0.0,
-                moving: false,
-            },
         );
         let window_name = &window_layer.labels[0];
         assert_eq!(
@@ -1930,79 +2115,156 @@ mod tests {
         );
     }
 
-    /// PIN (user ruling, 2026-08-15) — **the glance card's foot hangs the same
-    /// phrase on the same side, and the way out survives it.**
+    /// RED (ticket 12, user ruling 2026-09-20) — **a folder address too long for
+    /// the card is cut in the middle, and it gives the right-hand words their
+    /// width at every scale.**
     ///
-    /// The card used to be excluded from every notice by name, and the argument
-    /// was good: its foot is one fixed sentence and that sentence is the card's
-    /// only exit, so a warning that *took* the strip would have replaced the way
-    /// out with a complaint about a file you were merely looking at. The ruling
-    /// keeps the exit and drops the exclusion, because the phrase does not take
-    /// the strip — it takes the right-hand end of it, and the sentence is what
-    /// gives up the width.
+    /// The foot's lead used to be a sentence, cut from the back because a
+    /// sentence reads forwards. It is an address now, and an address is read
+    /// from both ends: the drive or the home it stands on, and the folder it
+    /// names. The ruling says it in five characters — 「从中间省略」 — and says
+    /// in the same breath which half of the strip yields when the phrase on the
+    /// right needs room: the address.
     ///
-    /// The card is the one foot in this window whose lead is not a path, which
-    /// is why it is cut from the **back**: a sentence reads forwards, and
-    /// "…double-click opens the preview pane" is a sentence with its verb
-    /// missing.
+    /// Four scales, because the division is in physical pixels and a rounding
+    /// that let the two runs touch at one scale would print them through each
+    /// other there and nowhere else.
     ///
-    /// MUTATION ①: pass `cut_left: true` for the card and the ellipsis assertion
-    /// goes red on a sentence beheaded instead of trimmed.
-    /// MUTATION ②: draw the phrase before the sentence without the split — give
-    /// both the whole run — and the disjointness assertion goes red, which is
-    /// the two printing through each other in 280 pixels.
+    /// MUTATION: dress the card's foot with `LeadCut::Back` (the old sentence's
+    /// cut) — the ellipsis moves to the end and the folder's own name is lost,
+    /// so the tail assertion goes red.
     #[test]
-    fn the_glance_cards_foot_keeps_its_way_out_beside_the_phrase() {
-        let window = (1600.0, 900.0);
-        let card = content(lines(6));
+    fn a_long_folder_is_elided_in_the_middle_and_yields_to_the_right_hand_words() {
+        let folder = r"C:\projects\a-rather-long-client-name\quarterly-reports\2026\drafts\final";
+        let notice = crate::preview::preview_truncated_notice();
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            // The narrowest window the card fits in — it is as narrow a card as
+            // there is, and the address does not fit in it whole.
+            let window = (340.0 * scale, 600.0 * scale);
+            let card = content(lines(6));
+            let row = [20.0 * scale, 300.0, 200.0 * scale, 320.0];
+            let layout = layout(
+                &card,
+                PeekAnchor::row(row),
+                window,
+                60.0 * scale,
+                24.0 * scale,
+                scale,
+            );
+            let dressed = foot_at(&layout, folder, notice, scale);
+            let layer = build(
+                &layout,
+                &card,
+                &dressed,
+                None,
+                None,
+                &[],
+                &bt_render::chrome_palette(),
+                scale,
+            );
+            let hung = layer
+                .labels
+                .iter()
+                .find(|label| label.text == notice)
+                .expect("the phrase is on the card, whole");
+            let address = layer
+                .labels
+                .iter()
+                .find(|label| label.text == dressed.lead)
+                .expect("and the address is printed");
+            assert!(hung.align_right, "flush with the strip's right edge");
+            assert_eq!(hung.rect[2], foot_run(&layout, scale)[2]);
+            assert!(
+                dressed.lead_box[0] + dressed.lead_width <= hung.rect[0],
+                "at {scale}: the address stops before the phrase begins: {:?} ({}) vs {:?}",
+                dressed.lead_box,
+                dressed.lead_width,
+                hung.rect
+            );
+            assert!(
+                address.rect[2] <= dressed.notice_box[0],
+                "at {scale}: the address's box stays left of the phrase's"
+            );
+            let (head, tail) = dressed
+                .lead
+                .split_once('\u{2026}')
+                .unwrap_or_else(|| panic!("at {scale}: the address was cut: {}", dressed.lead));
+            assert!(
+                folder.starts_with(head) && !head.is_empty(),
+                "at {scale}: the front of the address survives: {}",
+                dressed.lead
+            );
+            assert!(
+                folder.ends_with(tail) && tail.ends_with("final"),
+                "at {scale}: and so does the folder it names: {}",
+                dressed.lead
+            );
+            // One line: the strip is one row of type tall and the address one
+            // label in it.
+            assert!(
+                !dressed.lead.contains('\n'),
+                "at {scale}: the address never wraps"
+            );
+        }
+
+        // And with nothing hung on it, a short address is the whole run's.
         let layout = layout(
-            &card,
+            &content(lines(6)),
             PeekAnchor::row([40.0, 300.0, 240.0, 320.0]),
-            window,
+            (1600.0, 900.0),
             60.0,
             24.0,
             SCALE,
         );
-        let notice = crate::preview::preview_truncated_notice();
-        let dressed = foot(&layout, notice);
-        let layer = build(
-            &layout,
-            &card,
-            &dressed,
-            None,
-            &[],
-            &bt_render::chrome_palette(),
-            SCALE,
-        );
-
-        let hung = layer
-            .labels
-            .iter()
-            .find(|label| label.text == notice)
-            .expect("the phrase is on the card");
-        let exit = layer
-            .labels
-            .iter()
-            .find(|label| label.text.starts_with("Enter / double-click"))
-            .expect("and the way out is still printed");
-        assert!(hung.align_right, "flush with the strip's right edge");
-        assert_eq!(hung.rect[2], foot_run(&layout, SCALE)[2]);
-        assert!(
-            exit.rect[2] < hung.rect[0],
-            "the sentence stops before the phrase begins: {:?} vs {:?}",
-            exit.rect,
-            hung.rect
-        );
-        assert!(
-            !dressed.lead.starts_with('…'),
-            "a sentence is cut from the back, not the front: {}",
-            dressed.lead
-        );
-
-        // And with nothing hung on it the card is exactly what it was.
         let bare = foot(&layout, "");
-        assert_eq!(bare.lead, peek_foot_text(), "the sentence, whole");
+        assert_eq!(bare.lead, FOLDER, "the address, whole");
         assert_eq!(bare.lead_box, foot_run(&layout, SCALE), "in the whole run");
+    }
+
+    /// RED (ticket 12) — **the foot's folder is the file's parent, spelled the
+    /// way the files column's foot spells a folder, and a composed document has
+    /// none.**
+    ///
+    /// The address is a string operation on the path the card already holds —
+    /// no disk is asked (acceptance A3) — and it is the same spelling the
+    /// breadcrumbs and the column's foot use, so a Mac reads `~/…` in all three
+    /// places and Windows reads its drive letter in all three.
+    ///
+    /// MUTATION: print the file's own path instead of its parent, and every
+    /// assertion goes red.
+    #[test]
+    fn the_foot_shows_the_files_folder() {
+        use bt_platform::HostPlatform::{MacOs, Windows};
+        assert_eq!(
+            peek_foot_address(
+                Some(std::path::Path::new(r"C:\work\notes\plan.md")),
+                Windows,
+                Some(std::path::Path::new(r"C:\Users\someone")),
+            ),
+            FOLDER,
+        );
+        assert_eq!(
+            peek_foot_address(
+                Some(std::path::Path::new("/Users/someone/work/plan.md")),
+                MacOs,
+                Some(std::path::Path::new("/Users/someone")),
+            ),
+            "~/work",
+            "a Mac home is `~`, as the breadcrumbs and the column's foot print it"
+        );
+        assert_eq!(
+            peek_foot_address(
+                Some(std::path::Path::new("/Users/someone/plan.md")),
+                MacOs,
+                Some(std::path::Path::new("/Users/someone")),
+            ),
+            "~"
+        );
+        assert_eq!(
+            peek_foot_address(None, Windows, None),
+            "",
+            "a composed document is on no disk and names no folder"
+        );
     }
 
     /// PIN — **P148: the card stands to the right of its row, and flips to the
@@ -2412,6 +2674,7 @@ mod tests {
             &card,
             &foot(&layout, ""),
             None,
+            None,
             &[],
             &bt_render::chrome_palette(),
             SCALE,
@@ -2440,11 +2703,8 @@ mod tests {
             "the head still names the file"
         );
         assert!(
-            layer
-                .labels
-                .iter()
-                .any(|label| label.text == peek_foot_text()),
-            "and the foot still says how to open it"
+            layer.labels.iter().any(|label| label.text == FOLDER),
+            "and the foot still says where the file is"
         );
 
         // The body box is the document's own height, which is what makes a short
@@ -2554,6 +2814,7 @@ mod tests {
             &laid,
             &card,
             &foot(&laid, ""),
+            None,
             Some(PeekPicture {
                 key: "video-frame:clip",
                 rgba: &picture,
@@ -2640,6 +2901,7 @@ mod tests {
             &empty,
             &foot(&pending, ""),
             None,
+            None,
             &[],
             &bt_render::chrome_palette(),
             SCALE,
@@ -2714,6 +2976,7 @@ mod tests {
             &card,
             &foot(&laid, ""),
             None,
+            None,
             &[],
             &bt_render::chrome_palette(),
             SCALE,
@@ -2750,7 +3013,7 @@ mod tests {
             said("web").is_none(),
             "and never the name of the lane that draws it"
         );
-        assert!(said(peek_foot_text()).is_some(), "the foot still says how");
+        assert!(said(FOLDER).is_some(), "the foot still says where");
 
         // **The card does not wait to learn what is in it.** The count arrives
         // from a worker one or two frames after the card is up, and a card that
@@ -2773,6 +3036,7 @@ mod tests {
             &pending,
             &empty,
             &foot(&pending, ""),
+            None,
             None,
             &[],
             &bt_render::chrome_palette(),
@@ -2858,6 +3122,7 @@ mod tests {
             &laid,
             &card,
             &foot(&laid, ""),
+            None,
             Some(PeekPicture {
                 key: "peek:shot",
                 rgba: &pixels,
@@ -2998,6 +3263,7 @@ mod tests {
                 laid,
                 card,
                 &foot(laid, ""),
+                None,
                 None,
                 pages,
                 &bt_render::chrome_palette(),
@@ -3342,6 +3608,7 @@ mod tests {
             &layout,
             &card,
             &foot(&layout, ""),
+            None,
             Some(PeekPicture {
                 key: "peek:wide.png@280x70",
                 rgba: &rgba,
@@ -3779,8 +4046,8 @@ mod tests {
     /// ④ answer `Open` on the head — the handle goes back to being face, and
     ///    six pixels of intent over the name open a pane instead of keeping a
     ///    window (user ruling 2026-08-27, §7.29);
-    /// ⑤ let the head arm swallow the foot as well — a press on "Click to
-    ///    open" stops opening anything.
+    /// ⑤ let the head arm swallow the foot as well — a press on a foot with no
+    ///    address stops opening anything.
     #[test]
     fn a_press_in_the_card_is_the_door_to_the_pane_and_never_a_caret() {
         let row = [40.0, 300.0, 240.0, 320.0];
@@ -3800,22 +4067,24 @@ mod tests {
         let held = 4.0_f32;
         let on_thumb = [(bar.grab[0] + bar.grab[2]) / 2.0, bar.thumb[1] + held];
         assert_eq!(
-            press_at(card.frame, card.head, Some(&bar), on_thumb),
+            press_at(card.frame, card.head, None, Some(&bar), on_thumb),
             Press::Thumb(held)
         );
 
         // ② In the document beside it — the door, not a caret.
         let in_document = [card.body[0] + 20.0, (card.body[1] + card.body[3]) / 2.0];
         assert_eq!(
-            press_at(card.frame, card.head, Some(&bar), in_document),
+            press_at(card.frame, card.head, None, Some(&bar), in_document),
             Press::Open
         );
-        // And the foot is the card too: the face below the head is one door,
-        // which is what "click the card" means.
+        // And a foot with no address to press is the card too: without one the
+        // face below the head is one door, which is what "click the card"
+        // means. (The address's own press is the next test's.)
         assert_eq!(
             press_at(
                 card.frame,
                 card.head,
+                None,
                 Some(&bar),
                 [card.foot[0] + 20.0, (card.foot[1] + card.foot[3]) / 2.0]
             ),
@@ -3830,6 +4099,7 @@ mod tests {
             press_at(
                 card.frame,
                 card.head,
+                None,
                 Some(&bar),
                 [card.name[0], card.name[1] + 1.0]
             ),
@@ -3839,6 +4109,7 @@ mod tests {
             press_at(
                 card.frame,
                 card.head,
+                None,
                 Some(&bar),
                 [(card.head[0] + card.head[2]) / 2.0, card.head[1] + 1.0]
             ),
@@ -3849,6 +4120,7 @@ mod tests {
             press_at(
                 card.frame,
                 card.head,
+                None,
                 Some(&bar),
                 [card.body[0] + 20.0, card.body[1] + 1.0]
             ),
@@ -3861,6 +4133,7 @@ mod tests {
             press_at(
                 card.frame,
                 card.head,
+                None,
                 Some(&bar),
                 [card.frame[2] + 4.0, in_document[1]]
             ),
@@ -3870,6 +4143,7 @@ mod tests {
             press_at(
                 card.frame,
                 card.head,
+                None,
                 Some(&bar),
                 [in_document[0], card.frame[1] - 4.0]
             ),
@@ -3878,6 +4152,173 @@ mod tests {
 
         // ⑤ With no bar at all — a card whose document fits — the same point on
         //    the edge is the door, because there is nothing there to hold.
-        assert_eq!(press_at(card.frame, card.head, None, on_thumb), Press::Open);
+        assert_eq!(
+            press_at(card.frame, card.head, None, None, on_thumb),
+            Press::Open
+        );
+    }
+
+    /// RED (ticket 12, user ruling 2026-09-20) — **the foot's address is a press
+    /// of its own, and only the address.**
+    ///
+    /// Everything below the head was one door until the foot became the file's
+    /// folder. The address is now where the file *lives*, and a press on it
+    /// answers that (find it in the files column, or hand it to the file
+    /// manager) rather than opening the file again. The phrase hung on the right
+    /// is not the address, and the document above it is still the door.
+    ///
+    /// MUTATION: drop the `Press::Foot` arm from `press_at` — the press on the
+    /// address opens the pane, and the first assertion goes red.
+    #[test]
+    fn a_press_on_the_foots_address_is_the_foots_and_the_rest_is_still_the_door() {
+        let card = tall_card([40.0, 300.0, 240.0, 320.0]);
+        let notice = crate::preview::preview_truncated_notice();
+        let dressed = foot(&card, notice);
+        let address = foot_address_box(&card, &dressed).expect("a file's card has an address");
+        let middle = (card.foot[1] + card.foot[3]) / 2.0;
+        assert_eq!(
+            press_at(
+                card.frame,
+                card.head,
+                Some(address),
+                None,
+                [card.foot[0] + 12.0, middle]
+            ),
+            Press::Foot
+        );
+        assert_eq!(
+            press_at(
+                card.frame,
+                card.head,
+                Some(address),
+                None,
+                [dressed.notice_box[0] + 2.0, middle]
+            ),
+            Press::Open,
+            "the phrase on the right is not the address"
+        );
+        assert_eq!(
+            press_at(
+                card.frame,
+                card.head,
+                Some(address),
+                None,
+                [card.foot[0] + 12.0, card.foot[1] - 2.0]
+            ),
+            Press::Open,
+            "the document above the foot is still the door"
+        );
+        // A card with no folder to name — a composed document — has no address
+        // to press, and its foot is the face it always was.
+        let bare = crate::seats::dress_foot(
+            crate::seats::FootDress {
+                dissolved: 0.0,
+                run: foot_run(&card, SCALE),
+                lead: "",
+                flash: None,
+                notice: "",
+                cut: crate::seats::LeadCut::Middle,
+                font_px: PEEK_FOOT_FONT_LOGICAL_PX * SCALE,
+                gap_px: crate::seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * SCALE,
+            },
+            &mut ruler,
+        );
+        assert_eq!(foot_address_box(&card, &bare), None);
+    }
+
+    /// RED (41) — **the foot's address lights under the hand, and only there.**
+    ///
+    /// Ticket 12 made the foot the file's folder and a press on it finds the
+    /// file; on the owner's machine (2026-09-23, next89) pointing at it changed
+    /// nothing, so a control read as a caption. The files column's foot and a
+    /// float's foot both answer a hover with `--hover` behind the strip and the
+    /// words one ink up; this is the card's strip doing the same, over the card's
+    /// own `--menu` ground, through the one box the press is tested against.
+    /// Built through [`build`] with a pointer, in both themes.
+    ///
+    /// MUTATION: ignore the hover flag in the paint (`let foot_lit = false;` in
+    /// `build`) — the address keeps its resting ink under the hand and the first
+    /// assertion goes red.
+    #[test]
+    fn the_foots_address_lights_under_the_pointer_and_nowhere_else() {
+        let card = tall_card([40.0, 300.0, 240.0, 320.0]);
+        let notice = crate::preview::preview_truncated_notice();
+        let dressed = foot(&card, notice);
+        let address = foot_address_box(&card, &dressed).expect("a file's card has an address");
+        let middle = (card.foot[1] + card.foot[3]) / 2.0;
+        let on_address = [card.foot[0] + 12.0, middle];
+        let on_notice = [dressed.notice_box[0] + 2.0, middle];
+        let in_document = [card.foot[0] + 12.0, card.foot[1] - 12.0];
+        for palette in [bt_render::DARK_CHROME, bt_render::LIGHT_CHROME] {
+            assert_ne!(palette.menu_item_text, palette.body_hint_text);
+            let drawn = |pointer: Option<[f32; 2]>| {
+                build(
+                    &card,
+                    &content(lines(40)),
+                    &dressed,
+                    pointer,
+                    None,
+                    &[],
+                    &palette,
+                    SCALE,
+                )
+            };
+            let ink = |layer: &OverlayLayer| {
+                layer
+                    .labels
+                    .iter()
+                    .find(|label| label.text == FOLDER)
+                    .expect("the address is drawn")
+                    .color
+            };
+            let lit = |layer: &OverlayLayer| {
+                layer.quads.iter().any(|quad| {
+                    quad.color == palette.menu_item_hover
+                        && quad.rect[0] >= address[0]
+                        && quad.rect[2] <= address[2]
+                        && quad.rect[1] >= address[1]
+                        && quad.rect[3] <= address[3]
+                })
+            };
+
+            let hovered = drawn(Some(on_address));
+            assert_eq!(
+                ink(&hovered),
+                palette.menu_item_text,
+                "the address steps up from the resting ink under the hand"
+            );
+            assert!(
+                lit(&hovered),
+                "and `--hover` fills the strip it answers for"
+            );
+            assert!(
+                hovered
+                    .quads
+                    .iter()
+                    .filter(|quad| quad.color == palette.menu_item_hover)
+                    .all(|quad| quad.rect[2] <= address[2] && quad.rect[3] <= card.foot[3]),
+                "the fill stops at the address and inside the card's face"
+            );
+            let notice_ink = hovered
+                .labels
+                .iter()
+                .find(|label| label.text == notice)
+                .expect("the notice is drawn")
+                .color;
+            assert_eq!(
+                notice_ink, palette.body_hint_text,
+                "the notice is not the address"
+            );
+
+            for (away, why) in [
+                (None, "no pointer in the window"),
+                (Some(on_notice), "on the notice beside it"),
+                (Some(in_document), "in the document above it"),
+            ] {
+                let rest = drawn(away);
+                assert_eq!(ink(&rest), palette.body_hint_text, "{why}");
+                assert!(!lit(&rest), "{why}");
+            }
+        }
     }
 }

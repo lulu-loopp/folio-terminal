@@ -336,6 +336,52 @@ const fn pick_platform(
 /// have to be renamed with it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Text {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
+        )
+    )]
+    CleanupArchiveExit,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
+        )
+    )]
+    CleanupArchiveReady,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
+        )
+    )]
+    CleanupArchiveIncomplete,
+
+    CleanupRecovery,
+    CleanupRuntime,
+
+    CleanupRemoved,
+    CleanupAbsent,
+    CleanupLeft,
+    /// Folio's own files went and something it never wrote stood beside them, so
+    /// that something is still there (audit 3, E-1).
+    CleanupNotOurs,
+    CleanupRefused,
+    CleanupRoot,
+    CleanupRunning,
+    CleanupBusy,
+    CleanupUnexpected,
+    CleanupApplication,
+    CleanupLink,
+    CleanupUsage,
+    CleanupSystemUnknown,
+    CleanupRecorded,
+    CleanupMacHeld,
+
     // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
     PastePathEncoding,
     PastePathControl,
@@ -346,6 +392,9 @@ pub enum Text {
     PastePathNushell,
     PasteClipboardPromise,
     PasteClipboardRead,
+    /// The clipboard held a picture and the file Folio writes for it could not
+    /// be written (§7.61).
+    PasteClipboardPicture,
     PasteProfileOverride,
 
     // ── window chrome ──────────────────────────────────────────────────────
@@ -434,11 +483,34 @@ pub enum Text {
     DescAboutIssues,
     RowAboutLicences,
     DescAboutLicences,
+    /// **The three configuration doors on the About page** (0.4.4 ticket 05):
+    /// one file out, one file in, and the folder they come from. Two verbs end
+    /// in `…` because each opens the system's own dialog first.
+    RowExportSettings,
+    DescExportSettings,
+    ExportVerb,
+    RowImportSettings,
+    DescImportSettings,
+    ImportVerb,
+    RowSettingsFolder,
+    DescSettingsFolder,
+    /// The titles of the cards an export and an import raise — a state is one
+    /// word (owner, 2026-09-20). The body is the file, or the rows by name.
+    SettingsExported,
+    SettingsExportFailed,
+    SettingsImported,
+    SettingsImportFailed,
+    /// What an export or an import left out, named one by one in the card's body.
+    SettingsSkipped,
+    /// Rows the file carries that this platform has no row for: kept in the
+    /// file for the machine they belong to, and named rather than dropped.
+    SettingsNotOnThisMachine,
 
     RowTheme,
     RowCursor,
     RowFormulas,
     RowInlineFormulas,
+    RowRepairRowBreaks,
     RowGitPanel,
     /// **The Explorer verb's row** (§7.4, §7.4a), on the General page.
     ///
@@ -460,6 +532,12 @@ pub enum Text {
     /// "font" in a terminal's settings is ambiguous and the ambiguity is the
     /// whole complaint a reader would have.
     RowTerminalFont,
+    RowTerminalCjkFont,
+    CjkSimplified,
+    CjkTraditional,
+    CjkJapanese,
+    CjkKorean,
+    CjkUndeclared,
     RowFontSize,
     /// The Terminal page's first row, and therefore the row that puts that page
     /// in the rail at all.
@@ -469,6 +547,7 @@ pub enum Text {
     DescCursor,
     DescFormulas,
     DescInlineFormulas,
+    DescRepairRowBreaks,
     DescGitPanel,
     /// **What On does on a machine that can do everything** — the switch's line
     /// where Windows 11 and `folio.msix` are both there (user ruling
@@ -524,11 +603,13 @@ pub enum Text {
     DescDefaultProfile,
     DescLanguage,
     DescTerminalFont,
+    DescTerminalCjkFont,
     DescFontSize,
 
     /// Shared by Theme and Language, which is the point: it is one word meaning
     /// one thing — "ask Windows" — in both rows.
     OptionSystem,
+    OptionAutomatic,
     OptionLight,
     OptionDark,
     OptionCursorBar,
@@ -572,6 +653,9 @@ pub enum Text {
     /// there. Something outside Folio removed it, which is a fact the row owes
     /// the reader rather than a state to silently correct.
     PsReadLineRowGone,
+    /// A module somebody else wrote is standing in the directory Folio installs
+    /// into, so neither verb on the row is offered (audit 3, E-1).
+    PsReadLineRowNotOurs,
     /// The invitation's own question. It names the symptom the reader has
     /// already seen — the input line that does not follow the window — rather
     /// than the module, because the module is not what they noticed.
@@ -1381,17 +1465,20 @@ pub enum Text {
     ShortcutNoteOnePerMember,
     ShortcutNoteNoneAssigned,
     ShortcutNoteSomeUnassigned,
+    /// The word on a row whose chord is a bare `Ctrl` and one letter: the key no
+    /// longer reaches the program in the pane (owner rulings 2026-09-22 and
+    /// 2026-09-23). It replaced the recorder's refusal of the same chord.
+    ShortcutNoteShell,
     /// What stands where the caps would be on a row with no chord.
     ShortcutUnbound,
     /// The two rows the audit listed and declined, and the line under them.
     ShortcutReservedMoveFocus,
     ShortcutReservedResizePane,
     ShortcutReservedAltArrow,
-    /// The recorder's two standing refusals. The chords in them are key caps and
-    /// stay as they are; what is translated is the reason.
+    /// The recorder's standing refusal. The chord in it is key caps and stays as
+    /// it is; what is translated is the reason.
     ShortcutHintAltGrZone,
-    ShortcutHintShellControlLetter,
-    /// The recorder's third, and the only one that is about which row is asking:
+    /// The recorder's second, and the only one that is about which row is asking:
     /// the summon's key is claimed from Windows, so a chord with no modifier on
     /// it would be taken from every program on the machine.
     ShortcutHintGlobalNeedsModifier,
@@ -1682,9 +1769,7 @@ pub enum Text {
     RefNameShape,
 
     // ── the file peek card and the diff document ───────────────────────────
-    /// The card's foot. `Enter` is a key cap.
-    PeekFoot,
-    /// Its refusal — the preview pane's own sentence said in one line, and a
+    /// The card's refusal — the preview pane's own sentence said in one line, and a
     /// different sentence from [`Self::PreviewRefusalBinary`] because this one
     /// covers the unrecognised type as well.
     PeekUnknown,
@@ -1702,6 +1787,16 @@ pub enum Text {
     /// [`Self::DragSwapPanes`] and [`Self::DragReplacePane`].
     DragOpenInPreview,
     DragRootTreeHere,
+    /// **The caption a file row earns over a terminal's middle** (§7.1.1, user
+    /// ruling 2026-09-16).
+    ///
+    /// The third of this family and the one that is not a view verb at all: the
+    /// two above change what a pane is *showing*, and this one puts characters
+    /// on a command line. Which is exactly why the word has to be on the box —
+    /// the ruling that opened this zone rests on the label being there, because
+    /// the label is the whole of what tells a reader that this middle means
+    /// something the other middles do not.
+    DragPastePath,
 
     // ── the Terminal page's Scrollback row (P2-9 slice 2, 2026-08-19) ──────
     //
@@ -1780,11 +1875,13 @@ pub enum Text {
     // withdrawn surface is how a withdrawn surface comes back by accident.
     /// `Appearance ▸ Focus mode` — the row, and the name of the thing itself.
     RowFocusMode,
-    /// Its sentence. Says what the column *is* and names the chord, because this
-    /// row and that chord are the only two ways in — and, since 2026-08-20, the
-    /// only two ways out as well (the 08-19 ruling withdrew the pane-header
-    /// double-click and the pane menu's row; the 08-20 one withdrew the `Exit`
-    /// button, its heading row and the `Esc` rung).
+    /// Its sentence, **without the chord**. Says what the column *is*; the
+    /// chord that is the other way in — and, since 2026-08-20, the only other
+    /// way out (the 08-19 ruling withdrew the pane-header double-click and the
+    /// pane menu's row; the 08-20 one withdrew the `Exit` button, its heading
+    /// row and the `Esc` rung) — is added by [`focus_mode_row_in`] out of the
+    /// shortcut table, because a chord spelled here by hand is wrong on macOS
+    /// and wrong after a rebind (0.4.4 ticket 06, owner ruling 2026-09-22).
     DescFocusMode,
     // `FocusExit` — the word on a button at the head of the card column — left
     // this table with the button on 2026-08-20, for the same reason the pane
@@ -1801,6 +1898,14 @@ pub enum Text {
     /// the fact a reader has to know before they turn it on — that this is the
     /// one row in the dialog that overrides a colour a program asked for.
     DescMinimumContrast,
+    /// `Appearance ▸ Advanced ▸ Web pages`, which colour scheme a web pane asks its page for
+    /// (0.4.4 ticket 09).
+    RowWebPages,
+    /// Its sentence.
+    DescWebPages,
+    /// The row's first answer, the shipped one (`Theme`): the
+    /// page asks Folio's own light or dark. `Light` and `Dark` are the theme row's own two words.
+    OptionFollowTheme,
 
     // ── desktop notifications (§7.6, Windows landing slice 3, 2026-08-20) ──
     //
@@ -1920,6 +2025,20 @@ pub enum Text {
     ///
     /// One string and not four, because the four reasons are all "the file could not be written"
     /// wearing different hats and a reader takes the same action for every one of them.
+    AgentHooksExeUnknown,
+    AgentHooksExeUnstable,
+    AgentHooksPathPlaceholder,
+    AgentHooksTranslocated,
+    AgentHooksOwnerUnknown,
+    AgentHooksSchemaUnknown,
+    AgentHooksRecordFailed,
+    AgentHooksRootUnstable,
+    AgentHooksTakeOver,
+    AgentHooksLeftOther,
+    AgentConfigLink,
+    AgentConfigHardLink,
+    AgentConfigReadOnly,
+    AgentConfigChanged,
     ClaudeHooksFailedToast,
     // ── the focus card's height (§7.1.6b′, user ruling 2026-08-21) ──────────
     //
@@ -1992,6 +2111,16 @@ pub enum Text {
     ShortcutScopeWebPage,
     /// The tag for a row in force on either of the search capsule's two hosts.
     ShortcutScopeSearchHost,
+    /// `text-larger`'s row (ticket 37): one rung up the pane's text-size ladder.
+    ShortcutTextLarger,
+    /// `text-smaller`'s row (ticket 37).
+    ShortcutTextSmaller,
+    /// `text-actual-size`'s row (ticket 37) — and the pane head's indicator's tip, which is the
+    /// same verb.
+    ShortcutTextActualSize,
+    /// The tag for a row in force while a terminal holds the keyboard, on either screen
+    /// (ticket 37).
+    ShortcutScopeTerminal,
     /// `.pv-nav.pv-back`'s tip.
     PreviewWebBack,
     /// `.pv-nav.pv-fwd`'s tip.
@@ -2397,6 +2526,24 @@ pub enum Text {
     RowCopyOnSelect,
     /// Its sentence.
     DescCopyOnSelect,
+    /// **CHINESE PENDING (2026-09-23)** — `Terminal ▸ Ask before pasting several lines`, the
+    /// one row the owner ruled for the multi-line paste card (2026-09-22). English stands in both
+    /// columns until opus46 writes it.
+    RowMultilinePaste,
+    /// **CHINESE PENDING (2026-09-23)** — its sentence.
+    DescMultilinePaste,
+
+    // ── the multi-line paste card (0.4.4 ticket 02) ──
+    //
+    // Three strings and no sentence: the owner ruled the card's words (2026-09-22) and 界面字要少
+    // (2026-09-20) rules out an explanation. **CHINESE PENDING (2026-09-23)** on all three.
+    /// `N lines → <shell>` — the card's only line. `{lines}` and `{shell}` are filled by
+    /// [`paste_card_title`].
+    PasteCardTitle,
+    /// Today's bytes, one command per line.
+    PasteCardRun,
+    /// The lines joined, with no Enter.
+    PasteCardJoin,
 
     // ── a tab's own context menu (gesture audit 2026-08-26, 丙２) ──
     //
@@ -2651,6 +2798,21 @@ pub enum Text {
     /// here, so a row left on when the card was answered is a row waiting for a
     /// shell to name its own file.
     ShellIntegrationPending,
+    ShellProfileEncoding,
+    ShellMarksVersion,
+    ShellMarksPath,
+    ShellMarksProfileKind,
+    ShellProfileUnchanged,
+    ShellProfileMigrated,
+    ShellProfileRemoved,
+    ShellProfileRefused,
+    ShellProfileProbeFailed,
+    ShellProfileLink,
+    ShellProfileHardLink,
+    ShellProfileReadOnly,
+    ShellProfileChanged,
+    ShellProfileScriptLocation,
+    ShellProfileNothing,
 
     // ── the application menu bar (M3-2, macOS) ─────────────────────────────
     //
@@ -2777,6 +2939,11 @@ impl Text {
                 "The clipboard could not be read. Copy again and retry.",
                 "剪贴板无法读取。重新复制后再试。",
             ),
+            Self::PasteClipboardPicture => pick(
+                lang,
+                "The clipboard picture could not be saved. Copy again and retry.",
+                "剪贴板图片无法保存。重新复制后再试。",
+            ),
             Self::PasteProfileOverride => pick(
                 lang,
                 "profiles.json: {id}: {key} is unsupported; the default was kept.",
@@ -2875,6 +3042,30 @@ impl Text {
                 "The open-source components Folio is made of, and their licences.",
                 "Folio 使用的开源组件及其许可证。",
             ),
+            Self::RowExportSettings => pick(lang, "Export settings", "导出设置"),
+            Self::DescExportSettings => pick(
+                lang,
+                "Settings, profiles, shortcuts and colour schemes, in one file.",
+                "设置、配置文件、快捷键和配色，合为一个文件。",
+            ),
+            Self::ExportVerb => pick(lang, "Export…", "导出…"),
+            Self::RowImportSettings => pick(lang, "Import settings", "导入设置"),
+            Self::DescImportSettings => pick(
+                lang,
+                "Applies an exported file at once.",
+                "一次性应用导出文件。",
+            ),
+            Self::ImportVerb => pick(lang, "Import…", "导入…"),
+            Self::RowSettingsFolder => pick(lang, "Settings folder", "设置文件夹"),
+            Self::DescSettingsFolder => {
+                pick(lang, "Where these files are kept.", "这些文件的存放位置。")
+            }
+            Self::SettingsExported => pick(lang, "Exported", "已导出"),
+            Self::SettingsExportFailed => pick(lang, "Not exported", "未导出"),
+            Self::SettingsImported => pick(lang, "Imported", "已导入"),
+            Self::SettingsImportFailed => pick(lang, "Not imported", "未导入"),
+            Self::SettingsSkipped => pick(lang, "Skipped", "已跳过"),
+            Self::SettingsNotOnThisMachine => pick(lang, "Not on this machine", "本机不适用"),
 
             Self::RowTheme => pick(lang, "Theme", "主题"),
             Self::RowCursor => pick(lang, "Cursor", "光标"),
@@ -2883,6 +3074,7 @@ impl Text {
             // the same reason they do in English.
             Self::RowFormulas => pick(lang, "Display formulas", "行间公式"),
             Self::RowInlineFormulas => pick(lang, "Inline formulas", "行内公式"),
+            Self::RowRepairRowBreaks => pick(lang, "Repair row breaks", "修复公式换行"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
             Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器菜单"),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签布局"),
@@ -2891,6 +3083,12 @@ impl Text {
             Self::RowDefaultProfile => pick(lang, "Default profile", "默认配置文件"),
             Self::RowLanguage => pick(lang, "Language", "语言"),
             Self::RowTerminalFont => pick(lang, "Terminal font", "终端字体"),
+            Self::CjkSimplified => pick(lang, "Simplified Chinese", "简体中文"),
+            Self::CjkTraditional => pick(lang, "Traditional Chinese", "繁体中文"),
+            Self::CjkJapanese => pick(lang, "Japanese", "日文"),
+            Self::CjkKorean => pick(lang, "Korean", "韩文"),
+            Self::CjkUndeclared => pick(lang, "CJK (language undeclared)", "语言未注明"),
+            Self::RowTerminalCjkFont => pick(lang, "CJK font", "中文字体"),
             Self::RowFontSize => pick(lang, "Font size", "字号"),
             Self::RowPsReadLine => pick(lang, "PSReadLine patch", "PSReadLine 补丁"),
 
@@ -2913,6 +3111,11 @@ impl Text {
                 lang,
                 "Typesets $…$ in command output. Off, the LaTeX source is shown as printed.",
                 "排版命令输出里的 $…$。关闭时显示 LaTeX 源码原文。",
+            ),
+            Self::DescRepairRowBreaks => pick(
+                lang,
+                "Restores a row break an agent's own redraw dropped from a matrix or aligned block.",
+                "补回 agent 重绘时从矩阵或对齐块中丢掉的换行。",
             ),
             // **What it does, then the bound on what it can do.** The second
             // sentence is the one a reader of a terminal's settings actually
@@ -3025,6 +3228,11 @@ impl Text {
                 "The font terminal text is drawn in. Tabs, menus and this dialog keep their own.",
                 "终端文字使用的字体。标签、菜单和这个对话框保持各自的字体。",
             ),
+            Self::DescTerminalCjkFont => pick(
+                lang,
+                "The font for CJK text. Automatic is the platform's default.",
+                "终端中文、日文、韩文使用的字体。设为自动时使用系统默认字体。",
+            ),
             Self::DescFontSize => pick(
                 lang,
                 "The size of terminal text, before your display's scaling is applied.",
@@ -3041,10 +3249,17 @@ impl Text {
                 "The palette a light window uses for terminal text and for the window itself.",
                 "浅色窗口用的配色，终端与窗口本身共用一套。",
             ),
-            Self::DescDarkScheme => pick(
+            // **The folder is a platform fact** (0.4.4 ticket 07): the Mac
+            // column used to send a Mac reader to `%APPDATA%`, which that
+            // machine does not have. `persist::storage_dir` is where the
+            // folder really is on each.
+            Self::DescDarkScheme => pick_platform(
                 lang,
+                platform,
                 "The same for a dark window. Your own scheme files go in %APPDATA%\\Folio\\schemes.",
                 "深色窗口同理。你自己的配色文件放在 %APPDATA%\\Folio\\schemes。",
+                "The same for a dark window. Your own schemes go in ~/Library/Application Support/Folio/schemes.",
+                "深色窗口同理。你自己的配色文件放在 ~/Library/Application Support/Folio/schemes。",
             ),
             Self::SchemeFileSkipped => pick(lang, "Colour scheme skipped", "配色文件已跳过"),
 
@@ -3113,6 +3328,7 @@ impl Text {
             Self::OptionFitTile => pick(lang, "Tile", "平铺"),
 
             Self::OptionSystem => pick(lang, "System", "系统"),
+            Self::OptionAutomatic => pick(lang, "Automatic", "自动"),
             Self::OptionLight => pick(lang, "Light", "浅色"),
             Self::OptionDark => pick(lang, "Dark", "深色"),
             Self::OptionCursorBar => pick(lang, "Bar", "竖线"),
@@ -3137,6 +3353,11 @@ impl Text {
                 lang,
                 "The copy Folio installed is no longer on disk",
                 "Folio 安装的那一份已不在磁盘上",
+            ),
+            Self::PsReadLineRowNotOurs => pick(
+                lang,
+                "Another PSReadLine is installed here. Folio leaves it alone",
+                "此处有非 Folio 安装的 PSReadLine，不做改动",
             ),
             // **Length-sensitive.** The dialog's title is one unwrapped line in
             // a 400px float, exactly as the dirty gate's is; the first draft
@@ -3763,6 +3984,7 @@ impl Text {
                 "One chord for each; some are not set yet",
                 "每一个各有一组键；有些还没设",
             ),
+            Self::ShortcutNoteShell => pick(lang, "shell", "终端键"),
             Self::ShortcutUnbound => pick(lang, "Not set", "未设置"),
             Self::ShortcutReservedMoveFocus => {
                 pick(lang, "Move the focus between panes", "在窗格之间移动焦点")
@@ -3777,11 +3999,6 @@ impl Text {
                 lang,
                 "Ctrl+Alt is reserved for AltGr keyboards",
                 "Ctrl+Alt 留给 AltGr 键盘",
-            ),
-            Self::ShortcutHintShellControlLetter => pick(
-                lang,
-                "Ctrl+letter belongs to the shell",
-                "Ctrl+字母属于 shell",
             ),
             // **The three keys are named, so they have to be the ones on the
             // reader’s own keyboard** (§13.32 ②). `Win` is a keycap that does
@@ -4045,11 +4262,6 @@ impl Text {
             ),
 
             // ── the file peek card and the diff document ───────────────────
-            Self::PeekFoot => pick(
-                lang,
-                "Enter / double-click opens the preview pane",
-                "Enter / 双击打开预览窗格",
-            ),
             Self::PeekUnknown => pick(
                 lang,
                 "No preview: binary or unrecognised type.",
@@ -4160,10 +4372,15 @@ impl Text {
             // the row does to the key rather than what the key sends, because
             // the sentence under it is about the key and not about a press.
             Self::RowOptionSendsAlt => pick(lang, "Option key sends Alt", "Option 键当作 Alt"),
+            //
+            // **Two lines, like every other sentence on the page** (owner
+            // ruling 2026-09-23, which ends the 2026-09-13/14 exemption): the
+            // two states and who each one is for — terminal programs, or the
+            // accents every other Mac app types — and nothing past the budget.
             Self::DescOptionSendsAlt => pick(
                 lang,
-                "Off: Option types the accented characters macOS gives it, as in other apps. On: Option is the Alt key terminal programs expect, so Option with a letter is an Alt chord to the shell.",
-                "关闭时，Option 和在其他应用里一样，打出 macOS 给它的重音字符。打开时，Option 就是终端程序要的 Alt 键，Option 加上字母就是送到 shell 的 Alt 组合键。",
+                "On, Option is Alt to terminal programs. Off, it types accents as in other apps.",
+                "「开」时 Option 是终端程序的 Alt。「关」时像其他应用一样输入重音字符。",
             ),
             // ── the tree row's menu, completed (user ruling 2026-08-25) ────
             //
@@ -4183,6 +4400,7 @@ impl Text {
             Self::DragRootTreeHere => {
                 pick(lang, "Root the files column here", "把这棵树的根设到这里")
             }
+            Self::DragPastePath => pick(lang, "Paste path", "粘贴路径"),
 
             // ── the Terminal page's Scrollback row ─────────────────────────
             //
@@ -4259,17 +4477,18 @@ impl Text {
             // `solve_focused` and the `focus-mode` binding id are identifiers,
             // and an identifier is not something a reader meets.
             Self::RowFocusMode => pick(lang, "Cards", "卡片"),
-            // Three clauses, in the order a reader meets them: what replaces the
-            // tab strip, what happens to the tab you pick, and the other door.
-            // It states facts and names the chord — no persuasion, and no "we".
-            // The two pane-level doors it used to name were withdrawn on
-            // 2026-08-19, and the sentence lost them the same day: a row that
-            // advertises a gesture the build does not have is worse than a row
-            // that says less.
+            // What replaces the tab strip, in the order a reader meets it. The
+            // other door — the chord — is not spelled here: the row's sentence
+            // is composed by `focus_mode_row_in` out of the shortcut table, so it
+            // names the chord this platform and this reader's rebinds actually
+            // hold (0.4.4 ticket 06). The two pane-level doors it used to name
+            // were withdrawn on 2026-08-19, and the sentence lost them the same
+            // day: a row that advertises a gesture the build does not have is
+            // worse than a row that says less.
             Self::DescFocusMode => pick(
                 lang,
-                "The tab strip becomes a column of cards, one per tab. Ctrl+Shift+Z does the same.",
-                "标签条变成一列卡片，每个标签一张。Ctrl+Shift+Z 同样可切换。",
+                "The tab strip becomes a column of cards, one per tab.",
+                "标签条变成一列卡片，每个标签一张。",
             ),
             // 「最小对比度」is the term of art both WCAG's Chinese translations
             // and VS Code's own Chinese locale use for this quantity, so the row
@@ -4290,6 +4509,16 @@ impl Text {
                 "Lightens or darkens terminal text to this ratio. Above Off, program colours give way.",
                 "终端文字提亮或压暗到这个对比度。关以上会覆盖程序指定的颜色。",
             ),
+            // The web pane's colour-scheme row (0.4.4 ticket 09); Chinese by opus46, 2026-09-23.
+            Self::RowWebPages => pick(lang, "Web pages", "网页"),
+            Self::DescWebPages => pick(
+                lang,
+                "Asks web pages for light or dark. A site with no dark style stays as it is.",
+                "向网页请求浅色或深色。没有深色样式的网站保持原样。",
+            ),
+            // `Theme` and not the ticket's `Follow theme`: the picker's button is 118px and
+            // the longer label is drawn `Follow th…` on every machine, in the shipped state.
+            Self::OptionFollowTheme => pick(lang, "Theme", "主题"),
             // 「通知」and not 「桌面通知」: Windows itself calls the surface
             // 「通知」in its own Settings, and the row's sentence says where it
             // lands. English keeps the plural for the same reason — the row is
@@ -4411,16 +4640,11 @@ impl Text {
                 "This file was deleted. What you are reading is still here.",
                 "文件已被删除。你正在读的这一份还在。",
             ),
-            Self::RowPowerShellOffer => {
-                pick(lang, "Offer PowerShell integration", "PowerShell 整合提示")
-            }
-            // The same three things as the strip, in the same order, so a
-            // reader who read one and then looked for the switch reads one list
-            // twice rather than two lists once.
+            Self::RowPowerShellOffer => pick(lang, "PowerShell integration", "PowerShell 整合"),
             Self::DescPowerShellOffer => pick(
                 lang,
-                "A PowerShell pane without integration offers to add one. Integration marks commands, follows the folder, typesets $…$.",
-                "未整合的 PowerShell 窗格提示加入整合。整合提供命令标记、目录跟随和 $…$ 排版。",
+                "On offers setup. Off removes Folio's profile lines.",
+                "开启时提示安装整合。关闭时移除 Folio 整合行。",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -4456,6 +4680,162 @@ impl Text {
                 lang,
                 "Claude Code hook removed",
                 "已从 ~/.claude/settings.json 移除",
+            ),
+            Self::AgentHooksExeUnknown => pick(
+                lang,
+                "The running executable’s location is unavailable.",
+                "无法获取可执行文件的位置。",
+            ),
+            Self::AgentHooksPathPlaceholder => pick(
+                lang,
+                "This executable path contains an agent placeholder. Move Folio before installing hooks.",
+                "路径含有 agent 占位符。将 Folio 移到固定位置后再安装 hook。",
+            ),
+            Self::AgentHooksExeUnstable => pick(
+                lang,
+                "The hook executable needs a stable absolute Unicode path.",
+                "hook 可执行文件需要稳定的绝对路径。",
+            ),
+            Self::AgentHooksTranslocated => pick(
+                lang,
+                "Move Folio out of App Translocation before installing hooks.",
+                "将 Folio 移出 App Translocation 后再安装 hook。",
+            ),
+            Self::CleanupRecovery => pick(
+                lang,
+                "left (dated recovery copies of user configuration are kept)",
+                "已保留（带日期的配置备份不删除）",
+            ),
+            Self::CleanupRuntime => pick(
+                lang,
+                "left (OS runtime lock files are kept to preserve single-instance exclusion)",
+                "已保留（运行时锁文件用于单实例互斥）",
+            ),
+            Self::CleanupArchiveExit => pick(lang, "Cleanup exit code:", "清理退出码："),
+            Self::CleanupArchiveReady => pick(
+                lang,
+                "You can now delete the Folio application folder. Your settings and data were kept.",
+                "现在可以删除 Folio 应用文件夹。设置和数据已保留。",
+            ),
+            Self::CleanupArchiveIncomplete => pick(
+                lang,
+                "Cleanup did not complete. Read the result above before deleting the folder.",
+                "清理未完成。删除文件夹前请查看上方结果。",
+            ),
+            Self::CleanupRemoved => pick(lang, "removed", "已移除"),
+            Self::CleanupAbsent => pick(lang, "not present", "不存在"),
+            Self::CleanupLeft => pick(
+                lang,
+                "left (belongs to another existing copy):",
+                "已保留（属于另一份 Folio）：",
+            ),
+            Self::CleanupNotOurs => pick(
+                lang,
+                "left (not Folio's files):",
+                "已保留（非 Folio 的文件）：",
+            ),
+            Self::CleanupRefused => pick(lang, "refused", "未能移除"),
+            Self::CleanupRoot => pick(
+                lang,
+                "An absolute, verified cleanup root is required.",
+                "需要经过验证的绝对路径作为清理根目录。",
+            ),
+            Self::CleanupRunning => pick(
+                lang,
+                "A Folio instance is running; nothing was changed.",
+                "Folio 正在运行，未做任何更改。",
+            ),
+            Self::CleanupBusy => pick(
+                lang,
+                "A process holds Folio data; nothing was changed",
+                "有进程持有 Folio 数据，未做任何更改",
+            ),
+            Self::CleanupUnexpected => pick(
+                lang,
+                "The remover returned an unexpected outcome.",
+                "清理操作返回了意外结果。",
+            ),
+            Self::CleanupApplication => pick(
+                lang,
+                "The application folder cannot be purged.",
+                "应用程序文件夹不能被清除。",
+            ),
+            Self::CleanupLink => pick(
+                lang,
+                "A symlink or junction was found; the root was left unchanged.",
+                "发现符号链接或连接点，根目录未更改。",
+            ),
+            Self::CleanupUsage => pick(
+                lang,
+                "Use folio --uninstall-cleanup [--purge].",
+                "用法：folio --uninstall-cleanup [--purge]",
+            ),
+            Self::CleanupSystemUnknown => pick(
+                lang,
+                "The registration could not be read.",
+                "无法读取注册信息。",
+            ),
+            Self::CleanupRecorded => pick(
+                lang,
+                "The record names a path this door will not act on.",
+                "记录中的路径不在清理范围内。",
+            ),
+            Self::CleanupMacHeld => pick(
+                lang,
+                "On macOS Folio cannot tell whether another program holds this data. \
+                 Quit Folio before --purge.",
+                "macOS 上 Folio 无法判断是否有其他程序持有此数据。\
+                 清除前请先退出 Folio。",
+            ),
+            Self::AgentHooksOwnerUnknown => pick(
+                lang,
+                "The hook executable’s owner could not be verified.",
+                "无法确认 hook 可执行文件的归属。",
+            ),
+            Self::AgentHooksSchemaUnknown => pick(
+                lang,
+                "The hook configuration uses an unrecognized format.",
+                "hook 配置的格式无法识别。",
+            ),
+            Self::AgentHooksRecordFailed => pick(
+                lang,
+                "The integration locations could not be recorded. Check the Folio data folder.",
+                "无法记录整合位置。检查 Folio 数据文件夹。",
+            ),
+            Self::AgentHooksRootUnstable => pick(
+                lang,
+                "The agent configuration needs an absolute path.",
+                "agent 配置路径必须是绝对路径。",
+            ),
+            Self::AgentHooksTakeOver => pick(
+                lang,
+                "Another Folio owns these hooks. Press this switch again within 30 seconds to use this copy:",
+                "另一份 Folio 拥有这些 hook。30 秒内再按一次开关即可改用当前副本：",
+            ),
+            Self::AgentHooksLeftOther => pick(
+                lang,
+                "Hooks kept for another Folio:",
+                "已为另一份 Folio 保留 hook：",
+            ),
+            Self::AgentConfigLink => pick(
+                lang,
+                "This file is a link Folio will not write through.",
+                "此文件是链接，Folio 未写入。",
+            ),
+            Self::AgentConfigHardLink => pick(
+                lang,
+                "This file has hard links, possibly from a dotfile manager. Folio left it unchanged.",
+                "此文件存在硬链接，Folio 未做修改。",
+            ),
+            Self::AgentConfigReadOnly => pick(
+                lang,
+                "This file is read-only, or is not a regular file.",
+                "此文件为只读，或不是普通文件。",
+            ),
+            Self::AgentConfigChanged => pick(
+                lang,
+                "The file changed while Folio was working on it. Try again.",
+                "此文件在操作期间被改动，Folio 未写入。请重试。",
             ),
             Self::ClaudeHooksFailedToast => pick(
                 lang,
@@ -4521,6 +4901,12 @@ impl Text {
             Self::ShortcutScopeSearchHost => {
                 pick(lang, "Where there is text to search", "有内容可搜索的地方")
             }
+            // English in both columns until opus46 writes the Chinese: every one of these is in
+            // `CHINESE_PENDING`, so the missing translation is loud rather than invisible.
+            Self::ShortcutTextLarger => pick(lang, "Larger text", "Larger text"),
+            Self::ShortcutTextSmaller => pick(lang, "Smaller text", "Smaller text"),
+            Self::ShortcutTextActualSize => pick(lang, "Actual text size", "Actual text size"),
+            Self::ShortcutScopeTerminal => pick(lang, "In a terminal", "In a terminal"),
             Self::PreviewWebBack => pick(lang, "Back", "后退"),
             Self::PreviewWebForward => pick(lang, "Forward", "前进"),
             Self::PreviewWebReload => pick(lang, "Reload", "重新加载"),
@@ -4558,7 +4944,7 @@ impl Text {
                 "This version of the web engine cannot enforce this window's rules for a page, so the file was not opened.",
                 "当前网页引擎无法执行这个窗口对页面设定的规则，文件没有打开。",
                 "The web engine would not take this window's rules for a page, so the file was not opened.",
-                "The web engine would not take this window's rules for a page, so the file was not opened.", // zh: pending opus46
+                "网页引擎拒绝了这个窗口对页面设定的规则，文件没有打开。",
             ),
             Self::WebDialogDismissed => pick(
                 lang,
@@ -4741,6 +5127,17 @@ impl Text {
                 "Copies selected text to the clipboard when you release the mouse button.",
                 "松开鼠标后将选中的文字复制到剪贴板。",
             ),
+            Self::RowMultilinePaste => {
+                pick(lang, "Ask before pasting several lines", "多行粘贴前询问")
+            }
+            Self::DescMultilinePaste => pick(
+                lang,
+                "Asks before a paste runs as several commands. Off, it is sent as is.",
+                "粘贴内容会逐行执行时先询问。关闭时原样发送。",
+            ),
+            Self::PasteCardTitle => pick(lang, "{lines} lines → {shell}", "{lines} 行 → {shell}"),
+            Self::PasteCardRun => pick(lang, "Run line by line", "逐行运行"),
+            Self::PasteCardJoin => pick(lang, "Join into one line", "合为一行"),
             Self::ShortcutRecord => pick(lang, "Record", "录制"),
             // 「按键…」and not 「录制中…」: the ellipsis already says a clock is
             // running, and what the reader has to supply is the press.
@@ -4914,6 +5311,75 @@ impl Text {
                 "Takes a dated copy of your $PROFILE, then appends one line to it.",
                 "先做带日期的副本，再追加一行到 $PROFILE",
             ),
+            Self::ShellProfileEncoding => pick(
+                lang,
+                "Unsupported profile encoding; expected UTF-8, UTF-8 BOM or UTF-16LE BOM.",
+                "$PROFILE 的编码不受支持，需要 UTF-8、UTF-8 BOM 或 UTF-16LE BOM。",
+            ),
+            Self::ShellMarksVersion => pick(
+                lang,
+                "Unsupported integration marks version.",
+                "整合记录的版本不受支持。",
+            ),
+            Self::ShellMarksPath => pick(
+                lang,
+                "Integration mark paths must be absolute.",
+                "整合记录中的路径必须是绝对路径。",
+            ),
+            Self::ShellMarksProfileKind => pick(
+                lang,
+                "A recorded $PROFILE must be a .ps1 file.",
+                "记录的 $PROFILE 必须是 .ps1 文件。",
+            ),
+            Self::ShellProfileUnchanged => pick(lang, "Folio profile unchanged", "$PROFILE 未改动"),
+            Self::ShellProfileMigrated => pick(
+                lang,
+                "Updated Folio profile line",
+                "已更新 $PROFILE 中的 Folio 整合行",
+            ),
+            Self::ShellProfileRemoved => pick(
+                lang,
+                "Removed Folio profile line",
+                "已移除 $PROFILE 中的 Folio 整合行",
+            ),
+            Self::ShellProfileRefused => {
+                pick(lang, "Could not change profile", "无法修改 $PROFILE")
+            }
+            Self::ShellProfileProbeFailed => pick(
+                lang,
+                "Could not query this PowerShell profile within five seconds.",
+                "五秒内未能查到此 PowerShell 的 $PROFILE。",
+            ),
+            Self::ShellProfileLink => pick(
+                lang,
+                "Symbolic links and reparse points are not edited.",
+                "不修改符号链接和重解析点。",
+            ),
+            Self::ShellProfileHardLink => pick(
+                lang,
+                "This profile has hard links, possibly from a dotfile manager. Folio left it unchanged.",
+                "$PROFILE 存在硬链接，可能来自配置文件管理工具。Folio 未做修改。",
+            ),
+            Self::ShellProfileReadOnly => pick(
+                lang,
+                "The profile is read-only or is not a regular file.",
+                "$PROFILE 为只读，或不是普通文件。",
+            ),
+            Self::ShellProfileChanged => pick(
+                lang,
+                "The profile changed during the operation; retry when the editor is finished.",
+                "$PROFILE 在操作期间被改动，等编辑器关闭后重试。",
+            ),
+            Self::ShellProfileScriptLocation => pick(
+                lang,
+                "The script must be under APPDATA\\Folio or APPDATA\\BetterTerminal, in shell-integration.",
+                "脚本必须位于 APPDATA\\Folio 或 APPDATA\\BetterTerminal 的 shell-integration 下。",
+            ),
+            Self::ShellProfileNothing => pick(
+                lang,
+                "No Folio profile lines found.",
+                "未找到 Folio 整合行。",
+            ),
             Self::ShellIntegrationPending => pick(
                 lang,
                 "Takes effect in the next PowerShell session",
@@ -4969,7 +5435,27 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 683] = [
+    pub const ALL: [Self; 770] = [
+        Self::CleanupArchiveExit,
+        Self::CleanupArchiveReady,
+        Self::CleanupArchiveIncomplete,
+        Self::CleanupRecovery,
+        Self::CleanupRuntime,
+        Self::CleanupRemoved,
+        Self::CleanupAbsent,
+        Self::CleanupLeft,
+        Self::CleanupNotOurs,
+        Self::CleanupRefused,
+        Self::CleanupRoot,
+        Self::CleanupRunning,
+        Self::CleanupBusy,
+        Self::CleanupUnexpected,
+        Self::CleanupApplication,
+        Self::CleanupLink,
+        Self::CleanupUsage,
+        Self::CleanupSystemUnknown,
+        Self::CleanupRecorded,
+        Self::CleanupMacHeld,
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -4979,6 +5465,7 @@ impl Text {
         Self::PastePathNushell,
         Self::PasteClipboardPromise,
         Self::PasteClipboardRead,
+        Self::PasteClipboardPicture,
         Self::PasteProfileOverride,
         Self::Settings,
         Self::ToggleSidebar,
@@ -5026,10 +5513,25 @@ impl Text {
         Self::DescAboutIssues,
         Self::RowAboutLicences,
         Self::DescAboutLicences,
+        Self::RowExportSettings,
+        Self::DescExportSettings,
+        Self::ExportVerb,
+        Self::RowImportSettings,
+        Self::DescImportSettings,
+        Self::ImportVerb,
+        Self::RowSettingsFolder,
+        Self::DescSettingsFolder,
+        Self::SettingsExported,
+        Self::SettingsExportFailed,
+        Self::SettingsImported,
+        Self::SettingsImportFailed,
+        Self::SettingsSkipped,
+        Self::SettingsNotOnThisMachine,
         Self::RowTheme,
         Self::RowCursor,
         Self::RowFormulas,
         Self::RowInlineFormulas,
+        Self::RowRepairRowBreaks,
         Self::RowGitPanel,
         Self::RowUpdateCheck,
         Self::RowContextMenu,
@@ -5039,12 +5541,19 @@ impl Text {
         Self::RowDefaultProfile,
         Self::RowLanguage,
         Self::RowTerminalFont,
+        Self::RowTerminalCjkFont,
+        Self::CjkSimplified,
+        Self::CjkTraditional,
+        Self::CjkJapanese,
+        Self::CjkKorean,
+        Self::CjkUndeclared,
         Self::RowFontSize,
         Self::RowPsReadLine,
         Self::DescTheme,
         Self::DescCursor,
         Self::DescFormulas,
         Self::DescInlineFormulas,
+        Self::DescRepairRowBreaks,
         Self::DescGitPanel,
         Self::DescUpdateCheck,
         Self::DescExplorerMenu,
@@ -5059,8 +5568,10 @@ impl Text {
         Self::DescDefaultProfile,
         Self::DescLanguage,
         Self::DescTerminalFont,
+        Self::DescTerminalCjkFont,
         Self::DescFontSize,
         Self::OptionSystem,
+        Self::OptionAutomatic,
         Self::OptionLight,
         Self::OptionDark,
         Self::OptionCursorBar,
@@ -5077,6 +5588,7 @@ impl Text {
         Self::OptionSplitDown,
         Self::PsReadLineProbing,
         Self::PsReadLineRowGone,
+        Self::PsReadLineRowNotOurs,
         Self::PsReadLineInviteTitle,
         Self::PsReadLineInstall,
         Self::PsReadLineNotNow,
@@ -5320,12 +5832,12 @@ impl Text {
         Self::ShortcutNoteOnePerMember,
         Self::ShortcutNoteNoneAssigned,
         Self::ShortcutNoteSomeUnassigned,
+        Self::ShortcutNoteShell,
         Self::ShortcutUnbound,
         Self::ShortcutReservedMoveFocus,
         Self::ShortcutReservedResizePane,
         Self::ShortcutReservedAltArrow,
         Self::ShortcutHintAltGrZone,
-        Self::ShortcutHintShellControlLetter,
         Self::ShortcutHintGlobalNeedsModifier,
         Self::GitNotARepository,
         Self::GitReading,
@@ -5459,12 +5971,12 @@ impl Text {
         Self::RefNameDash,
         Self::RefNameLock,
         Self::RefNameShape,
-        Self::PeekFoot,
         Self::PeekUnknown,
         Self::PeekFileGone,
         Self::GitDocumentEmpty,
         Self::DragOpenInPreview,
         Self::DragRootTreeHere,
+        Self::DragPastePath,
         Self::RowScrollback,
         Self::DescScrollback,
         Self::RowLineWrapping,
@@ -5480,6 +5992,9 @@ impl Text {
         Self::DescFocusMode,
         Self::RowMinimumContrast,
         Self::DescMinimumContrast,
+        Self::RowWebPages,
+        Self::DescWebPages,
+        Self::OptionFollowTheme,
         Self::RowNotifications,
         Self::DescNotifications,
         Self::RowTurnEndNotifications,
@@ -5502,6 +6017,20 @@ impl Text {
         Self::DescClaudeHooks,
         Self::ClaudeHooksAddedToast,
         Self::ClaudeHooksRemovedToast,
+        Self::AgentHooksExeUnknown,
+        Self::AgentHooksExeUnstable,
+        Self::AgentHooksPathPlaceholder,
+        Self::AgentHooksTranslocated,
+        Self::AgentHooksOwnerUnknown,
+        Self::AgentHooksSchemaUnknown,
+        Self::AgentHooksRecordFailed,
+        Self::AgentHooksRootUnstable,
+        Self::AgentHooksTakeOver,
+        Self::AgentHooksLeftOther,
+        Self::AgentConfigLink,
+        Self::AgentConfigHardLink,
+        Self::AgentConfigReadOnly,
+        Self::AgentConfigChanged,
         Self::ClaudeHooksFailedToast,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
@@ -5512,6 +6041,10 @@ impl Text {
         Self::ShortcutCloseSearch,
         Self::ShortcutScopeWebPage,
         Self::ShortcutScopeSearchHost,
+        Self::ShortcutTextLarger,
+        Self::ShortcutTextSmaller,
+        Self::ShortcutTextActualSize,
+        Self::ShortcutScopeTerminal,
         Self::PreviewWebBack,
         Self::PreviewWebForward,
         Self::PreviewWebReload,
@@ -5583,6 +6116,11 @@ impl Text {
         Self::HyperlinkControlReveals,
         Self::RowCopyOnSelect,
         Self::DescCopyOnSelect,
+        Self::RowMultilinePaste,
+        Self::DescMultilinePaste,
+        Self::PasteCardTitle,
+        Self::PasteCardRun,
+        Self::PasteCardJoin,
         Self::TabMenuRename,
         Self::TabMenuUnpin,
         Self::TabMenuDuplicate,
@@ -5653,6 +6191,21 @@ impl Text {
         Self::MenuZoomWindow,
         Self::MenuBringAllToFront,
         Self::MenuFolioHelp,
+        Self::ShellProfileEncoding,
+        Self::ShellMarksVersion,
+        Self::ShellMarksPath,
+        Self::ShellMarksProfileKind,
+        Self::ShellProfileUnchanged,
+        Self::ShellProfileMigrated,
+        Self::ShellProfileRemoved,
+        Self::ShellProfileRefused,
+        Self::ShellProfileProbeFailed,
+        Self::ShellProfileLink,
+        Self::ShellProfileHardLink,
+        Self::ShellProfileReadOnly,
+        Self::ShellProfileChanged,
+        Self::ShellProfileScriptLocation,
+        Self::ShellProfileNothing,
     ];
 
     /// **The two columns of the platform table** — every string
@@ -5760,6 +6313,7 @@ impl Text {
         //   written under that account's `Documents`
         Self::RowPsReadLine,
         Self::PsReadLineProbing,
+        Self::PsReadLineRowNotOurs,
         Self::PsReadLineRemovedToast,
         // — the `$PROFILE` integration: the row, the strip a pane raises, and
         //   the line an outstanding first-run intent leaves on the row. The
@@ -5769,6 +6323,13 @@ impl Text {
         Self::DescPowerShellOffer,
         Self::PowerShellNoticeBody,
         Self::ShellIntegrationPending,
+        // Only the Windows PowerShell discovery worker can emit this refusal.
+        Self::ShellProfileProbeFailed,
+        // The refusal `shell_integration::install_into_profile` gives when the
+        // data folder is not under `%APPDATA%`. The install is reached only from
+        // the strip above and the first-run PowerShell intent, and neither
+        // rises off Windows.
+        Self::ShellProfileScriptLocation,
         // — the Acrylic row's reason, which only a Windows with no backdrop
         //   reads: off Windows this build has no backdrop to ask for and
         //   `settings::visible_rows_for` does not offer the row at all (§13.32
@@ -5796,18 +6357,16 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 1] = [
-        // zh: pending opus46 — the macOS column of the card a local file raises
-        // when the engine would not take this window's rules (M4-3, §13.38 ②).
-        // The Windows column beside it has had its Chinese since W2; what is
-        // owed is the same sentence about an engine that has no version to be
-        // behind.
-        (Self::WebFailGuardsSay, HostPlatform::MacOs),
-        // The hovered link's two macOS clauses (T-MAC-CMDCLICK, §13.45 ②) were
-        // written on 2026-09-13 and left this table then. Their Windows columns
-        // had carried Chinese since the overlay was written; what was owed was
-        // the same two clauses with `⌘` in them and the Finder's own name in
-        // the second, and that is what they say.
+    const CHINESE_PENDING: [(Self, HostPlatform); 8] = [
+        // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
+        (Self::ShortcutTextLarger, HostPlatform::Windows),
+        (Self::ShortcutTextLarger, HostPlatform::MacOs),
+        (Self::ShortcutTextSmaller, HostPlatform::Windows),
+        (Self::ShortcutTextSmaller, HostPlatform::MacOs),
+        (Self::ShortcutTextActualSize, HostPlatform::Windows),
+        (Self::ShortcutTextActualSize, HostPlatform::MacOs),
+        (Self::ShortcutScopeTerminal, HostPlatform::Windows),
+        (Self::ShortcutScopeTerminal, HostPlatform::MacOs),
     ];
 }
 
@@ -5854,6 +6413,21 @@ pub fn web_fail_blocked_scheme(scheme: &str) -> String {
 /// The Chinese takes full-width brackets, which is the same decision the
 /// parentheses were: a half-width `(` after a Chinese character reads as a typo
 /// in a way it does not after a Latin one.
+/// The multi-line paste card's one line — `12 lines → Command Prompt` (owner's ruling
+/// 2026-09-22: "the card says `12 lines → cmd`").
+///
+/// The shell is the profile's own title, the name the reader already reads on the tab, and the
+/// count is [`crate::input::pasted_line_count`]'s. Filled from [`Text::PasteCardTitle`] rather
+/// than written as a `format!` here so that the missing Chinese is carried by the table's
+/// pending list like every other string this ticket adds.
+#[must_use]
+pub fn paste_card_title(lines: usize, shell: &str) -> String {
+    Text::PasteCardTitle
+        .text()
+        .replace("{lines}", &lines.to_string())
+        .replace("{shell}", shell)
+}
+
 #[must_use]
 pub fn new_tab_tip(profile_title: &str) -> String {
     match current() {
@@ -6019,6 +6593,55 @@ pub fn update_row_available_in(lang: Lang, version: &str) -> String {
         }
         Lang::Chinese => format!("{version} 已发布。点击「打开发布页」可在浏览器中查看。"),
     }
+}
+
+/// **The `Cards` row's sentence**, with the chord the shortcut table holds for
+/// `focus-mode` — in the table's own caps spelling, which is the dialect of the
+/// machine the table was built for (0.4.4 ticket 06).
+///
+/// The chord is handed in rather than looked up, so this is a function of its
+/// arguments: the caller reads it from the one effective table
+/// ([`crate::shortcuts::Shortcuts::accelerator`]) on every draw, and a row the
+/// reader rebound shows the new chord the next time the dialog is painted. A
+/// row the reader has unbound has no chord, and the sentence then stops after
+/// its first clause — naming an absent key would be a door that is not there.
+#[must_use]
+pub fn focus_mode_row_in(lang: Lang, chord: Option<&str>) -> String {
+    let lead = Text::DescFocusMode.in_lang(lang);
+    match (chord, lang) {
+        (None, _) => lead.to_owned(),
+        (Some(chord), Lang::English) => format!("{lead} {chord} does the same."),
+        (Some(chord), Lang::Chinese) => format!("{lead}{chord} 同样可切换。"),
+    }
+}
+
+/// **A composed sentence that has to outlive the frame that composed it.**
+///
+/// `SettingsRow::description` answers `&'static str` — every row in the dialog
+/// hands its answer straight to a `ChromeLabel`, and the whole table costs zero
+/// allocations because of it. `psreadline::row_description` meets the same
+/// signature with a `OnceLock` per language, which is sound there because its
+/// probe is a one-shot; it is **not** sound for a sentence whose value can change
+/// while the process runs — the version `update::row_description` names, or the
+/// chord `focus_mode_row_in` names after a rebind — because a `OnceLock` would
+/// go on drawing the first one.
+///
+/// So the sentences are interned instead, and the pool is bounded by the things
+/// that generate them: one entry per language per distinct value this process is
+/// told about — at most two versions, and one chord per recording the reader
+/// makes on the `focus-mode` row. It does not grow with frames, with dialog
+/// opens, or with time.
+pub(crate) fn intern(text: String) -> &'static str {
+    static POOL: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut pool = POOL
+        .lock()
+        .expect("the sentence pool is not held across a panic");
+    if let Some(held) = pool.iter().find(|held| **held == text) {
+        return held;
+    }
+    let held: &'static str = Box::leak(text.into_boxed_str());
+    pool.push(held);
+    held
 }
 
 /// The row's line when the machine already had a new enough module of its own.
@@ -6202,6 +6825,22 @@ pub fn psreadline_already_current(found: &str, path: &str) -> String {
     }
 }
 
+/// The card raised when `On` is pressed over a module Folio did not write
+/// (audit 3, E-1).
+///
+/// It names the path for the reason every refusal on this row does — that is
+/// the half a reader can act on — and it says who the module belongs to rather
+/// than how new it is, because ownership is what stopped the write.
+#[must_use]
+pub fn psreadline_occupied(path: &str) -> String {
+    match current() {
+        Lang::English => {
+            format!("A PSReadLine Folio did not install is at {path}, so nothing was written.")
+        }
+        Lang::Chinese => format!("{path} 有非 Folio 安装的 PSReadLine，未写入任何东西。"),
+    }
+}
+
 /// The card raised when `On` is pressed over a directory that already holds it.
 #[must_use]
 pub fn psreadline_already_there(patched: &str, path: &str) -> String {
@@ -6297,6 +6936,24 @@ pub fn first_run_tip_copilot(path: &str) -> String {
     }
 }
 
+/// Paths are the evidence named by the adapter, never reconstructed by the UI.
+pub(crate) fn agent_owner_notice(install: bool, owners: &[std::path::PathBuf]) -> String {
+    let text = if install {
+        Text::AgentHooksTakeOver
+    } else {
+        Text::AgentHooksLeftOther
+    };
+    format!(
+        "{}\n{}",
+        text.text(),
+        owners
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
 /// An agent installer's refusal, carrying the reason the installer gave.
 ///
 /// **The reason is the point of the card.** "copilot 1.0.26 or newer is needed
@@ -6350,6 +7007,19 @@ pub fn progress_percent(percent: u32) -> String {
 #[must_use]
 pub fn zoom_percent(factor: f64) -> String {
     format!("{}%", (factor * 100.0).round())
+}
+
+/// **The pane head's text-size mark's tip** (ticket 37): the reset verb's name and, only when
+/// the 8–72 px clamp drew the pane at a size its percentage does not say, that size — `8 px`,
+/// a number and a unit, with no sentence around it.
+#[must_use]
+pub fn text_size_tip(verb: &str, base_logical_px: f32, percent: u16, effective_px: f32) -> String {
+    let asked = base_logical_px * f32::from(percent) / 100.0;
+    if (asked - effective_px).abs() > f32::EPSILON {
+        format!("{verb} ({} px)", effective_px.round())
+    } else {
+        verb.to_owned()
+    }
 }
 
 /// …and the two that qualify it.
@@ -6978,7 +7648,10 @@ impl CliText<'_> {
                      \x20 --tab             a tab in the Folio already running, not a window\n\
                      \x20 <path>            a folder opens a pane there; a file opens a preview\n\
                      \x20 -h, --help        this text\n\
-                     \x20 --version         which build this is"
+                     \x20 --version         which build this is\n\
+                     \x20 --remove-explorer-menu  take this copy of Folio out of Explorer's \
+                     right-click menu\n\
+                     \x20 --remove-shell-integration  remove Folio lines from this account's PowerShell profiles"
                 ),
                 Lang::Chinese => format!(
                     "folio [--cwd <文件夹>] [--profile <id>] [--new-window | --tab] [<路径>]\n\n\
@@ -6988,7 +7661,9 @@ impl CliText<'_> {
                      \x20 --tab             在已经开着的 Folio 里加标签，不另开窗\n\
                      \x20 <路径>            文件夹等同 --cwd，文件则打开预览\n\
                      \x20 -h, --help        显示这段说明\n\
-                     \x20 --version         显示这是哪一个构建"
+                     \x20 --version         显示这是哪一个构建\n\
+                     \x20 --remove-explorer-menu  把这份 Folio 从资源管理器的右键菜单里撤掉\n\
+                     \x20 --remove-shell-integration  从当前账户的 PowerShell $PROFILE 移除 Folio 整合行"
                 ),
             },
             Self::MissingValue(flag) => match lang {
@@ -8242,6 +8917,18 @@ mod tests {
     }
 
     #[test]
+    fn shell_integration_followup_settings_copy_budget() {
+        let description = Text::DescPowerShellOffer.in_lang(Lang::English);
+        let lines = crate::tooltip::wrap(description, 39.0, |run| run.chars().count() as f32);
+        assert!(lines.len() <= 2, "{lines:?}");
+        assert_eq!(
+            Text::RowPowerShellOffer.in_lang(Lang::English),
+            "PowerShell integration"
+        );
+        assert!(description.contains("Off removes"));
+    }
+
+    #[test]
     fn paste_refusal_copy_fits_two_lines_and_tracks_its_pending_columns() {
         use crate::toast;
         let entries = [
@@ -8254,6 +8941,7 @@ mod tests {
             Text::PastePathNushell,
             Text::PasteClipboardPromise,
             Text::PasteClipboardRead,
+            Text::PasteClipboardPicture,
             Text::PasteProfileOverride,
         ];
         let width = toast::TOAST_WINDOW_WIDTH_LOGICAL_PX
@@ -8285,8 +8973,9 @@ mod tests {
         }
     }
 
-    /// PIN (§7.1.6b′, user rulings 2026-08-19 and 2026-08-20) — **the focus-mode
-    /// row advertises the doors that exist, and no others.**
+    /// RED (0.4.4 ticket 06; §7.1.6b′, user rulings 2026-08-19, 2026-08-20 and
+    /// 2026-09-22) — **the `Cards` row names the chord the shortcut table holds,
+    /// on this platform and after any rebind, and no door this build withdrew.**
     ///
     /// The mode shipped with five doors and is down to two. Withdrawn on 08-19:
     /// a double-click on a pane header (it reads as "make this pane bigger",
@@ -8300,33 +8989,314 @@ mod tests {
     /// withdrawn door can go on being promised after the code that answered it
     /// is gone.
     ///
-    /// Red gate: put any withdrawn door's name back into the sentence without
-    /// building the door, and this goes red in whichever language it was added
-    /// to.
+    /// The old pin asserted `contains("Ctrl+Shift+Z")`, which pinned the defect
+    /// in place: the macOS table holds `Shift+Cmd+E` for `focus-mode`, and a
+    /// reader who records another chord owns a table that holds neither. The
+    /// chord is therefore read from the real table — `Shortcuts::defaults_for`
+    /// in each dialect, then `Shortcuts::set` with a chord its own verdict calls
+    /// free — through the real `accelerator`, into the real composer.
+    ///
+    /// MUTATION: spell `Ctrl+Shift+Z` into `DescFocusMode`, or make
+    /// `focus_mode_row_in` ignore its chord — the macOS dialect and the rebind
+    /// both go red.
     #[test]
-    fn the_focus_mode_row_names_the_chord_and_no_gesture_this_build_withdrew() {
-        for lang in [Lang::English, Lang::Chinese] {
-            let sentence = Text::DescFocusMode.in_lang(lang);
+    fn the_focus_mode_row_names_the_tables_chord_and_no_gesture_this_build_withdrew() {
+        use crate::shortcuts::{Action, ChordVerdict, Shortcuts, parse_chord};
+        for (platform, rebind) in [
+            (HostPlatform::Windows, "Ctrl+Shift+F9"),
+            (HostPlatform::MacOs, "Cmd+Shift+F9"),
+        ] {
+            let mut table = Shortcuts::defaults_for(platform);
+            let shipped = table
+                .accelerator(Action::ToggleFocusMode)
+                .expect("focus-mode ships bound in every dialect");
+            let chord = parse_chord(rebind).expect("the rebind is a chord");
             assert!(
-                sentence.contains("Ctrl+Shift+Z"),
-                "{lang:?}: the row names the one chord that turns it"
+                matches!(table.verdict_for("focus-mode", &chord), ChordVerdict::Free),
+                "{platform:?}: the rebind is one the recorder would accept"
             );
-            for withdrawn in [
-                "double-click",
-                "双击",
-                "⌄",
-                "pane's header",
-                "窗格标题栏",
-                "Exit",
-                "退出钮",
-                "Esc",
-            ] {
+            table.set("focus-mode", Some(chord));
+            let rebound = table
+                .accelerator(Action::ToggleFocusMode)
+                .expect("the rebind holds a chord");
+            assert_ne!(shipped, rebound);
+            for lang in Lang::ALL {
+                let sentence = focus_mode_row_in(lang, Some(&shipped));
                 assert!(
-                    !sentence.contains(withdrawn),
-                    "{lang:?}: the sentence still promises `{withdrawn}`, a door this \
-                     build does not have"
+                    sentence.contains(&shipped),
+                    "{platform:?} {lang:?}: the row names the table's chord {shipped:?}: \
+                     {sentence:?}"
+                );
+                assert_eq!(
+                    chords_spelled_in(&sentence),
+                    std::slice::from_ref(&shipped),
+                    "{platform:?} {lang:?}: the table's chord is the only one the row names"
+                );
+                let after = focus_mode_row_in(lang, Some(&rebound));
+                assert!(
+                    after.contains(&rebound) && !after.contains(&shipped),
+                    "{platform:?} {lang:?}: after a rebind the row names {rebound:?} and \
+                     not {shipped:?}: {after:?}"
+                );
+                for sentence in [sentence, after] {
+                    for withdrawn in [
+                        "double-click",
+                        "双击",
+                        "⌄",
+                        "pane's header",
+                        "窗格标题栏",
+                        "Exit",
+                        "退出钮",
+                        "Esc",
+                    ] {
+                        assert!(
+                            !sentence.contains(withdrawn),
+                            "{lang:?}: the sentence still promises `{withdrawn}`, a door \
+                             this build does not have"
+                        );
+                    }
+                }
+            }
+        }
+        // The Mac row, in the table's own caps spelling (acceptance A1).
+        assert!(
+            focus_mode_row_in(
+                Lang::English,
+                Shortcuts::defaults_for(HostPlatform::MacOs)
+                    .accelerator(Action::ToggleFocusMode)
+                    .as_deref(),
+            )
+            .contains("Shift+Cmd+E")
+        );
+    }
+
+    /// RED (0.4.4 ticket 06) — **a row whose chord the reader gave back to the
+    /// shell names no chord at all.**
+    ///
+    /// The composer's third answer. Naming a key the table no longer holds is
+    /// the defect the ticket fixes in a different costume, and naming "no key"
+    /// would be the row reporting an absence nobody asked about — so the
+    /// sentence stops after what the column is.
+    ///
+    /// MUTATION: make the `None` arm of `focus_mode_row_in` append a chord.
+    #[test]
+    fn an_unbound_focus_mode_row_names_no_chord() {
+        use crate::shortcuts::{Action, Shortcuts};
+        let mut table = Shortcuts::defaults_for(HostPlatform::Windows);
+        table.set("focus-mode", None);
+        let chord = table.accelerator(Action::ToggleFocusMode);
+        assert_eq!(chord, None);
+        for lang in Lang::ALL {
+            assert_eq!(
+                focus_mode_row_in(lang, chord.as_deref()),
+                Text::DescFocusMode.in_lang(lang)
+            );
+        }
+    }
+
+    /// Every chord-shaped run in `text`: one or more modifier words, each
+    /// followed by `+`, then something a shortcut row could hold as its key — a
+    /// single character, an arrow, or a named key. `Ctrl+click`, `Shift+wheel`,
+    /// `Alt+arrow`, `Ctrl+letter` and `Ctrl+Alt is …` are gestures and classes,
+    /// not chords, and are not returned.
+    ///
+    /// Both dialects' modifier words, and Apple's symbols, so a sentence cannot
+    /// get past the gate by spelling a Mac chord the Mac way.
+    fn chords_spelled_in(text: &str) -> Vec<String> {
+        const MODIFIERS: [&str; 13] = [
+            "Ctrl", "Control", "Alt", "Option", "Shift", "Cmd", "Command", "Win", "Super", "⌘",
+            "⌃", "⌥", "⇧",
+        ];
+        const NAMED: [&str; 26] = [
+            "Esc",
+            "Escape",
+            "Enter",
+            "Return",
+            "Tab",
+            "Space",
+            "Backspace",
+            "Delete",
+            "Del",
+            "Insert",
+            "Home",
+            "End",
+            "PageUp",
+            "PageDown",
+            "F1",
+            "F2",
+            "F3",
+            "F4",
+            "F5",
+            "F6",
+            "F7",
+            "F8",
+            "F9",
+            "F10",
+            "F11",
+            "F12",
+        ];
+        let mut found = Vec::new();
+        let mut from = 0;
+        while from < text.len() {
+            let rest = &text[from..];
+            let at_a_word_start = text[..from]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric());
+            let mut cursor = 0;
+            if at_a_word_start {
+                'modifiers: loop {
+                    for word in MODIFIERS {
+                        let tail = &rest[cursor..];
+                        if tail.starts_with(word) && tail[word.len()..].starts_with('+') {
+                            cursor += word.len() + 1;
+                            continue 'modifiers;
+                        }
+                    }
+                    break;
+                }
+            }
+            if cursor == 0 {
+                from += rest.chars().next().map_or(1, char::len_utf8);
+                continue;
+            }
+            let tail = &rest[cursor..];
+            let run: String = tail
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect();
+            let key = if run.is_empty() {
+                tail.chars()
+                    .next()
+                    .filter(|c| c.is_ascii_punctuation() || ['←', '↑', '→', '↓'].contains(c))
+                    .map(String::from)
+            } else if run.len() == 1 || NAMED.contains(&run.as_str()) {
+                Some(run)
+            } else {
+                None
+            };
+            match key {
+                Some(key) => {
+                    found.push(format!("{}{key}", &rest[..cursor]));
+                    from += cursor + key.len();
+                }
+                None => from += cursor,
+            }
+        }
+        found
+    }
+
+    /// **The chords no table row produces, spelled on purpose** — each by the
+    /// entry that spells it, with the reason on the line. The gate below
+    /// refuses an entry here that *is* a table chord (the ticket's blocking
+    /// criterion B2).
+    ///
+    /// The first-run card's `Esc` / `Ctrl+W` / `Alt+F4` are not here because no
+    /// `Text` spells them: they are named in that module's comments only.
+    const HAND_SPELLED_KEYS: &[(Text, &str)] = &[
+        // The search capsule's tip: `Shift+Enter` is the field's own key while
+        // it holds the focus, answered by the field and not by a row of the
+        // shortcut table — there is no row to read it from.
+        (Text::SearchTipPrevious, "Shift+Enter"),
+    ];
+
+    /// RED (0.4.4 ticket 06; owner ruling 2026-09-22 §4, "the T2 gate") — **no
+    /// shipped string spells a chord the shortcut table does not produce.**
+    ///
+    /// `DescFocusMode` spelled `Ctrl+Shift+Z` in both languages with no platform
+    /// column, which was true on Windows until somebody rebound the row and was
+    /// never true on a Mac. That class of defect is a sentence and a table
+    /// disagreeing, and the only way to keep them from disagreeing is for the
+    /// sentence not to hold the chord at all. So every `Text` × `Lang` ×
+    /// `HostPlatform` is scanned for chord-shaped runs, and each one must be
+    /// the caps spelling of a **surfaced** row of that platform's shipped table
+    /// — or be on [`HAND_SPELLED_KEYS`], which may not hold a table chord.
+    ///
+    /// A chord a string needs to name is composed from the table at the draw
+    /// (`focus_mode_row_in`), not spelled into this table.
+    ///
+    /// MUTATION: put `Ctrl+Shift+Z` back into `DescFocusMode` — this names
+    /// `(DescFocusMode, MacOs)`.
+    #[test]
+    fn no_shipped_string_spells_a_chord_the_table_does_not_produce() {
+        use crate::shortcuts::{Shortcuts, chord_caps_on};
+        let table_chords = |platform: HostPlatform| -> Vec<String> {
+            Shortcuts::defaults_for(platform)
+                .rows()
+                .iter()
+                .filter(|row| row.surfaced)
+                .filter_map(|row| row.chord.as_ref())
+                .map(|chord| chord_caps_on(chord, platform).join("+"))
+                .collect()
+        };
+        let platforms = [
+            HostPlatform::Windows,
+            HostPlatform::MacOs,
+            HostPlatform::OtherUnix,
+        ];
+        for (entry, chord) in HAND_SPELLED_KEYS {
+            for platform in platforms {
+                assert!(
+                    !table_chords(platform).iter().any(|held| held == chord),
+                    "{entry:?}: {chord:?} is a table chord on {platform:?} and must be read \
+                     from the table, not allowed by hand"
                 );
             }
+        }
+        let mut offenders: Vec<(Text, HostPlatform, Lang, String)> = Vec::new();
+        let mut scanned = 0_usize;
+        for platform in platforms {
+            let produced = table_chords(platform);
+            for entry in Text::ALL {
+                for lang in Lang::ALL {
+                    for chord in chords_spelled_in(entry.on(lang, platform)) {
+                        scanned += 1;
+                        let allowed = HAND_SPELLED_KEYS
+                            .iter()
+                            .any(|(held, spelled)| *held == entry && *spelled == chord);
+                        if !allowed && !produced.contains(&chord) {
+                            offenders.push((entry, platform, lang, chord));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these strings spell a chord no surfaced row of that platform's table \
+             produces — compose it from the table instead: {offenders:#?}"
+        );
+        assert!(
+            scanned > 0,
+            "the scan found the allowlisted chord, so it can see one"
+        );
+    }
+
+    /// The scanner the gate stands on, read against the shapes it has to tell
+    /// apart — so a gate that found nothing is not a scanner that could not.
+    #[test]
+    fn the_chord_scanner_finds_chords_and_passes_gestures() {
+        assert_eq!(
+            chords_spelled_in("Ctrl+Shift+Z does the same. Ctrl+Shift+Z 同样可切换。"),
+            ["Ctrl+Shift+Z", "Ctrl+Shift+Z"]
+        );
+        assert_eq!(chords_spelled_in("Previous (Shift+Enter)"), ["Shift+Enter"]);
+        assert_eq!(chords_spelled_in("Press Shift+Cmd+E."), ["Shift+Cmd+E"]);
+        assert_eq!(chords_spelled_in("Ctrl+, opens it"), ["Ctrl+,"]);
+        assert_eq!(chords_spelled_in("Ctrl+Shift+↑ jumps"), ["Ctrl+Shift+↑"]);
+        // A Chinese sentence need not leave a space after the key.
+        assert_eq!(chords_spelled_in("按 Ctrl+Shift+Z同样"), ["Ctrl+Shift+Z"]);
+        for gesture in [
+            "Ctrl+click opens",
+            "⌘+点击用默认程序打开",
+            "Shift+wheel",
+            "Alt+滚轮可滚动",
+            "Ctrl+Alt is reserved",
+            "Ctrl+letter belongs",
+            "Ctrl+字母属于 shell",
+            "readline 把 Alt+方向键读作",
+        ] {
+            assert!(chords_spelled_in(gesture).is_empty(), "{gesture:?}");
         }
     }
 
@@ -8439,10 +9409,8 @@ mod tests {
             }
             .in_lang(lang);
             let lines: Vec<&str> = usage.lines().collect();
-            // Nine since `--tab` joined `--new-window` (§7.59, user ruling 2026-09-11): the
-            // summary, a blank, and one line for each of the seven things this program can be
-            // told by somebody typing.
-            assert_eq!(lines.len(), 9, "{lang:?}: {usage}");
+            // The summary, one blank line, and nine supported command forms.
+            assert_eq!(lines.len(), 11, "{lang:?}: {usage}");
             assert!(lines[0].starts_with("folio [--cwd "), "{lang:?}");
             assert!(lines[1].is_empty(), "{lang:?}");
             for line in &lines[2..] {
@@ -8634,7 +9602,10 @@ mod tests {
     /// exemption list, and this names it.
     #[test]
     fn no_string_a_mac_reader_meets_names_a_windows_program() {
-        const WINDOWS_WORDS: [&str; 11] = [
+        const WINDOWS_WORDS: [&str; 12] = [
+            // A folder only one machine has (0.4.4 ticket 07: the dark scheme
+            // row sent a Mac reader to `%APPDATA%\Folio\schemes`).
+            "APPDATA",
             "Explorer",
             "资源管理器",
             "taskbar",
@@ -9610,11 +10581,15 @@ mod tests {
             Text::WebFailGuardsSay.on(Lang::English, HostPlatform::OtherUnix),
             mac
         );
-        // And the Chinese slot really is the English one, which is what files it
-        // in `CHINESE_PENDING` rather than leaving it to be discovered.
-        assert_eq!(
-            Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::MacOs),
-            mac
+        // Both platform columns now carry their own Chinese.
+        let chinese_mac = Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::MacOs);
+        assert_ne!(
+            chinese_mac, mac,
+            "the Mac column's Chinese was filled and is no longer the English placeholder"
+        );
+        assert!(
+            !chinese_mac.contains("版本"),
+            "a Mac's engine has no version to be behind, in either language: {chinese_mac}"
         );
         assert_ne!(
             Text::WebFailGuardsSay.on(Lang::Chinese, HostPlatform::Windows),

@@ -60,6 +60,17 @@ pub fn due(settings_file_was_missing: bool, stored: FirstRunCardV1) -> bool {
     settings_file_was_missing && stored == FirstRunCardV1::NotShown
 }
 
+/// Consume the first ready attempt, including one that cannot show a card.
+/// The App owns this latch; profile-table adoption and answering the card rearm
+/// it. Availability itself remains owned by `ProfilePrograms`, not this latch.
+pub fn take_ready_edge(attempted: &mut bool, ready: bool) -> bool {
+    if *attempted || !ready {
+        return false;
+    }
+    *attempted = true;
+    true
+}
+
 // ── the rows a machine can honour ──────────────────────────────────────────
 
 /// Which of the six questions a row is.
@@ -899,7 +910,8 @@ const WIDTH_RATIO: f32 = 0.92;
 
 /// How much of the window's height the card may take. The head and the foot are
 /// pinned inside whatever is left and the body between them scrolls.
-const SURFACE_MARGIN_LOGICAL_PX: f32 = 34.0;
+/// UI-SPEC.md S3: the centred-overlay margin, shared with the palette.
+const SURFACE_MARGIN_LOGICAL_PX: f32 = 24.0;
 
 /// 20 and not `.restore`'s 22: the mark's line box is taller than a bare title,
 /// so the optical top of the card is a couple of pixels lower than the metric
@@ -914,15 +926,19 @@ const MARK_LOGICAL_PX: f32 = 22.0;
 const MARK_GAP_LOGICAL_PX: f32 = 10.0;
 
 const TITLE_FONT_LOGICAL_PX: f32 = 15.0;
-const TITLE_LINE_LOGICAL_PX: f32 = 21.0;
+/// The dialog title line box from UI-SPEC.md T8 (restore::TITLE_LINE_LOGICAL_PX).
+const TITLE_LINE_LOGICAL_PX: f32 = 18.0;
 /// **18, and then the first row.** v3's 16 under a bare title; the header is one
 /// line taller in feel now that a mark stands on it, so the step under it grows
 /// with it.
 const HEADER_MARGIN_BOTTOM_LOGICAL_PX: f32 = 18.0;
 
-/// **One 13px line, vertically centred in 42** (v4 §2). The extra height per row
-/// is what "looser rhythm" buys once the second line is gone.
-const ROW_HEIGHT_LOGICAL_PX: f32 = 42.0;
+/// The settings single-line row (`UI-SPEC.md` H4;
+/// `settings.rs::ROW_PADDING_Y_LOGICAL_PX` 11 × 2 +
+/// `settings.rs::ROW_TITLE_LINE_LOGICAL_PX` 16.5, both private there), not
+/// v4 §2's own "one 13px line, vertically centred in 42". The same options
+/// used to sit airier here than in Settings.
+const ROW_HEIGHT_LOGICAL_PX: f32 = 38.5;
 const ROW_FONT_LOGICAL_PX: f32 = 13.0;
 /// How far the row's band runs past the content column on each side.
 ///
@@ -1879,6 +1895,12 @@ fn focus_ring(
     )
 }
 
+/// [`focus_ring`] at a button's own offset — the one outline a focused dialog button wears, lent
+/// to the other cards of this craft (the paste card, 0.4.4 ticket 45).
+pub(crate) fn button_focus_ring(rect: [f32; 4], scale: f32, accent: [u8; 3]) -> Vec<OverlayQuad> {
+    focus_ring(rect, scale, FOCUS_RING_BUTTON_OFFSET_LOGICAL_PX, accent)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_button(
     quads: &mut Vec<OverlayQuad>,
@@ -1969,6 +1991,75 @@ pub fn settings_line_width(surface_width: f32, scale: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::settings;
+
+    /// RED (ticket 21) — **the first-run card's option rows are as tall as a
+    /// Settings single-line row, not airier.**
+    ///
+    /// `UI-SPEC.md` H4: `settings.rs::ROW_PADDING_Y_LOGICAL_PX` 11 × 2 +
+    /// `settings.rs::ROW_TITLE_LINE_LOGICAL_PX` 16.5 (both private there) is
+    /// 38.5, where the row used to sit at 42.
+    ///
+    /// MUTATION: revert `ROW_HEIGHT_LOGICAL_PX` to a literal and this goes red.
+    #[test]
+    fn ui_spec_first_run_class_a_values_follow_the_rule() {
+        assert_eq!(
+            ROW_HEIGHT_LOGICAL_PX, 38.5,
+            "UI-SPEC.md H4, settings.rs::ROW_PADDING_Y_LOGICAL_PX + \
+             settings.rs::ROW_TITLE_LINE_LOGICAL_PX"
+        );
+    }
+
+    /// RED (28) — **The first-run margin and title line follow their shared rules.**
+    ///
+    /// S3 uses the centred-overlay margin; T8 uses the restore title line.
+    /// The restore constant is private, so its rule value is pinned here.
+    /// MUTATION: restore SURFACE_MARGIN_LOGICAL_PX to 34.0.
+    /// MUTATION: restore TITLE_LINE_LOGICAL_PX to 21.0.
+    #[test]
+    fn ui_spec_first_run_rest_values_follow_the_rule() {
+        assert_eq!(
+            SURFACE_MARGIN_LOGICAL_PX,
+            crate::palette::PALETTE_EDGE_MARGIN_LOGICAL_PX,
+            "S3: centred overlay margin"
+        );
+        assert_eq!(
+            TITLE_LINE_LOGICAL_PX, 18.0,
+            "T8: restore::TITLE_LINE_LOGICAL_PX"
+        );
+    }
+
+    /// RED (28) — **A short first-run card keeps the centred-overlay edge margin.**
+    ///
+    /// Exercise the real layout at each supported scale with enough rows to
+    /// fill the available height, including its physical-pixel rounding.
+    /// MUTATION: restore SURFACE_MARGIN_LOGICAL_PX to 34.0.
+    #[test]
+    fn the_first_run_card_keeps_the_centred_overlay_margin_in_a_short_window() {
+        let content = measured(&rows(&every_row()));
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let height = 320.0 * scale;
+            let placed = layout(&content, 640.0 * scale, height, scale, 0.0);
+            let margin = crate::palette::PALETTE_EDGE_MARGIN_LOGICAL_PX * scale;
+            assert!((placed.frame[1] - margin).abs() <= 0.5, "top at {scale}");
+            assert!(
+                (height - placed.frame[3] - margin).abs() <= 0.5,
+                "bottom at {scale}"
+            );
+        }
+    }
+
+    /// RED (28) — **The first-run title occupies the restore title's line height.**
+    ///
+    /// Pin the box produced by layout, including scale, rather than only the token.
+    /// MUTATION: restore TITLE_LINE_LOGICAL_PX to 21.0.
+    #[test]
+    fn the_first_run_title_uses_the_restore_title_line_height() {
+        let content = measured(&rows(&every_row()));
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let placed = layout(&content, 640.0 * scale, 480.0 * scale, scale, 0.0);
+            assert_eq!(placed.title.1[3] - placed.title.1[1], 18.0 * scale);
+        }
+    }
 
     /// A machine with everything: Windows 11 with the package beside the
     /// executable, all three agents on the path, none of them configured yet.
@@ -2576,6 +2667,63 @@ mod tests {
         assert!(declined().is_empty());
     }
 
+    /// PIN (§7.56 §7) — **`Done` with the PowerShell row off is a removal, and
+    /// on the machine this card is for it removes nothing, writes nothing and
+    /// says nothing.**
+    ///
+    /// The row off spends `PowerShellOffer(false)`, which is the Settings
+    /// page's own `Off` press, and that press runs
+    /// `shell_integration::begin_removal`. That is right — the answer has to
+    /// reach a `$PROFILE` a previous install wrote — but the card only ever
+    /// appears on a machine that has never run Folio, where there is no line to
+    /// take out. So the report comes back empty, and an empty report tells the
+    /// window nothing (`Report::window_text`). A new reader's first sight of
+    /// Folio is the terminal, not a corner toast about a file they never had.
+    ///
+    /// MUTATIONS:
+    /// ① give the empty report words and `Done` greets a new machine with
+    ///    `No Folio profile lines found.`;
+    /// ② let the removal write and a reader who answered `off` has a `$PROFILE`
+    ///    of their own rewritten for a line it does not contain.
+    #[test]
+    fn done_with_the_powershell_row_off_removes_nothing_and_says_nothing() {
+        let untouched = rows(&every_row());
+        assert!(
+            applications(&untouched, ExplorerShape::FirstPageAndClassic)
+                .contains(&Application::PowerShellOffer(false))
+        );
+        let press = settings_target(Application::PowerShellOffer(false)).expect("a row's press");
+        assert_eq!(
+            settings::powershell_integration_offer_requested(press),
+            Some(false),
+            "the card's off is the dialog's own Off, and Off is what runs the removal"
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "folio-first-run-off-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let profile = root.join("profile.ps1");
+        let original = b"# a profile of somebody's own\r\n";
+        std::fs::write(&profile, original).unwrap();
+        let report = shell_integration::remove_shell_integration_at(
+            &data,
+            Some(std::slice::from_ref(&profile)),
+        );
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(
+            report.window_text(),
+            None,
+            "a machine that has never run Folio is being told about a line it never had"
+        );
+        assert_eq!(std::fs::read(&profile).unwrap(), original);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// PIN (§7.56 §4.3) — **the intent is spent by the first shell to name its
     /// own `$PROFILE`, and a profile that already loads the script clears it
     /// without writing.**
@@ -2935,7 +3083,13 @@ mod tests {
     #[test]
     fn a_press_anywhere_on_a_row_is_a_press_on_its_switch_and_the_fade_ends_it() {
         let content = measured(&rows(&every_row()));
-        let placed = layout(&content, SHORT_SURFACE.0, SHORT_SURFACE.1, SCALE, 0.0);
+        // Ticket 28 (`UI-SPEC.md` S3) took 10 pt off the card's window-edge
+        // margin, which at this scale hands the card 30 px more room in the
+        // same window; this probe needs the last row's switch to still reach
+        // below the footer, so its window is 30 px shorter than the shared
+        // short fixture.
+        let surface = (SHORT_SURFACE.0, SHORT_SURFACE.1 - 30.0);
+        let placed = layout(&content, surface.0, surface.1, SCALE, 0.0);
         let middle = |rect: [f32; 4]| {
             (
                 f64::from((rect[0] + rect[2]) / 2.0),
@@ -2956,8 +3110,27 @@ mod tests {
             Target::Row(0),
             "the lit band answered a hover and not a press"
         );
+        // **The footer is pinned to the viewport, not to how many rows
+        // overflow it** (`cursor = viewport[3] + FOOT_GAP…` in [`layout`]), so
+        // shortening every row (`UI-SPEC.md` H4) moves the last row's switch
+        // up without moving the footer — and on this fixture the two used to
+        // clear each other by more room than they do now. The switch's own
+        // *centre* is no longer reliably past the footer, but the switch is
+        // still taller than the gap: probe low in the switch instead of at
+        // its middle, between the footer's own foot and the switch's, which
+        // stays correct regardless of exactly how much room is left.
         let last = placed.rows.len() - 1;
-        let (x, y) = middle(placed.rows[last].switch);
+        let switch = placed.rows[last].switch;
+        let below_the_foot = placed.done.1[3]
+            .max(placed.later.1[3])
+            .max(placed.body_clip[3]);
+        assert!(
+            switch[3] > below_the_foot,
+            "this fixture needs the last row's switch to still reach below \
+             the footer, or the probe below tests nothing"
+        );
+        let x = f64::from((switch[0] + switch[2]) / 2.0);
+        let y = f64::from((below_the_foot + switch[3]) / 2.0);
         assert_eq!(
             hit(&placed, x, y),
             Target::Panel,
@@ -3788,6 +3961,94 @@ mod tests {
                 "the line is the name and nothing else, so it says what the switch is and not \
                  what it gets you: {line:?}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod clock_edge_tests {
+    #[test]
+    fn first_run_ready_edge_is_shared_and_rearmed_by_changes() {
+        let mut attempted = false;
+        let mut reads = 0;
+        for _ in 0..200 {
+            if super::take_ready_edge(&mut attempted, false) {
+                reads += 1;
+            }
+        }
+        assert_eq!(reads, 0, "a pending probe cannot construct a card");
+        for _window in 0..4 {
+            for _ in 0..50 {
+                if super::take_ready_edge(&mut attempted, true) {
+                    reads += 1;
+                }
+            }
+        }
+        assert_eq!(reads, 1, "even a refused/empty card consumes the attempt");
+        attempted = false; // Profile-table adoption or a completed card gesture.
+        for _ in 0..200 {
+            if super::take_ready_edge(&mut attempted, true) {
+                reads += 1;
+            }
+        }
+        assert_eq!(reads, 2);
+    }
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call (`bt_source::Index::of_package`).
+    ///
+    /// The package is named here and nowhere else in the module.
+    fn source_index() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4
+    /// rather than a line of a file.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        source_index()
+            .body_of(&bt_source::ItemQuery::method(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    #[test]
+    fn first_run_clock_run_disk_questions_follow_the_ready_edge() {
+        // **P3's deletion commit for this pin** (`docs/plans/bt-app-split-prep.md`
+        // §6.3, and §6.0 rule 3). The commit before this one read every body
+        // twice — once as a slice of a named file, once as the body of an item
+        // of this crate — and asserted the two were the same bytes; this one
+        // removes the older of the two, because two implementations of one
+        // judgement do not vouch for each other (`docs/CONVENTIONS.md`
+        // §十 rule 4). The pattern is `main.rs::pty_drain_budget_tests`', not
+        // re-derived here.
+        let body = method_body("Runtime", "raise_first_run_if_due");
+        let edge = body
+            .find("first_run::take_ready_edge(")
+            .expect("one attempt after the probe settles");
+        let compact: String = body.split_whitespace().collect();
+        assert!(compact.contains("if!first_run::take_ready_edge(&mutself.app.first_run_attempted,!copilot_on_path||attention_copilot::probe_settled(),){returnOk(());}"));
+        for forbidden in ["std::fs::", "search_path(", "Command::"] {
+            assert!(!body.contains(forbidden));
+        }
+        for reader in [
+            "explorer_menu::package_file()",
+            "attention_hooks::state()",
+            "attention_codex::state()",
+            "attention_copilot::state()",
+        ] {
+            assert!(
+                body.find(reader).unwrap() > edge,
+                "{reader} must follow the edge"
+            );
+        }
+        // Agent availability already has one owner; never add a second PATH cache.
+        let lookup = method_body("Runtime", "agent_is_on_this_machine");
+        assert!(lookup.contains("self.app.profile_programs.is_available(id)"));
+        assert!(!lookup.contains("search_path("));
+        let available = method_body("ProfilePrograms", "is_available");
+        assert!(available.contains("self.program(id).is_some()"));
+        for name in ["adopt_profile_table", "answer_first_run"] {
+            assert!(method_body("Runtime", name).contains("self.app.first_run_attempted = false;"));
         }
     }
 }

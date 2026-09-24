@@ -232,7 +232,7 @@ pub(super) struct Reconcile<'a> {
     pub blocks: &'a [preview::MarkdownBlock],
     pub ranges: &'a [Range<usize>],
     pub content: &'a str,
-    pub source: Option<&'a MarkdownCaretBlock>,
+    pub source: &'a SourceBlocks,
     pub frame: preview_wrap::Frame,
     pub edits: Option<&'a [Edit]>,
     pub art_changed: bool,
@@ -315,10 +315,7 @@ impl State {
             let old_index = mapped;
             let (record, box_, width) = if let Some((i, old)) = reuse {
                 let old_record = &old.5.viewport.records[i];
-                let same_source = match (
-                    old.2.as_deref().filter(|s| s.index() == i),
-                    source.filter(|s| s.index() == index),
-                ) {
+                let same_source = match (old.2.get(i), source.get(index)) {
                     (None, None) => true,
                     (Some(MarkdownCaretBlock::Prose(a)), Some(MarkdownCaretBlock::Prose(b))) => {
                         a.text == b.text && a.heading == b.heading
@@ -591,7 +588,7 @@ impl Anchor {
 
     fn remap_text(
         &mut self,
-        source: Option<&MarkdownCaretBlock>,
+        source: &SourceBlocks,
         blocks: &[preview::MarkdownBlock],
         ranges: &[Range<usize>],
         maps: &[preview_provenance::BlockOrigins],
@@ -605,7 +602,7 @@ impl Anchor {
             Position::Text { within, .. } | Position::Mono { within, .. } => within,
             Position::Pixel(_) => 0.0,
         };
-        match source.filter(|s| s.index() == self.index) {
+        match source.get(self.index) {
             Some(MarkdownCaretBlock::Prose(prose)) => {
                 let local = byte.saturating_sub(prose.range.start).min(prose.text.len());
                 let paragraph = prose
@@ -653,7 +650,7 @@ impl Anchor {
 
 pub(super) struct Realize<'a> {
     pub blocks: &'a [preview::MarkdownBlock],
-    pub source: Option<&'a MarkdownCaretBlock>,
+    pub source: &'a SourceBlocks,
     pub art: PageArt<'a>,
     pub layout: &'a mut Layout,
     pub intrinsic: &'a mut [MarkdownBlockIntrinsic],
@@ -665,12 +662,17 @@ pub(super) struct Realize<'a> {
 }
 
 impl Realize<'_> {
+    /// Make every block in the visible band exact, and say **how many blocks
+    /// this call measured** — the number `BT_PREVIEW_TRACE`'s `reflow` line
+    /// reports (2026-09-23), so a caret flipping one block into source can be
+    /// told apart from a pass that re-measured the page.
     pub(super) fn ensure(
         &mut self,
         view: &mut View,
         anchor: Option<Anchor>,
         measure: &mut dyn Measure,
-    ) {
+    ) -> usize {
+        let mut realized = 0;
         self.cache
             .ensure_environment(self.pass.frame().intrinsic_environment());
         let anchor = if view.end {
@@ -743,7 +745,7 @@ impl Realize<'_> {
                 let placed = self.pass.block(
                     &self.blocks[index],
                     &self.intrinsic[index],
-                    self.source.filter(|s| s.index() == index),
+                    self.source.get(index),
                     self.art,
                     &mut |runs, width, font, line| measure.wrap(runs, width, font, line),
                 );
@@ -751,6 +753,7 @@ impl Realize<'_> {
                 self.state.records[index].exact = true;
                 self.state.unknown.remove(&index);
                 self.state.records[index].intrinsic = true;
+                realized += 1;
                 #[cfg(test)]
                 preview_typing::count("realized blocks", 1);
             }
@@ -759,7 +762,7 @@ impl Realize<'_> {
                     Position::Pixel(y) => y,
                     Position::Mono { byte, within } => self
                         .source
-                        .filter(|s| s.index() == anchor.index)
+                        .get(anchor.index)
                         .and_then(MarkdownCaretBlock::mono)
                         .map_or(0.0, |source| {
                             let wrap = source.wrap(self.pass.frame().width());
@@ -780,7 +783,7 @@ impl Realize<'_> {
                         let placed = self.layout.get(anchor.index).unwrap();
                         let paragraphs = self.pass.paragraphs(
                             &self.blocks[anchor.index],
-                            self.source.filter(|s| s.index() == anchor.index),
+                            self.source.get(anchor.index),
                             &placed,
                             self.art,
                         );
@@ -805,6 +808,7 @@ impl Realize<'_> {
             }
         }
         self.state.height = view.height;
+        realized
     }
 }
 
@@ -901,10 +905,26 @@ impl Measure for RuntimeMeasure<'_> {
     }
 }
 
+/// **What one geometry rebuild cost** — [`Runtime::rebuild_markdown_geometry`]'s
+/// account of itself, for `BT_PREVIEW_TRACE`'s `reflow` line (2026-09-23).
+///
+/// The two durations are zero when the trace is closed: nothing is timed then.
+/// `realized` is counted either way, because it is a count and costs nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct GeometryCost {
+    /// Blocks [`Realize::ensure`] measured.
+    pub realized: usize,
+    /// [`State::reconcile`]: the old document's records matched to the new
+    /// blocks, and a fresh height tree.
+    pub reconcile: std::time::Duration,
+    /// The anchor remapped and the visible band made exact.
+    pub realize: std::time::Duration,
+}
+
 pub(super) struct Build<'a> {
     pub blocks: &'a [preview::MarkdownBlock],
     pub bytes: MarkdownSourceBytes<'a>,
-    pub source: Option<&'a MarkdownCaretBlock>,
+    pub source: &'a SourceBlocks,
     pub maps: &'a [preview_provenance::BlockOrigins],
     pub art: PageArt<'a>,
     pub edits: Option<&'a [Edit]>,
@@ -932,7 +952,7 @@ fn capture(old: &PreviewDocument, view: View, measure: &mut dyn Measure) -> Opti
     if wrap.viewport.records[anchor.index].exact {
         let paragraphs = preview_wrap::anchor_paragraphs(
             &blocks[anchor.index],
-            source.as_deref().filter(|s| s.index() == anchor.index),
+            source.get(anchor.index),
             &layout.get(anchor.index)?,
             wrap.frame?,
             PageArt {
@@ -942,7 +962,7 @@ fn capture(old: &PreviewDocument, view: View, measure: &mut dyn Measure) -> Opti
             },
         );
         anchor.capture_text(&paragraphs, &mut |p| measure.rows(p));
-        if source.as_deref().is_none_or(|s| s.index() != anchor.index)
+        if source.get(anchor.index).is_none()
             && let Position::Pixel(local) = anchor.position
             && let Some(position) = fixed_text_position(
                 &blocks[anchor.index],
@@ -953,8 +973,7 @@ fn capture(old: &PreviewDocument, view: View, measure: &mut dyn Measure) -> Opti
         {
             anchor.position = position;
         }
-        if let Some(MarkdownCaretBlock::Mono(mono)) =
-            source.as_deref().filter(|s| s.index() == anchor.index)
+        if let Some(MarkdownCaretBlock::Mono(mono)) = source.get(anchor.index)
             && let Position::Pixel(local) = anchor.position
         {
             let wrap = mono.wrap(wrap.frame?.width());
@@ -972,7 +991,7 @@ fn capture(old: &PreviewDocument, view: View, measure: &mut dyn Measure) -> Opti
         anchor.file_byte = match anchor.position {
             Position::Text {
                 paragraph, byte, ..
-            } => match source.as_deref().filter(|s| s.index() == anchor.index) {
+            } => match source.get(anchor.index) {
                 Some(MarkdownCaretBlock::Prose(prose)) => Some(prose.line_start(paragraph) + byte),
                 _ => preview_provenance::file_offset_of(
                     &preview_select::Place::new(anchor.index, paragraph, byte),
@@ -982,7 +1001,7 @@ fn capture(old: &PreviewDocument, view: View, measure: &mut dyn Measure) -> Opti
                 ),
             },
             Position::Mono { byte, .. } => source
-                .as_deref()
+                .get(anchor.index)
                 .and_then(MarkdownCaretBlock::mono)
                 .map(|s| s.range.start + byte),
             Position::Pixel(_) => None,
@@ -1080,6 +1099,9 @@ impl Runtime<'_> {
         let old_key = self.preview_pane(surface).and_then(|p| p.doc_key.clone());
         let old_scroll = self.preview_pane(surface).map_or(0.0, |p| p.scroll[1]);
         self.rebuild_preview_document(surface, body, scale);
+        // **The caret's own block**, which is one of the source blocks and not
+        // necessarily the first of them (2026-09-23).
+        let seat = self.preview_caret_seat_block(surface);
         let target = self.preview_pane(surface).and_then(|pane| {
             let PreviewDocument::Markdown {
                 source,
@@ -1090,7 +1112,7 @@ impl Runtime<'_> {
             else {
                 return None;
             };
-            let index = source.as_deref()?.index();
+            let index = source.get(seat?)?.index();
             let placed = layout.get(index)?;
             let padding = seats::preview_markdown_metrics(scale).padding_y;
             let top = padding + placed.top;
@@ -1107,8 +1129,10 @@ impl Runtime<'_> {
             p.doc_key != old_key || p.scroll[1] != old_scroll || p.md_prose.is_none()
         });
         if changed {
-            let prose = self.preview_prose_geometry(surface, scale, None);
+            let blocks = self.preview_prose_geometry(surface, scale, None);
+            let prose = preview_caret_prose(&blocks, self.preview_caret_seat_block(surface));
             self.preview_pane_mut(surface).md_prose = prose;
+            self.preview_pane_mut(surface).md_prose_blocks = blocks;
         }
     }
 
@@ -1123,7 +1147,10 @@ impl Runtime<'_> {
         Layout,
         Vec<MarkdownBlockIntrinsic>,
         Arc<preview_wrap::Document>,
+        GeometryCost,
     ) {
+        // The clock runs only when the trace is open, `DocumentBuild`'s rule.
+        let clock = preview_trace::global().map(|_| Instant::now());
         let metrics = seats::preview_markdown_metrics(scale);
         let (left, right) = preview::markdown_measure_box(body, metrics);
         let frame =
@@ -1167,6 +1194,8 @@ impl Runtime<'_> {
             edits: build.edits,
             art_changed: build.art_changed,
         });
+        let reconciled = clock.map(|clock| clock.elapsed());
+        let clock = clock.map(|_| Instant::now());
         if let Some(anchor) = &mut anchor
             && let PreviewDocument::Markdown { ranges, .. } = old
         {
@@ -1185,7 +1214,7 @@ impl Runtime<'_> {
             );
         }
         let palette = bt_render::chrome_palette();
-        Realize {
+        let realized = Realize {
             blocks: build.blocks,
             source: build.source,
             art: build.art,
@@ -1204,11 +1233,16 @@ impl Runtime<'_> {
             cache: &mut self.window.markdown_intrinsics,
         }
         .ensure(&mut view, anchor, &mut measure);
+        let cost = GeometryCost {
+            realized,
+            reconcile: reconciled.unwrap_or_default(),
+            realize: clock.map(|clock| clock.elapsed()).unwrap_or_default(),
+        };
         let pane = self.preview_pane_mut(surface);
         pane.scroll[1] = view.scroll;
         let mut wrap = pass.document();
         Arc::make_mut(&mut wrap).viewport = state;
-        (layout, intrinsic, wrap)
+        (layout, intrinsic, wrap, cost)
     }
 
     /// Called even on parse-key equality: scroll and viewport-height changes do
@@ -1268,7 +1302,7 @@ impl Runtime<'_> {
         let state = &mut Arc::make_mut(&mut wrap).viewport;
         Realize {
             blocks: &blocks,
-            source: source.as_deref(),
+            source: &source,
             art: PageArt {
                 math: &math,
                 pictures: &pictures,

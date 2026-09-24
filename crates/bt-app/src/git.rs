@@ -123,7 +123,7 @@ pub fn git_worker_stopped_notice() -> &'static str {
     crate::i18n::Text::GitWorkerStopped.text()
 }
 
-/// What [`GitFault::GitMissing`] says when there is no `git.exe` at all.
+/// What [`GitFault::GitMissing`] says when there is no git at all.
 ///
 /// It says what to do about it, not only what is wrong (user ruling,
 /// 2026-08-16): the Git page is on by default so that it can be *found*, and a
@@ -2158,7 +2158,12 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8
         move || {
             let mut buffer = Vec::new();
             if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut buffer);
+                let _ = bt_platform::file_reads::Reader::new(
+                    &mut pipe,
+                    bt_platform::file_reads::Lane::GitPipe,
+                    None,
+                )
+                .read_to_end(&mut buffer);
             }
             buffer
         },
@@ -2167,6 +2172,21 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8
     // out a thread; the behaviour is kept rather than turned into a quiet
     // half-drained pipe, which is a deadlock wearing a shrug.
     .expect("spawn a git pipe reader")
+}
+
+/// The name of the program `command` starts, as a [`GitFault::GitMissing`]
+/// sentence says it: `git.exe` on Windows and `git` on a Mac (0.4.4 ticket 07).
+///
+/// Read off the path [`crate::profiles::find_git`] found rather than written
+/// into the sentence, so the words name the program this machine really tried
+/// to start. They used to say `git.exe` on every platform.
+fn program_name(command: &Command) -> String {
+    let program = Path::new(command.get_program());
+    program
+        .file_name()
+        .unwrap_or(program.as_os_str())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Run one `git`, and never wait for it longer than `timeout`.
@@ -2199,9 +2219,12 @@ fn run_git_with_input(
     if feeding {
         command.stdin(Stdio::piped());
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| GitFault::GitMissing(format!("git.exe would not start: {error}")))?;
+    let mut child = command.spawn().map_err(|error| {
+        GitFault::GitMissing(format!(
+            "{} would not start: {error}",
+            program_name(&command)
+        ))
+    })?;
     if feeding {
         let mut pipe = child.stdin.take();
         // Below normal for the reason [`drain`] gives: a thread does not inherit
@@ -2241,7 +2264,8 @@ fn run_git_with_input(
             Err(error) => {
                 let _ = child.kill();
                 return Err(GitFault::GitMissing(format!(
-                    "git.exe could not be waited for: {error}"
+                    "{} could not be waited for: {error}",
+                    program_name(&command)
                 )));
             }
         }
@@ -3872,7 +3896,7 @@ pub struct GitWorker {
 }
 
 impl GitWorker {
-    /// Start the thread. **Where `git.exe` is, is decided here, once.**
+    /// Start the thread. **Where git is, is decided here, once.**
     ///
     /// On the worker rather than at startup because it is a `PATH` walk and a
     /// handful of `is_file` probes, and the main thread has a window to open. Once
@@ -4040,7 +4064,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
             .expect("the recording contains this path")
     }
 
-    /// Where the real `git.exe` is, or the reason a test that needs one cannot
+    /// Where the real git is, or the reason a test that needs one cannot
     /// run. Every test that talks to a real repository goes through here.
     fn real_git() -> PathBuf {
         crate::profiles::find_git(&bt_pty::SystemShellEnvironment).expect(
@@ -4660,6 +4684,72 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         };
         let _ = std::fs::remove_dir_all(&outside);
         assert_eq!(outcome.err(), Some(GitFault::NotARepository));
+    }
+
+    /// RED (0.4.4 ticket 07) — **a git that would not start is named the way
+    /// this platform names the program: `git.exe` on Windows, `git` on a Mac.**
+    ///
+    /// The two [`GitFault::GitMissing`] sentences written at the spawn and at
+    /// the wait said `git.exe` on every platform, so a Mac reader whose git
+    /// failed to start was told about a Windows file. The words are now read off
+    /// the program that was really tried.
+    ///
+    /// The real producers end to end: [`crate::profiles::find_git_on`] finds the
+    /// git of an imaginary machine whose `PATH` names a folder that does not
+    /// exist, [`git_command`] builds the child and [`run_git`] fails to start
+    /// it. Nothing is spawned that could be a git, on either host.
+    ///
+    /// MUTATION: put the `git.exe` literal back into either sentence in
+    /// `run_git_with_input` and the Mac half of this names it.
+    #[test]
+    fn the_git_missing_words_name_this_platforms_program() {
+        use bt_platform::HostPlatform;
+        use std::ffi::OsString;
+
+        /// A machine whose `PATH` is one folder, holding one file.
+        struct Machine {
+            path: OsString,
+            file: PathBuf,
+        }
+        impl bt_pty::ShellEnvironment for Machine {
+            fn var_os(&self, key: &str) -> Option<OsString> {
+                (key == "PATH").then(|| self.path.clone())
+            }
+            fn is_file(&self, path: &Path) -> bool {
+                path == self.file
+            }
+        }
+
+        let bin = std::env::temp_dir()
+            .join(format!("folio-no-git-here-{}", std::process::id()))
+            .join("bin");
+        for platform in [HostPlatform::Windows, HostPlatform::MacOs] {
+            let name = crate::profiles::git_file_name_on(platform);
+            let machine = Machine {
+                path: bin.clone().into_os_string(),
+                file: bin.join(name),
+            };
+            let program = crate::profiles::find_git_on(platform, &machine)
+                .expect("the imaginary machine's git is found where its PATH says");
+            let outcome = run_git(
+                git_command(&program, &this_repository(), &[OsStr::new("--version")]),
+                GIT_COMMAND_TIMEOUT,
+            );
+            let words = match outcome {
+                Err(GitFault::GitMissing(words)) => words,
+                Err(fault) => {
+                    panic!("{platform:?}: a missing program is a missing git, not {fault:?}")
+                }
+                Ok(_) => panic!("{platform:?}: a program in a folder that does not exist started"),
+            };
+            assert!(
+                words.starts_with(&format!("{name} would not start: ")),
+                "{platform:?} names {name}: {words:?}"
+            );
+            if platform != HostPlatform::Windows {
+                assert!(!words.contains("git.exe"), "{platform:?}: {words:?}");
+            }
+        }
     }
 
     /// PIN — a machine with no git answers every question with the same reason,

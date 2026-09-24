@@ -70,6 +70,10 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (31, migrate_settings_v31_to_v32),
     (32, migrate_settings_v32_to_v33),
     (33, migrate_settings_v33_to_v34),
+    (34, migrate_settings_v34_to_v35),
+    (35, migrate_settings_v35_to_v36),
+    (36, migrate_settings_v36_to_v37),
+    (37, migrate_settings_v37_to_v38),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -808,6 +812,60 @@ fn migrate_settings_v33_to_v34(mut value: Value) -> Value {
     value
 }
 
+/// v34 -> v35: the terminal grid's separately chosen CJK family.
+///
+/// Empty is the automatic platform chain and therefore the only honest value
+/// for a document whose reader was never offered this question.
+fn migrate_settings_v34_to_v35(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(35));
+        object.insert("terminal_cjk_font_family".to_owned(), Value::from(""));
+    }
+    value
+}
+
+/// v35 -> v36: the row-break repair switch, defaulted **on**.
+///
+/// This is the v1 -> v2 kind of step and not the v2 -> v3 kind: there is a behaviour to carry
+/// forward. Every build that could have written a v35 document repaired an agent's eaten row
+/// separators unconditionally, with no way to say otherwise, so a reader arriving here has been
+/// seeing repaired matrices all along. `true` preserves the screen they have; `false` would be
+/// this step revoking a feature on their behalf.
+fn migrate_settings_v35_to_v36(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(36));
+        object.insert("repair_row_breaks".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v36 -> v37: the multi-line paste question, defaulted **on** (owner's ruling 2026-09-22).
+///
+/// [`migrate_settings_v7_to_v8`]'s one-key shape. `true` is the ruling itself rather than a
+/// behaviour carried forward: the question is new, and the owner ruled that it is asked unless a
+/// reader turns it off. No sibling is read or rewritten.
+fn migrate_settings_v36_to_v37(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(37));
+        object.insert("multiline_paste_ask".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v37 -> v38: which colour scheme a web pane asks its page for, defaulted to **Folio's own theme**
+/// (owner's ruling 2026-09-21, 0.4.4 ticket 09).
+///
+/// [`migrate_settings_v7_to_v8`]'s one-key shape. `FollowTheme` is the ruling itself: no earlier
+/// build told a page anything, and the owner ruled that a page follows the window it is in. No
+/// sibling is read or rewritten.
+fn migrate_settings_v37_to_v38(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(38));
+        object.insert("web_color_scheme".to_owned(), Value::from("FollowTheme"));
+    }
+    value
+}
+
 /// Migration table for `keybindings.json`. Empty, and it will stay empty for as
 /// long as the file's *shape* holds: a schema step is owed when the document
 /// changes, and adding, renaming or retiring a shortcut row does not change this
@@ -1429,54 +1487,61 @@ where
     };
 
     // Every refusal below this line has the bytes in hand, so every one of them
-    // keeps them. One closure rather than five call sites, so a reason added
-    // later cannot be the one that forgets.
-    let refuse = |reason: FallbackReason| -> (T, ReadReport) {
-        (
+    // keeps them. One call rather than five sites, so a reason added later
+    // cannot be the one that forgets.
+    match parse_document::<T>(&bytes, current_version, migrations) {
+        Ok(value) => (value, ReadReport::Loaded),
+        Err(reason) => (
             T::default(),
             ReadReport::FellBackToDefaults {
                 kept: keep_rejected(path, &bytes),
                 reason,
             },
-        )
-    };
+        ),
+    }
+}
 
-    let envelope: VersionEnvelope = match serde_json::from_slice(&bytes) {
-        Ok(env) => env,
-        Err(e) => return refuse(FallbackReason::ParseError(e.to_string())),
-    };
+/// **The one reading of a document's bytes** — the half of
+/// [`read_with_fallback`] that has nothing to do with a disk.
+///
+/// Split out so that a document which arrives some other way than off its own
+/// path — a part of an exported bundle (`crate::export`) — is read by exactly
+/// the chain a hand-edited file is: the version envelope first, a future version
+/// refused whole and never partly parsed, an older one walked forward through
+/// `migrations`, and the typed parse last. A second reader for the same document
+/// would be a second place for the rules to drift apart.
+pub(crate) fn parse_document<T>(
+    bytes: &[u8],
+    current_version: u32,
+    migrations: &[(u32, MigrationStep)],
+) -> Result<T, FallbackReason>
+where
+    T: DeserializeOwned,
+{
+    let envelope: VersionEnvelope =
+        serde_json::from_slice(bytes).map_err(|e| FallbackReason::ParseError(e.to_string()))?;
 
     if envelope.schema_version > current_version {
-        return refuse(FallbackReason::FutureSchemaVersion {
+        return Err(FallbackReason::FutureSchemaVersion {
             found: envelope.schema_version,
             current: current_version,
         });
     }
 
     if envelope.schema_version < current_version {
-        let value: Value = match serde_json::from_slice(&bytes) {
-            Ok(v) => v,
-            Err(e) => return refuse(FallbackReason::ParseError(e.to_string())),
-        };
-        let migrated =
-            match migrate_value(value, envelope.schema_version, current_version, migrations) {
-                Ok(v) => v,
-                Err(found) => return refuse(FallbackReason::NoMigrationPath { found }),
-            };
-        return match serde_json::from_value::<T>(migrated) {
-            Ok(v) => (v, ReadReport::Loaded),
-            Err(e) => refuse(FallbackReason::ParseError(e.to_string())),
-        };
+        let value: Value =
+            serde_json::from_slice(bytes).map_err(|e| FallbackReason::ParseError(e.to_string()))?;
+        let migrated = migrate_value(value, envelope.schema_version, current_version, migrations)
+            .map_err(|found| FallbackReason::NoMigrationPath { found })?;
+        return serde_json::from_value::<T>(migrated)
+            .map_err(|e| FallbackReason::ParseError(e.to_string()));
     }
 
-    match serde_json::from_slice::<T>(&bytes) {
-        Ok(v) => (v, ReadReport::Loaded),
-        Err(e) => refuse(FallbackReason::ParseError(e.to_string())),
-    }
+    serde_json::from_slice::<T>(bytes).map_err(|e| FallbackReason::ParseError(e.to_string()))
 }
 
 /// Why [`read_bounded`] answered with nothing.
-enum BoundedRead {
+pub(crate) enum BoundedRead {
     NotFound,
     Io(String),
     TooLarge { bytes: u64 },
@@ -1491,7 +1556,7 @@ enum BoundedRead {
 /// the second bound is the one that is actually true of the bytes in hand. A
 /// file that grew past the ceiling in that window reads as oversized, which is
 /// the answer a `stat` a moment later would have given.
-fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedRead> {
+pub(crate) fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedRead> {
     use std::io::Read;
 
     let metadata = match std::fs::metadata(path) {
@@ -1504,7 +1569,7 @@ fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedRead> {
             bytes: metadata.len(),
         });
     }
-    let file = match std::fs::File::open(path) {
+    let file = match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Settings, path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(BoundedRead::NotFound),
         Err(e) => return Err(BoundedRead::Io(e.to_string())),
@@ -2675,6 +2740,196 @@ mod tests {
         let absent: crate::SettingsV1 =
             serde_json::from_value(written).expect("this key has a default");
         assert_eq!(absent.launch_opens, crate::LaunchOpensV1::NewWindow);
+    }
+
+    /// RED (issue #10) — a v34 file acquires automatic CJK selection without
+    /// changing a neighbouring preference the reader chose.
+    #[test]
+    fn real_settings_v34_to_v35_migration_adds_an_automatic_cjk_family() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 34,
+                "terminal_font_family": "Cascadia Mono",
+                "option_sends_alt": true
+            }),
+            34,
+            35,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(35));
+        assert_eq!(migrated["terminal_cjk_font_family"], json!(""));
+        assert_eq!(migrated["terminal_font_family"], json!("Cascadia Mono"));
+        assert_eq!(migrated["option_sends_alt"], json!(true));
+    }
+
+    /// RED — **a reader upgrading past v35 keeps the repaired matrices they already had.**
+    ///
+    /// MUTATIONS:
+    /// ① write `false` and every agent-printed matrix on every upgraded machine comes back as a
+    ///    single row, on a question its reader was never asked;
+    /// ② forget the `schema_version` line and the ladder never leaves this rung;
+    /// ③ overwrite a neighbouring key and a preference somebody really did express is lost.
+    #[test]
+    fn real_settings_v35_to_v36_migration_keeps_an_existing_reader_their_repair() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 35,
+                "display_formulas": false,
+                "terminal_cjk_font_family": "Microsoft YaHei",
+                "option_sends_alt": true
+            }),
+            35,
+            36,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(36));
+        assert_eq!(
+            migrated["repair_row_breaks"],
+            json!(true),
+            "every build that could have written a v35 document made this repair unconditionally"
+        );
+        assert_eq!(migrated["display_formulas"], json!(false));
+        assert_eq!(
+            migrated["terminal_cjk_font_family"],
+            json!("Microsoft YaHei")
+        );
+        assert_eq!(migrated["option_sends_alt"], json!(true));
+
+        // And a v36 document that simply omits the line means the same thing, because leaving a
+        // line out is not the way a reader asks for a repair to stop.
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            repair_row_breaks: false,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("repair_row_breaks");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert!(absent.repair_row_breaks);
+    }
+
+    /// RED (0.4.4 ticket 02) — **the v36 -> v37 step adds the paste question's key, on, and
+    /// leaves every sibling exactly as it found it.**
+    ///
+    /// The step is one key on its own day. A step that rewrote a neighbour would be answering a
+    /// question on the reader's behalf that the ruling never asked, and a step that forgot the
+    /// version line would leave the ladder on this rung forever.
+    ///
+    /// MUTATION: write `false` in `migrate_settings_v36_to_v37` — the first assertion goes red;
+    /// drop its `schema_version` line — the second does.
+    #[test]
+    fn migrate_settings_v36_to_v37_adds_one_key_and_leaves_every_sibling_alone() {
+        let before = json!({
+            "schema_version": 36,
+            "copy_on_select": false,
+            "repair_row_breaks": false,
+            "terminal_cjk_font_family": "Microsoft YaHei",
+            "option_sends_alt": true
+        });
+        let migrated = migrate_value(before.clone(), 36, 37, SETTINGS_MIGRATIONS).unwrap();
+        assert_eq!(
+            migrated["multiline_paste_ask"],
+            json!(true),
+            "the owner ruled the question on by default"
+        );
+        assert_eq!(migrated["schema_version"], json!(37));
+        let (before, after) = (
+            before.as_object().expect("an object"),
+            migrated.as_object().expect("an object"),
+        );
+        assert_eq!(after.len(), before.len() + 1, "exactly one key is added");
+        for (key, value) in before {
+            if key != "schema_version" {
+                assert_eq!(&after[key], value, "`{key}` was rewritten by the step");
+            }
+        }
+
+        // And a v37 document that omits the line means the same thing.
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            multiline_paste_ask: false,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("multiline_paste_ask");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert!(absent.multiline_paste_ask);
+    }
+
+    /// RED (0.4.4 ticket 09) — **the v37 -> v38 step adds the web pane's colour-scheme key, on
+    /// Folio's own theme, and leaves every sibling exactly as it found it.**
+    ///
+    /// One key on its own day, like every rung since v7. A step that rewrote a neighbour would be
+    /// answering a question on the reader's behalf the ruling never asked — `theme_mode` above all,
+    /// which this key reads and must never write — and a step that forgot the version line would
+    /// leave the ladder on this rung forever.
+    ///
+    /// MUTATION: write `"Light"` in `migrate_settings_v37_to_v38` — the first assertion goes red;
+    /// drop its `schema_version` line — the second does.
+    #[test]
+    fn migrate_settings_v37_to_v38_adds_one_key_and_leaves_every_sibling_alone() {
+        let before = json!({
+            "schema_version": 37,
+            "theme_mode": "Dark",
+            "minimum_contrast": "Ratio3",
+            "multiline_paste_ask": false,
+            "search_engine": "Bing"
+        });
+        let migrated = migrate_value(before.clone(), 37, 38, SETTINGS_MIGRATIONS).unwrap();
+        assert_eq!(
+            migrated["web_color_scheme"],
+            json!("FollowTheme"),
+            "the owner ruled that a page follows Folio's theme"
+        );
+        assert_eq!(migrated["schema_version"], json!(38));
+        let (before, after) = (
+            before.as_object().expect("an object"),
+            migrated.as_object().expect("an object"),
+        );
+        assert_eq!(after.len(), before.len() + 1, "exactly one key is added");
+        for (key, value) in before {
+            if key != "schema_version" {
+                assert_eq!(&after[key], value, "`{key}` was rewritten by the step");
+            }
+        }
+
+        // And the spelling the step writes is the enum's own: a whole v37 document, walked up
+        // the rung, reads back as `FollowTheme` — while a v38 document that omits the line means
+        // the same thing.
+        let mut whole = serde_json::to_value(crate::SettingsV1::default()).expect("serialises");
+        let object = whole
+            .as_object_mut()
+            .expect("a settings document is an object");
+        object.remove("web_color_scheme");
+        object.insert("schema_version".to_owned(), json!(37));
+        let walked = migrate_value(whole, 37, 38, SETTINGS_MIGRATIONS).unwrap();
+        let read: crate::SettingsV1 =
+            serde_json::from_value(walked).expect("the migrated document deserialises");
+        assert_eq!(read.web_color_scheme, crate::WebColorSchemeV1::FollowTheme);
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            web_color_scheme: crate::WebColorSchemeV1::Dark,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        assert_eq!(written["web_color_scheme"], json!("Dark"));
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("web_color_scheme");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert_eq!(
+            absent.web_color_scheme,
+            crate::WebColorSchemeV1::FollowTheme
+        );
     }
 
     #[test]

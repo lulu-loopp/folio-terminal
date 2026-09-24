@@ -90,19 +90,21 @@
 //! This is a resident facility, so the bill has to be small enough that nobody
 //! would think about turning it off:
 //!
-//! - **Per station**, [`at`] is two relaxed stores to a static — on x86-64 two
-//!   `mov`s, no fence, no branch, no clock read, no allocation. There are eight
-//!   of them, at function entries, on a loop turn that already does far more
-//!   work than that in its first line. The two stations that are not entered
-//!   this way — [`Station::Parked`] and [`Station::Woken`] — are stamped by
-//!   [`park`] and [`woke`], at the two ends of the platform's own wait.
+//! - **Per station transition**, one monotonic-clock read, relaxed atomic
+//!   accounting and a fixed-capacity call-tree lookup. An enter/leave pair has
+//!   two clock reads, no allocation and no system call. The previous ledger
+//!   already read the clock and charged exclusive time; it was not two stores.
+//!   Call-tree keys include the parent and optional pane ID, so repeated calls
+//!   do not borrow another event's milliseconds. Overflow keeps the full coarse
+//!   ledger and explicitly marks the line. Formatting stays on the watchdog.
+//! - **CPU time**, one read when a hold opens while the watch is armed, and a
+//!   second only when a slow hold is admitted to the reporting queue. Neither
+//!   sample is a process CPU counter; a failed sample prints no invented zero.
 //! - **Per turn of the loop**, [`beat`] is one `Instant::now()` (which
 //!   `about_to_wait` already calls for its own clocks) plus four stores, and
-//!   [`park`] at the other end of the turn is two more — **plus the one kernel
-//!   query a hold opens with** ([`Heartbeat::open_footprint`], which is where
-//!   the reason it cannot be deferred is written down). It is the one kernel
-//!   query this facility deliberately makes on the window thread, it is made on
-//!   a turn that already carries a frame and a platform round trip, and a
+//!   [`park`] at the other end of the turn is two more. The footprint baseline
+//!   is cached for [`FOOTPRINT_SAMPLE_INTERVAL`], bounding its one kernel query
+//!   to four a second even when a platform spuriously spins its run loop. A
 //!   parked thread makes none of them: no hold is open, so nothing is sampled.
 //! - **Per two seconds, forever**, the watchdog does one `Instant::now()`, four
 //!   atomic loads and a comparison, then sleeps again. **Zero allocation**: the
@@ -192,13 +194,12 @@
 //! counters below, the log could not tell them apart.
 //!
 //! So a hold now also carries [`Paging`]: the process's page faults and
-//! resident size, sampled at the two ends of the hold and appended to the line
-//! after a middle dot. The sampling rule is the one thing worth stating twice —
-//! **the opening sample is taken at every hold and the closing one only at a
-//! hold that is being reported**, because *slow* is not known until a hold ends
-//! and a baseline read after the paging is over measures nothing. See
-//! [`Heartbeat::open_footprint`] for why the two cheaper-looking designs both
-//! print `faults +0` on the holds they exist for.
+//! resident size, sampled around the hold and appended to the line after a
+//! middle dot. The opening baseline is at most
+//! [`FOOTPRINT_SAMPLE_INTERVAL`] old; the closing sample is taken only for a
+//! hold that is being reported. *Slow* is not known until a hold ends, while a
+//! baseline read after the paging is over measures nothing. See
+//! [`Heartbeat::open_footprint`] for the bounded compromise.
 //!
 //! The watchdog runs in the `BelowNormal` band with every other worker (§1.4).
 //! That is the right band even though its job is to run when the window thread
@@ -292,6 +293,10 @@ const STARTUP_THRESHOLD: Duration = Duration::from_secs(30);
 /// perf-resilience work was 1.25 s, and that was a debug build under a 24-way
 /// `cargo`, which is exactly the kind of hold worth a line).
 const SLOW_HOLD_THRESHOLD: Duration = Duration::from_millis(500);
+/// A footprint baseline may be this old when a hold opens. Half the slow-hold
+/// threshold keeps the attribution useful while bounding the platform query to
+/// four calls a second during a busy or spuriously woken loop.
+const FOOTPRINT_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How many slow holds may wait for the watchdog to write them.
 ///
@@ -316,7 +321,10 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 48;
+const STATION_COUNT: usize = 207;
+
+#[path = "hang_watch_detail.rs"]
+mod detail;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -377,6 +385,16 @@ pub enum Station {
     Present = 5,
     /// `Runtime::flush_wheel` — a coalesced burst of notches being spent.
     Wheel = 6,
+    /// `Runtime::flush_dropped_files` — the paths one drop put on this window,
+    /// spelled for a shell and written into it (GitHub issue #1 ②).
+    ///
+    /// [`Self::Wheel`]'s twin, one gesture over and collected the same way:
+    /// winit delivers a dropped file per event with no batch marker, so the
+    /// paths accumulate until the turn boundary and are spent here, once. Its
+    /// own station rather than [`Self::EventFileDrop`]'s for the reason the
+    /// wheel's pair states — one is an addition to a list and the other is a
+    /// write onto a child's input, and the two are repaired differently.
+    FileDrop = 48,
     /// `Runtime::advance_web_page` — a call into WebView2 and therefore into
     /// another process.
     WebPage = 7,
@@ -605,6 +623,11 @@ pub enum Station {
     /// Entered and left around the two scans themselves rather than around
     /// `refresh_search`, which leaves through eight doors: a station that is put
     /// back on only one of them would be a worse lie than the one this replaces.
+    ///
+    /// **Bounded since ticket 51** (D-38): a keystroke now reads the volatile
+    /// planes and at most `search::SEARCH_HISTORY_SLICE` frozen lines, and the
+    /// rest of the history is read a slice per turn by
+    /// `Runtime::advance_search_scan`, which stands under this name as well.
     SearchScan = 34,
     /// `WindowEvent::CloseRequested` — the dirty gate, which asks the reader
     /// about preview buffers that would not survive the shut, and the summoned
@@ -688,6 +711,15 @@ pub enum Station {
     /// the preview files no kernel would speak for, which is the only thing
     /// either arm asks a disk.
     EventFocus = 46,
+    /// `WindowEvent::DroppedFile` — one path a hand let go of over this window,
+    /// added to the batch the turn boundary spends ([`Self::FileDrop`]).
+    ///
+    /// **`HoveredFile` and `HoveredFileCancelled` are deliberately not here.**
+    /// A drag passing over this window changes nothing on the glass — the drop
+    /// affordance the files column would need is a ruling nobody has made — so
+    /// both kinds fall through the dispatcher's own catch-all and answer
+    /// [`Self::EventOther`], which is exactly what that label is for.
+    EventFileDrop = 49,
     /// Every kind `window_event`'s match ends in `_ => Ok(())` for.
     ///
     /// **The label says `other` rather than naming them**, because the set is
@@ -697,6 +729,242 @@ pub enum Station {
     /// the dispatch itself — and, since that is very nearly impossible, a kind
     /// this window has started answering without being given a name.
     EventOther = 47,
+    /// CPU-side frame composition and command encoding. The surface acquire
+    /// sits between two intervals bearing this name, and the ledger adds them.
+    RenderCompose = 50,
+    /// `wgpu::Surface::get_current_texture`.
+    SurfaceAcquire = 51,
+    /// `wgpu::Queue::submit` after the command buffer has been finished.
+    QueueSubmit = 52,
+    /// `wgpu::Queue::present`, for a swapchain frame.
+    SwapchainPresent = 53,
+    /// winit's `Window::set_ime_cursor_area` platform call.
+    ImeCursorArea = 54,
+    /// Folio's platform system-caret update for the input method.
+    ImeSystemCaret = 55,
+    /// `bt_pty::OutputRing::try_pop`, through `read_output_slice`.
+    DrainRingRead = 56,
+    /// `DualPlaneSession::feed_at`: parse bytes and apply terminal events.
+    DrainFeed = 57,
+    /// Replies taken from the terminal actor and handed to bt-pty's writer.
+    DrainReplies = 58,
+    /// `DualPlaneSession::end_feed_turn`: settle the complete sliced feed.
+    DrainSettle = 59,
+    /// Interpret and publish the outcomes accumulated from all drained panes.
+    DrainOutcomes = 60,
+    /// The visible-artifact detection and scheduling pass over a projected frame.
+    DetectionPass = 61,
+    /// `Runtime::trace_drain` offering its line to the bounded trace sink.
+    DrainTrace = 62,
+    /// Decide whether terminal output publishes now or remains deferred.
+    DrainPublish = 63,
+    /// DirectComposition's update of the swapchain-covered rectangle.
+    CompositorSize = 64,
+    /// DirectComposition's `Commit`, which publishes the presented swapchain.
+    CompositorCommit = 65,
+    ImeEnabled = 66,
+    ImePreedit = 67,
+    ImeCommit = 68,
+    ImeDisabled = 69,
+    EventMoved = 70,
+    EventTheme = 71,
+    EventOccluded = 72,
+    EventCursorLeft = 73,
+    ImeAllowed = 74,
+    ImeCaretDestroy = 75,
+    PtyInput = 76,
+    ClipboardWrite = 77,
+    EventLookup = 78,
+    EventSettleApplication = 79,
+    EventRestore = 80,
+    EventOpen = 81,
+    EventQuit = 82,
+    EventShut = 83,
+    RedrawLayout = 84,
+    RedrawProjection = 85,
+    RedrawOverlay = 86,
+    RedrawTables = 87,
+    RedrawSignature = 88,
+    RetainedPicture = 89,
+    RedrawCommit = 90,
+    PresentSeats = 91,
+    /// `sample_window_place`, from `Runtime::observe_window_place` — the one
+    /// reading of where the window is, taken at the head of every turn, at a
+    /// window's birth and by an attention delivery between turns (ticket 48; was
+    /// `DrainPlace`, same id and label, when the drain took it).
+    Place = 92,
+    /// `Window::has_focus`, the focus half of that reading (was `DrainFocus`).
+    PlaceFocus = 93,
+    DrainPane = 94,
+    DrainPalette = 95,
+    DrainRingStats = 96,
+    DrainKeyboardFocus = 97,
+    DrainMarks = 98,
+    DrainAttention = 99,
+    DrainRaiseAttention = 100,
+    DrainGit = 101,
+    /// `Window::set_title`, from `Runtime::flush_title` — the one write of the
+    /// window's title, once a turn at most (ticket 49; was `DrainTitle`, same id
+    /// and label, when the drain wrote it).
+    WindowTitle = 102,
+    DrainBegin = 103,
+    DrainWake = 104,
+    DrainWatermark = 105,
+    SettingsWrite = 106,
+    PreviewSave = 107,
+    RenameDisk = 108,
+    SharedLock = 109,
+    EventGate = 110,
+    ClockRaiseFirstRunIfDue = 111,
+    ClockRaisePsreadlineInviteIfDue = 112,
+    ClockAdvanceCursorBlinkIfDue = 113,
+    ClockAdvanceRenameBlinkIfDue = 114,
+    ClockAdvanceSchemeWatch = 115,
+    ClockAdvanceStorageWatch = 116,
+    ClockAdvancePreviewWatch = 117,
+    ClockAdvanceFilesWatch = 118,
+    ClockAdvanceTabPressIfDue = 119,
+    ClockServicePictures = 120,
+    ClockAdvanceStripAnimation = 121,
+    ClockFinishSynchronizedUpdateIfDue = 122,
+    ClockFinishPtyCoalesceIfDue = 123,
+    ClockAdvanceGitWatch = 124,
+    ClockSettleCompositionOwner = 125,
+    ClockOfferImeCaret = 126,
+    ClockFlushImeCursorArea = 127,
+    ClockFinishResizeIfQuiescent = 128,
+    ClockFinishPreviewScaleIfQuiet = 129,
+    ClockAdvanceLiveMathIfDue = 130,
+    ClockActivateHyperlinkHoverIfDue = 131,
+    ClockActivatePeekIfDue = 132,
+    ClockAdvanceChevrons = 133,
+    ClockAdvancePaneMenu = 134,
+    ClockAdvanceTermMenu = 135,
+    ClockAdvanceTabMenu = 136,
+    ClockAdvanceDragSpring = 137,
+    ClockServiceDragAutoscroll = 138,
+    ClockRefreshMathHoverAgainstThePicture = 139,
+    ClockAdvanceMathToggleIfDue = 140,
+    ClockAdvanceMathToolsIfDue = 141,
+    ClockAdvanceLayoutPeekIfDue = 142,
+    ClockAdvanceTooltipIfDue = 143,
+    ClockNoteKeyHint = 144,
+    ClockAdvanceKeyHintIfDue = 145,
+    ClockNoteCardHint = 146,
+    ClockAdvanceCardHint = 147,
+    ClockAdvanceToasts = 148,
+    ClockAdvanceCommandFlash = 149,
+    ClockAdvanceCommandRails = 150,
+    ClockAdvanceTerminalThumbs = 151,
+    ClockAdvanceFilePeek = 152,
+    ClockAdvanceFloat = 153,
+    ClockRearmHoverIntents = 154,
+    ClockAdvanceFootReveal = 155,
+    ClockAdvancePageFootClocks = 156,
+    ClockAdvancePreviewNotice = 157,
+    ClockAdvancePreviewRefusal = 158,
+    AtlasUpload = 159,
+    TextShaping = 160,
+    RenderLayout = 161,
+    ImeCancel = 162,
+    DrainChannel = 163,
+    ClockFileDwell = 164,
+    ClockFileClose = 165,
+    ClockMathCopy = 166,
+    ClockWebZoom = 167,
+    ClockWebDialog = 168,
+    EventActivation = 169,
+    EventDestroyed = 170,
+    EventHoveredFile = 171,
+    EventHoverCancelled = 172,
+    EventCursorEntered = 173,
+    EventPinch = 174,
+    EventPan = 175,
+    EventDoubleTap = 176,
+    EventRotation = 177,
+    EventPressure = 178,
+    EventAxis = 179,
+    EventTouch = 180,
+    RedrawTableSources = 181,
+    RedrawSeatFrames = 182,
+    RedrawValidate = 183,
+    RedrawDispatch = 184,
+    WindowRedraw = 185,
+    WindowFocus = 186,
+    WindowVisible = 187,
+    WindowCursor = 188,
+    KeybindingsWrite = 189,
+    ProfilesWrite = 190,
+    DrainTab = 191,
+    ImeTrace = 192,
+    DiagnosticWrite = 193,
+    SurfaceConfigure = 194,
+    /// `IsIconic` and the DWM cloak query, inside `sample_window_place`.
+    PlaceHidden = 195,
+    /// `bt_platform::window_is_exposed` — the exposure probe's `GetWindowRect`
+    /// and hit tests, which ask whatever window is under each point.
+    PlaceExposure = 196,
+    /// `bt_platform::taskbar_is_auto_hidden` — `SHAppBarMessage`, a message to
+    /// the shell's taskbar.
+    PlaceTaskbar = 197,
+    /// `TaskbarMirror::show`, the taskbar button's progress, from
+    /// `Runtime::advance_strip_animation`.
+    TaskbarMirror = 198,
+    /// `WebSeat::start_environment`'s call into the host — the first page in
+    /// the process spends `CreateCoreWebView2EnvironmentWithOptions` here (the
+    /// loader, the runtime's discovery and the browser's launch request); every
+    /// later page finds the process-wide environment cached and only queues its
+    /// answer.
+    ///
+    /// **Born naming a stall that had already been reported** (ticket 43,
+    /// D-64). The two holds of 2026-09-23 while a web preview opened —
+    /// 4,099 ms and 2,884 ms — read `window_event 3979 ms` with every named
+    /// child under 130 ms: the engine coming up had no word in this ledger, so
+    /// the gesture that asked for it, the callback road it answered on and the
+    /// burst that installed it were all one remainder. This station and the
+    /// six after it are that remainder, named.
+    WebEnvironment = 199,
+    /// `WebHost::request_controller` —
+    /// `CreateCoreWebView2CompositionController` on this window, a synchronous
+    /// call whose controller arrives later by callback. Reached from
+    /// [`Self::WebSpoke`] on the turn the environment's callback is read.
+    WebController = 200,
+    /// `Compositor::attach_web_visual` — the DirectComposition visual a
+    /// controller that has just arrived is given, the first part of the
+    /// `WebEffect::InstallEvents` burst.
+    WebVisual = 201,
+    /// `WebHost::install` — the controller taken, its settings said, every
+    /// handler attached and its root visual target set, in one walk
+    /// (`INSTALL_SEQUENCE`). The burst's second part.
+    WebInstall = 202,
+    /// `WebSeat::stand_on_the_floor` on the install turn — the new visual
+    /// placed, its cover said, and the controller's scale, bounds and
+    /// visibility told before anything navigates. The burst's third part; the
+    /// same call on a frame's clock is [`Self::WebPlace`]'s.
+    WebFloor = 203,
+    /// `WebHost::navigate` — `ICoreWebView2::Navigate`, the first of which the
+    /// install burst ends in, and every later one a seat is asked for.
+    WebNavigate = 204,
+    /// **Control is back with the platform's message pump inside a turn** —
+    /// stamped at the foot of `window_event` and of `user_event`, so what the
+    /// thread does between one of this program's handlers and the next is not
+    /// charged to the handler that has already returned.
+    ///
+    /// **The callback road** (ticket 43). WebView2 is a single-threaded engine
+    /// whose in-process half runs on this thread: its creation callbacks and
+    /// whatever else it posts to itself are dispatched by the pump winit drives,
+    /// between handlers. Before this station that time was charged to the last
+    /// station standing, which after a window event was [`Self::Event`] — and
+    /// that is the `window_event 3979 ms` the 2026-09-23 report could not
+    /// divide. Time here is the platform's own loop and anything that runs on
+    /// it: winit, the engine, a hook another program installed.
+    Pump = 205,
+    /// `settings::monospace_family_files`, from `apply_stored_terminal_font` —
+    /// the face `settings.json` names, looked up by its name before the first
+    /// grid is measured and whenever the face changes (ticket 50). Before the
+    /// font list has landed this is one family asked of the system font
+    /// collection; after, a row of that list.
+    FontLookup = 206,
 }
 
 impl Station {
@@ -751,7 +1019,166 @@ impl Station {
             Self::EventWindow => "window state",
             Self::EventRedraw => "redraw",
             Self::EventFocus => "focused",
+            Self::FileDrop => "flush_dropped_files",
+            Self::EventFileDrop => "dropped_file",
             Self::EventOther => "window_event other",
+            Self::RenderCompose => "redraw compose/encode",
+            Self::SurfaceAcquire => "surface acquire",
+            Self::QueueSubmit => "queue submit",
+            Self::SwapchainPresent => "swapchain present",
+            Self::ImeCursorArea => "IME set_cursor_area",
+            Self::ImeSystemCaret => "IME system caret",
+            Self::DrainRingRead => "PTY ring read",
+            Self::DrainFeed => "terminal parse/feed",
+            Self::DrainReplies => "PTY reply dispatch",
+            Self::DrainSettle => "feed turn settle",
+            Self::DrainOutcomes => "drain outcomes",
+            Self::DetectionPass => "visible artifact detection",
+            Self::DrainTrace => "trace sink offer",
+            Self::DrainPublish => "drain publish decision",
+            Self::CompositorSize => "compositor covered size",
+            Self::CompositorCommit => "compositor commit",
+            Self::ImeEnabled => "IME Enabled",
+            Self::ImePreedit => "IME Preedit",
+            Self::ImeCommit => "IME Commit",
+            Self::ImeDisabled => "IME Disabled",
+            Self::EventMoved => "moved",
+            Self::EventTheme => "theme changed",
+            Self::EventOccluded => "occluded",
+            Self::EventCursorLeft => "cursor left",
+            Self::ImeAllowed => "Window::set_ime_allowed",
+            Self::ImeCaretDestroy => "ImeSystemCaret::destroy",
+            Self::PtyInput => "PtySession::write input enqueue",
+            Self::ClipboardWrite => "clipboard write",
+            Self::EventLookup => "window runtime lookup",
+            Self::EventSettleApplication => "settle_application_change",
+            Self::EventRestore => "settle_restore_answer",
+            Self::EventOpen => "open_pending_window",
+            Self::EventQuit => "settle_quit",
+            Self::EventShut => "close window",
+            Self::RedrawLayout => "redraw layout",
+            Self::RedrawProjection => "pane projection",
+            Self::RedrawOverlay => "overlay build",
+            Self::RedrawTables => "table paints",
+            Self::RedrawSignature => "present signature",
+            Self::RetainedPicture => "present_retained_picture",
+            Self::RedrawCommit => "redraw bookkeeping",
+            Self::PresentSeats => "present_seats_and_commit",
+            Self::Place => "sample_window_place",
+            Self::PlaceFocus => "Window::has_focus",
+            Self::DrainPane => "drain pane",
+            Self::DrainPalette => "terminal palette",
+            Self::DrainRingStats => "PTY ring stats",
+            Self::DrainKeyboardFocus => "terminal keyboard focus",
+            Self::DrainMarks => "command marks and outcomes",
+            Self::DrainAttention => "deliver_osc_attention",
+            Self::DrainRaiseAttention => "drain raise_attention",
+            Self::DrainGit => "reread_git_surfaces",
+            Self::WindowTitle => "Window::set_title",
+            Self::DrainBegin => "begin_feed_turn",
+            Self::DrainWake => "PTY wake accept",
+            Self::DrainWatermark => "command_marks_watermark",
+            Self::SettingsWrite => "write_settings_atomic",
+            Self::PreviewSave => "preview buffer save",
+            Self::RenameDisk => "filesystem rename",
+            Self::SharedLock => "shared lock acquisition",
+            Self::EventGate => "window event gates",
+            Self::ClockRaiseFirstRunIfDue => "first run",
+            Self::ClockRaisePsreadlineInviteIfDue => "PSReadLine invite",
+            Self::ClockAdvanceCursorBlinkIfDue => "shell caret",
+            Self::ClockAdvanceRenameBlinkIfDue => "rename caret",
+            Self::ClockAdvanceSchemeWatch => "schemes watch",
+            Self::ClockAdvanceStorageWatch => "storage watch",
+            Self::ClockAdvancePreviewWatch => "preview watch",
+            Self::ClockAdvanceFilesWatch => "files watch",
+            Self::ClockAdvanceTabPressIfDue => "tab press",
+            Self::ClockServicePictures => "pictures",
+            Self::ClockAdvanceStripAnimation => "strip animation",
+            Self::ClockFinishSynchronizedUpdateIfDue => "synchronized update",
+            Self::ClockFinishPtyCoalesceIfDue => "PTY coalesce",
+            Self::ClockAdvanceGitWatch => "git watch",
+            Self::ClockSettleCompositionOwner => "composition owner",
+            Self::ClockOfferImeCaret => "IME caret offer",
+            Self::ClockFlushImeCursorArea => "IME cursor",
+            Self::ClockFinishResizeIfQuiescent => "resize finish",
+            Self::ClockFinishPreviewScaleIfQuiet => "preview resample",
+            Self::ClockAdvanceLiveMathIfDue => "live stability",
+            Self::ClockActivateHyperlinkHoverIfDue => "hyperlink hover",
+            Self::ClockActivatePeekIfDue => "peek hover",
+            Self::ClockAdvanceChevrons => "chevrons",
+            Self::ClockAdvancePaneMenu => "pane menu",
+            Self::ClockAdvanceTermMenu => "terminal menu",
+            Self::ClockAdvanceTabMenu => "tab menu",
+            Self::ClockAdvanceDragSpring => "drag spring",
+            Self::ClockServiceDragAutoscroll => "drag auto-scroll",
+            Self::ClockRefreshMathHoverAgainstThePicture => "formula hover",
+            Self::ClockAdvanceMathToggleIfDue => "formula toggle",
+            Self::ClockAdvanceMathToolsIfDue => "formula tools",
+            Self::ClockAdvanceLayoutPeekIfDue => "layout peek",
+            Self::ClockAdvanceTooltipIfDue => "tooltip",
+            Self::ClockNoteKeyHint => "key hint intent",
+            Self::ClockAdvanceKeyHintIfDue => "key hint",
+            Self::ClockNoteCardHint => "Cards hint intent",
+            Self::ClockAdvanceCardHint => "Cards hint",
+            Self::ClockAdvanceToasts => "toast",
+            Self::ClockAdvanceCommandFlash => "command flash",
+            Self::ClockAdvanceCommandRails => "command rails",
+            Self::ClockAdvanceTerminalThumbs => "terminal thumbs",
+            Self::ClockAdvanceFilePeek => "file peek",
+            Self::ClockAdvanceFloat => "float",
+            Self::ClockRearmHoverIntents => "hover intents",
+            Self::ClockAdvanceFootReveal => "revealed foot",
+            Self::ClockAdvancePageFootClocks => "page acknowledgements",
+            Self::ClockAdvancePreviewNotice => "preview save notice",
+            Self::ClockAdvancePreviewRefusal => "preview refusal",
+            Self::AtlasUpload => "atlas upload",
+            Self::TextShaping => "text shaping",
+            Self::RenderLayout => "render layout",
+            Self::ImeCancel => "IMM/TSF cancel_composition",
+            Self::DrainChannel => "terminal reply channel receive",
+            Self::ClockFileDwell => "file-peek dwell",
+            Self::ClockFileClose => "file-peek close grace",
+            Self::ClockMathCopy => "formula-copy acknowledgement",
+            Self::ClockWebZoom => "web zoom acknowledgement",
+            Self::ClockWebDialog => "web dialog acknowledgement",
+            Self::EventActivation => "activation token",
+            Self::EventDestroyed => "destroyed",
+            Self::EventHoveredFile => "hovered file",
+            Self::EventHoverCancelled => "hovered file cancelled",
+            Self::EventCursorEntered => "cursor entered",
+            Self::EventPinch => "pinch gesture",
+            Self::EventPan => "pan gesture",
+            Self::EventDoubleTap => "double tap gesture",
+            Self::EventRotation => "rotation gesture",
+            Self::EventPressure => "touchpad pressure",
+            Self::EventAxis => "axis motion",
+            Self::EventTouch => "touch",
+            Self::RedrawTableSources => "table source collection",
+            Self::RedrawSeatFrames => "seat frame assembly",
+            Self::RedrawValidate => "redraw frame validation",
+            Self::RedrawDispatch => "dispatch decoration tasks",
+            Self::WindowRedraw => "Window::request_redraw",
+            Self::WindowFocus => "Window::focus_window",
+            Self::WindowVisible => "Window::set_visible",
+            Self::WindowCursor => "Window::set_cursor",
+            Self::KeybindingsWrite => "write_keybindings_atomic",
+            Self::ProfilesWrite => "write_profiles_atomic",
+            Self::DrainTab => "drain tab",
+            Self::ImeTrace => "IME trace::Dump::line",
+            Self::SurfaceConfigure => "surface configure",
+            Self::DiagnosticWrite => "stderr diagnostic write",
+            Self::PlaceHidden => "IsIconic + cloak",
+            Self::PlaceExposure => "window_is_exposed",
+            Self::PlaceTaskbar => "taskbar_is_auto_hidden",
+            Self::TaskbarMirror => "TaskbarMirror::show",
+            Self::WebEnvironment => "request_environment",
+            Self::WebController => "request_controller",
+            Self::WebVisual => "attach_web_visual",
+            Self::WebInstall => "WebHost::install",
+            Self::WebFloor => "stand_on_the_floor",
+            Self::WebNavigate => "WebHost::navigate",
+            Self::Pump => "message pump",
+            Self::FontLookup => "font family lookup",
         }
     }
 
@@ -820,6 +1247,166 @@ impl Station {
             45 => Self::EventRedraw,
             46 => Self::EventFocus,
             47 => Self::EventOther,
+            48 => Self::FileDrop,
+            49 => Self::EventFileDrop,
+            50 => Self::RenderCompose,
+            51 => Self::SurfaceAcquire,
+            52 => Self::QueueSubmit,
+            53 => Self::SwapchainPresent,
+            54 => Self::ImeCursorArea,
+            55 => Self::ImeSystemCaret,
+            56 => Self::DrainRingRead,
+            57 => Self::DrainFeed,
+            58 => Self::DrainReplies,
+            59 => Self::DrainSettle,
+            60 => Self::DrainOutcomes,
+            61 => Self::DetectionPass,
+            62 => Self::DrainTrace,
+            63 => Self::DrainPublish,
+            64 => Self::CompositorSize,
+            65 => Self::CompositorCommit,
+            66 => Self::ImeEnabled,
+            67 => Self::ImePreedit,
+            68 => Self::ImeCommit,
+            69 => Self::ImeDisabled,
+            70 => Self::EventMoved,
+            71 => Self::EventTheme,
+            72 => Self::EventOccluded,
+            73 => Self::EventCursorLeft,
+            74 => Self::ImeAllowed,
+            75 => Self::ImeCaretDestroy,
+            76 => Self::PtyInput,
+            77 => Self::ClipboardWrite,
+            78 => Self::EventLookup,
+            79 => Self::EventSettleApplication,
+            80 => Self::EventRestore,
+            81 => Self::EventOpen,
+            82 => Self::EventQuit,
+            83 => Self::EventShut,
+            84 => Self::RedrawLayout,
+            85 => Self::RedrawProjection,
+            86 => Self::RedrawOverlay,
+            87 => Self::RedrawTables,
+            88 => Self::RedrawSignature,
+            89 => Self::RetainedPicture,
+            90 => Self::RedrawCommit,
+            91 => Self::PresentSeats,
+            92 => Self::Place,
+            93 => Self::PlaceFocus,
+            94 => Self::DrainPane,
+            95 => Self::DrainPalette,
+            96 => Self::DrainRingStats,
+            97 => Self::DrainKeyboardFocus,
+            98 => Self::DrainMarks,
+            99 => Self::DrainAttention,
+            100 => Self::DrainRaiseAttention,
+            101 => Self::DrainGit,
+            102 => Self::WindowTitle,
+            103 => Self::DrainBegin,
+            104 => Self::DrainWake,
+            105 => Self::DrainWatermark,
+            106 => Self::SettingsWrite,
+            107 => Self::PreviewSave,
+            108 => Self::RenameDisk,
+            109 => Self::SharedLock,
+            110 => Self::EventGate,
+            111 => Self::ClockRaiseFirstRunIfDue,
+            112 => Self::ClockRaisePsreadlineInviteIfDue,
+            113 => Self::ClockAdvanceCursorBlinkIfDue,
+            114 => Self::ClockAdvanceRenameBlinkIfDue,
+            115 => Self::ClockAdvanceSchemeWatch,
+            116 => Self::ClockAdvanceStorageWatch,
+            117 => Self::ClockAdvancePreviewWatch,
+            118 => Self::ClockAdvanceFilesWatch,
+            119 => Self::ClockAdvanceTabPressIfDue,
+            120 => Self::ClockServicePictures,
+            121 => Self::ClockAdvanceStripAnimation,
+            122 => Self::ClockFinishSynchronizedUpdateIfDue,
+            123 => Self::ClockFinishPtyCoalesceIfDue,
+            124 => Self::ClockAdvanceGitWatch,
+            125 => Self::ClockSettleCompositionOwner,
+            126 => Self::ClockOfferImeCaret,
+            127 => Self::ClockFlushImeCursorArea,
+            128 => Self::ClockFinishResizeIfQuiescent,
+            129 => Self::ClockFinishPreviewScaleIfQuiet,
+            130 => Self::ClockAdvanceLiveMathIfDue,
+            131 => Self::ClockActivateHyperlinkHoverIfDue,
+            132 => Self::ClockActivatePeekIfDue,
+            133 => Self::ClockAdvanceChevrons,
+            134 => Self::ClockAdvancePaneMenu,
+            135 => Self::ClockAdvanceTermMenu,
+            136 => Self::ClockAdvanceTabMenu,
+            137 => Self::ClockAdvanceDragSpring,
+            138 => Self::ClockServiceDragAutoscroll,
+            139 => Self::ClockRefreshMathHoverAgainstThePicture,
+            140 => Self::ClockAdvanceMathToggleIfDue,
+            141 => Self::ClockAdvanceMathToolsIfDue,
+            142 => Self::ClockAdvanceLayoutPeekIfDue,
+            143 => Self::ClockAdvanceTooltipIfDue,
+            144 => Self::ClockNoteKeyHint,
+            145 => Self::ClockAdvanceKeyHintIfDue,
+            146 => Self::ClockNoteCardHint,
+            147 => Self::ClockAdvanceCardHint,
+            148 => Self::ClockAdvanceToasts,
+            149 => Self::ClockAdvanceCommandFlash,
+            150 => Self::ClockAdvanceCommandRails,
+            151 => Self::ClockAdvanceTerminalThumbs,
+            152 => Self::ClockAdvanceFilePeek,
+            153 => Self::ClockAdvanceFloat,
+            154 => Self::ClockRearmHoverIntents,
+            155 => Self::ClockAdvanceFootReveal,
+            156 => Self::ClockAdvancePageFootClocks,
+            157 => Self::ClockAdvancePreviewNotice,
+            158 => Self::ClockAdvancePreviewRefusal,
+            159 => Self::AtlasUpload,
+            160 => Self::TextShaping,
+            161 => Self::RenderLayout,
+
+            162 => Self::ImeCancel,
+            163 => Self::DrainChannel,
+            164 => Self::ClockFileDwell,
+            165 => Self::ClockFileClose,
+            166 => Self::ClockMathCopy,
+            167 => Self::ClockWebZoom,
+            168 => Self::ClockWebDialog,
+            169 => Self::EventActivation,
+            170 => Self::EventDestroyed,
+            171 => Self::EventHoveredFile,
+            172 => Self::EventHoverCancelled,
+            173 => Self::EventCursorEntered,
+            174 => Self::EventPinch,
+            175 => Self::EventPan,
+            176 => Self::EventDoubleTap,
+            177 => Self::EventRotation,
+            178 => Self::EventPressure,
+            179 => Self::EventAxis,
+            180 => Self::EventTouch,
+            181 => Self::RedrawTableSources,
+            182 => Self::RedrawSeatFrames,
+            183 => Self::RedrawValidate,
+            184 => Self::RedrawDispatch,
+            185 => Self::WindowRedraw,
+            186 => Self::WindowFocus,
+            187 => Self::WindowVisible,
+            188 => Self::WindowCursor,
+            189 => Self::KeybindingsWrite,
+            190 => Self::ProfilesWrite,
+            191 => Self::DrainTab,
+            192 => Self::ImeTrace,
+            193 => Self::DiagnosticWrite,
+            194 => Self::SurfaceConfigure,
+            195 => Self::PlaceHidden,
+            196 => Self::PlaceExposure,
+            197 => Self::PlaceTaskbar,
+            198 => Self::TaskbarMirror,
+            199 => Self::WebEnvironment,
+            200 => Self::WebController,
+            201 => Self::WebVisual,
+            202 => Self::WebInstall,
+            203 => Self::WebFloor,
+            204 => Self::WebNavigate,
+            205 => Self::Pump,
+            206 => Self::FontLookup,
             _ => Self::Starting,
         }
     }
@@ -976,11 +1563,17 @@ pub struct SlowHold {
     /// so a gap the ledger failed to attribute shows up as the line not adding
     /// up rather than as time that never existed.
     pub held_ms: u64,
+    /// Milliseconds since this process's heartbeat origin.
+    pub session_age_ms: u64,
+    /// One-based count of slow-hold lines successfully queued in this run.
+    pub stall_count: u64,
     /// Milliseconds per station, indexed by [`Station::slot`].
     pub spent_ms: [u64; STATION_COUNT],
     /// What the machine's memory manager did while the hold ran, when this
     /// platform counts it and both ends were sampled. See [`Paging`].
     pub paging: Option<Paging>,
+    pub cpu_us: Option<u64>,
+    detail: detail::Tree,
 }
 
 impl SlowHold {
@@ -1023,10 +1616,26 @@ impl SlowHold {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let where_ = self
+            .detail
+            .line()
+            .filter(|line| !line.is_empty())
+            .unwrap_or(where_);
         let mut line = format!(
             "Folio: the window thread held control for {} ms on turn {} — {where_}",
             self.held_ms, self.turn
         );
+        if let Some(cpu_us) = self.cpu_us {
+            line.push_str(&format!(
+                " · thread CPU {}.{:03} ms / wall {} ms",
+                cpu_us / 1000,
+                cpu_us % 1000,
+                self.held_ms
+            ));
+        }
+        if self.detail.overflowed() {
+            line.push_str(" · detail capacity exceeded");
+        }
         // Appended, never interleaved, and behind a separator no station label
         // contains: every line this instrument has ever written keeps its
         // shape, and a reader who greps for `held control for` or for a station
@@ -1039,6 +1648,11 @@ impl SlowHold {
                 megabytes(paging.working_set_after),
             ));
         }
+        line.push_str(&format!(
+            " · session age {}, stall #{}",
+            seconds(self.session_age_ms),
+            self.stall_count
+        ));
         line
     }
 }
@@ -1050,6 +1664,9 @@ impl SlowHold {
 /// allocate, and cannot be what wedges. Three atomics is the whole of it.
 #[derive(Debug)]
 pub struct Heartbeat {
+    detail: detail::Ledger,
+    cpu_time: fn() -> Option<u64>,
+    held_cpu: AtomicU64,
     origin: Instant,
     at_ms: AtomicU64,
     turn: AtomicU64,
@@ -1083,6 +1700,8 @@ pub struct Heartbeat {
     slow: Mutex<Vec<SlowHold>>,
     /// Slow holds that found the queue full or busy.
     slow_dropped: AtomicU64,
+    /// Slow-hold lines successfully admitted to [`Self::slow`].
+    slow_reported: AtomicU64,
     /// **Where the two footprint readings come from.**
     ///
     /// A function pointer rather than a direct call to
@@ -1102,6 +1721,9 @@ pub struct Heartbeat {
     /// in either number, because both of them have legitimate values everywhere
     /// in their range and a platform with no arm answers nothing at all.
     held_footprint: AtomicBool,
+    /// When the cached opening footprint was sampled, plus one; zero means no
+    /// sample has yet been attempted.
+    footprint_sampled_at_ms: AtomicU64,
 }
 
 impl Default for Heartbeat {
@@ -1113,7 +1735,9 @@ impl Default for Heartbeat {
 impl Heartbeat {
     #[must_use]
     pub fn new() -> Self {
-        Self::sampling(bt_platform::mem::footprint)
+        let mut heart = Self::sampling(bt_platform::mem::footprint);
+        heart.cpu_time = armed_thread_cpu_us;
+        heart
     }
 
     /// [`Self::new`], with the footprint sampler named. See [`Self::footprint`].
@@ -1121,9 +1745,13 @@ impl Heartbeat {
     fn sampling(footprint: fn() -> Option<Footprint>) -> Self {
         Self {
             footprint,
+            detail: detail::Ledger::new(),
+            cpu_time: || None,
+            held_cpu: AtomicU64::new(0),
             held_faults: AtomicU64::new(0),
             held_working_set: AtomicU64::new(0),
             held_footprint: AtomicBool::new(false),
+            footprint_sampled_at_ms: AtomicU64::new(0),
             origin: Instant::now(),
             at_ms: AtomicU64::new(0),
             turn: AtomicU64::new(0),
@@ -1134,6 +1762,7 @@ impl Heartbeat {
             spent_ms: std::array::from_fn(|_| AtomicU64::new(0)),
             slow: Mutex::new(Vec::new()),
             slow_dropped: AtomicU64::new(0),
+            slow_reported: AtomicU64::new(0),
         }
     }
 
@@ -1190,28 +1819,37 @@ impl Heartbeat {
     /// against the last named call rather than vanishing — [`Station`]'s own
     /// rule, now counted instead of merely labelled.
     fn move_to(&self, station: Station, now_ms: u64) {
+        self.charge(station, now_ms);
+        self.detail.at(station);
+    }
+
+    fn charge(&self, station: Station, now_ms: u64) {
         let leaving = Station::from_byte(self.station.load(Ordering::Relaxed));
         let since = self.station_since_ms.load(Ordering::Relaxed);
+        self.detail.charge(now_ms.saturating_sub(since));
         self.spent_ms[leaving.slot()].fetch_add(now_ms.saturating_sub(since), Ordering::Relaxed);
         self.station_since_ms.store(now_ms, Ordering::Relaxed);
         self.station.store(station as u8, Ordering::Relaxed);
     }
 
-    /// **A hold begins**: the ledger is emptied, the footprint taken and the
-    /// clock started.
+    /// **A hold begins**: the ledger is emptied, the coarse footprint baseline
+    /// refreshed if needed and the clock started.
     fn open_hold(&self, now_ms: u64) {
+        self.detail.clear();
+        self.held_cpu.store(
+            (self.cpu_time)().map_or(0, |us| us.saturating_add(1)),
+            Ordering::Relaxed,
+        );
         for spent in &self.spent_ms {
             spent.store(0, Ordering::Relaxed);
         }
-        self.open_footprint();
+        self.open_footprint(now_ms);
         self.station_since_ms.store(now_ms, Ordering::Relaxed);
         self.held_since_ms
             .store(now_ms.saturating_add(1), Ordering::Relaxed);
     }
 
-    /// **The one system call this instrument makes on an ordinary turn**, and
-    /// it is made here — at the opening of every hold, slow or not — because
-    /// there is no later moment that could have it.
+    /// **Refresh the coarse opening baseline when it is old.**
     ///
     /// The tempting design is to sample only the holds that turn out to be
     /// reported, and it cannot be built: *slow* is a fact about a hold that is
@@ -1230,13 +1868,20 @@ impl Heartbeat {
     ///   a fault counter it reads is a fact about the moment *it* woke rather
     ///   than about either end of somebody else's hold.
     ///
-    /// So the bill is one kernel query per hold — a hold being a turn of the
-    /// loop — against a turn that already carries a frame, a drain and a
-    /// platform round trip, and nothing whatever on the turns in between,
-    /// because a parked thread opens no hold. The other end,
+    /// The opening sample is therefore allowed to precede its hold by at most
+    /// [`FOOTPRINT_SAMPLE_INTERVAL`], half the threshold that makes a hold worth
+    /// reporting. That bounded attribution error is preferable to a kernel call
+    /// on every harmless run-loop iteration. The other end,
     /// [`Self::close_footprint`], is on the reporting path alone and is reached
     /// by roughly none of them.
-    fn open_footprint(&self) {
+    fn open_footprint(&self, now_ms: u64) {
+        let sampled = self.footprint_sampled_at_ms.load(Ordering::Relaxed);
+        let age = now_ms.saturating_sub(sampled.saturating_sub(1));
+        if sampled != 0
+            && age < u64::try_from(FOOTPRINT_SAMPLE_INTERVAL.as_millis()).unwrap_or(u64::MAX)
+        {
+            return;
+        }
         if let Some(footprint) = (self.footprint)() {
             self.held_faults.store(footprint.faults, Ordering::Relaxed);
             self.held_working_set
@@ -1245,6 +1890,8 @@ impl Heartbeat {
         } else {
             self.held_footprint.store(false, Ordering::Relaxed);
         }
+        self.footprint_sampled_at_ms
+            .store(now_ms.saturating_add(1), Ordering::Relaxed);
     }
 
     /// **The second sample, taken only for a hold that is already going to be
@@ -1292,17 +1939,27 @@ impl Heartbeat {
         }
         // Below the threshold this line is never reached, which is the whole of
         // what keeps the second system call off the ordinary turn.
-        let hold = SlowHold {
-            turn: self.turn.load(Ordering::Relaxed),
-            held_ms,
-            spent_ms,
-            paging: self.close_footprint(),
-        };
+        let paging = self.close_footprint();
         // `try_lock` and never `lock`: see [`Self::slow`].
         if let Ok(mut queue) = self.slow.try_lock()
             && queue.len() < SLOW_HOLDS_KEPT
         {
-            queue.push(hold);
+            let stall_count = self.slow_reported.fetch_add(1, Ordering::Relaxed) + 1;
+            let baseline = self.held_cpu.load(Ordering::Relaxed);
+            let cpu_us = (baseline != 0)
+                .then(|| (self.cpu_time)())
+                .flatten()
+                .and_then(|closing| closing.checked_sub(baseline - 1));
+            queue.push(SlowHold {
+                cpu_us,
+                detail: self.detail.snapshot(),
+                turn: self.turn.load(Ordering::Relaxed),
+                held_ms,
+                session_age_ms: now_ms,
+                stall_count,
+                spent_ms,
+                paging,
+            });
         } else {
             self.slow_dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -1326,7 +1983,7 @@ impl Heartbeat {
         )
     }
 
-    /// **The window thread entered a named call.** Two relaxed stores.
+    /// **The window thread entered a named call.** Clocked exclusive accounting.
     ///
     /// No ordering, because none is owed: this is a hint about a thread that is
     /// still running, and a watchdog that reads a station one instruction stale
@@ -1393,6 +2050,7 @@ impl Heartbeat {
     pub fn woke_at(&self, now_ms: u64) {
         self.open_hold(now_ms);
         self.station.store(Station::Woken as u8, Ordering::Relaxed);
+        self.detail.at(Station::Woken);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
     }
 
@@ -1424,6 +2082,14 @@ impl Heartbeat {
 /// thinking about it. The origin instant is fixed at whichever of `main`'s
 /// first two calls touches it, which is before the event loop is built.
 static HEARTBEAT: LazyLock<Heartbeat> = LazyLock::new(Heartbeat::new);
+static CPU_ARMED: AtomicBool = AtomicBool::new(false);
+
+fn armed_thread_cpu_us() -> Option<u64> {
+    CPU_ARMED
+        .load(Ordering::Relaxed)
+        .then(bt_platform::mem::thread_cpu_us)
+        .flatten()
+}
 
 /// The process's heartbeat.
 #[must_use]
@@ -1437,8 +2103,101 @@ pub fn beat() {
 }
 
 /// The window thread entered `station`. See [`Heartbeat::at`].
-pub fn at(station: Station) {
-    HEARTBEAT.at(station);
+pub fn at(location: impl Into<Location>) {
+    match location.into() {
+        Location::Station(station) => HEARTBEAT.at(station),
+        Location::Resume {
+            station,
+            node,
+            scope,
+        } => HEARTBEAT.resume_at(station, node, scope, HEARTBEAT.now_ms()),
+    }
+}
+
+/// Opaque return address for an exclusive scope, including its call-tree path.
+#[derive(Clone, Copy)]
+pub enum Location {
+    Station(Station),
+    Resume {
+        station: Station,
+        node: usize,
+        scope: usize,
+    },
+}
+
+impl From<Station> for Location {
+    fn from(station: Station) -> Self {
+        Self::Station(station)
+    }
+}
+
+impl Heartbeat {
+    fn enter_at(&self, station: Station, pane: u64, now: u64) -> Location {
+        let parent = self.detail.current();
+        let scope = self.detail.scope();
+        let previous = Station::from_byte(self.station.load(Ordering::Relaxed));
+        self.charge(station, now);
+        self.park.store(PARK_RUNNING, Ordering::Relaxed);
+        self.detail.enter(station, parent, pane);
+        self.detail.set_scope(self.detail.current());
+        Location::Resume {
+            station: previous,
+            node: parent,
+            scope,
+        }
+    }
+
+    fn resume_at(&self, station: Station, node: usize, scope: usize, now: u64) {
+        self.charge(station, now);
+        self.park.store(PARK_RUNNING, Ordering::Relaxed);
+        self.detail.restore(node);
+        self.detail.set_scope(scope);
+    }
+}
+
+/// Attribute subsequent present stations without formatting on the window thread.
+pub fn present_attempt(window: u64, generation: u64, sequence: u64) {
+    HEARTBEAT.detail.attempt([window, generation, sequence]);
+}
+
+pub fn present_generation(generation: u64) {
+    HEARTBEAT.detail.generation(generation);
+}
+pub fn end_present_attempt() {
+    HEARTBEAT.detail.attempt([0; 3]);
+}
+
+fn present_progress(station: Station) -> &'static str {
+    match station {
+        Station::SurfaceConfigure => "in_progress:configure",
+        Station::SurfaceAcquire => "in_progress:acquire",
+        Station::QueueSubmit => "in_progress:submit",
+        Station::SwapchainPresent => "in_progress:present",
+        Station::CompositorSize | Station::CompositorCommit => "in_progress:commit",
+        Station::RenderCompose
+        | Station::TextShaping
+        | Station::AtlasUpload
+        | Station::RenderLayout => "in_progress:encode",
+        Station::RedrawCommit => "in_progress:acknowledge",
+        _ => "in_progress:prepare",
+    }
+}
+
+/// Numeric evidence only; input contents are never recorded.
+pub fn counters(bytes: usize, accepted: usize, count: usize) {
+    HEARTBEAT.detail.counters(bytes, accepted, count);
+}
+
+/// A renderer callback changes sibling phases inside one presentation scope.
+pub fn phase(station: Station) {
+    HEARTBEAT.charge(station, HEARTBEAT.now_ms());
+    HEARTBEAT.park.store(PARK_RUNNING, Ordering::Relaxed);
+    HEARTBEAT.detail.phase(station);
+}
+
+/// Enter a pane scope; the ID is part of the fixed ledger key.
+pub fn enter_pane(station: Station, pane: u64) -> Location {
+    HEARTBEAT.enter_at(station, pane.saturating_add(1), HEARTBEAT.now_ms())
 }
 
 /// **Enter `station`, and answer the one being left** so the caller can put it
@@ -1459,10 +2218,29 @@ pub fn at(station: Station) {
 /// thing this module must never do is add a `Drop` to a thread that is already
 /// in trouble.
 #[must_use]
-pub fn enter(station: Station) -> Station {
-    let leaving = HEARTBEAT.sample().station;
-    HEARTBEAT.at(station);
-    leaving
+pub fn enter(station: Station) -> Location {
+    HEARTBEAT.enter_at(station, 0, HEARTBEAT.now_ms())
+}
+
+/// Run one existing call as an exclusive child station, then resume its parent.
+///
+/// The two station transitions are the two monotonic-clock reads this
+/// instrumentation adds. Returning the parent's station after `work` rather
+/// than using a drop guard also restores it on an ordinary `Result::Err`
+/// without adding unwind work to a thread already in trouble.
+pub fn during<T>(station: Station, work: impl FnOnce() -> T) -> T {
+    let parent = enter(station);
+    let output = work();
+    at(parent);
+    output
+}
+
+/// Same exclusive scope, keyed by the numeric tab/pane identity.
+pub fn during_pane<T>(station: Station, pane: u64, work: impl FnOnce() -> T) -> T {
+    let parent = enter_pane(station, pane);
+    let output = work();
+    at(parent);
+    output
 }
 
 /// The window thread is handing control back. See [`Heartbeat::park`].
@@ -1923,6 +2701,7 @@ pub fn prune_reports(directory: &Path, keep: usize) -> std::io::Result<usize> {
 /// start because it could not arrange to diagnose itself would be a worse
 /// program than one that starts without the diagnosis.
 pub fn start(reports: PathBuf, trace_perf: bool) {
+    CPU_ARMED.store(true, Ordering::Relaxed);
     let ui_thread_id = bt_platform::hang::current_thread_id();
     // Touch the heartbeat here so its origin is the start of the run rather
     // than the first station, which makes `uptime` in a report mean what it
@@ -1936,9 +2715,9 @@ pub fn start(reports: PathBuf, trace_perf: bool) {
     if let Err(error) = bt_platform::spawn_at_priority(
         "bt-hang-watch",
         bt_platform::ThreadPriority::BelowNormal,
-        move || watch_forever(reports, ui_thread_id, threshold),
+        move || watch_forever(reports, ui_thread_id, threshold, trace_perf),
     ) {
-        eprintln!("Folio could not start its hang watchdog: {error}");
+        crate::diagnostics::note(&format!("Folio could not start its hang watchdog: {error}"));
     }
 }
 
@@ -1998,8 +2777,9 @@ pub fn can_come_round(now_ms: u64, pulse: Pulse, allowance_ms: u64) -> bool {
 /// `threshold` is [`start`]'s answer and not this thread's: see
 /// [`TRACED_HANG_THRESHOLD`] for which run gets which, and for why the reading
 /// is not taken here.
-fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
+fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace_perf: bool) {
     let mut watch = HangWatch::new(threshold, STARTUP_THRESHOLD);
+    let mut reads = crate::file_reads::Clock::default();
     // The file the stall in progress was reported to, so its healing line lands
     // in the same file rather than in a second one nobody would connect to it.
     let mut open_report: Option<PathBuf> = None;
@@ -2009,21 +2789,23 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
     loop {
         std::thread::sleep(WATCH_INTERVAL);
         let heart = heartbeat();
-        // **The other instrument, drained first**: a hold that ran long and
-        // then healed is exactly what the poll below is about to call `Quiet`,
-        // and printing it before that verdict is what puts the two facts in the
-        // log in the order they happened. Formatting and writing happen here,
-        // on this thread, for the same reason a report does.
+        // **The other instrument, drained first and said last** (X-7): a hold
+        // that ran long and then healed is exactly what the poll below is about
+        // to call `Quiet`, so the holds are read before the verdict and land in
+        // the log ahead of it, in the order the two facts happened. What moved
+        // is the *writing*: nothing at all is written until the arithmetic has
+        // run and, if it found a stall, the report file is on the disk. A
+        // watchdog that printed first could be parked in that print — behind a
+        // console nobody is reading — at the moment it was supposed to be
+        // taking the stack of a window that had stopped.
         let (slow, dropped) = heart.take_slow_holds();
-        for hold in slow {
-            eprintln!("{}", hold.line());
-        }
-        if dropped > 0 {
-            eprintln!("Folio: {dropped} more slow turns went unrecorded");
-        }
+        // What the report attempt below left to say, kept until it has said
+        // everything the file can hold.
+        let mut reported: Option<String> = None;
         // Four atomic loads and a clock read. This is the entire steady-state
         // cost of the facility.
-        match watch.poll(heart.now_ms(), heart.sample(), &mut ask) {
+        let now_ms = heart.now_ms();
+        match watch.poll(now_ms, heart.sample(), &mut ask) {
             // `Excused` says nothing out loud on purpose: a window that is being
             // dragged answers this every two seconds, and a diagnostic that
             // narrated it would be a log full of a program working.
@@ -2046,7 +2828,7 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
                 turn,
             } => {
                 WINDOW_THREAD_HUNG.store(true, Ordering::Relaxed);
-                open_report = write_report(
+                let report = write_report(
                     &reports,
                     ui_thread_id,
                     Stall {
@@ -2059,6 +2841,8 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
                     },
                     heart.now_ms(),
                 );
+                open_report = report.path;
+                reported = Some(report.said);
             }
             Verdict::Healed { hung_ms, station } => {
                 WINDOW_THREAD_HUNG.store(false, Ordering::Relaxed);
@@ -2067,6 +2851,27 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration) {
                 }
             }
         }
+        // **Everything this turn has to say, now that the disk has it.**
+        // `diagnostics::note` and not `eprintln!`: a log file of this process's
+        // own, reached by a handle of its own, so that a console somebody
+        // stopped reading cannot hold the one thread that is still working.
+        for hold in slow {
+            crate::diagnostics::note(&hold.line());
+        }
+        if dropped > 0 {
+            crate::diagnostics::note(&format!("Folio: {dropped} more slow turns went unrecorded"));
+        }
+        if let Some(said) = reported {
+            crate::diagnostics::note(&said);
+        }
+        reads.tick(
+            now_ms,
+            trace_perf,
+            &bt_platform::file_reads::LEDGER,
+            bt_platform::file_reads::take_input,
+            |line| crate::diagnostics::note(&line),
+            crate::trace_sink::stderr_line,
+        );
     }
 }
 
@@ -2085,13 +2890,21 @@ struct Stall {
     turn: u64,
 }
 
-/// Take the sample and put it on the disk. Answers where it landed.
-fn write_report(
-    reports: &Path,
-    ui_thread_id: u32,
-    stall: Stall,
-    uptime_ms: u64,
-) -> Option<PathBuf> {
+/// **What one report attempt left behind**: the file, for the healing line that
+/// belongs in it, and the one sentence the log is owed about it.
+///
+/// The sentence is **answered and not printed** (X-7). Writing it here would put
+/// the watchdog's only output inside the function that takes a stopped thread's
+/// stack, on a channel that may be a console nobody is reading — so the caller
+/// says it, after this has returned and the evidence is already on the disk.
+struct Reported {
+    path: Option<PathBuf>,
+    said: String,
+}
+
+/// Take the sample and put it on the disk. Answers where it landed and what to
+/// say about it.
+fn write_report(reports: &Path, ui_thread_id: u32, stall: Stall, uptime_ms: u64) -> Reported {
     let Stall {
         silent_ms,
         threshold_ms,
@@ -2102,6 +2915,7 @@ fn write_report(
     } = stall;
     // **The suspend happens here and nowhere else.** Everything above is
     // arithmetic; everything below is formatting.
+    let attempt = HEARTBEAT.detail.active_attempt().unwrap_or_default();
     let stack = bt_platform::hang::capture_thread_stack(ui_thread_id, MAX_FRAMES);
     let timestamp = utc_timestamp(SystemTime::now());
     let facts = ReportFacts {
@@ -2118,31 +2932,37 @@ fn write_report(
         stack: &stack,
         surfaces: bt_render::surface_failure_tally(),
     };
-    let body = render_report(&facts);
+    let mut body = render_report(&facts);
+    if !attempt.is_empty() {
+        body.push_str(&format!("\npresent attempt:{attempt}\n"));
+    }
     // Created lazily: a run that never hangs never makes this directory.
     if let Err(error) = fs::create_dir_all(reports) {
-        eprintln!(
-            "Folio saw its window thread stop for {} at {station} but could not create {}: {error}",
-            seconds(silent_ms),
-            reports.display()
-        );
-        return None;
+        return Reported {
+            path: None,
+            said: format!(
+                "Folio saw its window thread stop for {} at {station}{attempt} but could not create {}: \
+                 {error}",
+                seconds(silent_ms),
+                reports.display()
+            ),
+        };
     }
     let _ = prune_reports(reports, REPORTS_KEPT.saturating_sub(1));
     let path = reports.join(report_filename(&timestamp));
     match File::create(&path).and_then(|mut file| file.write_all(body.as_bytes())) {
-        Ok(()) => {
-            eprintln!(
-                "Folio's window thread has not answered for {}; last station {station}. Report: {}",
+        Ok(()) => Reported {
+            said: format!(
+                "Folio's window thread has not answered for {}; last station {station}{attempt}. Report: {}",
                 seconds(silent_ms),
                 path.display()
-            );
-            Some(path)
-        }
-        Err(error) => {
-            eprintln!("Folio could not write {}: {error}", path.display());
-            None
-        }
+            ),
+            path: Some(path),
+        },
+        Err(error) => Reported {
+            said: format!("Folio could not write {}: {error}{attempt}", path.display()),
+            path: None,
+        },
     }
 }
 
@@ -2218,13 +3038,199 @@ pub fn run_selftest_if_due() {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_cpu_sampler_answers_with_a_monotonic_thread_counter() {
+        let first = bt_platform::mem::thread_cpu_us();
+        let second = bt_platform::mem::thread_cpu_us();
+        match (first, second) {
+            (Some(first), Some(second)) => assert!(second >= first),
+            (None, None) => {} // Platforms without a thread counter omit the field.
+            _ => panic!("thread counter availability changed between adjacent reads"),
+        }
+    }
+    #[test]
+    fn event_kinds_have_distinct_value_labels_including_each_ime_variant() {
+        use super::Station;
+        use winit::event::{Ime, WindowEvent};
+        for (event, expected) in [
+            (WindowEvent::Ime(Ime::Enabled), Station::ImeEnabled),
+            (
+                WindowEvent::Ime(Ime::Preedit("中".into(), Some((3, 3)))),
+                Station::ImePreedit,
+            ),
+            (
+                WindowEvent::Ime(Ime::Commit("中".into())),
+                Station::ImeCommit,
+            ),
+            (WindowEvent::Ime(Ime::Disabled), Station::ImeDisabled),
+            (WindowEvent::CloseRequested, Station::EventClose),
+            (WindowEvent::Destroyed, Station::EventDestroyed),
+            (WindowEvent::RedrawRequested, Station::EventRedraw),
+            (WindowEvent::Occluded(true), Station::EventOccluded),
+            (WindowEvent::Occluded(false), Station::EventOccluded),
+            (WindowEvent::Focused(true), Station::EventFocus),
+            (WindowEvent::Focused(false), Station::EventFocus),
+            (
+                WindowEvent::ThemeChanged(winit::window::Theme::Dark),
+                Station::EventTheme,
+            ),
+            (
+                WindowEvent::DroppedFile("synthetic.txt".into()),
+                Station::EventFileDrop,
+            ),
+            (
+                WindowEvent::HoveredFile("synthetic.txt".into()),
+                Station::EventHoveredFile,
+            ),
+            (
+                WindowEvent::HoveredFileCancelled,
+                Station::EventHoverCancelled,
+            ),
+            (
+                WindowEvent::Resized(winit::dpi::PhysicalSize::new(1, 1)),
+                Station::EventResize,
+            ),
+            (
+                WindowEvent::Moved(winit::dpi::PhysicalPosition::new(0, 0)),
+                Station::EventMoved,
+            ),
+        ] {
+            assert_eq!(crate::window_event_station(&event), expected);
+        }
+    }
+
+    #[test]
+    fn nested_production_transitions_preserve_the_complete_exclusive_sum() {
+        use super::{Heartbeat, Location, Park, Station};
+        let heart = Heartbeat::sampling(|| None);
+        heart.woke_at(0);
+        heart.at_station(Station::Event, 10);
+        let Location::Resume {
+            station,
+            node,
+            scope,
+        } = heart.enter_at(Station::ImeCommit, 0, 20)
+        else {
+            unreachable!()
+        };
+        let Location::Resume {
+            station: caller,
+            node: call_node,
+            scope: call_scope,
+        } = heart.enter_at(Station::PtyInput, 0, 30)
+        else {
+            unreachable!()
+        };
+        heart.resume_at(caller, call_node, call_scope, 1330);
+        heart.resume_at(station, node, scope, 1340);
+        heart.park_at(Park::Indefinite, 1350);
+        let hold = heart.take_slow_holds().0.remove(0);
+        assert_eq!(hold.spent_ms.iter().sum::<u64>(), hold.held_ms);
+        assert_eq!(hold.detail.total_ms(), hold.held_ms);
+        assert_eq!(hold.held_ms, 1350);
+        assert!(hold.line().contains(
+            "window_event 20 ms (IME Commit 20 ms (PtySession::write input enqueue 1300 ms))"
+        ));
+        assert_eq!(hold.line().lines().count(), 1);
+    }
+    #[test]
+    fn thread_cpu_is_sampled_at_open_and_only_on_admitted_slow_close() {
+        use std::cell::RefCell;
+        thread_local! {
+            static CPU: RefCell<(usize, std::collections::VecDeque<Option<u64>>)> =
+                RefCell::new((0, [Some(100), Some(200), Some(3200), None, Some(4000), None].into()));
+        }
+        fn sample() -> Option<u64> {
+            CPU.with(|state| {
+                let mut state = state.borrow_mut();
+                state.0 += 1;
+                state.1.pop_front().unwrap()
+            })
+        }
+        let mut heart = super::Heartbeat::sampling(|| None);
+        heart.cpu_time = sample;
+        heart.woke_at(0);
+        heart.beat_at(1); // same hold, no second opening sample
+        heart.park_at(super::Park::Indefinite, 10);
+        assert_eq!(CPU.with(|state| state.borrow().0), 1);
+        heart.woke_at(1000);
+        heart.park_at(super::Park::Indefinite, 2300);
+        let hold = heart.take_slow_holds().0.remove(0);
+        assert_eq!(hold.cpu_us, Some(3000));
+        assert!(hold.line().contains("thread CPU 3.000 ms / wall 1300 ms"));
+        heart.woke_at(3000); // refused baseline: don't ask for an end
+        heart.park_at(super::Park::Indefinite, 4300);
+        assert_eq!(heart.take_slow_holds().0[0].cpu_us, None);
+        assert_eq!(CPU.with(|state| state.borrow().0), 4);
+        heart.woke_at(5000);
+        heart.park_at(super::Park::Indefinite, 6300); // refused end
+        assert_eq!(heart.take_slow_holds().0[0].cpu_us, None);
+        assert_eq!(CPU.with(|state| state.borrow().0), 6);
+    }
+
+    /// A measurement, never a wall-clock acceptance gate; no GUI or process control.
+    #[test]
+    #[ignore = "explicit instrumentation cost measurement"]
+    fn measure_cpu_sampler_and_station_cost() {
+        use std::hint::black_box;
+        use std::sync::atomic::Ordering;
+        let iterations = 200_000_u32;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            black_box(bt_platform::mem::thread_cpu_us());
+        }
+        eprintln!(
+            "CPU sampler: {:.1} ns/read",
+            start.elapsed().as_nanos() as f64 / f64::from(iterations)
+        );
+        let heart = super::Heartbeat::sampling(|| None);
+        heart.woke_at(0);
+        // Baseline transition copied from the pre-detail ledger: no tree work.
+        // This is measurement only, not a second implementation used by tests.
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let parent = black_box(heart.sample().station);
+            for station in [super::Station::PtyInput, parent] {
+                let now = heart.now_ms();
+                let leaving = super::Station::from_byte(heart.station.load(Ordering::Relaxed));
+                let since = heart.station_since_ms.load(Ordering::Relaxed);
+                heart.spent_ms[leaving.slot()]
+                    .fetch_add(now.saturating_sub(since), Ordering::Relaxed);
+                heart.station_since_ms.store(now, Ordering::Relaxed);
+                heart.station.store(station as u8, Ordering::Relaxed);
+                heart.park.store(super::PARK_RUNNING, Ordering::Relaxed);
+            }
+        }
+        eprintln!(
+            "baseline enter/leave pair: {:.1} ns",
+            start.elapsed().as_nanos() as f64 / f64::from(iterations)
+        );
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let super::Location::Resume {
+                station,
+                node,
+                scope,
+            } = heart.enter_at(super::Station::PtyInput, 0, heart.now_ms())
+            else {
+                unreachable!()
+            };
+            heart.resume_at(station, node, scope, heart.now_ms());
+        }
+        eprintln!(
+            "station enter/leave pair: {:.1} ns",
+            start.elapsed().as_nanos() as f64 / f64::from(iterations)
+        );
+    }
     use std::cell::RefCell;
+    use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
-        Answer, Footprint, HangWatch, Heartbeat, Paging, Park, Pulse, ReportFacts, STATION_COUNT,
-        SlowHold, Station, Verdict, can_come_round, prune_reports, render_healed, render_report,
-        report_filename, slow_hold_threshold_ms, utc_timestamp,
+        Answer, Footprint, HangWatch, Heartbeat, Location, Paging, Park, Pulse, ReportFacts,
+        STATION_COUNT, SlowHold, Stall, Station, Verdict, can_come_round, prune_reports,
+        render_healed, render_report, report_filename, slow_hold_threshold_ms, utc_timestamp,
+        write_report,
     };
 
     /// A heartbeat on a platform that counts nothing, which is what every test
@@ -3184,6 +4190,102 @@ mod tests {
         );
     }
 
+    /// PIN — **the watchdog writes its report, and says so, while the trace
+    /// sink is stalled and the process's `stderr` lock is held** (X-7).
+    ///
+    /// The two ways the console reaches back into this thread, both arranged at
+    /// once: a sink whose writer is inside a write that will not return, and the
+    /// lock every `eprintln!` in the workspace goes through, held by somebody
+    /// else. The one thread whose entire job is to still be working when the
+    /// window thread is not must come through both without waiting — so the
+    /// report file appears, and the line about it reaches `diagnostics.log` by
+    /// the road that owns no lock.
+    ///
+    /// The work runs on a second thread only so that this one can put a deadline
+    /// on it: a regression here does not fail an assertion, it stops.
+    ///
+    /// MUTATION: put the `eprintln!` back in `write_report`; the report is never
+    /// written and the deadline expires.
+    #[test]
+    fn a_report_and_its_line_do_not_wait_for_the_console() {
+        let private = std::env::temp_dir().join(format!(
+            "folio-hang-stalled-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&private);
+        std::fs::create_dir_all(&private).expect("a private directory for this test");
+        let reports = private.join("hang-reports");
+        let log = private.join(crate::diagnostics::LOG_FILENAME);
+
+        let sink = crate::trace_sink::StalledWriter::start();
+        sink.fill();
+        assert!(
+            !sink.offer("one more"),
+            "the sink under test is supposed to be full"
+        );
+        let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
+        let (locked, holding) = std::sync::mpsc::sync_channel::<()>(1);
+        let holder = std::thread::spawn(move || {
+            let _guard = std::io::stderr().lock();
+            let _ = locked.send(());
+            let _ = released.recv();
+        });
+        holding
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the holder took the process lock");
+
+        let (done, finished) = std::sync::mpsc::sync_channel::<bool>(1);
+        let worker = {
+            let reports = reports.clone();
+            let log = log.clone();
+            std::thread::spawn(move || {
+                let reported = write_report(
+                    &reports,
+                    // The watchdog's own id: `capture_thread_stack` refuses to
+                    // sample the thread that asked, so this exercises the
+                    // report's every other step without suspending anything.
+                    bt_platform::hang::current_thread_id(),
+                    Stall {
+                        silent_ms: 2_400,
+                        threshold_ms: 2_000,
+                        overdue_ms: None,
+                        answer: Answer::Silent,
+                        station: Station::Present,
+                        turn: 91,
+                    },
+                    12_000,
+                );
+                let noted = crate::diagnostics::append_note(&log, &reported.said);
+                let _ = done.send(reported.path.is_some() && noted);
+            })
+        };
+        let completed = finished.recv_timeout(Duration::from_secs(10));
+        drop(release);
+        holder.join().unwrap();
+        worker.join().unwrap();
+        drop(sink);
+
+        assert_eq!(
+            completed,
+            Ok(true),
+            "the report path waited for a console it must not touch"
+        );
+        let written: Vec<PathBuf> = std::fs::read_dir(&reports)
+            .expect("the reports directory was created")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(written.len(), 1, "one stall, one report: {written:?}");
+        let said = std::fs::read_to_string(&log).expect("the log took the line");
+        assert!(
+            said.contains("has not answered for 2.400s"),
+            "the log says what happened and names the report, {said}"
+        );
+        assert!(said.ends_with('\n'), "one whole line, {said}");
+        let _ = std::fs::remove_dir_all(&private);
+    }
+
     /// PIN — **the cap holds and it only ever deletes our own files.** A pruner
     /// that swept the directory would be a diagnostic that eats whatever a
     /// person put beside its output.
@@ -3274,10 +4376,43 @@ mod tests {
         assert_eq!(hold.spent_ms[Station::WebPage.slot()], 1_880);
         assert_eq!(hold.spent_ms[Station::Event.slot()], 10);
         assert_eq!(hold.spent_ms[Station::Woken.slot()], 10);
+        assert_eq!(hold.session_age_ms, 2_900);
+        assert_eq!(hold.stall_count, 1);
         assert_eq!(
             hold.line(),
             "Folio: the window thread held control for 1900 ms on turn 0 — \
-             advance_web_page 1880 ms, window_event 10 ms, woken 10 ms",
+             advance_web_page 1880 ms, window_event 10 ms, woken 10 ms · \
+             session age 2.900s, stall #1",
+        );
+    }
+
+    /// **A child station owns its interval exclusively.** Returning to the
+    /// parent starts a new parent interval; it does not make the child time a
+    /// second copy inside the parent.
+    #[test]
+    fn redraw_substations_add_up_without_double_counting_the_parent() {
+        let heart = Heartbeat::sampling(no_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::RenderCompose, 1_010);
+        heart.at_station(Station::SurfaceAcquire, 1_110);
+        heart.at_station(Station::RenderCompose, 1_610);
+        heart.at_station(Station::QueueSubmit, 1_710);
+        heart.at_station(Station::SwapchainPresent, 1_810);
+        heart.at_station(Station::RenderCompose, 2_310);
+        heart.park_at(Park::Indefinite, 2_410);
+        let (holds, dropped) = heart.take_slow_holds();
+        assert_eq!(dropped, 0);
+        let [hold] = holds.as_slice() else {
+            panic!("one synthetic redraw hold was recorded: {holds:?}")
+        };
+        assert_eq!(hold.spent_ms[Station::RenderCompose.slot()], 300);
+        assert_eq!(hold.spent_ms[Station::SurfaceAcquire.slot()], 500);
+        assert_eq!(hold.spent_ms[Station::QueueSubmit.slot()], 100);
+        assert_eq!(hold.spent_ms[Station::SwapchainPresent.slot()], 500);
+        assert_eq!(
+            hold.spent_ms.iter().sum::<u64>(),
+            hold.held_ms,
+            "exclusive child intervals and their parent account for the hold once",
         );
     }
 
@@ -3313,7 +4448,8 @@ mod tests {
         assert_eq!(
             hold.line(),
             "Folio: the window thread held control for 1030 ms on turn 1 — \
-             apply_preview_results 1000 ms, woken 20 ms, about_to_wait 10 ms",
+             apply_preview_results 1000 ms, woken 20 ms, about_to_wait 10 ms · \
+             session age 2.030s, stall #1",
             "the handler is named, and named first",
         );
     }
@@ -3346,6 +4482,115 @@ mod tests {
         }
     }
 
+    /// RED (43) — **the stall self-report has a word for every phase of a web
+    /// page coming up.**
+    ///
+    /// The two holds of 2026-09-23 while a web preview opened read
+    /// `window_event 3979 ms` and `window_event 2703 ms` with every named child
+    /// under 130 ms: the environment request, the controller request, the
+    /// install burst's parts, the first navigation and the pump the engine's
+    /// callbacks arrive on had no word in this vocabulary, so a four-second
+    /// stall could only be called an event. Each word is the function a reader
+    /// greps for, and each comes back out of the ledger it goes into.
+    ///
+    /// MUTATION: drop `Self::WebInstall => "WebHost::install"` from
+    /// [`Station::label`] (or the variant) and the install burst has no word.
+    #[test]
+    fn the_stall_report_has_a_word_for_every_phase_of_a_web_page_coming_up() {
+        let vocabulary: Vec<&'static str> = (0..STATION_COUNT)
+            .map(|slot| Station::from_byte(u8::try_from(slot).expect("one byte")).label())
+            .collect();
+        for word in [
+            "request_environment",
+            "request_controller",
+            "attach_web_visual",
+            "WebHost::install",
+            "stand_on_the_floor",
+            "WebHost::navigate",
+            "message pump",
+        ] {
+            assert!(
+                vocabulary.contains(&word),
+                "`{word}` is not a word the stall self-report can say"
+            );
+        }
+    }
+
+    /// RED (43) — **a hold spent bringing a web page up says which phase spent
+    /// it**, and the pump the engine's callbacks run on is not charged to the
+    /// event that had already returned.
+    ///
+    /// The synthetic turn is the shape of the 2026-09-23 report: a press that
+    /// opens the page, the thread handed back to the pump, the environment's
+    /// answer read on its own wake, and the controller's answer installed and
+    /// navigated. Before ticket 43 the pump's three seconds went to
+    /// `window_event` and the install burst to `drive_web_page`.
+    ///
+    /// MUTATION: map `Station::Pump` to the label `window_event` shares and the
+    /// line reads `window_event 3000 ms` again (and
+    /// `every_station_prints_its_own_word` goes red with it).
+    #[test]
+    fn a_hold_spent_bringing_a_web_page_up_says_which_phase_spent_it() {
+        let heart = Heartbeat::sampling(no_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::Event, 1_000);
+        let press = heart.enter_at(Station::EventMouse, 0, 1_000);
+        let environment = heart.enter_at(Station::WebEnvironment, 0, 1_010);
+        if let Location::Resume {
+            station,
+            node,
+            scope,
+        } = environment
+        {
+            heart.resume_at(station, node, scope, 1_090);
+        }
+        if let Location::Resume {
+            station,
+            node,
+            scope,
+        } = press
+        {
+            heart.resume_at(station, node, scope, 1_100);
+        }
+        heart.at_station(Station::Pump, 1_100);
+        heart.at_station(Station::WebSpoke, 4_100);
+        heart.at_station(Station::WebController, 4_110);
+        heart.at_station(Station::WebVisual, 4_150);
+        heart.at_station(Station::WebInstall, 4_160);
+        heart.at_station(Station::WebFloor, 4_260);
+        heart.at_station(Station::WebNavigate, 4_280);
+        heart.at_station(Station::Pump, 4_300);
+        heart.park_at(Park::Indefinite, 4_300);
+        let (holds, dropped) = heart.take_slow_holds();
+        assert_eq!(dropped, 0);
+        let [hold] = holds.as_slice() else {
+            panic!("one hold, and it ran long: {holds:?}")
+        };
+        assert_eq!(hold.spent_ms[Station::Pump.slot()], 3_000);
+        assert_eq!(hold.spent_ms[Station::Event.slot()], 0);
+        assert_eq!(hold.spent_ms[Station::WebInstall.slot()], 100);
+        let line = hold.line();
+        for named in [
+            "message pump 3000 ms",
+            "WebHost::install 100 ms",
+            "request_environment 80 ms",
+            "request_controller 40 ms",
+            "stand_on_the_floor 20 ms",
+            "WebHost::navigate 20 ms",
+            "attach_web_visual 10 ms",
+        ] {
+            assert!(
+                line.contains(named),
+                "`{named}` is not in the line:\n{line}"
+            );
+        }
+        assert!(
+            line.contains("window_event 0 ms (mouse_input 20 ms (request_environment 80 ms))"),
+            "the pump's time is charged to an event that had returned, or the \
+             environment request is not the gesture's own child:\n{line}"
+        );
+    }
+
     /// **The ledger is emptied between holds**, or the next slow line would be
     /// this one's arithmetic said twice.
     #[test]
@@ -3362,6 +4607,26 @@ mod tests {
             heart.take_slow_holds(),
             (Vec::new(), 0),
             "the short hold after a long one carries none of its milliseconds"
+        );
+    }
+
+    /// Session age and the ordinal come from the heartbeat that owns the
+    /// ledger, and the ordinal advances only for a line admitted to its queue.
+    #[test]
+    fn slow_hold_lines_carry_session_age_and_a_running_count() {
+        let heart = Heartbeat::sampling(no_footprint);
+        heart.woke_at(1_000);
+        heart.park_at(Park::Indefinite, 2_000);
+        heart.woke_at(9_000);
+        heart.park_at(Park::Indefinite, 10_000);
+        let (holds, dropped) = heart.take_slow_holds();
+        assert_eq!(dropped, 0);
+        assert_eq!(
+            holds
+                .iter()
+                .map(|hold| (hold.session_age_ms, hold.stall_count))
+                .collect::<Vec<_>>(),
+            [(2_000, 1), (10_000, 2)],
         );
     }
 
@@ -3457,14 +4722,19 @@ mod tests {
     #[test]
     fn a_hold_with_no_named_station_still_states_its_length() {
         let hold = SlowHold {
+            cpu_us: None,
+            detail: super::detail::Tree::default(),
             turn: 7,
             held_ms: 900,
+            session_age_ms: 12_345,
+            stall_count: 4,
             spent_ms: [0; STATION_COUNT],
             paging: None,
         };
         assert_eq!(
             hold.line(),
-            "Folio: the window thread held control for 900 ms on turn 7 — no station held it",
+            "Folio: the window thread held control for 900 ms on turn 7 — no station held it · \
+             session age 12.345s, stall #4",
         );
     }
 
@@ -3483,8 +4753,12 @@ mod tests {
         spent_ms[Station::Present.slot()] = 2_092;
         spent_ms[Station::Wheel.slot()] = 1_928;
         let hold = SlowHold {
+            cpu_us: None,
+            detail: super::detail::Tree::default(),
             turn: 3_937_579,
             held_ms: 4_056,
+            session_age_ms: 8_404_000,
+            stall_count: 31,
             spent_ms,
             paging: Some(Paging {
                 faults: 38_210,
@@ -3496,7 +4770,8 @@ mod tests {
             hold.line(),
             "Folio: the window thread held control for 4056 ms on turn 3937579 — \
              publish_frame_inner 2092 ms, flush_wheel 1928 ms · \
-             faults +38210, working set 179 → 412 MB",
+             faults +38210, working set 179 → 412 MB · \
+             session age 8404.000s, stall #31",
         );
     }
 
@@ -3512,15 +4787,19 @@ mod tests {
         let mut spent_ms = [0; STATION_COUNT];
         spent_ms[Station::Wheel.slot()] = 1_928;
         let hold = SlowHold {
+            cpu_us: None,
+            detail: super::detail::Tree::default(),
             turn: 3_937_579,
             held_ms: 4_056,
+            session_age_ms: 8_404_000,
+            stall_count: 31,
             spent_ms,
             paging: None,
         };
         assert_eq!(
             hold.line(),
             "Folio: the window thread held control for 4056 ms on turn 3937579 — \
-             flush_wheel 1928 ms",
+             flush_wheel 1928 ms · session age 8404.000s, stall #31",
         );
     }
 
@@ -3531,8 +4810,12 @@ mod tests {
     #[test]
     fn a_working_set_is_printed_in_the_megabytes_a_reader_recognises() {
         let hold = |before: u64, after: u64| SlowHold {
+            cpu_us: None,
+            detail: super::detail::Tree::default(),
             turn: 0,
             held_ms: 900,
+            session_age_ms: 900,
+            stall_count: 1,
             spent_ms: [0; STATION_COUNT],
             paging: Some(Paging {
                 faults: 0,
@@ -3545,11 +4828,13 @@ mod tests {
         let after = 179 * 1024 * 1024 + 1;
         let line = hold(before, after).line();
         assert!(
-            line.ends_with("· faults +0, working set 180 → 179 MB"),
+            line.ends_with("· faults +0, working set 180 → 179 MB · session age 0.900s, stall #1"),
             "rounded to the nearest, both ends: {line}"
         );
         assert!(
-            hold(0, 0).line().ends_with("working set 0 → 0 MB"),
+            hold(0, 0)
+                .line()
+                .ends_with("working set 0 → 0 MB · session age 0.900s, stall #1"),
             "nothing resident is nothing, not a division that trapped"
         );
     }
@@ -3587,20 +4872,21 @@ mod tests {
         );
         assert_eq!(footprints_asked(), 2, "one end, then the other");
         assert!(
-            hold.line()
-                .ends_with("· faults +38210, working set 179 → 412 MB"),
+            hold.line().ends_with(
+                "· faults +38210, working set 179 → 412 MB · session age 2.900s, stall #1"
+            ),
             "{}",
             hold.line(),
         );
     }
 
-    /// **An ordinary hold is sampled once and never asks again** — the cost
-    /// rule, stated as a number rather than as a comment.
+    /// **An ordinary hold refreshes the coarse sample when it is old and never
+    /// asks on the reporting path** — the cost rule, stated as a number rather
+    /// than as a comment.
     ///
-    /// Sixty turns a second each pay the opening query, because *slow* is not
-    /// known until a hold ends and a baseline taken later measures nothing (see
-    /// [`Heartbeat::open_footprint`]). What none of them pay is the second one:
-    /// it lives past the threshold check, on the path that produces a line.
+    /// The first hold pays the opening query; rapid followers reuse it. What an
+    /// ordinary hold never pays is the second query: it lives past the threshold
+    /// check, on the path that produces a line.
     ///
     /// MUTATION: move `close_footprint` above that check and this reads 2.
     #[test]
@@ -3625,6 +4911,28 @@ mod tests {
             3,
             "the slow one opened with a sample and closed with a second",
         );
+    }
+
+    /// A busy or spuriously woken run loop does not turn the diagnostic into
+    /// another wake-time platform call. The boundary itself refreshes so the
+    /// baseline used by a report is never older than the advertised interval.
+    #[test]
+    fn rapid_holds_share_one_coarse_opening_sample() {
+        queue_footprints(&[(10, 1024), (20, 2048)]);
+        let heart = Heartbeat::sampling(fake_footprint);
+        for now_ms in [1_000, 1_010, 1_100, 1_249] {
+            heart.woke_at(now_ms);
+            heart.park_at(Park::Indefinite, now_ms + 1);
+        }
+        assert_eq!(
+            footprints_asked(),
+            1,
+            "the cached sample covers the interval"
+        );
+
+        heart.woke_at(1_250);
+        heart.park_at(Park::Indefinite, 1_251);
+        assert_eq!(footprints_asked(), 2, "the boundary refreshes the baseline");
     }
 
     /// **A platform that counts nothing says nothing**, and a hold whose
@@ -3656,7 +4964,7 @@ mod tests {
         assert_eq!(
             hold.line(),
             "Folio: the window thread held control for 3000 ms on turn 0 — \
-             drain_pty 2990 ms, woken 10 ms",
+             drain_pty 2990 ms, woken 10 ms · session age 3.000s, stall #1",
         );
     }
 

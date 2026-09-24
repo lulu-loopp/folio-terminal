@@ -12,5 +12,15 @@ publish.workspace = true
 # constant is self-held (§2.5).
 [dependencies]
 
+[dev-dependencies]
+# **The crate this package's guards ask about itself** — the mechanism of
+# `docs/plans/bt-app-split-prep.md`. A guard that walks `src/` one directory
+# deep is bound to a directory listing, and a file written into a subdirectory
+# beside it stops being read without a word; asking `bt-source` for this
+# package's declared sources is the binding that survives the move. Tests only,
+# and `bt-source`'s own manifest says that nothing in `folio.exe` may ever
+# depend on it — red line L7 is about `[dependencies]`, which stays empty.
+bt-source = { path = "../bt-source" }
+
 [lints]
 workspace = true

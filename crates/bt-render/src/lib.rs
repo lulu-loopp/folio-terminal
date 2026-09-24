@@ -1,5 +1,7 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
+mod cjk_fonts;
+use cjk_fonts::{CjkFace, FontSystem, match_cjk_attrs, match_grid_attrs, proportional_cjk_family};
 mod contrast;
 mod glyph_census;
 pub mod glyph_probe;
@@ -8,8 +10,13 @@ pub mod motion;
 mod procedural;
 mod rounded_rect;
 mod scheme;
+mod synthetic_bold;
 mod theme;
 mod video;
+use synthetic_bold::{
+    GridCellArea, SyntheticBoldGlyphs, SyntheticBoldIdsExhausted, SyntheticPlacements,
+    place_synthetic_bold, synthetic_bold_glyphs, with_synthetic_bold,
+};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -35,13 +42,13 @@ use bt_viewport::{
 };
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution, Shaping,
-    Stretch, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
-    Wrap,
+    Attrs, Buffer, Cache, Color, Family, Metrics, PrepareError, Resolution, Shaping, Stretch,
+    Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
     cosmic_text::{Cursor, Fallback, FeatureTag, FontFeatures},
 };
 use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
+use unicode_script::UnicodeScript;
 use wgpu::util::DeviceExt;
 
 /// Install the process-wide trace destination before constructing a renderer.
@@ -207,8 +214,10 @@ const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 /// that box stood on the terminal's own ground beside the band, where nothing
 /// else could be pressed and a generous box cost nothing. These stand inside the
 /// block, on its floor, in a right inset cut to hold exactly them; the run they
-/// now belong to is the window's run of head controls, and its box is 19.
-pub const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 19.0;
+/// now belong to is the window's run of head controls, and its box is theirs
+/// (`UI-SPEC.md` H3, 2026-09-23: the run's tool box moved from 19 to 22, and
+/// this reuse moves with it).
+pub const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 22.0;
 /// `.math-tools { gap: 2px }` (mock-up 2117).
 const MATH_TOOL_GAP_LOGICAL_PX: f32 = 2.0;
 /// `.math-tools button { border-radius: 5px }` (mock-up 2129) — the pill a
@@ -372,6 +381,16 @@ pub struct MathToolBoxes {
     pub copy: [f32; 4],
 }
 
+/// Per-present diagnostic values, derived from the same geometry as the ground
+/// and the seats. Never retained by the renderer or consulted for placement.
+#[derive(Clone, Debug)]
+pub struct MathBandTrace {
+    pub seat: MathToolBoxes,
+    pub ink_right: f32,
+    pub height_subpixels: i64,
+    pub picture_opacity_milli: u16,
+}
+
 /// **Where one named band's rows stand**, in the pane body's own pixels — see
 /// [`WindowRenderer::math_band_face`].
 ///
@@ -453,7 +472,7 @@ fn math_band_face_for(
 /// placement — and walking it backwards for "whichever was last" is precisely
 /// the reading this ticket removed: it answers with *some* block on a frame
 /// where the named one is not lit, and some block is not this block.
-fn math_tool_boxes_for(
+pub fn math_tool_boxes_for(
     metrics: CellMetrics,
     seat: SeatViewport,
     frame: &ViewportFrame,
@@ -574,26 +593,36 @@ fn math_block_geometry_px(
         band_top + placement.content_offset_subpixels as f32 / SUBPIXELS_PER_PX as f32
     };
     let clip_height = placement.clip_height_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32;
-    let scaled_width = if placement.display == MathBlockDisplay::Source {
-        // **The longest row this pane laid the source out on**, and nothing added to it. It carried
-        // `+ 4` from M1.9b, which was room for the two verbs drawn inside the box in that
-        // milestone; the room they need is stated once now, in `math_block_ground_bounds`' right
-        // inset, and adding it here as well would be a block reserving the same cells twice.
-        //
-        // **The rows and not `placement.source`** (owner's ruling 2026-09-16,
-        // T-MATH-SOURCE-BAND-HUGS-TEXT). That field is the block's pre-wrap original grid text,
-        // `$$` delimiters and all — neither the rows the pane cut nor anything drawn — so a block
-        // whose source wrapped was measured long and a block whose `$$` line was its longest was
-        // measured by a delimiter. `MathBlockPlacement::source_width_cells` is the rows themselves,
-        // counted in columns, which is what the ink of a source face actually is.
-        placement.source_width_cells.max(1) as f32 * metrics.cell_width_px
-    } else {
-        placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0
+    let face = placement.face_milli.map_or_else(
+        || {
+            if placement.display == MathBlockDisplay::Source {
+                1.0
+            } else {
+                0.0
+            }
+        },
+        |milli| f32::from(milli.min(1000)) / 1000.0,
+    );
+    let across = |rendered: f32, source: f32| {
+        if face == 0.0 {
+            rendered
+        } else if face == 1.0 {
+            source
+        } else {
+            rendered + (source - rendered) * face
+        }
     };
-    let scaled_height = if placement.display == MathBlockDisplay::Source {
-        clip_height
+    let rendered_width =
+        placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0;
+    let source_width = placement.source_width_cells.max(1) as f32 * metrics.cell_width_px;
+    let scaled_width = across(rendered_width, source_width);
+    let rendered_height =
+        placement.artifact.height_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0;
+    let scaled_height = across(rendered_height, clip_height);
+    let top = if placement.face_milli.is_some() {
+        across(top, band_top)
     } else {
-        placement.artifact.height_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0
+        top
     };
     let ([visible_top, visible_bottom], [clip_top, clip_bottom]) = math_vertical_bounds(
         placement.artifact.mode,
@@ -604,14 +633,26 @@ fn math_block_geometry_px(
         scaled_height,
         clip_height,
     );
-    let (visible_left, visible_right) = math_horizontal_bounds(
+    // Source rows begin at column zero. Both the band's own inset and the
+    // raster's bearing travel to that endpoint; keeping either until the face
+    // flips would leave a smaller version of the same landing discontinuity.
+    let rendered_left = math_block_left_px(
         metrics,
-        seat.width,
-        frame.columns,
         placement.left_subpixels,
-        scaled_width,
-        math_block_takes_the_left_indent(placement),
-    )?;
+        math_block_is_a_band(placement),
+    );
+    let source_left = math_block_left_px(
+        metrics,
+        if placement.face_milli.is_some() {
+            0
+        } else {
+            placement.left_subpixels
+        },
+        false,
+    );
+    let left = across(rendered_left, source_left);
+    let (visible_left, visible_right) =
+        math_horizontal_bounds(metrics, seat.width, frame.columns, left, scaled_width)?;
     if visible_right <= visible_left || visible_bottom <= visible_top {
         return None;
     }
@@ -943,7 +984,7 @@ impl CellMetrics {
     /// and every headless probe means by "the grid", and threading a size
     /// through thirty call sites to say 16 each time would bury the one place
     /// where the number is not 16.
-    fn measure(font_system: &mut FontSystem, scale_factor: f64) -> Result<Self, RenderError> {
+    pub fn measure(font_system: &mut FontSystem, scale_factor: f64) -> Result<Self, RenderError> {
         Self::measure_at(
             font_system,
             scale_factor,
@@ -956,7 +997,12 @@ impl CellMetrics {
     /// The row height comes out of [`LINE_HEIGHT_TO_FONT_SIZE_RATIO`] rather
     /// than from a constant, so a larger face gets a taller row and the
     /// descenders that a fixed row height would clip stay inside the cell.
-    fn measure_at(
+    ///
+    /// **The narrow measuring service** (ticket 37): every size a terminal pane is drawn at is
+    /// measured here, once, from a logical face size and a display scale — the scale is applied
+    /// inside and nowhere else, so nothing pre-multiplies by DPI or scales a measured cell after.
+    /// Products reach it through [`GpuContext::terminal_cell_metrics`]'s memo.
+    pub fn measure_at(
         font_system: &mut FontSystem,
         scale_factor: f64,
         font_size_logical_px: f32,
@@ -1173,13 +1219,31 @@ pub fn compose_preedit(
     frame: &ViewportFrame,
     preedit: Option<&Preedit>,
 ) -> Result<ComposedFrame, FrameShapeError> {
+    compose_preedit_inner::<false>(frame, preedit).map(|(composed, _)| composed)
+}
+
+/// Same compositor, with an observation at the cell-write site for BT_IME_TRACE.
+pub fn compose_preedit_traced(
+    frame: &ViewportFrame,
+    preedit: Option<&Preedit>,
+) -> Result<(ComposedFrame, bool), FrameShapeError> {
+    compose_preedit_inner::<true>(frame, preedit)
+}
+
+fn compose_preedit_inner<const TRACE: bool>(
+    frame: &ViewportFrame,
+    preedit: Option<&Preedit>,
+) -> Result<(ComposedFrame, bool), FrameShapeError> {
     frame.validate_shape()?;
     let Some(preedit) = preedit.filter(|preedit| !preedit.text.is_empty() && frame.cursor.visible)
     else {
-        return Ok(ComposedFrame {
-            frame: frame.clone(),
-            ime_caret: frame.cursor,
-        });
+        return Ok((
+            ComposedFrame {
+                frame: frame.clone(),
+                ime_caret: frame.cursor,
+            },
+            false,
+        ));
     };
 
     let mut composed = frame.clone();
@@ -1201,12 +1265,15 @@ pub fn compose_preedit(
         column: drawn.map_or(0, |column| column.0),
         visible: drawn.is_some(),
     };
-    overlay_preedit_cells(&mut composed, preedit);
+    let written = overlay_preedit_cells::<TRACE>(&mut composed, preedit);
     composed.cursor = ime_caret;
-    Ok(ComposedFrame {
-        frame: composed,
-        ime_caret,
-    })
+    Ok((
+        ComposedFrame {
+            frame: composed,
+            ime_caret,
+        },
+        written,
+    ))
 }
 
 /// The frame's caret back in the grid's own columns.
@@ -1273,7 +1340,8 @@ fn advance_grid_position(
 /// through `frame.horizontal`; one whose grid column the window does not show is stepped over
 /// rather than drawn, and a combining mark then joins whichever lead cell was drawn last — never a
 /// cell belonging to a cluster nobody put on screen.
-fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
+fn overlay_preedit_cells<const TRACE: bool>(frame: &mut ViewportFrame, preedit: &Preedit) -> bool {
+    let mut written = false;
     let columns = frame.columns.get() as usize;
     // IME remains bounded to the PTY grid in phase A. Moving it into a partially visible
     // presentation row belongs to the cursor/IME debt carried into the pixel-offset phase.
@@ -1320,6 +1388,9 @@ fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
                 cell.style.flags.insert(CellFlags::WIDE_CHAR);
             }
             frame.cells[index] = cell;
+            if TRACE {
+                written = true;
+            }
             previous_lead = Some(index);
 
             if let Some(spacer_index) = spacer_index {
@@ -1335,6 +1406,7 @@ fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
             column %= columns;
         }
     }
+    written
 }
 
 /// Let go of every wide character the composition is about to cover half of.
@@ -1495,6 +1567,45 @@ fn fnv_write_color(state: &mut u64, color: TerminalColor) {
 pub struct FrameTrigger {
     pub occurred_at: Instant,
     pub source: FrameSource,
+}
+
+pub use wgpu::PresentMode;
+
+/// Configuration read from the live renderer and the descriptor used by its device.
+#[derive(Clone, Copy, Debug)]
+pub struct PresentConfiguration {
+    pub generation: u64,
+    pub mode: wgpu::PresentMode,
+    pub latency: u32,
+    pub wait: &'static str,
+}
+
+/// A real call boundary inside one on-screen presentation.
+///
+/// The application uses these transitions to move its one window-thread time
+/// ledger between stations. They deliberately carry no durations: the caller's
+/// monotonic clock is the authority for where its thread's time went, while the
+/// renderer only knows where one call ends and the next begins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresentPhase {
+    /// Surface configuration, including resize and recovery.
+    SurfaceConfigure(u64),
+    /// Shape text rows and chrome/preview labels.
+    TextShaping,
+    /// Rasterize glyphs and upload atlas textures.
+    AtlasUpload,
+    /// Prepare frame geometry and image layers.
+    Layout,
+    /// CPU composition and command encoding, on both sides of surface acquire.
+    ComposeEncode,
+    /// `Surface::get_current_texture`.
+    SurfaceAcquire,
+    /// `Queue::submit`.
+    QueueSubmit,
+    /// `Queue::present` for a swapchain frame.
+    Present,
+    /// The renderer has left all presentation phases.
+    Complete,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2626,6 +2737,36 @@ struct GlyphRefusalLog {
     reported: TextRefusals,
 }
 
+/// **Which picture of a rendered table a pane's placement is drawn from** (ticket 37).
+///
+/// A table is set in its pane's own text at its pane's own size, so one source in a pane at 80 %
+/// and in a pane at 150 % of one window is two pictures. The identity is the source, the face
+/// size it was laid out at and the font environment it was laid out in — the paint's owner
+/// (`bt_app`'s `Runtime::refresh_table_paints`) keys its map the same way, and
+/// [`WindowRenderer::set_table_blocks`] takes the map it built.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+pub struct TableBlockKey {
+    /// The block's render source.
+    pub source: String,
+    /// `font_size_px` of the metrics the table was laid out for, as bits.
+    pub font_size_bits: u32,
+    /// [`GpuContext::font_environment_epoch`] when it was laid out.
+    pub font_environment: u64,
+}
+
+impl TableBlockKey {
+    /// The picture of `source` a pane drawn at `metrics` in font environment `font_environment`
+    /// needs.
+    #[must_use]
+    pub fn of(source: &str, metrics: CellMetrics, font_environment: u64) -> Self {
+        Self {
+            source: source.to_owned(),
+            font_size_bits: metrics.font_size_px.to_bits(),
+            font_environment,
+        }
+    }
+}
+
 /// One rendered table block's picture, in the block's own coordinates.
 ///
 /// **Coordinates, not pixels, and that is the whole of what makes a table different from a
@@ -3216,9 +3357,9 @@ fn buffer_resident_bytes(buffer: &Buffer) -> usize {
 }
 
 fn shape_entry_resident_bytes(key: &ShapeKey, buffer: &Buffer, value_bytes: usize) -> usize {
-    size_of::<Arc<ShapeKey>>()
+    size_of::<Arc<SizedShapeKey>>()
         .saturating_add(3 * size_of::<usize>())
-        .saturating_add(size_of::<ShapeKey>())
+        .saturating_add(size_of::<SizedShapeKey>())
         .saturating_add(key.text.heap_bytes())
         .saturating_add(value_bytes)
         .saturating_add(buffer_resident_bytes(buffer))
@@ -3292,6 +3433,10 @@ struct WideGlyph {
     left_offset_px: f32,
     top_offset_px: f32,
     color: Color,
+    /// Which of the buffer's glyphs are drawn emboldened from their own face
+    /// ([`synthetic_bold_glyphs`]); `None` for a cell drawn as shaped. Decided at
+    /// the shaping cache's miss and carried with the shape, never per frame.
+    synthetic_bold: Option<Arc<[bool]>>,
 }
 
 struct NarrowGlyph {
@@ -3300,8 +3445,23 @@ struct NarrowGlyph {
     left_offset_px: f32,
     top_offset_px: f32,
     color: Color,
+    /// Which of the buffer's glyphs are drawn emboldened from their own face
+    /// ([`synthetic_bold_glyphs`]); `None` for a cell drawn as shaped. Decided at
+    /// the shaping cache's miss and carried with the shape, never per frame.
+    synthetic_bold: Option<Arc<[bool]>>,
 }
 
+/// What a cell asks the shaping caches for: the cluster and its style.
+///
+/// **Not the whole of a cache's key** (ticket 37). The buffer a cache hands back is laid out at
+/// one em and its offsets are measured against one cell — its width, its height, its baseline and
+/// the primary face's cap geometry — so the same `M` in a pane at 150 % and in a pane at 100 % of
+/// one window is two shapes. The caches file an entry under [`SizedShapeKey`], this key plus
+/// every measured input of the placement, and a caller cannot build the one without the other:
+/// `get_or_shape` takes the metrics it shapes at and keys by them itself. The font environment is
+/// the other input, and it is held by a clearing contract rather than a key field:
+/// [`WindowRenderer::adopt_metrics`] empties both caches whenever
+/// [`GpuContext::set_terminal_font`] or a display change moves it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ShapeKey {
     /// The cluster itself, inline. A key is built for *every* non-blank cell on
@@ -3312,10 +3472,29 @@ struct ShapeKey {
     italic: bool,
 }
 
+/// A shaping cache's own key: the cluster, and the metrics it was shaped and placed at.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SizedShapeKey {
+    shape: ShapeKey,
+    metrics: RowMetricsKey,
+}
+
 struct CachedNarrowShape {
     buffer: Arc<Buffer>,
     left_offset_px: f32,
     top_offset_px: f32,
+    /// Which of the buffer's glyphs are drawn emboldened from their own face
+    /// ([`synthetic_bold_glyphs`]); `None` for a cell drawn as shaped. Decided at
+    /// the shaping cache's miss and carried with the shape, never per frame.
+    synthetic_bold: Option<Arc<[bool]>>,
+}
+
+/// What a shaping cache hands back for one cell — a cached shape, shared.
+struct ShapedCell {
+    buffer: Arc<Buffer>,
+    left_offset_px: f32,
+    top_offset_px: f32,
+    synthetic_bold: Option<Arc<[bool]>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3340,7 +3519,7 @@ impl ShapeCacheCounters {
 }
 
 struct NarrowShapingCache {
-    entries: ByteLru<ShapeKey, CachedNarrowShape>,
+    entries: ByteLru<SizedShapeKey, CachedNarrowShape>,
     track_perf: bool,
     counters: ShapeCacheCounters,
     #[cfg(test)]
@@ -3378,24 +3557,31 @@ impl NarrowShapingCache {
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
         metrics: CellMetrics,
-    ) -> (Arc<Buffer>, f32, f32) {
-        if let Some(cached) = self.entries.get(&key) {
+        cjk_families: &TerminalCjkFamilies,
+    ) -> ShapedCell {
+        let sized = SizedShapeKey {
+            shape: key,
+            metrics: metrics.into(),
+        };
+        if let Some(cached) = self.entries.get(&sized) {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
-            return (
-                Arc::clone(&cached.buffer),
-                cached.left_offset_px,
-                cached.top_offset_px,
-            );
+            return ShapedCell {
+                buffer: Arc::clone(&cached.buffer),
+                left_offset_px: cached.left_offset_px,
+                top_offset_px: cached.top_offset_px,
+                synthetic_bold: cached.synthetic_bold.clone(),
+            };
         }
 
         let miss_started = self.track_perf.then(Instant::now);
         let (mut buffer, family, size_policy) = shape_narrow_buffer_for_key(
-            &key,
+            &sized.shape,
             font_system,
             swash_cache,
             metrics,
+            cjk_families,
             #[cfg(test)]
             &mut self.color_emoji_trial_shapes,
         );
@@ -3408,7 +3594,8 @@ impl NarrowShapingCache {
                     metrics.cell_width_px,
                 );
                 if em_scale < 1.0 {
-                    buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale, family);
+                    buffer =
+                        shape_narrow_buffer(&sized.shape, font_system, metrics, em_scale, family);
                 }
                 let glyph_baseline_px = buffer
                     .layout_runs()
@@ -3428,7 +3615,8 @@ impl NarrowShapingCache {
                     metrics.primary_cap_height_px,
                 );
                 if (em_scale - 1.0).abs() > f32::EPSILON {
-                    buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale, family);
+                    buffer =
+                        shape_narrow_buffer(&sized.shape, font_system, metrics, em_scale, family);
                 }
                 align_ink_offsets(
                     &buffer,
@@ -3446,15 +3634,22 @@ impl NarrowShapingCache {
                 metrics.cell_height_px,
             ),
         };
+        let synthetic_bold = synthetic_bold_glyphs(
+            sized.shape.bold,
+            size_policy == NarrowSizePolicy::ColorEmoji,
+            &buffer,
+            font_system,
+        );
         let buffer = Arc::new(buffer);
         let resident_bytes =
-            shape_entry_resident_bytes(&key, &buffer, size_of::<CachedNarrowShape>());
+            shape_entry_resident_bytes(&sized.shape, &buffer, size_of::<CachedNarrowShape>());
         let (_, evictions) = self.entries.insert(
-            key,
+            sized,
             CachedNarrowShape {
                 buffer: Arc::clone(&buffer),
                 left_offset_px,
                 top_offset_px,
+                synthetic_bold: synthetic_bold.clone(),
             },
             resident_bytes,
         );
@@ -3467,7 +3662,12 @@ impl NarrowShapingCache {
                 .miss_time
                 .saturating_add(miss_started.elapsed());
         }
-        (buffer, left_offset_px, top_offset_px)
+        ShapedCell {
+            buffer,
+            left_offset_px,
+            top_offset_px,
+            synthetic_bold,
+        }
     }
 }
 
@@ -3475,10 +3675,14 @@ struct CachedWideShape {
     buffer: Arc<Buffer>,
     left_offset_px: f32,
     top_offset_px: f32,
+    /// Which of the buffer's glyphs are drawn emboldened from their own face
+    /// ([`synthetic_bold_glyphs`]); `None` for a cell drawn as shaped. Decided at
+    /// the shaping cache's miss and carried with the shape, never per frame.
+    synthetic_bold: Option<Arc<[bool]>>,
 }
 
 struct WideShapingCache {
-    entries: ByteLru<ShapeKey, CachedWideShape>,
+    entries: ByteLru<SizedShapeKey, CachedWideShape>,
     track_perf: bool,
     counters: ShapeCacheCounters,
     #[cfg(test)]
@@ -3516,24 +3720,31 @@ impl WideShapingCache {
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
         metrics: CellMetrics,
-    ) -> (Arc<Buffer>, f32, f32) {
-        if let Some(cached) = self.entries.get(&key) {
+        cjk_families: &TerminalCjkFamilies,
+    ) -> ShapedCell {
+        let sized = SizedShapeKey {
+            shape: key,
+            metrics: metrics.into(),
+        };
+        if let Some(cached) = self.entries.get(&sized) {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
-            return (
-                Arc::clone(&cached.buffer),
-                cached.left_offset_px,
-                cached.top_offset_px,
-            );
+            return ShapedCell {
+                buffer: Arc::clone(&cached.buffer),
+                left_offset_px: cached.left_offset_px,
+                top_offset_px: cached.top_offset_px,
+                synthetic_bold: cached.synthetic_bold.clone(),
+            };
         }
 
         let miss_started = self.track_perf.then(Instant::now);
         let (buffer, size_policy) = shape_wide_buffer_for_key(
-            &key,
+            &sized.shape,
             font_system,
             swash_cache,
             metrics,
+            cjk_families,
             #[cfg(test)]
             &mut self.color_emoji_trial_shapes,
         );
@@ -3556,15 +3767,22 @@ impl WideShapingCache {
                 metrics.cell_height_px,
             ),
         };
+        let synthetic_bold = synthetic_bold_glyphs(
+            sized.shape.bold,
+            matches!(size_policy, WideSizePolicy::ColorEmojiBox { .. }),
+            &buffer,
+            font_system,
+        );
         let buffer = Arc::new(buffer);
         let resident_bytes =
-            shape_entry_resident_bytes(&key, &buffer, size_of::<CachedWideShape>());
+            shape_entry_resident_bytes(&sized.shape, &buffer, size_of::<CachedWideShape>());
         let (_, evictions) = self.entries.insert(
-            key,
+            sized,
             CachedWideShape {
                 buffer: Arc::clone(&buffer),
                 left_offset_px,
                 top_offset_px,
+                synthetic_bold: synthetic_bold.clone(),
             },
             resident_bytes,
         );
@@ -3577,7 +3795,12 @@ impl WideShapingCache {
                 .miss_time
                 .saturating_add(miss_started.elapsed());
         }
-        (buffer, left_offset_px, top_offset_px)
+        ShapedCell {
+            buffer,
+            left_offset_px,
+            top_offset_px,
+            synthetic_bold,
+        }
     }
 }
 
@@ -3765,6 +3988,50 @@ fn note_a_rebuilt_device(rebuilds: &mut u64) -> String {
     *rebuilds += 1;
     format!("Folio rebuilt the GPU device after it was lost (#{rebuilds})")
 }
+
+/// **Latch the first thing a device says about itself, and answer with the line
+/// to write the one time it is worth writing.**
+///
+/// The two channels a device reports its own end through — the device-lost
+/// callback and the uncaptured-error handler — are alike in the three ways that
+/// matter here, so they are latched by one function rather than by two closures
+/// that happen to look the same. Both arrive **from inside wgpu**, on whatever
+/// thread and in the middle of whatever call happened to notice; both are called
+/// **many times** for one fault, because every later resource built on a dead
+/// device raises its own error; and for both, the sentence that matters is the
+/// *first* one, because every sentence after it is about a consequence.
+///
+/// So: the latch takes the first and refuses the rest, and the line is returned
+/// rather than printed, which is what makes "one fault, one line" a property of
+/// the code and lets a test hold it without a device. `None` is a latch that was
+/// already set — say nothing, and leave the sentence that was there.
+///
+/// The sentence is flattened to one line on the way in. A wgpu validation error
+/// is a paragraph with a `Caused by:` under it, and `diagnostics.log` is read a
+/// line at a time by whoever is on the machine; nothing is dropped, only the
+/// layout.
+fn note_what_the_device_said(
+    latch: &OnceLock<String>,
+    headline: &str,
+    said: &str,
+) -> Option<String> {
+    let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    match latch.set(said.clone()) {
+        Ok(()) => Some(format!("{headline} — {said}")),
+        Err(_) => None,
+    }
+}
+
+/// The headline over what the driver said when it took a device away.
+const DEVICE_LOST_HEADLINE: &str = "Folio lost the GPU device";
+
+/// The headline over an error wgpu could attribute to no call of ours.
+///
+/// A different sentence from [`DEVICE_LOST_HEADLINE`] because it is a different
+/// finding, and the log is where the two are told apart: a device that was taken
+/// away is a fact about the machine, and an error raised on a device that is
+/// still here is a fact about this program.
+const DEVICE_FAULT_HEADLINE: &str = "Folio's GPU device reported an error";
 
 /// How many times a single episode of device loss may ask for a new device
 /// before this process gives up on the machine.
@@ -4135,6 +4402,61 @@ struct SeatTextSlot {
     status_text_renderer: TextRenderer,
 }
 
+/// **The memo of the one measuring service** (ticket 37): the cell metrics of a face size at a
+/// display scale, keyed by (font environment, size bits, scale bits).
+///
+/// Derived and discardable: an entry is what [`CellMetrics::measure_at`] answers for its key, and
+/// nothing reads it as intent. **Bounded**, at [`Self::CAPACITY`] entries, and emptied whole when
+/// it would grow past them. **Cleared when the font environment moves** — the epoch
+/// [`GpuContext::set_terminal_font`] already advances — so no second epoch is invented beside it.
+#[derive(Debug, Default)]
+pub struct CellMetricsMemo {
+    epoch: u64,
+    entries: HashMap<(u32, u64), CellMetrics>,
+}
+
+impl CellMetricsMemo {
+    /// Twelve rungs at a few scales and a few Settings sizes, with room to spare.
+    pub const CAPACITY: usize = 64;
+
+    /// The metrics of `font_size_logical_px` at `scale_factor` in font environment `epoch`,
+    /// measured on the first ask and remembered for the next.
+    pub fn measure(
+        &mut self,
+        font_system: &mut FontSystem,
+        epoch: u64,
+        scale_factor: f64,
+        font_size_logical_px: f32,
+    ) -> Result<CellMetrics, RenderError> {
+        if self.epoch != epoch {
+            self.entries.clear();
+            self.epoch = epoch;
+        }
+        let key = (font_size_logical_px.to_bits(), scale_factor.to_bits());
+        if let Some(metrics) = self.entries.get(&key) {
+            return Ok(*metrics);
+        }
+        let metrics = CellMetrics::measure_at(font_system, scale_factor, font_size_logical_px)?;
+        if self.entries.len() >= Self::CAPACITY {
+            self.entries.clear();
+        }
+        self.entries.insert(key, metrics);
+        Ok(metrics)
+    }
+
+    /// How many sizes are remembered — for the memo's own tests.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether nothing is remembered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// Everything one process's GPU costs once — the device, the shared glyph
 /// atlas, the two pipelines, the font system — and nothing that belongs to a
 /// single window.
@@ -4169,6 +4491,7 @@ pub struct GpuContext {
     /// `Device`, and `get_default_config`/`get_capabilities` must be asked of
     /// the same `Adapter`.
     instance: wgpu::Instance,
+    present_wait: wgpu::Dx12UseFrameLatencyWaitableObject,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -4180,11 +4503,19 @@ pub struct GpuContext {
     font_system: FontSystem,
     /// Changes when fonts or family mappings change; scopes measurement reuse.
     font_environment_epoch: u64,
+    /// The measuring service's memo — see [`CellMetricsMemo`].
+    cell_metrics: CellMetricsMemo,
+    /// Resolved, per-script CJK families plus the user's stored preference.
+    terminal_cjk_families: TerminalCjkFamilies,
     swash_cache: SwashCache,
     /// Kept so a window — or a seat that appears mid-session (a split) — can
     /// mint its own viewport without rebuilding anything.
     glyphon_cache: Cache,
     atlas: TextAtlas,
+    /// **The custom-glyph ids `atlas` may hold for synthetic bold** (ticket 38),
+    /// and how to draw each of them again. Emptied only by
+    /// [`GpuContext::replace_atlas`], with the atlas it lives beside.
+    synthetic_bold: SyntheticBoldGlyphs,
     /// **Whether the shelf layout under the atlas has already been thrown away
     /// once for a refusal no complete frame has answered yet** — the latch that
     /// makes [`GpuContext::close_the_frame`] a repair and not a reflex.
@@ -4222,6 +4553,26 @@ pub struct GpuContext {
     /// otherwise carry on over a corpse ask this first: composing a frame,
     /// closing one out on the shared atlas, and reading one back.
     device_loss: Arc<OnceLock<String>>,
+    /// **The first error wgpu could not hand back to a call**, once there has
+    /// been one.
+    ///
+    /// The other half of the same story the field above tells, and the half that
+    /// was pointed at `panic!` until 2026-09-16 (§7.1.3m ⑤″, user report of a
+    /// power cut). wgpu delivers a *lost device* through the callback beside
+    /// this one and delivers everything else — every validation error raised
+    /// against the quietly invalid resources a departed device goes on handing
+    /// out — to the device's error sink. With no handler installed, that sink's
+    /// default is to end the process, which is how a driver reset during a power
+    /// event closed a window full of live shells while the rebuild that was
+    /// meant to answer it stood two frames away.
+    ///
+    /// Latched exactly like the loss and for the same reason: the handler is
+    /// called once per error and a dead device raises them by the dozen, so the
+    /// sentence worth keeping is the first. Read through
+    /// [`GpuContext::still_has_its_device`], which is what makes a fault a
+    /// refused frame rather than a crash — and replaced, never cleared, when a
+    /// new device is minted.
+    device_fault: Arc<OnceLock<String>>,
     rect_pipeline: wgpu::RenderPipeline,
     /// The same pipeline blending `Replace`, for the chrome quads that *are*
     /// the window's ground — see [`ChromeSurface::Ground`].
@@ -4229,6 +4580,9 @@ pub struct GpuContext {
     /// The same again, cross-faded by the pass's blend constant, for a ground on
     /// a floating layer that carries its own opacity — see [`OverlayGround`].
     ground_fade_rect_pipeline: wgpu::RenderPipeline,
+    /// How a fading overlay surface goes back onto the frame — see
+    /// [`OverlayGroup`].
+    group_pipelines: GroupPipelines,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
     math_samplers: MathSamplers,
@@ -4655,6 +5009,11 @@ fn configure_window_surface(
         .find(wgpu::TextureFormat::is_srgb)
         .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
     gpu.accept_format(config.format)?;
+    // **The same frame, seen as bytes** (overlay groups, 2026-09-24): a fading
+    // surface is put back through a view of the swapchain without its sRGB
+    // suffix, so its blend runs on encoded values as CSS `opacity` does. Every
+    // other draw goes on through the sRGB view, unchanged.
+    config.view_formats = vec![config.format.remove_srgb_suffix()];
     // The gate, before the surface is configured rather than after: a
     // visual target that cannot be `PreMultiplied` is not this program's
     // window, and configuring it anyway would leave a swapchain on screen
@@ -4712,6 +5071,23 @@ enum SurfaceAcquisition {
     Offscreen(wgpu::TextureView),
 }
 
+/// The non-terminal inputs sampled at the presentation door. Retained setters
+/// advance `retained_revision` only when their drawing values change; chrome
+/// quads/labels include hover marks, notices, thumbs and sampled animation phases.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RendererPresentState {
+    pub retained_revision: u64,
+    pub surface_generation: u64,
+    pub size: (u32, u32),
+    pub scale_factor: u64,
+    pub font_revision: u64,
+    pub theme_revision: u64,
+    pub cursor_style: CursorStyle,
+    pub cursor_blink_visible: bool,
+    pub window_focused: bool,
+    pub seat: SeatViewport,
+}
+
 /// One window's half of the renderer: its surface, its resolution, its metrics,
 /// and every cache that is keyed by a pixel font size.
 ///
@@ -4721,6 +5097,8 @@ enum SurfaceAcquisition {
 /// size and two windows at 1.5x and 2.0x are two sets of pixel font sizes
 /// (spike Q3).
 pub struct WindowRenderer {
+    retained_revision: u64,
+    surface_generation: u64,
     target: FrameTarget,
     config: wgpu::SurfaceConfiguration,
     /// What the adapter offered this surface and what it was configured with,
@@ -4745,6 +5123,17 @@ pub struct WindowRenderer {
     /// cover the dialog in every channel, not just in the one it happens to draw
     /// its own surface with — see [`OverlayLayer`].
     overlay_layers: Vec<OverlayLayer>,
+    /// **The fading surfaces among those layers** — spans of `overlay_layers`,
+    /// each drawn whole and composited once while it fades or travels. See
+    /// [`OverlayGroup`].
+    overlay_groups: Vec<OverlayGroup>,
+    /// The textures a fading surface is drawn into, one per surface fading at
+    /// once. Emptied on the first frame nothing fades, so a window at rest holds
+    /// none; made again, at the frame's size, on the frame a fade begins.
+    group_targets: Vec<GroupTarget>,
+    /// How many surfaces the last frame put back through a texture — the
+    /// witness that a frame did or did not take the group path.
+    groups_composited: u32,
     /// One text-renderer pair per Terminal seat, grown on demand — the same
     /// shape, and for the same reason, as
     /// [`WindowRenderer::overlay_text_renderers`]: a `TextRenderer` holds
@@ -4805,7 +5194,12 @@ pub struct WindowRenderer {
     /// no moment at which they could disagree, because the only writer is the
     /// constructor.
     max_texture_dimension_2d: u32,
-    metrics: CellMetrics,
+    /// **The window's base metrics** (ticket 37): the Settings face size measured at this
+    /// window's display scale. What chrome that follows the Settings size reads, through
+    /// [`Self::base_metrics`] — and never what a terminal pane is drawn at. A pane's own metrics
+    /// arrive with its [`SeatFrame`], derived from its rung by the pane's owner, and every
+    /// per-seat helper below takes them as a parameter.
+    base_metrics: CellMetrics,
     /// This window's share of [`RendererInitTimings`] — configuring its own
     /// swapchain, and measuring the cell against its own scale factor. The rest
     /// of that report is the device layer's and is charged once per process.
@@ -4843,7 +5237,7 @@ pub struct WindowRenderer {
     /// tracing; nothing in this module branches on it.
     preview_text_frame: PreviewTextFrame,
     /// This frame's table pictures, keyed by the source text of the block each belongs to.
-    table_blocks: HashMap<String, TableBlockPaint>,
+    table_blocks: HashMap<TableBlockKey, TableBlockPaint>,
     preview_text_renderer: TextRenderer,
     trace_perf: bool,
     perf_frame: u64,
@@ -5021,6 +5415,15 @@ pub struct SeatFrame<'a> {
     /// the flight lands.
     pub clip: SeatViewport,
     pub frame: &'a ViewportFrame,
+    /// **The metrics this seat's picture is drawn at** (ticket 37) — the pane's own, derived
+    /// from its rung by its owner, and never the window's.
+    ///
+    /// Paired with [`Self::frame`] because the two are one picture: the frame's rows were
+    /// projected at this cell height and its `layout_key` carries this face size, and every
+    /// helper that turns the frame into pixels — the shaping, the atlas preparation, the status
+    /// text, the procedural glyphs, the backgrounds, the caret, the selection, the search marks,
+    /// the formulas and the tables — takes these as a parameter rather than asking the window.
+    pub metrics: CellMetrics,
     /// Whether this is the seat holding keyboard focus.
     ///
     /// It is what the caret is drawn from. A window nobody is looking at fades
@@ -5420,24 +5823,30 @@ pub struct OverlayLayer {
     pub quads: Vec<OverlayQuad>,
     pub labels: Vec<ChromeLabel>,
     pub icons: Vec<ChromeIcon>,
-    /// The layer's own `opacity`, `0.0 ..= 1.0` — CSS `opacity` on the element
-    /// this layer *is*, which is why it lives here and not on each fill.
+    /// **A multiplier folded into every primitive of this layer**, `0.0 ..= 1.0`
+    /// — and not the way a surface fades. A surface fades as an
+    /// [`OverlayGroup`].
     ///
-    /// A layer is already the mock-up's `z-index` in this pipeline's terms (see
-    /// above); `.tip { opacity: 0; transition: opacity .09s }` asks it to be the
-    /// mock-up's `opacity` too, and for the same reason. A fading popup is one
-    /// thing fading, not a fill and a hairline and a caption that each happen to
-    /// be fading at the same rate: the moment they are separate the caller has to
-    /// remember to fade all three, and the one it forgets is the one nobody looks
-    /// at until it is wrong.
+    /// The fold multiplies each fill's alpha, each mark's opacity and each
+    /// letter's alpha separately, and every one of them is then blended onto
+    /// the frame in linear light. That is right only for a layer whose
+    /// primitives never overlap each other — a formula's source face fading in
+    /// over the picture it replaces, which is letters and nothing else. It is
+    /// wrong for a floating plate, and the fade audit of 2026-09-23 measured
+    /// how wrong: `settings::push_float_window` lays the face over the whole
+    /// frame, the `--border` hairline over the whole frame, and the face again
+    /// one border in, so folded per primitive the hairline shows through the
+    /// interior at `0.094·a·(1 − a)` of white. The sentence that stood here
+    /// called that "under 2.5% of an already-invisible ink"; in alpha it is,
+    /// and in linear light over `#2A2A2A` it is `#3B3B3B` at `a = .5` — a plate
+    /// mid-fade brighter than it will ever be at rest, by more than its whole
+    /// lift off the ground. And because the blend is linear, the letters reach
+    /// most of their contrast long before the plate and the shadow reach theirs.
     ///
-    /// CSS composites the element into a group and fades the group once, which
-    /// this pipeline has no offscreen buffer to do; the fold is per primitive
-    /// instead. The two answers differ only where a layer overlaps itself — a
-    /// hairline showing faintly through the face laid over it — and only while
-    /// `opacity` is strictly between 0 and 1. At the `--border` alphas the
-    /// palette actually uses (.088/.094) the widest gap that opens is under 2.5%
-    /// of an already-invisible ink, and it closes as the fade lands.
+    /// So a surface that fades — a tip, a menu, a card, a toast, a float, the
+    /// rail's fold, the drag ghost — keeps this at `1.0` and hands its fade to
+    /// the renderer as a group, which is drawn whole and composited once, on
+    /// encoded bytes, exactly as CSS `opacity` is.
     pub opacity: f32,
     /// A scrolled **document** inside this layer (P43's second tenant).
     ///
@@ -5602,6 +6011,118 @@ impl OverlayLayer {
             })
             .collect()
     }
+}
+
+/// **One fading surface of the overlay** — CSS `opacity` (and a `transform:
+/// translate`) on the element a run of layers *is* (`docs/DESIGN.md`,
+/// 2026-09-24; the fade audit of 2026-09-23).
+///
+/// A span of the list [`WindowRenderer::set_modal_overlay`] is given, handed in
+/// beside it rather than folded into it, because that list's indices are
+/// already load-bearing — [`WebHole::above`] and a video's
+/// `VideoStage::Overlay(n)` both name a layer by its place — and a group moves
+/// no layer. Spans may nest (a video bar fading inside a card that is fading)
+/// and must not otherwise overlap; nested opacities multiply, because the inner
+/// surface is composited into the outer one before the outer one is composited
+/// into the frame.
+///
+/// **At rest a group is nothing.** A group whose opacity draws as `255/255` and
+/// whose offset is zero whole pixels is drawn exactly as its layers always were,
+/// straight onto the frame, byte for byte. Only while it fades or travels is it
+/// drawn at full strength into a texture of its own and put back once, through
+/// a non-sRGB view of the frame, so the blend happens on encoded bytes: the
+/// plate, its hairline, its shadow and its letters arrive together, which the
+/// old per-primitive fold in linear light could not do (see
+/// [`OverlayLayer::opacity`]).
+///
+/// **A ground inside a group cross-fades.** A pixel an [`OverlayGround`] laid
+/// down is the window itself, not something laid on it, so on the way back it
+/// is lerped against what stands under the group, alpha included — the
+/// one-translucency ruling [`create_ground_fade_rect_pipeline`] states for a
+/// lone ground, kept for the whole surface. Every other pixel is composited
+/// over. That is the rail's fold, and it is a property of the pixels rather
+/// than of the group, so the group carries no switch for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OverlayGroup {
+    /// The layers this surface is made of, as indices into the overlay list.
+    pub layers: std::ops::Range<usize>,
+    /// `0.0 ..= 1.0`. Drawn in whole 1/255 steps, the resolution of the frame.
+    pub opacity: f32,
+    /// Physical pixels the whole surface is displaced by, `[dx, dy]`. Drawn in
+    /// whole pixels: a surface in flight moves by the pixel, never smears.
+    pub offset: [f32; 2],
+}
+
+impl OverlayGroup {
+    /// The opacity this group is drawn at, in the frame's own 1/255 steps.
+    #[must_use]
+    pub fn drawn_opacity(&self) -> u8 {
+        (self.opacity.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
+    /// The offset this group is drawn at, in whole physical pixels.
+    #[must_use]
+    pub fn drawn_offset(&self) -> [i32; 2] {
+        [self.offset[0].round() as i32, self.offset[1].round() as i32]
+    }
+
+    /// Whether this surface is standing still at full strength — the state in
+    /// which it is drawn exactly as it would be with no group at all.
+    #[must_use]
+    pub fn at_rest(&self) -> bool {
+        self.drawn_opacity() == u8::MAX && self.drawn_offset() == [0, 0]
+    }
+
+    /// This group with its opacity and offset put in the steps they are drawn
+    /// in, so that two groups that draw the same picture compare equal.
+    #[must_use]
+    fn quantised(self) -> Self {
+        let [dx, dy] = self.drawn_offset();
+        Self {
+            opacity: f32::from(self.drawn_opacity()) / 255.0,
+            offset: [dx as f32, dy as f32],
+            ..self
+        }
+    }
+}
+
+/// **Where each overlay layer stands on the glass, groups included** — one
+/// [`OverlayLayer::opaque_bounds`] per layer, displaced by every group it is
+/// in and absent while any of those groups is drawn at nothing.
+///
+/// The question `OverlayLayer::opaque_bounds` answers about a layer alone,
+/// asked of the layer where it is actually drawn. A surface's fade and travel
+/// live on its group now rather than in its layers, so a reader of the layers
+/// alone would take a menu leaving at opacity zero for a surface, and a menu
+/// arriving four pixels short of its place for one already there.
+#[must_use]
+pub fn overlay_layer_bounds(
+    layers: &[OverlayLayer],
+    groups: &[OverlayGroup],
+) -> Vec<Option<[f32; 4]>> {
+    layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| {
+            let mut offset = [0.0_f32; 2];
+            for group in groups.iter().filter(|group| group.layers.contains(&index)) {
+                if group.drawn_opacity() == 0 {
+                    return None;
+                }
+                let [dx, dy] = group.drawn_offset();
+                offset[0] += dx as f32;
+                offset[1] += dy as f32;
+            }
+            layer.opaque_bounds().map(|[left, top, right, bottom]| {
+                [
+                    left + offset[0],
+                    top + offset[1],
+                    right + offset[0],
+                    bottom + offset[1],
+                ]
+            })
+        })
+        .collect()
 }
 
 /// The fills a rounded rectangle is made of: whole runs where it covers a pixel
@@ -5902,6 +6423,137 @@ fn limits_with_this_adapters_textures(adapter: &wgpu::Adapter) -> wgpu::Limits {
     }
 }
 
+/// The name a machine sets to move Folio between its GPUs for one run.
+const GPU_PREFERENCE_VARIABLE: &str = "BT_GPU_PREFERENCE";
+
+/// **What Folio asks for when nobody says otherwise**, and the only place that
+/// answer is written down.
+///
+/// `HighPerformance` has been the request since the first skeleton commit,
+/// where it arrived as a literal rather than as a decision. This ticket does
+/// not change it; it makes it nameable, reportable and switchable so that the
+/// two choices can be compared on the machine the question is about.
+const DEFAULT_GPU_POWER_PREFERENCE: wgpu::PowerPreference = wgpu::PowerPreference::HighPerformance;
+
+/// **Which GPU Folio asked the driver for, and why that one** — one fact, one
+/// owner.
+///
+/// Every `request_adapter` in this crate reads [`gpu_power_request`] and
+/// nothing else, so the three adapters this process can ask for over its life —
+/// the surface bootstrap, the rebuild after a device loss, and the headless
+/// probe — cannot come to disagree about what is being asked for. The source is
+/// carried beside the preference because a recording that says only
+/// `LowPower` leaves the reader unable to tell a machine that was switched from
+/// a build whose default changed.
+///
+/// `wgpu` has a switch of its own — `PowerPreference::from_env` over
+/// `WGPU_POWER_PREF` — and this crate never calls it, so there is exactly one
+/// name to set and exactly one answer to read back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuPowerRequest {
+    preference: wgpu::PowerPreference,
+    source: GpuPowerSource,
+}
+
+/// Where a [`GpuPowerRequest`] came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GpuPowerSource {
+    /// Nothing was set, or the variable was set to nothing at all — which every
+    /// switch in this program reads as "not this run"
+    /// (`docs/BT-ENVIRONMENT.md`).
+    Default,
+    /// `BT_GPU_PREFERENCE` named this preference.
+    Environment,
+    /// `BT_GPU_PREFERENCE` was set to something this build does not know. The
+    /// default stands and the value is kept so that the line reporting the
+    /// adapter can say so: a diagnostic switch that ignores its own value in
+    /// silence is how somebody spends a day comparing a build against itself.
+    NotUnderstood(String),
+}
+
+impl GpuPowerRequest {
+    /// The preference to hand `wgpu`.
+    #[must_use]
+    pub fn preference(&self) -> wgpu::PowerPreference {
+        self.preference
+    }
+}
+
+/// One wording for the request, wherever it is read out: what was asked for and
+/// where the answer came from, in a line beside the adapter that answered.
+impl std::fmt::Display for GpuPowerRequest {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.source {
+            GpuPowerSource::Default => write!(out, "{:?} (default)", self.preference),
+            GpuPowerSource::Environment => {
+                write!(out, "{:?} ({GPU_PREFERENCE_VARIABLE})", self.preference)
+            }
+            GpuPowerSource::NotUnderstood(value) => write!(
+                out,
+                "{:?} ({GPU_PREFERENCE_VARIABLE}={value:?} not understood)",
+                self.preference
+            ),
+        }
+    }
+}
+
+/// **The one place Folio decides which GPU it runs on**, read by every
+/// `request_adapter` in this crate and by the line that reports the adapter
+/// each one returned.
+///
+/// The environment is read once per process and remembered, because the answer
+/// cannot change under a running process and because a request made at startup
+/// and one made an hour later after a device loss must be the same request. A
+/// frame pays nothing; the whole process pays one `var_os`.
+///
+/// **This is a diagnosis switch, not a setting.** It exists so the same build
+/// can be started twice on one hybrid-graphics laptop — once as it ships, once
+/// with `BT_GPU_PREFERENCE=low` — and the adapter line show a different
+/// adapter, which is the only way to find out whether that machine's long
+/// `swapchain present` holds follow the discrete GPU. A row in Settings is a
+/// later question, and so is the default.
+#[must_use]
+pub fn gpu_power_request() -> &'static GpuPowerRequest {
+    static RESOLVED: OnceLock<GpuPowerRequest> = OnceLock::new();
+    RESOLVED.get_or_init(|| read_gpu_power_request(std::env::var_os(GPU_PREFERENCE_VARIABLE)))
+}
+
+/// The parse alone, with the environment passed in so it can be held to a table
+/// without a machine, a GPU or a process-wide variable.
+///
+/// `low` and `high` are the words `wgpu` itself uses for these two adapters, so
+/// a reader who knows one switch knows this one. Case is ignored; surrounding
+/// whitespace is not trimmed, because every other switch in this program reads
+/// a value verbatim and one that quietly repaired its input would be a
+/// different kind of surprise.
+fn read_gpu_power_request(value: Option<std::ffi::OsString>) -> GpuPowerRequest {
+    let default = GpuPowerRequest {
+        preference: DEFAULT_GPU_POWER_PREFERENCE,
+        source: GpuPowerSource::Default,
+    };
+    let Some(value) = value else {
+        return default;
+    };
+    let value = value.to_string_lossy().into_owned();
+    if value.is_empty() {
+        return default;
+    }
+    let preference = match value.to_ascii_lowercase().as_str() {
+        "low" => wgpu::PowerPreference::LowPower,
+        "high" => wgpu::PowerPreference::HighPerformance,
+        _ => {
+            return GpuPowerRequest {
+                preference: DEFAULT_GPU_POWER_PREFERENCE,
+                source: GpuPowerSource::NotUnderstood(value),
+            };
+        }
+    };
+    GpuPowerRequest {
+        preference,
+        source: GpuPowerSource::Environment,
+    }
+}
+
 /// **Everything on [`GpuContext`] that is made out of a device**, and nothing
 /// that outlives one.
 ///
@@ -5920,11 +6572,15 @@ fn limits_with_this_adapters_textures(adapter: &wgpu::Adapter) -> wgpu::Limits {
 /// device's.
 struct DeviceResources {
     device_loss: Arc<OnceLock<String>>,
+    device_fault: Arc<OnceLock<String>>,
     glyphon_cache: Cache,
     atlas: TextAtlas,
     rect_pipeline: wgpu::RenderPipeline,
     ground_rect_pipeline: wgpu::RenderPipeline,
     ground_fade_rect_pipeline: wgpu::RenderPipeline,
+    /// How a fading overlay surface goes back onto the frame — see
+    /// [`OverlayGroup`].
+    group_pipelines: GroupPipelines,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
     math_samplers: MathSamplers,
@@ -5938,29 +6594,62 @@ struct DeviceResources {
 }
 
 impl DeviceResources {
-    /// Build the whole set against a device, **arming the loss callback before
-    /// anything else is built on it**.
+    /// Build the whole set against a device, **arming both of the device's own
+    /// channels before anything else is built on it**.
     ///
     /// The order is the one §7.1.3m ⑤ fixed and it holds for a replacement
     /// device exactly as it held for the first: the notice arrives once, from
     /// inside whichever call happens to notice, so a device that goes away
     /// during its own pipeline compilation has to have somewhere to say so.
+    ///
+    /// **Two channels and not one** (§7.1.3m ⑤″). A device that is taken away
+    /// says so through `set_device_lost_callback` and through nothing else —
+    /// wgpu classifies that one kind and drops it before the error sink
+    /// (`wgpu_core.rs`: `ErrorType::DeviceLost => return`). Everything that then
+    /// goes wrong *because* it went away is an ordinary validation error against
+    /// a resource that was handed out quietly invalid, and those go to the sink,
+    /// whose default handler is `panic!`. Arming only the first callback is
+    /// therefore arming the channel that reports the cause and leaving the one
+    /// that reports every consequence pointed at the process's own exit.
     fn mint(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let device_loss: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
         {
             let latch = Arc::clone(&device_loss);
             device.set_device_lost_callback(move |reason, message| {
-                let said = format!("{reason:?}: {message}");
-                if latch.set(said.clone()).is_ok() {
-                    eprintln!("Folio lost the GPU device — {said}");
+                if let Some(line) = note_what_the_device_said(
+                    &latch,
+                    DEVICE_LOST_HEADLINE,
+                    &format!("{reason:?}: {message}"),
+                ) {
+                    eprintln!("{line}");
                 }
             });
+        }
+        let device_fault: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+        {
+            let latch = Arc::clone(&device_fault);
+            device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+                // **Nothing in here may panic**, and that is the whole of what
+                // this handler is for. It is called from inside wgpu, on the
+                // thread of whatever call raised the error and with wgpu's own
+                // locks just released; a panic here is the same process-ending
+                // event the default handler was, raised from a place no `?` can
+                // catch it. Latching a string and writing at most one line is
+                // everything it does, and the frame path is where the fact is
+                // acted on — see [`GpuContext::still_has_its_device`].
+                if let Some(line) =
+                    note_what_the_device_said(&latch, DEVICE_FAULT_HEADLINE, &error.to_string())
+                {
+                    eprintln!("{line}");
+                }
+            }));
         }
         let glyphon_cache = Cache::new(device);
         let atlas = TextAtlas::new(device, queue, &glyphon_cache, format);
         let rect_pipeline = create_rect_pipeline(device, format);
         let ground_rect_pipeline = create_ground_rect_pipeline(device, format);
         let ground_fade_rect_pipeline = create_ground_fade_rect_pipeline(device, format);
+        let group_pipelines = create_group_pipelines(device, format);
         let (math_pipeline, math_bind_group_layout, math_samplers) =
             create_math_pipeline(device, format);
         let (background_pipeline, background_bind_group_layout, background_sampler) =
@@ -5971,11 +6660,13 @@ impl DeviceResources {
             create_blank_bind_group(device, queue, &video_bind_group_layout, &video_sampler);
         Self {
             device_loss,
+            device_fault,
             glyphon_cache,
             atlas,
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
+            group_pipelines,
             math_pipeline,
             math_bind_group_layout,
             math_samplers,
@@ -6037,10 +6728,16 @@ impl GpuContext {
         height: u32,
         scale_factor: f64,
     ) -> Result<(Self, WindowRenderer), RenderError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        let present_wait = descriptor
+            .backend_options
+            .dx12
+            .latency_waitable_object
+            .clone();
+        let instance = wgpu::Instance::new(descriptor);
         let kind = target.kind();
         let surface = create_surface(&instance, target)?;
-        let mut gpu = Self::bootstrap_for_surface(instance, &surface).await?;
+        let mut gpu = Self::bootstrap_for_surface(instance, &surface, present_wait).await?;
         let window =
             WindowRenderer::from_surface(&mut gpu, surface, kind, width, height, scale_factor)?;
         Ok((gpu, window))
@@ -6058,12 +6755,13 @@ impl GpuContext {
     pub async fn bootstrap_for_surface(
         instance: wgpu::Instance,
         surface: &wgpu::Surface<'static>,
+        present_wait: wgpu::Dx12UseFrameLatencyWaitableObject,
     ) -> Result<Self, RenderError> {
         let phase_started = Instant::now();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(surface),
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: gpu_power_request().preference(),
                 force_fallback_adapter: false,
                 ..Default::default()
             })
@@ -6087,7 +6785,7 @@ impl GpuContext {
             .find(wgpu::TextureFormat::is_srgb)
             .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
         Self::assemble(
-            instance,
+            (instance, present_wait),
             adapter,
             device,
             queue,
@@ -6159,7 +6857,13 @@ impl GpuContext {
                 RebuiltWindow::Offscreen(renderer) => offscreen.push(renderer),
             }
         }
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        let present_wait = descriptor
+            .backend_options
+            .dx12
+            .latency_waitable_object
+            .clone();
+        let instance = wgpu::Instance::new(descriptor);
         let bootstrap = if on_screen.is_empty() {
             None
         } else {
@@ -6171,7 +6875,7 @@ impl GpuContext {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: bootstrap.as_ref().map(|(_, surface, _)| surface),
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: gpu_power_request().preference(),
                 force_fallback_adapter: false,
                 ..Default::default()
             })
@@ -6204,11 +6908,13 @@ impl GpuContext {
         let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
         let DeviceResources {
             device_loss,
+            device_fault,
             glyphon_cache,
             atlas,
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
+            group_pipelines,
             math_pipeline,
             math_bind_group_layout,
             math_samplers,
@@ -6221,19 +6927,21 @@ impl GpuContext {
             video_blank,
         } = DeviceResources::mint(&device, &queue, format);
         self.instance = instance;
+        self.present_wait = present_wait;
         self.adapter = adapter;
         self.device = device;
         self.queue = queue;
         self.format = format;
         self.max_texture_dimension_2d = max_texture_dimension_2d;
         self.glyphon_cache = glyphon_cache;
-        self.atlas = atlas;
+        self.replace_atlas(atlas);
         // A fresh packing is not a repair of a fragmented one, so the episode
         // the re-pack latch was in ends with the device it was in.
         self.glyph_atlas_refitted = false;
         self.rect_pipeline = rect_pipeline;
         self.ground_rect_pipeline = ground_rect_pipeline;
         self.ground_fade_rect_pipeline = ground_fade_rect_pipeline;
+        self.group_pipelines = group_pipelines;
         self.math_pipeline = math_pipeline;
         self.math_bind_group_layout = math_bind_group_layout;
         self.math_samplers = math_samplers;
@@ -6264,8 +6972,11 @@ impl GpuContext {
         for renderer in offscreen {
             renderer.adopt_new_device(self, None)?;
         }
-        // **The latch is replaced last, after every window has adopted** (review
-        // row R2-7). Replacing it is what says the device is back — an
+        // **Both latches are replaced last, after every window has adopted**
+        // (review row R2-7; the fault latch joined it in §7.1.3m ⑤″, and for the
+        // same reason — a context that kept the old device's faults would refuse
+        // every frame on the new one). Replacing them is what says the device is
+        // back — an
         // `OnceLock` cannot be un-set, so a context that kept the old one would
         // refuse every frame it was ever asked for again — and *when* it is
         // replaced is what says the recovery is over. It used to be installed
@@ -6278,6 +6989,7 @@ impl GpuContext {
         // pilot tries the whole rebuild again, and a machine that will not give
         // a device back reaches the exit that is there for it.
         self.device_loss = device_loss;
+        self.device_fault = device_fault;
         Ok(())
     }
 
@@ -6345,11 +7057,17 @@ impl GpuContext {
         demand_fallback: bool,
         texture_ceiling: Option<u32>,
     ) -> Result<Self, RenderError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        let present_wait = descriptor
+            .backend_options
+            .dx12
+            .latency_waitable_object
+            .clone();
+        let instance = wgpu::Instance::new(descriptor);
         let phase_started = Instant::now();
         let options = |force_fallback_adapter| wgpu::RequestAdapterOptions {
             compatible_surface: None,
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: gpu_power_request().preference(),
             force_fallback_adapter,
             ..Default::default()
         };
@@ -6383,7 +7101,7 @@ impl GpuContext {
             .map_err(|error| RenderError::Wgpu(error.to_string()))?;
         let device_time = phase_started.elapsed();
         Self::assemble(
-            instance,
+            (instance, present_wait),
             adapter,
             device,
             queue,
@@ -6394,7 +7112,7 @@ impl GpuContext {
     }
 
     fn assemble(
-        instance: wgpu::Instance,
+        instance: (wgpu::Instance, wgpu::Dx12UseFrameLatencyWaitableObject),
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -6402,6 +7120,7 @@ impl GpuContext {
         adapter_time: Duration,
         device_time: Duration,
     ) -> Result<Self, RenderError> {
+        let (instance, present_wait) = instance;
         let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
         let phase_started = Instant::now();
         let mut font_system = terminal_font_system();
@@ -6417,11 +7136,13 @@ impl GpuContext {
         // what makes the first device and every later one provably the same set.
         let DeviceResources {
             device_loss,
+            device_fault,
             glyphon_cache,
             atlas,
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
+            group_pipelines,
             math_pipeline,
             math_bind_group_layout,
             math_samplers,
@@ -6434,8 +7155,10 @@ impl GpuContext {
             video_blank,
         } = DeviceResources::mint(&device, &queue, format);
         let render_resources_time = phase_started.elapsed();
+        let terminal_cjk_families = resolve_terminal_cjk_families("", &mut font_system);
         Ok(Self {
             instance,
+            present_wait,
             adapter,
             device,
             queue,
@@ -6443,15 +7166,20 @@ impl GpuContext {
             max_texture_dimension_2d,
             font_system,
             font_environment_epoch: 1,
+            cell_metrics: CellMetricsMemo::default(),
+            terminal_cjk_families,
             swash_cache,
             glyphon_cache,
             atlas,
+            synthetic_bold: SyntheticBoldGlyphs::new(),
             glyph_atlas_refitted: false,
             glyph_atlas_refits: 0,
             device_loss,
+            device_fault,
             rect_pipeline,
             ground_rect_pipeline,
             ground_fade_rect_pipeline,
+            group_pipelines,
             math_pipeline,
             math_bind_group_layout,
             math_samplers,
@@ -6483,19 +7211,20 @@ impl GpuContext {
 
     /// Point the **grid's** face at a family and a size — never the chrome's.
     ///
-    /// The two halves of the Appearance block's font rows arrive together
-    /// because they cost the same thing: every measurement, every shaped run
-    /// and every composed row is derived from the pair, so changing one is
-    /// exactly as invalidating as changing both, and a caller that could change
-    /// them separately would pay twice for one visible change.
+    /// The primary face, CJK face and size from the Appearance block arrive
+    /// together because they cost the same thing: every measurement, every
+    /// shaped run and every composed row is derived from that font state, so
+    /// changing one is exactly as invalidating as changing all three, and a
+    /// caller that could change them separately would pay twice for one visible
+    /// change.
     ///
     /// **The files come in rather than being looked up here.** This renderer
     /// builds its font database from a fixed file list on purpose (see
     /// [`terminal_font_system`]) — enumerating `Fonts/` is the startup cost that
     /// design exists to avoid, and this crate has no business opening a system
     /// font collection. `bt-platform` enumerates once, when the user opens the
-    /// picker, and hands back name and paths together; an empty `files` is the
-    /// ordinary case for a family the startup list already loaded.
+    /// picker, and hands back each name and its paths together; empty file lists
+    /// are the ordinary case for families the startup list already loaded.
     ///
     /// Loading is idempotent and cheap on repeat: `fontdb` refuses a face it
     /// already holds, so re-choosing a family the user has picked before does
@@ -6510,6 +7239,8 @@ impl GpuContext {
         &mut self,
         family: &str,
         files: &[std::path::PathBuf],
+        cjk_family: &str,
+        cjk_files: &[std::path::PathBuf],
         size_logical_px: f32,
     ) {
         self.font_environment_epoch = self
@@ -6517,7 +7248,14 @@ impl GpuContext {
             .checked_add(1)
             .expect("font epoch exhausted");
         for file in files {
-            let _ = self.font_system.db_mut().load_font_file(file);
+            let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+                self.font_system.db_mut().load_font_file(file)
+            });
+        }
+        for file in cjk_files {
+            let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+                self.font_system.db_mut().load_font_file(file)
+            });
         }
         // A file a reader picked is a file this renderer has never opened, and
         // the one thing it may not be is a face with no em ([`drop_faces_with_no_scalable_em`]).
@@ -6532,6 +7270,8 @@ impl GpuContext {
             family
         };
         self.font_system.db_mut().set_monospace_family(family);
+        self.terminal_cjk_families =
+            resolve_terminal_cjk_families(cjk_family, &mut self.font_system);
         self.terminal_font_size_logical_px = size_logical_px;
     }
 
@@ -6540,6 +7280,25 @@ impl GpuContext {
     #[must_use]
     pub fn font_environment_epoch(&self) -> u64 {
         self.font_environment_epoch
+    }
+
+    /// **The terminal's cell metrics at one face size and one display scale** — the measuring
+    /// service every pane size goes through (ticket 37), memoised by
+    /// ([`Self::font_environment_epoch`], size, scale).
+    ///
+    /// A pane at 150 % beside a pane at 100 % asks for two sizes; a wheel ramp asks for the same
+    /// dozen again and again, and after the first ask of each it costs a map lookup.
+    pub fn terminal_cell_metrics(
+        &mut self,
+        scale_factor: f64,
+        font_size_logical_px: f32,
+    ) -> Result<CellMetrics, RenderError> {
+        self.cell_metrics.measure(
+            &mut self.font_system,
+            self.font_environment_epoch,
+            scale_factor,
+            font_size_logical_px,
+        )
     }
 
     /// The grid's face size in logical pixels, as last set.
@@ -6554,6 +7313,12 @@ impl GpuContext {
         primary_font_family(&self.font_system)
     }
 
+    /// The active CJK preference, empty when the platform chain owns the choice.
+    #[must_use]
+    pub fn terminal_cjk_font_family(&self) -> &str {
+        &self.terminal_cjk_families.chosen
+    }
+
     /// The swapchain format this context's atlas and pipelines were baked for.
     #[must_use]
     pub fn format(&self) -> wgpu::TextureFormat {
@@ -6563,6 +7328,16 @@ impl GpuContext {
     #[must_use]
     pub fn adapter_name(&self) -> String {
         self.adapter.get_info().name
+    }
+
+    /// The adapter that owns this context, after selection or recovery.
+    ///
+    /// Read from wgpu rather than copied into context state, so a diagnostic
+    /// emitted after device recovery cannot accidentally describe the adapter
+    /// that was lost.
+    #[must_use]
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.adapter.get_info()
     }
 
     #[must_use]
@@ -6615,6 +7390,18 @@ impl GpuContext {
         self.device_loss.get().map(String::as_str)
     }
 
+    /// **What wgpu raised against this device that no call of ours could be
+    /// handed**, or `None` while it has raised nothing.
+    ///
+    /// The uncaptured-error handler's half of the answer — see the `device_fault`
+    /// field. Public for the same reason [`Self::device_loss`] is: the decision
+    /// about what a broken device costs belongs to the application, and this is
+    /// the only place the fact is kept.
+    #[must_use]
+    pub fn device_fault(&self) -> Option<&str> {
+        self.device_fault.get().map(String::as_str)
+    }
+
     /// **Take this context's device away for real**, the way a driver would.
     ///
     /// Not a simulation and not a flag: `wgpu::Device::destroy` marks the device
@@ -6641,13 +7428,83 @@ impl GpuContext {
     /// The same question asked the way the frame path spends it.
     ///
     /// **The one gate all three doors go through** — composing a frame, closing
-    /// one out on the shared atlas, reading one back — so that "a lost device is
-    /// an error and not a later panic" is one statement rather than three.
+    /// one out on the shared atlas, reading one back — so that "a broken device
+    /// is an error and not a later panic" is one statement rather than three.
+    ///
+    /// # Why the loss is read first, and why the fault is read at all
+    ///
+    /// A device that went away is the diagnosis; a fault raised afterwards is a
+    /// symptom of it, and naming the symptom would send the reader of
+    /// `diagnostics.log` after the wrong thing. The order is not a guess about
+    /// timing either: wgpu marks a device lost and calls the loss callback
+    /// **synchronously**, from inside the call that noticed, and only then does
+    /// it begin handing out the invalid resources whose use raises the faults —
+    /// so by the time any of those faults exists, the loss latch is already set.
+    ///
+    /// A fault on a device that is *not* lost is the other case, and it keeps
+    /// the answer §7.1.3m ⑤ gave: this program has done something wgpu refused,
+    /// and it is refused loudly. What changed is only where the noise comes
+    /// from. It used to be `panic!`, raised inside wgpu on whatever thread
+    /// noticed, unwinding through a callback nobody could catch; it is now an
+    /// error returned from the frame, carried up to `FolioApp::fail` with the
+    /// sentence wgpu wrote, where a device that can be rebuilt is rebuilt and
+    /// one that cannot ends the run with words a reader can use.
     fn still_has_its_device(&self) -> Result<(), RenderError> {
-        match self.device_loss.get() {
-            Some(said) => Err(RenderError::DeviceLost(said.clone())),
+        if let Some(said) = self.device_loss.get() {
+            return Err(RenderError::DeviceLost(said.clone()));
+        }
+        match self.device_fault.get() {
+            Some(said) => Err(RenderError::Wgpu(said.clone())),
             None => Ok(()),
         }
+    }
+
+    /// **A vertex buffer minted the one way that cannot end the process.**
+    ///
+    /// Every buffer the frame path makes is made here, and the reason is one
+    /// line of `wgpu::util`: `create_buffer_init` asks for a buffer
+    /// `mapped_at_creation` and then **unwraps** the mapping
+    /// (`util/device.rs`: `.expect("Failed to get mapped range …")`). On a
+    /// device the driver has just taken away, `create_buffer` hands back a
+    /// quietly invalid buffer — that is wgpu's contract for a lost device, and
+    /// §7.1.3m ⑤ is written about it — and the mapping of a quietly invalid
+    /// buffer is a `MapRangeError`. So the convenience that saves one line costs
+    /// the process: the crash of 2026-09-16 was a driver reset during a power
+    /// cut, met a millisecond later by this call, naming a buffer of terminal
+    /// cell grounds for a machine event that had nothing to do with it.
+    ///
+    /// `create_buffer` + `write_buffer` is the same two GPU operations without
+    /// the unwrap. Neither can panic: a failure of either goes to the device's
+    /// error sink, which since §7.1.3m ⑤″ is the handler armed in
+    /// [`DeviceResources::mint`], and the frame that asked for it is refused by
+    /// name on the next gate instead of taking the window with it.
+    ///
+    /// The `const` block is the whole of the alignment argument: wgpu wants a
+    /// write whose length is a multiple of [`wgpu::COPY_BUFFER_ALIGNMENT`], and
+    /// every vertex type in this file is built of four-byte fields. Holding that
+    /// at compile time is what lets this body be two statements with no
+    /// arithmetic in it — a type that ever stopped being four-byte would not
+    /// build, rather than padding at run time for a case that cannot arise.
+    fn vertex_buffer<T: Pod>(&self, label: &str, contents: &[T]) -> wgpu::Buffer {
+        const {
+            assert!(
+                size_of::<T>().is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT as usize),
+                "a vertex written through the queue has to be a whole number of copy words"
+            );
+        }
+        let contents: &[u8] = bytemuck::cast_slice(contents);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: contents.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Ordered before the command buffers of the next submit by the queue
+        // itself, and every one of these buffers is drawn from by exactly that
+        // submit — so this is the same write `create_buffer_init` did, done
+        // where a failure is reportable.
+        self.queue.write_buffer(&buffer, 0, contents);
+        buffer
     }
 
     /// **The one place the shared atlas is told a frame is over** — called by
@@ -6741,8 +7598,17 @@ impl GpuContext {
     /// lost one it does nothing at all: no trim, no re-pack, no line. The frame
     /// that comes after says what actually happened, once, by name
     /// ([`RenderError::DeviceLost`]).
+    /// **The one door that replaces the shared atlas**, and with it every
+    /// synthetic-bold id the old one could hold (ticket 38). An id retired while
+    /// its atlas lives would let two rasters share one key in it; an atlas
+    /// replaced without its ids would leave them spent for nothing.
+    fn replace_atlas(&mut self, atlas: TextAtlas) {
+        self.atlas = atlas;
+        self.synthetic_bold.retire_all();
+    }
+
     fn close_the_frame(&mut self, outcome: &Result<PresentOutcome, RenderError>) {
-        if self.device_loss.get().is_some() {
+        if self.still_has_its_device().is_err() {
             return;
         }
         match outcome {
@@ -6752,8 +7618,9 @@ impl GpuContext {
             }
             Ok(PresentOutcome::PresentedWithoutText(_)) if !self.glyph_atlas_refitted => {
                 self.glyph_atlas_refitted = true;
-                self.atlas =
+                let atlas =
                     TextAtlas::new(&self.device, &self.queue, &self.glyphon_cache, self.format);
+                self.replace_atlas(atlas);
                 // Unconditional, and numbered by the same statement that does
                 // the numbering — see [`note_a_repack`]. A re-pack the log does
                 // not carry is a re-pack nobody on the machine it happened on
@@ -7126,6 +7993,10 @@ impl WindowRenderer {
     /// touch them, so releasing them early would buy nothing but a second state
     /// this type can be in.
     fn surrender_target(&mut self) {
+        self.surface_generation = self
+            .surface_generation
+            .checked_add(1)
+            .expect("surface generation exhausted");
         self.target = FrameTarget::Surrendered;
     }
 
@@ -7187,7 +8058,7 @@ impl WindowRenderer {
                         format: self.config.format,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                             | wgpu::TextureUsages::COPY_SRC,
-                        view_formats: &[],
+                        view_formats: &[self.config.format.remove_srgb_suffix()],
                     }));
                 self.configured_size = (self.config.width, self.config.height);
             }
@@ -7241,6 +8112,9 @@ impl WindowRenderer {
                 )
             })
             .collect();
+        // The fading surfaces' textures were the old device's; the next frame
+        // that fades makes its own on this one.
+        self.group_targets.clear();
         self.max_texture_dimension_2d = gpu.max_texture_dimension_2d;
         Ok(())
     }
@@ -7279,7 +8153,9 @@ impl WindowRenderer {
             // that has a swapchain nothing, because a swapchain has no such
             // texture.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            // Its bytes-view beside it, as a swapchain's is — see
+            // `configure_window_surface`.
+            view_formats: &[format.remove_srgb_suffix()],
         });
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -7290,7 +8166,7 @@ impl WindowRenderer {
             desired_maximum_frame_latency: 1,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             color_space: wgpu::SurfaceColorSpace::Auto,
-            view_formats: Vec::new(),
+            view_formats: vec![format.remove_srgb_suffix()],
         };
         Self::assemble(
             gpu,
@@ -7363,6 +8239,8 @@ impl WindowRenderer {
         // swapchain pays for that counting only when someone asked for it.
         let measure_shaping = trace_perf || matches!(target, FrameTarget::Offscreen(_));
         Ok(Self {
+            retained_revision: 0,
+            surface_generation: 0,
             target,
             config,
             // Filled in by `from_surface`, which is the only constructor with a
@@ -7375,6 +8253,9 @@ impl WindowRenderer {
             chrome_icons: Vec::new(),
             web_holes: Vec::new(),
             overlay_layers: Vec::new(),
+            overlay_groups: Vec::new(),
+            group_targets: Vec::new(),
+            groups_composited: 0,
             seat_slots,
             text_viewport,
             chrome_text_renderer,
@@ -7382,7 +8263,7 @@ impl WindowRenderer {
             math_texture_refusals: 0,
             textureless_math_blocks: 0,
             max_texture_dimension_2d: gpu.max_texture_dimension_2d,
-            metrics,
+            base_metrics: metrics,
             surface_configure_time,
             font_metrics_time,
             text_rows: Vec::new(),
@@ -7410,12 +8291,80 @@ impl WindowRenderer {
         })
     }
 
-    pub fn metrics(&self) -> CellMetrics {
-        self.metrics
+    /// The sequence used by this renderer's BT_PERF_TRACE frame line.
+    pub fn perf_frame(&self) -> u64 {
+        self.perf_frame
     }
 
-    pub fn ime_cursor_area(&self, frame: &ViewportFrame) -> ImeCursorArea {
-        ime_cursor_area_for_metrics(self.metrics, frame)
+    /// Read diagnostics from this present's named, lit band. No GPU access.
+    pub fn math_band_trace(
+        &self,
+        metrics: CellMetrics,
+        seat: SeatViewport,
+        frame: &ViewportFrame,
+        named: &MathBlockAnchor,
+    ) -> Option<MathBandTrace> {
+        let placement = frame.math_blocks.iter().find(|placement| {
+            placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+                && placement.toolbar_visible
+                && placement.anchor.same_block(named)
+        })?;
+        let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
+        Some(MathBandTrace {
+            seat: MathToolBoxes {
+                anchor: placement.anchor.clone(),
+                display: placement.display,
+                block: geometry.block,
+                source: geometry.eye?,
+                copy: geometry.copy?,
+            },
+            ink_right: geometry.ink[2],
+            height_subpixels: placement.clip_height_subpixels,
+            picture_opacity_milli: placement.picture_opacity_milli,
+        })
+    }
+
+    /// **The window's base metrics** — the Settings face size at this window's display scale
+    /// (ticket 37).
+    ///
+    /// The named base/chrome interface, and the only one: chrome that follows the Settings size
+    /// and stays at window scale reads it (the chrome scroll distance, a flash band's padding).
+    /// **A terminal pane is never drawn, hit or sized from it**: a pane's metrics are derived from
+    /// its own rung by its owner and arrive here with its [`SeatFrame`]. What wants only the
+    /// display scale asks [`Self::scale_factor`] or [`Self::dpi_milli`], not this.
+    /// `text_size_tests::no_pane_reads_the_windows_metrics` names every reader.
+    #[must_use]
+    pub fn base_metrics(&self) -> CellMetrics {
+        self.base_metrics
+    }
+
+    /// This window's display scale — what every chrome rectangle is multiplied by.
+    #[must_use]
+    pub fn scale_factor(&self) -> f64 {
+        self.base_metrics.scale_factor
+    }
+
+    /// [`Self::scale_factor`] in thousandths, as layout keys and the seat solver carry it.
+    #[must_use]
+    pub fn dpi_milli(&self) -> NonZeroU32 {
+        self.base_metrics.dpi_milli()
+    }
+
+    /// **A terminal pane's metrics at an effective face size**, measured at this window's display
+    /// scale through the one measuring service ([`GpuContext::terminal_cell_metrics`]).
+    ///
+    /// The size is the pane's effective logical size, derived from its rung by its owner; the
+    /// scale is applied once, inside the measurement, and never by the caller.
+    pub fn pane_cell_metrics(
+        &self,
+        gpu: &mut GpuContext,
+        font_size_logical_px: f32,
+    ) -> Result<CellMetrics, RenderError> {
+        gpu.terminal_cell_metrics(self.base_metrics.scale_factor, font_size_logical_px)
+    }
+
+    pub fn ime_cursor_area(&self, metrics: CellMetrics, frame: &ViewportFrame) -> ImeCursorArea {
+        ime_cursor_area_for_metrics(metrics, frame)
     }
 
     /// **Where one named band's floor and its two marks stand**, in the pane
@@ -7449,11 +8398,12 @@ impl WindowRenderer {
     #[must_use]
     pub fn math_tool_boxes(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         hovered: &MathBlockAnchor,
     ) -> Option<MathToolBoxes> {
-        math_tool_boxes_for(self.metrics, seat, frame, hovered)
+        math_tool_boxes_for(metrics, seat, frame, hovered)
     }
 
     /// **Where the named band's rows stand on this picture** — see
@@ -7465,17 +8415,19 @@ impl WindowRenderer {
     /// up.
     pub fn math_band_face(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         named: &MathBlockAnchor,
     ) -> Option<MathBandFace> {
-        math_band_face_for(self.metrics, seat, frame, named)
+        math_band_face_for(metrics, seat, frame, named)
     }
 
     /// The pointer's half of [`Self::math_tool_boxes`], cut to the same `seat`
     /// and for the same reason (RC-2).
     pub fn math_hit_test(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         x: f64,
@@ -7483,7 +8435,7 @@ impl WindowRenderer {
     ) -> Option<MathHit> {
         let point = [x as f32, y as f32];
         if let Some(failure) = frame.math_failures.iter().rev().find(|failure| {
-            self.math_failure_geometry(seat, frame, failure)
+            self.math_failure_geometry(metrics, seat, frame, failure)
                 .is_some_and(|(_, hit)| point_in_rect(point, hit))
         }) {
             return Some(MathHit {
@@ -7495,7 +8447,7 @@ impl WindowRenderer {
             if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math {
                 return None;
             }
-            let geometry = self.math_block_geometry(seat, frame, placement)?;
+            let geometry = self.math_block_geometry(metrics, seat, frame, placement)?;
             let target = if geometry.eye.is_some_and(|rect| point_in_rect(point, rect)) {
                 MathHitTarget::ToggleSource
             } else if geometry.copy.is_some_and(|rect| point_in_rect(point, rect)) {
@@ -7564,6 +8516,22 @@ impl WindowRenderer {
         }
     }
 
+    /// All retained inputs to `compose_frame`, without touching the device.
+    pub fn present_state(&self) -> RendererPresentState {
+        RendererPresentState {
+            retained_revision: self.retained_revision,
+            surface_generation: self.surface_generation,
+            size: (self.config.width, self.config.height),
+            scale_factor: self.base_metrics.scale_factor.to_bits(),
+            font_revision: self.font_revision,
+            theme_revision: theme_revision(),
+            cursor_style: current_cursor_style(),
+            cursor_blink_visible: self.cursor_blink_visible,
+            window_focused: self.window_focused,
+            seat: self.seat,
+        }
+    }
+
     /// Select the cursor presentation without changing terminal DEC cursor visibility.
     pub fn set_window_focused(&mut self, focused: bool) -> bool {
         let changed = self.window_focused != focused;
@@ -7595,8 +8563,8 @@ impl WindowRenderer {
         peek_thumbnail_extent(
             seat.width as f32,
             seat.height as f32,
-            self.metrics.padding_px,
-            self.metrics.scale_factor as f32,
+            self.base_metrics.padding_px,
+            self.base_metrics.scale_factor as f32,
             image_width_px,
             image_height_px,
         )
@@ -7609,12 +8577,19 @@ impl WindowRenderer {
             (None, None) => false,
             (Some(current), Some(next)) => {
                 current.key != next.key
+                    || current.seat != next.seat
+                    || current.width_px != next.width_px
+                    || current.height_px != next.height_px
                     || current.pointer_x != next.pointer_x
                     || current.pointer_y != next.pointer_y
             }
             _ => true,
         };
         self.peek_overlay = overlay;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7664,7 +8639,34 @@ impl WindowRenderer {
                 .zip(images.iter())
                 .any(|(current, next)| !drawn_the_same(current, next));
         self.preview_images = images;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
+    }
+
+    /// Numeric identity for diagnostics; no renderer snapshot or native calls.
+    #[must_use]
+    pub fn surface_generation(&self) -> u64 {
+        self.surface_generation
+    }
+
+    pub fn present_configuration(&self, gpu: &GpuContext) -> PresentConfiguration {
+        PresentConfiguration {
+            generation: self.surface_generation,
+            mode: self.config.present_mode,
+            latency: self.config.desired_maximum_frame_latency,
+            wait: if gpu.adapter.get_info().backend == wgpu::Backend::Dx12 {
+                match gpu.present_wait {
+                    wgpu::Dx12UseFrameLatencyWaitableObject::Wait => "Wait",
+                    wgpu::Dx12UseFrameLatencyWaitableObject::DontWait => "DontWait",
+                    wgpu::Dx12UseFrameLatencyWaitableObject::None => "None",
+                }
+            } else {
+                "None"
+            },
+        }
     }
 
     /// Replace **every** preview body this frame. Returns whether anything
@@ -7726,6 +8728,10 @@ impl WindowRenderer {
     pub fn set_video_layers(&mut self, layers: Vec<VideoLayer>) -> bool {
         let changed = self.video_layers != layers;
         self.video_layers = layers;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7738,6 +8744,10 @@ impl WindowRenderer {
     pub fn set_preview_bodies(&mut self, bodies: Vec<PreviewBody>) -> bool {
         let changed = self.preview_bodies != bodies;
         self.preview_bodies = bodies;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7780,6 +8790,10 @@ impl WindowRenderer {
     pub fn set_web_holes(&mut self, holes: Vec<WebHole>) -> bool {
         let changed = self.web_holes != holes;
         self.web_holes = holes;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7795,9 +8809,13 @@ impl WindowRenderer {
     /// method never holds, while the source is on the placement the renderer is already reading.
     /// Two panes showing the same table are then showing one picture, which is also correct — and
     /// the caller owns staleness, since it hands the whole map over every time anything moves.
-    pub fn set_table_blocks(&mut self, blocks: HashMap<String, TableBlockPaint>) -> bool {
+    pub fn set_table_blocks(&mut self, blocks: HashMap<TableBlockKey, TableBlockPaint>) -> bool {
         let changed = self.table_blocks != blocks;
         self.table_blocks = blocks;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7972,6 +8990,10 @@ impl WindowRenderer {
         let changed = image.seat != seat || image.clip != clip;
         image.seat = seat;
         image.clip = clip;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -7979,6 +9001,10 @@ impl WindowRenderer {
         if width == 0 || height == 0 {
             return Ok(());
         }
+        self.surface_generation = self
+            .surface_generation
+            .checked_add(1)
+            .expect("surface generation exhausted");
         let swapchain_size = surface_config_size(width, height, gpu.max_texture_dimension_2d);
         self.config.width = swapchain_size.0;
         self.config.height = swapchain_size.1;
@@ -8133,6 +9159,10 @@ impl WindowRenderer {
         self.chrome_quads = quads;
         self.chrome_labels = labels;
         self.chrome_icons = icons;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
     }
 
@@ -8149,10 +9179,60 @@ impl WindowRenderer {
     /// (DESIGN §7.1.5: a modal is a window-level stance, not a property of the
     /// terminal's content), so `ViewportFrame` equality and the replay contracts
     /// stay untouched by a visible dialog.
-    pub fn set_modal_overlay(&mut self, layers: Vec<OverlayLayer>) -> bool {
-        let changed = self.overlay_layers != layers;
+    ///
+    /// `groups` are the surfaces among `layers` that fade or travel as one
+    /// piece — see [`OverlayGroup`]. They are kept in the steps they are drawn
+    /// in, so a fade whose next sample draws the same picture is not a change.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, on a span that runs past the list or that partly
+    /// overlaps another: a surface is a run of layers, and two runs that share
+    /// some layers and not others are not two surfaces anybody drew.
+    pub fn set_modal_overlay(
+        &mut self,
+        layers: Vec<OverlayLayer>,
+        groups: Vec<OverlayGroup>,
+    ) -> bool {
+        let groups: Vec<OverlayGroup> = groups
+            .into_iter()
+            .filter(|group| !group.layers.is_empty())
+            .map(OverlayGroup::quantised)
+            .collect();
+        debug_assert!(
+            groups.iter().all(|group| group.layers.end <= layers.len()),
+            "an overlay group names a layer past the end of the list"
+        );
+        debug_assert!(
+            groups.iter().all(|a| groups.iter().all(|b| {
+                let (a, b) = (&a.layers, &b.layers);
+                a.end <= b.start
+                    || b.end <= a.start
+                    || (a.start <= b.start && b.end <= a.end)
+                    || (b.start <= a.start && a.end <= b.end)
+            })),
+            "two overlay groups partly overlap: spans must nest or stand apart"
+        );
+        let changed = self.overlay_layers != layers || self.overlay_groups != groups;
         self.overlay_layers = layers;
+        self.overlay_groups = groups;
+        self.retained_revision = self
+            .retained_revision
+            .checked_add(u64::from(changed))
+            .expect("renderer revision exhausted");
         changed
+    }
+
+    /// **How many fading surfaces the last frame drew apart and put back** —
+    /// zero on every frame whose groups all stand at rest, which is every frame
+    /// under reduced motion.
+    ///
+    /// The witness a test reads to know the group path was or was not taken:
+    /// the picture alone cannot say, because at rest the two roads draw the
+    /// same bytes by design.
+    #[must_use]
+    pub fn overlay_groups_composited(&self) -> u32 {
+        self.groups_composited
     }
 
     /// How wide `text` will be when drawn as a plain [`ChromeLabel`] at
@@ -8200,7 +9280,7 @@ impl WindowRenderer {
         text: &str,
         font_size_px: f32,
     ) -> f32 {
-        measure_chrome_label(
+        measure_chrome_label_with_cjk(
             &mut gpu.font_system,
             text,
             font_size_px,
@@ -8208,6 +9288,7 @@ impl WindowRenderer {
             0.0,
             false,
             true,
+            &gpu.terminal_cjk_families,
         )
     }
 
@@ -8230,7 +9311,7 @@ impl WindowRenderer {
         letter_spacing_em: f32,
         tabular_numerals: bool,
     ) -> f32 {
-        measure_chrome_label(
+        measure_chrome_label_with_cjk(
             &mut gpu.font_system,
             text,
             font_size_px,
@@ -8238,6 +9319,7 @@ impl WindowRenderer {
             letter_spacing_em,
             tabular_numerals,
             false,
+            &gpu.terminal_cjk_families,
         )
     }
 
@@ -8279,7 +9361,7 @@ impl WindowRenderer {
         letter_spacing_em: f32,
         tabular_numerals: bool,
     ) -> ChromeTextAdvances {
-        chrome_label_advances(
+        chrome_label_advances_with_cjk(
             &mut gpu.font_system,
             text,
             font_size_px,
@@ -8287,6 +9369,7 @@ impl WindowRenderer {
             letter_spacing_em,
             tabular_numerals,
             false,
+            &gpu.terminal_cjk_families,
         )
     }
 
@@ -8310,13 +9393,9 @@ impl WindowRenderer {
         gpu: &mut GpuContext,
         scale_factor: f64,
     ) -> Result<CellMetrics, RenderError> {
-        let metrics = CellMetrics::measure_at(
-            &mut gpu.font_system,
-            scale_factor,
-            gpu.terminal_font_size_logical_px,
-        )?;
+        let metrics = gpu.terminal_cell_metrics(scale_factor, gpu.terminal_font_size_logical_px)?;
         self.adopt_metrics(gpu, metrics);
-        Ok(self.metrics)
+        Ok(self.base_metrics)
     }
 
     /// Re-measure and re-shape after [`GpuContext::set_terminal_font`] moved the
@@ -8335,13 +9414,12 @@ impl WindowRenderer {
     /// does not move the window, so the monitor it is on is the monitor it was
     /// already on.
     pub fn apply_font_change(&mut self, gpu: &mut GpuContext) -> Result<CellMetrics, RenderError> {
-        let metrics = CellMetrics::measure_at(
-            &mut gpu.font_system,
-            self.metrics.scale_factor,
+        let metrics = gpu.terminal_cell_metrics(
+            self.base_metrics.scale_factor,
             gpu.terminal_font_size_logical_px,
         )?;
         self.adopt_metrics(gpu, metrics);
-        Ok(self.metrics)
+        Ok(self.base_metrics)
     }
 
     /// Take a freshly measured grid and throw away everything that described
@@ -8352,7 +9430,7 @@ impl WindowRenderer {
     /// glyphs at the wrong size, from a cache whose key did not happen to
     /// include the thing that moved.
     fn adopt_metrics(&mut self, gpu: &mut GpuContext, metrics: CellMetrics) {
-        self.metrics = metrics;
+        self.base_metrics = metrics;
         self.text_rows.clear();
         self.status_overlay = None;
         self.composed_row_cache.clear();
@@ -8418,6 +9496,9 @@ impl WindowRenderer {
                 // out in, and the two calls below take the values they always did.
                 clip: self.seat,
                 frame,
+                // The single-seat door is a replay's or a probe's, whose one pane has no rung of
+                // its own: it is drawn at the window's base size, 100 %.
+                metrics: self.base_metrics,
                 focused: true,
             }],
             trigger,
@@ -8460,7 +9541,20 @@ impl WindowRenderer {
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
-        let outcome = self.compose_frame(gpu, seats, trigger);
+        self.present_frame_with_phases(gpu, seats, trigger, |_| {})
+    }
+
+    /// [`Self::present_frame`], reporting only its real external-call
+    /// boundaries to the caller's timing ledger.
+    pub fn present_frame_with_phases(
+        &mut self,
+        gpu: &mut GpuContext,
+        seats: &[SeatFrame<'_>],
+        trigger: FrameTrigger,
+        mut phase: impl FnMut(PresentPhase),
+    ) -> Result<PresentOutcome, RenderError> {
+        phase(PresentPhase::ComposeEncode);
+        let outcome = self.compose_frame(gpu, seats, trigger, &mut phase);
         // **The one place the shared atlas is told the frame is over, and it is
         // outside every way the frame can end.**
         //
@@ -8495,6 +9589,7 @@ impl WindowRenderer {
         // in-use set — see [`GpuContext::close_the_frame`], which is now the one
         // place either debt is paid.
         gpu.close_the_frame(&outcome);
+        phase(PresentPhase::Complete);
         outcome
     }
 
@@ -8508,6 +9603,7 @@ impl WindowRenderer {
         gpu: &mut GpuContext,
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
+        phase: &mut dyn FnMut(PresentPhase),
     ) -> Result<PresentOutcome, RenderError> {
         let frame_started = Instant::now();
         // **Nothing is drawn on a device that is not there any more.** The
@@ -8586,42 +9682,65 @@ impl WindowRenderer {
         for (index, entry) in seats.iter().enumerate() {
             let frame = entry.frame;
             self.seat = entry.seat;
-            let text_stats = self.prepare_text_rows(gpu, frame)?;
+            phase(PresentPhase::TextShaping);
+            let text_stats = self.prepare_text_rows(gpu, entry.metrics, frame)?;
             rows_prepared_at = Instant::now();
             // `text_rows` and `status_overlay` stay single slots on purpose:
             // they are staging for the prepare that immediately follows, and
             // glyphon copies what it needs into this seat's own renderer. What
             // may not be shared is the renderer, and it is not.
-            let text_prepare_result = {
-                let slot = &mut self.seat_slots[index];
-                match prepare_text_atlas(
-                    &mut slot.text_renderer,
-                    &gpu.device,
-                    &gpu.queue,
-                    &mut gpu.font_system,
-                    &mut gpu.atlas,
-                    &self.text_viewport,
-                    &mut gpu.swash_cache,
-                    &self.text_rows,
-                    self.metrics,
-                    frame,
-                    entry.seat,
-                ) {
-                    Ok(()) => prepare_status_text_atlas(
-                        &mut slot.status_text_renderer,
+            phase(PresentPhase::AtlasUpload);
+            // The synthesized-bold glyphs of this seat's grid and status overlay,
+            // placed on the same geometry glyphon is about to be handed. An id
+            // space that has run out is a full atlas by another name, and takes
+            // the same road: the lane is refused, the frame is presented without
+            // text, and `close_the_frame` repacks and retires every id (ticket 38).
+            let placements = seat_synthetic_bold(
+                &mut gpu.synthetic_bold,
+                &mut gpu.font_system,
+                &self.text_rows,
+                self.status_overlay.as_deref(),
+                entry.metrics,
+                frame,
+                entry.seat,
+            );
+            let text_prepare_result = match &placements {
+                Err(SyntheticBoldIdsExhausted) => Err(PrepareError::AtlasFull),
+                Ok((grid_placements, status_placements)) => {
+                    let slot = &mut self.seat_slots[index];
+                    match prepare_text_atlas(
+                        &mut slot.text_renderer,
                         &gpu.device,
                         &gpu.queue,
                         &mut gpu.font_system,
                         &mut gpu.atlas,
                         &self.text_viewport,
                         &mut gpu.swash_cache,
-                        self.status_overlay.as_deref(),
-                        self.metrics,
+                        &mut gpu.synthetic_bold,
+                        &self.text_rows,
+                        entry.metrics,
                         frame,
-                        entry.seat.width as f32,
                         entry.seat,
-                    ),
-                    Err(error) => Err(error),
+                        grid_placements,
+                    ) {
+                        Ok(()) => prepare_status_text_atlas(
+                            &mut slot.status_text_renderer,
+                            &gpu.device,
+                            &gpu.queue,
+                            &mut gpu.font_system,
+                            &mut gpu.atlas,
+                            &self.text_viewport,
+                            &mut gpu.swash_cache,
+                            &mut gpu.synthetic_bold,
+                            self.status_overlay.as_deref(),
+                            entry.metrics,
+                            frame,
+                            entry.seat.width as f32,
+                            entry.seat,
+                            status_placements,
+                        ),
+                        Err(error) => Err(error),
+                    }
                 }
             };
             // glyphon grows each atlas geometrically before returning AtlasFull. If the device
@@ -8636,14 +9755,22 @@ impl WindowRenderer {
             // fit. The trim this frame owes is the unconditional one in
             // [`Self::present_frame`], and the retry is
             // [`PresentOutcome::PresentedWithoutText`].
-            if let Some(census) = census.as_mut() {
+            if let (Some(census), Ok((grid_placements, status_placements))) =
+                (census.as_mut(), &placements)
+            {
                 // The same two sequences the two prepares above were handed, in
                 // the same order — see [`grid_text_areas`].
                 census.record(
                     TextLane::Grid,
                     &mut gpu.font_system,
                     &mut gpu.swash_cache,
-                    grid_text_areas(&self.text_rows, self.metrics, frame, entry.seat),
+                    grid_text_areas(
+                        &self.text_rows,
+                        entry.metrics,
+                        frame,
+                        entry.seat,
+                        grid_placements,
+                    ),
                 );
                 census.record(
                     TextLane::Grid,
@@ -8651,10 +9778,11 @@ impl WindowRenderer {
                     &mut gpu.swash_cache,
                     status_text_areas(
                         self.status_overlay.as_deref(),
-                        self.metrics,
+                        entry.metrics,
                         frame,
                         entry.seat.width as f32,
                         entry.seat,
+                        status_placements,
                     ),
                 );
             }
@@ -8669,21 +9797,32 @@ impl WindowRenderer {
 
             // Math draws first: the hover dim rect decorates a block's raster, so it must know which
             // rasters this frame actually put on screen before it decides to darken anything.
-            let math_batch = self.prepare_math_draws(gpu, frame);
-            table_block_bodies.extend(self.table_block_bodies(frame));
+            phase(PresentPhase::Layout);
+            let math_batch = self.prepare_math_draws(gpu, entry.metrics, frame);
+            table_block_bodies.extend(self.table_block_bodies(
+                entry.metrics,
+                gpu.font_environment_epoch,
+                frame,
+            ));
             math_prepared_at = Instant::now();
-            let math_vertex_buffer = (!math_batch.vertices.is_empty()).then(|| {
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("visible math block vertices"),
-                        contents: bytemuck::cast_slice(&math_batch.vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-            });
+            // **The gate again, where this seat starts asking the device for
+            // memory** (§7.1.3m ⑤″). The one at the top of this function
+            // answered for the instant the frame began, and a frame does not
+            // begin and end in the same instant: everything between the two —
+            // the shaping, the atlas prepares, the math rasters, each of them a
+            // queue write and a poll — is time in which a driver reset can land,
+            // and the report of 2026-09-16 is a device lost in exactly that
+            // window. Asking here costs an atomic load per seat and is what
+            // makes the frame after a mid-frame loss a refusal by name rather
+            // than a picture drawn out of resources that are already rubble.
+            gpu.still_has_its_device()?;
+            let math_vertex_buffer = (!math_batch.vertices.is_empty())
+                .then(|| gpu.vertex_buffer("visible math block vertices", &math_batch.vertices));
             let SeatRects {
                 grounds: ground_rects,
                 ink: rects,
             } = self.rectangles(
+                entry.metrics,
                 frame,
                 &math_batch.drawn,
                 self.window_focused && entry.focused,
@@ -8694,30 +9833,18 @@ impl WindowRenderer {
             } else {
                 ground_rects.as_slice()
             };
-            let ground_rect_buffer =
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("terminal cell grounds"),
-                        contents: bytemuck::cast_slice(ground_rect_data),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+            let ground_rect_buffer = gpu.vertex_buffer("terminal cell grounds", ground_rect_data);
             let rect_data = if rects.is_empty() {
                 empty_rect.as_slice()
             } else {
                 rects.as_slice()
             };
-            let rect_buffer = gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("terminal cell rectangles"),
-                    contents: bytemuck::cast_slice(rect_data),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
+            let rect_buffer = gpu.vertex_buffer("terminal cell rectangles", rect_data);
             let status_rects = frame
                 .status_text
                 .as_deref()
                 .and_then(|status| {
-                    status_overlay_geometry(self.metrics, frame, status, entry.seat.width as f32)
+                    status_overlay_geometry(entry.metrics, frame, status, entry.seat.width as f32)
                 })
                 .map(|geometry| self.float_tag_rects(geometry.rect))
                 .unwrap_or_default();
@@ -8727,29 +9854,19 @@ impl WindowRenderer {
                 status_rects.as_slice()
             };
             let status_rect_buffer =
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("status overlay rectangle"),
-                        contents: bytemuck::cast_slice(status_rect_data),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+                gpu.vertex_buffer("status overlay rectangle", status_rect_data);
             // The wash first, the block's own chrome after it: see
             // [`Self::math_selection_wash_rectangles`] for why this buffer's order is the
             // z-order that matters here.
-            let mut math_overlays = self.math_selection_wash_rectangles(frame);
-            math_overlays.extend(self.math_overlay_rectangles(frame));
+            let mut math_overlays = self.math_selection_wash_rectangles(entry.metrics, frame);
+            math_overlays.extend(self.math_overlay_rectangles(entry.metrics, frame));
             let overlay_data = if math_overlays.is_empty() {
                 empty_rect.as_slice()
             } else {
                 math_overlays.as_slice()
             };
             let math_overlay_buffer =
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("math toolbar overlay rectangles"),
-                        contents: bytemuck::cast_slice(overlay_data),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+                gpu.vertex_buffer("math toolbar overlay rectangles", overlay_data);
             if entry.focused {
                 focused_text_stats = Some(text_stats);
             }
@@ -8784,41 +9901,21 @@ impl WindowRenderer {
         // band's right edge — means that one by it.
         self.seat = focused_seat;
 
+        // Every seat has prepared; the window's own furniture is about to. The
+        // same question as inside the loop, asked once for the half of the frame
+        // that has no seat in it.
+        gpu.still_has_its_device()?;
         let (peek_rects, peek_draws, peek_vertices) = self.prepare_peek_draws(gpu);
-        let peek_rect_buffer = (!peek_rects.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("peek flyout rectangles"),
-                    contents: bytemuck::cast_slice(&peek_rects),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
-        let peek_vertex_buffer = (!peek_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("peek flyout image vertices"),
-                    contents: bytemuck::cast_slice(&peek_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let peek_rect_buffer = (!peek_rects.is_empty())
+            .then(|| gpu.vertex_buffer("peek flyout rectangles", &peek_rects));
+        let peek_vertex_buffer = (!peek_vertices.is_empty())
+            .then(|| gpu.vertex_buffer("peek flyout image vertices", &peek_vertices));
         let (preview_stages, preview_vertices) = self.prepare_preview_draws(gpu);
-        let preview_vertex_buffer = (!preview_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("preview seat image vertices"),
-                    contents: bytemuck::cast_slice(&preview_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let preview_vertex_buffer = (!preview_vertices.is_empty())
+            .then(|| gpu.vertex_buffer("preview seat image vertices", &preview_vertices));
         let (video_draws, video_vertices) = self.prepare_video_draws(gpu);
-        let video_vertex_buffer = (!video_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("video layer vertices"),
-                    contents: bytemuck::cast_slice(&video_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let video_vertex_buffer = (!video_vertices.is_empty())
+            .then(|| gpu.vertex_buffer("video layer vertices", &video_vertices));
         // Seat chrome. Empty whenever the tree is a lone terminal leaf, and every
         // branch below is guarded on emptiness, so a lone leaf issues exactly the
         // command stream it issued before seats existed.
@@ -8842,14 +9939,8 @@ impl WindowRenderer {
                 )
             })
             .collect();
-        let chrome_ground_rect_buffer = (!chrome_ground_rects.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("seat chrome grounds"),
-                    contents: bytemuck::cast_slice(chrome_ground_rects.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let chrome_ground_rect_buffer = (!chrome_ground_rects.is_empty())
+            .then(|| gpu.vertex_buffer("seat chrome grounds", chrome_ground_rects.as_slice()));
         let chrome_rects: Vec<RectInstance> = self
             .chrome_quads
             .iter()
@@ -8858,14 +9949,8 @@ impl WindowRenderer {
                 surface_pixel_rect(quad.rect, quad.color, self.config.width, self.config.height)
             })
             .collect();
-        let chrome_rect_buffer = (!chrome_rects.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("seat chrome rectangles"),
-                    contents: bytemuck::cast_slice(chrome_rects.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let chrome_rect_buffer = (!chrome_rects.is_empty())
+            .then(|| gpu.vertex_buffer("seat chrome rectangles", chrome_rects.as_slice()));
         let chrome_icons = std::mem::take(&mut self.chrome_icons);
         // Two lists and one pass: the marks that stand under this pass's letters
         // and the run that covers them — see [`ChromeIcon::above_text`]. The
@@ -8900,28 +9985,18 @@ impl WindowRenderer {
         let (preview_raster_draws, preview_raster_vertices) =
             self.prepare_chrome_icon_draws(gpu, &preview_rasters);
         let preview_raster_buffer = (!preview_raster_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("preview document raster vertices"),
-                    contents: bytemuck::cast_slice(preview_raster_vertices.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
+            gpu.vertex_buffer(
+                "preview document raster vertices",
+                preview_raster_vertices.as_slice(),
+            )
         });
-        let chrome_icon_buffer = (!chrome_icon_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("chrome mark vertices"),
-                    contents: bytemuck::cast_slice(chrome_icon_vertices.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let chrome_icon_buffer = (!chrome_icon_vertices.is_empty())
+            .then(|| gpu.vertex_buffer("chrome mark vertices", chrome_icon_vertices.as_slice()));
         let chrome_over_buffer = (!chrome_over_vertices.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("chrome mark vertices over the type"),
-                    contents: bytemuck::cast_slice(chrome_over_vertices.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
+            gpu.vertex_buffer(
+                "chrome mark vertices over the type",
+                chrome_over_vertices.as_slice(),
+            )
         });
         // **The documents' words are asked for before the labels around them**
         // (user report 2026-08-29, `docs/DESIGN.md` §7.1.3l).
@@ -8943,6 +10018,7 @@ impl WindowRenderer {
         // loses its letters is not a document. So the page is served first, and
         // what yields under pressure is the furniture around it.
 
+        phase(PresentPhase::TextShaping);
         let mut preview_text_layouts: Vec<ChromeTextLayout> = Vec::new();
         for body in self.preview_bodies.iter().chain(table_block_bodies.iter()) {
             // A seat's document is never faded as a whole — a pane is the window,
@@ -8957,6 +10033,7 @@ impl WindowRenderer {
                 chrome_text_areas(&preview_text_layouts),
             );
         }
+        phase(PresentPhase::AtlasUpload);
         let preview_text_prepared = if preview_text_layouts.is_empty() {
             false
         } else {
@@ -8968,6 +10045,7 @@ impl WindowRenderer {
                 &mut gpu.atlas,
                 &self.text_viewport,
                 &mut gpu.swash_cache,
+                &mut gpu.synthetic_bold,
                 &preview_text_layouts,
             );
             accept_text_prepare(
@@ -8979,11 +10057,13 @@ impl WindowRenderer {
             )
         };
 
-        let chrome_layouts = shape_chrome_labels(
+        phase(PresentPhase::TextShaping);
+        let chrome_layouts = shape_chrome_labels_with_cjk(
             &mut gpu.font_system,
             &self.chrome_labels,
             gpu.chrome_cap_height_ratio,
             1.0,
+            &gpu.terminal_cjk_families,
         );
         if let Some(census) = census.as_mut() {
             census.record(
@@ -8993,6 +10073,7 @@ impl WindowRenderer {
                 chrome_text_areas(&chrome_layouts),
             );
         }
+        phase(PresentPhase::AtlasUpload);
         let chrome_prepared = if chrome_layouts.is_empty() {
             false
         } else {
@@ -9004,6 +10085,7 @@ impl WindowRenderer {
                 &mut gpu.atlas,
                 &self.text_viewport,
                 &mut gpu.swash_cache,
+                &mut gpu.synthetic_bold,
                 &chrome_layouts,
             );
             accept_text_prepare(
@@ -9018,6 +10100,7 @@ impl WindowRenderer {
         // already carries its own `clip` in whole-surface coordinates, so two
         // documents on screen are two sets of cropped rectangles and not two
         // passes.
+        phase(PresentPhase::Layout);
         let preview_body_rects: Vec<RectInstance> = self
             .preview_bodies
             .iter()
@@ -9026,14 +10109,8 @@ impl WindowRenderer {
                 preview_body_rect_instances(body, 1.0, self.config.width, self.config.height)
             })
             .collect();
-        let preview_body_rect_buffer = (!preview_body_rects.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("preview body fills"),
-                    contents: bytemuck::cast_slice(preview_body_rects.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let preview_body_rect_buffer = (!preview_body_rects.is_empty())
+            .then(|| gpu.vertex_buffer("preview body fills", preview_body_rects.as_slice()));
         // The holes, in the ground's own arithmetic at an alpha of zero — see
         // [`WindowRenderer::set_web_holes`]. The colour handed in is never read
         // by the shader once it has been multiplied by nothing, and naming it
@@ -9052,14 +10129,8 @@ impl WindowRenderer {
                 )
             })
             .collect();
-        let web_hole_buffer = (!web_hole_rects.is_empty()).then(|| {
-            gpu.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("web preview holes"),
-                    contents: bytemuck::cast_slice(web_hole_rects.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let web_hole_buffer = (!web_hole_rects.is_empty())
+            .then(|| gpu.vertex_buffer("web preview holes", web_hole_rects.as_slice()));
         // **The forensic line for "the body drew its rules and none of its
         // words"** (user report 2026-08-21). The three numbers are the three
         // places that picture can come from and they separate them completely:
@@ -9137,14 +10208,8 @@ impl WindowRenderer {
                     )
                 })
                 .collect();
-            let ground_buffer = (!ground_rects.is_empty()).then(|| {
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("overlay layer grounds"),
-                        contents: bytemuck::cast_slice(ground_rects.as_slice()),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-            });
+            let ground_buffer = (!ground_rects.is_empty())
+                .then(|| gpu.vertex_buffer("overlay layer grounds", ground_rects.as_slice()));
             let mut rects: Vec<RectInstance> = layer
                 .faded_quads()
                 .iter()
@@ -9169,23 +10234,11 @@ impl WindowRenderer {
                     self.config.height,
                 ));
             }
-            let rect_buffer = (!rects.is_empty()).then(|| {
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("modal overlay rectangles"),
-                        contents: bytemuck::cast_slice(rects.as_slice()),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-            });
+            let rect_buffer = (!rects.is_empty())
+                .then(|| gpu.vertex_buffer("modal overlay rectangles", rects.as_slice()));
             let hole_rects = std::mem::take(&mut layer_hole_rects[index]);
-            let hole_buffer = (!hole_rects.is_empty()).then(|| {
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("overlay layer web holes"),
-                        contents: bytemuck::cast_slice(hole_rects.as_slice()),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-            });
+            let hole_buffer = (!hole_rects.is_empty())
+                .then(|| gpu.vertex_buffer("overlay layer web holes", hole_rects.as_slice()));
             // **The layer's own marks and its document's pictures, one channel.**
             // The two are the same kind of thing — a content-keyed raster placed
             // in surface pixels and cropped to a box — and the body's had no way
@@ -9197,18 +10250,15 @@ impl WindowRenderer {
             icons.extend(layer.faded_document_rasters());
             let (icon_draws, icon_vertices) = self.prepare_chrome_icon_draws(gpu, &icons);
             let icon_buffer = (!icon_vertices.is_empty()).then(|| {
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("modal overlay mark vertices"),
-                        contents: bytemuck::cast_slice(icon_vertices.as_slice()),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
+                gpu.vertex_buffer("modal overlay mark vertices", icon_vertices.as_slice())
             });
-            let mut layouts = shape_chrome_labels(
+            phase(PresentPhase::TextShaping);
+            let mut layouts = shape_chrome_labels_with_cjk(
                 &mut gpu.font_system,
                 &layer.labels,
                 gpu.chrome_cap_height_ratio,
                 layer.opacity,
+                &gpu.terminal_cjk_families,
             );
             // **This layer's share of the forensic record** (user report
             // 2026-08-28). A glance card's head, its type chip and the document
@@ -9242,6 +10292,7 @@ impl WindowRenderer {
                     chrome_text_areas(&layouts),
                 );
             }
+            phase(PresentPhase::AtlasUpload);
             let text_prepared = if layouts.is_empty() {
                 false
             } else {
@@ -9253,6 +10304,7 @@ impl WindowRenderer {
                     &mut gpu.atlas,
                     &self.text_viewport,
                     &mut gpu.swash_cache,
+                    &mut gpu.synthetic_bold,
                     &layouts,
                 );
                 accept_text_prepare(
@@ -9263,6 +10315,7 @@ impl WindowRenderer {
                     &mut refused,
                 )
             };
+            phase(PresentPhase::Layout);
             overlay_draws.push(PreparedOverlayLayer {
                 ground_buffer,
                 ground_count: ground_rects.len() as u32,
@@ -9294,24 +10347,58 @@ impl WindowRenderer {
                 || layer.icon_buffer.is_some()
                 || layer.text_prepared
         });
+        // **Which surfaces fade this frame** — see [`OverlayGroup`]. Flat on
+        // every frame nothing fades or travels, and then everything below draws
+        // exactly the command stream it drew before groups existed.
+        let plan = GroupPlan::new(&self.overlay_groups, overlay_draws.len());
+        // **A page cannot fade** (the fade audit, §6 ②). A web page is a native
+        // view composed under this whole surface, seen through a hole; wgpu can
+        // no more fade it than it can draw it, so a hole inside a surface that
+        // is fading would leave the page standing solid while its window
+        // dissolved around it. It cannot happen today — a preview float never
+        // fades (`float_fade_of`) and a glance card over a page draws text — and
+        // this says so where the day it could would be seen.
+        debug_assert!(
+            self.overlay_groups
+                .iter()
+                .filter(|group| !group.at_rest())
+                .all(|group| group.layers.clone().all(|index| overlay_draws
+                    .get(index)
+                    .is_none_or(|layer| layer.hole_count == 0))),
+            "a web page's hole inside a fading overlay surface: a native view cannot be faded"
+        );
         let rectangles_prepared_at = Instant::now();
+        // **The last gate, and the only one that stands in front of the
+        // swapchain.** Everything above is staging; below it the surface is
+        // configured, a back buffer is taken, an encoder is filled and a submit
+        // is made, and each of those on a device that has gone is a call whose
+        // failure is reported somewhere other than where it happened. It stands
+        // here rather than a few lines down because every `mem::take` this
+        // function does has been given back by now — a frame that leaves at this
+        // point leaves the window holding everything it was saying.
+        gpu.still_has_its_device()?;
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
         // both the default-black interval and DXGI's stretch of the old frame.
-        self.configure_surface_if_needed(gpu)?;
+        self.configure_surface_if_needed(gpu, phase)?;
+        phase(PresentPhase::SurfaceAcquire);
         let acquisition = self.acquire();
+        phase(PresentPhase::ComposeEncode);
         let (acquired, view) = match acquisition {
             SurfaceAcquisition::Frame(texture) => {
                 let view = texture.texture.create_view(&Default::default());
                 (AcquiredFrame::Swapchain(texture), view)
             }
             SurfaceAcquisition::Suboptimal(texture) => {
-                self.configure_surface(gpu)?;
+                phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));
+                let configured = self.configure_surface(gpu);
+                phase(PresentPhase::ComposeEncode);
+                configured?;
                 let view = texture.texture.create_view(&Default::default());
                 (AcquiredFrame::Swapchain(texture), view)
             }
             SurfaceAcquisition::Failed(failure) => {
-                return self.handle_surface_failure(gpu, failure);
+                return self.handle_surface_failure(gpu, failure, phase);
             }
             SurfaceAcquisition::Offscreen(view) => (AcquiredFrame::Offscreen, view),
         };
@@ -9336,23 +10423,95 @@ impl WindowRenderer {
                     image.height_px,
                 );
                 let [r, g, b] = srgb_rgb_to_linear(default_background());
-                gpu.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("window ground quad"),
-                        contents: bytemuck::cast_slice(&background_quad_vertices(
-                            uv,
-                            [r as f32, g as f32, b as f32],
-                            ground.alpha,
-                            ground.image_opacity,
-                        )),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
+                gpu.vertex_buffer(
+                    "window ground quad",
+                    &background_quad_vertices(
+                        uv,
+                        [r as f32, g as f32, b as f32],
+                        ground.alpha,
+                        ground.image_opacity,
+                    ),
+                )
             });
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Folio frame"),
             });
+        let surface = (self.config.width, self.config.height);
+        // **Every fading surface, drawn whole into a texture of its own, before
+        // the frame's pass opens** (overlay groups, 2026-09-24) — so that the
+        // pass is broken only where a surface is put back, never to fill one.
+        // Innermost first: a surface standing inside another is put back into
+        // the outer one's texture before the outer one is put back anywhere.
+        self.group_targets.retain(|target| target.size == surface);
+        if plan.groups.is_empty() {
+            self.group_targets.clear();
+        }
+        while self.group_targets.len() < plan.groups.len() {
+            let target = GroupTarget::new(gpu, self.config.format, surface);
+            self.group_targets.push(target);
+        }
+        let video = video_vertex_buffer
+            .as_ref()
+            .map(|buffer| (buffer, video_draws.as_slice()));
+        let mut groups_composited = 0_u32;
+        if overlay_has_work {
+            for index in (0..plan.groups.len()).rev() {
+                let target = &self.group_targets[index];
+                let mut pass = Some(
+                    begin_overlay_pass(
+                        &mut encoder,
+                        &target.colour,
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        "overlay group pass",
+                        surface,
+                    )
+                    .forget_lifetime(),
+                );
+                for item in plan.items(plan.groups[index].layers.clone(), Some(index)) {
+                    match item {
+                        GroupItem::Layer(layer) => {
+                            let pass = pass.get_or_insert_with(|| {
+                                begin_overlay_pass(
+                                    &mut encoder,
+                                    &target.colour,
+                                    wgpu::LoadOp::Load,
+                                    "overlay group pass",
+                                    surface,
+                                )
+                                .forget_lifetime()
+                            });
+                            self.draw_overlay_layer(
+                                pass,
+                                gpu,
+                                &overlay_draws[layer],
+                                layer,
+                                video,
+                                surface,
+                            )?;
+                        }
+                        GroupItem::Group(child) => {
+                            drop(pass.take());
+                            self.composite_group(
+                                &mut encoder,
+                                gpu,
+                                &plan,
+                                child,
+                                &target.bytes,
+                                surface,
+                            );
+                            groups_composited += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let overlay_items = plan.items(0..overlay_draws.len(), None);
+        let frame_layers = overlay_items
+            .iter()
+            .take_while(|item| matches!(item, GroupItem::Layer(_)))
+            .count();
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Folio terminal pass"),
@@ -9735,81 +10894,71 @@ impl WindowRenderer {
                     SeatViewport::whole(self.config.width, self.config.height),
                     (self.config.width, self.config.height),
                 );
-                // Bottom layer first, and each one's three channels closed before
-                // the next one's open: this loop *is* the overlay's z-order, and
-                // it is the reason a picker's popup covers the row under it
-                // whether that row drew itself as a fill, a mark or a caption.
-                for (index, layer) in overlay_draws.iter().enumerate() {
-                    // The grounds first, as they are in the chrome's own pass and
-                    // for the same reason: a ground is the surface the rest of
-                    // this layer is struck on. The blend constant is this layer's
-                    // opacity, which is the whole of how a floating ground fades
-                    // — see [`create_ground_fade_rect_pipeline`].
-                    if let Some(buffer) = layer.ground_buffer.as_ref() {
-                        let fade = f64::from(layer.ground_opacity);
-                        pass.set_pipeline(&gpu.ground_fade_rect_pipeline);
-                        pass.set_blend_constant(wgpu::Color {
-                            r: fade,
-                            g: fade,
-                            b: fade,
-                            a: fade,
+                // Bottom layer first, and each one's channels closed before the
+                // next one's open: this loop *is* the overlay's z-order, and it
+                // is the reason a picker's popup covers the row under it whether
+                // that row drew itself as a fill, a mark or a caption. It runs
+                // up to the first surface that is fading; on a frame with none
+                // that is every layer, in this pass, as it always was.
+                for item in &overlay_items[..frame_layers] {
+                    let GroupItem::Layer(index) = *item else {
+                        unreachable!("the frame's own run is layers by construction");
+                    };
+                    self.draw_overlay_layer(
+                        &mut pass,
+                        gpu,
+                        &overlay_draws[index],
+                        index,
+                        video,
+                        surface,
+                    )?;
+                }
+            }
+        }
+        // **The rest of the overlay, from the first fading surface up**: each
+        // surface put back through the frame's bytes-view, and the layers
+        // between and above them drawn in a pass resumed on the frame as it now
+        // stands. Nothing here runs on a frame with no surface fading.
+        if overlay_has_work && frame_layers < overlay_items.len() {
+            let bytes = self.bytes_view(&acquired);
+            let mut pass: Option<wgpu::RenderPass<'static>> = None;
+            for item in &overlay_items[frame_layers..] {
+                match *item {
+                    GroupItem::Layer(index) => {
+                        let pass = pass.get_or_insert_with(|| {
+                            begin_overlay_pass(
+                                &mut encoder,
+                                &view,
+                                wgpu::LoadOp::Load,
+                                "Folio overlay pass",
+                                surface,
+                            )
+                            .forget_lifetime()
                         });
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        pass.draw(0..6, 0..layer.ground_count);
-                    }
-                    // **A video playing in this floating window**, over its
-                    // ground and under everything it draws on top (route B slice
-                    // ②; §7.44 ③). Here and not in the seat's slot because a
-                    // float's face is opaque and a video under it is a video
-                    // nobody sees; here and not last of everything because a
-                    // float stacked over this one has to cover it, which is the
-                    // whole reason this loop is the z-order.
-                    if let Some(vertex_buffer) = video_vertex_buffer.as_ref() {
-                        draw_video_stage(
-                            &mut pass,
+                        self.draw_overlay_layer(
+                            pass,
                             gpu,
-                            vertex_buffer,
-                            &video_draws,
-                            VideoStage::Overlay(index),
-                            (self.config.width, self.config.height),
-                        );
+                            &overlay_draws[index],
+                            index,
+                            video,
+                            surface,
+                        )?;
                     }
-                    if let Some(buffer) = layer.rect_buffer.as_ref() {
-                        pass.set_pipeline(&gpu.rect_pipeline);
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        pass.draw(0..6, 0..layer.rect_count);
-                    }
-                    // **And then the part of this layer that is not there**
-                    // (§7.14c): a float carrying a page has just painted its own
-                    // face across the rectangle the page lives in, and the page
-                    // is composed *under* this whole surface. So the hole is
-                    // punched here — over this layer's ground and its fills, and
-                    // under its marks, its captions and every layer above it,
-                    // which are all things that legitimately stand over a page.
-                    if let Some(buffer) = layer.hole_buffer.as_ref() {
-                        pass.set_pipeline(&gpu.ground_rect_pipeline);
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        pass.draw(0..6, 0..layer.hole_count);
-                    }
-                    if let Some(buffer) = layer.icon_buffer.as_ref() {
-                        pass.set_pipeline(&gpu.math_pipeline);
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        for draw in &layer.icon_draws {
-                            pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
-                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                        }
-                    }
-                    if layer.text_prepared {
-                        self.overlay_text_renderers[index]
-                            .render(&gpu.atlas, &self.text_viewport, &mut pass)
-                            .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                    GroupItem::Group(group) => {
+                        drop(pass.take());
+                        self.composite_group(&mut encoder, gpu, &plan, group, &bytes, surface);
+                        groups_composited += 1;
                     }
                 }
             }
         }
+        self.groups_composited = groups_composited;
         let encoded_at = Instant::now();
-        gpu.queue.submit([encoder.finish()]);
+        let command_buffer = encoder.finish();
+        phase(PresentPhase::QueueSubmit);
+        gpu.queue.submit([command_buffer]);
         let submitted_at = Instant::now();
+        phase(PresentPhase::Present);
         match acquired {
             AcquiredFrame::Swapchain(texture) => gpu.queue.present(texture),
             // Nothing to hand back: an offscreen frame is finished the moment it
@@ -9817,6 +10966,7 @@ impl WindowRenderer {
             AcquiredFrame::Offscreen => {}
         }
         let present_called_at = Instant::now();
+        phase(PresentPhase::ComposeEncode);
         let receipt = PresentReceipt {
             trigger,
             submitted_at,
@@ -9898,24 +11048,31 @@ impl WindowRenderer {
     fn prepare_text_rows(
         &mut self,
         gpu: &mut GpuContext,
+        metrics: CellMetrics,
         frame: &ViewportFrame,
     ) -> Result<TextPreparationStats, RenderError> {
-        prepare_text_rows(
+        prepare_text_rows_with_cjk(
             frame,
-            self.metrics,
+            metrics,
             &mut self.text_rows,
             &mut self.status_overlay,
             &mut self.composed_row_cache,
             self.font_revision,
             theme_revision(),
             &mut gpu.font_system,
+            &gpu.terminal_cjk_families,
             &mut gpu.swash_cache,
             &mut self.narrow_shaping_cache,
             &mut self.wide_shaping_cache,
         )
     }
 
-    fn prepare_math_draws(&mut self, gpu: &mut GpuContext, frame: &ViewportFrame) -> MathDrawBatch {
+    fn prepare_math_draws(
+        &mut self,
+        gpu: &mut GpuContext,
+        metrics: CellMetrics,
+        frame: &ViewportFrame,
+    ) -> MathDrawBatch {
         // UI-UX §7.5c, M1.9a ruling: do not invent automatic math line breaking. With terminal
         // wrapping on (the current native default), the pane clips a left-aligned, max-content
         // raster and therefore acts as the block's horizontal viewport. Scrolling controls are
@@ -9924,10 +11081,10 @@ impl WindowRenderer {
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
         let mut drawn = HashSet::new();
-        let pane_left = self.metrics.padding_px;
-        let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
+        let pane_left = metrics.padding_px;
+        let pane_right = (pane_left + frame.columns.get() as f32 * metrics.cell_width_px)
             .min(self.seat.width as f32);
-        let pane_top = self.metrics.padding_px;
+        let pane_top = metrics.padding_px;
         let pane_bottom = self.seat.height as f32;
 
         for (index, placement) in frame.math_blocks.iter().enumerate() {
@@ -9956,7 +11113,8 @@ impl WindowRenderer {
                 self.note_textureless_block(gpu, key, placement.artifact.rgba.len());
                 continue;
             };
-            let Some(geometry) = self.math_block_geometry(self.seat, frame, placement) else {
+            let Some(geometry) = self.math_block_geometry(metrics, self.seat, frame, placement)
+            else {
                 continue;
             };
             drawn.insert(index);
@@ -9968,7 +11126,7 @@ impl WindowRenderer {
             let block_top = if placement.artifact.mode == MathMode::Inline {
                 pane_top
                     + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32
-                    + self.metrics.ascii_baseline_px
+                    + metrics.ascii_baseline_px
                     - placement.artifact.baseline_subpixels as f32 / SUBPIXELS_PER_PX as f32
             } else {
                 pane_top
@@ -9979,7 +11137,7 @@ impl WindowRenderer {
                         / SUBPIXELS_PER_PX as f32
             };
             let block_left_px = math_block_left_px(
-                self.metrics,
+                metrics,
                 placement.left_subpixels,
                 math_block_takes_the_left_indent(placement),
             );
@@ -10084,8 +11242,8 @@ impl WindowRenderer {
             overlay.seat.height as f32,
             self.config.width as f32,
             self.config.height as f32,
-            self.metrics.padding_px,
-            self.metrics.scale_factor as f32,
+            self.base_metrics.padding_px,
+            self.base_metrics.scale_factor as f32,
             overlay.width_px,
             overlay.height_px,
             overlay.pointer_x,
@@ -10164,21 +11322,25 @@ impl WindowRenderer {
     /// terminal is showing, with the round's antialiasing on both of its edges
     /// instead of only the outer one.
     fn peek_box_rects(&self, layout: &PeekBoxLayout) -> Vec<RectInstance> {
-        peek_box_fills(layout, chrome_palette(), self.metrics.scale_factor as f32)
-            .into_iter()
-            .map(|fill| {
-                // Normalized by the surface, not by `self.seat`: the flyout is a floating window
-                // over the whole window, and its rectangles arrive here already in the window's
-                // own pixels.
-                surface_pixel_rect_with_alpha(
-                    fill.rect,
-                    fill.color,
-                    fill.alpha,
-                    self.config.width,
-                    self.config.height,
-                )
-            })
-            .collect()
+        peek_box_fills(
+            layout,
+            chrome_palette(),
+            self.base_metrics.scale_factor as f32,
+        )
+        .into_iter()
+        .map(|fill| {
+            // Normalized by the surface, not by `self.seat`: the flyout is a floating window
+            // over the whole window, and its rectangles arrive here already in the window's
+            // own pixels.
+            surface_pixel_rect_with_alpha(
+                fill.rect,
+                fill.color,
+                fill.alpha,
+                self.config.width,
+                self.config.height,
+            )
+        })
+        .collect()
     }
 
     /// Upload and place every chrome mark, in whole-surface pixels.
@@ -10474,11 +11636,12 @@ impl WindowRenderer {
     /// pane happens to have the keyboard.
     fn math_block_geometry(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         placement: &MathBlockPlacement,
     ) -> Option<MathBlockGeometry> {
-        math_block_geometry_px(self.metrics, seat, frame, placement)
+        math_block_geometry_px(metrics, seat, frame, placement)
     }
 
     /// This seat's rendered tables, turned into bodies in whole-window coordinates.
@@ -10489,13 +11652,18 @@ impl WindowRenderer {
     /// with that box then differs: a raster is a quad with a texture on it, and a table is the
     /// fills and the text its layout already decided, translated to the box's corner and cropped
     /// by the clip the body carries.
-    fn table_block_bodies(&self, frame: &ViewportFrame) -> Vec<PreviewBody> {
+    fn table_block_bodies(
+        &self,
+        metrics: CellMetrics,
+        font_environment: u64,
+        frame: &ViewportFrame,
+    ) -> Vec<PreviewBody> {
         if self.table_blocks.is_empty() {
             return Vec::new();
         }
         let origin_x = self.seat.x as f32;
         let origin_y = self.seat.y as f32;
-        let pane_top = self.metrics.padding_px;
+        let pane_top = metrics.padding_px;
         frame
             .math_blocks
             .iter()
@@ -10504,10 +11672,14 @@ impl WindowRenderer {
                     && placement.display == MathBlockDisplay::Rendered
             })
             .filter_map(|placement| {
-                let paint = self.table_blocks.get(&placement.artifact.source)?;
-                let geometry = self.math_block_geometry(self.seat, frame, placement)?;
+                let paint = self.table_blocks.get(&TableBlockKey::of(
+                    &placement.artifact.source,
+                    metrics,
+                    font_environment,
+                ))?;
+                let geometry = self.math_block_geometry(metrics, self.seat, frame, placement)?;
                 let indent = math_block_takes_the_left_indent(placement);
-                let left = math_block_left_px(self.metrics, placement.left_subpixels, indent)
+                let left = math_block_left_px(metrics, placement.left_subpixels, indent)
                     - placement.horizontal_scroll_px as f32;
                 let top = pane_top
                     + placement
@@ -10562,6 +11734,7 @@ impl WindowRenderer {
     /// the focused pane is a press that lands somewhere else.
     fn math_failure_geometry(
         &self,
+        metrics: CellMetrics,
         seat: SeatViewport,
         frame: &ViewportFrame,
         placement: &bt_viewport::MathFailurePlacement,
@@ -10569,10 +11742,10 @@ impl WindowRenderer {
         if !frame.drawable_interval_overlaps(placement.top_subpixels, placement.height_subpixels) {
             return None;
         }
-        let pane_left = self.metrics.padding_px;
-        let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
-            .min(seat.width as f32);
-        let pane_top = self.metrics.padding_px;
+        let pane_left = metrics.padding_px;
+        let pane_right =
+            (pane_left + frame.columns.get() as f32 * metrics.cell_width_px).min(seat.width as f32);
+        let pane_top = metrics.padding_px;
         let pane_bottom = seat.height as f32;
         let raw_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
         let raw_bottom = raw_top + placement.height_subpixels as f32 / SUBPIXELS_PER_PX as f32;
@@ -10581,7 +11754,7 @@ impl WindowRenderer {
         if bottom <= top || pane_right <= pane_left {
             return None;
         }
-        let scale = self.metrics.scale_factor as f32;
+        let scale = metrics.scale_factor as f32;
         let marker_right = pane_right - scale;
         let marker_left = (marker_right - 2.0 * scale).max(pane_left);
         let inset = (4.0 * scale).min((bottom - top) / 3.0);
@@ -10660,6 +11833,7 @@ impl WindowRenderer {
         &mut self,
         gpu: &GpuContext,
         failure: SurfaceFailure,
+        phase: &mut dyn FnMut(PresentPhase),
     ) -> Result<PresentOutcome, RenderError> {
         // **First, and unconditionally** — including on the fatal path, because
         // the run that ends in `SurfaceValidation` is exactly the run whose
@@ -10669,22 +11843,34 @@ impl WindowRenderer {
         // **Second, and unconditionally** — see this function's own note. The
         // frame staged its uploads before it asked for a back buffer, and it is
         // leaving without the submit that retires them.
+        phase(PresentPhase::QueueSubmit);
         gpu.queue.submit(std::iter::empty());
+        phase(PresentPhase::ComposeEncode);
         match surface_failure_policy(failure) {
             SurfaceFailurePolicy::Skip => Ok(PresentOutcome::Skipped),
             SurfaceFailurePolicy::SkipUntilVisible => Ok(PresentOutcome::SkippedNotVisible),
             SurfaceFailurePolicy::Reconfigure => {
-                self.configure_surface(gpu)?;
+                phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));
+                let configured = self.configure_surface(gpu);
+                phase(PresentPhase::ComposeEncode);
+                configured?;
                 Ok(PresentOutcome::Reconfigure)
             }
             SurfaceFailurePolicy::FatalValidation => Err(RenderError::SurfaceValidation),
         }
     }
 
-    fn configure_surface_if_needed(&mut self, gpu: &GpuContext) -> Result<(), RenderError> {
+    fn configure_surface_if_needed(
+        &mut self,
+        gpu: &GpuContext,
+        phase: &mut dyn FnMut(PresentPhase),
+    ) -> Result<(), RenderError> {
         let requested_size = (self.config.width, self.config.height);
         if self.configured_size != requested_size {
-            self.configure_surface(gpu)?;
+            phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));
+            let configured = self.configure_surface(gpu);
+            phase(PresentPhase::ComposeEncode);
+            configured?;
         }
         Ok(())
     }
@@ -10696,6 +11882,10 @@ impl WindowRenderer {
     /// leave `configured_size` equal to `config`, which is the only thing the
     /// rest of the frame reads.
     fn configure_surface(&mut self, gpu: &GpuContext) -> Result<(), RenderError> {
+        self.surface_generation = self
+            .surface_generation
+            .checked_add(1)
+            .expect("surface generation exhausted");
         match &mut self.target {
             FrameTarget::Surface(surface) => surface.configure(&gpu.device, &self.config),
             // Nothing to bring up to a size. The window is between two devices,
@@ -10716,7 +11906,7 @@ impl WindowRenderer {
                     dimension: wgpu::TextureDimension::D2,
                     format: self.config.format,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
+                    view_formats: &[self.config.format.remove_srgb_suffix()],
                 });
             }
         }
@@ -10770,6 +11960,206 @@ impl WindowRenderer {
             // `Unavailable` means — and the skip it turns into is the right
             // answer, because the picture is unchanged and still owed.
             FrameTarget::Surrendered => SurfaceAcquisition::Failed(SurfaceFailure::Unavailable),
+        }
+    }
+
+    /// Draw one prepared overlay layer into the pass that is open — every channel,
+    /// in the order the overlay's z-order is built on.
+    ///
+    /// One function because the same layer is drawn by one of three passes — the
+    /// frame's own, a resumed one after a fading surface was put back, or a fading
+    /// surface's texture — and three copies of five channels would be three
+    /// chances to draw them in two orders.
+    fn draw_overlay_layer(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        gpu: &GpuContext,
+        layer: &PreparedOverlayLayer,
+        index: usize,
+        video: Option<(&wgpu::Buffer, &[VideoDraw])>,
+        surface: (u32, u32),
+    ) -> Result<(), RenderError> {
+        // The grounds first, as they are in the chrome's own pass and for the same
+        // reason: a ground is the surface the rest of this layer is struck on. The
+        // blend constant is this layer's opacity, which is the whole of how a
+        // floating ground fades — see [`create_ground_fade_rect_pipeline`].
+        if let Some(buffer) = layer.ground_buffer.as_ref() {
+            let fade = f64::from(layer.ground_opacity);
+            pass.set_pipeline(&gpu.ground_fade_rect_pipeline);
+            pass.set_blend_constant(wgpu::Color {
+                r: fade,
+                g: fade,
+                b: fade,
+                a: fade,
+            });
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..layer.ground_count);
+        }
+        // **A video playing in this floating window**, over its ground and under
+        // everything it draws on top (route B slice ②; §7.44 ③). Here and not in
+        // the seat's slot because a float's face is opaque and a video under it is
+        // a video nobody sees; here and not last of everything because a float
+        // stacked over this one has to cover it, which is the whole reason the
+        // layer order is the z-order. Drawn wherever the layer is drawn, so a video
+        // on a fading surface fades with it.
+        if let Some((vertex_buffer, draws)) = video {
+            draw_video_stage(
+                pass,
+                gpu,
+                vertex_buffer,
+                draws,
+                VideoStage::Overlay(index),
+                surface,
+            );
+        }
+        if let Some(buffer) = layer.rect_buffer.as_ref() {
+            pass.set_pipeline(&gpu.rect_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..layer.rect_count);
+        }
+        // **And then the part of this layer that is not there** (§7.14c): a float
+        // carrying a page has just painted its own face across the rectangle the
+        // page lives in, and the page is composed *under* this whole surface. So
+        // the hole is punched here — over this layer's ground and its fills, and
+        // under its marks, its captions and every layer above it, which are all
+        // things that legitimately stand over a page.
+        if let Some(buffer) = layer.hole_buffer.as_ref() {
+            pass.set_pipeline(&gpu.ground_rect_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..layer.hole_count);
+        }
+        if let Some(buffer) = layer.icon_buffer.as_ref() {
+            pass.set_pipeline(&gpu.math_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            for draw in &layer.icon_draws {
+                pass.set_bind_group(0, draw.tile.bind_group(draw.blit), &[]);
+                pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+            }
+        }
+        if layer.text_prepared {
+            self.overlay_text_renderers[index]
+                .render(&gpu.atlas, &self.text_viewport, pass)
+                .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// **The frame seen as bytes** — the view of this frame's attachment
+    /// without its sRGB suffix, which a fading surface is put back through (see
+    /// [`OverlayGroup`]). Both kinds of target are made with that view format
+    /// allowed: the swapchain in `configure_window_surface`, the offscreen
+    /// texture where it is made.
+    fn bytes_view(&self, acquired: &AcquiredFrame) -> wgpu::TextureView {
+        let descriptor = wgpu::TextureViewDescriptor {
+            format: Some(self.config.format.remove_srgb_suffix()),
+            ..wgpu::TextureViewDescriptor::default()
+        };
+        match acquired {
+            AcquiredFrame::Swapchain(frame) => frame.texture.create_view(&descriptor),
+            AcquiredFrame::Offscreen => {
+                let FrameTarget::Offscreen(texture) = &self.target else {
+                    unreachable!("an offscreen frame is only acquired from an offscreen target");
+                };
+                texture.create_view(&descriptor)
+            }
+        }
+    }
+
+    /// **Put one fading surface back** — group `index` of `plan`, from the
+    /// texture it was drawn into onto `target`, a bytes-view, at the group's
+    /// opacity and whole-pixel offset (see `group.wgsl`).
+    ///
+    /// The surface's own grounds are cut out of the part put back *over* and
+    /// put back by cross-fade instead: a ground is the window, not something on
+    /// it (see [`OverlayGroup`]). Grounds of a surface nested inside this one
+    /// are not cut out: that surface was put back into this texture already and
+    /// is, to this one, what it has become.
+    fn composite_group(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        gpu: &GpuContext,
+        plan: &GroupPlan,
+        index: usize,
+        target: &wgpu::TextureView,
+        surface: (u32, u32),
+    ) {
+        let group = &plan.groups[index];
+        let source = &self.group_targets[index];
+        let [dx, dy] = group.offset;
+        let (dx, dy) = (dx as f32, dy as f32);
+        let (width, height) = (surface.0 as f32, surface.1 as f32);
+        // Every pixel whose texel is on the texture: the frame, moved by the
+        // offset, cut to the frame.
+        let bounds = [
+            dx.max(0.0),
+            dy.max(0.0),
+            (width + dx).min(width),
+            (height + dy).min(height),
+        ];
+        if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
+            return;
+        }
+        let grounds: Vec<[f32; 4]> = plan
+            .items(group.layers.clone(), Some(index))
+            .into_iter()
+            .filter_map(|item| match item {
+                GroupItem::Layer(layer) => self.overlay_layers.get(layer),
+                GroupItem::Group(_) => None,
+            })
+            .flat_map(|layer| layer.grounds.iter())
+            .map(|ground| {
+                let [left, top, right, bottom] = ground.rect;
+                [left + dx, top + dy, right + dx, bottom + dy]
+            })
+            .collect();
+        let over = rects_outside(bounds, &grounds);
+        let cross_fade = if grounds.is_empty() {
+            Vec::new()
+        } else {
+            rects_outside(bounds, &over)
+        };
+        let mut instances = group_instances(&over, group.offset, group.opacity, surface);
+        instances.extend(group_instances(
+            &cross_fade,
+            group.offset,
+            group.opacity,
+            surface,
+        ));
+        if instances.is_empty() {
+            return;
+        }
+        let buffer = gpu.vertex_buffer("overlay group composite", instances.as_slice());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("overlay group composite"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        let over_count = over.len() as u32;
+        if over_count > 0 {
+            pass.set_pipeline(&gpu.group_pipelines.over);
+            pass.set_bind_group(0, &source.decoded, &[]);
+            pass.draw(0..6, 0..over_count);
+        }
+        if !cross_fade.is_empty() {
+            let fade = f64::from(group.opacity);
+            pass.set_pipeline(&gpu.group_pipelines.cross_fade);
+            pass.set_bind_group(0, &source.raw, &[]);
+            pass.set_blend_constant(wgpu::Color {
+                r: fade,
+                g: fade,
+                b: fade,
+                a: fade,
+            });
+            pass.draw(0..6, over_count..instances.len() as u32);
         }
     }
 
@@ -10830,6 +12220,7 @@ impl WindowRenderer {
     /// selection over glass goes half-transparent.
     fn rectangles(
         &self,
+        metrics: CellMetrics,
         frame: &ViewportFrame,
         drawn_math_blocks: &HashSet<usize>,
         seat_focused: bool,
@@ -10848,7 +12239,7 @@ impl WindowRenderer {
             let (_, background) = resolve_colors(&cell.style);
             if background != default_background() {
                 grounds.push(premultiplied_by_ground(
-                    self.cell_rect(frame, index / columns, index % columns, background),
+                    self.cell_rect(metrics, frame, index / columns, index % columns, background),
                     ground_alpha,
                 ));
             }
@@ -10862,6 +12253,7 @@ impl WindowRenderer {
             let end = span.end_column.min(frame.columns.get()) as usize;
             if end > start && (span.row as usize) < drawable_rows {
                 rects.push(self.cell_rect_span(
+                    metrics,
                     frame,
                     span,
                     start,
@@ -10881,8 +12273,7 @@ impl WindowRenderer {
         // happens in the projection — `rounded_rect_coverage` on a five-cell run
         // rounds the run's own two ends, and rounding every cell would draw four
         // beads with pinched joins between them.
-        let match_radius =
-            (SEARCH_MATCH_RADIUS_LOGICAL_PX * self.metrics.scale_factor as f32).max(0.0);
+        let match_radius = (SEARCH_MATCH_RADIUS_LOGICAL_PX * metrics.scale_factor as f32).max(0.0);
         for (spans, ground) in [
             (&frame.search_spans, search_match_rgb()),
             (&frame.current_search_spans, search_current_rgb()),
@@ -10893,8 +12284,7 @@ impl WindowRenderer {
                 if end <= start || (span.row as usize) >= drawable_rows {
                     continue;
                 }
-                let bounds =
-                    selection_span_bounds_px(self.metrics, frame, span, start, end - start);
+                let bounds = selection_span_bounds_px(metrics, frame, span, start, end - start);
                 rects.extend(rounded_rect_coverage(bounds, match_radius).into_iter().map(
                     |entry| {
                         self.pixel_rect_with_coverage(
@@ -10933,10 +12323,11 @@ impl WindowRenderer {
         // over them. That was already true of the scrim it replaces; it matters
         // far more now that the fill is opaque.
         let ground_radius =
-            (PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX * self.metrics.scale_factor as f32).max(0.0);
+            (PREVIEW_CODE_GROUND_RADIUS_LOGICAL_PX * metrics.scale_factor as f32).max(0.0);
         for (index, placement) in frame.math_blocks.iter().enumerate() {
             if math_block_ground_is_drawn(placement, drawn_math_blocks.contains(&index))
-                && let Some(geometry) = self.math_block_geometry(self.seat, frame, placement)
+                && let Some(geometry) =
+                    self.math_block_geometry(metrics, self.seat, frame, placement)
             {
                 rects.extend(
                     rounded_rect_coverage(geometry.block, ground_radius)
@@ -10955,7 +12346,9 @@ impl WindowRenderer {
             }
         }
         for failure in &frame.math_failures {
-            if let Some((marker, _)) = self.math_failure_geometry(self.seat, frame, failure) {
+            if let Some((marker, _)) =
+                self.math_failure_geometry(metrics, self.seat, frame, failure)
+            {
                 rects.push(self.pixel_rect_with_coverage(
                     marker[0],
                     marker[1],
@@ -10967,7 +12360,7 @@ impl WindowRenderer {
             }
         }
         if let Some(caret) = seat_caret(
-            self.metrics,
+            metrics,
             frame,
             seat_focused,
             self.cursor_blink_visible,
@@ -10995,7 +12388,7 @@ impl WindowRenderer {
             }
             let row = index / columns;
             let column = index % columns;
-            let [left, top, right, bottom] = frame_cell_bounds_px(self.metrics, frame, row, column);
+            let [left, top, right, bottom] = frame_cell_bounds_px(metrics, frame, row, column);
             let Some(geometry) = procedural::geometry(
                 character,
                 left,
@@ -11009,7 +12402,7 @@ impl WindowRenderer {
                 // was before the size became a setting. A DPI change and a Font
                 // size change both move `font_size_px`, and both should thicken
                 // these rules by the same factor.
-                self.metrics.font_size_px / DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX,
+                metrics.font_size_px / DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX,
             ) else {
                 continue;
             };
@@ -11032,12 +12425,11 @@ impl WindowRenderer {
             if cell.style.flags.contains(CellFlags::UNDERLINE) {
                 let row = index / columns;
                 let column = index % columns;
-                let [left, _, right, bottom] =
-                    frame_cell_bounds_px(self.metrics, frame, row, column);
+                let [left, _, right, bottom] = frame_cell_bounds_px(metrics, frame, row, column);
                 let (foreground, _) = resolve_colors(&cell.style);
                 rects.push(self.pixel_rect(
                     left,
-                    bottom - self.metrics.scale_factor as f32,
+                    bottom - metrics.scale_factor as f32,
                     right,
                     bottom,
                     foreground,
@@ -11055,10 +12447,10 @@ impl WindowRenderer {
             let (foreground, _) = resolve_colors(&cell.style);
             let end = dotted_underline_run_end(&frame.cells, index, columns, drawable_cells);
 
-            let [left, _, _, bottom] = frame_cell_bounds_px(self.metrics, frame, row, start_column);
-            let right = left + (end - index) as f32 * self.metrics.cell_width_px;
+            let [left, _, _, bottom] = frame_cell_bounds_px(metrics, frame, row, start_column);
+            let right = left + (end - index) as f32 * metrics.cell_width_px;
             rects.extend(
-                dotted_underline_segments(left, right, bottom, self.metrics.scale_factor)
+                dotted_underline_segments(left, right, bottom, metrics.scale_factor)
                     .into_iter()
                     .map(|[segment_left, top, segment_right, segment_bottom]| {
                         self.pixel_rect(
@@ -11090,10 +12482,11 @@ impl WindowRenderer {
     /// failures, and could not name which of several blocks it meant.
     fn math_overflow_fade_rectangles(
         &self,
+        metrics: CellMetrics,
         placement: &MathBlockPlacement,
         geometry: &MathBlockGeometry,
     ) -> Vec<RectInstance> {
-        math_overflow_fade_slabs(self.metrics, placement, geometry)
+        math_overflow_fade_slabs(metrics, placement, geometry)
             .into_iter()
             .map(|(rect, coverage)| {
                 self.pixel_rect_with_coverage(
@@ -11123,7 +12516,11 @@ impl WindowRenderer {
     /// rest of it, and both of those belong over the wash — a fade that a selection had covered
     /// would stop saying the formula continues, and a button the reader is about to press must
     /// not be tinted by a drag that happens to have crossed it.
-    fn math_selection_wash_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
+    fn math_selection_wash_rectangles(
+        &self,
+        metrics: CellMetrics,
+        frame: &ViewportFrame,
+    ) -> Vec<RectInstance> {
         // Read once per frame from the same atomic word the band reads, for the band's own
         // reason: a theme switch must never leave one half of a selection wearing the previous
         // canvas's fill while the other half wears the new one.
@@ -11133,11 +12530,12 @@ impl WindowRenderer {
             if placement.selection_spans.is_empty() {
                 continue;
             }
-            let Some(geometry) = self.math_block_geometry(self.seat, frame, placement) else {
+            let Some(geometry) = self.math_block_geometry(metrics, self.seat, frame, placement)
+            else {
                 continue;
             };
             rects.extend(
-                math_selection_wash_slabs(self.metrics, frame, placement, &geometry)
+                math_selection_wash_slabs(metrics, frame, placement, &geometry)
                     .into_iter()
                     .map(|rect| {
                         self.pixel_rect_with_coverage(
@@ -11172,30 +12570,37 @@ impl WindowRenderer {
     /// So the marks moved up a crate, to where marks are rasterized, and this
     /// file kept the half only it can answer: *where* they stand
     /// ([`WindowRenderer::math_tool_boxes`]).
-    fn math_overlay_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
+    fn math_overlay_rectangles(
+        &self,
+        metrics: CellMetrics,
+        frame: &ViewportFrame,
+    ) -> Vec<RectInstance> {
         let mut rects = Vec::new();
         for placement in &frame.math_blocks {
-            let Some(geometry) = self.math_block_geometry(self.seat, frame, placement) else {
+            let Some(geometry) = self.math_block_geometry(metrics, self.seat, frame, placement)
+            else {
                 continue;
             };
-            rects.extend(self.math_overflow_fade_rectangles(placement, &geometry));
+            rects.extend(self.math_overflow_fade_rectangles(metrics, placement, &geometry));
         }
         rects
     }
 
     fn cell_rect(
         &self,
+        metrics: CellMetrics,
         frame: &ViewportFrame,
         row: usize,
         column: usize,
         color: [u8; 3],
     ) -> RectInstance {
-        let [left, top, right, bottom] = frame_cell_bounds_px(self.metrics, frame, row, column);
+        let [left, top, right, bottom] = frame_cell_bounds_px(metrics, frame, row, column);
         self.pixel_rect(left, top, right, bottom, color)
     }
 
     fn cell_rect_span(
         &self,
+        metrics: CellMetrics,
         frame: &ViewportFrame,
         selection: &SelectionSpan,
         column: usize,
@@ -11203,7 +12608,7 @@ impl WindowRenderer {
         color: [u8; 3],
     ) -> RectInstance {
         let [left, top, right, bottom] =
-            selection_span_bounds_px(self.metrics, frame, selection, column, span);
+            selection_span_bounds_px(metrics, frame, selection, column, span);
         self.pixel_rect(left, top, right, bottom, color)
     }
 
@@ -11227,7 +12632,7 @@ impl WindowRenderer {
     /// Without it the chip has no edge at all on every light scheme this product
     /// ships, where `--menu` and `--termbg` are one colour.
     fn float_tag_rects(&self, rect: [f32; 4]) -> Vec<RectInstance> {
-        let hairline = (self.metrics.scale_factor as f32).max(1.0);
+        let hairline = (self.base_metrics.scale_factor as f32).max(1.0);
         float_tag_boxes(rect, hairline, chrome_palette().float_tag())
             .into_iter()
             .map(|(box_of, colour)| {
@@ -11290,9 +12695,19 @@ impl WindowRenderer {
         self.text_viewport
             .update(&gpu.queue, Resolution { width, height });
         let seat = SeatViewport::whole(width, height);
-        let text_stats = self.prepare_text_rows(gpu, frame)?;
+        let text_stats = self.prepare_text_rows(gpu, self.base_metrics, frame)?;
         let rows_prepared_at = Instant::now();
         {
+            let (grid_placements, status_placements) = seat_synthetic_bold(
+                &mut gpu.synthetic_bold,
+                &mut gpu.font_system,
+                &self.text_rows,
+                self.status_overlay.as_deref(),
+                self.base_metrics,
+                frame,
+                seat,
+            )
+            .map_err(|_| RenderError::GlyphRender(PrepareError::AtlasFull.to_string()))?;
             let slot = &mut self.seat_slots[0];
             prepare_text_atlas(
                 &mut slot.text_renderer,
@@ -11302,10 +12717,12 @@ impl WindowRenderer {
                 &mut gpu.atlas,
                 &self.text_viewport,
                 &mut gpu.swash_cache,
+                &mut gpu.synthetic_bold,
                 &self.text_rows,
-                self.metrics,
+                self.base_metrics,
                 frame,
                 seat,
+                &grid_placements,
             )
             .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
             prepare_status_text_atlas(
@@ -11316,13 +12733,15 @@ impl WindowRenderer {
                 &mut gpu.atlas,
                 &self.text_viewport,
                 &mut gpu.swash_cache,
+                &mut gpu.synthetic_bold,
                 self.status_overlay.as_deref(),
-                self.metrics,
+                self.base_metrics,
                 frame,
                 // A headless probe has no seat: it renders into the whole target, so the surface is
                 // the pane.
                 width as f32,
                 seat,
+                &status_placements,
             )
             .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
         }
@@ -11454,7 +12873,7 @@ impl WindowRenderer {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_text_rows(
+fn prepare_text_rows_with_cjk(
     frame: &ViewportFrame,
     metrics: CellMetrics,
     text_rows: &mut Vec<Arc<ComposedRow>>,
@@ -11463,6 +12882,7 @@ fn prepare_text_rows(
     font_revision: u64,
     theme_revision: u64,
     font_system: &mut FontSystem,
+    terminal_cjk_families: &TerminalCjkFamilies,
     swash_cache: &mut SwashCache,
     narrow_shaping_cache: &mut NarrowShapingCache,
     wide_shaping_cache: &mut WideShapingCache,
@@ -11492,19 +12912,21 @@ fn prepare_text_rows(
         }
         rows_reshaped = rows_reshaped.saturating_add(1);
 
-        let narrow_glyphs = shape_narrow_glyphs(
+        let narrow_glyphs = shape_narrow_glyphs_with_cjk(
             source_cells,
             font_system,
             swash_cache,
             metrics,
             narrow_shaping_cache,
+            terminal_cjk_families,
         );
-        let wide_glyphs = shape_wide_glyphs(
+        let wide_glyphs = shape_wide_glyphs_with_cjk(
             source_cells,
             font_system,
             swash_cache,
             metrics,
             wide_shaping_cache,
+            terminal_cjk_families,
         );
         let row = Arc::new(ComposedRow {
             narrow_glyphs,
@@ -11531,19 +12953,21 @@ fn prepare_text_rows(
         } else {
             rows_reshaped = rows_reshaped.saturating_add(1);
             let row = Arc::new(ComposedRow {
-                narrow_glyphs: shape_narrow_glyphs(
+                narrow_glyphs: shape_narrow_glyphs_with_cjk(
                     &cells,
                     font_system,
                     swash_cache,
                     metrics,
                     narrow_shaping_cache,
+                    terminal_cjk_families,
                 ),
-                wide_glyphs: shape_wide_glyphs(
+                wide_glyphs: shape_wide_glyphs_with_cjk(
                     &cells,
                     font_system,
                     swash_cache,
                     metrics,
                     wide_shaping_cache,
+                    terminal_cjk_families,
                 ),
             });
             composed_row_cache.insert(key, Arc::clone(&row));
@@ -11574,6 +12998,38 @@ fn prepare_text_rows(
         narrow: narrow_shaping_cache.counters.delta_since(narrow_before),
         wide: wide_shaping_cache.counters.delta_since(wide_before),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn prepare_text_rows(
+    frame: &ViewportFrame,
+    metrics: CellMetrics,
+    text_rows: &mut Vec<Arc<ComposedRow>>,
+    status_overlay: &mut Option<Arc<ComposedRow>>,
+    composed_row_cache: &mut ComposedRowCache,
+    font_revision: u64,
+    theme_revision: u64,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    narrow_shaping_cache: &mut NarrowShapingCache,
+    wide_shaping_cache: &mut WideShapingCache,
+) -> Result<TextPreparationStats, RenderError> {
+    let terminal_cjk_families = resolve_terminal_cjk_families("", font_system);
+    prepare_text_rows_with_cjk(
+        frame,
+        metrics,
+        text_rows,
+        status_overlay,
+        composed_row_cache,
+        font_revision,
+        theme_revision,
+        font_system,
+        &terminal_cjk_families,
+        swash_cache,
+        narrow_shaping_cache,
+        wide_shaping_cache,
+    )
 }
 
 /// A chrome rectangle in whole-surface pixels.
@@ -11757,12 +13213,16 @@ fn chrome_label_attrs(
 /// also deciding how large to draw the answer. A chrome label decides no such
 /// thing, so it asks the cheap half of the question and leaves the expensive
 /// half where the size policy that needs it lives.
-fn mono_cluster_family(cluster: &str, font_system: &mut FontSystem) -> Family<'static> {
+fn mono_cluster_family<'a>(
+    cluster: &str,
+    terminal_cjk_families: &'a TerminalCjkFamilies,
+    font_system: &mut FontSystem,
+) -> Family<'a> {
     if cluster.is_ascii() {
         return Family::Monospace;
     }
     match font_presentation_route(cluster, font_system) {
-        PresentationRoute::TerminalText => Family::Monospace,
+        PresentationRoute::TerminalText => terminal_grid_family(cluster, terminal_cjk_families),
         PresentationRoute::TextSymbol => Family::Name(TEXT_SYMBOL_FONT_FAMILY),
         PresentationRoute::ColorEmoji => {
             if font_family_available(font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY) {
@@ -11786,17 +13246,18 @@ fn mono_cluster_family(cluster: &str, font_system: &mut FontSystem) -> Family<'s
 /// move a whole row of Latin onto the symbol face because one arrow stood at the
 /// end of it. The pane asks per cell; this asks per cluster, which is the same
 /// grain.
-fn mono_label_spans(
+fn mono_label_spans<'a>(
     text: &str,
+    terminal_cjk_families: &'a TerminalCjkFamilies,
     font_system: &mut FontSystem,
-) -> Option<Vec<(Range<usize>, Family<'static>)>> {
-    let mut spans: Vec<(Range<usize>, Family<'static>)> = Vec::new();
+) -> Option<Vec<(Range<usize>, Family<'a>)>> {
+    let mut spans: Vec<(Range<usize>, Family<'a>)> = Vec::new();
     let mut routed = false;
     let mut at = 0usize;
     for cluster in bt_unicode::graphemes(text) {
         let range = at..at + cluster.len();
         at = range.end;
-        let family = mono_cluster_family(cluster, font_system);
+        let family = mono_cluster_family(cluster, terminal_cjk_families, font_system);
         routed |= !matches!(family, Family::Monospace);
         match spans.last_mut() {
             Some((last, standing)) if *standing == family => last.end = range.end,
@@ -11819,13 +13280,36 @@ fn set_chrome_label_text(
     text: &str,
     attrs: &Attrs<'static>,
     mono: bool,
+    terminal_cjk_families: &TerminalCjkFamilies,
 ) {
-    match mono.then(|| mono_label_spans(text, font_system)).flatten() {
+    if text.is_ascii() {
+        buffer.set_text(text, attrs, Shaping::Advanced, None);
+        return;
+    }
+    let catalogue = font_system.cjk_catalog();
+    let spans = if mono {
+        mono_label_spans(text, terminal_cjk_families, font_system)
+    } else {
+        let mut at = 0;
+        let mut routed = false;
+        let spans = bt_unicode::graphemes(text)
+            .map(|cluster| {
+                let range = at..at + cluster.len();
+                at = range.end;
+                let family =
+                    proportional_cjk_family(cluster, &catalogue).unwrap_or(Family::SansSerif);
+                routed |= matches!(family, Family::Name(_));
+                (range, family)
+            })
+            .collect::<Vec<_>>();
+        routed.then_some(spans)
+    };
+    match spans {
         Some(spans) => buffer.set_rich_text(
             spans.iter().map(|(range, family)| {
                 let mut span = attrs.clone();
                 span.family = *family;
-                (&text[range.clone()], span)
+                (&text[range.clone()], match_cjk_attrs(font_system, span))
             }),
             attrs,
             Shaping::Advanced,
@@ -12031,6 +13515,7 @@ impl ChromeTextAdvances {
 /// The caller of the hour is the tab's pane-count badge, which the mock-up sizes
 /// as `max(min-width, text + padding)` (`.panecount`, lines 292-304): the badge
 /// cannot know its own width without knowing the number's.
+#[cfg(test)]
 fn measure_chrome_label(
     font_system: &mut FontSystem,
     text: &str,
@@ -12040,7 +13525,8 @@ fn measure_chrome_label(
     tabular_numerals: bool,
     mono: bool,
 ) -> f32 {
-    let Some(buffer) = shape_chrome_measurement(
+    let terminal_cjk_families = resolve_terminal_cjk_families("", font_system);
+    measure_chrome_label_with_cjk(
         font_system,
         text,
         font_size_px,
@@ -12048,6 +13534,30 @@ fn measure_chrome_label(
         letter_spacing_em,
         tabular_numerals,
         mono,
+        &terminal_cjk_families,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_chrome_label_with_cjk(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size_px: f32,
+    weight: ChromeLabelWeight,
+    letter_spacing_em: f32,
+    tabular_numerals: bool,
+    mono: bool,
+    terminal_cjk_families: &TerminalCjkFamilies,
+) -> f32 {
+    let Some(buffer) = shape_chrome_measurement_with_cjk(
+        font_system,
+        text,
+        font_size_px,
+        weight,
+        letter_spacing_em,
+        tabular_numerals,
+        mono,
+        terminal_cjk_families,
     ) else {
         return 0.0;
     };
@@ -12066,6 +13576,7 @@ fn measure_chrome_label(
 /// the sibling function answers. A caller that wants both gets them for the
 /// price of one pass, which is the whole point: a box that asked for a width
 /// and four offsets used to shape five times.
+#[cfg(test)]
 fn chrome_label_advances(
     font_system: &mut FontSystem,
     text: &str,
@@ -12075,7 +13586,8 @@ fn chrome_label_advances(
     tabular_numerals: bool,
     mono: bool,
 ) -> ChromeTextAdvances {
-    let Some(buffer) = shape_chrome_measurement(
+    let cjk = resolve_terminal_cjk_families("", font_system);
+    chrome_label_advances_with_cjk(
         font_system,
         text,
         font_size_px,
@@ -12083,6 +13595,30 @@ fn chrome_label_advances(
         letter_spacing_em,
         tabular_numerals,
         mono,
+        &cjk,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chrome_label_advances_with_cjk(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size_px: f32,
+    weight: ChromeLabelWeight,
+    letter_spacing_em: f32,
+    tabular_numerals: bool,
+    mono: bool,
+    terminal_cjk_families: &TerminalCjkFamilies,
+) -> ChromeTextAdvances {
+    let Some(buffer) = shape_chrome_measurement_with_cjk(
+        font_system,
+        text,
+        font_size_px,
+        weight,
+        letter_spacing_em,
+        tabular_numerals,
+        mono,
+        terminal_cjk_families,
     ) else {
         return ChromeTextAdvances::empty();
     };
@@ -12103,9 +13639,8 @@ fn chrome_label_advances(
     ChromeTextAdvances::from_stops(stops)
 }
 
-/// The buffer both measurements read, shaped once — `None` for a string with
-/// nothing in it, which has no width and no boundaries but its own.
-fn shape_chrome_measurement(
+#[allow(clippy::too_many_arguments)]
+fn shape_chrome_measurement_with_cjk(
     font_system: &mut FontSystem,
     text: &str,
     font_size_px: f32,
@@ -12113,6 +13648,7 @@ fn shape_chrome_measurement(
     letter_spacing_em: f32,
     tabular_numerals: bool,
     mono: bool,
+    terminal_cjk_families: &TerminalCjkFamilies,
 ) -> Option<Buffer> {
     if text.is_empty() {
         return None;
@@ -12139,6 +13675,7 @@ fn shape_chrome_measurement(
         // half. That is what the Git page's meta column was doing at every width.
         &chrome_label_attrs(weight, letter_spacing_em, tabular_numerals, mono),
         mono,
+        terminal_cjk_families,
     );
     buffer.shape_until_scroll(font_system, false);
     Some(buffer)
@@ -12154,11 +13691,29 @@ fn shape_chrome_measurement(
 /// and not of the label: a caption does not decide how faded the popup carrying
 /// it is, and a per-label field would ask all thirty-odd construction sites to
 /// answer a question only their layer can.
+#[cfg(test)]
 fn shape_chrome_labels(
     font_system: &mut FontSystem,
     labels: &[ChromeLabel],
     cap_height_ratio: f32,
     alpha: f32,
+) -> Vec<ChromeTextLayout> {
+    let terminal_cjk_families = resolve_terminal_cjk_families("", font_system);
+    shape_chrome_labels_with_cjk(
+        font_system,
+        labels,
+        cap_height_ratio,
+        alpha,
+        &terminal_cjk_families,
+    )
+}
+
+fn shape_chrome_labels_with_cjk(
+    font_system: &mut FontSystem,
+    labels: &[ChromeLabel],
+    cap_height_ratio: f32,
+    alpha: f32,
+    terminal_cjk_families: &TerminalCjkFamilies,
 ) -> Vec<ChromeTextLayout> {
     labels
         .iter()
@@ -12202,7 +13757,14 @@ fn shape_chrome_labels(
                 label.tabular_numerals,
                 label.mono,
             );
-            set_chrome_label_text(&mut buffer, font_system, &label.text, &attrs, label.mono);
+            set_chrome_label_text(
+                &mut buffer,
+                font_system,
+                &label.text,
+                &attrs,
+                label.mono,
+                terminal_cjk_families,
+            );
             buffer.shape_until_scroll(font_system, false);
             let mut text_width = shaped_line_width(&buffer);
             // **A cell of a grid is fitted to its columns and never cut by them**
@@ -12215,6 +13777,7 @@ fn shape_chrome_labels(
                 buffer.shape_until_scroll(font_system, false);
                 text_width = shaped_line_width(&buffer);
             }
+            trace_chrome_cjk_glyphs(font_system, &buffer, label);
             let left = if label.align_center {
                 (label.rect[0] + (width - text_width) / 2.0).max(label.rect[0])
             } else if label.align_right {
@@ -12266,6 +13829,59 @@ fn shape_chrome_labels(
             }
         })
         .collect()
+}
+
+/// Self-report for the owner's unreproduced mixed-weight screenshot.
+/// Which face chrome's non-ASCII text landed in, **once per decision and never
+/// per glyph** (2026-09-20).
+///
+/// The first form wrote a line for every non-ASCII glyph of every label of every
+/// frame and put the character in it: one afternoon's recording grew past 3.5 GB,
+/// and a trace that is only ever supposed to hold counters was holding what was
+/// on screen. The fact worth a line is the *decision* — this face, for this
+/// requested weight, at this size — and a session makes a few dozen of those.
+fn trace_chrome_cjk_glyphs(font_system: &FontSystem, buffer: &Buffer, label: &ChromeLabel) {
+    static TRACE: OnceLock<bool> = OnceLock::new();
+    static SEEN: OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(glyphon::fontdb::ID, u16, u32)>>,
+    > = OnceLock::new();
+    if !*TRACE.get_or_init(|| std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty())) {
+        return;
+    }
+    let requested = label.weight.shaping_weight().0;
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs {
+            let non_ascii = label
+                .text
+                .get(glyph.start..glyph.end)
+                .is_some_and(|text| !text.is_ascii());
+            if !non_ascii {
+                continue;
+            }
+            let decision = (glyph.font_id, requested, glyph.font_size.to_bits());
+            let first = SEEN
+                .get_or_init(Default::default)
+                .lock()
+                .is_ok_and(|mut seen| seen.insert(decision));
+            if !first {
+                continue;
+            }
+            let Some(face) = font_system.db().face(glyph.font_id) else {
+                continue;
+            };
+            let file = match &face.source {
+                glyphon::fontdb::Source::File(path)
+                | glyphon::fontdb::Source::SharedFile(path, _) => path
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+                _ => "<memory>".into(),
+            };
+            bt_viewport::trace::line(format!(
+                "BT_PERF_TRACE chrome_cjk font_id={:?} family={:?} file={file:?} face_weight={} requested_weight={requested} size={}",
+                glyph.font_id, face.families, face.weight.0, glyph.font_size
+            ));
+        }
+    }
 }
 
 /// The shaping attributes one preview run is set with.
@@ -12410,6 +14026,7 @@ fn shape_preview_paragraph(font_system: &mut FontSystem, paragraph: &PreviewPara
     let cells = preview_grid_cells(&paragraph.runs, advance);
     let resting = vec![0.0_f32; cells.len()];
     set_preview_grid_cells(
+        font_system,
         &mut buffer,
         &paragraph.runs,
         &cells,
@@ -12424,6 +14041,7 @@ fn shape_preview_paragraph(font_system: &mut FontSystem, paragraph: &PreviewPara
         .any(|tracking| tracking.abs() > f32::EPSILON)
     {
         set_preview_grid_cells(
+            font_system,
             &mut buffer,
             &paragraph.runs,
             &cells,
@@ -12499,6 +14117,7 @@ fn preview_grid_cells(runs: &[PreviewRun], advance: f32) -> Vec<PreviewGridCell>
 /// run because the tracking is per cell — and the shaping is unchanged by that,
 /// for the reason [`shape_preview_paragraph`] states.
 fn set_preview_grid_cells(
+    font_system: &FontSystem,
     buffer: &mut Buffer,
     runs: &[PreviewRun],
     cells: &[PreviewGridCell],
@@ -12506,6 +14125,7 @@ fn set_preview_grid_cells(
     letter_spacing_em: f32,
     metrics: Metrics,
 ) {
+    let catalogue = font_system.cjk_catalog();
     let default = preview_run_attrs(false, false, false, letter_spacing_em);
     buffer.set_rich_text(
         cells.iter().enumerate().map(|(index, cell)| {
@@ -12524,7 +14144,11 @@ fn set_preview_grid_cells(
                     metrics.line_height,
                 ));
             }
-            (&preview_run_text(run)[cell.text.clone()], attrs)
+            let text = &preview_run_text(run)[cell.text.clone()];
+            if let Some(family) = proportional_cjk_family(text, &catalogue) {
+                attrs.family = family;
+            }
+            (text, match_cjk_attrs(font_system, attrs))
         }),
         &default,
         Shaping::Advanced,
@@ -12817,8 +14441,9 @@ fn set_preview_runs(
         })
         .collect();
     let default = preview_run_attrs(false, false, false, letter_spacing_em);
+    let catalogue = font_system.cjk_catalog();
     buffer.set_rich_text(
-        runs.iter().zip(&boxes).map(|(run, tracking)| {
+        runs.iter().zip(&boxes).flat_map(|(run, tracking)| {
             let [r, g, b] = run.color;
             let mut attrs = preview_run_attrs(run.mono, run.bold, run.italic, letter_spacing_em)
                 .color(Color::rgba(r, g, b, 255));
@@ -12834,7 +14459,18 @@ fn set_preview_runs(
             if let Some(tracking) = tracking {
                 attrs = attrs.letter_spacing(*tracking);
             }
-            (preview_run_text(run), attrs)
+            if preview_run_text(run).is_ascii() {
+                return vec![(preview_run_text(run), attrs)];
+            }
+            bt_unicode::graphemes(preview_run_text(run))
+                .map(|cluster| {
+                    let mut attrs = attrs.clone();
+                    if let Some(family) = proportional_cjk_family(cluster, &catalogue) {
+                        attrs.family = family;
+                    }
+                    (cluster, match_cjk_attrs(font_system, attrs))
+                })
+                .collect::<Vec<_>>()
         }),
         &default,
         Shaping::Advanced,
@@ -13009,9 +14645,13 @@ fn prepare_chrome_text_atlas(
     atlas: &mut TextAtlas,
     viewport: &Viewport,
     swash_cache: &mut SwashCache,
+    synthetic_bold: &mut SyntheticBoldGlyphs,
     layouts: &[ChromeTextLayout],
 ) -> Result<(), PrepareError> {
-    text_renderer.prepare(
+    // Chrome text carries no custom glyph, but it shares the grid's atlas, and
+    // glyphon redraws every custom raster that atlas holds through whichever
+    // prepare grows it — a `None` there is a panic (ticket 38).
+    text_renderer.prepare_with_custom(
         device,
         queue,
         font_system,
@@ -13019,6 +14659,7 @@ fn prepare_chrome_text_atlas(
         viewport,
         chrome_text_areas(layouts),
         swash_cache,
+        |request| synthetic_bold.rasterize(request),
     )
 }
 
@@ -13054,12 +14695,28 @@ fn grid_glyph_ink(
 /// second opinion about where the grid's glyphs sit, and a subpixel bin is
 /// decided by exactly that geometry — so the count would drift from the demand
 /// it claims to measure at the first change to either.
+///
+/// A cell drawn with synthetic bold carries an empty buffer and its custom
+/// glyphs ([`with_synthetic_bold`]); `placements` is what
+/// [`place_synthetic_bold`] made of [`grid_cell_areas`] for this frame.
 fn grid_text_areas<'a>(
     text_rows: &'a [Arc<ComposedRow>],
     metrics: CellMetrics,
     frame: &'a ViewportFrame,
     seat: SeatViewport,
+    placements: &'a SyntheticPlacements,
 ) -> impl Iterator<Item = TextArea<'a>> + 'a {
+    with_synthetic_bold(grid_cell_areas(text_rows, metrics, frame, seat), placements)
+}
+
+/// **Where each of one seat's grid cells is drawn** — the one geometry
+/// [`grid_text_areas`] and [`place_synthetic_bold`] both read.
+fn grid_cell_areas<'a>(
+    text_rows: &'a [Arc<ComposedRow>],
+    metrics: CellMetrics,
+    frame: &'a ViewportFrame,
+    seat: SeatViewport,
+) -> impl Iterator<Item = GridCellArea<'a>> + 'a {
     // **The seat's corner, added here and nowhere else** (§7.36). Everything
     // above this line is seat-local, as the whole terminal side of this crate
     // is; everything glyphon is handed is the window's, because the window is
@@ -13092,27 +14749,30 @@ fn grid_text_areas<'a>(
                 let [left, top, _, bottom] =
                     frame_cell_bounds_px(metrics, frame, row, glyph.column);
                 let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
-                TextArea {
-                    buffer: &glyph.buffer,
-                    left: left + glyph.left_offset_px,
-                    top: top + glyph.top_offset_px,
-                    scale: 1.0,
-                    // Clip to the terminal row, not the cell. The grid owns pen origins, while
-                    // accents and fallback ink remain free to overhang adjacent cells.
-                    bounds: TextBounds {
-                        left: (origin_x + padding).floor() as i32,
-                        top: top.floor() as i32,
-                        right: text_right,
-                        bottom: bottom.ceil() as i32,
+                GridCellArea {
+                    area: TextArea {
+                        buffer: &glyph.buffer,
+                        left: left + glyph.left_offset_px,
+                        top: top + glyph.top_offset_px,
+                        scale: 1.0,
+                        // Clip to the terminal row, not the cell. The grid owns pen origins,
+                        // while accents and fallback ink remain free to overhang adjacent cells.
+                        bounds: TextBounds {
+                            left: (origin_x + padding).floor() as i32,
+                            top: top.floor() as i32,
+                            right: text_right,
+                            bottom: bottom.ceil() as i32,
+                        },
+                        default_color: grid_glyph_ink(
+                            frame,
+                            current_ink,
+                            row,
+                            glyph.column,
+                            glyph.color,
+                        ),
+                        custom_glyphs: &[],
                     },
-                    default_color: grid_glyph_ink(
-                        frame,
-                        current_ink,
-                        row,
-                        glyph.column,
-                        glyph.color,
-                    ),
-                    custom_glyphs: &[],
+                    synthetic_bold: glyph.synthetic_bold.as_deref(),
                 }
             })
         });
@@ -13123,23 +14783,57 @@ fn grid_text_areas<'a>(
             text_row.wide_glyphs.iter().map(move |wide| {
                 let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, wide.column);
                 let (left, top, bottom) = (left + origin_x, top + origin_y, bottom + origin_y);
-                TextArea {
-                    buffer: &wide.buffer,
-                    left: left + wide.left_offset_px,
-                    top: top + wide.top_offset_px,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: left.floor() as i32,
-                        top: top.floor() as i32,
-                        right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
-                        bottom: bottom.ceil() as i32,
+                GridCellArea {
+                    area: TextArea {
+                        buffer: &wide.buffer,
+                        left: left + wide.left_offset_px,
+                        top: top + wide.top_offset_px,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: left.floor() as i32,
+                            top: top.floor() as i32,
+                            right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
+                            bottom: bottom.ceil() as i32,
+                        },
+                        default_color: grid_glyph_ink(
+                            frame,
+                            current_ink,
+                            row,
+                            wide.column,
+                            wide.color,
+                        ),
+                        custom_glyphs: &[],
                     },
-                    default_color: grid_glyph_ink(frame, current_ink, row, wide.column, wide.color),
-                    custom_glyphs: &[],
+                    synthetic_bold: wide.synthetic_bold.as_deref(),
                 }
             })
         });
     narrow_text_areas.chain(wide_text_areas)
+}
+
+/// **One seat's synthesized-bold glyphs, grid and status overlay**, placed on
+/// the geometry their prepares read ([`grid_cell_areas`], [`status_cell_areas`]).
+#[allow(clippy::too_many_arguments)]
+fn seat_synthetic_bold(
+    table: &mut SyntheticBoldGlyphs,
+    font_system: &mut FontSystem,
+    text_rows: &[Arc<ComposedRow>],
+    status_overlay: Option<&ComposedRow>,
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    seat: SeatViewport,
+) -> Result<(SyntheticPlacements, SyntheticPlacements), SyntheticBoldIdsExhausted> {
+    let grid = place_synthetic_bold(
+        grid_cell_areas(text_rows, metrics, frame, seat),
+        table,
+        font_system,
+    )?;
+    let status = place_synthetic_bold(
+        status_cell_areas(status_overlay, metrics, frame, seat.width as f32, seat),
+        table,
+        font_system,
+    )?;
+    Ok((grid, status))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13151,19 +14845,22 @@ fn prepare_text_atlas(
     atlas: &mut TextAtlas,
     viewport: &Viewport,
     swash_cache: &mut SwashCache,
+    synthetic_bold: &mut SyntheticBoldGlyphs,
     text_rows: &[Arc<ComposedRow>],
     metrics: CellMetrics,
     frame: &ViewportFrame,
     seat: SeatViewport,
+    placements: &SyntheticPlacements,
 ) -> Result<(), PrepareError> {
-    text_renderer.prepare(
+    text_renderer.prepare_with_custom(
         device,
         queue,
         font_system,
         atlas,
         viewport,
-        grid_text_areas(text_rows, metrics, frame, seat),
+        grid_text_areas(text_rows, metrics, frame, seat, placements),
         swash_cache,
+        |request| synthetic_bold.rasterize(request),
     )
 }
 
@@ -13174,7 +14871,24 @@ fn status_text_areas<'a>(
     frame: &'a ViewportFrame,
     seat_width_px: f32,
     seat: SeatViewport,
+    placements: &'a SyntheticPlacements,
 ) -> impl Iterator<Item = TextArea<'a>> + 'a {
+    with_synthetic_bold(
+        status_cell_areas(status_overlay, metrics, frame, seat_width_px, seat),
+        placements,
+    )
+}
+
+/// Where each cell of a seat's status overlay is drawn — the geometry
+/// [`status_text_areas`] and [`place_synthetic_bold`] both read, as
+/// [`grid_cell_areas`] is for the grid.
+fn status_cell_areas<'a>(
+    status_overlay: Option<&'a ComposedRow>,
+    metrics: CellMetrics,
+    frame: &'a ViewportFrame,
+    seat_width_px: f32,
+    seat: SeatViewport,
+) -> impl Iterator<Item = GridCellArea<'a>> + 'a {
     let Some(status) = frame.status_text.as_deref() else {
         return None.into_iter().flatten();
     };
@@ -13197,37 +14911,43 @@ fn status_text_areas<'a>(
     let narrow_text_areas = row.narrow_glyphs.iter().map(move |glyph| {
         let left = rect[0]
             + glyph.column.saturating_sub(geometry.first_column) as f32 * metrics.cell_width_px;
-        TextArea {
-            buffer: &glyph.buffer,
-            left: left + glyph.left_offset_px,
-            top: rect[1] + glyph.top_offset_px,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: rect[0].floor() as i32,
-                top: rect[1].floor() as i32,
-                right: rect[2].ceil() as i32,
-                bottom: rect[3].ceil() as i32,
+        GridCellArea {
+            area: TextArea {
+                buffer: &glyph.buffer,
+                left: left + glyph.left_offset_px,
+                top: rect[1] + glyph.top_offset_px,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: rect[0].floor() as i32,
+                    top: rect[1].floor() as i32,
+                    right: rect[2].ceil() as i32,
+                    bottom: rect[3].ceil() as i32,
+                },
+                default_color: glyph.color,
+                custom_glyphs: &[],
             },
-            default_color: glyph.color,
-            custom_glyphs: &[],
+            synthetic_bold: glyph.synthetic_bold.as_deref(),
         }
     });
     let wide_text_areas = row.wide_glyphs.iter().map(move |wide| {
         let left = rect[0]
             + wide.column.saturating_sub(geometry.first_column) as f32 * metrics.cell_width_px;
-        TextArea {
-            buffer: &wide.buffer,
-            left: left + wide.left_offset_px,
-            top: rect[1] + wide.top_offset_px,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: left.floor() as i32,
-                top: rect[1].floor() as i32,
-                right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
-                bottom: rect[3].ceil() as i32,
+        GridCellArea {
+            area: TextArea {
+                buffer: &wide.buffer,
+                left: left + wide.left_offset_px,
+                top: rect[1] + wide.top_offset_px,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: left.floor() as i32,
+                    top: rect[1].floor() as i32,
+                    right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
+                    bottom: rect[3].ceil() as i32,
+                },
+                default_color: wide.color,
+                custom_glyphs: &[],
             },
-            default_color: wide.color,
-            custom_glyphs: &[],
+            synthetic_bold: wide.synthetic_bold.as_deref(),
         }
     });
     Some(narrow_text_areas.chain(wide_text_areas))
@@ -13244,20 +14964,30 @@ fn prepare_status_text_atlas(
     atlas: &mut TextAtlas,
     viewport: &Viewport,
     swash_cache: &mut SwashCache,
+    synthetic_bold: &mut SyntheticBoldGlyphs,
     status_overlay: Option<&ComposedRow>,
     metrics: CellMetrics,
     frame: &ViewportFrame,
     seat_width_px: f32,
     seat: SeatViewport,
+    placements: &SyntheticPlacements,
 ) -> Result<(), PrepareError> {
-    text_renderer.prepare(
+    text_renderer.prepare_with_custom(
         device,
         queue,
         font_system,
         atlas,
         viewport,
-        status_text_areas(status_overlay, metrics, frame, seat_width_px, seat),
+        status_text_areas(
+            status_overlay,
+            metrics,
+            frame,
+            seat_width_px,
+            seat,
+            placements,
+        ),
         swash_cache,
+        |request| synthetic_bold.rasterize(request),
     )
 }
 
@@ -13818,7 +15548,8 @@ fn drop_faces_with_no_scalable_em(db: &mut glyphon::fontdb::Database) -> usize {
 ///
 /// So the chain is written down. It is read in this order, first face present on
 /// the machine wins, and it is the same order for every ideograph the window
-/// draws:
+/// draws on this proportional surface. Coordinator ruling, 2026-09-20: this
+/// order is retained for chrome/previews; the grid has its own chain below:
 ///
 /// 1. `Microsoft YaHei UI` — Simplified Chinese, the UI cut, and Windows' own
 ///    interface face since 7. The product's Chinese is 简体, so this is the face
@@ -13855,6 +15586,47 @@ const CJK_FALLBACK_FAMILIES: [&str; 11] = [
     "SimSun",
     "NSimSun",
     "MS Gothic",
+];
+
+/// Grid-only chain. Owner and coordinator ruling, 2026-09-20: NSimSun is
+/// the face the Windows terminal drew through 0.4.2, and the owner prefers
+/// its outlines in the grid. The 2026-09-19 serif-at-12px objection applies
+/// to proportional chrome, not this surface. Monospace labels follow the grid;
+/// proportional chrome and previews retain CJK_FALLBACK_FAMILIES unchanged.
+#[cfg(target_os = "windows")]
+const GRID_CJK_FALLBACK_FAMILIES: [&str; 11] = [
+    "NSimSun",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "DengXian",
+    "Microsoft JhengHei UI",
+    "Microsoft JhengHei",
+    "Yu Gothic UI",
+    "Meiryo UI",
+    "Malgun Gothic",
+    "SimSun",
+    "MS Gothic",
+];
+
+fn grid_cjk_fallback_families() -> &'static [&'static str] {
+    #[cfg(target_os = "windows")]
+    {
+        &GRID_CJK_FALLBACK_FAMILIES
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        platform_cjk_fallback_families()
+    }
+}
+
+/// The named CJK families a third desktop platform tries before conceding to
+/// the library-wide fallback. These are capability requests, not guarantees.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const OTHER_CJK_FALLBACK_FAMILIES: [&str; 4] = [
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK KR",
+    "WenQuanYi Zen Hei",
 ];
 
 /// The files those families live in, in the order the families are read.
@@ -13950,10 +15722,14 @@ fn terminal_font_system() -> FontSystem {
         "seguiemj.ttf",
         "seguisym.ttf",
     ] {
-        let _ = db.load_font_file(fonts.join(file));
+        let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            db.load_font_file(fonts.join(file))
+        });
     }
     for file in CJK_FALLBACK_FONT_FILES {
-        let _ = db.load_font_file(fonts.join(file));
+        let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            db.load_font_file(fonts.join(file))
+        });
     }
     drop_faces_with_no_scalable_em(&mut db);
     db.set_monospace_family(DEFAULT_PRIMARY_FONT_FAMILY);
@@ -13992,7 +15768,11 @@ const CHROME_SANS_FONT_FILES: [&str; 2] = ["SegUIVar.ttf", "segoeui.ttf"];
 fn load_chrome_sans_family(db: &mut glyphon::fontdb::Database, fonts: &std::path::Path) {
     for file in CHROME_SANS_FONT_FILES {
         let first_new_face = db.len();
-        if db.load_font_file(fonts.join(file)).is_err() {
+        if bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+            db.load_font_file(fonts.join(file))
+        })
+        .is_err()
+        {
             continue;
         }
         let Some(family) = db
@@ -14038,6 +15818,32 @@ const MACOS_CJK_FALLBACK_FAMILIES: [&str; 6] = [
     "Apple SD Gothic Neo",
     "Hiragino Sans GB",
 ];
+
+#[cfg(target_os = "windows")]
+fn platform_cjk_fallback_families() -> &'static [&'static str] {
+    &CJK_FALLBACK_FAMILIES
+}
+
+#[cfg(target_os = "macos")]
+fn platform_cjk_fallback_families() -> &'static [&'static str] {
+    &MACOS_CJK_FALLBACK_FAMILIES
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn platform_cjk_fallback_families() -> &'static [&'static str] {
+    &OTHER_CJK_FALLBACK_FAMILIES
+}
+
+/// The single owner of the ordered families Folio permits for a CJK grid cell.
+/// A user's choice leads; automatic mode is exactly the platform chain.
+fn terminal_cjk_family_chain(chosen: &str) -> impl Iterator<Item = &str> {
+    (!chosen.is_empty()).then_some(chosen).into_iter().chain(
+        grid_cjk_fallback_families()
+            .iter()
+            .copied()
+            .filter(move |family| !family.eq_ignore_ascii_case(chosen)),
+    )
+}
 
 /// The grid's face, most wanted first. Asked of the database rather than
 /// asserted, because only one of these is guaranteed.
@@ -14175,7 +15981,9 @@ fn terminal_font_system() -> FontSystem {
     db.load_font_source(glyphon::fontdb::Source::Binary(Arc::new(
         NOTO_COLOR_EMOJI_BYTES,
     )));
-    db.load_system_fonts();
+    bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
+        db.load_system_fonts()
+    });
     // **Before any family is chosen**, because the choice this crate makes is
     // only in force if the database cannot answer it with something nobody
     // chose — see [`drop_faces_with_no_scalable_em`], which is the whole of M2-5's font
@@ -14237,7 +16045,7 @@ fn shape_narrow_buffer(
     font_system: &mut FontSystem,
     metrics: CellMetrics,
     em_scale: f32,
-    family: Family<'static>,
+    family: Family<'_>,
 ) -> Buffer {
     let mut buffer = Buffer::new(
         font_system,
@@ -14249,10 +16057,9 @@ fn shape_narrow_buffer(
     // so the shaping buffer itself must stay horizontally unbounded.
     buffer.set_size(None, Some(metrics.cell_height_px));
     buffer.set_monospace_width(None);
-    let mut attrs = shape_attrs(key, family).metrics(Metrics::new(
-        metrics.font_size_px * em_scale,
-        metrics.cell_height_px,
-    ));
+    let mut attrs = match_grid_attrs(font_system, shape_attrs(key, family), &key.text).metrics(
+        Metrics::new(metrics.font_size_px * em_scale, metrics.cell_height_px),
+    );
     if matches!(family, Family::Monospace) && key.text.chars().count() == 1 {
         attrs = attrs.letter_spacing(
             (metrics.cell_width_px - metrics.primary_advance_px) / metrics.font_size_px,
@@ -14263,16 +16070,17 @@ fn shape_narrow_buffer(
     buffer
 }
 
-fn shape_narrow_buffer_for_key(
+fn shape_narrow_buffer_for_key<'a>(
     key: &ShapeKey,
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     metrics: CellMetrics,
+    cjk_families: &'a TerminalCjkFamilies,
     #[cfg(test)] color_emoji_trial_shapes: &mut u64,
-) -> (Buffer, Family<'static>, NarrowSizePolicy) {
+) -> (Buffer, Family<'a>, NarrowSizePolicy) {
     match font_presentation_route(&key.text, font_system) {
         PresentationRoute::TerminalText => {
-            let family = Family::Monospace;
+            let family = terminal_grid_family(&key.text, cjk_families);
             (
                 shape_narrow_buffer(key, font_system, metrics, 1.0, family),
                 family,
@@ -14589,12 +16397,13 @@ fn is_primary_font_id(font_system: &FontSystem, id: glyphon::fontdb::ID) -> bool
         .is_some_and(|face| face.families.iter().any(|(family, _)| family == primary))
 }
 
-fn shape_narrow_glyphs(
+fn shape_narrow_glyphs_with_cjk(
     cells: &[CapturedCell],
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     metrics: CellMetrics,
     cache: &mut NarrowShapingCache,
+    cjk_families: &TerminalCjkFamilies,
 ) -> Vec<NarrowGlyph> {
     narrow_cell_slots(cells)
         .into_iter()
@@ -14604,15 +16413,15 @@ fn shape_narrow_glyphs(
                 bold: slot.style.flags.contains(CellFlags::BOLD),
                 italic: slot.style.flags.contains(CellFlags::ITALIC),
             };
-            let (buffer, left_offset_px, top_offset_px) =
-                cache.get_or_shape(key, font_system, swash_cache, metrics);
+            let shaped = cache.get_or_shape(key, font_system, swash_cache, metrics, cjk_families);
             let (foreground, _) = resolve_colors(&slot.style);
             NarrowGlyph {
                 column: slot.column,
-                buffer,
-                left_offset_px,
-                top_offset_px,
+                buffer: shaped.buffer,
+                left_offset_px: shaped.left_offset_px,
+                top_offset_px: shaped.top_offset_px,
                 color: Color::rgb(foreground[0], foreground[1], foreground[2]),
+                synthetic_bold: shaped.synthetic_bold,
             }
         })
         .collect()
@@ -14636,12 +16445,13 @@ fn wide_cell_slots(cells: &[CapturedCell]) -> Vec<WideCellSlot> {
         .collect()
 }
 
-fn shape_wide_glyphs(
+fn shape_wide_glyphs_with_cjk(
     cells: &[CapturedCell],
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     metrics: CellMetrics,
     cache: &mut WideShapingCache,
+    cjk_families: &TerminalCjkFamilies,
 ) -> Vec<WideGlyph> {
     wide_cell_slots(cells)
         .into_iter()
@@ -14651,18 +16461,56 @@ fn shape_wide_glyphs(
                 bold: slot.style.flags.contains(CellFlags::BOLD),
                 italic: slot.style.flags.contains(CellFlags::ITALIC),
             };
-            let (buffer, left_offset_px, top_offset_px) =
-                cache.get_or_shape(key, font_system, swash_cache, metrics);
+            let shaped = cache.get_or_shape(key, font_system, swash_cache, metrics, cjk_families);
             let (foreground, _) = resolve_colors(&slot.style);
             WideGlyph {
                 column: slot.column,
-                buffer,
-                left_offset_px,
-                top_offset_px,
+                buffer: shaped.buffer,
+                left_offset_px: shaped.left_offset_px,
+                top_offset_px: shaped.top_offset_px,
                 color: Color::rgb(foreground[0], foreground[1], foreground[2]),
+                synthetic_bold: shaped.synthetic_bold,
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+fn shape_narrow_glyphs(
+    cells: &[CapturedCell],
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    metrics: CellMetrics,
+    cache: &mut NarrowShapingCache,
+) -> Vec<NarrowGlyph> {
+    let cjk_families = resolve_terminal_cjk_families("", font_system);
+    shape_narrow_glyphs_with_cjk(
+        cells,
+        font_system,
+        swash_cache,
+        metrics,
+        cache,
+        &cjk_families,
+    )
+}
+
+#[cfg(test)]
+fn shape_wide_glyphs(
+    cells: &[CapturedCell],
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    metrics: CellMetrics,
+    cache: &mut WideShapingCache,
+) -> Vec<WideGlyph> {
+    let cjk_families = resolve_terminal_cjk_families("", font_system);
+    shape_wide_glyphs_with_cjk(
+        cells,
+        font_system,
+        swash_cache,
+        metrics,
+        cache,
+        &cjk_families,
+    )
 }
 
 /// How a two-cell slot sizes the face it shapes with, and therefore where the result is placed.
@@ -14683,7 +16531,7 @@ fn shape_wide_buffer(
     key: &ShapeKey,
     font_system: &mut FontSystem,
     metrics: CellMetrics,
-    family: Family<'static>,
+    family: Family<'_>,
     size_policy: WideSizePolicy,
 ) -> Buffer {
     let mut buffer = Buffer::new(
@@ -14705,6 +16553,7 @@ fn shape_wide_buffer(
             shape_attrs(key, family).metrics(Metrics::new(em_px, metrics.cell_height_px))
         }
     };
+    let attrs = match_grid_attrs(font_system, attrs, &key.text);
     buffer.set_text(&key.text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
     buffer
@@ -14715,19 +16564,23 @@ fn shape_wide_buffer_for_key(
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     metrics: CellMetrics,
+    cjk_families: &TerminalCjkFamilies,
     #[cfg(test)] color_emoji_trial_shapes: &mut u64,
 ) -> (Buffer, WideSizePolicy) {
     match font_presentation_route(&key.text, font_system) {
-        PresentationRoute::TerminalText => (
-            shape_wide_buffer(
-                key,
-                font_system,
-                metrics,
-                Family::Monospace,
+        PresentationRoute::TerminalText => {
+            let family = terminal_grid_family(&key.text, cjk_families);
+            (
+                shape_wide_buffer(
+                    key,
+                    font_system,
+                    metrics,
+                    family,
+                    WideSizePolicy::MonospaceSlot,
+                ),
                 WideSizePolicy::MonospaceSlot,
-            ),
-            WideSizePolicy::MonospaceSlot,
-        ),
+            )
+        }
         PresentationRoute::TextSymbol => (
             shape_wide_buffer(
                 key,
@@ -14893,6 +16746,161 @@ fn primary_font_supports_text(font_system: &mut FontSystem, text: &str) -> bool 
     text.chars().all(|character| charmap.map(character) != 0)
 }
 
+#[cfg(test)]
+fn font_family_supports_text(font_system: &mut FontSystem, family: &str, text: &str) -> bool {
+    let Some(font_id) = font_system.db().query(&glyphon::fontdb::Query {
+        families: &[Family::Name(family)],
+        weight: Weight::NORMAL,
+        stretch: Stretch::Normal,
+        style: Style::Normal,
+    }) else {
+        return false;
+    };
+    if !font_system.db().face(font_id).is_some_and(|face| {
+        face.families
+            .iter()
+            .any(|(candidate, _)| candidate.eq_ignore_ascii_case(family))
+    }) {
+        return false;
+    }
+    let Some(font) = font_system.get_font(font_id, Weight::NORMAL) else {
+        return false;
+    };
+    let charmap = font.as_swash().charmap();
+    text.chars().all(|character| charmap.map(character) != 0)
+}
+
+#[derive(Debug, Default)]
+struct TerminalCjkFamilies {
+    chosen: String,
+    han: String,
+    hiragana: String,
+    katakana: String,
+    hangul: String,
+    candidates: Vec<Arc<CjkFace>>,
+}
+
+fn resolve_cjk_chain<'a>(
+    chosen: &str,
+    chain: impl Iterator<Item = &'a str>,
+    installed: &[Arc<CjkFace>],
+    simplified_first: bool,
+) -> TerminalCjkFamilies {
+    let mut candidates: Vec<_> = chain
+        .filter_map(|name| {
+            installed
+                .iter()
+                .find(|f| f.name.eq_ignore_ascii_case(name))
+                .cloned()
+        })
+        .collect();
+    // A deliberately chosen Japanese face is honoured. Automatic Han favours
+    // a declared Simplified face over a Japanese-only face, even if reordered
+    // platform data puts the latter first. Other scripts keep their chain order.
+    let han_owner = candidates
+        .iter()
+        .find(|f| !chosen.is_empty() && f.name.eq_ignore_ascii_case(chosen) && f.coverage.han)
+        .or_else(|| {
+            simplified_first
+                .then(|| candidates.iter().find(|f| f.coverage.simplified))
+                .flatten()
+        })
+        .or_else(|| candidates.iter().find(|f| f.coverage.han));
+    let han = han_owner.map_or_else(String::new, |f| f.name.clone());
+    let resolve = |accept: fn(bt_unicode::font_coverage::CjkCoverage) -> bool| {
+        candidates
+            .iter()
+            .find(|f| accept(f.coverage))
+            .map_or_else(String::new, |f| f.name.clone())
+    };
+    let hiragana = resolve(|c| c.hiragana);
+    let katakana = resolve(|c| c.katakana);
+    let hangul = resolve(|c| c.hangul);
+    let chosen = if [&han, &hiragana, &katakana, &hangul]
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case(chosen))
+    {
+        chosen.to_owned()
+    } else {
+        String::new()
+    };
+    candidates.shrink_to_fit();
+    TerminalCjkFamilies {
+        chosen,
+        han,
+        hiragana,
+        katakana,
+        hangul,
+        candidates,
+    }
+}
+
+fn resolve_terminal_cjk_families(
+    chosen: &str,
+    font_system: &mut FontSystem,
+) -> TerminalCjkFamilies {
+    resolve_cjk_chain(
+        chosen,
+        terminal_cjk_family_chain(chosen),
+        &font_system.cjk_catalog().faces,
+        true,
+    )
+}
+
+/// Weight and style never enter ownership. Font declarations decide the script
+/// owner; the cached cmap decides whether it can draw the actual cluster.
+/// A Japanese face may own Han yet lack a Simplified-only ideograph. Such a
+/// cluster falls to the next family in Folio's chain declaring Simplified;
+/// that is a DIFFERENT face and will look different, a stated font limitation.
+fn terminal_grid_family<'a>(text: &str, families: &'a TerminalCjkFamilies) -> Family<'a> {
+    let script = text.chars().map(|c| c.script()).find(|s| {
+        matches!(
+            s,
+            unicode_script::Script::Han
+                | unicode_script::Script::Hiragana
+                | unicode_script::Script::Katakana
+                | unicode_script::Script::Hangul
+        )
+    });
+    let name = match script {
+        Some(unicode_script::Script::Han) => &families.han,
+        Some(unicode_script::Script::Hiragana) => &families.hiragana,
+        Some(unicode_script::Script::Katakana) => &families.katakana,
+        Some(unicode_script::Script::Hangul) => &families.hangul,
+        _ => return Family::Monospace,
+    };
+    if let Some(owner) = families
+        .candidates
+        .iter()
+        .find(|f| f.name == *name && f.covers(text))
+    {
+        return Family::Name(&owner.name);
+    }
+    let qualifies = |f: &&Arc<CjkFace>| match script {
+        Some(unicode_script::Script::Han) => f.coverage.han,
+        Some(unicode_script::Script::Hiragana) => f.coverage.hiragana,
+        Some(unicode_script::Script::Katakana) => f.coverage.katakana,
+        Some(unicode_script::Script::Hangul) => f.coverage.hangul,
+        _ => false,
+    };
+    let fallback = (script == Some(unicode_script::Script::Han))
+        .then(|| {
+            families
+                .candidates
+                .iter()
+                .find(|f| f.coverage.simplified && f.covers(text))
+        })
+        .flatten()
+        .or_else(|| {
+            families
+                .candidates
+                .iter()
+                .filter(qualifies)
+                .find(|f| f.covers(text))
+        });
+    fallback.map_or(Family::Monospace, |f| Family::Name(&f.name))
+}
+
 fn font_family_available(font_system: &FontSystem, family: &str) -> bool {
     font_system.db().faces().any(|face| {
         face.families
@@ -14954,7 +16962,7 @@ fn is_color_cluster_from_family_within_slot(
         && bottom <= slot_height_px + SIZE_TOLERANCE_PX
 }
 
-fn shape_attrs(key: &ShapeKey, family: Family<'static>) -> Attrs<'static> {
+fn shape_attrs<'a>(key: &ShapeKey, family: Family<'a>) -> Attrs<'a> {
     let mut attrs = Attrs::new().family(family);
     if key.bold {
         attrs = attrs.weight(Weight::BOLD);
@@ -15124,6 +17132,116 @@ fn ground_fade_blend() -> wgpu::BlendState {
     wgpu::BlendState {
         color: fade,
         alpha: fade,
+    }
+}
+
+/// One rectangle of a fading surface put back on the frame — see `group.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct GroupInstance {
+    /// The rectangle in clip space, the rect pipeline's own encoding.
+    rect: [f32; 4],
+    /// The group's whole-pixel offset: the texel is the pixel minus this.
+    offset: [f32; 2],
+    opacity: f32,
+}
+
+/// **How a fading surface goes back onto the frame** — the two pipelines of
+/// `group.wgsl` and the one texture binding they share.
+///
+/// Built against the frame's format *without* its sRGB suffix, and that is the
+/// whole point: a pass on that view blends the bytes as they are stored, which
+/// is what a browser does with `opacity`, while every other pipeline in this
+/// crate blends on the sRGB view, in linear light.
+struct GroupPipelines {
+    layout: wgpu::BindGroupLayout,
+    /// Everything a surface lays *on* the window: `src + dst·(1 − αs)`, the
+    /// source already multiplied by the group's opacity.
+    over: wgpu::RenderPipeline,
+    /// A ground's pixels: `src + dst·(1 − o)`, with `o` the blend constant — the
+    /// lerp [`ground_fade_blend`] is, on encoded bytes.
+    cross_fade: wgpu::RenderPipeline,
+}
+
+fn create_group_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> GroupPipelines {
+    let target = format.remove_srgb_suffix();
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("overlay group texture layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("overlay group shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("group.wgsl").into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("overlay group pipeline layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = |label: &str, entry: &str, blend: wgpu::BlendState| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vertex"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<GroupInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4,
+                        1 => Float32x2,
+                        2 => Float32,
+                    ],
+                })],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some(entry),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target,
+                    blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+    let cross_fade = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusConstant,
+        operation: wgpu::BlendOperation::Add,
+    };
+    GroupPipelines {
+        over: pipeline(
+            "overlay group over",
+            "over",
+            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+        ),
+        cross_fade: pipeline(
+            "overlay group cross-fade",
+            "cross_fade",
+            wgpu::BlendState {
+                color: cross_fade,
+                alpha: cross_fade,
+            },
+        ),
+        layout,
     }
 }
 
@@ -15699,14 +17817,12 @@ fn math_horizontal_bounds(
     metrics: CellMetrics,
     surface_width: u32,
     columns: NonZeroU32,
-    left_subpixels: i64,
+    block_left: f32,
     scaled_width: f32,
-    takes_the_indent: bool,
 ) -> Option<(f32, f32)> {
     let pane_left = metrics.padding_px;
     let pane_right =
         (pane_left + columns.get() as f32 * metrics.cell_width_px).min(surface_width as f32);
-    let block_left = math_block_left_px(metrics, left_subpixels, takes_the_indent);
     let visible_left = block_left.max(pane_left);
     let visible_right = (block_left + scaled_width).min(pane_right);
     (visible_right > visible_left).then_some((visible_left, visible_right))
@@ -15856,6 +17972,287 @@ fn indexed_color(index: u8) -> [u8; 3] {
 /// The viewport is set to the whole surface every time. A layer's box is already
 /// in the window's own coordinates — the caller may be inside a seat's viewport
 /// or a float's, and neither is the space these quads were computed in.
+/// **A texture one fading surface is drawn into** — see [`OverlayGroup`].
+///
+/// The size of the frame and in the frame's format, so that every overlay
+/// pipeline draws into it unchanged and at the frame's own coordinates: a
+/// glyph's clip space, a scissor and the video mask's framebuffer position all
+/// speak window pixels, and a texture cut to the surface's bounds would have had
+/// to teach each of them an origin.
+struct GroupTarget {
+    size: (u32, u32),
+    /// The sRGB view: what the surface is drawn into, and what `over` loads —
+    /// decoded to linear light, premultiplied.
+    colour: wgpu::TextureView,
+    /// The view without the sRGB suffix: what a surface nested inside this one
+    /// is put back through, and what `cross_fade` loads — the stored bytes.
+    bytes: wgpu::TextureView,
+    decoded: wgpu::BindGroup,
+    raw: wgpu::BindGroup,
+}
+
+impl GroupTarget {
+    fn new(gpu: &GpuContext, format: wgpu::TextureFormat, size: (u32, u32)) -> Self {
+        let bytes_format = format.remove_srgb_suffix();
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("overlay group texture"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[bytes_format],
+        });
+        let colour = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bytes = texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(bytes_format),
+            ..wgpu::TextureViewDescriptor::default()
+        });
+        let bind = |label: &str, view: &wgpu::TextureView| {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &gpu.group_pipelines.layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                }],
+            })
+        };
+        let decoded = bind("overlay group, decoded", &colour);
+        let raw = bind("overlay group, raw", &bytes);
+        Self {
+            size,
+            colour,
+            bytes,
+            decoded,
+            raw,
+        }
+    }
+}
+
+/// One group as it is drawn this frame: every span naming the same layers
+/// folded into one.
+///
+/// Two groups over the same layers are one surface faded twice — a tip still
+/// fading in when its departure begins — and compositing it at `o₁` and then
+/// at `o₂` is compositing it at `o₁·o₂`, exactly, grounds included. Folding them
+/// here is that identity, and it leaves nesting to mean what it looks like:
+/// one surface standing inside another.
+#[derive(Clone, Debug, PartialEq)]
+struct DrawnGroup {
+    layers: std::ops::Range<usize>,
+    opacity: f32,
+    offset: [i32; 2],
+}
+
+impl DrawnGroup {
+    fn at_rest(&self) -> bool {
+        self.opacity >= 1.0 && self.offset == [0, 0]
+    }
+}
+
+/// What one run of the overlay is made of, in drawing order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GroupItem {
+    /// A layer drawn straight onto whatever this run is being drawn into.
+    Layer(usize),
+    /// A surface drawn into its own texture and put back here — an index into
+    /// [`GroupPlan::groups`].
+    Group(usize),
+}
+
+/// **Which fading surfaces are drawn apart this frame, and in what order** —
+/// the whole of the group decision, taken once per frame from the spans.
+///
+/// A group at rest is not in it at all: its layers are drawn where they stand,
+/// which is what makes a frame with nothing fading the frame this renderer drew
+/// before groups existed. A group drawn at nothing is not in it either, and
+/// neither are its layers: a surface at opacity zero is not on the glass.
+#[derive(Debug, Default)]
+struct GroupPlan {
+    /// The surfaces drawn apart, sorted by first layer and, among those, widest
+    /// first.
+    groups: Vec<DrawnGroup>,
+    /// Layers inside a surface drawn at nothing.
+    hidden: Vec<std::ops::Range<usize>>,
+}
+
+impl GroupPlan {
+    fn new(groups: &[OverlayGroup], layer_count: usize) -> Self {
+        let mut drawn: Vec<DrawnGroup> = Vec::new();
+        for group in groups {
+            let layers = group.layers.start.min(layer_count)..group.layers.end.min(layer_count);
+            if layers.is_empty() {
+                continue;
+            }
+            let opacity = f32::from(group.drawn_opacity()) / 255.0;
+            let [dx, dy] = group.drawn_offset();
+            match drawn.iter_mut().find(|held| held.layers == layers) {
+                Some(held) => {
+                    held.opacity *= opacity;
+                    held.offset = [held.offset[0] + dx, held.offset[1] + dy];
+                }
+                None => drawn.push(DrawnGroup {
+                    layers,
+                    opacity,
+                    offset: [dx, dy],
+                }),
+            }
+        }
+        let hidden = drawn
+            .iter()
+            .filter(|group| group.opacity <= 0.0)
+            .map(|group| group.layers.clone())
+            .collect();
+        drawn.retain(|group| !group.at_rest() && group.opacity > 0.0);
+        drawn.sort_by(|a, b| {
+            a.layers
+                .start
+                .cmp(&b.layers.start)
+                .then(b.layers.end.cmp(&a.layers.end))
+        });
+        Self {
+            groups: drawn,
+            hidden,
+        }
+    }
+
+    fn hidden(&self, layer: usize) -> bool {
+        self.hidden.iter().any(|range| range.contains(&layer))
+    }
+
+    /// The items of `range`, which is either the whole overlay (`inside: None`)
+    /// or the span of group `inside` itself.
+    fn items(&self, range: std::ops::Range<usize>, inside: Option<usize>) -> Vec<GroupItem> {
+        let mut items = Vec::new();
+        let mut at = range.start;
+        while at < range.end {
+            let child = self
+                .groups
+                .iter()
+                .enumerate()
+                .filter(|(index, group)| {
+                    Some(*index) != inside
+                        && group.layers.start == at
+                        && group.layers.end <= range.end
+                })
+                .max_by_key(|(_, group)| group.layers.end)
+                .map(|(index, _)| index);
+            match child {
+                Some(index) => {
+                    items.push(GroupItem::Group(index));
+                    at = self.groups[index].layers.end;
+                }
+                None => {
+                    if !self.hidden(at) {
+                        items.push(GroupItem::Layer(at));
+                    }
+                    at += 1;
+                }
+            }
+        }
+        items
+    }
+}
+
+/// `bounds` less every rectangle in `cut`, as rectangles — for the part of a
+/// group that composites *over* the frame once its grounds are taken out.
+///
+/// Cut into horizontal slabs at every edge in play and, inside each slab, into
+/// the runs no cut covers. Each piece reuses the very `f32` edges it was cut
+/// from, so a piece and the ground beside it rasterise to a partition of the
+/// pixels between them: no pixel is put back twice, and none is missed.
+fn rects_outside(bounds: [f32; 4], cut: &[[f32; 4]]) -> Vec<[f32; 4]> {
+    let cut: Vec<[f32; 4]> = cut
+        .iter()
+        .filter_map(|rect| crop_to(*rect, bounds))
+        .collect();
+    if cut.is_empty() {
+        return vec![bounds];
+    }
+    let mut edges: Vec<f32> = vec![bounds[1], bounds[3]];
+    for rect in &cut {
+        edges.push(rect[1]);
+        edges.push(rect[3]);
+    }
+    edges.sort_by(f32::total_cmp);
+    edges.dedup();
+    let mut pieces = Vec::new();
+    for slab in edges.windows(2) {
+        let (top, bottom) = (slab[0], slab[1]);
+        let mut covered: Vec<(f32, f32)> = cut
+            .iter()
+            .filter(|rect| rect[1] <= top && rect[3] >= bottom)
+            .map(|rect| (rect[0], rect[2]))
+            .collect();
+        covered.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut left = bounds[0];
+        for (from, to) in covered {
+            if from > left {
+                pieces.push([left, top, from, bottom]);
+            }
+            left = left.max(to);
+        }
+        if left < bounds[2] {
+            pieces.push([left, top, bounds[2], bottom]);
+        }
+    }
+    pieces
+}
+
+/// A group's pieces in clip space, ready for `group.wgsl`.
+fn group_instances(
+    rects: &[[f32; 4]],
+    offset: [i32; 2],
+    opacity: f32,
+    surface: (u32, u32),
+) -> Vec<GroupInstance> {
+    rects
+        .iter()
+        .map(|rect| GroupInstance {
+            rect: surface_pixel_rect_with_alpha(*rect, [0, 0, 0], 0.0, surface.0, surface.1).rect,
+            offset: [offset[0] as f32, offset[1] as f32],
+            opacity,
+        })
+        .collect()
+}
+
+/// Open a pass over `view` with the overlay's whole-surface viewport and
+/// scissor — the state the overlay loop has always drawn in.
+fn begin_overlay_pass<'encoder>(
+    encoder: &'encoder mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
+    label: &str,
+    surface: (u32, u32),
+) -> wgpu::RenderPass<'encoder> {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    pass.set_viewport(0.0, 0.0, surface.0 as f32, surface.1 as f32, 0.0, 1.0);
+    set_scissor(
+        &mut pass,
+        SeatViewport::whole(surface.0, surface.1),
+        surface,
+    );
+    pass
+}
+
 fn draw_video_stage(
     pass: &mut wgpu::RenderPass<'_>,
     gpu: &GpuContext,
@@ -15976,6 +18373,7 @@ pub fn measure_preview_text_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
     use bt_transcript::CapturedCell;
     use bt_viewport::horizontal::HorizontalProjection;
 
@@ -16724,6 +19122,7 @@ mod tests {
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
             picture_opacity_milli: 1000,
+            face_milli: None,
             selection_spans: Vec::new(),
         }
     }
@@ -16860,18 +19259,22 @@ mod tests {
             metrics,
             200,
             NonZeroU32::new(10).unwrap(),
-            inset_subpixels,
+            math_block_left_px(metrics, inset_subpixels, false),
             40.0,
-            false,
         )
         .unwrap();
         let expected_left = metrics.padding_px + 5.0;
         assert!((visible_left - expected_left).abs() <= 1.0);
 
         // A rendered block gets a small left indent so its tight-cropped ink lines up with text.
-        let (rendered_left, _) =
-            math_horizontal_bounds(metrics, 200, NonZeroU32::new(10).unwrap(), 0, 40.0, true)
-                .unwrap();
+        let (rendered_left, _) = math_horizontal_bounds(
+            metrics,
+            200,
+            NonZeroU32::new(10).unwrap(),
+            math_block_left_px(metrics, 0, true),
+            40.0,
+        )
+        .unwrap();
         assert!(rendered_left > metrics.padding_px + 1.0);
 
         let hit = [visible_left, 10.0, visible_right, 30.0];
@@ -16905,8 +19308,11 @@ mod tests {
         // 60 columns is wider than this seat holds: padding + 60 * 18 = 1096.
         let columns = NonZeroU32::new(60).unwrap();
         let (left, right) = math_horizontal_bounds(
-            metrics, SEAT_WIDTH, columns, 0, 4000.0, // an image far wider than either extent
-            true,
+            metrics,
+            SEAT_WIDTH,
+            columns,
+            math_block_left_px(metrics, 0, true),
+            4000.0, // an image far wider than either extent
         )
         .expect("a visible band");
         assert!(left >= metrics.padding_px);
@@ -16928,8 +19334,14 @@ mod tests {
             toolbar_left + total
         );
         // Red gate: the same call against the window extent does escape.
-        let (_, window_right) =
-            math_horizontal_bounds(metrics, WINDOW_WIDTH, columns, 0, 4000.0, true).unwrap();
+        let (_, window_right) = math_horizontal_bounds(
+            metrics,
+            WINDOW_WIDTH,
+            columns,
+            math_block_left_px(metrics, 0, true),
+            4000.0,
+        )
+        .unwrap();
         assert!(
             window_right > SEAT_WIDTH as f32,
             "the pin would pass even if a draw site read the window"
@@ -17094,11 +19506,15 @@ mod tests {
         }
 
         // ③ One function answers for every chip.
-        let source = include_str!("lib.rs");
+        //
+        // Asked of the crate and not of this file (P8): a chip struck from a
+        // second place is a third occurrence wherever that place is written,
+        // and `scheme.rs` and `theme.rs` are where somebody would write it.
         // Spelled in two halves so this line is not itself a fourth occurrence.
+        let spelling = concat!("float_tag_rects", "(");
+        let struck = found(needle!(Pattern::text(spelling)), View::Raw).len();
         assert_eq!(
-            source.matches(concat!("float_tag_rects", "(")).count(),
-            2,
+            struck, 2,
             "one definition and one call site — a chip that struck its own \
              colours would be a third"
         );
@@ -17552,6 +19968,33 @@ mod tests {
         )
     }
 
+    fn shape_row_for_test_with_cjk(
+        cells: &[CapturedCell],
+        font_system: &mut FontSystem,
+        metrics: CellMetrics,
+        cjk_family: &str,
+    ) -> (Vec<NarrowGlyph>, Vec<WideGlyph>) {
+        let cjk_families = resolve_terminal_cjk_families(cjk_family, font_system);
+        let mut swash_cache = SwashCache::new();
+        let narrow = shape_narrow_glyphs_with_cjk(
+            cells,
+            font_system,
+            &mut swash_cache,
+            metrics,
+            &mut NarrowShapingCache::new(),
+            &cjk_families,
+        );
+        let wide = shape_wide_glyphs_with_cjk(
+            cells,
+            font_system,
+            &mut swash_cache,
+            metrics,
+            &mut WideShapingCache::new(),
+            &cjk_families,
+        );
+        (narrow, wide)
+    }
+
     fn assert_narrow_glyph_origins(glyphs: &[NarrowGlyph], metrics: CellMetrics) {
         const X_TOLERANCE: f32 = 0.0001;
 
@@ -17594,6 +20037,18 @@ mod tests {
             .and_then(|face| face.families.first())
             .map(|(family, _)| family.clone())
             .expect("glyph font has a family")
+    }
+
+    fn wide_text_cells(text: &str) -> Vec<CapturedCell> {
+        text.chars()
+            .flat_map(|character| {
+                let mut lead = CapturedCell::plain(character.to_string());
+                lead.style.flags.insert(CellFlags::WIDE_CHAR);
+                let mut spacer = CapturedCell::plain("");
+                spacer.wide_spacer = true;
+                [lead, spacer]
+            })
+            .collect()
     }
 
     fn raster_content(font_system: &mut FontSystem, buffer: &Buffer) -> glyphon::SwashContent {
@@ -19107,13 +21562,17 @@ mod tests {
         // ① The substance is the fifteen columns the rows really take, and the
         //    region is ⑨ i's ground round it: one whole cell column on the left,
         //    which the pane edge takes straight back because a source row begins
-        //    at column zero, and on the right that column plus the four the two
-        //    marks need. The same rectangle the ground is drawn under and the
-        //    same one `math_band_face` answers with.
+        //    at column zero, and on the right that column plus the five the two
+        //    marks need (`UI-SPEC.md` H3, 2026-09-23: `MATH_TOOL_BUTTON_LOGICAL_PX`
+        //    grew from 19 to 22, and `math_tool_cluster_width_px`'s two marks
+        //    plus their gap now round up to five ten-pixel cells at this
+        //    fixture's own metrics rather than four). The same rectangle the
+        //    ground is drawn under and the same one `math_band_face` answers
+        //    with.
         let ink_right = metrics.padding_px + 15.0 * metrics.cell_width_px;
         assert_eq!(geometry.ink, [metrics.padding_px, 28.0, ink_right, 88.0]);
         assert_eq!(geometry.block[0], metrics.padding_px);
-        assert_eq!(geometry.block[2], ink_right + 5.0 * metrics.cell_width_px);
+        assert_eq!(geometry.block[2], ink_right + 6.0 * metrics.cell_width_px);
         assert_eq!([geometry.block[1], geometry.block[3]], [28.0, 88.0]);
         assert_eq!(boxes.block, geometry.block);
         assert!(
@@ -19258,50 +21717,64 @@ mod tests {
     /// wrong in every split window.
     #[test]
     fn the_band_accessors_are_given_a_seat_and_never_take_one() {
-        let source = include_str!("lib.rs");
-        for opening in [
-            "pub fn math_tool_boxes(",
-            "pub fn math_band_face(",
-            "pub fn math_hit_test(",
-            "fn math_failure_geometry(",
+        // The last of the six is the one that does the arithmetic: it takes the
+        // seat too, so nothing below the other five can quietly reach for the
+        // field again.
+        for name in [
+            "math_tool_boxes",
+            "math_band_face",
+            "math_band_trace",
+            "math_hit_test",
+            "math_failure_geometry",
+            "math_block_geometry",
         ] {
-            let block = block_beginning_with(source, opening);
-            assert!(!block.is_empty(), "{opening} is declared in this file");
-            assert!(
-                block.contains("seat: SeatViewport"),
-                "{opening} takes the band's own pane:\n{block}"
+            // The item, not a slice of a file (P8), and a refusal rather than
+            // an empty string when it is not declared.
+            // `View::CodeKeepingLiterals` and not `View::Raw` because an item's
+            // bytes begin at its first attribute, so the raw reading would take
+            // these accessors' own doc comments as code — the prose above
+            // `math_band_trace` names the field this forbids.
+            let item = Scope::Item(ItemQuery::method("WindowRenderer", name));
+            let handed = found_in(
+                needle!(Pattern::text("seat: SeatViewport")),
+                View::CodeKeepingLiterals,
+                item.clone(),
+            );
+            let reaches = found_in(
+                needle!(Pattern::text("self.seat")),
+                View::CodeKeepingLiterals,
+                item,
             );
             assert!(
-                !block.contains("self.seat"),
-                "{opening} reads the focused pane's rectangle instead of the one it was \
-                 handed:\n{block}"
+                !handed.is_empty(),
+                "{name} does not take the band's own pane"
+            );
+            assert!(
+                reaches.is_empty(),
+                "{name} reads the focused pane's rectangle instead of the one it \
+                 was handed:\n{}",
+                reaches.report(source())
             );
         }
-        // And the one that does the arithmetic takes it too, so nothing below
-        // these three can quietly reach for the field again.
-        let geometry = block_beginning_with(source, "fn math_block_geometry(");
-        assert!(
-            geometry.contains("seat: SeatViewport") && !geometry.contains("self.seat"),
-            "the block's own geometry is a function of the seat it is handed:\n{geometry}"
-        );
     }
 
-    /// PIN (owner's report 2026-09-14, T-MATH-TOOLS-SEAT): **a picture that has
-    /// not caught up draws no marks, rather than another block's.**
+    /// PIN (owner's report 2026-09-14, re-ruled 2026-09-20 by
+    /// T-MARKS-FRAME-IN-HAND): **the band is named and the picture is the frame
+    /// being drawn.**
     ///
-    /// This is the defect itself, in one line. The marks are built in `bt_app`
-    /// from a pane's *last presented* frame, and the picture that lights a band
-    /// is presented after the gesture that lit it — so the frame in hand at the
-    /// moment the pointer crosses onto a formula is the one from before it
-    /// crossed. Asked "where do this band's marks stand" of that frame, the only
-    /// true answer is "this frame does not have that band lit".
+    /// The 2026-09-14 premise was that marks appear on hover and then stand
+    /// still, so a previous picture was allowed to answer nothing for one frame.
+    /// The band now also travels while its height changes. The named lookup is
+    /// unchanged — a neighbouring lit block can never answer — but the caller
+    /// must ask the exact picture being drawn, so there is no honest stale-frame
+    /// gap left to preserve.
     ///
     /// MUTATION: answer with whichever placement in the frame carries
     /// `toolbar_visible` — the reading this ticket removed — and both assertions
     /// return the *other* band's boxes. That is the owner's screenshot: the
     /// ground on the block under the pointer, the marks one block above it.
     #[test]
-    fn a_frame_that_has_not_caught_up_places_no_marks_at_all() {
+    fn the_band_is_named_and_the_picture_is_the_frame_being_drawn() {
         let stale = seat_test_frame(0);
         let ahead = seat_test_frame(1);
 
@@ -19313,6 +21786,54 @@ mod tests {
             seat_test_boxes(&ahead, &stale.math_blocks[0].anchor).is_none(),
             "and the band it left is not lit in the picture it moved to"
         );
+    }
+
+    /// Both endpoints and every intermediate frame are the geometry the product
+    /// draws. Unequal source/raster widths expose the old face-branch snap.
+    #[test]
+    fn math_band_edges_travel_continuously_across_both_faces() {
+        for to_source in [true, false] {
+            let mut frame = seat_test_frame(0);
+            frame.math_blocks[0].source_width_cells = 6;
+            frame.math_blocks[0].left_subpixels = 2 * SUBPIXELS_PER_PX;
+            let mut widths = Vec::new();
+            let mut edges = Vec::new();
+            for step in 0..=1000 {
+                let face = if to_source { step } else { 1000 - step };
+                let p = &mut frame.math_blocks[0];
+                p.display = if face == 1000 {
+                    MathBlockDisplay::Source
+                } else {
+                    MathBlockDisplay::Rendered
+                };
+                p.left_subpixels = if p.display == MathBlockDisplay::Source {
+                    0
+                } else {
+                    2 * SUBPIXELS_PER_PX
+                };
+                p.picture_opacity_milli = 1000 - face;
+                p.face_milli = if step == 0 || step == 1000 {
+                    None
+                } else {
+                    Some(face)
+                };
+                p.clip_height_subpixels = (40_000 + i64::from(face) * 40) * SUBPIXELS_PER_PX / 1000;
+                let geometry = seat_test_geometry(&frame, 0);
+                edges.push([geometry.block[0], geometry.block[2]]);
+                widths.push(geometry.block[2] - geometry.block[0]);
+            }
+            let sign = if to_source { -1.0 } else { 1.0 };
+            for pair in edges.windows(2) {
+                for axis in 0..2 {
+                    assert!(sign * (pair[1][axis] - pair[0][axis]) >= -0.001);
+                    assert!(
+                        (pair[1][axis] - pair[0][axis]).abs() <= 1.0,
+                        "one-frame edge flip: {pair:?}, direction={to_source}"
+                    );
+                }
+            }
+            assert!((widths[1000] - widths[999]).abs() <= 1.0);
+        }
     }
 
     /// PIN (owner's report 2026-09-14, T-MATH-TOOLS-SEAT): **the name is the
@@ -20275,83 +22796,146 @@ mod tests {
         headless_device(format, true, None).ok()
     }
 
-    /// Every `#[cfg(test)]` module in one file's source, joined — the region a
-    /// rule about *test* code is allowed to be checked against, so that the
-    /// production constructors and their own definitions are out of scope.
+    // ── the crate asked, instead of the directory listed (P8) ─────────────
+    //
+    // `docs/plans/bt-app-split-prep.md` §3.3 named the `crate_sources` walker
+    // that stood here as one of three non-recursive walkers: it read
+    // `crates/bt-render/src/` one directory deep, which was every file of this
+    // crate while that directory was flat and none of the files in the first
+    // subdirectory anybody added. The same sentence was true of the ten
+    // bindings under it that read this file's own text — a fact that moves to
+    // a file beside this one stops being read, silently and without changing a
+    // verdict. What stands here instead is the universe this crate's own `mod`
+    // declarations describe, and a file on the disk that no declaration reaches
+    // is reported rather than skipped.
+
+    /// **This crate, indexed once per process** — the workspace read, this
+    /// package's own `src/` declared as the universe and lowered, on the first
+    /// ask of the process, behind one call.
+    fn source() -> &'static Index {
+        Index::of_package("bt-render")
+    }
+
+    /// One search over every file this crate's declarations reach, refusing
+    /// loudly rather than answering a smaller question.
+    fn found(needle: Needle, view: View) -> Found {
+        source()
+            .search(&Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The same, narrowed to one named scope — a Rust path, never a file.
+    fn found_in(needle: Needle, view: View, scope: Scope) -> Found {
+        source()
+            .search(&Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **Where the one occurrence of `needle` stands**, as a byte offset into
+    /// the union of this crate's sources.
     ///
-    /// Comment lines go first, so that a sentence naming a constructor can never
-    /// look like a call to it.
-    fn test_code_in(source: &str) -> String {
-        let lines: Vec<&str> = source
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect();
-        let mut collected = Vec::new();
-        let mut index = 0;
-        while index < lines.len() {
-            let opens_a_test_module = lines[index].trim() == concat!("#[cfg(", "test)]")
-                && lines
-                    .get(index + 1)
-                    .is_some_and(|line| line.trim_start().starts_with("mod "));
-            if !opens_a_test_module {
-                index += 1;
+    /// The three order gates below used to take `source.find(…)` over one
+    /// file's text; a union offset is the same fact said about the crate. Two
+    /// offsets are comparable for the reason §2.2 gives: the union is the files
+    /// laid out in path order with their boundaries recorded, and no match may
+    /// cross one, so two sites inside one file order exactly as that file does.
+    /// More than one match is a refusal and not a first: an order gate whose
+    /// landmark stopped being unique is asking about a place it cannot name.
+    fn only(needle: Needle, view: View, what: &str) -> usize {
+        let hits = found(needle, view);
+        assert_eq!(
+            hits.len(),
+            1,
+            "{what} has to stand exactly once for its place to mean anything\n{}",
+            hits.report(source())
+        );
+        hits.spans()[0].start()
+    }
+
+    /// Whether an identity is declared inside test code.
+    ///
+    /// **Item grain and not file grain.** Every test module in this crate is an
+    /// inline `#[cfg(test)] mod` inside a file the product compiles, so
+    /// `FileRecord::permits_product` answers "product" for all of them; the
+    /// predicate written on the enclosing inline module is what tells the two
+    /// halves of `lib.rs` apart, and it is carried on the identity (§2.4).
+    fn is_test_code(identity: &bt_source::ItemIdentity) -> bool {
+        identity
+            .variant
+            .predicates()
+            .iter()
+            .any(|predicate| predicate == "test")
+    }
+
+    /// **One module's own code, with every comment masked out and every space
+    /// taken out with them.**
+    ///
+    /// The replacement for the reading of this file's own text that this module
+    /// used to squeeze: a module is a Rust path and not a file, so the day this
+    /// crate's root is split the path still resolves, and the comment masking is
+    /// `View::CodeKeepingLiterals`' (§2.1) rather than a line filter's — which
+    /// is a repair, because the filter dropped whole `//` lines and left every
+    /// trailing one, so a sentence written after a semicolon could answer a
+    /// question about code.
+    ///
+    /// A module's bytes are contiguous inside one file, so nothing squeezed
+    /// here can match across a file boundary (§2.2 rule 3).
+    fn module_code_without_space(path: &str) -> String {
+        let index = source();
+        let module = index
+            .modules()
+            .iter()
+            .find(|module| module.module_paths().iter().any(|it| it == path))
+            .unwrap_or_else(|| panic!("this crate declares no module `{path}`"));
+        let span = module.span();
+        let mut code = String::with_capacity(span.len());
+        let mut at = span.start();
+        for comment in index.comments() {
+            if comment.span().start() < at || comment.span().end() > span.end() {
                 continue;
             }
-            index += 1;
-            let indent = indent_of(lines[index]);
-            let closing = format!("{}}}", " ".repeat(indent));
-            while index < lines.len() {
-                collected.push(lines[index]);
-                if lines[index] == closing {
-                    break;
-                }
-                index += 1;
-            }
-            index += 1;
+            code.extend(
+                index.union()[at..comment.span().start()]
+                    .chars()
+                    .filter(|character| !character.is_whitespace()),
+            );
+            at = comment.span().end();
         }
-        collected.join("\n")
+        code.extend(
+            index.union()[at..span.end()]
+                .chars()
+                .filter(|character| !character.is_whitespace()),
+        );
+        code
     }
 
-    /// The body of the item whose first line begins with `opening`, from that
-    /// line to the `}` at the same indent. Empty when there is no such item.
-    fn block_beginning_with(source: &str, opening: &str) -> String {
-        let lines: Vec<&str> = source.lines().collect();
-        let Some(start) = lines
-            .iter()
-            .position(|line| line.trim_start().starts_with(opening))
-        else {
-            return String::new();
-        };
-        let closing = format!("{}}}", " ".repeat(indent_of(lines[start])));
-        let end = lines[start..]
-            .iter()
-            .position(|line| *line == closing)
-            .map_or(lines.len(), |offset| start + offset + 1);
-        lines[start..end].join("\n")
-    }
-
-    fn indent_of(line: &str) -> usize {
-        line.len() - line.trim_start().len()
-    }
-
-    /// This crate's `src`, file by file.
-    fn crate_sources() -> Vec<(String, String)> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files: Vec<(String, String)> = std::fs::read_dir(&root)
-            .expect("this crate's src directory")
-            .map(|entry| entry.expect("a directory entry").path())
-            .filter(|path| path.extension().is_some_and(|kind| kind == "rs"))
-            .map(|path| {
-                let name = path
-                    .file_name()
-                    .expect("a file name")
-                    .to_string_lossy()
-                    .into_owned();
-                (name, std::fs::read_to_string(&path).expect("a source file"))
-            })
-            .collect();
-        files.sort();
-        files
+    /// **The evidence §3.2 asks a migrated walker to ship**, kept rather than
+    /// spent: the declared file set, printed in full, and the cross-check that
+    /// says the disk holds nothing the declarations do not reach.
+    ///
+    /// This is what the deleted directory listing meant by seeing the crate,
+    /// said about declarations instead of about a listing, and it is also what
+    /// makes a `.rs` file dropped into `src/` with no `mod` for it a red test
+    /// rather than a file every gate below silently skips.
+    #[test]
+    fn every_file_of_the_renderer_is_reached_by_a_declaration() {
+        let index = source();
+        // Printed, not only compared: §3.2 asks for the sorted list of paths
+        // and not a count, and `--nocapture` is where a ticket takes it from.
+        for file in index.files() {
+            println!("declared: {}", file.path().display());
+        }
+        assert!(
+            index.cross_check().agrees(),
+            "a `.rs` file under this crate's `src/` is reached by no \
+             declaration, so no gate below is read against it:\n{}",
+            index.cross_check().report()
+        );
+        assert!(
+            index.files().len() >= 12,
+            "the reading must actually see the crate, saw {}",
+            index.files().len()
+        );
     }
 
     /// PIN (§7.37) — **no test in this crate stands up a headless device except
@@ -20385,43 +22969,68 @@ mod tests {
             concat!("headless_", "on("),
             concat!("headless_under_a_", "texture_ceiling("),
         ];
-        let doorway = block_beginning_with(
-            &test_code_in(include_str!("lib.rs")),
-            concat!("fn headless_", "device("),
-        );
-        assert!(
-            !doorway.is_empty(),
-            "the one door has to exist before anything can be held to it"
-        );
-        assert_eq!(
-            doorway.matches(constructors[0]).count(),
-            1,
-            "the door asks for this machine's adapter exactly once"
-        );
-        assert_eq!(
-            doorway.matches(constructors[1]).count(),
-            1,
-            "and for the software adapter exactly once"
-        );
-        assert_eq!(
-            doorway.matches(constructors[3]).count(),
-            1,
-            "and for a device under a texture ceiling exactly once"
-        );
+        // The door is an item of this crate and not a stretch of this file
+        // (P8): a door moved into `src/headless/` is the same door, and the
+        // query refuses out loud rather than answering about no bytes at all.
+        let door = Scope::Item(ItemQuery::function(concat!("headless_", "device")));
+        for (which, what) in [
+            (0, "this machine's adapter"),
+            (1, "the software adapter"),
+            (3, "a device under a texture ceiling"),
+        ] {
+            let asked = found_in(
+                needle!(Pattern::text(constructors[which])),
+                View::CodeKeepingLiterals,
+                door.clone(),
+            )
+            .len();
+            assert_eq!(asked, 1, "the door asks for {what} exactly once");
+        }
 
-        for (name, source) in crate_sources() {
-            let outside_the_door = test_code_in(&source).replace(&doorway, "");
-            for constructor in constructors {
-                assert_eq!(
-                    outside_the_door.matches(constructor).count(),
-                    0,
-                    "{name}: a test stands up a headless device with \
-                     `{constructor}` instead of going through the one door — \
-                     that device takes no lock, and two unlocked devices in one \
-                     process is `STATUS_ACCESS_VIOLATION`"
-                );
+        // **The same claim as an owner set** (§4.1): every item that names one
+        // of the four constructors in test code, and how often. A total cannot
+        // say this — "no test builds a device" is a statement about *which*
+        // items name the constructors, and the door is one of them.
+        //
+        // **P8 reconciliation, written down rather than adjusted away** (§6.0
+        // rule 5). The walk this replaces took "test code" to be `#[cfg(test)]
+        // mod` blocks, which is how it is spelled in a file; this reading takes
+        // it to be the `#[cfg(test)]` an item stands under, wherever it is
+        // written (§2.4). The two disagree by one item, and it is a real one:
+        // `GpuContext::headless_under_a_texture_ceiling` is itself
+        // `#[cfg(test)]`, and the walk never looked inside it. Its two
+        // occurrences are its own declaration and the single call to the one
+        // real constructor that every one of these four makes — the plumbing
+        // the door stands on, not a test standing up a device. It is named
+        // here so that a second such helper is a red test rather than a number
+        // that grew.
+        let mut owners: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for constructor in constructors {
+            for (owner, count) in found(
+                needle!(Pattern::text(constructor)),
+                View::CodeKeepingLiterals,
+            )
+            .owners(source())
+            {
+                if is_test_code(&owner) {
+                    *owners.entry(owner.name.clone()).or_default() += count;
+                }
             }
         }
+        assert_eq!(
+            owners,
+            std::collections::BTreeMap::from([
+                (concat!("headless_", "device").to_owned(), 3),
+                (
+                    concat!("headless_under_a_", "texture_ceiling").to_owned(),
+                    2
+                ),
+            ]),
+            "a test stands up a headless device somewhere other than the one \
+             door — that device takes no lock, and two unlocked devices in one \
+             process is `STATUS_ACCESS_VIOLATION`"
+        );
     }
 
     /// PIN (§7.1.6c-4b) — the ground's two percentages are clamped where the
@@ -20850,6 +23459,61 @@ mod tests {
         assert_eq!((slots[0].column, slots[0].text.as_str()), (0, "A"));
         assert_eq!((slots[1].column, slots[1].text.as_str()), (2, "B"));
         assert_ne!(slots[0].style, slots[1].style);
+    }
+
+    #[test]
+    fn ime_trace_observes_actual_preedit_writes_without_changing_frames() {
+        let mut frame = ViewportFrame {
+            columns: NonZeroU32::new(8).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(8),
+            grid_rows: NonZeroU32::new(2).unwrap(),
+            rows: NonZeroU32::new(2).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: vec![CapturedCell::plain(""); 16],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 2,
+                visible: true,
+            },
+            cell_anchors: test_cell_anchors(16),
+            row_map: test_row_map(2),
+            selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(8),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        for (text, visible, expected) in [
+            ("synthetic", true, true),
+            ("synthetic", false, false),
+            ("", true, false),
+            ("\u{0301}", true, false),
+        ] {
+            frame.cursor.visible = visible;
+            let preedit = Preedit {
+                text: text.to_owned(),
+                cursor_byte: None,
+            };
+            let ordinary = compose_preedit(&frame, Some(&preedit)).unwrap();
+            let (traced, written) = compose_preedit_traced(&frame, Some(&preedit)).unwrap();
+            assert_eq!(written, expected);
+            assert_eq!(ordinary.frame, traced.frame);
+            assert_eq!(ordinary.ime_caret, traced.ime_caret);
+        }
+        assert!(!compose_preedit_traced(&frame, None).unwrap().1);
+        // A wide cluster at the final grid cell wraps outside the grid and writes nothing.
+        frame.cursor.row = 1;
+        frame.cursor.column = 7;
+        let wide = Preedit {
+            text: "\u{1f600}".to_owned(),
+            cursor_byte: None,
+        };
+        assert!(!compose_preedit_traced(&frame, Some(&wide)).unwrap().1);
     }
 
     #[test]
@@ -21567,6 +24231,113 @@ mod tests {
         );
     }
 
+    /// RED (issue #10) — the grid, rather than cosmic-text's generic monospace
+    /// fallback walk, chooses the first installed family in Folio's CJK chain.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn grid_han_uses_the_first_available_cjk_family() {
+        let mut font_system = terminal_font_system();
+        let expected = GRID_CJK_FALLBACK_FAMILIES[0];
+        if !font_family_supports_text(&mut font_system, expected, "你好世界") {
+            eprintln!("skipped: {expected} is absent or does not cover the Han fixture");
+            return;
+        }
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let shaped = shape_wide_for_test(&wide_text_cells("你好世界"), &mut font_system, metrics);
+        assert_eq!(shaped.len(), 4);
+        for glyph in shaped.iter().map(|slot| first_layout_glyph(&slot.buffer)) {
+            assert_ne!(glyph.glyph_id, 0, "the chosen face must cover Han");
+            assert_eq!(
+                glyph_family(&font_system, &glyph),
+                expected,
+                "the grid must name the first available family in its CJK chain"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn grid_han_uses_pingfang_and_never_gb18030_bitmap() {
+        let mut font_system = terminal_font_system();
+        let expected = MACOS_CJK_FALLBACK_FAMILIES[0];
+        if !font_family_supports_text(&mut font_system, expected, "你好世界") {
+            eprintln!("skipped: {expected} is absent or does not cover the Han fixture");
+            return;
+        }
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let shaped = shape_wide_for_test(&wide_text_cells("你好世界"), &mut font_system, metrics);
+        for family in shaped
+            .iter()
+            .map(|slot| glyph_family(&font_system, &first_layout_glyph(&slot.buffer)))
+        {
+            assert_eq!(family, expected);
+            assert_ne!(family, "GB18030 Bitmap");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn chosen_cjk_family_isolated_from_ascii_and_clears_to_automatic() {
+        let mut font_system = terminal_font_system();
+        let Some(chosen) = ["DengXian", "SimSun"]
+            .into_iter()
+            .find(|family| font_family_supports_text(&mut font_system, family, "你好世界"))
+        else {
+            eprintln!("skipped: neither DengXian nor SimSun covers the Han fixture");
+            return;
+        };
+        let Some(automatic) = GRID_CJK_FALLBACK_FAMILIES
+            .iter()
+            .copied()
+            .find(|family| font_family_supports_text(&mut font_system, family, "你好世界"))
+        else {
+            eprintln!("skipped: no automatic CJK family covers the Han fixture");
+            return;
+        };
+        let primary = primary_font_family(&font_system).to_owned();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let mut row = vec![CapturedCell::plain("A")];
+        row.extend(wide_text_cells("你好世界"));
+
+        let (ascii, custom) = shape_row_for_test_with_cjk(&row, &mut font_system, metrics, chosen);
+        assert!(custom.iter().all(|slot| {
+            glyph_family(&font_system, &first_layout_glyph(&slot.buffer)) == chosen
+        }));
+        assert_eq!(ascii.len(), 1, "the mixed row has one narrow ASCII cell");
+        assert_eq!(
+            glyph_family(&font_system, &first_layout_glyph(&ascii[0].buffer)),
+            primary,
+            "the CJK choice must not replace the monospace role"
+        );
+
+        let (_, cleared) = shape_row_for_test_with_cjk(&row, &mut font_system, metrics, "");
+        assert!(
+            cleared.iter().all(|slot| {
+                glyph_family(&font_system, &first_layout_glyph(&slot.buffer)) == automatic
+            }),
+            "clearing the setting must restore the platform chain"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn every_cjk_script_the_grid_owns_resolves_to_a_named_family() {
+        let mut font_system = terminal_font_system();
+        let families = resolve_terminal_cjk_families("", &mut font_system);
+        for (text, resolved) in [
+            ("你", families.han.as_str()),
+            ("あ", families.hiragana.as_str()),
+            ("ア", families.katakana.as_str()),
+            ("한", families.hangul.as_str()),
+        ] {
+            assert!(!resolved.is_empty(), "no named family covers {text}");
+            assert_eq!(
+                terminal_grid_family(text, &families),
+                Family::Name(resolved)
+            );
+        }
+    }
+
     #[test]
     fn shaped_ascii_glyphs_stay_on_integer_cell_columns() {
         const COLUMNS: usize = 80;
@@ -21628,6 +24399,107 @@ mod tests {
         assert!(!Arc::ptr_eq(&first[0].buffer, &bold[0].buffer));
     }
 
+    /// The two sizes ticket 37's shaping tests shape one cluster at: the default face and the
+    /// same face half again as large, at one scale, as two panes of one window would be.
+    fn two_pane_sizes(font_system: &mut FontSystem) -> (CellMetrics, CellMetrics) {
+        let small = CellMetrics::measure_at(font_system, 1.0, 14.0).unwrap();
+        let large = CellMetrics::measure_at(font_system, 1.0, 21.0).unwrap();
+        assert!(large.cell_width_px > small.cell_width_px);
+        (small, large)
+    }
+
+    /// RED (37) — **one cluster shaped at two sizes is two shapes in the narrow cache.**
+    ///
+    /// A window's panes share one `NarrowShapingCache`, and a pane at 150 % beside a pane at
+    /// 100 % asks it for the same `M` at two sizes. Keyed by the cluster and its style alone, the
+    /// second ask was answered with the first size's buffer and offsets: glyphs of one pane's
+    /// size drawn into the other pane's cells, with nothing to say so. Both orders are driven
+    /// through one shared cache, because two fresh caches would pass vacuously.
+    ///
+    /// MUTATION: drop the metrics from the key `NarrowShapingCache::get_or_shape` looks up.
+    #[test]
+    fn one_cluster_shaped_at_two_sizes_is_two_shapes_in_the_narrow_cache() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let (small, large) = two_pane_sizes(&mut font_system);
+        let cells = [CapturedCell::plain("M")];
+        for order in [[small, large, small], [large, small, large]] {
+            let mut cache = NarrowShapingCache::new();
+            let mut seen: Vec<(CellMetrics, Arc<Buffer>)> = Vec::new();
+            for metrics in order {
+                let glyphs = shape_narrow_glyphs(
+                    &cells,
+                    &mut font_system,
+                    &mut swash_cache,
+                    metrics,
+                    &mut cache,
+                );
+                assert_eq!(
+                    glyphs[0].buffer.metrics().font_size,
+                    metrics.font_size_px,
+                    "the shape handed back is the size it was asked for",
+                );
+                if let Some((_, earlier)) = seen.iter().find(|(m, _)| *m == metrics) {
+                    assert!(
+                        Arc::ptr_eq(earlier, &glyphs[0].buffer),
+                        "a repeat ask at one size is the cached shape of that size",
+                    );
+                } else {
+                    for (_, other) in &seen {
+                        assert!(!Arc::ptr_eq(other, &glyphs[0].buffer));
+                    }
+                    seen.push((metrics, Arc::clone(&glyphs[0].buffer)));
+                }
+            }
+            assert_eq!(cache.entries.len(), 2);
+        }
+    }
+
+    /// RED (37) — **one cluster shaped at two sizes is two shapes in the wide cache.**
+    ///
+    /// The two-cell twin of the narrow test: a CJK ideograph in a pane at 150 % and in a pane
+    /// at 100 % of one window shares `WideShapingCache`, whose key was the cluster and its style.
+    /// The second pane got the first pane's buffer, and its offsets, which are centred in the
+    /// first pane's two-cell slot.
+    ///
+    /// MUTATION: drop the metrics from the key `WideShapingCache::get_or_shape` looks up.
+    #[test]
+    fn one_cluster_shaped_at_two_sizes_is_two_shapes_in_the_wide_cache() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let (small, large) = two_pane_sizes(&mut font_system);
+        let mut cell = CapturedCell::plain("中");
+        cell.style.flags.insert(CellFlags::WIDE_CHAR);
+        let cells = [cell];
+        for order in [[small, large, small], [large, small, large]] {
+            let mut cache = WideShapingCache::new();
+            let mut seen: Vec<(CellMetrics, Arc<Buffer>)> = Vec::new();
+            for metrics in order {
+                let glyphs = shape_wide_glyphs(
+                    &cells,
+                    &mut font_system,
+                    &mut swash_cache,
+                    metrics,
+                    &mut cache,
+                );
+                assert_eq!(
+                    glyphs[0].buffer.metrics().font_size,
+                    metrics.font_size_px,
+                    "the shape handed back is the size it was asked for",
+                );
+                if let Some((_, earlier)) = seen.iter().find(|(m, _)| *m == metrics) {
+                    assert!(Arc::ptr_eq(earlier, &glyphs[0].buffer));
+                } else {
+                    for (_, other) in &seen {
+                        assert!(!Arc::ptr_eq(other, &glyphs[0].buffer));
+                    }
+                    seen.push((metrics, Arc::clone(&glyphs[0].buffer)));
+                }
+            }
+            assert_eq!(cache.entries.len(), 2);
+        }
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn regional_indicator_flag_cells_pin_every_glyph_to_its_grid_column() {
@@ -21680,6 +24552,10 @@ mod tests {
         cjk.style.flags.insert(CellFlags::WIDE_CHAR);
         let mut fullwidth_b = CapturedCell::plain("Ｂ");
         fullwidth_b.style.flags.insert(CellFlags::WIDE_CHAR);
+        let mut kana = CapturedCell::plain("あ");
+        kana.style.flags.insert(CellFlags::WIDE_CHAR);
+        let mut emoji = CapturedCell::plain("😀");
+        emoji.style.flags.insert(CellFlags::WIDE_CHAR);
         let mut spacer = CapturedCell::plain("");
         spacer.wide_spacer = true;
         let cells = [
@@ -21688,22 +24564,26 @@ mod tests {
             CapturedCell::plain("☆"),
             cjk,
             spacer.clone(),
+            kana,
+            spacer.clone(),
             CapturedCell::plain("│"),
             fullwidth_b,
+            spacer.clone(),
+            emoji,
             spacer,
             CapturedCell::plain("|"),
         ];
         let narrow = shape_narrow_for_test(&cells, &mut font_system, metrics);
         assert_eq!(
             narrow.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
-            [0, 1, 2, 8]
+            [0, 1, 2, 12]
         );
         assert_narrow_glyph_origins(&narrow, metrics);
 
         let wide = shape_wide_for_test(&cells, &mut font_system, metrics);
         assert_eq!(
             wide.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
-            [3, 6]
+            [3, 5, 8, 10]
         );
         for glyph in wide {
             let local_x = glyph.buffer.layout_runs().next().unwrap().glyphs[0].x;
@@ -21818,18 +24698,17 @@ mod tests {
         );
     }
 
-    /// This file with every comment line and every space taken out — the shape
-    /// of what it *does*, so that a sentence about a rule can never satisfy the
-    /// test that guards the rule.
-    fn source_without_prose() -> String {
-        include_str!("lib.rs")
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect()
+    /// **This crate's root module with every comment masked out and every space
+    /// taken out** — the shape of what it *does*, so that a sentence about a
+    /// rule can never satisfy the test that guards the rule.
+    ///
+    /// Asked of the module path `crate` and not read off `lib.rs` (P8), so the
+    /// binding survives a split of this file, and masked by
+    /// `View::CodeKeepingLiterals`' rule rather than by a line filter's.
+    /// Squeezed once per process: nine gates below ask for it.
+    fn source_without_prose() -> &'static str {
+        static SQUEEZED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        SQUEEZED.get_or_init(|| module_code_without_space("crate"))
     }
 
     /// The same, with this file's own tests cut off the end.
@@ -21838,12 +24717,12 @@ mod tests {
     /// checked against production code alone: a gate that says "there is one
     /// exit" and searches the whole file counts the two string literals in its
     /// own body and reports three.
-    fn production_source() -> String {
+    fn production_source() -> &'static str {
         let source = source_without_prose();
         let tests = source
             .find(concat!("#[cfg(", "test)]modtests{"))
             .expect("this file's own test module");
-        source[..tests].to_owned()
+        &source[..tests]
     }
 
     /// PIN (§7.36) — **a window has one glyphon `Viewport`, and every batch of
@@ -22414,7 +25293,7 @@ mod tests {
             width: WIDTH,
             height: HEIGHT,
         };
-        let frame = single_cell_cursor_frame(window.metrics());
+        let frame = single_cell_cursor_frame(window.base_metrics());
 
         let mut labels = Vec::new();
         let mut paragraphs = Vec::new();
@@ -22474,6 +25353,7 @@ mod tests {
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat,
                     clip: seat,
                     frame: &frame,
@@ -22551,6 +25431,7 @@ mod tests {
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat,
                     clip: seat,
                     frame: &frame,
@@ -22913,20 +25794,21 @@ mod tests {
         let mut window =
             WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
         window.set_glyph_census(true);
-        let fixture = chinese_four_k_frame(window.metrics(), WIDTH, HEIGHT);
+        let fixture = chinese_four_k_frame(window.base_metrics(), WIDTH, HEIGHT);
         assert!(
             fixture.cards_out_of_view > 0,
             "eight cards at this height must overflow the column, or the fixture is not the \
              report's window"
         );
         window.set_chrome(Vec::new(), fixture.chrome, Vec::new());
-        window.set_modal_overlay(vec![fixture.cards]);
+        window.set_modal_overlay(vec![fixture.cards], Vec::new());
         window.set_preview_bodies(vec![fixture.page]);
 
         let outcome = window
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat: fixture.seat,
                     clip: fixture.seat,
                     frame: &fixture.frame,
@@ -23009,7 +25891,7 @@ mod tests {
         let mut in_another_ink = stress_label(text.clone(), RECT, FONT_PX, None, false);
         in_another_ink.color = [12, 200, 90];
         overlay.labels.push(in_another_ink);
-        window.set_modal_overlay(vec![overlay]);
+        window.set_modal_overlay(vec![overlay], Vec::new());
         // And the same characters at the same size on a page, in the same face —
         // a different shaper, a different lane, and the same fonts underneath.
         window.set_preview_bodies(vec![PreviewBody {
@@ -23038,11 +25920,12 @@ mod tests {
             rasters: Vec::new(),
         }]);
 
-        let frame = single_cell_cursor_frame(window.metrics());
+        let frame = single_cell_cursor_frame(window.base_metrics());
         window
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat: SeatViewport {
                         x: 0,
                         y: 0,
@@ -23124,6 +26007,84 @@ mod tests {
         assert!(gpu.max_texture_dimension_2d() >= wgpu::Limits::default().max_texture_dimension_2d);
     }
 
+    /// RED — **one name moves Folio between a machine's GPUs, and anything else
+    /// leaves today's choice standing and says so.**
+    ///
+    /// The whole table is the parse, taken with the environment as an argument:
+    /// nothing here asks a machine what GPUs it has, and nothing here touches
+    /// the process's own variables, which the tests of this crate share.
+    ///
+    /// The first row is the blocking one — unset is `HighPerformance`, which is
+    /// what every build before this one asked for, and this ticket changes no
+    /// default. The last two are the reason the source is carried beside the
+    /// preference: a value nobody understood is reported rather than dropped,
+    /// and whitespace is a value like any other, because every other switch in
+    /// this program reads its value verbatim (`docs/BT-ENVIRONMENT.md`).
+    ///
+    /// Mutation: let the unknown arm fall through to `Default` and the last two
+    /// rows fail on the wording a reader would have to diagnose without.
+    #[test]
+    fn the_gpu_preference_is_read_from_one_name_and_unknown_values_are_not_swallowed() {
+        let table: [(Option<&str>, wgpu::PowerPreference, &str); 8] = [
+            (
+                None,
+                wgpu::PowerPreference::HighPerformance,
+                "HighPerformance (default)",
+            ),
+            (
+                Some(""),
+                wgpu::PowerPreference::HighPerformance,
+                "HighPerformance (default)",
+            ),
+            (
+                Some("low"),
+                wgpu::PowerPreference::LowPower,
+                "LowPower (BT_GPU_PREFERENCE)",
+            ),
+            (
+                Some("LOW"),
+                wgpu::PowerPreference::LowPower,
+                "LowPower (BT_GPU_PREFERENCE)",
+            ),
+            (
+                Some("Low"),
+                wgpu::PowerPreference::LowPower,
+                "LowPower (BT_GPU_PREFERENCE)",
+            ),
+            (
+                Some("high"),
+                wgpu::PowerPreference::HighPerformance,
+                "HighPerformance (BT_GPU_PREFERENCE)",
+            ),
+            (
+                Some("medium"),
+                wgpu::PowerPreference::HighPerformance,
+                "HighPerformance (BT_GPU_PREFERENCE=\"medium\" not understood)",
+            ),
+            (
+                Some(" low"),
+                wgpu::PowerPreference::HighPerformance,
+                "HighPerformance (BT_GPU_PREFERENCE=\" low\" not understood)",
+            ),
+        ];
+        for (value, preference, said) in table {
+            let request = read_gpu_power_request(value.map(std::ffi::OsString::from));
+            assert_eq!(
+                request.preference(),
+                preference,
+                "{value:?} asked for the wrong adapter"
+            );
+            assert_eq!(request.to_string(), said, "{value:?} was reported wrongly");
+        }
+        // The default is the one the three call sites get when nobody sets
+        // anything, and it is still the literal every build before this one
+        // spelled out three times.
+        assert_eq!(
+            DEFAULT_GPU_POWER_PREFERENCE,
+            wgpu::PowerPreference::HighPerformance
+        );
+    }
+
     /// PIN — **every lane prepares into the one shared atlas.**
     ///
     /// The sharing the gate above measures is only true while there is one
@@ -23149,16 +26110,17 @@ mod tests {
              level — and the one `TextRenderer::new` a new overlay level needs, all naming \
              `gpu.atlas` and nothing else"
         );
-        let context = block_beginning_with(include_str!("lib.rs"), "pub struct GpuContext {");
-        assert!(
-            !context.is_empty(),
-            "the device context has to exist before anything can be held to it"
-        );
-        assert_eq!(
-            context.matches("TextAtlas").count(),
-            1,
-            "one device context, one atlas"
-        );
+        // The type, not the lines under a signature (P8), and a refusal rather
+        // than an empty string when it is not declared. Its bytes begin at its
+        // first attribute, so the reading masks comments and keeps literals:
+        // the prose over this struct names its atlas twice.
+        let atlases = found_in(
+            needle!(Pattern::text("TextAtlas")),
+            View::CodeKeepingLiterals,
+            Scope::Item(ItemQuery::type_item("GpuContext")),
+        )
+        .len();
+        assert_eq!(atlases, 1, "one device context, one atlas");
     }
 
     /// RED — **a label nobody can see does not cast its bitmaps**
@@ -23250,11 +26212,12 @@ mod tests {
         );
 
         window.set_chrome(Vec::new(), labels, Vec::new());
-        let frame = single_cell_cursor_frame(window.metrics());
+        let frame = single_cell_cursor_frame(window.base_metrics());
         window
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat: SeatViewport {
                         x: 0,
                         y: 0,
@@ -23324,7 +26287,7 @@ mod tests {
         let mut gpu = on_this_machines_adapter(FORMAT);
         let mut window =
             WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
-        let frame = single_cell_cursor_frame(window.metrics());
+        let frame = single_cell_cursor_frame(window.base_metrics());
         let picture: Arc<[u8]> = Arc::from(vec![255_u8; 4 * 8 * 8].into_boxed_slice());
         let escapes = [
             // The crash report's own rectangle.
@@ -23380,6 +26343,7 @@ mod tests {
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat: SeatViewport::whole(WIDTH, HEIGHT),
                         clip,
                         frame: &frame,
@@ -23480,7 +26444,7 @@ mod tests {
         );
         let mut window =
             WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 2.0, FORMAT).expect("a window");
-        let metrics = window.metrics();
+        let metrics = window.base_metrics();
         let mut han = HanStream::new(0x5EA7_11FF);
         let mut worst: Option<(usize, String)> = None;
         for frame_index in 0..FRAMES {
@@ -23527,6 +26491,7 @@ mod tests {
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat: SeatViewport {
                             x: 0,
                             y: 0,
@@ -23631,27 +26596,40 @@ mod tests {
             0,
             "the re-pack counter is bumped somewhere that is not the line that reports it"
         );
-        let minting = block_beginning_with(
-            include_str!("lib.rs"),
-            concat!("fn note_a_", "repack(refits: &mut u64)"),
-        );
-        assert!(
-            minting.contains("*refits += 1;"),
-            "the one place that counts a re-pack has to be the one that names it: {minting}"
-        );
-        let closing = block_beginning_with(
-            include_str!("lib.rs"),
-            concat!("fn close_the_", "frame(&mut self,"),
-        );
+        // Both are items of this crate and not lines of this file (P8): the
+        // counter and the sentence stay one statement wherever the two
+        // functions are written.
+        let mint = Scope::Item(ItemQuery::function(concat!("note_a_", "repack")));
+        let close = Scope::Item(ItemQuery::method(
+            "GpuContext",
+            concat!("close_the_", "frame"),
+        ));
+        let counted = found_in(
+            needle!(Pattern::text("*refits += 1;")),
+            View::CodeKeepingLiterals,
+            mint.clone(),
+        )
+        .len();
+        let sentences = found_in(
+            needle!(Pattern::text("format!(")),
+            View::CodeKeepingLiterals,
+            mint,
+        )
+        .len();
+        let spent = found_in(
+            needle!(Pattern::text(concat!("note_a_", "repack("))),
+            View::CodeKeepingLiterals,
+            close,
+        )
+        .len();
         assert_eq!(
-            minting.matches("format!(").count(),
-            1,
-            "one sentence, built once"
+            counted, 1,
+            "the one place that counts a re-pack has to be the one that names it"
         );
+        assert_eq!(sentences, 1, "one sentence, built once");
         assert_eq!(
-            closing.matches(concat!("note_a_", "repack(")).count(),
-            1,
-            "the frame's closing verb spends the pair exactly once: {closing}"
+            spent, 1,
+            "the frame's closing verb spends the pair exactly once"
         );
     }
 
@@ -23751,7 +26729,7 @@ mod tests {
         let mut window =
             WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
         window.set_glyph_census(true);
-        let metrics = window.metrics();
+        let metrics = window.base_metrics();
         let mut han = HanStream::new(0x4C1D_9A37);
         let mut refused_frames = 0usize;
         let mut longest_run = 0usize;
@@ -23808,6 +26786,7 @@ mod tests {
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat: SeatViewport {
                             x: 0,
                             y: 0,
@@ -23877,6 +26856,275 @@ mod tests {
         );
     }
 
+    /// A frame of `rows` rows of text, cell for cell, projected at `metrics` — narrow ASCII, a
+    /// CJK ideograph and an emoji written as their lead cell and spacer, the three shaping lanes a
+    /// terminal draws (ticket 37). Windows-only like the two GPU tests that use it.
+    #[cfg(target_os = "windows")]
+    fn mixed_text_frame(
+        metrics: CellMetrics,
+        columns: u32,
+        rows: u32,
+        seed: u32,
+        han: &mut HanStream,
+    ) -> ViewportFrame {
+        const EMOJI: [&str; 4] = ["😀", "🚀", "🎉", "📁"];
+        let mut cells = Vec::with_capacity((columns * rows) as usize);
+        for row in 0..rows {
+            let mut column = 0;
+            while column < columns {
+                let pick = (row * 31 + column * 7 + seed) as usize;
+                let lane = (column / 4 + row + seed) % 3;
+                if lane != 0 && column + 1 < columns {
+                    let text = if lane == 1 {
+                        han.next_char().to_string()
+                    } else {
+                        EMOJI[pick % EMOJI.len()].to_owned()
+                    };
+                    let mut lead = CapturedCell::plain(&text);
+                    lead.style.flags.insert(CellFlags::WIDE_CHAR);
+                    cells.push(lead);
+                    cells.push(CapturedCell {
+                        wide_spacer: true,
+                        ..CapturedCell::default()
+                    });
+                    column += 2;
+                } else {
+                    let letter = char::from(b'A' + (pick % 26) as u8).to_string();
+                    cells.push(CapturedCell::plain(&letter));
+                    column += 1;
+                }
+            }
+        }
+        ViewportFrame {
+            columns: NonZeroU32::new(columns).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns),
+            grid_rows: NonZeroU32::new(rows).unwrap(),
+            rows: NonZeroU32::new(rows).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells,
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: false,
+            },
+            cell_anchors: test_cell_anchors((columns * rows) as usize),
+            row_map: test_row_map_for_metrics(rows, metrics),
+            selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(columns),
+            view_generation: bt_doc::ViewGeneration(1),
+        }
+    }
+
+    /// NEW (37) — **two identical tables at two text sizes keep two paints.**
+    ///
+    /// A table is set in its pane's own text, so the same source in a pane at 80 % and in a pane
+    /// at 150 % is two pictures. The renderer's map is keyed by [`TableBlockKey`] — source, face
+    /// size and font environment — and each seat's placement is looked up with the metrics that
+    /// seat is drawn at, so each pane draws its own paint. On base the map was keyed by the
+    /// source, and the second size's paint replaced the first; this test cannot be written against
+    /// that shape (the key type is new), so its red is the mutation below. The app's half — which
+    /// sizes `Runtime::table_sources` names — is pinned in `bt-app`.
+    ///
+    /// MUTATION: make `TableBlockKey::of` ignore the metrics (a fixed `font_size_bits`) — the two
+    /// paints share one key, the map keeps one, and the 80 % pane draws the 150 % paint.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn two_identical_tables_at_two_text_sizes_keep_two_paints() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let mut gpu = on_this_machines_adapter(FORMAT);
+        let mut window =
+            WindowRenderer::offscreen(&mut gpu, 800, 400, 1.0, FORMAT).expect("a window");
+        let environment = gpu.font_environment_epoch();
+        let small = gpu.terminal_cell_metrics(1.0, 12.8).expect("measures");
+        let large = gpu.terminal_cell_metrics(1.0, 24.0).expect("measures");
+        let source = "| a | b |\n| 1 | 2 |";
+        let paint = |ink: u8| TableBlockPaint {
+            quads: vec![PreviewQuad {
+                rect: [0.0, 0.0, 10.0, 10.0],
+                color: [ink, ink, ink],
+            }],
+            paragraphs: Vec::new(),
+        };
+        assert!(window.set_table_blocks(HashMap::from([
+            (TableBlockKey::of(source, small, environment), paint(80)),
+            (TableBlockKey::of(source, large, environment), paint(150)),
+        ])));
+        for (metrics, ink) in [(small, 80), (large, 150)] {
+            let mut frame = mixed_text_frame(metrics, 40, 6, 0, &mut HanStream::new(37));
+            let mut placement = test_math_placement(source, 0, 4 * SUBPIXELS_PER_PX, 4);
+            placement.artifact.kind = bt_viewport::RgbaArtifactKind::Table;
+            placement.artifact.source = source.to_owned();
+            placement.artifact.width_px = 100;
+            placement.artifact.height_px = 4;
+            frame.math_blocks.push(placement);
+            let bodies = window.table_block_bodies(metrics, environment, &frame);
+            assert_eq!(bodies.len(), 1, "the table is drawn");
+            assert_eq!(
+                bodies[0].quads[0].color,
+                [ink, ink, ink],
+                "a pane at {} px draws the paint laid out at its own size",
+                metrics.font_size_px
+            );
+        }
+    }
+
+    /// NEW (37) — **seats at mixed sizes share the atlas, and get their text back.**
+    ///
+    /// The atlas has no area proof ([`GpuContext::close_the_frame`] retracts it: the bucketed
+    /// allocator fragments across sizes). What is asserted is the contract that replaces it,
+    /// under the load per-pane sizes add: three seats drawn in the same frame at three sizes,
+    /// with narrow text, CJK and emoji, in two windows presented in turn, on a device whose
+    /// textures stop at 1024 so the shared atlas is under real pressure — on WARP, which is CI's
+    /// device. A frame may lose its text (the packer can wear out); the next frame of that window
+    /// must not, and at the end each window's seats are read back and every one of them has ink
+    /// on it. The run is asserted to have reached a refusal at all, or it would prove nothing.
+    ///
+    /// **What it does not discriminate, measured on 2026-09-24:** taking the re-pack arm out of
+    /// `GpuContext::close_the_frame`, or leaving a refused frame untrimmed, leaves it green at this
+    /// scale (80 frames: 2 refusals, never two in a row, with or without the arm; at 400 frames
+    /// 7 against 3). The packer wears out over hours, not over a CI minute, and the soak that
+    /// shows it is `a_session_long_enough_to_wear_the_packer_out_gets_its_text_back` (ignored,
+    /// D-59). What this holds is the contract at the load per-pane sizes add.
+    ///
+    /// MUTATION: shape a seat's rows from another seat's frame (hand `prepare_text_rows` the
+    /// first seat's frame for every seat) — red: the pairing of frame and metrics breaks.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn mixed_size_seats_share_the_atlas_and_get_their_text_back() {
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        // Within the ceiling: the surface is a texture too, and a wider one is clamped to it.
+        const WIDTH: u32 = 504;
+        const HEIGHT: u32 = 504;
+        const CEILING: u32 = 512;
+        const FRAMES: usize = 80;
+        /// Every rung of ticket 37's ladder over the largest Settings size, 24 px — the sizes a
+        /// window of panes can hold at once, the top one exactly the 72 px clamp.
+        const SIZES: [f32; 12] = [
+            12.0, 16.08, 19.2, 21.6, 24.0, 26.4, 30.0, 36.0, 42.0, 48.0, 60.0, 72.0,
+        ];
+        let mut gpu = on_a_device_whose_textures_stop_at(FORMAT, CEILING);
+        let mut windows = [
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window"),
+            WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window"),
+        ];
+        let seat_width = WIDTH / 3;
+        let seats: [SeatViewport; 3] = std::array::from_fn(|index| SeatViewport {
+            x: index as u32 * seat_width,
+            y: 0,
+            width: seat_width,
+            height: HEIGHT,
+        });
+        // One frame of one window: three seats at three sizes, built afresh each time.
+        let mut han = HanStream::new(0x37_7E57);
+        let mut present = |gpu: &mut GpuContext, window: &mut WindowRenderer, index: usize| {
+            let metrics: [CellMetrics; 3] = std::array::from_fn(|seat| {
+                let size = SIZES[(index * 5 + seat * 4) % SIZES.len()];
+                gpu.terminal_cell_metrics(1.0, size).expect("measures")
+            });
+            let frames: Vec<ViewportFrame> = metrics
+                .iter()
+                .enumerate()
+                .map(|(seat, metrics)| {
+                    let grid = metrics.grid_for_pixels(seat_width, HEIGHT);
+                    mixed_text_frame(
+                        *metrics,
+                        u32::from(grid.columns.get()),
+                        u32::from(grid.rows.get()),
+                        (index * 3 + seat) as u32,
+                        &mut han,
+                    )
+                })
+                .collect();
+            let seat_frames: Vec<SeatFrame<'_>> = frames
+                .iter()
+                .zip(metrics)
+                .zip(seats)
+                .enumerate()
+                .map(|(seat_index, ((frame, metrics), seat))| SeatFrame {
+                    seat,
+                    clip: seat,
+                    frame,
+                    metrics,
+                    focused: seat_index == 0,
+                })
+                .collect();
+            window
+                .present_frame(
+                    gpu,
+                    &seat_frames,
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("one frame")
+        };
+        let mut refused_in_a_row = [0usize; 2];
+        let mut longest = 0usize;
+        let mut refused = 0usize;
+        for frame_index in 0..FRAMES {
+            let which = frame_index % 2;
+            let outcome = present(&mut gpu, &mut windows[which], frame_index);
+            if matches!(outcome, PresentOutcome::PresentedWithoutText(_)) {
+                refused += 1;
+                refused_in_a_row[which] += 1;
+                longest = longest.max(refused_in_a_row[which]);
+            } else {
+                refused_in_a_row[which] = 0;
+            }
+        }
+        println!(
+            "mixed-size stress: {refused} of {FRAMES} frames refused, {} atlas re-packs",
+            gpu.glyph_atlas_refits()
+        );
+        assert!(
+            refused > 0,
+            "the fixture never reached the atlas's pressure, so it proves nothing about it"
+        );
+        assert!(
+            longest <= 1,
+            "a window lost its text on {longest} frames in a row: the atlas was not given back"
+        );
+        assert!(
+            refused * 4 < FRAMES,
+            "{refused} of {FRAMES} frames were drawn without their text"
+        );
+        // Each window once more, and every one of its seats has ink on it: a frame that lost its
+        // text is owed again, and the one retry the contract allows is all it may take.
+        for (which, window) in windows.iter_mut().enumerate() {
+            let complete = (0..2).any(|attempt| {
+                matches!(
+                    present(&mut gpu, window, FRAMES + which * 2 + attempt),
+                    PresentOutcome::Presented(_)
+                )
+            });
+            assert!(
+                complete,
+                "window {which} got its text back within one retry"
+            );
+            let pixels = window.read_back(&gpu).expect("the frame reads back");
+            for seat in seats {
+                let ground = pixels[(seat.y * WIDTH + seat.x) as usize];
+                let inked = (seat.y..seat.y + seat.height)
+                    .flat_map(|y| (seat.x..seat.x + seat.width).map(move |x| (x, y)))
+                    .filter(|(x, y)| pixels[(y * WIDTH + x) as usize] != ground)
+                    .count();
+                assert!(
+                    inked > (seat.width * seat.height / 200) as usize,
+                    "window {which}, seat at x={}: {inked} inked pixels — its text did not come                      back",
+                    seat.x
+                );
+            }
+        }
+    }
+
     /// RED — **a card's text reaches the glass on the very frame its layout
     /// lands, and the frame says so.**
     ///
@@ -23917,64 +27165,68 @@ mod tests {
             width: WIDTH,
             height: HEIGHT,
         };
-        let frame = single_cell_cursor_frame(window.metrics());
-        window.set_modal_overlay(vec![OverlayLayer {
-            quads: vec![
-                OverlayQuad {
-                    rect: FACE,
-                    color: [24, 24, 28],
-                    alpha: 1.0,
-                },
-                OverlayQuad {
-                    rect: RULE,
-                    color: [0, 0, 255],
-                    alpha: 1.0,
-                },
-            ],
-            labels: vec![ChromeLabel {
-                mono: false,
-                text: "CONVENTIONS.md".to_owned(),
-                rect: HEAD,
-                font_size_px: 18.0,
-                color: HEAD_INK,
-                align_right: false,
-                align_center: false,
-                letter_spacing_em: 0.0,
-                weight: ChromeLabelWeight::Regular,
-                tabular_numerals: false,
-                clip: None,
-            }],
-            body: Some(PreviewBody {
-                clip: BODY,
-                quads: Vec::new(),
-                paragraphs: vec![PreviewParagraph {
-                    runs: vec![PreviewRun {
-                        text: "every session reads this once".to_owned(),
-                        color: WORD_INK,
-                        mono: false,
-                        bold: false,
-                        italic: false,
-                        font_scale: 1.0,
-                        inline_box_px: None,
-                    }],
-                    rect: [BODY[0], BODY[1] + 4.0, BODY[2], BODY[1] + 28.0],
-                    font_size_px: 15.0,
-                    line_height_px: 22.0,
-                    wrap: true,
-                    letter_spacing_em: 0.0,
+        let frame = single_cell_cursor_frame(window.base_metrics());
+        window.set_modal_overlay(
+            vec![OverlayLayer {
+                quads: vec![
+                    OverlayQuad {
+                        rect: FACE,
+                        color: [24, 24, 28],
+                        alpha: 1.0,
+                    },
+                    OverlayQuad {
+                        rect: RULE,
+                        color: [0, 0, 255],
+                        alpha: 1.0,
+                    },
+                ],
+                labels: vec![ChromeLabel {
+                    mono: false,
+                    text: "CONVENTIONS.md".to_owned(),
+                    rect: HEAD,
+                    font_size_px: 18.0,
+                    color: HEAD_INK,
                     align_right: false,
                     align_center: false,
-                    cell_advance: None,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
                 }],
-                blocks: Vec::new(),
-                rasters: Vec::new(),
-            }),
-            ..OverlayLayer::default()
-        }]);
+                body: Some(PreviewBody {
+                    clip: BODY,
+                    quads: Vec::new(),
+                    paragraphs: vec![PreviewParagraph {
+                        runs: vec![PreviewRun {
+                            text: "every session reads this once".to_owned(),
+                            color: WORD_INK,
+                            mono: false,
+                            bold: false,
+                            italic: false,
+                            font_scale: 1.0,
+                            inline_box_px: None,
+                        }],
+                        rect: [BODY[0], BODY[1] + 4.0, BODY[2], BODY[1] + 28.0],
+                        font_size_px: 15.0,
+                        line_height_px: 22.0,
+                        wrap: true,
+                        letter_spacing_em: 0.0,
+                        align_right: false,
+                        align_center: false,
+                        cell_advance: None,
+                    }],
+                    blocks: Vec::new(),
+                    rasters: Vec::new(),
+                }),
+                ..OverlayLayer::default()
+            }],
+            Vec::new(),
+        );
         let outcome = window
             .present_frame(
                 &mut gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat,
                     clip: seat,
                     frame: &frame,
@@ -24991,8 +28243,9 @@ mod tests {
     fn a_mini_row_of_ascii_is_still_whole_columns_wide() {
         const ROW: &str = "> cargo build";
         let mut font_system = terminal_font_system();
+        let cjk_families = resolve_terminal_cjk_families("", &mut font_system);
         assert!(
-            mono_label_spans(ROW, &mut font_system).is_none(),
+            mono_label_spans(ROW, &cjk_families, &mut font_system).is_none(),
             "a row on the grid's own face is one span and asks the route nothing"
         );
         let label = mini_grid_cell_label(&mut font_system, ROW, ROW.len() as f32);
@@ -26243,28 +29496,39 @@ mod tests {
     /// the picture is painted straight back over the selection.
     #[test]
     fn the_wash_is_struck_over_the_picture_and_under_the_blocks_own_chrome() {
-        let source: String = include_str!("lib.rs")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        let wash = source
-            .find(concat!("self.math_selection_wash_", "rectangles(frame);"))
-            .expect("the wash's own list");
-        let chrome = source
-            .find(concat!(
+        // Four places in this crate's sources rather than four offsets into
+        // this file (P8). Each landmark is required to be unique rather than
+        // taken first: an order gate whose landmark stopped being the only one
+        // of itself is asking about a place it cannot name.
+        let wash = only(
+            needle!(Pattern::text(concat!(
+                "self.math_selection_wash_",
+                "rectangles(entry.metrics, frame);"
+            ))),
+            View::Raw,
+            "the wash's own list",
+        );
+        let chrome = only(
+            needle!(Pattern::text(concat!(
                 "math_overlays.extend(self.math_overlay_",
-                "rectangles(frame));"
-            ))
-            .expect("the block's chrome joining the same list");
-        let tiles = source
-            .find(concat!("fordrawin&seat.", "math_draws{"))
-            .expect("the seat's math tile draws");
-        let overlay = source
-            .find(concat!(
-                "pass.draw(0..6,0..seat.",
-                "math_overlay_countasu32);"
-            ))
-            .expect("the overlay buffer's draw");
+                "rectangles(entry.metrics, frame));"
+            ))),
+            View::Raw,
+            "the block's chrome joining the same list",
+        );
+        let tiles = only(
+            needle!(Pattern::text(concat!("for draw in &seat.", "math_draws {"))),
+            View::Raw,
+            "the seat's math tile draws",
+        );
+        let overlay = only(
+            needle!(Pattern::text(concat!(
+                "pass.draw(0..6, 0..seat.",
+                "math_overlay_count as u32);"
+            ))),
+            View::Raw,
+            "the overlay buffer's draw",
+        );
         assert!(
             wash < chrome,
             "the wash goes in first, so the fades and the buttons stand over it"
@@ -27249,12 +30513,13 @@ mod tests {
                 picture(2, right, "the recording's still", RIGHT),
             ]);
 
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
             window
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat,
                         clip: seat,
                         frame: &frame,
@@ -27359,6 +30624,9 @@ mod tests {
     /// The web preview block's slice ①: the hole a hosted page is seen through.
     mod web_holes {
         use super::super::*;
+        use bt_source::{Pattern, View, needle};
+
+        use super::only;
 
         /// PIN — **a hole is the absence of the window, whatever colour is
         /// handed in.**
@@ -27411,28 +30679,39 @@ mod tests {
         /// that issues them.
         #[test]
         fn the_hole_is_drawn_over_the_seat_and_under_everything_over_the_window() {
-            let source: String = include_str!("lib.rs")
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect();
-            let hole = source
-                .find(concat!(
-                    "pass.set_vertex_buffer(0,",
-                    "buffer.slice(..));pass.draw(0..6,0..web_hole_rects"
-                ))
-                .expect("the hole draw");
-            let body = source
-                .find(concat!("pass.draw(0..6,0..", "preview_body_rects.len()"))
-                .expect("the preview body draw");
-            let peek = source
-                .find(concat!("pass.draw(0..6,0..", "peek_rects.len()"))
-                .expect("the peek flyout draw");
-            let overlay = source
-                .find(concat!(
+            // Four places in this crate's sources, each required to be the only
+            // one of itself (P8). The hole's landmark is the draw's own count
+            // rather than the two statements the squeezed file reading could
+            // join across a line break: `web_hole_rects` is named once.
+            let hole = only(
+                needle!(Pattern::text(concat!("0..web_hole_", "rects"))),
+                View::Raw,
+                "the hole draw",
+            );
+            let body = only(
+                needle!(Pattern::text(concat!(
+                    "pass.draw(0..6, 0..",
+                    "preview_body_rects.len()"
+                ))),
+                View::Raw,
+                "the preview body draw",
+            );
+            let peek = only(
+                needle!(Pattern::text(concat!(
+                    "pass.draw(0..6, 0..",
+                    "peek_rects.len()"
+                ))),
+                View::Raw,
+                "the peek flyout draw",
+            );
+            let overlay = only(
+                needle!(Pattern::text(concat!(
                     "pass.set_pipeline(&gpu.",
                     "ground_fade_rect_pipeline);"
-                ))
-                .expect("the overlay's own grounds");
+                ))),
+                View::Raw,
+                "the overlay's own grounds",
+            );
             assert!(body < hole, "the hole covers the seat's own body");
             assert!(hole < peek, "a floating window covers the hole");
             assert!(hole < overlay, "a scrim covers the hole");
@@ -27468,22 +30747,41 @@ mod tests {
         ///    every hole is back to being punched under the whole stack.
         #[test]
         fn a_layers_own_hole_is_punched_after_the_face_that_layer_draws() {
-            let source: String = include_str!("lib.rs")
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect();
-            let ground = source
-                .find(concat!("pass.draw(0..6,0..", "layer.ground_count"))
-                .expect("the overlay layer's ground draw");
-            let rects = source
-                .find(concat!("pass.draw(0..6,0..", "layer.rect_count"))
-                .expect("the overlay layer's fill draw");
-            let hole = source
-                .find(concat!("pass.draw(0..6,0..", "layer.hole_count"))
-                .expect("the overlay layer's hole draw");
-            let loop_ = source
-                .find("for(index,layer)inoverlay_draws.iter().enumerate()")
-                .expect("the overlay stack's own loop");
+            // Four places in this crate's sources, each required to be the only
+            // one of itself (P8).
+            let ground = only(
+                needle!(Pattern::text(concat!(
+                    "pass.draw(0..6, 0..",
+                    "layer.ground_count"
+                ))),
+                View::Raw,
+                "the overlay layer's ground draw",
+            );
+            let rects = only(
+                needle!(Pattern::text(concat!(
+                    "pass.draw(0..6, 0..",
+                    "layer.rect_count"
+                ))),
+                View::Raw,
+                "the overlay layer's fill draw",
+            );
+            let hole = only(
+                needle!(Pattern::text(concat!(
+                    "pass.draw(0..6, 0..",
+                    "layer.hole_count"
+                ))),
+                View::Raw,
+                "the overlay layer's hole draw",
+            );
+            // The one function every pass that draws an overlay layer calls —
+            // the frame's own, a resumed one above a fading surface, and a
+            // fading surface's texture (overlay groups, 2026-09-24) — once per
+            // layer, which is what the loop over the stack used to be.
+            let loop_ = only(
+                needle!(Pattern::text(concat!("fn draw_", "overlay_layer("))),
+                View::Raw,
+                "the one drawer of an overlay layer",
+            );
             assert!(
                 ground < hole,
                 "a layer's ground is painted over its own hole"
@@ -27493,6 +30791,549 @@ mod tests {
                 loop_ < hole,
                 "the layer holes are not punched inside the stack's loop, so \
                  they cannot stand between two layers at all"
+            );
+        }
+    }
+
+    /// **Overlay group opacity, composited like CSS** (ticket 46; the fade
+    /// audit of 2026-09-23, its §6 red gates). Every pixel here is read back
+    /// from a real frame on the software adapter, over a ground this module lays
+    /// down itself, so the numbers are the audit's own: `#1B1B1B` under a
+    /// `#2A2A2A` plate, a `#E3E3E3` letter, the `--border` hairline at 24/255.
+    mod overlay_groups {
+        use std::sync::Arc;
+
+        use super::*;
+
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        const WIDTH: u32 = 320;
+        const HEIGHT: u32 = 240;
+        const GROUND: [u8; 3] = [0x1B, 0x1B, 0x1B];
+        const PLATE: [u8; 3] = [0x2A, 0x2A, 0x2A];
+        const INK: [u8; 3] = [0xE3, 0xE3, 0xE3];
+        /// The card's frame, and the point inside it where nothing but the
+        /// plate is drawn.
+        const CARD: [f32; 4] = [60.0, 50.0, 260.0, 190.0];
+        const INTERIOR: (u32, u32) = (72, 60);
+        /// Where the letter stands, clear of `INTERIOR`.
+        const LETTER: [f32; 4] = [120.0, 70.0, 220.0, 180.0];
+
+        /// Layer 0: the frame's ground, laid down by this module so that every
+        /// expected value is arithmetic on bytes it chose.
+        fn ground_layer() -> OverlayLayer {
+            OverlayLayer {
+                quads: vec![OverlayQuad {
+                    rect: [0.0, 0.0, WIDTH as f32, HEIGHT as f32],
+                    color: GROUND,
+                    alpha: 1.0,
+                }],
+                ..OverlayLayer::default()
+            }
+        }
+
+        /// A floating plate as `settings::push_float_window` draws one: a
+        /// shadow band outside the frame, the face over the whole frame, the
+        /// `--border` hairline over the whole frame, the face again one border
+        /// in — and a letter on it.
+        fn card_layer() -> OverlayLayer {
+            let [left, top, right, bottom] = CARD;
+            OverlayLayer {
+                quads: vec![
+                    OverlayQuad {
+                        rect: [left - 6.0, top - 6.0, right + 6.0, bottom + 6.0],
+                        color: [0, 0, 0],
+                        alpha: 0.3,
+                    },
+                    OverlayQuad {
+                        rect: CARD,
+                        color: PLATE,
+                        alpha: 1.0,
+                    },
+                    OverlayQuad {
+                        rect: CARD,
+                        color: [255, 255, 255],
+                        alpha: 24.0 / 255.0,
+                    },
+                    OverlayQuad {
+                        rect: [left + 1.0, top + 1.0, right - 1.0, bottom - 1.0],
+                        color: PLATE,
+                        alpha: 1.0,
+                    },
+                ],
+                labels: vec![ChromeLabel {
+                    mono: false,
+                    text: "I".to_owned(),
+                    rect: LETTER,
+                    font_size_px: 96.0,
+                    color: INK,
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
+                }],
+                ..OverlayLayer::default()
+            }
+        }
+
+        fn group(layers: std::ops::Range<usize>, opacity: f32) -> OverlayGroup {
+            OverlayGroup {
+                layers,
+                opacity,
+                offset: [0.0, 0.0],
+            }
+        }
+
+        fn window(gpu: &mut GpuContext) -> WindowRenderer {
+            WindowRenderer::offscreen(gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window")
+        }
+
+        fn present(window: &mut WindowRenderer, gpu: &mut GpuContext) -> Vec<[u8; 4]> {
+            let seat = SeatViewport::whole(WIDTH, HEIGHT);
+            let frame = single_cell_cursor_frame(window.base_metrics());
+            window
+                .present_frame(
+                    gpu,
+                    &[SeatFrame {
+                        metrics: window.base_metrics(),
+                        seat,
+                        clip: seat,
+                        frame: &frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("one frame");
+            window.read_back(gpu).expect("the frame reads back")
+        }
+
+        /// The red channel of a BGRA pixel — every ink here is a grey.
+        fn at(pixels: &[[u8; 4]], (x, y): (u32, u32)) -> u8 {
+            pixels[(y * WIDTH + x) as usize][2]
+        }
+
+        fn brightest(pixels: &[[u8; 4]], rect: [f32; 4]) -> u8 {
+            let mut most = 0;
+            for y in rect[1] as u32..rect[3] as u32 {
+                for x in rect[0] as u32..rect[2] as u32 {
+                    most = most.max(at(pixels, (x, y)));
+                }
+            }
+            most
+        }
+
+        fn digest(pixels: &[[u8; 4]]) -> u64 {
+            let mut state = FNV_1A_64_OFFSET_BASIS;
+            for pixel in pixels {
+                fnv_write(&mut state, pixel);
+            }
+            state
+        }
+
+        /// The card at rest, with no group and with none in play: the frame
+        /// this renderer drew before groups existed.
+        ///
+        /// Recorded on BASE `883143d5` on the software adapter, through
+        /// BASE's own `set_modal_overlay(layers)`: see the ticket 46 report.
+        const AT_REST_ON_BASE: u64 = 0x2e17_cdb3_09f1_9400;
+
+        /// RED (46) — **a card fading at one half reads as CSS `opacity` on the
+        /// whole card, not as its parts faded one by one.**
+        ///
+        /// The audit's gate (a). Folded into each primitive and blended in linear
+        /// light — BASE's fade, drawn here first as the contrast — the hairline
+        /// shows through the face laid over it and the plate comes out `#3B`,
+        /// brighter mid-fade than it ever is at rest, while the letter is
+        /// already `#AB`. Drawn whole and composited once on encoded bytes, the
+        /// plate is `#22` (half-way from `#1B` to `#2A`) and the letter `#7F`
+        /// (half-way from `#1B` to `#E3`), which is what a browser draws for
+        /// `.card { opacity: .5 }`.
+        ///
+        /// MUTATION: make `DrawnGroup::at_rest` answer `true` and the group is
+        /// drawn straight onto the frame at full strength — the plate reads
+        /// `#2A` and the letter `#E3`.
+        #[test]
+        fn a_card_fading_at_one_half_reads_as_css_opacity_on_the_whole_card() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+
+            let mut folded = card_layer();
+            folded.opacity = 0.5;
+            window.set_modal_overlay(vec![ground_layer(), folded], Vec::new());
+            let base = present(&mut window, &mut gpu);
+            let (plate, letter) = (at(&base, INTERIOR), brightest(&base, LETTER));
+            assert!(
+                plate >= 0x38 && letter >= 0xA8,
+                "folded per primitive the plate overshoots and the letter leads \
+                 (the audit's #3B / #AB); read {plate:#04x} / {letter:#04x}"
+            );
+
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], vec![group(1..2, 0.5)]);
+            let pixels = present(&mut window, &mut gpu);
+            let (plate, letter) = (at(&pixels, INTERIOR), brightest(&pixels, LETTER));
+            assert!(
+                (0x21..=0x23).contains(&plate),
+                "the plate at one half should be #22 (CSS), read {plate:#04x}"
+            );
+            assert!(
+                (0x7E..=0x80).contains(&letter),
+                "a #E3 letter at one half should be #7F (CSS), read {letter:#04x}"
+            );
+            assert_eq!(window.overlay_groups_composited(), 1);
+        }
+
+        /// PIN (46) — **a surface at rest draws the bytes it drew before groups
+        /// existed**, group or no group.
+        ///
+        /// The audit's gate (b). At opacity 1 and no offset the group path is
+        /// never taken, so a window with nothing fading pays nothing and shows
+        /// nothing new: the frame with the card's span declared is the frame
+        /// without it, and both are BASE's frame, byte for byte (the digest was
+        /// read on BASE, on this adapter, from this fixture). The frame's own
+        /// target now allows a bytes-view beside its sRGB one; this also pins
+        /// that allowing it changed no byte.
+        ///
+        /// MUTATION: make `DrawnGroup::at_rest` answer `false` and the card is
+        /// put back through a texture at opacity 1 — its shadow and its
+        /// antialiased edges blended on encoded bytes rather than in linear
+        /// light — and the digests part.
+        #[test]
+        fn a_surface_at_rest_draws_the_same_bytes_as_before_groups_existed() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], Vec::new());
+            let plain = present(&mut window, &mut gpu);
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], vec![group(1..2, 1.0)]);
+            let grouped = present(&mut window, &mut gpu);
+            eprintln!("BT_OVERLAY_GROUP at_rest_digest={:016x}", digest(&plain));
+            assert_eq!(window.overlay_groups_composited(), 0);
+            assert!(plain == grouped, "a group at rest changed the frame");
+            assert_eq!(
+                digest(&plain),
+                AT_REST_ON_BASE,
+                "the frame at rest is not BASE's frame"
+            );
+        }
+
+        /// RED (46) — **a group whose opacity draws as 255/255 and whose offset
+        /// is under half a pixel is at rest, and never takes the group path.**
+        ///
+        /// The audit's gate (c), the renderer's half: reduced motion hands every
+        /// surface opacity 1 and no travel (the producers' half is pinned in
+        /// `bt-app`), and what that must buy is the frame's own command stream —
+        /// no texture, no composite, no pass broken. A curve settling through
+        /// its last 1/255 is at rest by the same rule, which is the rule
+        /// `Passages::drawn` already counts frame debt by.
+        ///
+        /// MUTATION: drop `drawn.retain(..)` in `GroupPlan::new` and every
+        /// declared span is composited, at rest or not.
+        #[test]
+        fn a_group_at_rest_never_takes_the_group_path() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let settled = OverlayGroup {
+                layers: 1..2,
+                opacity: 0.999,
+                offset: [0.3, -0.4],
+            };
+            assert!(settled.at_rest());
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], vec![settled]);
+            let _ = present(&mut window, &mut gpu);
+            assert_eq!(window.overlay_groups_composited(), 0);
+            assert!(
+                window.group_targets.is_empty(),
+                "a window with nothing fading holds no group texture"
+            );
+        }
+
+        /// RED (46) — **a web page's hole inside a fading surface is a defect
+        /// the debug build names.**
+        ///
+        /// The audit's gate (d). A page is a native view composed under this
+        /// whole surface and seen through a hole; nothing wgpu draws can fade
+        /// it, so a hole inside a fading span would leave the page standing
+        /// solid while its window dissolved round it. No producer builds one
+        /// (a preview float never fades; a glance card over a page draws text),
+        /// and this is where the day one does is caught.
+        ///
+        /// MUTATION: delete the `debug_assert!` beside `GroupPlan::new` in
+        /// `compose_frame` and the frame is drawn without a word.
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic(expected = "a web page's hole inside a fading overlay surface")]
+        fn a_web_hole_inside_a_fading_surface_panics_in_a_debug_build() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window = window(&mut gpu);
+            window.set_modal_overlay(vec![ground_layer(), card_layer()], vec![group(1..2, 0.5)]);
+            window.set_web_holes(vec![WebHole {
+                rect: [80.0, 80.0, 200.0, 160.0],
+                above: Some(1),
+            }]);
+            let _ = present(&mut window, &mut gpu);
+        }
+
+        /// RED (46) — **a video playing on a fading card fades with it.**
+        ///
+        /// The audit's gate (e), and its F1: `Runtime::video_layers` hands
+        /// every picture opacity 1, so on BASE a recording on the glance card
+        /// stood at full strength from the card's first frame. A video on an
+        /// overlay layer is drawn wherever that layer is drawn, so inside a
+        /// span it is drawn into the surface's texture and put back with the
+        /// rest of the card: pure green at one half over `#1B` is `#0E8D0E`.
+        ///
+        /// MUTATION: draw the `VideoStage::Overlay` stages in the frame's own
+        /// pass only (drop the `video` argument of the group pass's
+        /// `draw_overlay_layer`) and the picture is missing from the card, or,
+        /// with the group path dropped, at full strength on it.
+        #[test]
+        fn a_video_playing_on_a_fading_card_fades_with_it() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let slot = SeatViewport {
+                x: 80,
+                y: 70,
+                width: 60,
+                height: 40,
+            };
+            // The card's slot is a layer of its own, above the plate — the shape
+            // `file_peek::build` gives a card with a recording on it.
+            window.set_modal_overlay(
+                vec![ground_layer(), card_layer(), OverlayLayer::default()],
+                vec![group(1..3, 0.5)],
+            );
+            window.set_video_layers(vec![VideoLayer {
+                stage: VideoStage::Overlay(2),
+                key: "a recording on the card".to_owned(),
+                box_: slot,
+                clip: slot,
+                frame: Some(VideoFrameUpload {
+                    bgra: Arc::from(vec![0_u8, 255, 0, 255].into_boxed_slice()),
+                    width_px: 1,
+                    height_px: 1,
+                    generation: 1,
+                }),
+                ground: None,
+                radius_px: 0.0,
+                opacity: 1.0,
+            }]);
+            let pixels = present(&mut window, &mut gpu);
+            let [blue, green, red, _] = pixels[(90 * WIDTH + 110) as usize];
+            assert!(
+                (0x8C..=0x8E).contains(&green) && (0x0D..=0x0F).contains(&red),
+                "green at one half over #1B should read #0E8D0E, read \
+                 r={red:#04x} g={green:#04x} b={blue:#04x}"
+            );
+        }
+
+        /// RED (46) — **spans nest, and a surface fading inside a fading
+        /// surface is faded by both.**
+        ///
+        /// The audit's gate (g): a video bar fading on a card that is itself
+        /// fading. The inner surface is put back into the outer one's texture
+        /// before the outer one is put back into the frame, which is exactly
+        /// CSS's nesting: a white bar at one half on the plate is `#94`
+        /// inside the card, and the card at one half over `#1B` makes it `#58`
+        /// — the bar's own contribution a quarter, the product of the two.
+        ///
+        /// MUTATION: skip `GroupItem::Group` items inside a group's own pass
+        /// (put back only the outermost surfaces) and the bar vanishes; draw
+        /// the inner span's layers directly instead and it reads `#91`.
+        #[test]
+        fn nested_spans_multiply() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let bar = OverlayLayer {
+                quads: vec![OverlayQuad {
+                    rect: [80.0, 150.0, 240.0, 175.0],
+                    color: [255, 255, 255],
+                    alpha: 1.0,
+                }],
+                ..OverlayLayer::default()
+            };
+            window.set_modal_overlay(
+                vec![ground_layer(), card_layer(), bar],
+                vec![group(1..3, 0.5), group(2..3, 0.5)],
+            );
+            let pixels = present(&mut window, &mut gpu);
+            let plate = at(&pixels, INTERIOR);
+            let bar = at(&pixels, (90, 160));
+            assert!(
+                (0x21..=0x23).contains(&plate),
+                "the plate at one half should be #22, read {plate:#04x}"
+            );
+            assert!(
+                (0x57..=0x59).contains(&bar),
+                "a white bar at one half on a card at one half should be #58, \
+                 read {bar:#04x}"
+            );
+            assert_eq!(window.overlay_groups_composited(), 2);
+        }
+
+        /// RED (46) — **a ground inside a fading surface cross-fades, and the
+        /// frame beside it is left alone.**
+        ///
+        /// The rail's fold: its panel is a ground — the window itself at that
+        /// place — and its shade falls outside the panel, across the panes. The
+        /// panel's pixels are lerped against what stands under the group, so a
+        /// `#2A` panel at one half over `#1B` is `#22`; the shade is composited
+        /// over, so black at one half, faded to a half again, takes a quarter
+        /// off `#1B`; and a pixel the surface never touched is `#1B` exactly.
+        /// A constant cross-fade over the whole surface (the audit's first
+        /// sketch of `CrossFade`) would have darkened that pixel to `#0E`.
+        ///
+        /// MUTATION: put the grounds back with the `over` pipeline (drop the
+        /// cut in `composite_group`) and the panel keeps its `(1 − o·αs)`
+        /// arithmetic — still `#22` on an opaque window, so the pin on the
+        /// untouched pixel is the one that carries it; route the whole
+        /// surface through `cross_fade` and that pixel reads `#0E`.
+        #[test]
+        fn a_ground_in_a_fading_surface_cross_fades_and_the_frame_beside_it_is_untouched() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let rail = OverlayLayer {
+                grounds: vec![OverlayGround {
+                    rect: [0.0, 0.0, 100.0, HEIGHT as f32],
+                    color: PLATE,
+                }],
+                quads: vec![OverlayQuad {
+                    rect: [100.0, 0.0, 140.0, HEIGHT as f32],
+                    color: [0, 0, 0],
+                    alpha: 0.5,
+                }],
+                ..OverlayLayer::default()
+            };
+            window.set_modal_overlay(vec![ground_layer(), rail], vec![group(1..2, 0.5)]);
+            let pixels = present(&mut window, &mut gpu);
+            let (panel, shade, untouched) = (
+                at(&pixels, (50, 120)),
+                at(&pixels, (120, 120)),
+                at(&pixels, (250, 120)),
+            );
+            assert!(
+                (0x21..=0x23).contains(&panel),
+                "the panel at one half should be #22, read {panel:#04x}"
+            );
+            assert!(
+                (0x13..=0x15).contains(&shade),
+                "black at a quarter over #1B should be #14, read {shade:#04x}"
+            );
+            assert_eq!(
+                untouched, 0x1B,
+                "a pixel the fading surface never touched was changed"
+            );
+        }
+
+        /// PIN (46) — **a group's offset moves the whole surface by whole
+        /// pixels.** A menu four pixels short of its place is the menu, four
+        /// pixels up: the plate's top edge row reads the plate at `top + dy`
+        /// and the ground one row above it.
+        ///
+        /// MUTATION: drop `input.offset` from `texel` in `group.wgsl` and the
+        /// surface is drawn in place.
+        #[test]
+        fn an_offset_moves_the_whole_surface_by_whole_pixels() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            window.set_modal_overlay(
+                vec![ground_layer(), card_layer()],
+                vec![OverlayGroup {
+                    layers: 1..2,
+                    opacity: 0.5,
+                    offset: [0.0, -4.0],
+                }],
+            );
+            let pixels = present(&mut window, &mut gpu);
+            let top = CARD[1] as u32;
+            let x = INTERIOR.0;
+            assert!(
+                (0x21..=0x23).contains(&at(&pixels, (x, top - 4 + 2))),
+                "the plate was not moved up by four"
+            );
+            assert!(
+                at(&pixels, (x, CARD[3] as u32 - 2)) < 0x1B,
+                "the plate's old bottom rows should now show the shadow under it"
+            );
+        }
+
+        /// PIN (46) — **the part of a surface put back over, and the part put
+        /// back by cross-fade, share every pixel exactly once.**
+        #[test]
+        fn the_pieces_outside_the_grounds_and_the_grounds_partition_the_frame() {
+            let bounds = [0.0, 0.0, 50.0, 40.0];
+            let cut = [[10.0, 5.0, 30.0, 20.0], [25.0, 15.0, 45.0, 35.0]];
+            let over = rects_outside(bounds, &cut);
+            let cross = rects_outside(bounds, &over);
+            let covers = |rects: &[[f32; 4]], x: f32, y: f32| {
+                rects
+                    .iter()
+                    .filter(|r| r[0] <= x && x < r[2] && r[1] <= y && y < r[3])
+                    .count()
+            };
+            for y in 0..40 {
+                for x in 0..50 {
+                    let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let in_cut = cut
+                        .iter()
+                        .any(|r| r[0] <= x && x < r[2] && r[1] <= y && y < r[3]);
+                    assert_eq!(covers(&over, x, y), usize::from(!in_cut), "over at {x},{y}");
+                    assert_eq!(
+                        covers(&cross, x, y),
+                        usize::from(in_cut),
+                        "cross at {x},{y}"
+                    );
+                }
+            }
+        }
+
+        /// PIN (46) — **where a layer stands is where its groups put it**: a
+        /// layer inside a surface drawn at nothing stands nowhere, and a layer
+        /// inside a travelling one stands moved.
+        #[test]
+        fn a_layers_bounds_follow_its_groups() {
+            let layers = vec![card_layer(), card_layer()];
+            let bounds = overlay_layer_bounds(
+                &layers,
+                &[
+                    OverlayGroup {
+                        layers: 0..1,
+                        opacity: 0.0,
+                        offset: [0.0, 0.0],
+                    },
+                    OverlayGroup {
+                        layers: 1..2,
+                        opacity: 0.5,
+                        offset: [3.0, -4.0],
+                    },
+                ],
+            );
+            assert_eq!(bounds[0], None);
+            let alone = card_layer().opaque_bounds().expect("the card stands");
+            assert_eq!(
+                bounds[1],
+                Some([
+                    alone[0] + 3.0,
+                    alone[1] - 4.0,
+                    alone[2] + 3.0,
+                    alone[3] - 4.0
+                ])
             );
         }
     }
@@ -27578,7 +31419,8 @@ mod tests {
             let window = WindowRenderer::offscreen(&mut gpu, 400, 200, 1.0, FORMAT)
                 .expect("an offscreen window");
             let frame = grid();
-            let rects = window.rectangles(&frame, &HashSet::new(), true, ALPHA);
+            let rects =
+                window.rectangles(window.base_metrics(), &frame, &HashSet::new(), true, ALPHA);
 
             assert_eq!(
                 rects.grounds.len(),
@@ -27626,7 +31468,8 @@ mod tests {
             let window = WindowRenderer::offscreen(&mut gpu, 400, 200, 1.0, FORMAT)
                 .expect("an offscreen window");
             let frame = grid();
-            let opaque = window.rectangles(&frame, &HashSet::new(), true, 1.0);
+            let opaque =
+                window.rectangles(window.base_metrics(), &frame, &HashSet::new(), true, 1.0);
             for ground in &opaque.grounds {
                 assert!(
                     (ground.color[3] - 1.0).abs() < 1e-6,
@@ -27641,7 +31484,8 @@ mod tests {
             );
             // And the ink half is untouched at every alpha: it is the same list,
             // built by the same arithmetic, whatever the window's opacity is.
-            let glass = window.rectangles(&frame, &HashSet::new(), true, 0.3);
+            let glass =
+                window.rectangles(window.base_metrics(), &frame, &HashSet::new(), true, 0.3);
             assert_eq!(opaque.ink, glass.ink);
         }
 
@@ -27885,23 +31729,23 @@ mod tests {
                 WindowRenderer::offscreen(&mut gpu, 400, 300, 2.0, FORMAT).expect("a 2.0x window");
             let mut coarse =
                 WindowRenderer::offscreen(&mut gpu, 800, 600, 1.5, FORMAT).expect("a 1.5x window");
-            assert_eq!(fine.metrics().scale_factor, 2.0);
-            assert_eq!(coarse.metrics().scale_factor, 1.5);
+            assert_eq!(fine.base_metrics().scale_factor, 2.0);
+            assert_eq!(coarse.base_metrics().scale_factor, 1.5);
             assert!(
-                fine.metrics().font_size_px > coarse.metrics().font_size_px,
+                fine.base_metrics().font_size_px > coarse.base_metrics().font_size_px,
                 "the same logical size on a denser window is more pixels: {} vs {}",
-                fine.metrics().font_size_px,
-                coarse.metrics().font_size_px
+                fine.base_metrics().font_size_px,
+                coarse.base_metrics().font_size_px
             );
 
-            let fine_metrics = fine.metrics();
+            let fine_metrics = fine.base_metrics();
             let fine_revision = fine.font_revision;
             coarse
                 .update_scale_factor(&mut gpu, 3.0)
                 .expect("the coarse window follows its own monitor");
-            assert_eq!(coarse.metrics().scale_factor, 3.0);
+            assert_eq!(coarse.base_metrics().scale_factor, 3.0);
             assert_eq!(
-                fine.metrics(),
+                fine.base_metrics(),
                 fine_metrics,
                 "one window's DPI change may not re-measure another window's cell"
             );
@@ -27925,7 +31769,7 @@ mod tests {
                 WindowRenderer::offscreen(&mut gpu, 400, 300, 1.0, FORMAT).expect("first window");
             let mut second =
                 WindowRenderer::offscreen(&mut gpu, 400, 300, 1.0, FORMAT).expect("second window");
-            let frame = single_cell_cursor_frame(first.metrics());
+            let frame = single_cell_cursor_frame(first.base_metrics());
 
             let cold = first
                 .probe_frame(&mut gpu, &frame)
@@ -27983,7 +31827,7 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, 400, 300, 1.0, FORMAT).expect("a window");
 
-            let before = window.metrics();
+            let before = window.base_metrics();
             let revision_before = window.font_revision();
             let frame = single_cell_cursor_frame(before);
             let warm = window.probe_frame(&mut gpu, &frame).expect("one frame");
@@ -27996,7 +31840,7 @@ mod tests {
                 "and the second finds it — which is the state the change has to undo"
             );
 
-            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], 24.0);
+            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], "", &[], 24.0);
             let after = window.apply_font_change(&mut gpu).expect("a re-measure");
 
             assert!(
@@ -28034,7 +31878,7 @@ mod tests {
 
             // (4) — the same font again is still a full invalidation.
             let revision = window.font_revision();
-            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], 24.0);
+            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], "", &[], 24.0);
             window.apply_font_change(&mut gpu).expect("a re-measure");
             assert!(window.font_revision() > revision);
         }
@@ -28051,9 +31895,9 @@ mod tests {
         #[test]
         fn a_family_this_machine_does_not_have_falls_back_to_the_face_it_draws() {
             let mut gpu = context();
-            gpu.set_terminal_font("No Such Family Is Installed", &[], 16.0);
+            gpu.set_terminal_font("No Such Family Is Installed", &[], "", &[], 16.0);
             assert_eq!(gpu.terminal_font_family(), DEFAULT_PRIMARY_FONT_FAMILY);
-            gpu.set_terminal_font("", &[], 16.0);
+            gpu.set_terminal_font("", &[], "", &[], 16.0);
             assert_eq!(
                 gpu.terminal_font_family(),
                 DEFAULT_PRIMARY_FONT_FAMILY,
@@ -28068,7 +31912,7 @@ mod tests {
                 .expect("a headless probe");
             assert!(!probe.adapter_name().is_empty());
             assert!(probe.max_texture_dimension_2d() > 0);
-            let frame = single_cell_cursor_frame(probe.window.metrics());
+            let frame = single_cell_cursor_frame(probe.window.base_metrics());
             let sample = probe.prepare_frame(&frame).expect("one replayed frame");
             assert!(sample.narrow_glyphs > 0);
             assert_eq!(sample.row_cache_misses, 1);
@@ -28124,7 +31968,7 @@ mod tests {
                 width: 320,
                 height: 300,
             };
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             window.set_chrome(
                 Vec::new(),
                 vec![ChromeLabel {
@@ -28146,6 +31990,7 @@ mod tests {
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat,
                         clip: seat,
                         frame: &frame,
@@ -28262,7 +32107,7 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             // Two pixels, BGRA: the left one blue, the right one green.
             let recording: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
             window.set_video_layers(vec![VideoLayer {
@@ -28284,6 +32129,7 @@ mod tests {
                 .present_frame(
                     &mut gpu,
                     &[SeatFrame {
+                        metrics: window.base_metrics(),
                         seat,
                         clip: seat,
                         frame: &frame,
@@ -28372,12 +32218,13 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
                 window
                     .present_frame(
                         gpu,
                         &[SeatFrame {
+                            metrics: window.base_metrics(),
                             seat,
                             clip: seat,
                             frame: &frame,
@@ -28461,12 +32308,13 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
                 window
                     .present_frame(
                         gpu,
                         &[SeatFrame {
+                            metrics: window.base_metrics(),
                             seat,
                             clip: seat,
                             frame: &frame,
@@ -28580,12 +32428,13 @@ mod tests {
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
                 window
                     .present_frame(
                         gpu,
                         &[SeatFrame {
+                            metrics: window.base_metrics(),
                             seat,
                             clip: seat,
                             frame: &frame,
@@ -28682,12 +32531,13 @@ mod tests {
             let mut second = WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT)
                 .expect("and a second one");
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            let frame = single_cell_cursor_frame(first.metrics());
+            let frame = single_cell_cursor_frame(first.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
                 window
                     .present_frame(
                         gpu,
                         &[SeatFrame {
+                            metrics: window.base_metrics(),
                             seat,
                             clip: seat,
                             frame: &frame,
@@ -29062,6 +32912,7 @@ mod tests {
             window.present_frame(
                 gpu,
                 &[SeatFrame {
+                    metrics: window.base_metrics(),
                     seat,
                     clip: seat,
                     frame,
@@ -29107,8 +32958,8 @@ mod tests {
             let mut gpu = on_this_machines_adapter(FORMAT);
             let mut window =
                 WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
-            window.set_modal_overlay(a_sentence_this_window_keeps());
-            let frame = single_cell_cursor_frame(window.metrics());
+            window.set_modal_overlay(a_sentence_this_window_keeps(), Vec::new());
+            let frame = single_cell_cursor_frame(window.base_metrics());
 
             one_frame(&mut window, &mut gpu, &frame).expect("the frame before the loss");
             let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
@@ -29195,7 +33046,7 @@ mod tests {
                 display_height_px: 80,
                 pan_px: [0.0, 0.0],
             }]);
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
 
             one_frame(&mut window, &mut gpu, &frame).expect("the frame that uploads it");
             let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
@@ -29286,7 +33137,7 @@ mod tests {
                     above_text: false,
                 }],
             );
-            let frame = single_cell_cursor_frame(window.metrics());
+            let frame = single_cell_cursor_frame(window.base_metrics());
 
             one_frame(&mut window, &mut gpu, &frame).expect("the frame");
             assert!(
@@ -29336,9 +33187,9 @@ mod tests {
                 WindowRenderer::offscreen(&mut gpu, 320, 200, 1.0, FORMAT).expect("first window");
             let mut second =
                 WindowRenderer::offscreen(&mut gpu, 240, 160, 2.0, FORMAT).expect("second window");
-            first.set_modal_overlay(a_sentence_this_window_keeps());
-            second.set_modal_overlay(a_sentence_this_window_keeps());
-            let frame = single_cell_cursor_frame(first.metrics());
+            first.set_modal_overlay(a_sentence_this_window_keeps(), Vec::new());
+            second.set_modal_overlay(a_sentence_this_window_keeps(), Vec::new());
+            let frame = single_cell_cursor_frame(first.base_metrics());
             one_frame(&mut first, &mut gpu, &frame).expect("the first window's frame");
             one_frame(&mut second, &mut gpu, &frame).expect("the second window's frame");
             let (before_first, before_second) = (
@@ -29413,6 +33264,1415 @@ mod tests {
                 "a rebuild that left a window blank has not recovered anything, and the \
                  pilot asks this before it decides the episode is over"
             );
+        }
+
+        /// **One fault is one sentence and one line**, however many times the
+        /// device says it (§7.1.3m ⑤″).
+        ///
+        /// The uncaptured-error handler is called once per error, and a device
+        /// that has gone raises one for every resource built on it afterwards —
+        /// a frame's worth is dozens. What a reader of `diagnostics.log` needs
+        /// is the *first*, because every one after it is about a consequence;
+        /// what they must not be given is the same page printed forty times.
+        ///
+        /// The flattening is the other half of the same care: wgpu writes a
+        /// validation error as a paragraph with a `Caused by:` under it, and a
+        /// log read a line at a time is a log where that is four entries.
+        ///
+        /// MUTATION: return the line unconditionally instead of only on the
+        /// first set, and the second assertion goes red — which is the shape of
+        /// the log this handler would otherwise write.
+        #[test]
+        fn a_device_says_what_went_wrong_once_however_often_it_says_it() {
+            let latch = OnceLock::new();
+            let first = note_what_the_device_said(
+                &latch,
+                DEVICE_FAULT_HEADLINE,
+                "Validation Error\n\nCaused by:\n  Buffer with 'terminal cell grounds' \
+                 label is invalid\n",
+            );
+
+            assert_eq!(
+                first.as_deref(),
+                Some(
+                    "Folio's GPU device reported an error — Validation Error Caused by: \
+                     Buffer with 'terminal cell grounds' label is invalid"
+                ),
+                "the sentence wgpu wrote, whole, on one line"
+            );
+            assert!(
+                note_what_the_device_said(&latch, DEVICE_FAULT_HEADLINE, "and again").is_none(),
+                "the second report of the same fault is not a second line"
+            );
+            assert_eq!(
+                latch.get().map(String::as_str),
+                Some(
+                    "Validation Error Caused by: Buffer with 'terminal cell grounds' \
+                     label is invalid"
+                ),
+                "and it is the first sentence that is kept, because the ones after it \
+                 are about what the first one caused"
+            );
+        }
+
+        /// PIN (user report 2026-09-16) — **the buffer that used to end the
+        /// process.**
+        ///
+        /// A power cut put the laptop on battery, the AMD driver reset, and the
+        /// device went away in the middle of a frame that was already past the
+        /// gate at the top of `compose_frame`. The next thing that frame did was
+        /// ask for its cell grounds through `wgpu::util`'s `create_buffer_init`,
+        /// which mints `mapped_at_creation` and **unwraps** the mapping — and
+        /// the mapping of the quietly invalid buffer a departed device hands out
+        /// is a `MapRangeError`. Exit 101, a window full of live shells gone,
+        /// two frames after the rebuild that was meant to answer it had already
+        /// worked once.
+        ///
+        /// This is that line, against a device that is really gone. Nothing here
+        /// asserts a return value: the whole claim is that the process is still
+        /// running to make the assertions after it.
+        ///
+        /// MUTATION: put `create_buffer_init` back and this test does not fail,
+        /// it aborts — which is precisely what it is for.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn the_buffer_a_frame_mints_after_the_device_went_away_does_not_end_the_process() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 320, 200, 1.0, FORMAT).expect("a window");
+            window.set_modal_overlay(a_sentence_this_window_keeps(), Vec::new());
+            let frame = single_cell_cursor_frame(window.base_metrics());
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame before the loss");
+            let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
+            assert!(before > 0, "there has to be a picture to lose");
+
+            gpu.lose_the_device_on_purpose();
+            // The crash, by name, in the middle of a frame the gate at the top
+            // of `compose_frame` has already let through.
+            let grounds = gpu.vertex_buffer("terminal cell grounds", &[RectInstance::zeroed()]);
+            drop(grounds);
+
+            assert!(
+                matches!(
+                    one_frame(&mut window, &mut gpu, &frame),
+                    Err(RenderError::DeviceLost(_))
+                ),
+                "the frame is refused by the name of what actually went wrong"
+            );
+            pollster::block_on(
+                gpu.rebuild_after_device_loss(vec![RebuiltWindow::Offscreen(&mut window)]),
+            )
+            .expect("a machine that has one device has another");
+            assert!(
+                gpu.device_loss().is_none() && gpu.device_fault().is_none(),
+                "a new device carries new latches — both of them, or every frame on it \
+                 is refused for something the device before it did"
+            );
+
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame after the rebuild");
+            assert_eq!(
+                ink_pixels(&window.read_back(&gpu).expect("it reads back")),
+                before,
+                "the same words, on a device that did not exist when they were last said"
+            );
+        }
+
+        /// RED — **an error wgpu cannot hand back to a call is latched, not
+        /// thrown** (§7.1.3m ⑤″).
+        ///
+        /// Until this the workspace installed no `on_uncaptured_error` handler
+        /// at all, so the error sink's default stood: `panic!`, raised inside
+        /// wgpu on whatever thread noticed, where no `?` in this crate could
+        /// reach it. That is fail-loud in the only sense that matters against a
+        /// bug of our own — and it is also what turned every validation error
+        /// raised in the wake of a device loss into the end of the run.
+        ///
+        /// Loud is kept and the noise is moved: the fault is latched, the frame
+        /// after it is refused **by the sentence wgpu wrote**, and that error
+        /// travels up to `FolioApp::fail`, where a device that can be rebuilt is
+        /// rebuilt and one that cannot ends the run with words a reader can use.
+        ///
+        /// The fault is provoked the only way a test can provoke a real one on a
+        /// live device: a write past the end of a buffer, which wgpu classifies
+        /// `Validation` and has nowhere to return.
+        ///
+        /// MUTATION: take the handler off and this test aborts inside
+        /// `wgpu-core` on the write, three assertions early.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn an_error_wgpu_could_not_hand_back_is_latched_and_refuses_the_next_frame() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 160, 1.0, FORMAT).expect("a window");
+            let frame = single_cell_cursor_frame(window.base_metrics());
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame before the fault");
+            assert!(
+                gpu.device_fault().is_none(),
+                "a device nothing has gone wrong on has nothing to say"
+            );
+
+            let small = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("a buffer this test writes past the end of"),
+                size: 16,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            gpu.queue.write_buffer(&small, 0, &[0_u8; 64]);
+
+            let said = gpu
+                .device_fault()
+                .expect("the handler caught what used to be a panic")
+                .to_owned();
+            assert!(!said.contains('\n'), "one fault, one line: {said:?}");
+            gpu.queue.write_buffer(&small, 0, &[1_u8; 128]);
+            assert_eq!(
+                gpu.device_fault(),
+                Some(said.as_str()),
+                "the handler is idempotent — a second fault does not replace the first"
+            );
+
+            let refits = gpu.glyph_atlas_refits();
+            assert!(
+                matches!(
+                    one_frame(&mut window, &mut gpu, &frame),
+                    Err(RenderError::Wgpu(reported)) if reported == said
+                ),
+                "the frame after a fault is refused, carrying the sentence wgpu wrote"
+            );
+            assert_eq!(
+                gpu.glyph_atlas_refits(),
+                refits,
+                "and nothing was repaired on the way out: a re-pack on a device this \
+                 broken mints an atlas every later frame would take its ink from"
+            );
+        }
+    }
+    /// Ticket 38: the family that draws a grid cell never depends on the weight
+    /// asked (step 0), and a bold request on a face with no bold cut is drawn
+    /// heavier from that face's own outline (step 2).
+    mod synthetic_bold {
+        use super::*;
+
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+        /// A checked-in test font written where `set_terminal_font` can load
+        /// it from a path, the way the picker hands it a family's files.
+        fn font_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+            // A directory of its own per call: fontdb maps a loaded file, and
+            // Windows refuses to rewrite a mapped file under another test.
+            static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "folio-bt-render-synthetic-bold-{}-{call}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("a scratch directory");
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).expect("the font file");
+            path
+        }
+
+        fn test_sans_file() -> std::path::PathBuf {
+            font_file(
+                "Test-Sans400.ttf",
+                include_bytes!("../tests/fonts/Test-Sans400.ttf"),
+            )
+        }
+
+        /// The family and face weight each glyph of a grid cell is drawn from,
+        /// shaped through the product's own road: the cache-miss shaper, over
+        /// the context's database and resolved CJK families.
+        fn drawn_faces(gpu: &mut GpuContext, text: &str, bold: bool) -> Vec<(String, u16)> {
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            let key = ShapeKey {
+                text: text.into(),
+                bold,
+                italic: false,
+            };
+            let mut trials = 0;
+            let (buffer, _, _) = shape_narrow_buffer_for_key(
+                &key,
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &gpu.terminal_cjk_families,
+                &mut trials,
+            );
+            buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter())
+                .map(|glyph| {
+                    assert_ne!(glyph.glyph_id, 0, "the cell found a glyph");
+                    let face = gpu.font_system.db().face(glyph.font_id).expect("a face");
+                    (face.families[0].0.clone(), face.weight.0)
+                })
+                .collect()
+        }
+
+        /// RED (38, step 0) — **a bold cell in a primary family with no bold
+        /// cut stays in that family.**
+        ///
+        /// The 2026-09-20 rule (`1ddd516c`) is stated for the resolved family,
+        /// and the Chinese families have kept it through `match_cjk_attrs`
+        /// since then. The primary did not: cosmic-text was asked for weight
+        /// 700, its default-monospace shortcut needs an exact weight, and its
+        /// fallback ranking then took any monospace face with a real bold — on
+        /// Windows, Consolas Bold, which the product's database always holds.
+        /// The font arrives the way a picked family does, as a file handed to
+        /// `set_terminal_font`, so the file → fontdb → `set_monospace_family` →
+        /// shaper chain is the product's own.
+        ///
+        /// MUTATION: return `match_cjk_attrs(fs, attrs)` from
+        /// `match_grid_attrs` for `Family::Monospace` too (skip the swap), and
+        /// the bold `A` is drawn in another family.
+        #[test]
+        fn a_bold_cell_in_a_primary_family_with_no_bold_cut_stays_in_that_family() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            gpu.set_terminal_font("Test Sans", &[test_sans_file()], "", &[], 16.0);
+            assert_eq!(gpu.terminal_font_family(), "Test Sans");
+            let regular = drawn_faces(&mut gpu, "A", false);
+            let bold = drawn_faces(&mut gpu, "A", true);
+            assert_eq!(regular, [("Test Sans".to_owned(), 400)]);
+            assert_eq!(
+                bold, regular,
+                "the weight asked for never changes the family, nor the face it offers"
+            );
+        }
+
+        /// PIN (38, step 0) — **a primary family that has a bold cut still
+        /// draws its own bold.** The swap hands the shaper the face the family
+        /// offers; for a family with a 700 face that is the 700 face.
+        ///
+        /// MUTATION: swap every weight to the regular face's in
+        /// `family_face_matches` and the bold `A` comes back at 400.
+        #[test]
+        fn a_primary_family_with_a_bold_cut_draws_its_own_bold() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let files = [
+                font_file(
+                    "Test-CJK400.ttf",
+                    include_bytes!("../tests/fonts/Test-CJK400.ttf"),
+                ),
+                font_file(
+                    "Test-CJK700.ttf",
+                    include_bytes!("../tests/fonts/Test-CJK700.ttf"),
+                ),
+            ];
+            gpu.set_terminal_font("Test CJK", &files, "", &[], 16.0);
+            assert_eq!(
+                drawn_faces(&mut gpu, "A", false),
+                [("Test CJK".to_owned(), 400)]
+            );
+            assert_eq!(
+                drawn_faces(&mut gpu, "A", true),
+                [("Test CJK".to_owned(), 700)]
+            );
+        }
+
+        // ── step 2: synthetic bold ─────────────────────────────────────────
+
+        fn test_other_file() -> std::path::PathBuf {
+            font_file(
+                "Test-Other400.ttf",
+                include_bytes!("../tests/fonts/Test-Other400.ttf"),
+            )
+        }
+
+        /// The product's road for a user who picked single-weight faces: a
+        /// primary with no bold cut (Test Sans) and a Chinese family with no
+        /// bold cut (Test Other), both handed to `set_terminal_font` as files.
+        fn regular_only_families(gpu: &mut GpuContext, size_logical_px: f32) {
+            gpu.set_terminal_font(
+                "Test Sans",
+                &[test_sans_file()],
+                "Test Other",
+                &[test_other_file()],
+                size_logical_px,
+            );
+            assert_eq!(gpu.terminal_font_family(), "Test Sans");
+            assert_eq!(gpu.terminal_cjk_font_family(), "Test Other");
+        }
+
+        /// The ink colour every test cell is written in, and the test for it.
+        /// `[b, g, r, a]` on the way back.
+        const INK: TerminalColor = TerminalColor::Rgb(255, 0, 0);
+        fn is_ink(pixel: &[u8; 4]) -> bool {
+            let (blue, green, red) = (
+                u32::from(pixel[0]),
+                u32::from(pixel[1]),
+                u32::from(pixel[2]),
+            );
+            red > 40 && blue * 3 < red && green * 3 < red
+        }
+
+        /// One test cell: its text and flags. A wide cell is followed by its
+        /// spacer, as the terminal writes it.
+        fn row_cells(cells: &[(&str, CellFlags)]) -> Vec<CapturedCell> {
+            let mut row = Vec::new();
+            for &(text, flags) in cells {
+                let mut cell = CapturedCell::plain(text);
+                cell.style.flags = flags;
+                cell.style.foreground = INK;
+                let wide = flags.contains(CellFlags::WIDE_CHAR);
+                row.push(cell);
+                if wide {
+                    let mut spacer = CapturedCell::plain("");
+                    spacer.wide_spacer = true;
+                    spacer.style.foreground = INK;
+                    row.push(spacer);
+                }
+            }
+            row
+        }
+
+        fn one_row_frame(cells: Vec<CapturedCell>, metrics: CellMetrics) -> ViewportFrame {
+            let columns = cells.len() as u32;
+            ViewportFrame {
+                columns: NonZeroU32::new(columns).unwrap(),
+                horizontal: HorizontalProjection::unscrolled(columns),
+                grid_rows: NonZeroU32::new(1).unwrap(),
+                rows: NonZeroU32::new(1).unwrap(),
+                presentation_offset_subpixels: 0,
+                cells,
+                cursor: bt_viewport::GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+                cell_anchors: test_cell_anchors(columns as usize),
+                row_map: test_row_map_for_metrics(1, metrics),
+                selection_spans: Vec::new(),
+                search_spans: Vec::new(),
+                current_search_spans: Vec::new(),
+                math_blocks: Vec::new(),
+                math_failures: Vec::new(),
+                status_text: None,
+                viewport_origin: FrameViewportOrigin::Bottom,
+                scroll_offset_rows: 0,
+                layout_key: bt_doc_layout_key(columns),
+                view_generation: bt_doc::ViewGeneration(1),
+            }
+        }
+
+        fn present(
+            window: &mut WindowRenderer,
+            gpu: &mut GpuContext,
+            frame: &ViewportFrame,
+        ) -> PresentOutcome {
+            let seat = SeatViewport::whole(window.config.width, window.config.height);
+            window
+                .present_frame(
+                    gpu,
+                    &[SeatFrame {
+                        metrics: window.base_metrics(),
+                        seat,
+                        clip: seat,
+                        frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .expect("a frame")
+        }
+
+        /// The ink inside columns `first..first + width` of the one row: the
+        /// red channel summed over the pixels that read as ink, so a stroke
+        /// that gained part of a pixel counts the part it gained.
+        fn ink_in_columns(
+            pixels: &[[u8; 4]],
+            surface_width: u32,
+            metrics: CellMetrics,
+            frame: &ViewportFrame,
+            first: usize,
+            width: usize,
+        ) -> usize {
+            let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, 0, first);
+            let right = left + width as f32 * metrics.cell_width_px;
+            let (x0, x1) = (left.floor() as usize, right.ceil() as usize);
+            let (y0, y1) = (top.floor() as usize, bottom.ceil() as usize);
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| pixels[y * surface_width as usize + x]))
+                .filter(is_ink)
+                .map(|pixel| usize::from(pixel[2]))
+                .sum()
+        }
+
+        /// The ink of one cell's raster alone, measured off the swash image
+        /// the product makes: regular (`embolden` false) or synthesized.
+        fn raster_ink(gpu: &mut GpuContext, key: glyphon::CacheKey, embolden: bool) -> [i32; 4] {
+            let font = gpu
+                .font_system
+                .get_font(key.font_id, key.font_weight)
+                .expect("the face");
+            let image = crate::synthetic_bold::synthetic_bold_image(
+                &mut swash::scale::ScaleContext::new(),
+                &font,
+                key,
+                embolden,
+            )
+            .expect("a raster");
+            let p = image.placement;
+            [
+                p.left,
+                -p.top,
+                p.left + p.width as i32,
+                -p.top + p.height as i32,
+            ]
+        }
+
+        /// RED (38) — **a bold cell in a family with no bold cut has more ink
+        /// than its regular twin, and both are drawn by that family.**
+        ///
+        /// Since 2026-09-20 such a cell keeps its family's regular face, so on
+        /// `097a4863` it is drawn exactly like the regular text beside it — the
+        /// two cells read back with equal ink. The Chinese family arrives the
+        /// way a picked family does (a file handed to `set_terminal_font`, the
+        /// `file_reads` Fonts lane, fontdb, `resolve_terminal_cjk_families`),
+        /// and the frame goes through `present_frame` on the software adapter
+        /// and is read back, so every step between the cell and the glass is
+        /// the product's.
+        ///
+        /// MUTATION: make `SYNTHETIC_BOLD_STRENGTH_EM` zero, or have
+        /// `synthetic_bold_glyphs` answer `None`, and the two cells carry the
+        /// same ink.
+        #[test]
+        fn a_bold_cell_in_a_family_with_no_bold_cut_has_more_ink_than_its_regular_twin() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            let frame = one_row_frame(
+                row_cells(&[
+                    ("你", CellFlags::WIDE_CHAR),
+                    ("你", CellFlags::WIDE_CHAR | CellFlags::BOLD),
+                ]),
+                metrics,
+            );
+            assert!(matches!(
+                present(&mut window, &mut gpu, &frame),
+                PresentOutcome::Presented(_)
+            ));
+            let pixels = window.read_back(&gpu).expect("it reads back");
+            let width = window.config.width;
+            let regular = ink_in_columns(&pixels, width, metrics, &frame, 0, 2);
+            let bold = ink_in_columns(&pixels, width, metrics, &frame, 2, 2);
+            eprintln!("BT_SYNTHETIC_BOLD cjk regular_ink={regular} bold_ink={bold}");
+            assert!(regular > 0, "the regular cell drew");
+            assert!(
+                bold * 100 >= regular * 105,
+                "the bold cell carries at least 5% more ink: {bold} against {regular}"
+            );
+            let families: Vec<String> = window.text_rows[0]
+                .wide_glyphs
+                .iter()
+                .flat_map(|wide| {
+                    wide.buffer
+                        .layout_runs()
+                        .flat_map(|run| run.glyphs.iter())
+                        .map(|glyph| {
+                            gpu.font_system.db().face(glyph.font_id).unwrap().families[0]
+                                .0
+                                .clone()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(families, ["Test Other", "Test Other"]);
+        }
+
+        /// RED (38) — **a bold cell in a primary family with no bold cut is
+        /// emboldened in that family.** Step 0 keeps the cell in Test Sans; this
+        /// is the ink that step leaves owed.
+        ///
+        /// MUTATION: have `synthetic_bold_glyphs` answer `None` for
+        /// `Family::Monospace` cells (skip the primary), and the two `A`s read
+        /// back equal.
+        #[test]
+        fn a_bold_cell_in_a_primary_family_with_no_bold_cut_is_emboldened_in_that_family() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 160, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            // Test Sans draws its `A` wider than the cell (the cell is measured
+            // on an `M` the face does not have), so each `A` is given the empty
+            // cell after it to overhang into, and its ink is read over both.
+            let frame = one_row_frame(
+                row_cells(&[
+                    ("A", CellFlags::empty()),
+                    (" ", CellFlags::empty()),
+                    ("A", CellFlags::BOLD),
+                    (" ", CellFlags::empty()),
+                ]),
+                metrics,
+            );
+            present(&mut window, &mut gpu, &frame);
+            let pixels = window.read_back(&gpu).expect("it reads back");
+            let width = window.config.width;
+            let regular = ink_in_columns(&pixels, width, metrics, &frame, 0, 2);
+            let bold = ink_in_columns(&pixels, width, metrics, &frame, 2, 2);
+            eprintln!("BT_SYNTHETIC_BOLD primary regular_ink={regular} bold_ink={bold}");
+            assert!(regular > 0);
+            assert!(
+                bold * 100 >= regular * 105,
+                "the bold `A` carries at least 5% more ink: {bold} against {regular}"
+            );
+            for glyph in &window.text_rows[0].narrow_glyphs {
+                for laid in glyph.buffer.layout_runs().flat_map(|run| run.glyphs.iter()) {
+                    let face = gpu.font_system.db().face(laid.font_id).unwrap();
+                    assert_eq!(face.families[0].0, "Test Sans");
+                }
+            }
+        }
+
+        /// RED (38) — **synthetic bold never changes the family that draws the
+        /// cell.** For all four bold/italic combinations in Test Other, the
+        /// shaped glyph comes from Test Other, and the raster the synthesis
+        /// makes for it is made from that same face — the table is keyed by the
+        /// glyph's own `CacheKey`, face id included. Beside
+        /// `cjk_chosen_regular_only_family_survives_bold_italic`, which holds
+        /// the shaping half on its own and is unedited.
+        ///
+        /// MUTATION: rasterize a synthesized glyph from `CacheKey { font_id:
+        /// <the primary's id>, .. }` in `place_synthetic_bold`, and the face the
+        /// raster came from is not Test Other.
+        #[test]
+        fn synthetic_bold_never_changes_the_family_that_draws_the_cell() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            regular_only_families(&mut gpu, 16.0);
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut flags = CellFlags::WIDE_CHAR;
+                flags.set(CellFlags::BOLD, bold);
+                flags.set(CellFlags::ITALIC, italic);
+                let cells = row_cells(&[("你", flags)]);
+                let gpu = &mut *gpu;
+                let shaped = shape_wide_glyphs_with_cjk(
+                    &cells,
+                    &mut gpu.font_system,
+                    &mut gpu.swash_cache,
+                    metrics,
+                    &mut WideShapingCache::new(),
+                    &gpu.terminal_cjk_families,
+                );
+                assert_eq!(shaped[0].synthetic_bold.is_some(), bold, "{bold} {italic}");
+                let area = GridCellArea {
+                    area: TextArea {
+                        buffer: &shaped[0].buffer,
+                        left: 0.0,
+                        top: 0.0,
+                        scale: 1.0,
+                        bounds: TextBounds::default(),
+                        default_color: Color::rgb(255, 0, 0),
+                        custom_glyphs: &[],
+                    },
+                    synthetic_bold: shaped[0].synthetic_bold.as_deref(),
+                };
+                gpu.synthetic_bold.retire_all();
+                let placed =
+                    place_synthetic_bold([area], &mut gpu.synthetic_bold, &mut gpu.font_system)
+                        .expect("ids");
+                assert_eq!(placed.glyph_count(), usize::from(bold));
+                let faces: Vec<_> = shaped[0]
+                    .buffer
+                    .layout_runs()
+                    .flat_map(|run| run.glyphs.iter())
+                    .map(|glyph| glyph.font_id)
+                    .chain(gpu.synthetic_bold.faces())
+                    .map(|id| gpu.font_system.db().face(id).unwrap().families[0].0.clone())
+                    .collect();
+                assert!(
+                    faces.iter().all(|family| family == "Test Other"),
+                    "bold={bold} italic={italic}: {faces:?}"
+                );
+            }
+        }
+
+        /// RED (38, coordinator 2026-09-24) — **a cluster the chosen primary
+        /// family does not cover asks its fallback at the weight asked, and a
+        /// fallback with a real bold cut draws that bold, with no synthesis.**
+        ///
+        /// The 2026-09-20 rule is that the *chosen* family never changes for
+        /// weight. Test Sans has no `M`, so an `M` leaves it at any weight; the
+        /// swap in `match_grid_attrs` is owed only to clusters the primary
+        /// draws. Applied to every request, it asked the fallback for 400, and
+        /// the fallback's regular face was then emboldened instead of its bold
+        /// cut being drawn. The fallback here is the product database's own
+        /// (Consolas on Windows, whose `consolab.ttf` is always loaded).
+        ///
+        /// MUTATION: drop the `primary_font_supports_text` guard from
+        /// `match_grid_attrs` (apply the swap to every request), and the `M` is
+        /// drawn from a 400 face with a custom glyph minted for it.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_cluster_the_primary_does_not_cover_draws_its_fallbacks_real_bold() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            regular_only_families(&mut gpu, 16.0);
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            let gpu = &mut *gpu;
+            let shaped = shape_narrow_glyphs_with_cjk(
+                &row_cells(&[("M", CellFlags::BOLD)]),
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &mut NarrowShapingCache::new(),
+                &gpu.terminal_cjk_families,
+            );
+            let glyph = shaped[0].buffer.layout_runs().next().unwrap().glyphs[0].clone();
+            assert_ne!(glyph.glyph_id, 0);
+            let face = gpu.font_system.db().face(glyph.font_id).unwrap();
+            assert_ne!(face.families[0].0, "Test Sans", "Test Sans has no `M`");
+            assert_eq!(
+                (face.families[0].0.as_str(), face.weight.0),
+                ("Consolas", 700),
+                "the fallback's own bold cut"
+            );
+            assert!(
+                shaped[0].synthetic_bold.is_none(),
+                "no custom glyph is minted"
+            );
+        }
+
+        /// PIN (38) — **a family with a bold cut draws its own bold and is not
+        /// emboldened**: Test CJK (400 and 700) as the Chinese family, a bold
+        /// cell shaped from the 700 face and carrying no synthesis.
+        ///
+        /// MUTATION: drop the face-weight half of `synthetic_bold_glyphs`'
+        /// condition and the 700 face is emboldened on top of its own bold.
+        #[test]
+        fn a_family_with_a_bold_cut_draws_its_own_bold_and_is_not_emboldened() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let files = [
+                font_file(
+                    "Test-CJK400.ttf",
+                    include_bytes!("../tests/fonts/Test-CJK400.ttf"),
+                ),
+                font_file(
+                    "Test-CJK700.ttf",
+                    include_bytes!("../tests/fonts/Test-CJK700.ttf"),
+                ),
+            ];
+            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], "Test CJK", &files, 16.0);
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            let cells = row_cells(&[("你", CellFlags::WIDE_CHAR | CellFlags::BOLD)]);
+            let gpu = &mut *gpu;
+            let shaped = shape_wide_glyphs_with_cjk(
+                &cells,
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &mut WideShapingCache::new(),
+                &gpu.terminal_cjk_families,
+            );
+            let glyph = shaped[0].buffer.layout_runs().next().unwrap().glyphs[0].clone();
+            let face = gpu.font_system.db().face(glyph.font_id).unwrap();
+            assert_eq!(
+                (face.families[0].0.as_str(), face.weight.0),
+                ("Test CJK", 700)
+            );
+            assert!(shaped[0].synthetic_bold.is_none(), "no custom glyph");
+        }
+
+        /// PIN (38) — **a bold colour emoji and a bold box-drawing cell are
+        /// unchanged**: the emoji carries no synthesis (its route is colour),
+        /// and a box-drawing cell never reaches the shaper at all (it is
+        /// procedural geometry).
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_bold_colour_emoji_and_a_bold_box_drawing_cell_are_not_emboldened() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            let gpu = &mut *gpu;
+            let emoji = shape_wide_glyphs_with_cjk(
+                &row_cells(&[("👍", CellFlags::WIDE_CHAR | CellFlags::BOLD)]),
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &mut WideShapingCache::new(),
+                &gpu.terminal_cjk_families,
+            );
+            assert_eq!(emoji.len(), 1);
+            assert!(emoji[0].synthetic_bold.is_none());
+            let boxed = shape_narrow_glyphs_with_cjk(
+                &row_cells(&[("─", CellFlags::BOLD)]),
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &mut NarrowShapingCache::new(),
+                &gpu.terminal_cjk_families,
+            );
+            assert!(boxed.is_empty(), "box drawing is not shaped");
+        }
+
+        /// RED (38) — **bold-italic in a regular-only family is slanted and
+        /// heavier**: more ink than the italic-only cell, and the same slant
+        /// (the left edge of the ink moves right from its bottom row to its
+        /// top row, as `FAKE_ITALIC`'s 14° skew moves it).
+        ///
+        /// MUTATION: drop the `.transform(..)` from `synthetic_bold_image` and
+        /// the bold-italic cell stands upright.
+        #[test]
+        fn bold_italic_in_a_regular_only_family_is_slanted_and_heavier() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            let frame = one_row_frame(
+                row_cells(&[
+                    ("你", CellFlags::WIDE_CHAR | CellFlags::ITALIC),
+                    (
+                        "你",
+                        CellFlags::WIDE_CHAR | CellFlags::ITALIC | CellFlags::BOLD,
+                    ),
+                ]),
+                metrics,
+            );
+            present(&mut window, &mut gpu, &frame);
+            let pixels = window.read_back(&gpu).expect("it reads back");
+            let width = window.config.width;
+            let italic = ink_in_columns(&pixels, width, metrics, &frame, 0, 2);
+            let bold_italic = ink_in_columns(&pixels, width, metrics, &frame, 2, 2);
+            assert!(
+                bold_italic * 100 >= italic * 105,
+                "heavier: {bold_italic} against {italic}"
+            );
+            // The slant, read off the ink: the leftmost ink column of the top
+            // ink row against that of the bottom ink row, inside each cell.
+            let slant = |first: usize| {
+                let [left, top, _, bottom] = frame_cell_bounds_px(metrics, &frame, 0, first);
+                let x0 = left.floor() as usize;
+                let x1 = (left + 2.0 * metrics.cell_width_px).ceil() as usize;
+                let rows: Vec<usize> = (top.floor() as usize..bottom.ceil() as usize)
+                    .filter(|y| (x0..x1).any(|x| is_ink(&pixels[y * width as usize + x])))
+                    .collect();
+                let leftmost = |y: usize| {
+                    (x0..x1)
+                        .find(|x| is_ink(&pixels[y * width as usize + x]))
+                        .unwrap() as i64
+                };
+                leftmost(*rows.first().unwrap()) - leftmost(*rows.last().unwrap())
+            };
+            let (italic_slant, bold_italic_slant) = (slant(0), slant(2));
+            eprintln!(
+                "BT_SYNTHETIC_BOLD italic_ink={italic} bold_italic_ink={bold_italic} \
+                 italic_slant={italic_slant} bold_italic_slant={bold_italic_slant}"
+            );
+            assert!(italic_slant >= 1, "the italic cell is slanted");
+            assert!(
+                (bold_italic_slant - italic_slant).abs() <= 1,
+                "and the bold-italic one by the same skew: {bold_italic_slant} against \
+                 {italic_slant}"
+            );
+        }
+
+        /// PIN (38) — **synthetic bold ink stays inside its cell's tolerance**
+        /// at the smallest and the largest size a pane is drawn at (8 and 72
+        /// logical pixels, ticket 37), at display scales 1 and 2.
+        ///
+        /// swash's embolden moves every outline point by the strength plus its
+        /// bisector shift, so the ink grows by up to twice the strength on the
+        /// right and top and not at all on the left and bottom. The tolerance is
+        /// that growth, rounded out to whole pixels plus one of antialiasing,
+        /// and the grown ink must still lie inside the slot a wide cell's text
+        /// area is clipped to — two cells wide, one row tall — so nothing of it
+        /// is cut off.
+        ///
+        /// MUTATION: make `SYNTHETIC_BOLD_STRENGTH_EM` `1.0 / 8.0` and the grown
+        /// ink crosses the right edge of the two-cell slot.
+        #[test]
+        fn synthetic_bold_ink_stays_inside_its_cell_tolerance() {
+            let mut gpu = on_this_machines_adapter(FORMAT);
+            regular_only_families(&mut gpu, 16.0);
+            for size in [8.0_f32, 72.0] {
+                for scale in [1.0_f64, 2.0] {
+                    let metrics = gpu.terminal_cell_metrics(scale, size).expect("metrics");
+                    let cells = row_cells(&[("你", CellFlags::WIDE_CHAR | CellFlags::BOLD)]);
+                    let gpu = &mut *gpu;
+                    let shaped = shape_wide_glyphs_with_cjk(
+                        &cells,
+                        &mut gpu.font_system,
+                        &mut gpu.swash_cache,
+                        metrics,
+                        &mut WideShapingCache::new(),
+                        &gpu.terminal_cjk_families,
+                    );
+                    let run = shaped[0].buffer.layout_runs().next().unwrap();
+                    let (line_y, glyph) = (run.line_y, run.glyphs[0].clone());
+                    let origin = (shaped[0].left_offset_px, shaped[0].top_offset_px);
+                    let physical = glyph.physical(origin, 1.0);
+                    let regular = raster_ink(gpu, physical.cache_key, false);
+                    let bold = raster_ink(gpu, physical.cache_key, true);
+                    let strength = crate::synthetic_bold::SYNTHETIC_BOLD_STRENGTH_EM
+                        * f32::from_bits(physical.cache_key.font_size_bits);
+                    let tolerance = (2.0 * strength).ceil() as i32 + 1;
+                    eprintln!(
+                        "BT_SYNTHETIC_BOLD size={size} scale={scale} strength_px={strength:.2} \
+                         regular={regular:?} bold={bold:?}"
+                    );
+                    assert!(bold[0] >= regular[0] - 1, "left edge {size}/{scale}");
+                    assert!(bold[3] <= regular[3] + 1, "bottom edge {size}/{scale}");
+                    assert!(
+                        bold[2] <= regular[2] + tolerance,
+                        "right edge {size}/{scale}"
+                    );
+                    assert!(bold[1] >= regular[1] - tolerance, "top edge {size}/{scale}");
+                    // Inside the wide slot, in slot coordinates.
+                    let x = physical.x;
+                    let y = line_y.round() as i32 + physical.y;
+                    let slot_right = (2.0 * metrics.cell_width_px).ceil() as i32;
+                    let row_bottom = metrics.cell_height_px.ceil() as i32;
+                    assert!(
+                        x + bold[0] >= 0 && x + bold[2] <= slot_right,
+                        "{size}/{scale}"
+                    );
+                    assert!(
+                        y + bold[1] >= 0 && y + bold[3] <= row_bottom,
+                        "{size}/{scale}"
+                    );
+                }
+            }
+        }
+
+        /// A frame asking for two synthesized rasters: a bold `A` in the primary
+        /// and a bold `你` in the Chinese family — two faces, two ids. Narrow
+        /// cells are placed first, so the `A` is given the first id.
+        fn two_synthesized_cells(metrics: CellMetrics) -> ViewportFrame {
+            one_row_frame(
+                row_cells(&[
+                    ("A", CellFlags::BOLD),
+                    ("你", CellFlags::WIDE_CHAR | CellFlags::BOLD),
+                ]),
+                metrics,
+            )
+        }
+
+        fn one_bold_han(metrics: CellMetrics) -> ViewportFrame {
+            one_row_frame(
+                row_cells(&[("你", CellFlags::WIDE_CHAR | CellFlags::BOLD)]),
+                metrics,
+            )
+        }
+
+        fn all_ink(pixels: &[[u8; 4]]) -> usize {
+            pixels
+                .iter()
+                .filter(|pixel| is_ink(pixel))
+                .map(|pixel| usize::from(pixel[2]))
+                .sum()
+        }
+
+        /// RED (38) — **when the synthetic-bold ids run out the frame is
+        /// refused as a full atlas, and the repack gives them back.**
+        ///
+        /// The id space is glyphon's `u16`; a test-only ceiling of one stands in
+        /// for 65,536, as the soaks stand a small texture roof in for a real
+        /// one. The frame that needs a second id is presented without its grid
+        /// text, `close_the_frame` repacks once, and the frame after — asking
+        /// for the id the refused frame never got — is drawn.
+        ///
+        /// MUTATION: answer an exhausted table with `Ok(None)` (draw the cell
+        /// without its glyph) in `SyntheticBoldGlyphs::raster`, and the frame
+        /// is presented as complete with a character missing.
+        #[test]
+        fn running_out_of_synthetic_bold_ids_refuses_the_frame_and_the_repack_gives_them_back() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            gpu.synthetic_bold.set_ceiling(1);
+            let refits = gpu.glyph_atlas_refits();
+
+            let refused = present(&mut window, &mut gpu, &two_synthesized_cells(metrics));
+            assert!(
+                matches!(refused, PresentOutcome::PresentedWithoutText(_)),
+                "{refused:?}"
+            );
+            assert_eq!(gpu.glyph_atlas_refits(), refits + 1, "one repack");
+            assert_eq!(gpu.synthetic_bold.len(), 0, "every id went with the atlas");
+
+            let drawn = present(&mut window, &mut gpu, &one_bold_han(metrics));
+            assert!(matches!(drawn, PresentOutcome::Presented(_)), "{drawn:?}");
+            assert!(all_ink(&window.read_back(&gpu).expect("it reads back")) > 0);
+        }
+
+        /// RED (38) — **a synthetic bold glyph is drawn again after the atlas is
+        /// repacked**, with the same ink, and the id table started again with
+        /// the new atlas.
+        ///
+        /// The repack is a real `close_the_frame` episode, forced through the
+        /// id ceiling (the road the test above pins). Before it the table holds
+        /// the bold `你`'s id; the episode empties it; drawing the bold `你`
+        /// again gives out exactly one id, and the same ink reaches the glass.
+        ///
+        /// MUTATION: drop `self.synthetic_bold.retire_all()` from
+        /// `GpuContext::replace_atlas`, and the table still holds the old
+        /// atlas's id after the repack.
+        #[test]
+        fn a_synthetic_bold_glyph_is_drawn_again_after_the_atlas_is_repacked() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            let han = one_bold_han(metrics);
+            present(&mut window, &mut gpu, &han);
+            let before = all_ink(&window.read_back(&gpu).expect("it reads back"));
+            assert!(before > 0);
+
+            assert_eq!(gpu.synthetic_bold.len(), 1);
+            gpu.synthetic_bold.set_ceiling(1);
+            present(&mut window, &mut gpu, &two_synthesized_cells(metrics));
+            assert_eq!(gpu.glyph_atlas_refits(), 1, "the episode happened");
+            assert_eq!(
+                gpu.synthetic_bold.len(),
+                0,
+                "the id table was retired with the atlas it described"
+            );
+            gpu.synthetic_bold.set_ceiling(usize::MAX);
+
+            assert!(matches!(
+                present(&mut window, &mut gpu, &han),
+                PresentOutcome::Presented(_)
+            ));
+            assert_eq!(
+                all_ink(&window.read_back(&gpu).expect("it reads back")),
+                before,
+                "the same glyph, redrawn into the new atlas"
+            );
+            assert_eq!(gpu.synthetic_bold.len(), 1, "one id, given out afresh");
+        }
+
+        /// RED (38) — **the glyph census counts a synthesized cell.** Its text
+        /// area carries an empty buffer and one custom glyph, so a census that
+        /// walked buffers alone would report a bold Chinese screen as empty.
+        ///
+        /// MUTATION: drop the custom-glyph loop from `GlyphCensus::record` and
+        /// the grid lane asks for nothing.
+        #[test]
+        fn the_glyph_census_counts_a_synthesized_cell() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 80, 1.0, FORMAT).expect("a window");
+            window.set_glyph_census(true);
+            let metrics = window.base_metrics();
+            present(&mut window, &mut gpu, &one_bold_han(metrics));
+            let census = window.glyph_census().expect("a census");
+            let grid = census.lane(TextLane::Grid);
+            assert_eq!(grid.requested, 1, "{grid:?}");
+            assert_eq!(grid.unique, 1, "{grid:?}");
+            assert!(grid.ink_px > 0, "{grid:?}");
+        }
+
+        /// A chrome label and a preview paragraph, bold and regular, Latin and
+        /// Chinese — the two surfaces ticket 38 may not touch.
+        fn chrome_and_preview(window: &mut WindowRenderer) {
+            let label = |text: &str, top: f32, weight: ChromeLabelWeight, mono: bool| ChromeLabel {
+                mono,
+                text: text.to_owned(),
+                rect: [4.0, top, 236.0, top + 20.0],
+                font_size_px: 14.0,
+                color: [255, 0, 0],
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight,
+                tabular_numerals: false,
+                clip: None,
+            };
+            window.set_chrome(
+                Vec::new(),
+                vec![
+                    label("Bold 你好 A", 40.0, ChromeLabelWeight::SemiBold, false),
+                    label("Mono 你 A", 60.0, ChromeLabelWeight::SemiBold, true),
+                ],
+                Vec::new(),
+            );
+            let run = |text: &str, bold: bool, mono: bool| PreviewRun {
+                text: text.into(),
+                color: [255, 0, 0],
+                mono,
+                bold,
+                italic: false,
+                font_scale: 1.0,
+                inline_box_px: None,
+            };
+            window.set_preview_bodies(vec![PreviewBody {
+                clip: [0.0, 80.0, 240.0, 120.0],
+                quads: Vec::new(),
+                paragraphs: vec![PreviewParagraph {
+                    runs: vec![
+                        run("preview 你 ", false, false),
+                        run("bold 你 ", true, false),
+                        run("mono 你", true, true),
+                    ],
+                    rect: [4.0, 84.0, 236.0, 116.0],
+                    font_size_px: 14.0,
+                    line_height_px: 20.0,
+                    wrap: false,
+                    letter_spacing_em: 0.0,
+                    align_right: false,
+                    align_center: false,
+                    cell_advance: None,
+                }],
+                blocks: Vec::new(),
+                rasters: Vec::new(),
+            }]);
+        }
+
+        /// PIN (38) — **chrome and preview pixels are untouched by synthetic
+        /// bold.** Every prepare against the shared atlas now carries the
+        /// custom-glyph rasterizer (glyphon redraws every custom raster through
+        /// whichever prepare grows the atlas), and none of those text areas
+        /// carries a custom glyph. The pin: the same bold chrome labels and
+        /// preview runs, over a grid of regular-weight cells, read back byte for
+        /// byte the same on a context whose atlas holds synthesized rasters as
+        /// on a fresh one. (The before-and-after-the-ticket digest of this frame
+        /// is in the ticket 38 report.)
+        ///
+        /// MUTATION: route a chrome label through `place_synthetic_bold`, or
+        /// draw the grid's bold cell into the chrome's rows, and the two frames
+        /// part company.
+        #[test]
+        fn chrome_and_preview_bold_are_untouched() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            regular_only_families(&mut gpu, 16.0);
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 240, 120, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            chrome_and_preview(&mut window);
+            let plain = one_row_frame(row_cells(&[("A", CellFlags::empty())]), metrics);
+            present(&mut window, &mut gpu, &plain);
+            let fresh = window.read_back(&gpu).expect("it reads back");
+            eprintln!(
+                "BT_SYNTHETIC_BOLD chrome_digest={:016x}",
+                pixel_digest(&fresh)
+            );
+
+            present(&mut window, &mut gpu, &two_synthesized_cells(metrics));
+            assert!(
+                gpu.synthetic_bold.len() >= 2,
+                "the atlas holds synthesized rasters"
+            );
+            present(&mut window, &mut gpu, &plain);
+            let after = window.read_back(&gpu).expect("it reads back");
+            assert!(fresh == after, "chrome and preview pixels moved");
+        }
+
+        fn pixel_digest(pixels: &[[u8; 4]]) -> u64 {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            pixels.hash(&mut hasher);
+            hasher.finish()
+        }
+    }
+}
+
+#[cfg(test)]
+mod cjk_picker_regressions {
+    use super::*;
+    fn synthetic() -> FontSystem {
+        let mut db = glyphon::fontdb::Database::new();
+        for bytes in [
+            include_bytes!("../tests/fonts/Test-Escape700.ttf").as_slice(),
+            include_bytes!("../tests/fonts/Test-Other400.ttf").as_slice(),
+            include_bytes!("../tests/fonts/Test-CJK400.ttf").as_slice(),
+            include_bytes!("../tests/fonts/Test-CJK700.ttf").as_slice(),
+            include_bytes!("../tests/fonts/Test-Sans400.ttf").as_slice(),
+        ] {
+            db.load_font_data(bytes.to_vec());
+        }
+        let faces: Vec<_> = db
+            .faces()
+            .filter(|f| f.families[0].0 == "Test CJK")
+            .cloned()
+            .collect();
+        for mut face in faces {
+            db.remove_face(face.id);
+            for name in platform_cjk_fallback_families()
+                .iter()
+                .filter(|name| **name != "NSimSun")
+            {
+                face.families.push((
+                    (*name).into(),
+                    glyphon::fontdb::Language::English_UnitedStates,
+                ));
+            }
+            db.push_face_info(face);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let mut face = db
+                .faces()
+                .find(|f| f.families[0].0 == "Test Other")
+                .unwrap()
+                .clone();
+            db.remove_face(face.id);
+            face.families.push((
+                "NSimSun".into(),
+                glyphon::fontdb::Language::English_UnitedStates,
+            ));
+            db.push_face_info(face);
+        }
+        db.set_sans_serif_family("Test Sans");
+        FontSystem::new_with_locale_and_db_and_fallback("en-US".into(), db, TestFallback)
+    }
+    #[derive(Debug)]
+    struct TestFallback;
+    impl Fallback for TestFallback {
+        fn common_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn forbidden_fallback(&self) -> &[&'static str] {
+            &[]
+        }
+        fn script_fallback(&self, _: unicode_script::Script, _: &str) -> &[&'static str] {
+            &["Test CJK"]
+        }
+    }
+    fn families(buffer: &Buffer, fs: &FontSystem) -> Vec<String> {
+        buffer
+            .layout_runs()
+            .flat_map(|r| r.glyphs.iter())
+            .map(|g| {
+                assert_ne!(g.glyph_id, 0);
+                fs.db().face(g.font_id).unwrap().families[0].0.clone()
+            })
+            .collect()
+    }
+    #[test]
+    fn cjk_proportional_family_survives_every_label_weight() {
+        let mut fs = synthetic();
+        let grid = resolve_terminal_cjk_families("", &mut fs);
+        for weight in [
+            Weight::NORMAL,
+            Weight::MEDIUM,
+            Weight::SEMIBOLD,
+            Weight::BOLD,
+        ] {
+            let mut b = Buffer::new(&mut fs, Metrics::new(14.0, 20.0));
+            let attrs =
+                chrome_label_attrs(ChromeLabelWeight::Regular, 0.0, false, false).weight(weight);
+            set_chrome_label_text(&mut b, &mut fs, "你", &attrs, false, &grid);
+            b.shape_until_scroll(&mut fs, false);
+            assert_eq!(families(&b, &fs), ["Test CJK"], "{weight:?}");
+            let glyph = b.layout_runs().next().unwrap().glyphs.first().unwrap();
+            assert_eq!(
+                fs.db().face(glyph.font_id).unwrap().weight,
+                if weight.0 <= 500 {
+                    Weight::NORMAL
+                } else {
+                    Weight::BOLD
+                }
+            );
+        }
+    }
+    #[test]
+    fn cjk_preview_bold_run_keeps_proportional_family() {
+        let mut fs = synthetic();
+        for mono in [false, true] {
+            for bold in [false, true] {
+                for italic in [false, true] {
+                    let paragraph = PreviewParagraph {
+                        runs: vec![PreviewRun {
+                            text: "你".into(),
+                            color: [255; 3],
+                            mono,
+                            bold,
+                            italic,
+                            font_scale: 1.0,
+                            inline_box_px: None,
+                        }],
+                        rect: [0.0, 0.0, 100.0, 30.0],
+                        font_size_px: 14.0,
+                        line_height_px: 20.0,
+                        wrap: false,
+                        letter_spacing_em: 0.0,
+                        align_right: false,
+                        align_center: false,
+                        cell_advance: mono.then_some(10.0),
+                    };
+                    let b = shape_preview_paragraph(&mut fs, &paragraph);
+                    assert_eq!(
+                        families(&b, &fs),
+                        ["Test CJK"],
+                        "mono={mono} bold={bold} italic={italic}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn cjk_mono_label_measures_the_selected_family_it_draws() {
+        let mut fs = synthetic();
+        let selected = resolve_terminal_cjk_families("Test Other", &mut fs);
+        let measured = shape_chrome_measurement_with_cjk(
+            &mut fs,
+            "你",
+            14.0,
+            ChromeLabelWeight::Medium,
+            0.0,
+            false,
+            true,
+            &selected,
+        )
+        .unwrap();
+        let label = ChromeLabel {
+            text: "你".into(),
+            rect: [0.0, 0.0, 100.0, 30.0],
+            font_size_px: 14.0,
+            color: [255; 3],
+            mono: true,
+            weight: ChromeLabelWeight::Medium,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            tabular_numerals: false,
+            clip: None,
+        };
+        let drawn = shape_chrome_labels_with_cjk(&mut fs, &[label], 0.7, 1.0, &selected);
+        assert_eq!(families(&measured, &fs), ["Test Other"]);
+        assert_eq!(families(&drawn[0].buffer, &fs), families(&measured, &fs));
+        assert_eq!(
+            shaped_line_width(&drawn[0].buffer),
+            shaped_line_width(&measured)
+        );
+        let advances = chrome_label_advances_with_cjk(
+            &mut fs,
+            "你",
+            14.0,
+            ChromeLabelWeight::Medium,
+            0.0,
+            false,
+            true,
+            &selected,
+        );
+        assert_eq!(advances.width(), shaped_line_width(&measured));
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cjk_stored_family_identifier_keeps_the_same_face() {
+        let mut fs = synthetic();
+        let mut ids = Vec::new();
+        // The old stored name and the font's other family record name the same face.
+        for saved in ["NSimSun", "Test Other"] {
+            let cjk = resolve_terminal_cjk_families(saved, &mut fs);
+            assert_eq!(cjk.chosen, saved);
+            let b = shape_chrome_measurement_with_cjk(
+                &mut fs,
+                "你",
+                14.0,
+                ChromeLabelWeight::Medium,
+                0.0,
+                false,
+                true,
+                &cjk,
+            )
+            .unwrap();
+            assert_eq!(families(&b, &fs), ["Test Other"]);
+            ids.push(b.layout_runs().next().unwrap().glyphs[0].font_id);
+        }
+        assert_eq!(ids[0], ids[1]);
+    }
+    #[test]
+    fn cjk_catalog_is_reused_until_the_font_database_changes() {
+        let mut fs = synthetic();
+        let initial = fs.cjk_catalog();
+        let grid = resolve_terminal_cjk_families("Test Other", &mut fs);
+        let mut buffer = Buffer::new(&mut fs, Metrics::new(14.0, 20.0));
+        set_chrome_label_text(
+            &mut buffer,
+            &mut fs,
+            "你",
+            &chrome_label_attrs(ChromeLabelWeight::Medium, 0.0, false, false),
+            false,
+            &grid,
+        );
+        assert!(Arc::ptr_eq(&initial, &fs.cjk_catalog()));
+        fs.db_mut().set_sans_serif_family("Test Sans");
+        assert!(!Arc::ptr_eq(&initial, &fs.cjk_catalog()));
+    }
+    #[test]
+    fn cjk_settings_measurement_timing_probe() {
+        let mut fs = terminal_font_system();
+        for pass in 0..2 {
+            let start = Instant::now();
+            for _ in 0..10 {
+                for text in [
+                    "Microsoft YaHei UI",
+                    "Yu Gothic UI",
+                    "NSimSun",
+                    "Simplified Chinese",
+                    "General",
+                    "Automatic",
+                    "Cascadia Mono",
+                    "Consolas",
+                ] {
+                    let _ = measure_chrome_label(
+                        &mut fs,
+                        text,
+                        26.0,
+                        ChromeLabelWeight::Regular,
+                        0.0,
+                        false,
+                        false,
+                    );
+                }
+            }
+            eprintln!(
+                "BT_PERF_TRACE cjk_settings_measurement pass={pass} labels=80 elapsed_us={}",
+                start.elapsed().as_micros()
+            );
+        }
+    }
+    #[test]
+    fn cjk_chosen_regular_only_family_survives_bold_italic() {
+        let mut fs = synthetic();
+        let cjk = resolve_terminal_cjk_families("Test Other", &mut fs);
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let key = ShapeKey {
+                text: "你".into(),
+                bold,
+                italic,
+            };
+            let b = shape_narrow_buffer(
+                &key,
+                &mut fs,
+                CellMetrics {
+                    cell_width_px: 10.0,
+                    cell_height_px: 20.0,
+                    font_size_px: 16.0,
+                    padding_px: 0.0,
+                    scale_factor: 1.0,
+                    ascii_baseline_px: 16.0,
+                    primary_advance_px: 10.0,
+                    primary_cap_height_px: 12.0,
+                    primary_cap_center_y_px: 6.0,
+                },
+                1.0,
+                terminal_grid_family("你", &cjk),
+            );
+            assert_eq!(families(&b, &fs), ["Test Other"]);
         }
     }
 }

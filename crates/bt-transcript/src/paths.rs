@@ -678,6 +678,49 @@ pub fn may_read_unasked(path: &Path, namer: PathNamer<'_>) -> bool {
     is_local_absolute_path(path)
 }
 
+/// **Whether `path` is a share on another machine** — `\\server\share\…`, the one shape the owner's
+/// ruling of 2026-09-21 hands to the system on `Ctrl`+click (「UNC 与任意协议链接 Ctrl+点击交给系统」).
+///
+/// It answers from the spelling alone, like [`may_read_unasked`], and for the same reason: it is
+/// asked on the window thread about a path nobody has asked a disk about, and it must stay that
+/// way — a share is never asked about, on a hover, a press or the modifier going down.
+///
+/// Narrower than "not readable unasked", and each exclusion is a shape that is not another
+/// machine's file:
+///
+/// * `Prefix::DeviceNS` — `\\.\pipe\…`, `\\.\COM1` — is not a filesystem at all.
+/// * `Prefix::Verbatim*` — `\\?\C:\…`, `\\?\UNC\server\share\…` — is a second spelling that skips
+///   the normaliser every reader in this window is written against; nothing here produces one.
+/// * `\\wsl.localhost\<distro>\…` and its older alias `\\wsl$\<distro>\…` are a distribution this
+///   machine hosts ([`is_wsl_distribution_share`]). Where the pane is not standing in it, it is a
+///   stranger's spelling of one, and it stays what [`may_read_unasked`] makes it.
+#[cfg(windows)]
+#[must_use]
+pub fn is_a_share_on_another_machine(path: &Path) -> bool {
+    if path.as_os_str().to_string_lossy().contains('\0') {
+        return false;
+    }
+    matches!(
+        path.components().next(),
+        Some(std::path::Component::Prefix(prefix))
+            if matches!(
+                prefix.kind(),
+                std::path::Prefix::UNC(server, _)
+                    if !server.eq_ignore_ascii_case(WSL_DISTRIBUTION_SHARE_HOST)
+                        && !server.eq_ignore_ascii_case("wsl$")
+            )
+    )
+}
+
+/// The same question where no spelling of a path names another machine: a share a Mac reaches is
+/// a mount point with a local name of its own, and no `file:` URI carries a host here
+/// (`bt_platform::file_uri_to_path_on`).
+#[cfg(not(windows))]
+#[must_use]
+pub fn is_a_share_on_another_machine(_path: &Path) -> bool {
+    false
+}
+
 /// [`may_read_unasked`] asked again of what the last component is a **link to**.
 ///
 /// The lexical answer is about a spelling and a symbolic link is a spelling that means another
@@ -688,10 +731,19 @@ pub fn may_read_unasked(path: &Path, namer: PathNamer<'_>) -> bool {
 /// else wrote while holding the answer to "is this local?" open, and the shapes this window
 /// actually meets — a junction into a share, a link left by a build — are one hop.
 ///
-/// **Every call it makes is against the link itself and never against its target**:
+/// **Every call it makes is against the link itself and never against its *target***:
 /// `symlink_metadata` reports the link, `read_link` reads the name written inside it, and neither
-/// opens what that name points at. So a target on a disconnected share costs nothing, and this is
-/// safe on the window thread for the same reason the lexical half is.
+/// opens what that name points at.
+///
+/// **It is not safe on the window thread, and the sentence that used to stand here said it was**
+/// (audit 3 C-2, 2026-09-20). `symlink_metadata` is asked about the *whole* path, and Windows
+/// resolves every component but the last before it answers — so `C:uild\out.txt`, where
+/// `C:uild\out` is a junction into a dead share, goes to the redirector inside the very call
+/// that was meant to prevent that. So every caller of this must be a worker, and every
+/// window-thread reader of "is this a real, readable, local path" reads `bt_term::PathVerdict`
+/// out of its pane's ledger instead. `bt_term::path_exists` is the one caller that matters here:
+/// it is unchanged, and `bt_term::verify_path` calls *it*, which is the whole of what "the same
+/// question, asked on a worker" means.
 #[must_use]
 pub fn may_read_unasked_through_links(path: &Path, namer: PathNamer<'_>) -> bool {
     if !may_read_unasked(path, namer) {
@@ -735,22 +787,52 @@ fn is_windows_drive_absolute(text: &str) -> bool {
         && matches!(bytes[2], b'\\' | b'/')
 }
 
+/// **How many readings of one unquoted token the caller can choose between** — §7.30, the
+/// 2026-09-21 entry.
+///
+/// A space is a seam like any other: the token is read across it and offers the shorter reading
+/// behind it, and *which* reading is real is settled by asking the disk longest first. That is one
+/// rule, and this is the one question a caller has to answer before it may be given the readings —
+/// **can it arbitrate?** — because the readings of a token with spaces in it are not held apart by
+/// anything else on the line. Two readings of `D:\a.png and D:\b.png` both end in `.png`.
+///
+/// It is not a knob on where a token stops. Both settings read the same boundary table, the same
+/// prose seams and the same quoting; the only thing they disagree about is whether a space behind a
+/// name is a place the reading may continue past.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenSpaces {
+    /// The caller asks the disk about every reading and promises **at most one** of them —
+    /// [`PrintedPathLinks::links_in`], whose walk is one token, one answer. It gets the spaces.
+    ReadAcross,
+    /// The caller has no arbitrator: it admits a reading on that reading's own evidence and
+    /// decorates every one it admits, so two admissible readings of one token would be two
+    /// decorations laid over the same text. It gets the token's own end, which is what it has
+    /// always got. `bt_term::inline_image`'s picture scan is that caller — its evidence is an
+    /// extension allowlist, and an allowlist is a filter and not a judge.
+    StopAt,
+}
+
 /// Allocation-light lexical candidate scan for the event thread. It recognizes only drive-rooted
 /// Windows paths. Unquoted paths open at a token boundary ([`candidate_start_boundary`]) and close
-/// at whitespace or a closing delimiter ([`is_path_terminator_char`]); quoted paths may contain
+/// at a terminator ([`is_path_terminator_char`]) — which for a [`TokenSpaces::ReadAcross`] caller
+/// is a terminator that is not a space ([`token_end_across_spaces`]); quoted paths may contain
 /// whitespace and any delimiter, and must have a closing quote. Existence, file kind, size and
 /// content format are nobody's business here.
 ///
 /// One unquoted token may come back as **several candidates sharing a start** — its whole self
-/// first, then one shorter reading for every prose seam it carries (§7.30). They are readings of
-/// one token and not several references: whoever goes to the disk asks about the longest of them
-/// first and stops at the first that is there.
-pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> {
+/// first, then one shorter reading for every prose seam it carries and one for every space it was
+/// read across (§7.30). They are readings of one token and not several references: whoever goes to
+/// the disk asks about the longest of them first and stops at the first that is there.
+pub fn detect_absolute_path_candidates(
+    text: &str,
+    spaces: TokenSpaces,
+) -> Vec<PrintedPathCandidate> {
     detect_rooted_candidates(
         text,
         PrintedPathSpelling::Absolute,
         &absolute_candidate_opens_at,
         &|path| is_local_absolute_path(Path::new(path)),
+        spaces,
     )
 }
 
@@ -776,6 +858,9 @@ pub fn detect_foreign_path_candidates(
         PrintedPathSpelling::Foreign,
         &foreign_candidate_opens_at,
         &|path| namespace.to_local_path(path).is_some(),
+        // One caller, and it is the one that arbitrates: this spelling is read by the printed-path
+        // chain alone (`PrintedPathLinks::candidates_in`), never by the picture scan.
+        TokenSpaces::ReadAcross,
     )
 }
 
@@ -796,13 +881,15 @@ pub fn detect_foreign_path_candidates(
 /// signature spelled twice is a signature that can drift once.
 type RootedOpensAt = dyn Fn(&str, &[u8], usize, bool) -> bool;
 
-/// The walk both rooted scans are: find where a token opens, take its extent (quoted or not),
-/// release its prose tail, offer §7.30's shorter readings, and keep the ones `rooted` accepts.
+/// The walk both rooted scans are: find where a token opens, take its extent (quoted or not, and
+/// across the spaces a filename may hold), release its prose tail, offer §7.30's shorter readings,
+/// and keep the ones `rooted` accepts.
 fn detect_rooted_candidates(
     text: &str,
     spelling: PrintedPathSpelling,
     opens_at: &RootedOpensAt,
     rooted: &dyn Fn(&str) -> bool,
+    spaces: TokenSpaces,
 ) -> Vec<PrintedPathCandidate> {
     let bytes = text.as_bytes();
     let mut candidates = Vec::new();
@@ -830,23 +917,22 @@ fn detect_rooted_candidates(
             cursor += 1;
             continue;
         };
-        // Quoting is a declaration of extent, so nothing inside quotes is prose to be released —
-        // and, for the same reason, nothing inside them is prose to be cut at either (§7.30).
-        let end = if quoted {
-            token
+        // A quoted token offers no shorter form and no wider one: its quotes declared its extent,
+        // so nothing inside them is prose to be released and nothing inside them is prose to be cut
+        // at either (§7.30) — and a space inside them was always part of the name.
+        let forms = if quoted {
+            vec![token]
         } else {
-            release_prose_tail(text, start, token)
+            // §7.30 (owner report 2026-09-21). A space ends a token, and a filename may hold one —
+            // `C:\Program Files\…`, `…\验收 next85\中文 说明.md` — so a caller that can arbitrate
+            // between readings is given the ones the spaces open ([`TokenSpaces`]).
+            let (extent, crossed) = match spaces {
+                TokenSpaces::ReadAcross => token_end_across_spaces(text, token),
+                TokenSpaces::StopAt => (token, Vec::new()),
+            };
+            rooted_token_readings(text, start, extent, &crossed)
         };
-        let token_text = &text[start..end];
-        // A quoted token offers no shorter form: its quotes declared its extent. An unquoted one is
-        // searched whole — a drive prefix is as rare as an anchor, so this walk happens once per
-        // prefix and [`prose_seam_ends`] answers "no seams" at the cost of the walk itself.
-        let seams = if quoted {
-            Vec::new()
-        } else {
-            prose_seam_ends(token_text, token_text.len())
-        };
-        for form_end in std::iter::once(end).chain(seams.into_iter().map(|offset| start + offset)) {
+        for form_end in forms {
             let (path_length, location) = split_printed_location(&text[start..form_end]);
             let path_byte_end = start + path_length;
             if rooted(&text[start..path_byte_end]) {
@@ -859,6 +945,10 @@ fn detect_rooted_candidates(
                 });
             }
         }
+        // The cursor moves past the token's **own** end and not past the extent read across the
+        // spaces behind it: what stands behind a space is the next word, and the next word may open
+        // a reference of its own. `D:\a C:\b` offers the reading `D:\a C:\b` — the disk denies it —
+        // and still opens `C:\b`, which skipping the extent would swallow.
         cursor = if quoted {
             token.saturating_add(1)
         } else {
@@ -1025,25 +1115,38 @@ pub fn detect_relative_path_candidates(
 /// loosened: `docs/a.md:12:3` reaches this as `docs/a.md`, and `docs/a.md:abc` reaches it whole and
 /// is refused exactly as it always was.
 ///
-/// Five refusals. A candidate with no separator is a single bare name, which is out of scope. One
+/// Four refusals. A candidate with no separator is a single bare name, which is out of scope. One
 /// that *opens* with a separator names a place from the drive root rather than from here —
 /// `/usr/share/x.png` in a log line, or the `//host/x.png` a scheme leaves behind — and joining it
 /// to a working directory would invent a location nobody named. One containing `:` is not relative
 /// at all: the colon is exactly the character that makes text absolute (`D:\…`) or schemed
 /// (`file:…`, `https:…`), both of which are other scans' business and must never be claimed twice.
 ///
-/// # A reading must end on a character that is part of a name (user ruling 2026-08-28, §7.30)
+/// # The separator that admits a reference is one that divides two segments (user ruling
+/// 2026-08-28, §7.30; narrowed on the owner's report of 2026-09-22)
 ///
-/// The fourth refusal is a **trailing** separator. `src/` is a directory prefix, and a directory
-/// prefix is a name nobody wrote — not even when the disk holds it, because existence was only ever
-/// the licence to *draw* a reference, never to invent one. The line that settled it is git's rename
+/// The first refusal is asked of the candidate **with its trailing separators taken off**, and
+/// that one clause is the whole of the rule a trailing separator answers to. A bare reference is
+/// admitted on the strength of **carrying a separator** — that mark is the only thing ordinary
+/// prose does not have — and a separator at the very end divides nothing: `docs/` is `docs` with a
+/// slash after it, and `docs` alone was never a reference. The line that settled it is git's rename
 /// compression, `src/{old => new}/main.rs`, where the brace seams (§7.30) and the reading in front
-/// of it is exactly such a prefix.
+/// of it is exactly that shape; it is refused here as it always was.
 ///
-/// It closes a hole in the first refusal rather than adding a rule beside it. A bare reference is
-/// admitted on the strength of **carrying a separator** — that mark is the only thing ordinary prose
-/// does not have — and a trailing separator is the one place where the mark is not evidence of two
-/// segments at all. `docs/` is `docs` with a slash after it, and `docs` alone was never a reference.
+/// It used to be written as a refusal of its own — a candidate ending on a separator, whatever
+/// stood in front of it — and that spelling said more than the argument did.
+/// `mjx_experiments/umarm_can/media/` carries two separators that divide three named segments; the
+/// evidence is there, and the slash the agent typed after `media` is the person naming a
+/// **directory**, which this scan has recognised like a file since §7.1.5j. Three lines of one
+/// owner report of 2026-09-22 went dark on it — `文件都在 mjx_experiments/umarm_can/media/：`,
+/// `新写在 whydrift/models/；` and `experiments/qx181_model_ladder/ 的` — while `whydrift/models`
+/// on the row above, the same folder spelled without the slash, was an ordinary link. Nothing about
+/// existence loosens: the disk still says whether the directory is there, and it is asked about
+/// under the name the components spell ([`resolve_relative_reference`] drops the empty component
+/// the trailing slash leaves).
+///
+/// The slash stays inside the reference's span, because the name as printed is the name the reader
+/// points at — the same reason the printed spelling is the span everywhere else in this module.
 ///
 /// The absolute scan is deliberately not given the same clause: there the separator is never the
 /// evidence that something is a reference (the drive prefix is), and `D:\` is a real place whose own
@@ -1071,20 +1174,21 @@ pub fn detect_relative_path_candidates(
 pub fn is_relative_reference(candidate: &str) -> bool {
     !candidate.starts_with(['/', '\\'])
         && !candidate.starts_with('~')
-        && !candidate.ends_with(['/', '\\'])
-        && candidate.contains(['/', '\\'])
+        && candidate
+            .trim_end_matches(['/', '\\'])
+            .contains(['/', '\\'])
         && !candidate.contains(':')
 }
 
-/// The same five refusals where `\` is not a separator.
+/// The same four refusals where `\` is not a separator.
 ///
 /// Every word of the ruling above still holds; one character leaves the class
 /// it is tested against. A backslash is a **legal character in a POSIX
 /// filename** — `a\ b.txt` is what a shell prints for a name with a space in
 /// it — so reading it as a separator here would do the two wrong things at
 /// once: it would admit `docs\a.md` as a two-segment reference on a system
-/// where that is one file nobody has, and it would refuse `weird\name` as a
-/// trailing separator when it is a name.
+/// where that is one file nobody has, and it would take the `\` off the end of
+/// `weird\name` when it is part of the name.
 ///
 /// It stays on [`is_path_tail_char`] for exactly that reason: what a name may
 /// be *spelled with* and what divides a name into segments are two questions,
@@ -1093,8 +1197,7 @@ pub fn is_relative_reference(candidate: &str) -> bool {
 pub fn is_relative_reference(candidate: &str) -> bool {
     !candidate.starts_with('/')
         && !candidate.starts_with('~')
-        && !candidate.ends_with('/')
-        && candidate.contains('/')
+        && candidate.trim_end_matches('/').contains('/')
         && !candidate.contains(':')
 }
 
@@ -1391,7 +1494,9 @@ fn is_posix_root_prefix_at(bytes: &[u8], start: usize) -> bool {
 ///
 /// Everything else opens a path — whitespace of any width, opening brackets and quotes of any script
 /// (`(`、`（`、`「`、`“`), separators (`:`、`：`、`=`、`,`), and the rest of punctuation. That
-/// generality is the point: a path is no less a path for sitting in CJK prose.
+/// generality is the point: a path is no less a path for sitting in CJK prose. A bracket both opens
+/// a name and ends one, and that is one fact rather than two ([`is_opening_delimiter`]): it is a
+/// boundary, and a boundary is read from whichever side the name lies on.
 pub fn is_path_tail_char(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '/' | '\\' | '.' | '-' | '_' | '~')
 }
@@ -1432,6 +1537,70 @@ fn is_closing_delimiter(character: char) -> bool {
     )
 }
 
+/// Opening delimiters that end an unquoted path token — the **opening counterparts** of
+/// [`is_closing_delimiter`], §7.30 (user report 2026-09-17).
+///
+/// The line that settled it is an agent's, printed into a pane standing in the directory it names:
+/// `文件还是 docs/…/advisor_status_202609.html（commit e0bfcfe）。` A full-width `（` with no space
+/// in front of it, and the reference went dark — the token ran past the bracket to the space behind
+/// `commit`, and a bare reading may carry no character a path is not spelled with.
+///
+/// **A name loses nothing by this and that is the whole of the argument.** A bracket comes in a
+/// pair, and the closing half has ended a token since [`is_closing_delimiter`] was written, so a
+/// filename that genuinely carries one is *already* unreadable unquoted: `D:\x\photo(1).png` stops
+/// at its `)` today and the name it offers is `D:\x\photo`. Making the opening half stop it too
+/// changes where a name is cut, never whether it could have been read whole — and a **quoted**
+/// token still admits every name there is,
+/// because quoting is a declaration of extent and nothing inside one is prose to be cut at.
+///
+/// The one reading it does give up is a name carrying an **unmatched** opening bracket
+/// (`D:\x\a(1` with no `)` anywhere behind it), which was read whole while the balanced spelling of
+/// the same name never was. That is the asymmetry rather than a case worth keeping: no pair, no
+/// name, and quoting is the appeal.
+///
+/// The class is stated once — the opening halves of the pairs whose closing halves are on the list
+/// above — and it is why this is a rule and not a character. `（` was the mark the report arrived
+/// on; `「`, `【`, `《`, `〔`, `«` and the rest open the same aside in the same prose, and none of
+/// them was ever going to arrive one report at a time.
+///
+/// **The opening quotes come with the brackets, and `’` is why `‘` can.** `“` is admitted for the
+/// same reason its twin `”` is: it only ever opens. `’` is deliberately absent from the closing
+/// list because it doubles as an apostrophe inside ordinary filenames (`Bob’s photo.png`), and
+/// `‘` carries no such double duty — nobody's name opens with a left single quote — so the mark
+/// that made the exception there makes none here. The ASCII `"` and `'` stay off this list
+/// entirely: `"` is this scan's own declaration of extent (a terminator would cut inside a quoted
+/// token and offer the bare `b\c.md` lying across `"D:\a b\c.md"`), and `'` is the apostrophe
+/// again, in the script most filenames are written in.
+fn is_opening_delimiter(character: char) -> bool {
+    matches!(
+        character,
+        '(' | '['
+            | '{'
+            | '<'
+            | '\u{ff08}' // （
+            | '\u{ff3b}' // ［
+            | '\u{ff5b}' // ｛
+            | '\u{ff5f}' // ｟
+            | '\u{ff62}' // ｢
+            | '\u{ff1c}' // ＜
+            | '\u{3008}' // 〈
+            | '\u{300a}' // 《
+            | '\u{300c}' // 「
+            | '\u{300e}' // 『
+            | '\u{3010}' // 【
+            | '\u{3014}' // 〔
+            | '\u{3016}' // 〖
+            | '\u{3018}' // 〘
+            | '\u{301a}' // 〚
+            | '\u{27e8}' // ⟨
+            | '\u{27ea}' // ⟪
+            | '\u{00ab}' // «
+            | '\u{2039}' // ‹
+            | '\u{201c}' // “
+            | '\u{2018}' // ‘
+    )
+}
+
 /// Where an unquoted path token stops.
 ///
 /// The backtick is here for the same reason the web-address scan has stopped on it since it was
@@ -1442,8 +1611,15 @@ fn is_closing_delimiter(character: char) -> bool {
 /// report 2026-08-28: an `.exe` in a code span went unrecognized while a bare `.md` did not). A
 /// filename that genuinely carries a backtick is as rare as one that ends in `)` and, like it, can
 /// still be quoted.
+///
+/// A delimiter stops a token from **either** half of its pair ([`is_opening_delimiter`], user
+/// report 2026-09-17): a name that reaches an opening bracket has ended exactly as surely as one
+/// that reaches a closing one, and reading only the closing half was a rule stated at one end.
 pub fn is_path_terminator_char(character: char) -> bool {
-    character.is_whitespace() || is_closing_delimiter(character) || character == '`'
+    character.is_whitespace()
+        || is_closing_delimiter(character)
+        || is_opening_delimiter(character)
+        || character == '`'
 }
 
 /// Where a row's ink starts: the byte offset of its first non-blank character, and the visual
@@ -1463,6 +1639,96 @@ fn token_end(text: &str, start: usize) -> usize {
         .char_indices()
         .find(|(_, character)| is_path_terminator_char(*character))
         .map_or(text.len(), |(offset, _)| start + offset)
+}
+
+/// How many spaces one unquoted rooted token may be read across — §7.30 (owner report
+/// 2026-09-21).
+///
+/// **The cap is the cost, stated in questions.** Every space crossed is one more reading of the
+/// same token, and every reading is one more name the disk may be asked about, so this number *is*
+/// the budget: a rooted token costs at most four verdict requests beyond the ones it already cost,
+/// and a line holding *k* rooted tokens at most `4k`. Nothing about the shape of the text bounds
+/// it — `see D:\a b.md for details` reads on into the sentence exactly as far as into a folder
+/// name, because no rule short of the disk can tell the two apart — so the bound has to be a
+/// number, and a number is what this is.
+///
+/// **Four, because four is what the everyday names cost.** `C:\Program Files\Common Files\x.dll`
+/// crosses two; `…\验收 next85\中文 说明.md`, the line this came from, crosses two; the OneDrive
+/// folder a work account gets — `C:\Users\alice\OneDrive - Example State University\notes.md` — crosses
+/// four, and it is the widest everyday shape there is. A name wider than that can still be quoted,
+/// which is the appeal every other bound in this module offers.
+///
+/// Public for the same reason [`MAX_REJOIN_ROWS`] is: it is a **budget** other hops of the chain
+/// assert against, and a budget spelled as a literal in a second crate is a budget that can drift
+/// away from the code that spends it.
+pub const MAX_PATH_SPACES: usize = 4;
+
+/// Where an unquoted token ends once the spaces a filename may hold are read across, and the byte
+/// offset of every space it crossed, ascending — §7.30 (owner report 2026-09-21).
+///
+/// `token` is where [`token_end`] already stopped. The walk continues past it **only** over a
+/// single space with a path character behind it, and hands the next stretch back to [`token_end`],
+/// so every other terminator ends the extent exactly where it always did: a tab, a bracket of
+/// either half, a backtick, a second space, or the end of the row. That is the whole of the bound
+/// besides [`MAX_PATH_SPACES`] — nothing here reads what the words behind the space *say*, because
+/// `Files` and `for` are the same word to a lexer and the disk is what tells them apart (§7.1.5j
+/// ③, unmoved: a reading nobody holds is not a link).
+///
+/// A run of two or more spaces stops it because no reading could be admitted past one anyway:
+/// Win32 normalizes the trailing blanks off a component before the filesystem is ever asked, so a
+/// name spelled with a double space is a name asked about under a different name — the same fact
+/// [`is_sentence_stop`] reads about the trailing dot.
+fn token_end_across_spaces(text: &str, token: usize) -> (usize, Vec<usize>) {
+    let mut end = token;
+    let mut crossed = Vec::new();
+    while crossed.len() < MAX_PATH_SPACES {
+        let Some(behind) = text[end..].strip_prefix(' ') else {
+            break;
+        };
+        if !behind.starts_with(is_path_tail_char) {
+            break;
+        }
+        crossed.push(end);
+        end = token_end(text, end + 1);
+    }
+    (end, crossed)
+}
+
+/// Every reading one unquoted rooted token offers, longest first — §7.30, with the spaces of the
+/// 2026-09-21 entry in it.
+///
+/// One walk per **boundary**, and the boundaries are the extent's own end together with every
+/// space it was read across. Each of them is a place where a name has stopped, so each is released
+/// and cut by exactly the functions the token's own end is released and cut by — and that is the
+/// point rather than a convenience: §7.30's 2026-09-05 arm reads a sentence stop as a seam on the
+/// evidence that *nothing stands behind it*, and a space is that evidence as surely as the end of a
+/// row. Without a walk per boundary, `see D:\x\a.md. and more` would stop offering `D:\x\a.md` the
+/// moment the token was read past the stop.
+///
+/// **What it costs, stated in questions.** With no space crossed this is one walk and the readings
+/// are the ones this token has always offered, byte for byte. With the bound full it is five, so a
+/// rooted token carrying no prose seam — which is nearly every one — offers five readings and costs
+/// at most four verdict requests beyond what it cost before, and a line holding *k* rooted tokens
+/// at most `4k`.
+fn rooted_token_readings(text: &str, start: usize, extent: usize, spaces: &[usize]) -> Vec<usize> {
+    let mut forms = Vec::new();
+    for boundary in std::iter::once(extent).chain(spaces.iter().rev().copied()) {
+        let end = release_prose_tail(text, start, boundary);
+        let reading = &text[start..end];
+        forms.push(end);
+        forms.extend(
+            prose_seam_ends(reading, reading.len())
+                .into_iter()
+                .map(|offset| start + offset),
+        );
+    }
+    // One descending list, because a space and a prose seam are two witnesses of the same kind and
+    // the ruling is one order over all of them: longest first, the disk arbitrating. Two boundaries
+    // can offer the same reading — a stop standing in front of a space is cut by both — and a
+    // reading offered twice would be one wasted question.
+    forms.sort_unstable_by(|left, right| right.cmp(left));
+    forms.dedup();
+    forms
 }
 
 /// Where the path stops inside one reference, and the `:line[:col]` that follows it.
@@ -1544,7 +1810,7 @@ fn release_prose_tail(text: &str, start: usize, end: usize) -> usize {
     end
 }
 
-/// The ASCII characters a **seam** may sit on — §7.30.
+/// The characters a **seam** may sit on — §7.30.
 ///
 /// **A class, not a table** (user ruling 2026-08-28; the same discipline §7.1.5h ⑤ settled for
 /// URLs' trailing punctuation and [`release_prose_tail`] settled for CJK stops). It was once the
@@ -1552,38 +1818,44 @@ fn release_prose_tail(text: &str, start: usize, end: usize) -> usize {
 /// for this: an agent wrote `docs/a.md(正斜杠)…` and `dist\folio.exe(反斜杠)…`, and because `(`
 /// was not one of the five, the candidate ate its way to the closing `)` and went to the disk under
 /// a name no file holds. Enumerating brackets and operators one at a time is the very thing the
-/// class was invented to end.
+/// class was invented to end. (The brackets in that story are terminators since 2026-09-17 —
+/// [`is_opening_delimiter`] — so they no longer reach this test at all; the class is what admitted
+/// them in the first place, and it is stated here unchanged.)
 ///
-/// The class is: **ASCII punctuation a path is never spelled with.** [`is_ascii_punctuation`] minus
-/// the path-structure characters `/ \ . - _ ~` — everything else, from the sentence separators to
-/// `(`, `[`, `{`, `"`, `'`, `=`, `+`, `*`, `#`, `@`, `&`, `%`, `|`, is a mark a name is glued to,
-/// not part of the name.
+/// The class is: **a mark a path is never spelled with.** Not [`is_path_tail_char`] and not
+/// whitespace — everything from the sentence separators to `"`, `'`, `=`, `+`, `*`, `#`, `@`, `&`,
+/// `%` and `|` is a mark a name is glued to, not part of the name. Whitespace is held out because
+/// a separator is a mark *inside* a token and [`token_end`] has already ended the token on any
+/// space; saying so here rather than leaning on the one call site that filters terminators is what
+/// keeps every ASCII answer this function used to give exactly as it was.
 ///
-/// [`is_ascii_punctuation`]: char::is_ascii_punctuation
+/// # The separator is written on the keyboard the prose is written on (owner report 2026-09-22)
+///
+/// It used to read `is_ascii_punctuation`, and that word was the defect. An agent printed
+/// `  - docs/a.png：六个臂各一格` into a pane standing in the folder that holds the file, and the
+/// reference went dark: the token runs to the row's blank tail, [`release_prose_tail`] cannot
+/// release the prose because every CJK character in it **is** `is_alphanumeric` and therefore a
+/// path character, and the one reading left carries `：` — so [`bare_candidate_opens_at`] refuses
+/// it and no shorter form was ever offered.
+///
+/// `：` is the full-width form of the very mark this class was invented for, and a person typing
+/// Chinese types the full-width form: the half-width `:` and the full-width `：` are one separator
+/// spelled on two keyboards. [`a_binding_colon_stands_before`] already reads this transition from
+/// its other side — "a colon with another script in front of it has made nothing absolute" — and
+/// this is the same sentence said at the name's other end.
+///
+/// **Reading the class off [`is_path_tail_char`] is what keeps it a class.** For every ASCII
+/// character the answer is unchanged, because the two spellings differ only on the control
+/// characters and the space, and neither can be inside a token. What changes is that `：`, `，`,
+/// `、`, `。` and the rest of another script's punctuation now sit in the class their ASCII twins
+/// have always been in — which is one word of this function, not a list to be added to per report.
+///
+/// Boundary table row 19 is kept by the order readings are asked in, not by this class: since the
+/// later 2026-09-22 entry a non-ASCII separator seams whatever follows it ([`prose_seam_ends`]), so
+/// `D:\资料\A、B.md` also offers `D:\资料\A` — behind the whole name, which the disk is asked
+/// about first.
 fn is_seam_separator(character: char) -> bool {
-    character.is_ascii_punctuation() && !matches!(character, '/' | '\\' | '.' | '-' | '_' | '~')
-}
-
-/// The ASCII **opening brackets**, which are seams on their own account — §7.30 (user ruling
-/// 2026-08-28, on next16).
-///
-/// This is the one mark whose seam does not consult the character behind it. The line that settled
-/// it is `dist\folio-next16.exe(0.1.0 (84d843f47e))`: the byte after the bracket is an ASCII `0`,
-/// so the class-transition rule saw no transition, the token ate its way to the closing `)`, and a
-/// file that is really on the disk went unmarked. What a version banner, a `(1)` copy suffix and
-/// `docs/a.md(说明)` have in common is not the script behind the bracket — it is the bracket, which
-/// opens an aside about the thing just named rather than continuing its name.
-///
-/// The class is stated once and not enumerated twice: these are the **opening halves of the ASCII
-/// bracket pairs whose closing halves already end a token** ([`is_closing_delimiter`] holds `)`,
-/// `]`, `}` and `>`). None of the four is legal in a Windows path, which is why a name loses
-/// nothing by being read up to one.
-///
-/// A bracket is a seam and **not** a terminator, and the difference is the whole of the ruling: a
-/// terminator would make `D:\x\a(1).txt` unaskable, while a seam merely offers `D:\x\a` as a
-/// shorter reading — asked only after the disk has denied the longer one.
-fn is_ascii_opening_bracket(character: char) -> bool {
-    matches!(character, '(' | '[' | '{' | '<')
+    !is_path_tail_char(character) && !character.is_whitespace()
 }
 
 /// The ASCII marks that end a **sentence** rather than a name, read only where a token ends —
@@ -1609,8 +1881,10 @@ fn is_ascii_opening_bracket(character: char) -> bool {
 ///
 /// The path-structure characters `- _ ~` stay off the list: they end real names — an editor's
 /// `main.rs~`, an 8.3 short name — and none of them ends a sentence. `/` and `\` stay off it for a
-/// second reason as well: a reading ending on a separator is refused outright
-/// ([`is_relative_reference`], row 53), so a stop there would only ever offer a name nobody wrote.
+/// second reason as well: a reading ending on a separator names the directory its own components
+/// spell ([`is_relative_reference`], row 53, as narrowed on 2026-09-22), so a stop there would
+/// only ever offer that same place under a shorter spelling — a second question for one answer —
+/// and for `docs/` a name nobody wrote at all.
 ///
 /// **The double quote comes off it too, and that is §7.30 ⑤ rather than an exception to it.** A `"`
 /// is the one mark this scan reads as a *declaration of extent*: both scans open a quoted token on
@@ -1619,43 +1893,51 @@ fn is_ascii_opening_bracket(character: char) -> bool {
 /// middle of it opens, a second reference lying across the quoted one's own span. A `'` is not that
 /// mark here (it doubles as an apostrophe inside filenames and closes nothing), so it peels like
 /// any other.
+/// **ASCII, and the word is load-bearing** (owner report 2026-09-22). This test is about the mark
+/// that could be *part of a name* and therefore has to be asked about together with the reading it
+/// stands behind — that is the trailing `.` of row 16, and every other mark on this list is ASCII
+/// for the same reason. A `。` is not such a mark: [`release_prose_tail`] takes it off whatever the
+/// row looks like, so no cut can counterfeit it into a name, and letting it into the truncation
+/// gate's own run of stops would press down a reference that ends a row behind one. When
+/// [`is_seam_separator`] stopped being an ASCII-only class, this kept the word it had always had.
 fn is_sentence_stop(character: char) -> bool {
-    (is_seam_separator(character) || character == '.') && character != '"'
+    character.is_ascii() && (is_seam_separator(character) || character == '.') && character != '"'
 }
 
 /// Whether a token can carry a seam at all — the cheap per-token test that keeps an ordinary
 /// screenful free (§7.30 ④).
 ///
-/// A seam is a transition into another script, an opening bracket, or the sentence's own
-/// punctuation at the token's end, so a token holding none of the three offers no shorter form and
-/// needs no search. The first two are read over bytes rather than characters because those two
-/// questions agree byte for byte: every byte of a multi-byte character is non-ASCII, and no bracket
-/// byte can appear inside one. The third is one character at one place — the token's last — so it
-/// costs a look and not a walk, and it is asked first for exactly that reason.
+/// A seam is a transition into another script or the sentence's own punctuation at the token's end,
+/// so a token holding neither offers no shorter form and needs no search. The first is read over
+/// bytes rather than characters because the two questions agree byte for byte: every byte of a
+/// multi-byte character is non-ASCII. The second is one character at one place — the token's last —
+/// so it costs a look and not a walk, and it is asked first for exactly that reason.
 fn token_may_carry_a_seam(token: &str) -> bool {
-    token.ends_with(is_sentence_stop)
-        || token
-            .bytes()
-            .any(|byte| !byte.is_ascii() || is_ascii_opening_bracket(char::from(byte)))
+    token.ends_with(is_sentence_stop) || token.bytes().any(|byte| !byte.is_ascii())
 }
 
 /// Where one unquoted token offers a **shorter form** of itself, longest first — §7.30.
 ///
-/// A seam is one **character-class transition** and not a list of stops: a [`is_seam_separator`]
-/// with a non-ASCII character glued straight onto it. That is a person writing another script
-/// through an ASCII keyboard — `docs/a.md,这里是操作顺序` — and the separator is the sentence's,
-/// not the name's. Both halves of the transition are load-bearing:
+/// A seam is one **character-class transition** and not a list of stops: an ASCII
+/// [`is_seam_separator`] with a non-ASCII character glued straight onto it. That is a person
+/// writing another script through an ASCII keyboard — `docs/a.md,这里是操作顺序` — and the
+/// separator is the sentence's, not the name's. For an ASCII separator both halves of the
+/// transition are load-bearing: ASCII → ASCII is **not** a seam. `D:\x\a.md,b` is one name; a
+/// comma is legal in a Windows filename and nothing on the line says this one is punctuation.
 ///
-/// * ASCII → ASCII is **not** a seam. `D:\x\a.md,b` is one name; a comma is legal in a Windows
-///   filename and nothing on the line says this one is punctuation.
-/// * non-ASCII → anything is **not** a seam. A full-width stop is released whole by
-///   [`release_prose_tail`] (boundary table row 17), and `D:\资料\A、B.md` is somebody's filename
-///   read whole (row 19 stands unmoved).
+/// **A non-ASCII separator needs no witness** (owner report 2026-09-22). The witness exists
+/// because an ASCII mark may sit inside a name as easily as behind one; a full-width stop, comma,
+/// colon or bracket is a person writing prose, and it ends the name whatever follows it —
+/// `D:\x\a.md。18 条` offers `D:\x\a.md` exactly as `D:\x\a.md。十八条` does. The seam adds a
+/// reading and takes none away: the whole token is still offered first, so `D:\资料\A、B.md` is
+/// somebody's filename read whole whenever the disk holds it (row 19), and the shorter
+/// `D:\资料\A` is asked only behind it.
 ///
-/// **An [`is_ascii_opening_bracket`] is the exception, and it is a seam whatever follows it** (user
-/// ruling 2026-08-28) — read that function for why a bracket carries its own evidence and needs no
-/// witness behind it. It is found in this same pass and not a second one: a seam search is one walk
-/// over the token, and the two questions are asked of each character where it stands.
+/// **An opening bracket needs no seam of its own any more** (user report 2026-09-17). It had one
+/// from 2026-08-28, because a bracket carries its own evidence and needs no witness behind it —
+/// and that same evidence is why it is now a terminator ([`is_opening_delimiter`]), so no unquoted
+/// token reaches this walk carrying one. The rule did not go away; it moved to the one place a
+/// token's extent is decided.
 ///
 /// **The end of the token is a witness of its own** (user ruling 2026-09-05), and it is the same
 /// character-class transition seen at the one place where the other class is empty: an
@@ -1680,14 +1962,16 @@ fn prose_seam_ends(token: &str, limit: usize) -> Vec<usize> {
         if offset > limit {
             break;
         }
-        // `offset + 1` is a character boundary: every separator is one ASCII byte.
+        // An ASCII separator needs its witness behind it; a non-ASCII one is its own witness
+        // (2026-09-22, *a full-width stop needs no witness*). The witness is read past the
+        // separator's **own** width, which is not always one byte: `：` is three.
         let seams_here = offset >= stops_from
-            || is_ascii_opening_bracket(character)
             || (is_seam_separator(character)
-                && token[offset + 1..]
-                    .chars()
-                    .next()
-                    .is_some_and(|next| !next.is_ascii()));
+                && (!character.is_ascii()
+                    || token[offset + character.len_utf8()..]
+                        .chars()
+                        .next()
+                        .is_some_and(|next| !next.is_ascii())));
         if seams_here {
             seams.push(offset);
         }
@@ -2555,12 +2839,14 @@ impl PrintedPathLinks {
     /// The `file:` links one logical line of text offers, and — into `unknown` — every path it
     /// names that nobody has been asked about yet.
     ///
-    /// Ranges come back in reading order and never overlap: the three spellings are held off each
-    /// other by their own boundary rules (a URI's embedded `D:/…` and a native path's `\.\` are both
-    /// preceded by a path character, and [`is_relative_reference`] refuses anything carrying a `:`),
-    /// so no two of them can claim the same text. The several readings one seam-bearing token
-    /// offers (§7.30) do share text, and at most one of them ever becomes a link — which is what
-    /// the walk below is: one token, one answer.
+    /// Ranges come back in reading order. The three spellings are held off each other by their
+    /// own boundary rules (a URI's embedded `D:/…` and a native path's `\.\` are both preceded by
+    /// a path character, and [`is_relative_reference`] refuses anything carrying a `:`), so no two
+    /// of them can claim the same text — with one exception since the 2026-09-21 entry of §7.30: a
+    /// rooted reading that was read across a space may span a bare relative one behind that space,
+    /// and the viewport's own guard is what keeps two links from being drawn on one text. The
+    /// several readings one seam-bearing token offers (§7.30) do share text, and at most one of
+    /// them ever becomes a link — which is what the walk below is: one token, one answer.
     pub fn links_in(
         &self,
         text: &str,
@@ -2923,7 +3209,7 @@ impl PrintedPathLinks {
     /// Every candidate one text offers, in reading order — the one scan both the single-line pass
     /// and the rejoin read, so the two can never disagree about where a reference stops.
     fn candidates_in(&self, text: &str) -> Vec<PrintedPathCandidate> {
-        let mut candidates = detect_absolute_path_candidates(text);
+        let mut candidates = detect_absolute_path_candidates(text, TokenSpaces::ReadAcross);
         candidates.extend(detect_foreign_path_candidates(text, &self.namespace));
         if self.working_directory.is_some() {
             candidates.extend(detect_relative_path_candidates(text, &|_| true));
@@ -2993,7 +3279,7 @@ mod tests {
 
     /// Every candidate one line offers, as `(text, spelling)` pairs in reading order.
     fn candidates(text: &str) -> Vec<(&str, PrintedPathSpelling)> {
-        let mut found = detect_absolute_path_candidates(text);
+        let mut found = detect_absolute_path_candidates(text, TokenSpaces::ReadAcross);
         found.extend(detect_relative_path_candidates(text, &|_| true));
         found.extend(detect_file_uri_candidates(text));
         found.sort_by_key(|candidate| candidate.byte_start);
@@ -3010,9 +3296,32 @@ mod tests {
             .collect::<Vec<_>>()
     }
 
+    /// The readings one line's **rooted** tokens offer, in the order the disk is asked about them.
+    ///
+    /// The rooted scan alone, because that is the one this asks about: a bare relative reference
+    /// standing behind a space on the same line opens a candidate of its own, and it would be
+    /// reported here as though it were another reading of the same token.
+    fn rooted_readings(text: &str) -> Vec<&str> {
+        detect_absolute_path_candidates(text, TokenSpaces::ReadAcross)
+            .into_iter()
+            .map(|candidate| candidate.reference_text(text))
+            .collect()
+    }
+
+    /// The same, for the spelling a pane's own shell roots a path with.
+    fn foreign_readings<'line>(
+        namespace: &PrintedPathNamespace,
+        text: &'line str,
+    ) -> Vec<&'line str> {
+        detect_foreign_path_candidates(text, namespace)
+            .into_iter()
+            .map(|candidate| candidate.reference_text(text))
+            .collect()
+    }
+
     /// Every candidate as `(path text, location)` — the two halves a located reference splits into.
     fn located(text: &str) -> Vec<(&str, Option<PrintedPathLocation>)> {
-        let mut found = detect_absolute_path_candidates(text);
+        let mut found = detect_absolute_path_candidates(text, TokenSpaces::ReadAcross);
         found.extend(detect_relative_path_candidates(text, &|_| true));
         found.extend(detect_file_uri_candidates(text));
         found.sort_by_key(|candidate| candidate.byte_start);
@@ -3035,15 +3344,19 @@ mod tests {
         );
     }
 
-    /// Boundary table rows 3 and 4. A space is the ordinary end of an unquoted token, and quoting is
-    /// the one declaration of extent that lets a path carry one.
+    /// Boundary table rows 3 and 4, **as the 2026-09-21 entry leaves them**: quoting is still the
+    /// one declaration of extent, and unquoted the space is now a **seam** rather than the end of
+    /// the story — the token is read across it and offers the shorter reading behind it.
     #[test]
     fn a_space_belongs_to_a_path_only_inside_quotes() {
         assert_eq!(spans("\"D:\\a b\\c.md\""), ["D:\\a b\\c.md"]);
-        // Unquoted, the same characters are two references and not one, which is the honest
-        // reading: the space ended a drive-rooted token, and what follows it is a perfectly
-        // well-formed relative name. Neither of them exists, so neither becomes a link.
-        assert_eq!(spans("D:\\a b\\c.md"), ["D:\\a", "b\\c.md"]);
+        // Unquoted, the same characters offer the whole name first, then the reading the space
+        // used to be the whole of — and, as before, the relative name lying across the tail of it.
+        // Which of them is a link is the disk's to say and nobody else's.
+        assert_eq!(
+            spans("D:\\a b\\c.md"),
+            ["D:\\a b\\c.md", "D:\\a", "b\\c.md"]
+        );
     }
 
     /// Boundary table rows 5 and 6: a closing delimiter ends the token, in either width.
@@ -3256,7 +3569,11 @@ mod tests {
         assert_eq!(
             linked_in(
                 &msys(),
-                &[("C:\\Users\\alice\\notes\\a.md", true)],
+                &[
+                    ("C:\\Users\\alice\\notes\\a.md", true),
+                    ("C:\\Users\\alice\\notes\\a.md:12 for", false),
+                    ("C:\\Users\\alice\\notes\\a.md:12 for it", false),
+                ],
                 "see ~/notes/a.md:12 for it",
             ),
             ["~/notes/a.md:12 → file:///C:/Users/alice/notes/a.md#L12"]
@@ -3496,11 +3813,18 @@ mod tests {
     fn a_prompts_own_host_colon_is_not_a_binding_colon() {
         // The prompt's `$` is §7.30's sentence stop at the end of a token, so the disk is asked
         // about `D:\Demo$` before `D:\Demo` — the ruling's own longest-first order, unchanged by
-        // which colon stands in front of the name.
+        // which colon stands in front of the name. The command the person typed behind the prompt
+        // is read too, because a space is a seam and not a wall (2026-09-21), and it is the disk
+        // that says a directory is not called `Demo$ ls -la`.
         assert_eq!(
             linked_in(
                 &wsl(),
-                &[("D:\\Demo", true), ("D:\\Demo$", false)],
+                &[
+                    ("D:\\Demo", true),
+                    ("D:\\Demo$", false),
+                    ("D:\\Demo$ ls", false),
+                    ("D:\\Demo$ ls -la", false),
+                ],
                 "alice@HOST:/mnt/d/Demo$ ls -la",
             ),
             ["/mnt/d/Demo → file:///D:/Demo"]
@@ -4908,49 +5232,39 @@ mod tests {
                 "{line} has no settled position syntax, so it has no link at all"
             );
         }
-        // 7 and 8 as the opening-bracket seam leaves them (§7.30, user ruling 2026-08-28 evening).
-        // The bracket is a seam whatever follows it, so the reading in front of it is **the path
-        // itself** — which is what these two rows always wanted ("只画路径"), short of the
-        // `(12,34)` fragment no contract spells out yet. What the scenario forbade — a link over
-        // `…main.cpp(12,34`, a name nobody printed — is still not offered by anything.
-        let with_position_syntax = ledger(
-            "D:\\case",
-            &[
-                ("D:\\case\\src\\main.cpp", true),
-                ("D:\\case\\src\\main.cpp(12,34", false),
-                ("D:\\case\\src\\app.ts", true),
-            ],
-        );
+        // 7 and 8 as the opening bracket leaves them (§7.30, user report 2026-09-17). The bracket
+        // ends the token, so the only reading is **the path itself** — which is what these two rows
+        // always wanted ("只画路径"), short of the `(12,34)` fragment no contract spells out yet.
+        // What the scenario forbade — a link over `…main.cpp(12,34`, a name nobody printed — is
+        // offered by nothing, and since the bracket ends a token it is not even asked about.
         assert_eq!(
-            linked(
-                &with_position_syntax,
-                "D:\\case\\src\\main.cpp(12,34): error C2143",
-                None
-            ),
+            linked(&named, "D:\\case\\src\\main.cpp(12,34): error C2143", None),
             [(
                 "D:\\case\\src\\main.cpp",
                 "file:///D:/case/src/main.cpp".to_owned()
             )]
         );
         assert_eq!(
-            linked(
-                &with_position_syntax,
-                "src/app.ts(7,19): error TS2322",
-                None
-            ),
+            linked(&named, "src/app.ts(7,19): error TS2322", None),
             [("src/app.ts", "file:///D:/case/src/app.ts".to_owned())]
         );
-        // And the absolute spelling's first frame is the ordinary two-frame rhythm, not a promise:
-        // the whole printed string is a name of its own until the disk has denied it.
+        // And there is no longer reading to wait for: one name, one question, drawn on the frame
+        // its answer arrives in.
         let mut unknown = BTreeSet::new();
         assert_eq!(
-            named.links_in(
-                "D:\\case\\src\\main.cpp(12,34): error C2143",
-                None,
-                &mut unknown
-            ),
-            [],
-            "the shorter reading waits for the longer one's verdict"
+            named
+                .links_in(
+                    "D:\\case\\src\\main.cpp(12,34): error C2143",
+                    None,
+                    &mut unknown
+                )
+                .len(),
+            1,
+            "the name in front of the bracket is the whole of what the line offers"
+        );
+        assert!(
+            unknown.is_empty(),
+            "and no name with a bracket welded into it was ever asked about: {unknown:?}"
         );
         // 11, 12 — the two position shapes that *are* unambiguous today.
         assert_eq!(
@@ -4984,28 +5298,46 @@ mod tests {
     }
 
     /// Group A rows 3 and 4: an opening quote of **any** script declares an extent, so a candidate
-    /// that stopped at a space *inside* one has not reached the end of what was quoted.
+    /// that stopped at a space *inside* one has not reached the end of what was quoted — and since
+    /// the 2026-09-21 entry the reading that *does* reach it is offered, so the dangerous prefix is
+    /// refused **and** the name the quote declared is the link.
     ///
-    /// The gate is about the space, not about the quote character: `“D:\x\a.md”` stops at the
-    /// closing quote itself and is an ordinary, complete reference, which is why the second half of
-    /// this row is asserted beside the first.
+    /// The refusal is about the space, not about the quote character: `“D:\x\a.md”` stops at the
+    /// closing quote itself and is an ordinary, complete reference, which is why the last row here
+    /// is asserted beside the first.
     #[test]
     fn a_candidate_cut_by_a_space_inside_an_opening_quote_is_not_drawn() {
-        // The scenario list's fixture: the dangerous prefix and the whole script both exist.
+        // The scenario list's fixture: the dangerous prefix and the whole script both exist, and
+        // the reading carrying the closing quote does not.
         let links = ledger(
             "D:\\case",
             &[
                 ("D:\\Program", true),
                 ("D:\\Program Files\\Tool\\run.ps1", true),
+                ("D:\\Program Files\\Tool\\run.ps1'", false),
                 ("D:\\x\\a.md", true),
             ],
         );
+        let script = "file:///D:/Program%20Files/Tool/run.ps1".to_owned();
         assert_eq!(
             linked(&links, "'D:\\Program Files\\Tool\\run.ps1'", None),
-            []
+            [("D:\\Program Files\\Tool\\run.ps1", script.clone())],
+            "the extent the quote declared is read, and `D:\\Program` is never what is promised"
         );
         assert_eq!(
             linked(&links, "“D:\\Program Files\\Tool\\run.ps1”", None),
+            [("D:\\Program Files\\Tool\\run.ps1", script)],
+            "a full-width quote closes the same extent, and its closing half ends the token"
+        );
+        // The refusal itself, where no reading can reach the closing quote: a name spelled with
+        // more spaces than the bound carries is one this window still declines to guess at, and
+        // the prefix is not offered in its place.
+        assert_eq!(
+            linked(
+                &ledger("D:\\case", &[("D:\\Program", true)]),
+                "'D:\\Program Files A B C D\\run.ps1'",
+                None
+            ),
             []
         );
         assert_eq!(
@@ -5160,9 +5492,10 @@ mod tests {
     fn group_d_git_and_virtual_schemes() {
         let cwd = Some("D:\\case");
         // 44 keeps its "no link at all" across the opening-bracket seam (§7.30, user ruling
-        // 2026-08-28 evening). The brace does seam, but the reading in front of it is `src/` — a
-        // directory prefix, and a reading must end on a character that is part of a name. See
-        // `a_reading_that_ends_on_a_separator_is_not_a_name`.
+        // 2026-08-28 evening). The brace does seam, but the reading in front of it is `src/` — one
+        // segment with a slash after it, and the separator that admits a bare reference is one
+        // that divides two. See
+        // `a_trailing_separator_is_not_the_evidence_a_bare_reference_is_admitted_on`.
         for line in [
             "--- a/src/main.rs",
             "+++ b/src/main.rs",
@@ -5204,8 +5537,9 @@ mod tests {
                 ("D:\\a b\\c.md", true),
             ],
         );
-        // Rows 1, 2, 10, 11, 13, 15, 16, 18, 20 and 23: the reference runs to the end of the line,
-        // so at the edge it is pressed down and inside the row it is untouched.
+        // Rows 1, 2, 10, 11, 13, 15, 16, 18, 20 and 23, and row 4 since the 2026-09-21 entry: the
+        // reference runs to the end of the line, so at the edge it is pressed down and inside the
+        // row it is untouched.
         for line in [
             "D:\\Developer\\folio-terminal\\README.md",
             "D:/Developer/folio-terminal/README.md",
@@ -5217,6 +5551,7 @@ mod tests {
             "docs/a.md:13",
             "C:\\12",
             "  docs/plans/x/plan.md",
+            "D:\\a b\\c.md",
         ] {
             assert_eq!(
                 linked(&links, line, None).len(),
@@ -5250,45 +5585,57 @@ mod tests {
             );
             assert_eq!(linked(&links, line, last_cell_of(line)).len(), 1);
         }
-        // Rows 4, 8, 9, 14, 19 and 21 had no link at either placement and still have none: a gate
-        // that presses candidates down cannot turn "nothing" into one.
+        // Rows 8, 9, 14, 19 and 21 had no link at either placement and still have none: a gate
+        // that presses candidates down cannot turn "nothing" into one. (Row 4 left this list on
+        // 2026-09-21, when the space became a seam and the name behind it a reading.)
         for line in [
-            "D:\\a b\\c.md",
             "中文D:\\x\\a.md",
             "README",
             "file://server/share/a.md",
-            "见 D:\\x\\a.md，然后",
             "docs/a.md:abc",
         ] {
             assert_eq!(linked(&links, line, None), []);
             assert_eq!(linked(&links, line, last_cell_of(line)), []);
         }
+        // Row 19's sentence left that list on 2026-09-22 and is the one row whose two placements
+        // **must** differ — which is both rulings working rather than either bending. The
+        // full-width `，` is a seam now ([`is_seam_separator`]), so the token has two readings.
+        // Inside the row the longer one is nobody's answer yet, and a shorter reading is never
+        // drawn in front of a longer one still waiting for the disk, so the line draws nothing and
+        // asks. With the reference's own last cell being the row's, §7.1.5k ① presses the longer
+        // reading down before either the ledger or the probe queue may decide it — and the mark
+        // that ended the name is then the evidence the shorter reading is whole.
+        let row_19 = "见 D:\\x\\a.md，然后";
+        assert_eq!(linked(&links, row_19, None), []);
+        assert_eq!(
+            linked(&links, row_19, last_cell_of(row_19)),
+            [("D:\\x\\a.md", "file:///D:/x/a.md".to_owned())]
+        );
     }
 
-    /// Scenario 1 and 2 — **a conflict, recorded rather than worked around.**
+    /// Scenario 1 and 2 — **the conflict this module recorded, and the entry that settled it**
+    /// (owner report 2026-09-21).
     ///
-    /// `At D:\Program Files\Tool\run.ps1:12 char:3` cuts at the space and leaves `D:\Program`,
-    /// which on a great many machines is a real directory; the same shape comes out of `npm ERR!
-    /// path …`. The scenario list wants no link at all, and this window still draws one.
+    /// `At D:\Program Files\Tool\run.ps1:12 char:3` cut at the space and left `D:\Program`, which
+    /// on a great many machines is a real directory; the same shape comes out of `npm ERR! path …`.
+    /// The scenario list wanted no link at all, and this window drew that one.
     ///
-    /// It is not fixed here because every lexical rule that would fix it contradicts a ruling this
-    /// module already carries. Boundary table row 4 settles that an unquoted space ends a token and
-    /// that what follows it is a reference of its own, so "a candidate followed by a space and more
-    /// path-shaped text is suspect" would darken every `ls`-style line that prints two real paths
-    /// side by side. The discriminating fact is semantic and not lexical — `D:\Program` is a
-    /// *directory* and the reference continues into it — and reading it means probing the longer
-    /// candidates as well, which is disk work this slice is explicitly not allowed to add
-    /// (§7.1.5j's probe budget). Rows 3 and 4 of the same group *are* fixed, because an opening
-    /// quote is a declaration of extent and gives the evidence a bare space cannot.
+    /// It stood unfixed because the discriminating fact is not lexical — `D:\Program` is a
+    /// *directory* and the reference continues into it — and reading it meant probing the longer
+    /// candidates as well, which the probe budget of the day forbade on the window thread. Audit 3
+    /// C-2 moved the verdict onto a worker and the 2026-09-21 entry spent what that bought: the
+    /// longer readings are asked, the disk answers, and the name the reader is looking at is the
+    /// link. The scenario asked for no link because the only link on offer was the wrong one; what
+    /// it gets is the right one.
     #[test]
-    #[ignore = "§7.1.5k conflict: an unquoted space-cut prefix needs either a rule that contradicts \
-                boundary table row 4 or extra disk probes the budget forbids; see the doc comment"]
     fn an_unquoted_path_cut_at_a_space_does_not_link_its_prefix() {
         let links = ledger(
             "D:\\case",
             &[
                 ("D:\\Program", true),
                 ("D:\\Program Files\\Tool\\run.ps1", true),
+                // The longest reading's own name, with `char:3` read as its location (§7.1.5j ⑨).
+                ("D:\\Program Files\\Tool\\run.ps1:12 char", false),
                 ("D:\\Program Files\\nodejs\\node_modules\\x", true),
             ],
         );
@@ -5298,7 +5645,11 @@ mod tests {
                 "At D:\\Program Files\\Tool\\run.ps1:12 char:3",
                 None
             ),
-            []
+            [(
+                "D:\\Program Files\\Tool\\run.ps1:12",
+                "file:///D:/Program%20Files/Tool/run.ps1#L12".to_owned()
+            )],
+            "PowerShell's own error line names a file at a line, and that is what it points at"
         );
         assert_eq!(
             linked(
@@ -5306,7 +5657,11 @@ mod tests {
                 "npm ERR! path D:\\Program Files\\nodejs\\node_modules\\x",
                 None
             ),
-            []
+            [(
+                "D:\\Program Files\\nodejs\\node_modules\\x",
+                "file:///D:/Program%20Files/nodejs/node_modules/x".to_owned()
+            )],
+            "and npm's names the whole path it printed, not the drive's `Program` folder"
         );
     }
 
@@ -5344,11 +5699,16 @@ mod tests {
     /// that need it (§7.1.5j, user report 2026-08-23, and
     /// `a_path_the_disk_has_denied_is_never_asked_about_again` directly above). The scenario list
     /// asked for the opposite: a file that did not exist at first print and is built afterwards
-    /// should become a link. Both are now true, because the ruling gave the "no" the one expiry
-    /// that is a fact rather than a guess — **the pane's next `OSC 133 D`**. A command has ended,
-    /// so the disk may have moved; and a command is not a frame, so the budget is untouched. See
+    /// should become a link. Both are now true, because the ruling gave the "no" an expiry that is
+    /// a fact rather than a guess — **the pane's next `OSC 133 D`**. A command has ended, so the
+    /// disk may have moved; and a command is not a frame, so the budget is untouched. See
     /// `bt_term::DualPlaneSession::expire_denied_paths`, which is where the expiry lives: this
     /// layer's contract is unchanged, it answers whichever ledger it is handed.
+    ///
+    /// A second boundary joined it on 2026-09-20 — **the name being printed again** — for the pane
+    /// that never ends a command at all, and it reaches this layer exactly the same way: the
+    /// session hands over a ledger without that denial in it (`reprinted_path_links`) and the
+    /// sighting below becomes a question. Step ② is that step for both boundaries.
     ///
     /// **The conflict was not hypothetical, and 2026-08-25 is the day it was photographed.** The
     /// reader reported that `D:\Developer\folio-terminal\test-assets\folio-pdf-test.pdf` — an
@@ -5911,14 +6271,23 @@ mod tests {
         assert_eq!(spans("见 docs/a.md。"), ["docs/a.md"]);
         assert_eq!(spans("见 D:\\x\\a.md:12。"), ["D:\\x\\a.md:12"]);
         assert_eq!(spans("见 D:\\x\\a.md》"), ["D:\\x\\a.md"]);
-        // Interior punctuation is a filename's own: only the tail is released, so a name that
-        // really carries a `、` in the middle of it is still read whole.
-        assert_eq!(spans("D:\\资料\\A、B.md"), ["D:\\资料\\A、B.md"]);
-        // And the limit of that, written down rather than discovered: a sentence that goes on
-        // **past** the punctuation puts its own words inside the token, and words are what a
-        // filename is made of. The token is then a name nothing on the disk carries, so the line
-        // offers no link — the same safe "not recognized" this whole boundary table is built on.
-        assert_eq!(spans("见 D:\\x\\a.md，然后"), ["D:\\x\\a.md，然后"]);
+        // Only the tail is released, so a name that really carries a `、` in the middle of it is
+        // still read whole, and asked about first. The `、` is a seam too (2026-09-22, *a
+        // full-width stop needs no witness*), so the name in front of it is offered behind.
+        assert_eq!(
+            spans("D:\\资料\\A、B.md"),
+            ["D:\\资料\\A、B.md", "D:\\资料\\A"]
+        );
+        // A sentence that goes on **past** the punctuation puts its own words inside the token, and
+        // words are what a filename is made of — so the whole token is a reading, and it is the
+        // first one asked about. What used to be written here as the limit of that ("the line
+        // offers no link") was the owner's 2026-09-22 defect: the mark between the name and the
+        // prose is a separator whichever keyboard wrote it, so the name in front of it is now
+        // offered behind the long form and the disk chooses between them.
+        assert_eq!(
+            spans("见 D:\\x\\a.md，然后"),
+            ["D:\\x\\a.md，然后", "D:\\x\\a.md"]
+        );
     }
 
     /// Boundary table row 16 as the 2026-09-05 ruling leaves it, nailed down so the row above
@@ -5963,76 +6332,65 @@ mod tests {
         }
     }
 
-    /// §7.30, boundary table rows 46–48 (user ruling 2026-08-28): the seam is a **class**, so every
-    /// ASCII punctuation mark a path is not spelled with cuts — a bracket every bit as much as a
-    /// comma. This is the fifth screenshot: `docs/a.md(说明)` and its backslash twin both went dark
-    /// because `(` was not on the old five-mark table.
+    /// §7.30, boundary table rows 46–48 (user ruling 2026-08-28, amended 2026-09-17): a mark glued
+    /// to a CJK word cuts the name in front of it. This is the fifth screenshot: `docs/a.md(说明)`
+    /// and its backslash twin both went dark because `(` was not on the old five-mark table.
+    ///
+    /// Two different cuts do it, and the difference is worth seeing in one place. A **bracket** ends
+    /// the token outright ([`is_opening_delimiter`]), because its closing half always did. An
+    /// **operator** — `=`, `,`, `;` — only seams, so the whole token is still a reading and the disk
+    /// chooses between the two.
     #[test]
-    fn a_bracket_glued_to_a_cjk_word_seams_like_any_other_separator() {
-        // Row 46: an opening bracket then CJK — the shorter form is offered. The bare spelling is
-        // no candidate whole (`(` is not a path character), so the seam is the only reading there is.
+    fn a_mark_glued_to_a_cjk_word_cuts_the_name_it_follows() {
+        // Row 46: an opening bracket then CJK. The bare spelling is no candidate whole (`(` is not
+        // a path character) and the drive-rooted one stops at the bracket, so both read one name.
         assert_eq!(spans("docs/a.md(说明)"), ["docs/a.md"]);
-        assert_eq!(spans("dist\\folio.exe(说明)"), ["dist\\folio.exe"]); // the backslash twin seams too
-        // The drive-rooted form is a candidate whole (a `(` is legal in an absolute path), so both
-        // readings are offered, longest first, and the disk chooses.
-        assert_eq!(
-            spans("见 D:\\x\\a.md(说明)"),
-            ["D:\\x\\a.md(说明", "D:\\x\\a.md"]
-        );
-        // Row 47: other brackets and operators are the same class, no table to extend.
+        assert_eq!(spans("dist\\folio.exe(说明)"), ["dist\\folio.exe"]); // the backslash twin too
+        assert_eq!(spans("见 D:\\x\\a.md(说明)"), ["D:\\x\\a.md"]);
+        // Row 47: other brackets are the same class, no table to extend — and an operator is the
+        // other cut, where the longest reading is still offered first.
         assert_eq!(spans("docs/a.md[注]"), ["docs/a.md"]);
-        assert_eq!(
-            spans("见 D:\\x\\a.md{批}"),
-            ["D:\\x\\a.md{批", "D:\\x\\a.md"]
-        );
+        assert_eq!(spans("见 D:\\x\\a.md{批}"), ["D:\\x\\a.md"]);
         assert_eq!(
             spans("见 D:\\x\\a.md=值"),
             ["D:\\x\\a.md=值", "D:\\x\\a.md"]
         );
-        // Row 48 as it stands after the evening ruling of the same day (see
-        // `an_opening_bracket_is_a_seam_whatever_follows_it`): an opening bracket seams whatever
-        // follows it, so `docs/a.md(1).txt` **does** offer the shorter reading — it is offered, not
-        // promised, and the disk still decides. What has not changed is that `(` is a seam and not
-        // a terminator, which is what leaves a name that really carries a bracket askable at all.
+        // Row 48: a `(1)` copy suffix is read without its suffix, in either spelling. A name that
+        // really carries a bracket was already unreadable unquoted — its closing half has ended a
+        // token since the day this file was written — so the opening half costs it nothing.
         assert_eq!(spans("docs/a.md(1).txt"), ["docs/a.md"]);
-        assert_eq!(
-            spans("见 D:\\x\\a.md(1"),
-            ["D:\\x\\a.md(1", "D:\\x\\a.md"],
-            "the whole name is still the first reading offered"
-        );
+        assert_eq!(spans("见 D:\\x\\a.md(1"), ["D:\\x\\a.md"]);
     }
 
-    /// §7.30, boundary table rows 50 and 51 (user ruling 2026-08-28, on next16): an **ASCII
-    /// opening bracket** is a seam on its own account, **whatever follows it** — the one place in
-    /// this ruling where the character after the mark is not consulted.
+    /// §7.30, boundary table rows 50 and 51 (user ruling 2026-08-28, on next16; the mark promoted
+    /// from seam to terminator 2026-09-17): an **opening bracket** ends a token **whatever follows
+    /// it** — the one cut in this ruling that does not consult the character after the mark.
     ///
     /// The line that proved it: `dist\folio-next16.exe(0.1.0 (84d843f47e))`, where the byte behind
     /// the bracket is an ASCII `0`. The transition rule saw no transition, the token ate its way to
     /// the closing `)`, and a file that is really on the disk went unmarked. A bracket does not open
-    /// a filename in the wild — it opens an aside about the thing just named — so it offers a
-    /// shorter reading, and the disk still decides between the readings, longest first.
+    /// a filename in the wild — it opens an aside about the thing just named — and that is the same
+    /// evidence its closing half has always been read on, which is why the mark now stops the token
+    /// where it stands instead of offering a second reading behind it.
     #[test]
-    fn an_opening_bracket_is_a_seam_whatever_follows_it() {
-        // Row 50, the user's line. The bare spelling is no candidate whole (`(` is not a path
-        // character), so the seam is the only reading there is — and it is a real file.
+    fn an_opening_bracket_ends_a_token_whatever_follows_it() {
+        // Row 50, the user's line, in both spellings: the name in front of the bracket, and nothing
+        // longer. The bare one never had a longer reading (`(` is not a path character); the
+        // drive-rooted one gives up the reading that welded the version banner onto the name.
         assert_eq!(
             spans("dist\\folio-next16.exe(0.1.0 (84d843f47e))"),
             ["dist\\folio-next16.exe"]
         );
-        // The drive-rooted spelling *is* a candidate whole, so both readings are offered, longest
-        // first, exactly as a comma's seam offers them.
-        assert_eq!(
-            spans("见 D:\\dist\\x.exe(0.1.0"),
-            ["D:\\dist\\x.exe(0.1.0", "D:\\dist\\x.exe"]
-        );
-        // All four openers, and an ASCII digit, letter and space-less word behind each of them: the
-        // class is "the opening half of the bracket pairs whose closing half already ends a token".
+        assert_eq!(spans("见 D:\\dist\\x.exe(0.1.0"), ["D:\\dist\\x.exe"]);
+        // All four ASCII openers, and an ASCII digit, letter and space-less word behind each of
+        // them: the class is "the opening half of the pairs whose closing half already ends a
+        // token", and the full-width and CJK halves of that class are read in
+        // `a_name_printed_in_front_of_an_opening_bracket_is_read_without_it`.
         for line in ["docs/a.md(1", "docs/a.md[2", "docs/a.md{v3", "docs/a.md<x"] {
-            assert_eq!(spans(line), ["docs/a.md"], "{line} seams at its bracket");
+            assert_eq!(spans(line), ["docs/a.md"], "{line} ends at its bracket");
         }
-        // Row 51 at the disk, all three frames. Frame one: neither reading has an answer, so
-        // nothing is promised and both are asked — the shorter one may not be drawn ahead of the
-        // longer one's verdict.
+        // Row 51 at the disk, now two frames instead of three. Frame one: one reading, unanswered,
+        // so nothing is promised and exactly that one name is asked about.
         let mut unknown = BTreeSet::new();
         let asking = ledger("D:\\case", &[]);
         assert_eq!(
@@ -6041,28 +6399,93 @@ mod tests {
         );
         assert_eq!(
             unknown.into_iter().collect::<Vec<_>>(),
-            [
-                PathBuf::from("D:\\x\\a.exe"),
-                PathBuf::from("D:\\x\\a.exe(0.1.0")
-            ]
+            [PathBuf::from("D:\\x\\a.exe")],
+            "the name with the banner welded onto it is not a reading any more"
         );
-        // Frame two, the ordinary answer: the printed string is nobody's name, the name in front of
-        // the bracket is.
-        let denied = ledger(
-            "D:\\case",
-            &[("D:\\x\\a.exe", true), ("D:\\x\\a.exe(0.1.0", false)],
-        );
+        // Frame two: the name in front of the bracket is the link.
+        let answered = ledger("D:\\case", &[("D:\\x\\a.exe", true)]);
         assert_eq!(
-            linked(&denied, "见 D:\\x\\a.exe(0.1.0", None),
+            linked(&answered, "见 D:\\x\\a.exe(0.1.0", None),
             [("D:\\x\\a.exe", "file:///D:/x/a.exe".to_owned())]
         );
-        // Frame two, the other answer: a name that really carries a bracket wins whole, which is
-        // why the bracket is a seam and not a terminator.
+        // What the promotion costs, stated where it can be seen: a name carrying an **unmatched**
+        // opening bracket is no longer read whole unquoted, even on a disk that holds it — the
+        // balanced spelling of the same name never was, because `)` ends a token. Quoting is the
+        // appeal, and it still admits every name there is.
         let whole = ledger("D:\\case", &[("D:\\x\\a(1", true), ("D:\\x\\a", true)]);
         assert_eq!(
             linked(&whole, "见 D:\\x\\a(1", None),
+            [("D:\\x\\a", "file:///D:/x/a".to_owned())]
+        );
+        assert_eq!(
+            linked(&whole, "见 \"D:\\x\\a(1\"", None),
             [("D:\\x\\a(1", "file:///D:/x/a%281".to_owned())]
         );
+    }
+
+    /// PIN (user report 2026-09-17) — **a name printed straight in front of an opening bracket is
+    /// read without it**, whatever script the bracket is written in.
+    ///
+    /// The line is an agent's, printed into a pane standing in the directory it names, and the mark
+    /// behind the name is a full-width `（` with no space in front of it. Every rule on the line
+    /// already worked from the other side — `）` has ended a token since the day
+    /// [`is_closing_delimiter`] was written — and the reference still went dark, because the token
+    /// ran past the bracket to the space behind `commit` and a bare reading may carry no character a
+    /// path is not spelled with.
+    #[test]
+    fn a_name_printed_in_front_of_an_opening_bracket_is_read_without_it() {
+        let printed = "改完了，你说的每一条都落了，现在是 6 页，中英各页截图都过了。文件还是 \
+                       docs/deliverables/slides/dist/advisor_status_202609.html（commit e0bfcfe）。";
+        assert_eq!(
+            spans(printed),
+            ["docs/deliverables/slides/dist/advisor_status_202609.html"]
+        );
+        // The same line at the disk, through a ledger that says that one name is a file.
+        let links = ledger(
+            "D:\\Documents\\SyncFolder\\Research\\MPC",
+            &[(
+                "D:\\Documents\\SyncFolder\\Research\\MPC\\docs\\deliverables\\slides\\dist\\advisor_status_202609.html",
+                true,
+            )],
+        );
+        assert_eq!(
+            linked(&links, printed, None),
+            [(
+                "docs/deliverables/slides/dist/advisor_status_202609.html",
+                "file:///D:/Documents/SyncFolder/Research/MPC/docs/deliverables/slides/dist/\
+                 advisor_status_202609.html"
+                    .to_owned()
+            )]
+        );
+        // The class, not the character: every opening half whose closing half is a terminator, in
+        // both spellings a person types them in.
+        for opening in [
+            '(', '[', '{', '<', '（', '［', '｛', '＜', '「', '『', '【', '〈', '《', '〔', '«',
+            '“', '‘',
+        ] {
+            let line = format!("见 D:\\x\\a.md{opening}说明");
+            assert_eq!(
+                spans(&line),
+                ["D:\\x\\a.md"],
+                "`{line}` ends its name at the bracket"
+            );
+            let bare = format!("docs/a.md{opening}说明");
+            assert_eq!(
+                spans(&bare),
+                ["docs/a.md"],
+                "`{bare}` ends its name at the bracket"
+            );
+        }
+        // The closing halves are untouched, in both widths — this rule was only ever stated at one
+        // end, and the other end goes on saying what it said.
+        assert_eq!(spans("（见 docs/a.md）"), ["docs/a.md"]);
+        assert_eq!(spans("(see docs/a.md)"), ["docs/a.md"]);
+        assert_eq!(spans("见 D:\\x\\a.md）"), ["D:\\x\\a.md"]);
+        // And what a name pays for it: a filename that really carries a full-width pair is no more
+        // readable unquoted than it was before — the `）` already cut it — while quoting, which is
+        // a declaration of extent, still admits it whole.
+        assert_eq!(spans("docs/报告（一）.md"), ["docs/报告"]);
+        assert_eq!(spans("\"docs/报告（一）.md\""), ["docs/报告（一）.md"]);
     }
 
     /// §7.30, boundary table row 54 (user report 2026-09-03, on next29): **a colon another script
@@ -6135,33 +6558,73 @@ mod tests {
         assert!(spans(":8080/img/x.png").is_empty());
     }
 
-    /// §7.30, boundary table row 52 (user ruling 2026-08-28, evening): **a reading must end on a
-    /// character that is part of a name.** A trailing `/` or `\` is not; what stands in front of one
-    /// is a directory prefix, and a directory prefix is a name nobody wrote — not even when the disk
-    /// holds it, because existence was never the licence to invent a reference, only to draw one.
+    /// RED (owner report 2026-09-22, on `next86`) — §7.30, boundary table row 52 (user ruling
+    /// 2026-08-28, evening): **the separator that admits a bare reference is one that divides two
+    /// segments**, and the first refusal is therefore asked of the candidate with its trailing
+    /// separators taken off.
     ///
-    /// This is the same discipline that keeps a single bare word out (`README` is prose until
-    /// something says otherwise): a bare reference is admitted on the strength of carrying a
-    /// separator, and a **trailing** separator is the one place where that mark is not evidence of
-    /// two segments at all. So it closes a hole in the old rule rather than adding a new one, and it
-    /// is asked of every reading — the seam's shorter forms and the whole token alike.
+    /// The ruling's own argument was never about the last character. A bare reference is admitted
+    /// on the strength of carrying a separator — that mark is the only thing ordinary prose does
+    /// not have — and `docs/` is `docs` with a slash after it, where `docs` alone was never a
+    /// reference. Written as "a reading may not end on a separator" it said more than that: it also
+    /// refused `mjx_experiments/umarm_can/media/`, whose two interior separators divide three named
+    /// segments and whose trailing one is a person naming a **directory**, which this scan has
+    /// recognised like a file since §7.1.5j.
+    ///
+    /// RED EVIDENCE. The lines below are the owner's, replayed with the real base. Before the
+    /// narrowing, `spans` returned nothing for any of the three while `whydrift/models` on the row
+    /// above — the same folder spelled without the slash — was an ordinary link.
+    ///
+    /// MUTATION: put `!candidate.ends_with(['/', '\\'])` back beside the first refusal and the
+    /// three directory readings go dark again, while every assertion in the first half still
+    /// passes — which is the shape of the defect, a rule stated wider than its argument.
     #[test]
-    fn a_reading_that_ends_on_a_separator_is_not_a_name() {
+    fn a_trailing_separator_is_not_the_evidence_a_bare_reference_is_admitted_on() {
         let cwd = Some("D:\\case");
         // The line that settled it: git's rename compression, where the opening brace seams and the
-        // reading in front of it is a directory prefix. Scenario 44 keeps its "no link at all".
+        // reading in front of it is one segment with a slash after it. Scenario 44 keeps its "no
+        // link at all".
         assert_eq!(linked_on_a_full_disk(cwd, "src/{old => new}/main.rs"), []);
-        // The same shape without any seam: a lone directory prefix is refused at the lexer, so it
-        // never reaches the disk. `docs` alone was already out; `docs/` is out for the same reason.
+        // The same shape without any seam: one segment is refused at the lexer, so it never reaches
+        // the disk. `docs` alone was already out; `docs/` is out for the same reason.
         assert!(spans("docs/").is_empty());
         assert!(spans("cd docs/").is_empty());
         assert!(spans("./").is_empty(), "an anchor alone names no file");
+        assert!(spans("../").is_empty(), "and neither does a climb");
         assert_eq!(linked_on_a_full_disk(cwd, "cd docs/"), []);
         // What the rule must not touch: a reading that ends on a name still stands, seam or no seam.
         assert_eq!(spans("docs/a.md(1"), ["docs/a.md"]);
         assert_eq!(
             linked_on_a_full_disk(cwd, "cd docs/a.md"),
             [("docs/a.md", "file:///D:/case/docs/a.md".to_owned())]
+        );
+
+        // The owner's three lines. Two of them reach the reading only through the full-width seam
+        // of the 2026-09-22 entry; the third has an ordinary space behind the slash and needs no
+        // seam at all, which is what says the trailing separator is a cause of its own.
+        assert_eq!(
+            spans("● 两项收尾都完成了，已推送。文件都在 mjx_experiments/umarm_can/media/："),
+            ["mjx_experiments/umarm_can/media/"]
+        );
+        assert_eq!(
+            spans("新写在 whydrift/models/；每级要给出退化到下一级的参数极限"),
+            ["whydrift/models/"]
+        );
+        assert_eq!(
+            spans("产出 experiments/qx181_model_ladder/ 的"),
+            ["experiments/qx181_model_ladder/"]
+        );
+        // The row above it in the same output, which was a link all along — the contrast the
+        // report was written around.
+        assert_eq!(
+            spans("● Agent(Build model ladder L0-L2 in whydrift/models) Opus 5"),
+            ["whydrift/models"]
+        );
+        // The slash is inside the span, and the place asked about is the one the components spell:
+        // the empty component the trailing separator leaves is dropped on the way to the disk.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "文件都在 docs/plans/"),
+            [("docs/plans/", "file:///D:/case/docs/plans".to_owned())]
         );
     }
 
@@ -6202,9 +6665,14 @@ mod tests {
         assert!(!names_a_dos_device("COM0"));
     }
 
-    /// §7.30, boundary table rows 42 and 43 — the two transitions that are **not** seams, kept
-    /// beside the one that is: ASCII to ASCII is a filename's own punctuation (row 16's discipline
-    /// on a comma), and a non-ASCII stop is released whole by row 17 and cuts nothing.
+    /// §7.30, boundary table row 42 — the transition that is **not** a seam, kept beside the ones
+    /// that are: ASCII to ASCII is a filename's own punctuation (row 16's discipline on a comma).
+    ///
+    /// Row 43 was the second half of this test until 2026-09-22, when the owner's report showed it
+    /// was the defect rather than the rule: it asked for a full-width separator to weld the
+    /// sentence behind it onto the name. For an ASCII separator both halves of the transition are
+    /// still load-bearing; a non-ASCII separator is its own witness (2026-09-22, *a full-width
+    /// stop needs no witness*).
     #[test]
     fn a_seam_is_one_character_class_transition_and_not_a_list_of_stops() {
         // Row 42: `,b` is as much a name as `.md` is, so nothing is cut and the token stands whole.
@@ -6212,9 +6680,42 @@ mod tests {
         // The bare spelling of the same text offers nothing at all, exactly as it did before this
         // slice: a comma is not a path character, so the run rule refuses the opening.
         assert!(spans("docs/a.md,b").is_empty());
-        // Row 43 is boundary table row 19 unmoved: a full-width comma is not an ASCII separator,
-        // so the sentence behind it stays welded to the token and the line offers no link.
-        assert_eq!(spans("见 D:\\x\\a.md，然后"), ["D:\\x\\a.md，然后"]);
+        // Row 19: a full-width `、` needs no witness, so it is a seam even with the ASCII `B`
+        // behind it — and the whole name is still the first reading, so a file that really
+        // carries the `、` is found before the shorter name is asked about.
+        assert_eq!(
+            spans("D:\\资料\\A、B.md"),
+            ["D:\\资料\\A、B.md", "D:\\资料\\A"]
+        );
+        // Row 43, as the report leaves it: the name in front of the full-width separator is a
+        // reading of its own, offered behind the whole token.
+        assert_eq!(
+            spans("见 D:\\x\\a.md，然后"),
+            ["D:\\x\\a.md，然后", "D:\\x\\a.md"]
+        );
+    }
+
+    /// 2026-09-22, *a full-width stop needs no witness*: a non-ASCII separator ends the name
+    /// whatever follows it, while an ASCII one still needs a non-ASCII character glued behind it.
+    #[test]
+    fn a_non_ascii_separator_is_a_seam_whatever_follows_it() {
+        for separator in ['。', '，', '）'] {
+            let token = format!("D:\\x\\a.md{separator}1");
+            assert_eq!(
+                prose_seam_ends(&token, token.len()),
+                [token.find(separator).unwrap()],
+                "{token}"
+            );
+        }
+        // The ASCII twin is unchanged: `,1` is a name's own comma, so there is no seam.
+        let ascii = "D:\\x\\a.md,1";
+        assert!(prose_seam_ends(ascii, ascii.len()).is_empty());
+        // The owner's row: the reading without the stop is offered, and it comes behind the
+        // whole token.
+        assert_eq!(
+            spans("草稿在 D:\\x\\a.md。18"),
+            ["D:\\x\\a.md。18", "D:\\x\\a.md"]
+        );
     }
 
     /// §7.30, boundary table row 40 at the disk: the shorter form is a link the moment the disk
@@ -6421,9 +6922,123 @@ mod tests {
         // sentence punctuation, so no shorter reading is offered behind them.
         assert_eq!(spans("see docs/main.rs~"), ["docs/main.rs~"]);
         assert_eq!(spans("see docs/a.md-"), ["docs/a.md-"]);
-        // And a reading may still not end on a separator (row 53), so the stop does not hand
-        // anybody `docs/`.
+        // And one segment with a slash after it is still not a reference (row 53), so the stop does
+        // not hand anybody `docs/`.
         assert!(!spans("see docs/.").contains(&"docs/"));
+    }
+
+    /// PIN (owner report 2026-09-21, on the 0.4.3 candidate) — **a printed path may hold spaces,
+    /// and the disk still says which reading is real.**
+    ///
+    /// The line was `D:\Developer\trace\验收 next85\中文 说明.md`, printed by an agent into a pane
+    /// standing beside the file. It wore no mark and the pointer went straight through it, while
+    /// the same tree spelled without spaces was an ordinary link. Nothing to do with the Chinese:
+    /// [`token_end`] stopped at the first space, `D:\Developer\trace\验收` is not a name on that
+    /// disk, and so the row never offered a second reading to be arbitrated. `C:\Program Files\…`
+    /// and a work account's `…\OneDrive - Example State University\…` are the same shape, in ASCII.
+    ///
+    /// **No second mechanism, and that is the whole of the fix.** A space is read exactly as a
+    /// prose seam is — one shorter reading of one token, offered behind the longer ones, settled by
+    /// the disk (§7.30 ①②) — so the order, the "promise nothing while a longer reading is
+    /// unanswered" rule and the existence licence (§7.1.5j ③) all hold here unaltered. What the
+    /// lexer gained is a reading; what says whether it is a file is what always said so.
+    ///
+    /// MUTATION: take [`token_end_across_spaces`] back out of [`detect_rooted_candidates`] — every
+    /// assertion here goes red with one reading where there should be three or four, which is the
+    /// defect itself.
+    #[test]
+    fn a_bare_path_is_read_across_the_spaces_a_filename_may_hold() {
+        // The owner's own line: the whole spelling is the first reading, and each space behind it
+        // is one shorter reading, longest first.
+        assert_eq!(
+            rooted_readings("D:\\Developer\\trace\\验收 next85\\中文 说明.md"),
+            [
+                "D:\\Developer\\trace\\验收 next85\\中文 说明.md",
+                "D:\\Developer\\trace\\验收 next85\\中文",
+                "D:\\Developer\\trace\\验收",
+            ]
+        );
+        // The prose behind a real name is read as far as the bound reaches, because no rule short
+        // of the disk tells `Files` from `for` — and the disk is what refuses the two long ones.
+        assert_eq!(
+            rooted_readings("see D:\\a b.md for details"),
+            [
+                "D:\\a b.md for details",
+                "D:\\a b.md for",
+                "D:\\a b.md",
+                "D:\\a",
+            ]
+        );
+        // Three spaces, one name.
+        assert_eq!(
+            rooted_readings("D:\\a b\\c d\\e f.md"),
+            [
+                "D:\\a b\\c d\\e f.md",
+                "D:\\a b\\c d\\e",
+                "D:\\a b\\c",
+                "D:\\a",
+            ]
+        );
+        // The spelling a pane's own shell roots a path with reads the same way, because a space is
+        // a property of the name and not of the machine that roots it (T-3).
+        assert_eq!(
+            foreign_readings(&msys(), "/d/Demo/My Documents/x.md"),
+            ["/d/Demo/My Documents/x.md", "/d/Demo/My"]
+        );
+        assert_eq!(
+            foreign_readings(&wsl(), "~/My Documents/x.md"),
+            ["~/My Documents/x.md", "~/My"]
+        );
+        // A quoted token is untouched: its quotes declared its extent before any of this, and it
+        // has admitted spaces since the scan was written.
+        assert_eq!(rooted_readings("\"D:\\a b.md\" then"), ["D:\\a b.md"]);
+    }
+
+    /// §7.30 (owner report 2026-09-21) — **the bound is a count of spaces, and that count is what
+    /// the extra readings cost.**
+    ///
+    /// Four, one question each: a rooted token costs at most four verdict requests beyond what it
+    /// cost before, and a line holding *k* rooted tokens at most `4k`. The number is
+    /// [`MAX_PATH_SPACES`] and the reason it has to be a number rather than a shape is the
+    /// assertion above — the words behind a space say nothing a lexer can read, so only counting
+    /// them bounds the walk.
+    ///
+    /// MUTATION: drop the `crossed.len() < MAX_PATH_SPACES` guard and the first assertion goes red,
+    /// with the whole sentence read as one name and a question per word of it.
+    #[test]
+    fn the_spaces_a_reading_may_cross_are_capped_and_a_terminator_still_ends_it() {
+        // Five words behind the root; four spaces may be crossed, so the fifth word is in no
+        // reading at all.
+        let readings = rooted_readings("D:\\a b c d e f");
+        assert_eq!(
+            readings,
+            [
+                "D:\\a b c d e",
+                "D:\\a b c d",
+                "D:\\a b c",
+                "D:\\a b",
+                "D:\\a"
+            ]
+        );
+        assert_eq!(
+            readings.len(),
+            MAX_PATH_SPACES + 1,
+            "one reading per space crossed, and the reading the token had before any were"
+        );
+        // A terminator that is not a space ends the extent exactly where it always did.
+        assert_eq!(rooted_readings("(D:\\a b) c"), ["D:\\a b", "D:\\a"]);
+        assert_eq!(rooted_readings("D:\\a b\tc"), ["D:\\a b", "D:\\a"]);
+        assert_eq!(rooted_readings("`D:\\a b` c"), ["D:\\a b", "D:\\a"]);
+        // A run of blanks is not one blank: Win32 takes the trailing blanks off a component before
+        // the filesystem is ever asked, so a name spelled with two of them is a name that would be
+        // answered about under another name — the fact `is_sentence_stop` reads about the dot.
+        assert_eq!(rooted_readings("D:\\a  b"), ["D:\\a"]);
+        // And a space never swallows the name behind it: the walk resumes at the token's own end,
+        // so a second rooted name still opens where it stands.
+        assert_eq!(
+            rooted_readings("D:\\a C:\\b"),
+            ["D:\\a C:\\b", "D:\\a", "C:\\b"]
+        );
     }
 
     /// §7.30 and §7.1.5j ⑨ share one colon without fighting over it: `:` opens a seam only when
@@ -6624,9 +7239,18 @@ mod tests {
     #[test]
     fn a_links_range_covers_the_printed_text_and_never_a_neighbours() {
         let path = PathBuf::from("D:\\src\\a.md");
+        // The two readings the prose behind the name offers (§7.30, 2026-09-21) are denied, which
+        // is what a disk says about them; the name itself is the one that is there.
         let links = PrintedPathLinks::new(
             Some(PathBuf::from("D:\\src")),
-            BTreeMap::from([(path.clone(), true)]),
+            BTreeMap::from([
+                (path.clone(), true),
+                (PathBuf::from("D:\\src\\a.md and"), false),
+                (
+                    PathBuf::from("D:\\src\\a.md and file:///D:/src/a.md"),
+                    false,
+                ),
+            ]),
         );
         let line = "D:\\src\\a.md and file:///D:/src/a.md";
         let mut unknown = BTreeSet::new();
@@ -6861,7 +7485,7 @@ mod posix_tests {
 
     /// Every candidate one line offers, as `(text, spelling)` pairs in reading order.
     fn candidates(text: &str) -> Vec<(&str, PrintedPathSpelling)> {
-        let mut found = detect_absolute_path_candidates(text);
+        let mut found = detect_absolute_path_candidates(text, TokenSpaces::ReadAcross);
         found.extend(detect_relative_path_candidates(text, &|_| true));
         found.extend(detect_file_uri_candidates(text));
         found.sort_by_key(|candidate| candidate.byte_start);
@@ -6878,9 +7502,18 @@ mod posix_tests {
             .collect::<Vec<_>>()
     }
 
+    /// The readings one line's **rooted** tokens offer, in the order the disk is asked about them
+    /// — the sibling of the Windows module's helper of the same name.
+    fn rooted_readings(text: &str) -> Vec<&str> {
+        detect_absolute_path_candidates(text, TokenSpaces::ReadAcross)
+            .into_iter()
+            .map(|candidate| candidate.reference_text(text))
+            .collect()
+    }
+
     /// Every candidate as `(path text, location)` — the two halves a located reference splits into.
     fn located(text: &str) -> Vec<(&str, Option<PrintedPathLocation>)> {
-        let mut found = detect_absolute_path_candidates(text);
+        let mut found = detect_absolute_path_candidates(text, TokenSpaces::ReadAcross);
         found.extend(detect_relative_path_candidates(text, &|_| true));
         found.extend(detect_file_uri_candidates(text));
         found.sort_by_key(|candidate| candidate.byte_start);
@@ -6962,12 +7595,48 @@ mod posix_tests {
         assert_eq!(spans("D:/Developer/folio-terminal/README.md"), NO_SPANS);
     }
 
-    /// Boundary table rows 3 and 4. A space ends an unquoted token, and quoting is the one
-    /// declaration of extent that lets a path carry one.
+    /// Boundary table rows 3 and 4, **as the 2026-09-21 entry leaves them**: quoting is still the
+    /// one declaration of extent, and unquoted the space is now a seam the token is read across.
     #[test]
     fn a_space_belongs_to_a_path_only_inside_quotes() {
         assert_eq!(spans("\"/tmp/a b/c.md\""), ["/tmp/a b/c.md"]);
-        assert_eq!(spans("/tmp/a b/c.md"), ["/tmp/a", "b/c.md"]);
+        assert_eq!(
+            spans("/tmp/a b/c.md"),
+            ["/tmp/a b/c.md", "/tmp/a", "b/c.md"]
+        );
+    }
+
+    /// PIN (owner report 2026-09-21) — **a printed path may hold spaces** where a filesystem has
+    /// one root, and the disk still says which reading is real.
+    ///
+    /// The Windows module's `a_bare_path_is_read_across_the_spaces_a_filename_may_hold` is the
+    /// same claim in the spelling that platform reads; this is it in the spelling this one does,
+    /// because a space is a property of the name and not of the root in front of it.
+    ///
+    /// MUTATION: take `token_end_across_spaces` back out of `detect_rooted_candidates` and the
+    /// first assertion goes red with one reading where there should be four.
+    #[test]
+    fn a_bare_path_is_read_across_the_spaces_a_filename_may_hold() {
+        assert_eq!(
+            rooted_readings("see /home/alice/My Documents/x.txt for details"),
+            [
+                "/home/alice/My Documents/x.txt for details",
+                "/home/alice/My Documents/x.txt for",
+                "/home/alice/My Documents/x.txt",
+                "/home/alice/My",
+            ]
+        );
+        // Three spaces, one name.
+        assert_eq!(
+            rooted_readings("/a b/c d/e f.md"),
+            ["/a b/c d/e f.md", "/a b/c d/e", "/a b/c", "/a"]
+        );
+        // The bound, and the terminators that are not spaces.
+        let readings = rooted_readings("/a b c d e f");
+        assert_eq!(readings, ["/a b c d e", "/a b c d", "/a b c", "/a b", "/a"]);
+        assert_eq!(readings.len(), MAX_PATH_SPACES + 1);
+        assert_eq!(rooted_readings("(/a b) c"), ["/a b", "/a"]);
+        assert_eq!(rooted_readings("/a  b"), ["/a"]);
     }
 
     /// Boundary table rows 5 and 6: a closing delimiter ends the token, in either width.
@@ -7033,10 +7702,11 @@ mod posix_tests {
 
     // ── the relative grammar ────────────────────────────────────────────────
 
-    /// The five refusals, in the shape this platform prints them. The fourth — a trailing
-    /// separator — and the fifth — a leading `~` — are the two that carry a ruling of their own.
+    /// The four refusals, in the shape this platform prints them. The first — which since
+    /// 2026-09-22 is asked of the name with its trailing separators off — and the last, a leading
+    /// `~`, are the two that carry a ruling of their own.
     #[test]
-    fn the_five_refusals_hold() {
+    fn the_four_refusals_hold() {
         // no separator at all
         assert_eq!(spans("README"), NO_SPANS);
         // opens with a separator: that is the rooted scan's, not this one's
@@ -7044,9 +7714,15 @@ mod posix_tests {
             candidates("/usr/share/x.png"),
             [("/usr/share/x.png", PrintedPathSpelling::Absolute)]
         );
-        // a trailing separator is a directory prefix, and a reading must end on a character that
-        // is part of a name
+        // one segment with a slash after it carries no separator that divides anything, so the
+        // first refusal takes it
         assert_eq!(spans("src/"), NO_SPANS);
+        // and the POSIX sibling of the owner's 2026-09-22 lines: two segments and a trailing slash
+        // is a directory somebody named, and the separator that admits it is the interior one
+        assert_eq!(
+            spans("产出 experiments/qx181_model_ladder/ 的"),
+            ["experiments/qx181_model_ladder/"]
+        );
         // a colon is what makes text absolute or schemed, and both are other scans' business
         assert_eq!(spans("node:internal/modules/cjs/loader"), NO_SPANS);
         // a leading `~` is somebody else's expansion — the same ruling, unchanged by the platform
@@ -7894,6 +8570,41 @@ mod locality_tests {
             may_read_unasked(hosts, PathNamer::ThisWindow),
             "a share this window minted is one it may read back",
         );
+    }
+
+    /// RED (ticket 14) — **a share on another machine is `\\server\share`, and nothing else that
+    /// opens with two backslashes.**
+    ///
+    /// `Ctrl`+click hands this shape to the system (owner ruling 2026-09-21), so the predicate is
+    /// the whole width of that ruling: a device path, a verbatim spelling and a WSL distribution's
+    /// share are not another machine's files and must not be handed over as if they were.
+    ///
+    /// MUTATION: answer `!may_read_unasked(path, PathNamer::ThisWindow)` instead, and the device,
+    /// verbatim and `wsl$` rows go red.
+    #[test]
+    fn a_share_on_another_machine_is_a_server_and_a_share_and_nothing_else() {
+        for share in [
+            r"\\server\share\notes.md",
+            r"\\nas.local\photos\2026\a.jpg",
+            r"\\SERVER\share",
+        ] {
+            assert!(is_a_share_on_another_machine(Path::new(share)), "{share}");
+        }
+        for not_one in [
+            r"\\.\pipe\folio-probe",
+            r"\\.\COM1",
+            r"\\?\C:\Users\alice\notes.md",
+            r"\\?\UNC\server\share\notes.md",
+            r"\\wsl.localhost\Debian\etc\hosts",
+            r"\\wsl$\Ubuntu\etc\hosts",
+            r"C:\Users\alice\notes.md",
+            r"C:notes.md",
+        ] {
+            assert!(
+                !is_a_share_on_another_machine(Path::new(not_one)),
+                "not another machine's share: {not_one}"
+            );
+        }
     }
 }
 

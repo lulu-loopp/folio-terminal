@@ -1,0 +1,469 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1642" viewBox="0 0 1600 1642" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" role="img" aria-labelledby="t d">
+<title id="t">Folio after the ruled migration</title>
+<desc id="d">Folio as docs/ARCHITECTURE.md rules it to become: the lane moves of §5.4 steps 2 to 5 with their versions, the three owners of §4.1, bt-workbench and the outward adapters of §12, and the crate changes of §3.2. Anything the file leaves open is marked not ruled.</desc>
+<defs>
+<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3a4250"/></marker>
+<marker id="ahr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b03a2e"/></marker>
+<marker id="aho" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c25e00"/></marker>
+</defs>
+<rect x="0" y="0" width="1600" height="1642" fill="#ffffff"/>
+<text x="16" y="34" font-size="22" font-weight="bold" text-anchor="start" fill="#1b1f24">Folio after the ruled migration — what docs/ARCHITECTURE.md rules, and nothing more</text>
+<text x="16" y="58" font-size="12.5" font-weight="normal" text-anchor="start" fill="#4d5561">The lanes of §5.4 steps 2–5, the three owners of §4.1, and §12. A badge is the version the file rules; “not ruled” is what it leaves open. A lane is a logical owner, not one thread per row (§5.1).</text>
+<text x="16" y="112" font-size="15" font-weight="bold" text-anchor="start" fill="#555d68">Other processes</text>
+<text x="16" y="130" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">each one exits; none holds a window</text>
+<rect x="16" y="142" width="236" height="104" rx="8" fill="#f4f4f4" stroke="#555d68" stroke-width="1.5"/>
+<text x="26" y="162" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24">A second folio launch</text>
+<text x="26" y="181.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">hands its argv to the running one:</text>
+<text x="26" y="196.5" font-size="11.5" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">launch_wire::hand_over</tspan></text>
+<text x="26" y="212.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">bounded by HANDOVER_BUDGET,</text>
+<text x="26" y="227.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">then bt_platform::leave_process</text>
+<rect x="16" y="262" width="236" height="104" rx="8" fill="#f4f4f4" stroke="#555d68" stroke-width="1.5"/>
+<text x="26" y="282" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">folio attention &lt;family&gt;:&lt;event&gt;</text>
+<text x="26" y="301.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">an agent's hook, one message:</text>
+<text x="26" y="316.5" font-size="11.5" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">attention_wire::run_verb</tspan></text>
+<text x="26" y="332.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">stdin read on an unnamed thread,</text>
+<text x="26" y="347.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">bounded by STDIN_BUDGET</text>
+<rect x="16" y="382" width="236" height="236" rx="8" fill="#f4f4f4" stroke="#555d68" stroke-width="1.5"/>
+<text x="26" y="402" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24">Door processes (§2.1)</text>
+<text x="26" y="420.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">headless; each ends in process::exit</text>
+<text x="26" y="442.0" font-size="11.5" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">--uninstall-cleanup</tspan></text>
+<text x="26" y="458.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">  unnamed thread, REMOVAL_TIMEOUT</text>
+<text x="26" y="475.0" font-size="11.5" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">--explorer-command</tspan></text>
+<text x="26" y="491.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">  explorer_menu::serve, a COM server;</text>
+<text x="26" y="508.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">  spawns folio --from-explorer --cwd</text>
+<text x="26" y="524.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">  (detached, never reaped)</text>
+<text x="26" y="541.0" font-size="11.5" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">--remove-shell-integration</tspan></text>
+<text x="26" y="557.5" font-size="11.5" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">--remove-explorer-menu</tspan></text>
+<text x="26" y="574.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">  unnamed thread, REMOVAL_TIMEOUT</text>
+<text x="26" y="590.5" font-size="11.5" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">--help</tspan><tspan font-weight="normal" fill="#1b1f24"> · </tspan><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">--version</tspan><tspan font-weight="normal" fill="#1b1f24"> · a parse fault</tspan></text>
+<path d="M 16 498 L 8 498 L 8 196 L 15 196" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="16" y="634" width="236" height="128" rx="8" fill="#fff4e0" stroke="#c25e00" stroke-width="1.6" stroke-dasharray="6 4"/>
+<text x="26" y="654" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24">CLI and MCP adapters</text>
+<rect x="214.8" y="640" width="29.2" height="16" rx="8" fill="#c25e00"/>
+<text x="229.4" y="652" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.5</text>
+<text x="26" y="673.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">domain commands in, versioned</text>
+<text x="26" y="688.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">domain observations out (§12.3);</text>
+<text x="26" y="704.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">never AppEvent, Runtime, handles;</text>
+<text x="26" y="719.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">a fourth configuration entrance (§9);</text>
+<text x="26" y="735.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">transport: not ruled</text>
+<rect x="16" y="778" width="236" height="118" rx="8" fill="#ffffff" stroke="#c25e00" stroke-width="1.4" stroke-dasharray="3 4"/>
+<text x="26" y="798" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24">Remote clients</text>
+<rect x="214.8" y="784" width="29.2" height="16" rx="8" fill="#c25e00"/>
+<text x="229.4" y="796" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.6</text>
+<text x="26" y="817.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">a backend owns the session; clients</text>
+<text x="26" y="832.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">are views. Who sizes the PTY, what</text>
+<text x="26" y="848.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">counts as seen, who may interrupt:</text>
+<text x="26" y="863.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">not ruled (§12.2)</text>
+<rect x="266" y="84" width="1072" height="1060" rx="12" fill="#fbfcfd" stroke="#2b3440" stroke-width="2.2"/>
+<text x="280" y="106" font-size="16" font-weight="bold" text-anchor="start" fill="#1b1f24">folio — the window process</text>
+<text x="498" y="106" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">still one per data directory; §2 rules no change to the process list</text>
+<text x="280" y="124" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">The runtime/*.rs move was navigation, not ownership (§4.3); the owners below are the ruled direction (§4.1), extracted attention first, then documents, then terminal lifecycle (§12.1)</text>
+<rect x="280" y="142" width="250" height="290" rx="10" fill="#e7f3f8" stroke="#1d6a86" stroke-width="2"/>
+<text x="290" y="162" font-size="14" font-weight="bold" text-anchor="start" fill="#1d6a86">Ingress and diagnostics</text>
+<text x="290" y="179" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">endpoints, watches, watchdog, trace</text>
+<rect x="288" y="188" width="234" height="40" rx="6" fill="#ffffff" stroke="#1d6a86" stroke-width="1.3"/>
+<rect x="288" y="188" width="5" height="40" rx="2" fill="#2d7547"/>
+<text x="299" y="204" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">folio-launch-endpoint</text>
+<text x="299" y="220" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">→ LaunchAsked</text>
+<text x="516" y="220" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2d7547">bt-platform</text>
+<rect x="288" y="236" width="234" height="40" rx="6" fill="#ffffff" stroke="#1d6a86" stroke-width="1.3"/>
+<rect x="288" y="236" width="5" height="40" rx="2" fill="#2d7547"/>
+<text x="299" y="252" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">folio-attention-endpoint</text>
+<text x="299" y="268" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">→ AttentionSpoke</text>
+<text x="516" y="268" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2d7547">bt-platform</text>
+<rect x="288" y="284" width="234" height="40" rx="6" fill="#ffffff" stroke="#1d6a86" stroke-width="1.3"/>
+<rect x="288" y="284" width="5" height="40" rx="2" fill="#2d7547"/>
+<text x="299" y="300" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-dir-watch</text>
+<text x="299" y="316" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">start, retire async (row 8)</text>
+<text x="516" y="316" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2d7547">bt-platform</text>
+<rect x="474.0" y="288" width="42.0" height="16" rx="8" fill="#c25e00"/>
+<text x="495.0" y="300" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.4.4</text>
+<rect x="288" y="332" width="234" height="40" rx="6" fill="#ffffff" stroke="#1d6a86" stroke-width="1.3"/>
+<rect x="288" y="332" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="299" y="348" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-hang-watch</text>
+<text x="299" y="364" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">reads the Heartbeat</text>
+<text x="516" y="364" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="288" y="380" width="234" height="40" rx="6" fill="#ffffff" stroke="#1d6a86" stroke-width="1.3"/>
+<rect x="288" y="380" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="299" y="396" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-trace-sink</text>
+<text x="299" y="412" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">drains trace_sink::Queue</text>
+<text x="516" y="412" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<path d="M 252 194 C 266 194, 262 208, 287 208" fill="none" stroke="#3a4250" stroke-width="1.6" marker-end="url(#ah)"/>
+<path d="M 252 314 C 266 314, 262 256, 287 256" fill="none" stroke="#3a4250" stroke-width="1.6" marker-end="url(#ah)"/>
+<path d="M 530 272 L 555 272" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<path d="M 556 372 L 531 372" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="280" y="448" width="250" height="430" rx="10" fill="#fcefF1" stroke="#a3334c" stroke-width="2"/>
+<text x="290" y="468" font-size="14" font-weight="bold" text-anchor="start" fill="#a3334c">Storage and integration</text>
+<text x="290" y="485" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">transactions that must land</text>
+<rect x="480.0" y="455" width="42.0" height="16" rx="8" fill="#c25e00"/>
+<text x="501.0" y="467" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.4.4</text>
+<rect x="288" y="494" width="234" height="40" rx="6" fill="#ffffff" stroke="#a3334c" stroke-width="1.3"/>
+<rect x="288" y="494" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="299" y="510" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">session-writer</text>
+<text x="299" y="526" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">receipts: sent vs landed</text>
+<text x="516" y="526" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="288" y="542" width="234" height="40" rx="6" fill="#ffffff" stroke="#a3334c" stroke-width="1.3"/>
+<rect x="288" y="542" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="299" y="558" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">powershell-profile-migration</text>
+<text x="299" y="574" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">→ PowerShellProfileProbed</text>
+<text x="516" y="574" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="288" y="590" width="234" height="40" rx="6" fill="#ffffff" stroke="#a3334c" stroke-width="1.3"/>
+<rect x="288" y="590" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="299" y="606" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">powershell-profile-enable</text>
+<text x="299" y="622" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">→ PowerShellProfileProbed</text>
+<text x="516" y="622" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="288" y="638" width="234" height="40" rx="6" fill="#ffffff" stroke="#a3334c" stroke-width="1.3"/>
+<rect x="288" y="638" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="299" y="654" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">powershell-profile-removal</text>
+<text x="299" y="670" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">→ PowerShellProfileProbed</text>
+<text x="516" y="670" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="288" y="686" width="234" height="40" rx="6" fill="#ffffff" stroke="#a3334c" stroke-width="1.3" stroke-dasharray="5 3"/>
+<rect x="288" y="686" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="299" y="702" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">(unnamed) package job</text>
+<text x="299" y="718" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">→ ExplorerPackageChanged</text>
+<text x="516" y="718" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="288" y="738" width="234" height="130" rx="6" fill="#fff4e0" stroke="#c25e00" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="296" y="755" font-size="12.5" font-weight="bold" text-anchor="start" fill="#c25e00">Joins: rows 2, 3 and 20</text>
+<text x="296" y="772.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">install_recorded, apply_recorded,</text>
+<text x="296" y="787.3" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">renames, preview saves, settings,</text>
+<text x="296" y="802.6" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">keybindings, profiles, diagnostics;</text>
+<text x="296" y="817.9" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">serialized by resource; operation</text>
+<text x="296" y="833.2" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">identity; a durable outcome; receipts</text>
+<path d="M 556 558 L 529 558" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<path d="M 530 598 L 557 598" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="280" y="892" width="250" height="150" rx="6" fill="#fff4e0" stroke="#c25e00" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="288" y="909" font-size="12.5" font-weight="bold" text-anchor="start" fill="#c25e00">bt-workbench — may be born now</text>
+<text x="288" y="926.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">the attention state machine (§12.1):</text>
+<text x="288" y="941.3" font-size="11.5" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">AttentionLedger::apply</tspan><tspan font-weight="normal" fill="#1b1f24"> moves first;</tspan></text>
+<text x="288" y="956.6" font-size="11.5" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">WAIT_TTL</tspan><tspan font-weight="normal" fill="#1b1f24">'s dependency reverses;</tspan></text>
+<text x="288" y="971.9" font-size="11.5" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">deliver_attention</tspan><tspan font-weight="normal" fill="#1b1f24">'s routing goes</tspan></text>
+<text x="288" y="987.2" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">beside the session registry;</text>
+<text x="288" y="1002.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">its thread and version: not ruled</text>
+<path d="M 252 700 C 262 700, 262 932, 279 932" fill="none" stroke="#c25e00" stroke-width="1.6" marker-end="url(#aho)"/>
+<rect x="556" y="142" width="318" height="640" rx="10" fill="#eef2f8" stroke="#3d5478" stroke-width="2"/>
+<text x="566" y="162" font-size="14" font-weight="bold" text-anchor="start" fill="#3d5478">Window thread — the view owner</text>
+<text x="566" y="179" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">winit event loop · AboveNormal band</text>
+<rect x="564" y="194" width="302" height="100" rx="6" fill="#ffffff" stroke="#3d5478" stroke-width="1.3"/>
+<text x="572" y="211" font-size="12.5" font-weight="bold" text-anchor="start" fill="#3d5478">View owner (§4.1)</text>
+<text x="572" y="228.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">selection, scrolling, focus, layout, native</text>
+<text x="572" y="243.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">resources, render caches, the last picture</text>
+<text x="572" y="259.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">presented: PreviewPane, and LeafSession's</text>
+<text x="572" y="274.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">view half; a view ending never ends a session</text>
+<rect x="564" y="304" width="302" height="86" rx="6" fill="#ffffff" stroke="#3d5478" stroke-width="1.3"/>
+<text x="572" y="321" font-size="12.5" font-weight="bold" text-anchor="start" fill="#3d5478">Stays by native affinity (§5.2)</text>
+<text x="572" y="338.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">IME; the web view controller and native</text>
+<text x="572" y="353.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">views; the DirectComposition commit;</text>
+<text x="572" y="369.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">focus, visibility, title, cursor</text>
+<rect x="564" y="400" width="302" height="86" rx="6" fill="#ffffff" stroke="#3d5478" stroke-width="1.3"/>
+<text x="572" y="417" font-size="12.5" font-weight="bold" text-anchor="start" fill="#3d5478">Short owner work may stay (§5.2)</text>
+<text x="572" y="434.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">accepting completions, model transitions,</text>
+<text x="572" y="449.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">bounded input admission, hit testing,</text>
+<text x="572" y="465.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">producing frame candidates</text>
+<rect x="564" y="496" width="302" height="70" rx="6" fill="#ffffff" stroke="#3d5478" stroke-width="1.3"/>
+<text x="572" y="513" font-size="12.5" font-weight="bold" text-anchor="start" fill="#3d5478">Policies, still on this thread</text>
+<rect x="818.0" y="500" width="42.0" height="16" rx="8" fill="#c25e00"/>
+<text x="839.0" y="512" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.4.4</text>
+<text x="572" y="530.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">row 13: one sampling of the window place</text>
+<text x="572" y="545.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">row 14: set_title throttled</text>
+<rect x="564" y="576" width="302" height="70" rx="6" fill="#ffffff" stroke="#3d5478" stroke-width="1.3"/>
+<text x="572" y="593" font-size="12.5" font-weight="bold" text-anchor="start" fill="#3d5478">Ruled to stay</text>
+<text x="572" y="610.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">rows 15–18: bounded waits on the way in</text>
+<text x="572" y="625.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">and out; row 19: the two PTY rings</text>
+<text x="568" y="664.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">Document owner (§4.1): PreviewBuffer —</text>
+<text x="568" y="679.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">content, revision, undo, encoding, dirty,</text>
+<text x="568" y="695.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">disk baseline; its thread: not ruled</text>
+<text x="568" y="710.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">Clipboard acquisition: a platform contract,</text>
+<text x="568" y="726.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">not yet written (§5.2)</text>
+<rect x="556" y="796" width="318" height="262" rx="10" fill="#fdf7da" stroke="#806400" stroke-width="2" stroke-dasharray="7 4"/>
+<text x="566" y="816" font-size="14" font-weight="bold" text-anchor="start" fill="#806400">Presentation</text>
+<text x="566" y="833" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">rows 9–10 leave the window thread</text>
+<rect x="836.8" y="803" width="29.2" height="16" rx="8" fill="#c25e00"/>
+<text x="851.4" y="815" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.5</text>
+<text x="568" y="852.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">surface acquire, queue submit, present;</text>
+<text x="568" y="867.8" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">device recovery as an asynchronous</text>
+<text x="568" y="883.6" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">state machine. Keeps the surface lease</text>
+<text x="568" y="899.4" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">and the shared preparation permit —</text>
+<text x="568" y="915.2" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">GpuContext: fonts, atlas; WindowRenderer:</text>
+<text x="568" y="931.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">per-window surface. A picture commits only</text>
+<text x="568" y="946.8" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">after its completion and the owner-thread</text>
+<text x="568" y="962.6" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">compositor commit. The first cut leaves</text>
+<text x="568" y="978.4" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">surface configuration and GPU preparation</text>
+<text x="568" y="994.2" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">on the window thread; the platform acquire</text>
+<text x="568" y="1010.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">affinity is a prerequisite. Threads: not ruled</text>
+<path d="M 685.0 782 L 685.0 795" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<path d="M 745.0 796 L 745.0 783" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="598.7" y="782.5" width="90.3" height="15.5" fill="#ffffff" opacity="0.92"/>
+<text x="685.0" y="793" font-size="10.5" font-weight="normal" text-anchor="end" fill="#4d5561">admitted frame</text>
+<rect x="745.0" y="782.5" width="66.8" height="15.5" fill="#ffffff" opacity="0.92"/>
+<text x="749.0" y="793" font-size="10.5" font-weight="normal" text-anchor="start" fill="#4d5561">completion</text>
+<rect x="900" y="142" width="424" height="356" rx="10" fill="#fdf2e4" stroke="#a15f00" stroke-width="2"/>
+<text x="910" y="162" font-size="14" font-weight="bold" text-anchor="start" fill="#a15f00">Session owner and transport</text>
+<text x="910" y="179" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">per session; bt-pty keeps its threads</text>
+<rect x="1261.2" y="149" width="54.8" height="16" rx="8" fill="#c25e00"/>
+<text x="1288.6000000000001" y="161" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.5→0.6</text>
+<rect x="908" y="188" width="202" height="40" rx="6" fill="#ffffff" stroke="#a15f00" stroke-width="1.3" stroke-dasharray="5 3"/>
+<rect x="908" y="188" width="5" height="40" rx="2" fill="#a15f00"/>
+<text x="919" y="204" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">PTY reader</text>
+<text x="919" y="220" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">Normal · → PtyOutput</text>
+<text x="1104" y="220" font-size="10.5" font-weight="bold" text-anchor="end" fill="#a15f00">bt-pty</text>
+<rect x="1116" y="188" width="202" height="40" rx="6" fill="#ffffff" stroke="#a15f00" stroke-width="1.3" stroke-dasharray="5 3"/>
+<rect x="1116" y="188" width="5" height="40" rx="2" fill="#a15f00"/>
+<text x="1127" y="204" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">PTY writer</text>
+<text x="1127" y="220" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">← InputRing</text>
+<text x="1312" y="220" font-size="10.5" font-weight="bold" text-anchor="end" fill="#a15f00">bt-pty</text>
+<rect x="908" y="236" width="202" height="40" rx="6" fill="#ffffff" stroke="#a15f00" stroke-width="1.3"/>
+<rect x="908" y="236" width="5" height="40" rx="2" fill="#a15f00"/>
+<text x="919" y="252" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">pty-retirement</text>
+<text x="919" y="268" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">teardown, counted</text>
+<text x="1104" y="268" font-size="10.5" font-weight="bold" text-anchor="end" fill="#a15f00">bt-pty</text>
+<rect x="1116" y="236" width="202" height="40" rx="6" fill="#ffffff" stroke="#a15f00" stroke-width="1.3" stroke-dasharray="5 3"/>
+<rect x="1116" y="236" width="5" height="40" rx="2" fill="#a15f00"/>
+<text x="1127" y="252" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">PTY dump publisher</text>
+<text x="1127" y="268" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">BT_PTY_DUMP only</text>
+<text x="1312" y="268" font-size="10.5" font-weight="bold" text-anchor="end" fill="#a15f00">bt-pty</text>
+<rect x="908" y="288" width="408" height="94" rx="6" fill="#fff4e0" stroke="#c25e00" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="916" y="305" font-size="12.5" font-weight="bold" text-anchor="start" fill="#c25e00">Joins: rows 11 and 12</text>
+<text x="916" y="322.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">PTY birth, ordered resize and lifetime, behind the</text>
+<text x="916" y="337.3" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">session owner, keeping input and resize order;</text>
+<text x="916" y="352.6" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">a separate keyboard thread is not a prerequisite</text>
+<rect x="908" y="392" width="408" height="98" rx="6" fill="#ffffff" stroke="#a15f00" stroke-width="1.3"/>
+<text x="916" y="409" font-size="12.5" font-weight="bold" text-anchor="start" fill="#a15f00">Session owner (§4.1)</text>
+<text x="916" y="426.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">identity and incarnation, PTY lifecycle, launch profile,</text>
+<text x="916" y="441.3" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">program, directory, namespace, parser and transcript,</text>
+<text x="916" y="456.6" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">attention credentials; today LeafSession's session half,</text>
+<text x="916" y="471.9" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">DualPlaneSession, PtySession. Its thread: not ruled</text>
+<path d="M 874 272 L 899 272" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<path d="M 900 222 L 875 222" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="900" y="512" width="424" height="508" rx="10" fill="#eaf5ee" stroke="#2d7547" stroke-width="2"/>
+<text x="910" y="532" font-size="14" font-weight="bold" text-anchor="start" fill="#2d7547">Observation and computation</text>
+<text x="910" y="549" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">versioned requests, bounded queues and memory</text>
+<rect x="1274.0" y="519" width="42.0" height="16" rx="8" fill="#c25e00"/>
+<text x="1295.0" y="531" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.4.4</text>
+<rect x="1116" y="558" width="202" height="40" rx="6" fill="#ffffff" stroke="#2d7547" stroke-width="1.3"/>
+<rect x="1116" y="558" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="1127" y="574" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-git-worker</text>
+<text x="1127" y="590" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">→ GitReady</text>
+<text x="1312" y="590" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="1116" y="606" width="202" height="40" rx="6" fill="#ffffff" stroke="#2d7547" stroke-width="1.3"/>
+<rect x="1116" y="606" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="1127" y="622" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-git-pipe · -stdin</text>
+<text x="1127" y="638" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">per git command</text>
+<text x="1312" y="638" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="1116" y="654" width="202" height="40" rx="6" fill="#ffffff" stroke="#2d7547" stroke-width="1.3"/>
+<rect x="1116" y="654" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="1127" y="670" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">psreadline-probe</text>
+<text x="1127" y="686" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">latch → PsReadLineProbed</text>
+<text x="1312" y="686" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="1116" y="702" width="202" height="40" rx="6" fill="#ffffff" stroke="#2d7547" stroke-width="1.3"/>
+<rect x="1116" y="702" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="1127" y="718" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">powershell-profile-probe</text>
+<text x="1127" y="734" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">→ PowerShellProfileProbed</text>
+<text x="1312" y="734" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="1116" y="750" width="202" height="40" rx="6" fill="#ffffff" stroke="#2d7547" stroke-width="1.3"/>
+<rect x="1116" y="750" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="1127" y="766" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">copilot-version-probe</text>
+<text x="1127" y="782" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">latch → CopilotProbed</text>
+<text x="1312" y="782" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="1116" y="798" width="202" height="40" rx="6" fill="#ffffff" stroke="#2d7547" stroke-width="1.3"/>
+<rect x="1116" y="798" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="1127" y="814" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-update-check</text>
+<text x="1127" y="830" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">latch → UpdateChecked</text>
+<text x="1312" y="830" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="1116" y="846" width="202" height="40" rx="6" fill="#ffffff" stroke="#2d7547" stroke-width="1.3" stroke-dasharray="5 3"/>
+<rect x="1116" y="846" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="1127" y="862" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">(unnamed) package probe</text>
+<text x="1127" y="878" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">→ ExplorerPackageChanged</text>
+<text x="1312" y="878" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<rect x="908" y="558" width="202" height="206" rx="6" fill="#ffffff" stroke="#2d7547" stroke-width="1.3"/>
+<text x="916" y="575" font-size="12.5" font-weight="bold" text-anchor="start" fill="#2d7547">Unchanged workers</text>
+<text x="916" y="592.0" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-math-worker (own stack)</text>
+<text x="916" y="605.6" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-image-scale-worker</text>
+<text x="916" y="619.2" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-path-verify-worker</text>
+<text x="916" y="632.8" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-files-worker</text>
+<text x="916" y="646.4" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-index-worker</text>
+<text x="916" y="660.0" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-preview-worker</text>
+<text x="916" y="673.6" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">background-picture</text>
+<text x="916" y="687.2" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">clipboard-picture</text>
+<text x="916" y="700.8" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">font-families</text>
+<text x="916" y="714.4" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">folio-web-thumb</text>
+<text x="916" y="728.0" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">folio-video-*</text>
+<text x="916" y="741.6" font-size="11" font-weight="normal" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-image-resample-N</text>
+<rect x="908" y="774" width="202" height="176" rx="6" fill="#fff4e0" stroke="#c25e00" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="916" y="791" font-size="12.5" font-weight="bold" text-anchor="start" fill="#c25e00">Joins: rows 4–7</text>
+<text x="916" y="808.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">installed_copy walk (4)</text>
+<text x="916" y="823.3" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">font enumeration (5)</text>
+<text x="916" y="838.6" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">search scans (6)</text>
+<text x="916" y="853.9" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">macOS locale (7)</text>
+<text x="916" y="869.2" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">math keeps its stack; stuck</text>
+<text x="916" y="884.5" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">file calls stay isolated;</text>
+<text x="916" y="899.8" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">latest-result only where the</text>
+<text x="916" y="915.1" font-size="11.5" font-weight="normal" text-anchor="start" fill="#1b1f24">meaning permits it</text>
+<text x="908" y="968" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">probes: one request/result contract,</text>
+<text x="908" y="983" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">not one serial worker (decision 4)</text>
+<path d="M 874 612 L 899 612" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<path d="M 900 652 L 875 652" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="900" y="1034" width="424" height="96" rx="10" fill="#f3effb" stroke="#634a99" stroke-width="2"/>
+<text x="910" y="1054" font-size="14" font-weight="bold" text-anchor="start" fill="#634a99">OS hand-off</text>
+<text x="910" y="1071" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">bt-app::handoff_lane; row 1</text>
+<rect x="1210.0" y="1041" width="106.0" height="16" rx="8" fill="#c25e00"/>
+<text x="1263.0" y="1053" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">done 2026-09-22</text>
+<rect x="908" y="1080" width="408" height="40" rx="6" fill="#ffffff" stroke="#634a99" stroke-width="1.3"/>
+<rect x="908" y="1080" width="5" height="40" rx="2" fill="#2a5caa"/>
+<text x="919" y="1096" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-os-handoff</text>
+<text x="919" y="1112" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">request id, bound 32, no coalescing · → HandoffAnswered</text>
+<text x="1310" y="1112" font-size="10.5" font-weight="bold" text-anchor="end" fill="#2a5caa">bt-app</text>
+<path d="M 874 1090 L 899 1090" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<path d="M 900 1110 L 875 1110" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<text x="1352" y="112" font-size="15" font-weight="bold" text-anchor="start" fill="#666b52">Child processes (§2.2)</text>
+<text x="1352" y="130" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">the same list; the change is who starts them</text>
+<rect x="1352" y="142" width="232" height="132" rx="8" fill="#f7f7f2" stroke="#666b52" stroke-width="1.4"/>
+<text x="1362" y="159" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24">Pane processes, per pane</text>
+<rect x="1523.2" y="146" width="54.8" height="16" rx="8" fill="#c25e00"/>
+<text x="1550.6000000000001" y="158" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.5→0.6</text>
+<text x="1362" y="175.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">OpenConsole.exe: the ConPTY host</text>
+<text x="1362" y="189.5" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">the shell or agent: born behind</text>
+<text x="1362" y="204.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">the session owner, not on the</text>
+<text x="1362" y="218.5" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">window thread</text>
+<text x="1362" y="233.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">grandchildren: in a job object</text>
+<path d="M 1324 212 L 1351 212" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)" marker-start="url(#ah)"/>
+<rect x="1352" y="292" width="232" height="78" rx="8" fill="#f7f7f2" stroke="#666b52" stroke-width="1.4"/>
+<text x="1362" y="309" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24">Web view processes</text>
+<text x="1362" y="325.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">WebView2 processes; macOS WebKit</text>
+<text x="1362" y="339.5" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">WebContent; still driven from the</text>
+<text x="1362" y="354.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">window thread (§5.2)</text>
+<rect x="1352" y="558" width="232" height="88" rx="8" fill="#f7f7f2" stroke="#666b52" stroke-width="1.4"/>
+<text x="1362" y="575" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24">git</text>
+<text x="1362" y="591.0" font-size="11.3" text-anchor="start"><tspan font-weight="False" fill="normal" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">git::git_command</tspan></text>
+<text x="1362" y="605.5" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">through quiet_command; one</text>
+<text x="1362" y="620.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">status costs three threads</text>
+<path d="M 1318 578 L 1351 578" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="1352" y="654" width="232" height="40" rx="8" fill="#f7f7f2" stroke="#666b52" stroke-width="1.4"/>
+<text x="1362" y="671" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24">powershell.exe: PSReadLine probe</text>
+<text x="1362" y="687.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">once per process, no timeout</text>
+<path d="M 1318 674 L 1351 674" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="1352" y="702" width="232" height="40" rx="8" fill="#f7f7f2" stroke="#666b52" stroke-width="1.4"/>
+<text x="1362" y="719" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24">powershell.exe: $PROFILE probe</text>
+<text x="1362" y="735.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">once per program, with a deadline</text>
+<path d="M 1318 722 L 1351 722" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="1352" y="750" width="232" height="40" rx="8" fill="#f7f7f2" stroke="#666b52" stroke-width="1.4"/>
+<text x="1362" y="767" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24">cmd.exe /c copilot --version</text>
+<text x="1362" y="783.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">on opening the Agents page</text>
+<path d="M 1318 770 L 1351 770" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="1352" y="798" width="232" height="40" rx="8" fill="#f7f7f2" stroke="#666b52" stroke-width="1.4"/>
+<text x="1362" y="815" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24">no child: one HTTPS GET</text>
+<text x="1362" y="831.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">the only socket the program opens</text>
+<path d="M 1318 818 L 1351 818" fill="none" stroke="#3a4250" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ah)"/>
+<rect x="1352" y="894" width="232" height="62" rx="8" fill="#f7f7f2" stroke="#666b52" stroke-width="1.4"/>
+<text x="1362" y="911" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24">defaults, locale -a (macOS)</text>
+<rect x="1536.0" y="898" width="42.0" height="16" rx="8" fill="#c25e00"/>
+<text x="1557.0" y="910" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.4.4</text>
+<text x="1362" y="927.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">asked from the observation lane</text>
+<text x="1362" y="941.5" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">(row 7)</text>
+<path d="M 1324 924 L 1351 924" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<rect x="1352" y="1034" width="232" height="96" rx="8" fill="#f7f7f2" stroke="#666b52" stroke-width="1.4"/>
+<text x="1362" y="1051" font-size="12.5" font-weight="bold" text-anchor="start" fill="#1b1f24">The system's handlers</text>
+<text x="1362" y="1067.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">explorer.exe, the registered handler,</text>
+<text x="1362" y="1081.5" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">Finder: bt_platform::handoff;</text>
+<text x="1362" y="1096.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">detached: no handle, no wait, no kill</text>
+<path d="M 1324 1100 L 1351 1100" fill="none" stroke="#3a4250" stroke-width="1.4" marker-end="url(#ah)"/>
+<text x="16" y="1180" font-size="15" font-weight="bold" text-anchor="start" fill="#1b1f24">Crates — normal and target dependencies, read from the manifests</text>
+<text x="16" y="1198" font-size="11.5" font-weight="normal" text-anchor="start" fill="#4d5561">arrows point at the dependency; only the edges §3.2 questions are drawn, the rest are listed inside each box</text>
+<rect x="24" y="1214" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="32" y="1231" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-unicode</text>
+<text x="32" y="1247.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">no dependencies</text>
+<rect x="24" y="1314" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="32" y="1331" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-layout</text>
+<text x="32" y="1347.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">no dependencies</text>
+<rect x="24" y="1414" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="32" y="1431" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-source</text>
+<text x="32" y="1447.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">reads source for tests;</text>
+<text x="32" y="1460.5" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">never in folio</text>
+<rect x="24" y="1514" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="32" y="1531" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-winres</text>
+<text x="32" y="1547.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">build tool for bt-app</text>
+<rect x="184" y="1214" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="192" y="1231" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-transcript</text>
+<text x="192" y="1247.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ unicode</text>
+<rect x="344" y="1214" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="352" y="1231" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-doc</text>
+<text x="352" y="1247.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ transcript</text>
+<rect x="344" y="1314" width="148" height="84" rx="6" fill="#ffffff" stroke="#2d7547" stroke-width="1.8"/>
+<text x="352" y="1331" font-size="13" font-weight="bold" text-anchor="start" fill="#2d7547" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-platform</text>
+<text x="352" y="1347.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ transcript (Windows),</text>
+<text x="352" y="1360.5" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">unicode</text>
+<text x="352" y="1391" font-size="10.8" font-weight="bold" text-anchor="start" fill="#2d7547">12 thread sites</text>
+<rect x="344" y="1414" width="148" height="84" rx="6" fill="#ffffff" stroke="#a15f00" stroke-width="1.8"/>
+<text x="352" y="1431" font-size="13" font-weight="bold" text-anchor="start" fill="#a15f00" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-pty</text>
+<text x="352" y="1447.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ transcript</text>
+<text x="352" y="1491" font-size="10.8" font-weight="bold" text-anchor="start" fill="#a15f00">4 thread sites</text>
+<rect x="504" y="1214" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="512" y="1231" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-viewport</text>
+<text x="512" y="1247.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ doc, transcript,</text>
+<text x="512" y="1260.5" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">unicode</text>
+<rect x="504" y="1314" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="512" y="1331" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-math</text>
+<text x="512" y="1347.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ doc, platform</text>
+<rect x="504" y="1414" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="512" y="1431" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-detect</text>
+<text x="512" y="1447.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ doc, transcript,</text>
+<text x="512" y="1460.5" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">unicode</text>
+<rect x="504" y="1514" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="512" y="1531" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-persist</text>
+<text x="512" y="1547.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ platform</text>
+<rect x="664" y="1214" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="672" y="1231" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-render</text>
+<text x="672" y="1247.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ doc, platform,</text>
+<text x="672" y="1260.5" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">transcript, unicode,</text>
+<text x="672" y="1274.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">viewport</text>
+<rect x="664" y="1314" width="148" height="84" rx="6" fill="#ffffff" stroke="#7a3d9e" stroke-width="1.8"/>
+<text x="672" y="1331" font-size="13" font-weight="bold" text-anchor="start" fill="#7a3d9e" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-term</text>
+<text x="672" y="1347.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ detect, doc, math,</text>
+<text x="672" y="1360.5" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">platform, transcript,</text>
+<text x="672" y="1374.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">viewport, alacritty</text>
+<text x="672" y="1391" font-size="10.8" font-weight="bold" text-anchor="start" fill="#7a3d9e">1 rayon pool</text>
+<rect x="824" y="1214" width="148" height="84" rx="6" fill="#ffffff" stroke="#2a5caa" stroke-width="1.8"/>
+<text x="832" y="1231" font-size="13" font-weight="bold" text-anchor="start" fill="#2a5caa" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-app</text>
+<text x="832" y="1247.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">→ all but corpus; source</text>
+<text x="832" y="1260.5" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">(tests), winres (build)</text>
+<text x="832" y="1291" font-size="10.8" font-weight="bold" text-anchor="start" fill="#2a5caa">29 thread sites</text>
+<rect x="824" y="1314" width="148" height="84" rx="6" fill="#ffffff" stroke="#7d8590" stroke-width="1.2"/>
+<text x="832" y="1331" font-size="13" font-weight="bold" text-anchor="start" fill="#1b1f24" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-corpus</text>
+<text x="832" y="1347.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">tools → pty, render,</text>
+<text x="832" y="1360.5" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">term, transcript,</text>
+<text x="832" y="1374.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">viewport</text>
+<rect x="664" y="1414" width="148" height="84" rx="6" fill="#fff4e0" stroke="#c25e00" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="672" y="1431" font-size="13" font-weight="bold" text-anchor="start" fill="#c25e00" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">boundary</text>
+<text x="672" y="1447.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">headless observation and</text>
+<text x="672" y="1460.5" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">effect boundary: ruled,</text>
+<text x="672" y="1474.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">crate not named</text>
+<rect x="824" y="1414" width="148" height="84" rx="6" fill="#fff4e0" stroke="#c25e00" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="832" y="1431" font-size="13" font-weight="bold" text-anchor="start" fill="#c25e00" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">bt-workbench</text>
+<text x="832" y="1447.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">attention state machine;</text>
+<text x="832" y="1460.5" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">may be born now;</text>
+<text x="832" y="1474.0" font-size="10.8" font-weight="normal" text-anchor="start" fill="#4d5561">its edges not ruled</text>
+<path d="M 664 1346.0 L 653 1346.0" fill="none" stroke="#b03a2e" stroke-width="2.2" marker-end="url(#ahr)"/>
+<path d="M 738.0 1398 L 738.0 1413" fill="none" stroke="#c25e00" stroke-width="2.2" marker-end="url(#aho)"/>
+<text x="664" y="1528.0" font-size="11.3" text-anchor="start"><tspan font-weight="bold" fill="#c25e00">bt-term to bt-platform</tspan><tspan font-weight="normal" fill="#1b1f24">: through the boundary above;</tspan></text>
+<text x="664" y="1543.2" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">ruled to come first (decision 3); version: not ruled</text>
+<text x="664" y="1558.4" font-size="11.3" text-anchor="start"><tspan font-weight="bold" fill="#b03a2e">bt-term to bt-math</tspan><tspan font-weight="normal" fill="#1b1f24">: recorded debt until the composition</tspan></text>
+<text x="664" y="1573.6" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">layer is designed; hiding it behind re-exports changes nothing</text>
+<text x="664" y="1588.8" font-size="11.3" text-anchor="start"><tspan font-weight="bold" fill="#2d7547">bt-platform</tspan><tspan font-weight="normal" fill="#1b1f24">: the systems-crate split waits for 0.5,</tspan></text>
+<text x="664" y="1604.0" font-size="11.3" font-weight="normal" text-anchor="start" fill="#1b1f24">after the bt-app move; its shape: not ruled</text>
+<text x="664" y="1619.2" font-size="11.3" text-anchor="start"><tspan font-weight="bold" fill="False">Every edge</tspan><tspan font-weight="normal" fill="#1b1f24">: a direction guard over cargo metadata, planned (§3.3)</tspan></text>
+<rect x="1004" y="1162" width="580" height="300" rx="10" fill="#ffffff" stroke="#c9ced6" stroke-width="1.2"/>
+<text x="1018" y="1184" font-size="15" font-weight="bold" text-anchor="start" fill="#1b1f24">How to read it</text>
+<rect x="1018.0" y="1196" width="42.0" height="16" rx="8" fill="#c25e00"/>
+<text x="1039.0" y="1208" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#ffffff">0.4.4</text>
+<text x="1070" y="1208" font-size="11.8" font-weight="normal" text-anchor="start" fill="#1b1f24">the version §5.4 or §12 rules for the move; “done” has landed</text>
+<rect x="1018" y="1220" width="40" height="18" rx="4" fill="#fff4e0" stroke="#c25e00" stroke-width="1.4" stroke-dasharray="6 4"/>
+<text x="1070" y="1234" font-size="11.8" font-weight="normal" text-anchor="start" fill="#1b1f24">a new owner, lane or crate the file rules</text>
+<text x="1018" y="1260" font-size="11.8" font-weight="normal" text-anchor="start" fill="#1b1f24">Everything else keeps the meaning of the “today” diagram:</text>
+<text x="1018" y="1277" font-size="11.8" font-weight="normal" text-anchor="start" fill="#1b1f24">stripe and tag = the crate; → Name = the AppEvent it wakes with.</text>
+<text x="1018" y="1294" font-size="11.8" text-anchor="start"><tspan font-weight="bold" fill="False">Not ruled anywhere in the file</tspan><tspan font-weight="normal" fill="#1b1f24">: the thread count inside a lane;</tspan></text>
+<text x="1018" y="1311" font-size="11.8" font-weight="normal" text-anchor="start" fill="#1b1f24">folio-web-thumb's Normal band; the five unnamed bt-app spawns;</text>
+<text x="1018" y="1328" font-size="11.8" font-weight="normal" text-anchor="start" fill="#1b1f24">a door for files::read_directory; the asking/telling table</text>
+<text x="1018" y="1345" font-size="11.8" font-weight="normal" text-anchor="start" fill="#1b1f24">(the owner rules it before 0.5).</text>
+<text x="1018" y="1362" font-size="11.8" text-anchor="start"><tspan font-weight="bold" fill="False">Not drawn, not lanes</tspan><tspan font-weight="normal" fill="#1b1f24">: the preservation transaction for</tspan></text>
+<text x="1018" y="1379" font-size="11.8" font-weight="normal" text-anchor="start" fill="#1b1f24">the failure roads (§11, 0.4.4) and the diagnostics operation</text>
+<text x="1018" y="1396" font-size="11.8" font-weight="normal" text-anchor="start" fill="#1b1f24">vocabulary (§10) — both are ruled, neither moves a thread.</text>
+</svg>

@@ -6,6 +6,671 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- Each terminal pane can have its own text size: Ctrl+= and Ctrl+− (⌘ on a
+  Mac) or Ctrl+wheel over the pane, Ctrl+0 to reset. The pane shows the size
+  while it is not 100 %; it resets when Folio restarts.
+
+### Fixed
+
+- Typing no longer pauses while Folio asks Windows several times a turn
+  where its window is; it asks once.
+- A program that keeps changing its window title no longer slows typing;
+  Folio passes the title on at most once a frame.
+- Typing in the find box stays quick in a pane with a long history; matches
+  further back fill in over the next few frames.
+- A launch with a chosen terminal font no longer waits for Folio to list every
+  font on the machine.
+- A terminal font with no bold style no longer switches to another font's bold
+  for bold text.
+
+### Changed
+
+- The download notice uses the same padding, shadow, corners and text sizing as other dialogs and floating notices.
+- Right-click and drop-down menus use the same icon-to-label spacing as Settings.
+- The first-run card uses the same window-edge spacing and title line height as other dialogs.
+- Command palette rows use the same corners and icon spacing as other lists.
+- Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.
+- Tooltips, cards, menus and other fading surfaces now fade as one piece, so
+  their edges and text no longer arrive before their plates.
+- Bold text in a terminal font that has no bold style is now drawn heavier in
+  that same font, instead of looking like the text around it.
+- Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.
+- Git panel and graph spacing, corners, captions, badges and icons now match the rest of the window.
+- Glance-card head spacing, drag-tag padding and spacing, and peek-tag line height now match the other floating tags.
+- When Folio stops responding for half a second or more while a web page
+  opens, the line it writes to `diagnostics.log` now names the step that took
+  the time, including the time the system spent between Folio's own handlers.
+- A web pane on Windows uses the system's overlay scrollbars instead of the classic bars.
+
+## 0.4.4-preview — 2026-09-24
+
+### Added
+
+- Settings can be exported to one file and imported on another machine:
+  **Settings > About** has Export…, Import… and the settings folder. Every
+  link on that page is now a button, all of one size.
+- Sliding a finger over a pane now scrolls it, with the system's own flick.
+  A one-finger slide no longer selects text.
+- Pasting several lines into a shell that would run them one by one now asks
+  first: run them line by line, join them into one line, or cancel. A setting
+  under Terminal turns the question off.
+- Web panes follow Folio's light or dark theme; a setting can pin either. A
+  site's icon that would disappear into the bar it sits on gets a small round
+  plate.
+
+### Changed
+
+- When a pasted block is one command wrapped across lines (each line but the
+  last ends with `^` in cmd, a backtick in PowerShell or `\` in a Unix
+  shell), the paste card's Enter joins it into one line and drops those marks.
+- The multi-line paste card works like any two-button dialog: Tab and
+  Shift+Tab move between Join and Run line by line, Enter presses the
+  highlighted one, Esc cancels.
+- In a Markdown preview you are editing, every block a selection touches shows
+  its Markdown, as in Obsidian; a table the selection only passes through stays
+  rendered. The blocks change when you let go of the mouse, not while you drag.
+- A local HTML page in the preview can load its stylesheets, scripts and fonts
+  from the web.
+- A ⌄ menu you click now stays open until you press Esc, click elsewhere or
+  click the ⌄ again; resting on it still shows it only while the pointer is
+  there.
+- A multi-line paste into PowerShell now waits on the input line for Enter.
+- A shortcut can now use Ctrl with a letter; the row notes that the key no
+  longer reaches the shell.
+- Ctrl+click on a network-share path or on a mailto:, vscode: or other link now
+  hands it to Windows or macOS. Links inside a previewed document do the same.
+- The glance card's bottom line shows the file's folder; click it to find the
+  file, Ctrl+click to show it in Explorer.
+- On macOS, the Option key row in Settings > General explains itself in two
+  lines.
+
+- In the Markdown preview, a paragraph turns into its source when the gesture
+  ends, not while a selection is being drawn across it.
+
+- The glance card's shadow and the tooltip's padding and corners now match the
+  rest of the float-tag family.
+
+- The Git page's row height, head and row type, and section labels now match
+  the rest of the window.
+
+- Every pane's head title is the same size as the float and glance heads', and
+  the pane head's `⌄`, the preview switch, the float's dock and the files
+  root button now stand in the same tool box every other head control uses.
+  The formula band's own buttons, which already reuse
+  the pane head's, grow with it.
+
+- The command palette's field and rows are the same text size as the rest of
+  the window.
+
+- The first-run card's option rows are the same height as a Settings row.
+
+- The section labels inside the right-click and `⌄` menus are the same size
+  and spacing as Settings and the rail.
+
+- Every Settings combo wears the same `⌄` every other drop-down opener wears,
+  and the dialog title, the combo drop-down rows, the row titles and the nav
+  items are on the same scale as the rest of the window.
+
+### Fixed
+
+- Folio no longer stops within seconds of launch when a restored window's
+  shell prints its first prompt before the window has drawn; this stopped
+  every launch on macOS.
+- The multi-line paste card's title no longer runs under its × button; a very
+  long profile name is shortened with an ellipsis.
+- A zoomed picture in a floating window can be dragged to pan it, and a
+  double-click zooms it in or out, as in a pane.
+- The folder at the bottom of the glance card now lights up under the
+  pointer, like every other line you can click.
+- The open-in-browser arrow on a web pane showing an `http` or `https` page
+  now opens that page in your browser; it used to do nothing.
+- While a divider is dragged, the pane under the pointer keeps the rounded
+  top-right corner its card has.
+- On a slow disk, turning on PowerShell integration from the welcome card
+  could report a lock error although everything was written; it no longer
+  does.
+- The command marks down a pane's right edge no longer cover the last column of
+  text.
+- The Cards setting named the wrong shortcut on macOS and after a rebind.
+- In the Markdown preview, a selection dragged across the paragraph or table
+  you are editing highlights it too, instead of skipping it.
+
+- On macOS the Git page found no git, and the dark scheme setting named a
+  Windows folder.
+- Ctrl+click no longer freezes the window while Windows opens the file;
+  Explorer comes to the front.
+
+- Touch input — a touch screen, or a remote-desktop tool that sends touch —
+  now reaches Folio the way it reaches other Windows programs: a tap is a
+  click, and press-and-hold opens the menu. Windows does the translating.
+
+- A printed path with spaces in it is a link when the file is there.
+
+- A relative path an agent prints with a full-width colon or comma right
+  behind it (`experiments/plot.png：…`) is a link again when the file is in
+  the pane's folder.
+
+- A folder an agent prints with a slash on the end (`whydrift/models/`) is a
+  link, like the same folder printed without one. Clicking it shows the folder.
+
+- A printed path followed by a full-width stop and a number or a Latin word
+  (`notes.md。18 items`) is a link when the file is there.
+
+## 0.4.3-preview — 2026-09-21
+
+### Added
+
+- **Rendered blocks → Repair row breaks.** Folio restores the row separators a
+  coding agent's own redraw of its finished answer eats, so a matrix arrives as
+  a matrix rather than as one long row. The repair compensates for another
+  program's markdown renderer, and this row is how you say not to — the day
+  those tools stop damaging their own output, it stops being a repair. It ships
+  on, it reaches the formulas already on screen the moment it is changed, and
+  either way it never alters what copying a formula gives you.
+
+- **`folio --remove-explorer-menu` takes Folio back out of Explorer's
+  right-click menu, without opening a window.** Both entries go: the one on
+  Windows 11's first page and the classic one under "Show more options". It is
+  the piece that was missing from every way of removing Folio — there is no
+  installer, so deleting the files left a menu entry pointing at a `folio.exe`
+  that is no longer there, and the switch that could have taken it off went with
+  the folder. A registration belonging to another copy of Folio on the same
+  machine is left exactly as it is; one whose `folio.exe` has gone is cleared,
+  because nobody is answering it. It prints one line saying what it removed and
+  what it left, exits `0` when the machine is the way you asked for it —
+  including when there was nothing to remove — and non-zero only when a removal
+  was refused, with the reason on standard error. `docs/install.md` has the
+  per-channel steps.
+
+- **Terminal settings now include a separate CJK font choice.** Automatic uses
+  Folio's platform defaults, and an installed Chinese, Japanese or Korean face
+  can be chosen without changing the monospace font used for ASCII.
+
+- **`folio --uninstall-cleanup` undoes what Folio wrote outside its own folder,
+  in one command and without a window.** The `$PROFILE` line, the agent hooks,
+  the Explorer entries and the PSReadLine module, each reported on its own line
+  with what was removed and what was left. Hooks and Explorer entries belonging
+  to another copy of Folio that is still on the machine are left alone. It exits
+  `0` when the machine is the way you asked for it, including when there was
+  nothing to remove; `1` names a refusal to fix and retry; `2` means a Folio is
+  running, or, with `--purge`, that a process still holds the data. `--purge` on
+  the same command also deletes settings, sessions and browser data — both
+  Windows data roots and the legacy one, or all six macOS locations — while
+  keeping the dated recovery copies beside your own configuration files. The
+  application folder is never deleted. On macOS, Folio cannot tell whether
+  another program holds that data, and the command says so as it starts rather
+  than implying a check it never made. Windows also ships `uninstall.cmd`, which
+  is the same command by double-click. `docs/install.md` has the per-channel
+  steps.
+
+- **`folio --remove-shell-integration` takes Folio's line out of your PowerShell
+  `$PROFILE`, without opening a window.** It is the same remover the settings
+  switch uses, and it matches only the exact forms Folio itself writes — never
+  "a line mentioning `folio.ps1`", which may be your own. A profile that is
+  read-only, hard-linked, symlinked, or in an encoding it cannot rewrite is
+  refused and left byte-identical, with the reason on standard error. The
+  profile is replaced through `ReplaceFileW`, so its permissions, alternate
+  streams, attributes and creation time survive.
+
+- **A page for anyone who already deleted an older Folio.**
+  `docs/recovery-after-deleting-folio.md` names the exact `$PROFILE` line to
+  remove from which file, and the hook entries to delete from each coding
+  agent's own configuration — copy-and-paste, with no Folio needed. It exists
+  because a copy that is already gone cannot repair its own marks.
+
+### Changed
+
+- **When Folio's window pauses, its own log now names the call it was inside.**
+  The log records the GPU adapter Folio actually opened, then separates surface
+  acquisition, frame composition, submission and presentation from one another;
+  terminal-output turns say whether time went into the ring, the parser,
+  detection or publication, and input turns name both the event and either IME
+  platform call. A stall line also carries the run's age and its own number, so
+  one day's recording can show whether pauses grew as the session aged.
+
+- **The log now names the GPU Folio asked for as well as the one it got, and a
+  laptop with two can be told to try the other.** Folio has always asked for the
+  highest-performance adapter, which on a laptop with two graphics chips is the
+  discrete one; it still does, and nothing about a normal run changes. What is
+  new is that the `GPU adapter` line in `diagnostics.log` says what was asked
+  for beside what the driver answered, and that setting `BT_GPU_PREFERENCE=low`
+  for one run asks for the integrated adapter instead
+  (`docs/BT-ENVIRONMENT.md`). It is there to find out whether a particular
+  machine's long pauses belong to its discrete GPU — the same build can be run
+  both ways and the two recordings compared.
+
+- **A save in the preview editor replaces the content and keeps what the file
+  was carrying.** On Windows the alternate data streams (the `Zone.Identifier` a
+  download carries), the DACL, the creation time and the attribute word travel
+  through `ReplaceFileW`; on Unix the ownership, the mode and every extended
+  attribute — quarantine, Finder tags, `user.*` — are put on the replacement
+  before the rename. **Content is guaranteed and what the file carried is best
+  effort**, stated in that order: a volume that answers that it has no such
+  operation, and has provably changed nothing, gets the plain writer instead,
+  and a metadata step never fails a save on any platform. A symlinked or
+  unopenable name keeps the plain writer, as before; **a hard-linked target keeps
+  it too**, so the file's second name still reads the old bytes — the preserving
+  replacement refuses such targets rather than breaking the link. The staging
+  file is born private and widened afterwards to the mode the replaced file
+  carried, so a private note is never world-readable, not even for the length of
+  one write. **One window is open and recorded:** `ReplaceFileW` is a sequence
+  and not an atomic rename, so a crash or power loss between its two halves
+  leaves the old document under a `.tmp-<hex>` name that nothing in Folio looks
+  for.
+
+- **Folio installs its PSReadLine module only where the place is empty or its
+  own.** Until now the install door had no occupancy check at all: it wrote its
+  nine files into `<Documents>\WindowsPowerShell\Modules\PSReadLine\2.4.6`
+  whatever was standing there, and two states of the settings row let that write
+  through over a module the reader had installed from the PowerShell Gallery —
+  the folder then read as Folio's, so switching the row **Off** deleted it and
+  the gallery's `PSGetModuleInfo.xml`, `en-US\` and catalog with it. **This is
+  byte-identical back to v0.3.0.** To tell whether it happened to you, read the
+  version stamp on the module in that folder and look for the record the gallery
+  leaves beside a module it installed:
+
+  ```powershell
+  $d = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WindowsPowerShell\Modules\PSReadLine\2.4.6'
+  (Get-Item "$d\Microsoft.PowerShell.PSReadLine.dll").VersionInfo.ProductVersion
+  Test-Path "$d\PSGetModuleInfo.xml"
+  ```
+
+  A version containing `-bt.` is Folio's copy — only Folio's own builds put that
+  in the string — and anything else is yours, and untouched. Folio's copy **with**
+  `True` on the second line means a gallery install of yours stood there first
+  and was written over: install the PSReadLine you wanted again from wherever you
+  got it, at the version you had. Folio cannot put back a module it replaced, and
+  it does not try to. From 0.4.3 the check lives inside the one function that
+  writes: a folder is Folio's when the assembly is ours by bytes or by the
+  `2.4.6-bt.` stamp, or when there is no assembly and every name in it is one
+  Folio itself writes, and anything else is foreign — neither written to nor
+  deleted, with both verbs on the row dark over it. The disk fact is read before
+  the stored invitation, so a remembered "installed" can no longer offer the
+  button over somebody else's module. Removal was narrowed with it: the nine
+  names go, and the directories go only while they are empty, so the records
+  beside a mixed folder an older Folio left stay where they are and the cleanup
+  door names them.
+
+- **Folio's line in your PowerShell `$PROFILE` is one guarded form, and existing
+  installs are rewritten at start-up.** The bare dot-source line errored at every
+  PowerShell start once `%APPDATA%\Folio` was gone — a Folio that had been
+  deleted went on making an error in a file that is yours and not Folio's. The
+  line is now one exact managed form that is silent when the script it names is
+  missing, in Windows PowerShell 5.1 and PowerShell 7 and under strict mode, and
+  legacy lines are rewritten to it when Folio starts, off the window thread,
+  across every profile file Folio has written to and every one it can find. An
+  account still on the legacy data root keeps a line that loads the script it
+  actually has. Turning the integration off is recorded, and start-up then does
+  nothing for that account.
+
+- **An agent hook belongs to the `folio.exe` it names.** Until now Folio
+  recognised its own hook entries by a marker alone, so one copy removed
+  another's live hooks and an install silently replaced them. Ownership is now
+  read from the executable the entry names: Folio removes or refreshes an entry
+  naming this copy, removes one naming a `folio.exe` that no longer exists, and
+  leaves one naming another copy that is still there — taking that one over needs
+  a second, explicit press within thirty seconds, and the paths are named before
+  it happens. Only the operand's own file name says whether an entry is a Folio
+  at all, so a reader's own hook that happens to use the same words is a stranger
+  and stays; an entry Folio cannot decode is nobody's and has no say over the
+  entries beside it; and the bare `folio.exe` 0.4.2 wrote when it could not name
+  its own path names no copy, so it is removable rather than permanent. A
+  configuration path reached through a link is resolved once, at the top of the
+  operation, and only to a regular file inside the folder that path names — so a
+  machine whose `~/.claude` is a junction can install and uninstall like any
+  other, while a target outside the folder, a link to nothing, a hard link and a
+  read-only file are refused each with its own sentence, and the row says which
+  instead of reading Off over hooks that are firing. The entries are written in
+  each agent's direct-execution form, which also ends a quoting hazard on Windows
+  where a path containing `$` or a backtick was expanded by a shell. Folio
+  refuses to write a hook at all when it cannot say where its own executable is,
+  or when it is running translocated on macOS. Updating hooks may reformat that
+  agent's JSON settings; a dated backup is kept beside the file.
+
+- **The offer to switch the PowerShell integration on asks whether you already
+  have it, not whether Folio wrote it.** Two facts had been folded into one, and
+  the offer appeared in front of someone whose profile already loaded
+  `folio.ps1` by their own hand. A profile Folio never wrote to is no longer
+  claimed by Folio's record of where it has written.
+
+- **The window thread never asks a filesystem about a path a program printed.**
+  A hover resolved a reference by calling `symlink_metadata` and `is_dir` on the
+  thread that draws, three times per pointer move and uncached; a drive letter is
+  lexically local whatever it stands for, so a mapped network drive whose server
+  is gone — or a junction on a local disk into a dead share, which needs no
+  mapped drive at all — held the event loop for the redirector's own timeout,
+  re-armed on every motion over the cell. The pane's printed-path ledger is the
+  single owner of "is this a real, readable, local path" now, and the hover, the
+  press, the pointing finger and the glance card read it and call nothing; the
+  question itself is asked on a lane of its own that nobody waits on, so a stat
+  blocking inside SMB cannot starve the formulas and pictures on the decoration
+  queue. An unanswered name is not a link yet, which is the rhythm a bare printed
+  path has always had, and an `OSC 8` target is asked about on the pointer event
+  that meets it.
+
+- **On Windows the terminal names its own Chinese family, and the weight asked
+  for never changes it.** A chosen family with no bold cut keeps its regular face
+  rather than leaving for another family's bold, so one bold word in a line of
+  Chinese is no longer set in a different face. Which family owns a script is
+  read from the font's own `OS/2` declaration, with `cmap` block coverage where
+  it declares nothing, never from one sample character. Proportional text and
+  previews keep their own YaHei-first chain and now name their family too. Font
+  enumeration stays off the window thread.
+
+- **Three diagnostics lines are always on, and none of them contains typed
+  text.** A shown window that has owed a picture for longer than the threshold
+  and shown none writes one line. A minute in which file reading went over budget
+  with no input from you writes one line naming the lanes that read and the three
+  most re-read **basenames** — never a directory, never contents; the bounded
+  name table is cleared every minute. A composition that starts inside a live one
+  (`shape=restarted-inside-a-live-composition`) or ends without ever having
+  started (`shape=ended-without-a-start`) writes one line carrying the live
+  pre-edit's byte length and no text, at most 32 per window. `docs/PRIVACY.md`
+  says what may appear and advises reading it before attaching a log to an issue.
+
+- **`BT_IME_TRACE` no longer records composed or committed text.** It writes
+  event kinds, byte lengths, cursor ranges, rectangles, static reasons and
+  results, and a focused pane now records when an input method is active and has
+  not engaged. Older builds wrote the literal characters an input method
+  produced.
+
+### Fixed
+
+- **A matrix an agent printed is set in the rows it was written in, in three
+  places it was not.** Coding agents redraw a finished answer through their own
+  markdown renderer, which eats the `\\` that ends a row of a matrix, an
+  `aligned` block or a `cases` block; Folio has restored those for a while.
+  Three cases were wrong. A row end inside `\text{…}` gained a row break that
+  broke the text open, because a backslash one brace deep belongs to whatever
+  opened the brace and not to the block. A line end inside `\begin{equation}`
+  gained one too, although an `equation` holds a single formula and has no rows
+  to separate — so what it drew was a row nobody wrote. And a nested
+  `\begin{array}{cc}` was not repaired at all, because the scan looked only at
+  the environments that may open a block on their own. The rest of the redraw's
+  damage is still left exactly as it arrives, and deliberately: `\,` arrives as
+  a comma, `\[` as a bracket, and a line holding only `=` is deleted outright —
+  none of those can be put back without typesetting an equation nobody wrote.
+  What is repaired is repaired for the typesetter only; copying a formula, or
+  showing its source, gives back the bytes the terminal received.
+
+- **Folio names the family it draws Chinese with, instead of leaving the choice
+  to the font library.** The terminal gets a chain of its own, beginning with
+  **NSimSun** on Windows — the family the Windows terminal was measured already
+  resolving to in 0.4.2, reached by falling through the library's own search
+  rather than by being chosen; 0.4.3 makes it the decision, and Settings ▸
+  Terminal can name another family. Proportional text — headers, tab titles, the
+  files column, the preview — keeps its YaHei-first chain and now names it too,
+  so a header asking for a medium weight no longer falls through the library's
+  exact-weight filter to SimSun.
+
+- **Pasting a screenshot no longer makes Folio copy the same picture three
+  times before it uses one of them.** A screenshot tool puts the same picture on
+  the clipboard in several shapes at once — on Windows a `PNG`, a `CF_DIBV5` and
+  a `CF_DIB`; on macOS a PNG and a TIFF — and Folio was copying every one of them
+  into memory, on the thread that draws the window, before handing the best one
+  to the worker that writes the file. For a 4K screen that was about 66 MB copied
+  to use perhaps 4 MB of it, and up to three synchronous round trips into the
+  application the picture was copied from, each of which can render the picture
+  on demand. Folio now walks its preference list and stops at the first shape it
+  can see is whole — a few hundred bytes of header, no decoding — so one shape is
+  copied and the source is asked once. What ends up in the folder is the same
+  picture it always was. Sources that advertise a picture shape and then hand
+  over something no decoder can read, which some browsers and remote-desktop
+  clients do, still paste: Folio reads the header, sees it is not a picture and
+  takes the next shape, exactly as it used to after copying all of them. A source
+  that offers only the older shapes is read as before, and text or a file list on
+  the clipboard still wins over a picture without any of it being read.
+
+- **A local page or PDF whose path contains Chinese — or a space with `{`, `}`,
+  `^` or `` ` `` in the name — now opens in the preview, instead of being turned
+  away by Folio itself.** Double-clicking `报告.pdf` under `D:\文档\项目 (1)\`
+  drew Folio's own refusal card: the window had opened the file and then refused
+  it, because it was comparing two *spellings* of one path where it meant to
+  compare the path. The browser engine re-spells a local address in its own
+  form — every character outside a small set comes back percent-encoded — and
+  the two strings no longer matched. Folio now reads a local address as the file
+  it names, once, at the door, so the two spellings are one answer. The address
+  row shows the ordinary path again (`D:\文档\报告.pdf`, not `file:///D:/%E6…`),
+  links to files beside the page, in-page jumps and reload keep working, and a
+  session saved before this change still reopens its pages. Nothing that was
+  refused for a safety reason is opened now: a path that walks out of the page's
+  own folder, a network share, or an address that matches only after a spelling
+  is guessed at is refused exactly as before. Reported as issue #7.
+
+- **`diagnostics.log` now always opens with the line that says which build
+  wrote it.** The file a bug report arrives as is a stack of runs, and the line
+  between them carries the version, the commit and the process id. It was
+  written only by a run whose diagnostics went to that file, so a run started
+  with a trace variable set — or one whose log would not take the program's
+  output — appended its watchdog's lines to a file with no such line anywhere in
+  it, and nothing in what you sent said which Folio had written it. The line is
+  now written when the log is opened, before the run has said anything else, on
+  every kind of run.
+
+- **An idle Folio window now lets the event loop sleep.** Wake-up deadlines are
+  retained as absolute appointments owned by the event that armed them instead
+  of being renewed from each loop turn; unchanged macOS menu inputs also stop
+  before entering AppKit, and memory diagnostics no longer query the platform
+  on every wake.
+
+- **A PowerShell script now opens in the preview highlighted, instead of as
+  plain text.** `.ps1`, `.psm1` and `.psd1` files, and a ` ```powershell `,
+  ` ```pwsh ` or ` ```ps1 ` fence inside a Markdown document, get the same
+  keywords, strings, comments, numbers and function names every other language
+  has had — on Windows, on macOS and on Linux, with nothing new to install.
+  PowerShell was the one common language missing from the set of grammars Folio
+  carries, for a reason that was never visible from the outside: the grammar
+  needed one pattern rewritten before the pure-Rust regex engine Folio uses
+  would take it. The rewritten line, what it was, and why it means the same
+  thing are recorded in `assets/syntaxes/README.md`, beside the grammar itself.
+
+- **Folio no longer reads its installed PSReadLine module off disk on every turn
+  of the event loop.** Once a Windows PowerShell pane had reported its PSReadLine
+  version — or the Terminal settings page had been opened, which asks the same
+  question — the clock run's invitation check re-read the module from disk on
+  every turn, for the rest of the session, to answer a question the Settings row
+  asks once. The module is nine files and 437 KB; the reads come from the file
+  cache and were measured at about 100 MB a second, for as long as the window was
+  open, with nothing on screen or in the log to say why. **0.4.2 has this defect
+  too, and restarting Folio was the only relief.** The fact is now owned once by
+  the application rather than per window, and read at three edges: the moment the
+  version answer lands, an install or removal of the module, and the opening of
+  the Terminal page. A redraw or a hover on an already-open page is not an edge.
+  The rule this establishes is written down: a clock-run entry is a deadline or
+  an edge, never a poll, and a quiescent turn does no filesystem, registry,
+  PATH-search or process-start work.
+
+- **A frame a program held inside a synchronized update is no longer dropped,
+  and ending one keeps the sequence it interrupted.** Folio has two readers of
+  the instruction that opens a DEC 2026 block, and they disagreed on two
+  spellings of it: `CSI ? 1 ; 2026 h` and `CSI ? 2026 : 0 h` opened a block in
+  one and none in the other, so a window resized at that moment installed a grid
+  the held bytes had never reached — off the screen and off the history alike.
+  Both read every parameter now, and the first sub-parameter of each; an open
+  block ends on an exact byte match, because a parser holding one searches bytes
+  and reads no parameters at all. Separately, the deadline that closes a block a
+  program never ends used to throw away the escape sequence the boundary parser
+  was inside along with the block's own bytes, so the rest of that sequence's
+  payload was printed into the terminal as text. One function owns the release
+  now, and it never writes the flag that says a sequence is open.
+
+- **The key that redraws your prompt is sent only to a prompt the shell opened
+  in order.** `ESC[24;8~` is what `folio.ps1` binds `InvokePrompt` to, owed after
+  a ConPTY resize; whether a prompt was open was read from an `OSC 133` region,
+  which any program can open by printing one — a file through `cat`, a git author
+  name, a compromised motd. The next resize then wrote those seven bytes onto the
+  standard input of whatever was really running: `ssh`, `python`, an editor, an
+  agent's own display. The marks themselves stay permissive, deliberately, since
+  a program printing a whole cycle cannot be told from a nested shell speaking
+  the protocol; the order is checked once, where bytes leave for the child.
+  `shell_prompt_opened_in_order` asks for an open region, for the `B` to have
+  stood in a prompt an `A` opened, and for no command this session watched start
+  that it has not watched end. A nested integrated shell keeps its marks and is
+  not typed at while the command it runs inside is live.
+
+- **A printed path the disk refused is asked about again when the program prints
+  it again.** A denial used to stand until the pane's next `OSC 133 D`, and a
+  pane whose foreground program is one agent running for hours never ends a
+  command — so a file the agent named before writing it stayed dark for good,
+  including over the finished file. A denial is re-asked when a live row whose
+  fingerprint changed still spells the name; a repaint is not a printing, so an
+  unchanged row and a full-viewport redraw both cost nothing, no clock is
+  consulted, yeses are never re-asked, and a re-ask enters the same bounded
+  budgets by the same door.
+
+- **A name that is not there says "not found"**, where a reveal used to hand the
+  file manager a folder nobody had asked for — and on macOS to post nothing at
+  all. The routing table reads existence itself, so no arm can forget it, and the
+  press re-asks the question although the pane already holds an answer.
+
+- **A link under a resting pointer answers the first click.** The ledger's
+  question was put from pointer motion and nowhere else, so a path that arrived
+  by a wheel scroll or a fresh line of output, under a pointer already standing
+  on it, was never asked about: clicking it changed nothing, repeatably. One
+  function takes that question now and four doors ask through it — the pointer
+  move, the press going down, the hand-over modifier going down, and a frame
+  redrawn under a pointer standing still — with no filesystem call added to the
+  window thread to make it true.
+
+- **The Settings page is laid out when its content changes, not when the pointer
+  moves.** Every reader of the page's geometry in a turn — hit test, hover,
+  drawing, scroll clamp, the long menu's scroll-to-selected, the expansion clock
+  — laid the whole page out again, two or three times per pointer callback and
+  about 145 times in one turn. The geometry is a function of content, size, scale
+  and language, and it has one owner now that the readers share. Counted: opening
+  the page and moving the pointer across it 64 times went from 257 layouts to
+  one.
+
+- **A formula's two marks are placed from the frame being drawn, and stop when
+  the block lands.** They read the picture *before* the one being presented, so
+  during a change between a block's typeset picture and its source they trailed
+  the band by a frame and snapped into place when it landed. The band's own
+  geometry had a second fault at the same moment: its height and opacity were
+  interpolated while its width flipped in a single frame, so its ground and both
+  marks, which sit against the block's right edge, jumped sideways on the landing
+  frame of a shrink and the first frame of a grow — and the flight was settled
+  before that frame was composed, so it went on easing for another 90 ms after
+  the block had stopped. A window with no marks on screen now asks the picture
+  nothing at all.
+
+- **A focused pane is no longer sent a focus report it did not ask for.** Every
+  time a program turned focus reporting on, Folio reset what it believed the
+  program knew and sent an opening `CSI I`. ConPTY re-asserts focus reporting at
+  every program teardown and when the shell reads cooked input, so the byte
+  arrived at the prompt as a literal `^[[I`. A program that has just subscribed
+  already assumes the pane is focused; only the contrary is owed.
+
+- **A waiting card keeps the whole of its halo, and its dot breathes.** An outset
+  decoration grows from the card as drawn and is never clamped a second time; the
+  first card's top is the list's top exactly, so clamping the grown box had been
+  costing the waiting halo its entire top outset — 6 device pixels at 200% — on
+  every frame since the column existed, and the flight shadows were the same
+  shape. A decoration now grows only into the room its layout gives it, one
+  amount for all four sides, floored to whole device pixels, so a clamped card's
+  ring stays concentric and no scale that was already exact changed. The status
+  dot had never pulsed at all: the design page it was transcribed from names an
+  animation it never defines, and the transcription inherited the name without a
+  curve. It now takes the window's own 1.7-second breath, the one the halo uses;
+  reduced motion answers each channel's flat value — no halo, full dot.
+
+- **A zoomed pane's name is no longer printed under the zoom mark.** Three
+  functions owned "where the name starts" and only one of them knew about the
+  zoom, so a zoomed web pane set the first letter of its name in the same column
+  of pixels as the accent mark. The head is laid out once now, the mark is one of
+  its slots, and the name's left edge is derived from the slots actually present.
+  That pin caught an older overlap with it: a preview head with no room for a
+  name at all still placed the switcher and its badge under the tools.
+
+- **A preview pane too narrow for its switcher no longer swallows the keyboard.**
+  The layout folded the menu away while the window went on believing a popup was
+  up, so one press on the name of a pane dragged under about 262 logical pixels
+  ate every keystroke over a glass with nothing drawn on it. Each popup anchored
+  inside a pane has one answer to "would this draw anything" now, read by both
+  the layout and the window, so being drawn and taking the keyboard are the same
+  answer. Neither that menu nor the root menu folds for want of an anchor any
+  more: the switcher hangs from the name when the head wears no pill and the root
+  menu from the caption when the head carries no button, so the list of what the
+  preview has open stays reachable at every width, by pointer and by keyboard.
+
+- **A clipboard picture's shape is checked before it is decoded**, on the one
+  encoding that was not checking it. There is no TIFF decoder in this tree, so
+  the shape comes back out of the platform — the representation's own pixel
+  width, height and depth — and is judged by the same ceiling the PNG and DIB
+  arms use, and that judgement is the argument the decoding call is given. It
+  matters because an allocation failure inside AppKit ends the process rather
+  than returning an error, so a picture whose bytes are all there and whose real
+  shape is past the ceiling is now turned away instead of drawn at any cost.
+
+- **macOS: the loser of a two-launch race no longer keeps a window whose session
+  is discarded.** The data directory's claim is the single owner of "I am the
+  writer" and both of its endpoints are opened off it; ungated, the loser bound
+  the names first and the writer latched itself to nothing for the life of the
+  process, so every later launch landed in the window whose session writes go
+  nowhere. **And a preview goes to the last address it was given**, so an address
+  superseded by a later navigation is not replayed a round-trip later.
+
+- **An italic request on an upright-only CJK family stays italic.** Writing the
+  matched face's style back turned an italic request into Normal, so the
+  synthetic slant was never applied: italic Chinese in the terminal, and
+  `*emphasis*` in a preview, drew upright.
+
+
+## 0.4.2-preview — 2026-09-18
+
+### Added
+
+- **Dragging a file out of the files column into the middle of a terminal now
+  pastes its path, spelled for the shell running there.** The pane you are over
+  says which of the two things it will do before you let go: aim at a pane's
+  edge and you get the same split preview you have always got, and the file
+  opens beside it; aim at the middle of a terminal and the pane lights up with
+  `Paste path` on it, and the path arrives on that terminal's command line —
+  the one you dropped it on, not the one you had been typing in. It is the same
+  quoting a file dropped in from File Explorer or the Finder gets, so
+  PowerShell, `cmd`, a WSL shell and the rest each get the spelling they read,
+  and Folio runs no command of its own: the path is put in front of the cursor
+  for you to finish the line. A preview pane and a files column are unchanged —
+  their middles still mean what they meant — and `Esc` still calls the whole
+  thing off. If anything moves between the moment the pane lights up and the
+  moment you let go — your hand to another pane, a pane closing, a tab closing
+  under it — nothing is written at all, rather than written somewhere else. The
+  terminal that receives the path also takes the keyboard, so the next thing you
+  type — `Enter`, or the rest of the command — goes to the shell you dropped
+  onto; a drop that writes nothing leaves the keyboard where it was.
+
+- **Dropping a file onto Folio now puts its path on the command line.** Drag a
+  file out of File Explorer or the Finder and let go of it over a split, and its
+  path arrives in the terminal you dropped it on — not the one you happened to
+  be typing in — spelled for the shell running there. It is the same quoting a
+  file you *copied* has had since 0.4.1, so PowerShell, `cmd`, a WSL shell and
+  the rest each get the spelling they read. Several files let go of together
+  arrive on one line, one argument each, and a name the shell has no way to
+  spell is reported instead of being mangled. Folio runs no command of its own:
+  the path is put in front of the cursor for you to finish the line. The terminal
+  that receives the path also takes the keyboard, and Folio comes to the front —
+  you dropped the file here, so here is where you can carry on typing. A drop
+  that writes nothing changes neither, and a file let go of anywhere that is not
+  a terminal — over a card Folio is asking you something on, over a floating
+  window, on the tabs or in the gap between panes — is not typed anywhere at
+  all, rather than going to whichever pane you were last typing in.
+
+- **A picture on the clipboard now pastes as the path of a file Folio writes
+  for it.** A screenshot taken with `Win`+`Shift`+`S`, or with
+  `⌘`+`Ctrl`+`Shift`+`4` on a Mac, is on the clipboard as a picture rather than
+  as a file, so pasting it into a terminal used to type nothing at all — there
+  was nothing there a shell could be handed. Folio now writes it out as a PNG
+  and pastes that file's path, quoted for the shell in the pane exactly as the
+  path of a file copied in Explorer or the Finder already was. What the
+  clipboard holds still decides in one order: a copied file pastes its path,
+  text pastes as text, and only a clipboard holding a picture and nothing else
+  becomes a file — so copying a picture in a browser, which puts the page's own
+  text on the clipboard beside it, goes on pasting the text. The files are
+  written to `%TEMP%\folio\clipboard\` on Windows and to the same folder inside
+  your own temporary directory on a Mac, named for the moment they were taken,
+  and Folio keeps the twenty newest and removes the rest as it writes.
+
 ### Changed
 
 - **When Folio's window stops answering, its own log now says which kind of
@@ -19,6 +684,468 @@ All notable changes to Folio are recorded here. The format follows
   people actually notice live; a run started without it is unchanged.
 
 ### Fixed
+
+- **Everything that moves in a window is now drawn once per display frame, on
+  both platforms.** Turning a typeset formula over with `‹›`, and the two small
+  marks that travel with the block, moved in bursts rather than smoothly: Folio
+  was composing pictures as fast as the loop could turn — a dozen or two inside
+  one ninety-millisecond motion, far more than a screen can show — and then one
+  of them waited the better part of a tenth of a second for the display to take
+  them, so the eye read a flurry of near-identical steps and then a pause.
+  Windows was the worse of the two. A motion now asks for the next picture the
+  display will actually show, at the refresh rate of the monitor the window is
+  on, so a formula turning over and its marks travel evenly; a 144 Hz screen
+  gets twice the steps a 60 Hz one does. The same rate now governs every other
+  fade and slide in the window, and a window with nothing moving in it still
+  falls completely silent. A pane printing hard no longer holds anything still
+  either: whatever a picture was drawn for, it draws every motion at the instant
+  it is drawn, so a formula turning over beside a busy shell keeps moving and
+  still finishes on time.
+
+- **A typeset formula's highlight now leaves as soon as the pointer does, like
+  every other hover.** Move off a formula and its shading and its two small
+  marks stayed for another half-second before they began to go — the only thing
+  in the window that waited. They now start leaving on the same movement that
+  takes a pane header's buttons, a tab's close, a link's underline and a tooltip
+  away, and they fade out over the same ninety milliseconds they faded in on.
+  Reaching for one of the two marks still cannot drop the highlight: the marks
+  stand inside the formula's own shaded area, so the pointer never leaves it to
+  get to them. A formula caught in the middle of turning over goes on turning
+  over — looking away no longer cuts it short.
+
+- **A formula's highlight no longer stays lit after the formula has scrolled out
+  from under a resting pointer, and turning one over no longer stutters.** Two
+  things shared a screen. A formula showing its `$$…$$` source instead of its
+  picture had that picture drawn again on every single frame, thrown away each
+  time — several hundred renderings of one formula for a window nobody had
+  touched — which is the halting the change of face was reported for and which
+  left every other formula waiting behind it. A formula Folio could not draw at
+  all was tried again on every frame the same way, and fails the same way every
+  time; it is now tried once, and again only when something it was worked out
+  from changes — the text, the window's scale, the way formulas are read. And
+  the pale band under a formula, with the two marks beside it, was worked out
+  only when the pointer moved: if the formula itself moved away instead — a
+  wheel, a full-screen program redrawing, new output, a resized window — the
+  band stayed lit under a hand that was no longer on anything. Folio now asks
+  what the pointer is on whenever either of the two moves, and a formula that
+  comes back under the pointer before the half-second grace is up simply keeps
+  its marks rather than fading them in again.
+
+- **A formula scrolled partly off the top of a full-screen program's screen no
+  longer swallows the formula below it, and what is left of it on screen is left
+  as text.** When a program like Claude Code moves its output up and a formula's
+  opening `$$` goes off the top of the window, the `$$` still on screen is that
+  formula's closing one. Folio used to read it as the opening of something new,
+  which swallowed everything down as far as the next formula's own `$$` — so the
+  next formula stayed as plain text however long you looked at it, and where the
+  scrolled formula's `\begin{aligned}` was still visible, that much of it was
+  typeset on its own: a picture of part of a formula with the formula's last line
+  sitting underneath it as text. The formula below is now typeset, and the rows
+  above the stray `$$` that belong to no complete formula are left as the text
+  they are. An environment that is whole on the screen is still typeset on its
+  own, as it always was, and the `$$` under it stays one line of text: nothing
+  on screen says what that `$$` once enclosed. A formula Folio has already
+  typeset keeps its picture when its beginning scrolls off the top — that has
+  not changed. It is a formula Folio meets for the first time with its
+  beginning already gone that stays text: there is nothing on screen that says
+  what the whole of it was, so it waits until you scroll its beginning back into
+  view.
+- **A file name printed right before an opening bracket is recognised as a file
+  link again.** An agent that wrote `docs/report.html（commit …）` — the name, a
+  bracket, no space in between — left the name dark: Folio read the bracket and
+  everything behind it as part of the name and then found no such file. A
+  bracket now ends a name from either half of its pair, in every script one is
+  written in (`(`, `[`, `{`, `（`, `「`, `【`, `《` and the rest), exactly as the
+  closing half always did. Nothing a name could carry is lost by it: a file
+  whose name really holds a bracket was already unreadable without quotes,
+  because the closing half ends the name too — and quoting a path still opens
+  every name there is.
+
+- **A formula no longer flashes back to its source while you scroll inside a
+  full-screen program.** On macOS the system hands a terminal a program's
+  output in pieces of at most 1,024 bytes, so one redraw of a full screen
+  arrives as several of them a millisecond or two apart — and Folio could draw a
+  frame in between, with half of the redraw on it and a formula's source only
+  half written, which is not a formula, so the picture came down and the text
+  showed through. Folio now waits up to three milliseconds for the rest
+  whenever the system says there was more to come, and draws the whole redraw at
+  once. Typing is not delayed: a keystroke's echo is the system saying there is
+  nothing more, so it is drawn on the same frame as before. A program that
+  pauses in the middle of writing its own redraw can still be caught half-drawn
+  — nothing outside that program can know it has not finished — unless it marks
+  its redraws with synchronized output, which Folio has always honoured.
+
+- **A formula scrolling back into view inside a code block stays code.** When a
+  formula came back onto the screen, Folio asked whether it still reads those
+  lines as a formula — but it worked out the answer for those lines on their
+  own, while reading the screen as a whole can reach a different one. On a
+  screen whose first `$$` belongs to a formula that began above the top of it,
+  the two disagree: reading the whole screen finds a code fence and leaves the
+  `$$x^2$$` below it as code, and the shorter reading did not see the fence at
+  all — so a picture appeared over a line inside a code block, went away on the
+  next redraw of the same screen, and came back on the one after. The question
+  is now answered once, by reading the whole screen, which is the same reading
+  everything else in Folio uses.
+
+- **Folio no longer looks for a formula it has already failed to find, over and
+  over, on a screen that has not changed.** When a formula scrolls out of view,
+  Folio keeps its picture aside so that it can be given straight back the moment
+  the same text comes into view again. Looking for it means reading the whole
+  screen and working out what is on it, and that was being done afresh on every
+  read from the program — so a full-screen program that redraws its whole screen
+  each time you press a key made Folio do all of it on every keystroke, for each
+  formula it was holding aside, to reach the answer it had reached the moment
+  before. It is now asked once and asked again the instant anything it depends
+  on moves, so a formula scrolling back into view is still typeset in the very
+  frame that brings it back.
+
+- **A picture Folio has just taken down does not come back a moment later.**
+  While a full-screen program or a reprinting one is redrawing, Folio holds the
+  formulas already on the screen steady. If something ruled one of them out
+  during that redraw — the shell saying those lines are the command line you
+  type on, or Folio reading them again and deciding they are no longer a
+  formula, for instance because a code fence opened above them — the picture
+  went, and then the end of the redraw put it straight back, over lines it had
+  just been ruled off. A formula ruled out while a redraw is in progress now
+  stays out; one that is worked out again in the same redraw keeps its new
+  picture.
+
+- **After dragging a window's edge back to where it started, formulas in that
+  pane are typeset again — they used to stop for good.** If a drag, a divider,
+  a zoom or a move between monitors ended on the same size it began on, the
+  pane it happened to was left believing the gesture had never finished. Nothing
+  looked wrong at the time, and nothing ever came back: from that moment on
+  that pane typeset no formula, drew no table, and showed no picture for an
+  image path you printed — the ones already on the screen stayed, so the change
+  was easy to miss until the next thing you ran came out as source text and
+  stayed that way. Anything else Folio waits for a quiet screen to do was
+  waiting on the same signal, so it stopped too. It is over when the gesture is,
+  now, whether or not the size changed; the shell in that pane is still told
+  only when its size actually moved, so nothing is sent to it that it does not
+  need.
+
+- **Programs that ask which terminal they are running in now get an answer.**
+  Folio was silent when a program asked, and a terminal that says nothing is
+  treated as one that can do nothing — so full-screen programs such as Claude
+  Code never went on to ask whether Folio can update the screen in one piece,
+  and drew their frames the old way instead. Folio now answers with its own name
+  and version, the second question gets asked, and those programs switch to
+  updating the whole screen at once.
+
+- **A formula whose source was too long for the pane was read and typeset all
+  over again when it scrolled up into the history, instead of taking the
+  picture it already had with it.** A formula is proven on the rows of the
+  screen it stands on; history is kept in lines, and a line too long for the
+  pane takes two rows and is still one line. The handover counted rows and
+  looked for the end of the block one line too far down, found nothing there,
+  and let go of the picture — so the same formula was found and drawn a second
+  time, for nothing. Nothing of this was ever on the screen: the last row of a
+  block leaves the window in the same instant it leaves the live screen, so
+  what came back was already out of sight. It is work that is no longer done,
+  not a flicker that has stopped.
+
+- **A formula typeset while a full-screen program was redrawing no longer
+  disappears the moment that redraw finishes.** Folio holds its formulas steady
+  across a redraw by remembering them when one starts — but a formula Folio
+  worked out *during* the redraw was not in that memory, and finishing the redraw
+  threw it away, so it went back to LaTeX and had to be worked out and drawn all
+  over again. Replaying the owner's own recording, that happened at every one of
+  its 117 redraws.
+
+- **When a program finishes one screenful and begins the next in the same breath,
+  the formulas on the finished one stay where they are.** Folio went on reading the
+  new screen against the old one's layout, so with two identical formulas on show
+  one picture was placed over the other's lines and the other went back to LaTeX.
+
+- **A picture is never left standing over a formula that has just been edited.** A
+  program that replaced a formula's body in the middle of redrawing could leave
+  Folio showing the old picture over the new text until the redraw after it. Every
+  picture is now checked against the lines underneath it the moment they change.
+
+- **A formula edited in place is typeset again.** When a program rewrote only the
+  middle of a formula and left its `$$` lines untouched, the old picture went — it
+  was a picture of text that was no longer there — and nothing replaced it: Folio
+  had already answered the question on that formula's first line, and nothing on
+  that line had changed to make it ask again. A line that changes now reopens every
+  formula it belonged to, and a formula whose lines come back unchanged is still
+  never read twice.
+
+- **A picture is never put on a line that is a formula plus something else.** When
+  a formula scrolled back into view on the very last line of the content — the line
+  a full-screen program often shares with its own "jump to bottom" chip — Folio drew
+  the picture there even though it does not read such a line as a formula at all. A
+  moment later it took the picture off again, and drew it for real only once the
+  formula had scrolled onto a line of its own. Replaying the owner's own scrolling
+  session, that was the last of its flicker. A formula scrolling back onto a
+  bulleted line, a heading, or a line ending in a comma keeps its picture, and one
+  indented as code is left as code — Folio asks the same question there that it
+  asks everywhere else.
+
+- **Resizing the window while a program is drawing no longer loses a formula.** A
+  redraw that was still in progress when the window changed size went on measuring
+  against the old shape of the screen, so a formula could be drawn over the wrong
+  lines and another one lost — on a screen whose text had not changed at all. The
+  same redraw no longer loses them for a frame when Windows hands back the size it
+  settled on, either.
+
+- **A formula edited before Folio finished reading it the first time is read
+  again.** If a program replaced a formula's middle while Folio was still drawing
+  that formula, the drawing was thrown away — rightly, it was of text that had gone
+  — but nothing went back to look at what replaced it, and the formula stayed as
+  LaTeX for as long as it was on the screen. Going back to look costs the same
+  whether the screen is drawn thirty times a second or three hundred: Folio waits
+  for the whole formula to stop moving, not just its first line.
+
+- **A prompt that scrolls up the screen still is not typeset.** Folio decides
+  what a command printed from the text itself as it arrives, and it now keeps
+  that decision when the line scrolls off into the history rather than working
+  it out again from where the line used to sit — so a prompt that spelled the
+  same thing a command had printed stayed a prompt on its way past, instead of
+  becoming a formula the moment it left the screen.
+
+- **Dragging a window edge no longer lets a formula swallow the line under
+  it.** A formula kept while you resize is put back where its source now sits,
+  but it went on claiming as many rows as it used to occupy — so widening the
+  window, which lets a long formula fit in fewer lines, left it covering the
+  text underneath, and narrowing it left the formula showing its source until
+  the next redraw. Both lasted as long as the drag. A formula now occupies
+  exactly the lines its own source occupies at the width you are at.
+
+- **Two lines with the same formulas in them no longer show each other's
+  picture.** Where a line has more than one `$…$` in it, Folio draws the whole
+  line's formulas as one picture, and it was filing that picture under the
+  formulas alone — so two lines carrying the same formulas with different words
+  between them were treated as the same picture, and whichever Folio drew first
+  was shown for both. On the other line the second formula appeared in the wrong
+  place, over the words beside it. The picture is now filed under where its
+  formulas actually sit as well, and lines that really do match go on sharing
+  one. The same is true of a line whose formulas are spread over more than one
+  row: each row's picture is now filed under the part of the image it shows,
+  rather than only under where that part begins.
+
+- **Right-clicking a formula copies that formula, not one from the pane you
+  last typed in.** Copy LaTeX asked whichever pane held the keyboard, and a
+  right press does not move the keyboard — so in a split, copying from a formula
+  in the pane you were only pointing at either did nothing at all or, when the
+  other pane happened to hold a block in the same place, copied that one
+  instead. All three of a formula's actions — copy, show source, and the source
+  toggle's animation — now act on the pane the formula is in.
+
+- **A formula nested past what Folio can draw is refused, rather than ending
+  the program.** Some shapes of mathematics nest as deeply as they are long —
+  a stack of superscripts, a fraction inside a fraction inside a fraction, or a
+  short definition repeated — and following one down far enough used to end
+  Folio outright, from text a program had only printed. Folio now stops at its
+  limit as it reads, rather than trying to guess beforehand how far a formula
+  would take it, and leaves anything past that limit as the text you printed,
+  the way it leaves anything else it cannot draw. The limit is far beyond any
+  formula written to be read: thirty fractions inside one another, a dozen roots
+  inside one another, and every ordinary matrix and alignment are drawn as
+  before. An earlier attempt at the same fix guessed the depth in advance, and
+  guessed it wrong in both directions — it let several shapes of deep nesting
+  through, and refused a long row of perfectly flat fractions.
+
+- **A table of mathematics that would be too big to draw is refused before it is
+  drawn, not after.** A row of column markers and a column of row markers is a
+  handful of characters, and it asks for a grid as wide and as tall as both —
+  eight thousand characters could have asked for seven million cells, which is
+  minutes of work and more memory than Folio has. It now works that out from the
+  formula itself and leaves anything past its limit as the text you printed. It
+  works it out from what the formula becomes rather than from how it was written,
+  so putting the markers in a group, or behind an abbreviation, or in no table at
+  all, makes no difference. The limit is a sixty-four by sixty-four grid; an
+  ordinary matrix, a long alignment, a definition with thirty cases and a
+  multi-line derivation are all nowhere near it.
+
+- **A formula cannot run a program.** Mathematics written for TeX has a corner
+  of its notation that says "and here is some Typst" — Folio passed that through
+  and ran it, so a line of text a program printed into a pane could ask Folio to
+  loop forever, or to build something so large that it ran out of memory. The
+  first would have left every later formula on screen as plain text, with nothing
+  to show it was waiting; the second would have ended Folio. Folio now leaves
+  such a formula as the text you printed, the way it leaves anything else it
+  cannot draw, and the spacing commands that used to be worked out by running
+  them are read instead. Nothing that was ever a formula changes.
+
+- **One formula that cannot be drawn no longer takes the whole window with
+  it.** A fault while typesetting was caught in one stage of the work and not in
+  the others, so a fault in any of the rest ended Folio — every pane, every
+  shell, over one line of mathematics. A formula that goes wrong now stays as
+  the text you printed and nothing else is disturbed. Folio also refuses a
+  formula nested past its stated limit when the nesting is written without
+  braces, which it used to count only one way and let through the other.
+
+- **A screenful of formulas all at once no longer leaves the first few as raw
+  text.** Printing a dense page of mathematics — a report, a log, anything that
+  arrives in one go — gave Folio more formulas to draw than it queues at a time,
+  and the ones it could not take right away were forgotten rather than picked up
+  on the next pass. They stayed as `$…$` until something else disturbed the
+  line. Folio now comes back for them without letting a continually repainted
+  line hold up the rest.
+
+- **An inline formula in a command's output is typeset even when its picture is
+  ready only after the prompt has come back.** Printing a file of mathematics
+  hands Folio the whole file and the shell's "the command is done" mark in one
+  breath, so every picture in it is finished a moment later — and a `$…$` was
+  being judged, at that moment, against a command that had already ended. Some
+  of them typeset and some were left as raw text, the same file coming out
+  differently from one run to the next, and a line long enough to wrap tended to
+  lose both of its formulas at once. Which text a command printed is now written
+  down as it is printed, so the answer no longer depends on when the picture
+  happens to be ready. Displayed `$$` blocks were never affected: they carry
+  their own proof.
+
+- **Your prompt is never typeset as mathematics, whatever it says, wherever it
+  moves, and whatever a command does to the line afterwards.** Folio decides what a command printed by remembering it at the
+  moment it arrives, rather than by working it out afterwards from where things
+  sit — so a shell that redraws its prompt with the very text a command had just
+  printed gets a prompt, not a formula, and so does one that clears the screen
+  first, or reprints after a reset, or writes a shorter prompt over an older
+  line. The same holds when the screen moves underneath: inserting, deleting,
+  scrolling or shrinking rows carries each line's own history with it instead of
+  handing it whatever used to stand in that place. And a command that writes
+  over part of your prompt's line — with a tab, an accent, or by filling the
+  screen first — does not thereby take the rest of it: Folio asks that every
+  character on a line be one a command printed, so text that arrives by a route
+  nobody has taught it about is left alone rather than taken for output.
+
+- **Formulas printed after a full-screen program exits are typeset again.** When
+  a command shows something full-screen on its way — a pager, an editor, a menu
+  — and then carries on printing, everything it printed after that program left
+  was treated as though nobody knew where it came from, so `$…$` in it stayed as
+  raw text until the next command started. What a command prints on the screen
+  it has just been handed back is that command's output, and it is typeset like
+  the rest of it. What the full-screen program itself drew is unchanged.
+
+- **A formula is no longer taken down by its neighbour's result.** Folio looks
+  at every line that could be the start of something, and inside a block of
+  mathematics its own body lines look like that too. When one of those came back
+  as "nothing here", it took down whichever picture happened to be standing over
+  it — so a matrix could vanish the instant the formula above it finished, and
+  come back only when something else made Folio look again. An answer about one
+  line is now an answer about that line.
+
+- **A formula block that had partly scrolled into the history is no longer cut
+  off at the bottom by the line after it.** Print the same file twice and the
+  second printing pushed the first one's `$$` block up until its opening line
+  had already settled into the history while its closing line was still on the
+  live screen. A block standing across that join was drawn at the height of the
+  three lines it was written on rather than at the height of the picture it had
+  become, so a tall formula — an integral, a fraction, anything with something
+  above and below the line — lost its bottom edge under the next line of
+  output. The lines the block spans now make room for the whole of it wherever
+  it stands, and a block shorter than its own lines is placed exactly as
+  before.
+
+- **Clicking a command's mark beside the scroll bar goes to that command every
+  time, also when a formula is on screen.** A mark for one of the newest
+  commands — one whose own line is still on the live screen — could not always
+  be brought to the top of the pane, because there is nothing below it to
+  scroll to, and Folio answered that by forgetting the jump altogether: the
+  pane went back to following the output, and the moment there *was* room to
+  stand on the command you were left at the bottom instead. It took a second
+  click on the same mark to get there, so the same click did two different
+  things. A jump is now kept as the place you asked for until you say
+  otherwise, and a pane resting at the bottom still follows new output exactly
+  as it did.
+
+- **Losing the graphics device no longer closes Folio.** A power cut that
+  switches a laptop to battery, a graphics driver that updates itself, a machine
+  that changes which GPU it draws on: each of these takes the device away
+  underneath whatever is on screen at that instant. Folio already knew how to
+  ask the machine for another one and carry on, but a picture that was halfway
+  prepared when the device went reached a call that could only end the run —
+  the window closed, and every shell open in it closed with it. Nothing on
+  that path can end the run any more: the half-prepared picture is dropped, the
+  device is asked for again, and the window draws everything it was saying on
+  the new one.
+
+- **A dropped file now lands in the terminal you dropped it on even when Folio
+  is busy, or when you were last hovering somewhere else.** Where the file was
+  let go of was worked out after the fact — when Folio got round to typing the
+  path — and it preferred the last place it had seen your pointer, which during
+  a drag from another program is wherever your hand happened to be the previous
+  time it was over the window. On a split, either reading could name the wrong
+  terminal: the one you had been hovering before you went to fetch the file, or
+  whichever one your hand had moved on to while Folio was catching up with a
+  busy pane. The position is now read at the instant the file is released, and
+  nothing later can change it.
+
+- **Closing a pane or a tab no longer pauses the window while the program
+  inside it winds down.** Shutting a shell down is several steps, and one of
+  them waits for the console host to let go of everything running under it —
+  which for a pane that had an agent or a Node program in it can take seconds.
+  All of it used to happen between your click and the next frame, so closing a
+  tab could leave the window sitting still for as long as the program took to
+  go. The pane now leaves the window the moment you close it and is taken apart
+  on its own; if something in there takes an unusual amount of time, Folio notes
+  it in its own log instead of making you watch. Quitting still waits for those
+  to finish, briefly and with a limit, so nothing is left running behind a
+  window that has gone.
+
+- **On a Mac, Shift+wheel now scrolls the rows a formula pushed out of view.**
+  A typeset formula is taller than the line it was typed on, so it lifts the
+  rows above it off the top of the pane; the chip under a full-screen program
+  counts them and offers Shift+wheel to go back and read them. On a Mac that
+  gesture did nothing at all. macOS turns Shift plus a wheel into a sideways
+  scroll before Folio is shown it, so the notch arrived pointing along a line
+  instead of up a document, and a pane asked to move up by nothing moved by
+  nothing. Folio now reads it as the turn your hand made. Shift+wheel over a
+  line longer than the pane still scrolls sideways, and on a Mac it now goes
+  the way it has always gone on Windows rather than the opposite way.
+
+- **Closing Folio no longer waits for ever on a disk that has stopped
+  answering.** Folio writes your session to a file on the way out, and it waited
+  for that write to finish however long it took. On a folder that lives on a
+  network share or a cloud-sync drive that has gone quiet, that is for ever —
+  the windows are already leaving and there is nothing left to click. Folio now
+  gives the save three seconds, writes one line in its own log saying the save
+  did not finish, and closes. What you find on the disk next time is the last
+  save that completed, which may be the one that was still going when Folio
+  left: the file is never half written, so whichever of the two it is, it is
+  whole. Folio also keeps the marker that says this run did not see its save
+  finish, so the next start offers to restore rather than assuming all was well.
+  did not finish and that the last completed one still stands, and closes. The
+  file itself is never left half written: a save replaces it in one move. A save
+  that has already begun can still finish after Folio has gone, so what you open
+  next time is the last save that completed.
+- **Closing a pane whose reader is stuck no longer hangs the window.** When a
+  pane closes, Folio waits for the thread that was reading that shell's output
+  to come out of its last read. On one machine that wait held the window for
+  five seconds. It is now bounded: the reader gets two seconds, and past that it
+  is left to finish by itself while the window carries on. A shell that refuses
+  to be reaped no longer leaves the console and the reader standing behind it
+  either.
+
+- **A Codex, Claude Code or Copilot configuration file Folio cannot read is now
+  left exactly as it is.** Turning one of the agent rows on Settings ▸ Agents on
+  or off reads that program's own configuration file first — `config.toml`,
+  `settings.json`, `folio.json` — and a file Folio could not read was taken for
+  a file that was not there: a single byte that is not UTF-8 somewhere in it, a
+  permission that withholds it, or another program holding it open, and Folio
+  wrote a fresh file over the one you had written, with no copy kept anywhere.
+  Folio now tells "there is no file" apart from "there is a file and I could not
+  read it". The second one leaves your file untouched, shows the row as
+  something it will not write, and says so when the row is pressed. A file it
+  can read is still copied beside itself before anything is changed, as it was.
+
+- **A picture that has not changed no longer asks the GPU to draw it again.**
+  Repeated redraws compare each pane and the window furniture around it with the last
+  complete picture. Caret blinks, hover marks and moving panes still redraw;
+  resizing and replacing a surface always get their own frame.
+
+- **Reordering your profiles no longer closes the window when a pane is
+  opened.** Moving a row in Settings ▸ Profiles, or deleting one, changed which
+  profile every already-open pane thought it was running: a pane held the row's
+  place in the list rather than the profile itself, and the list had just moved
+  under it. Splitting or restarting such a pane started whichever profile had
+  slid into that place, without saying so, and that wrong profile was written
+  into your saved session, so it came back the same way the next morning. When
+  the list had grown shorter than the place a pane was holding, opening a pane
+  closed Folio outright, taking every tab in every window with it. A pane now
+  names its profile by the profile, so a list that moves cannot move it; a row
+  you really did delete costs that pane its shell choice and nothing else, and
+  the pane says so in its first line.
 
 - **On a Mac, a second Folio started from a terminal now hands over instead of
   becoming a second writer.** Which Folio is allowed to write your settings and
@@ -62,16 +1189,20 @@ All notable changes to Folio are recorded here. The format follows
   unambiguous — one unclosed `$`, the matching one near the start of the next
   line, and nothing in between that starts a new paragraph, bullet or heading — so
   a price at the end of a sentence is still a price.
-- **Copying a formula no longer leaves the window busy.** The tick that confirms
-  the copy has always come down after a moment on screen, but the window went on
-  asking to be woken for it for as long as it stayed open — one processor core,
-  spent on a window doing nothing. The confirmation is now finished with when it
-  leaves the screen.
-- **A formula's two marks stay with the formula.** Switching tabs or closing a
-  pane used to leave the marks from the block you had been pointing at standing
-  over whatever came next, until you moved the mouse. And in a window split into
-  panes of different sizes, the marks in an unfocused pane were placed — and
-  could be pressed — as though that pane were the size of the focused one.
+- **An inline formula in earlier output stays typeset when the window is
+  resized.** Changing a window's width has every formula on screen set again at
+  the new size. A `$…$` formula inside a command's output had to establish a
+  second time that its line was printed by a command, and the evidence for that
+  leaves when the prompt line the command began on scrolls out of the history —
+  so an older formula came back as the text you typed and stayed that way for
+  the rest of the session, while the `$$…$$` blocks beside it were set again as
+  usual. Where a line was printed is now noted as the line arrives and kept with
+  it, so a resize gives back the formulas it took away.
+
+- **A typeset formula no longer flashes back to its source while a program
+  repaints the screen.** A redraw arriving in several pieces now keeps the
+  formula's picture until the whole turn has finished, without waiting for it
+  to be typeset again.
 
 - **Maximising or resizing a window no longer pauses when a pane has a long
   history behind it.** Every pane on screen was copying its whole terminal
@@ -116,9 +1247,16 @@ All notable changes to Folio are recorded here. The format follows
   used to stop dead for seconds at a time, mid-keystroke, whenever the shell
   collecting the trace stopped reading it: the window was waiting for the
   recording to be taken, so the very thing being measured was what made it slow.
-  The lines now go to a thread of their own, and a run that produces them faster
-  than they can be written drops some and says how many rather than holding the
-  window.
+  The trace's lines now go to a thread of their own, and a run that produces them
+  faster than they can be written drops some and says how many rather than
+  holding the window. What Folio writes about itself no longer goes near that
+  recording either: the watchdog that reports a window which has stopped
+  answering writes the report and the line naming it into `diagnostics.log`
+  through a handle of its own, so it stays at work whatever the shell reading the
+  trace is doing, and so do the notes about a copied picture that could not be
+  saved and a session that could not be written on the way out. The other
+  messages Folio can print on that console — each of them about something that
+  has already gone wrong — still go to it directly and can still wait for it.
 
 ## 0.4.1-preview — 2026-09-16
 

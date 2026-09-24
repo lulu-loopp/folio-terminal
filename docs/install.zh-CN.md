@@ -7,7 +7,7 @@
 从[发布页](https://github.com/lulu-loopp/folio-terminal/releases)下载
 `folio-<version>-windows-x64.zip`，解压到任意目录，运行 `folio.exe`。无需安装。`SHA256SUMS.txt` 是下载文件的校验和。系统要求：**Windows 10 1809 及以上或 Windows 11，64 位**。
 
-压缩包共九个文件，需放在同一文件夹中。`folio.exe` 是主程序；`conpty.dll` 和 `OpenConsole.exe` 是启动 shell 的必需组件；`folio.msix` 是签名包，用于注册右键菜单第一页入口，指向解压目录；`folio-here.cmd` 供 VS Code 调用；其余是两份许可证、第三方声明和商标说明。
+压缩包共十个文件，需放在同一文件夹中。`folio.exe` 是主程序；`conpty.dll` 和 `OpenConsole.exe` 是启动 shell 的必需组件；`folio.msix` 是签名包，用于注册右键菜单第一页入口，指向解压目录；`folio-here.cmd` 供 VS Code 调用；`uninstall.cmd` 用于卸载清理；其余是两份许可证、第三方声明和商标说明。
 
 网页预览需要 **WebView2 Runtime**。Windows 11 已内置；Windows 10 通常也有，若缺少可安装 [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。缺少时预览窗格提示。
 
@@ -70,6 +70,21 @@ agent 等待标记首次需要在窗口之外提醒时，macOS 会询问是否�
 Finder 右键菜单的**服务**下有 **Open in Folio**——Folio 首次运行时自动注册，无需手动开启，也不需要注销。在文件夹上点击时打开一个标签页进入该文件夹；在文件上点击时进入文件所在的文件夹。Folio 还有自己的菜单栏，每一项的快捷键与[快捷键](shortcuts.md)表中对应行一致。
 
 Agent 页的三个开关**默认关闭**，各自读取对应工具的配置文件并显示当前状态。新机器上配置文件不存在，三项均显示关闭。
+
+## 卸载
+
+关闭 Folio，在另一个终端中运行一条命令：
+
+- **Windows：** 在解压目录中运行 `folio.exe --uninstall-cleanup`，或双击 `uninstall.cmd`。
+- **macOS：** `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`。
+
+命令不开窗。它移除 Folio 的整合项，保留属于另一份 Folio 的 hook 和右键菜单登记，逐项报告结果。退出码 `0` 表示清理完成；`1` 指出需要修正后重试的项；`2` 表示 Folio 正在运行，或使用 purge 时有进程仍持有数据。
+
+在同一命令后加 `--purge` 可同时删除设置、会话和浏览器数据，包括 Windows 上的两个数据根目录和历史数据目录，或 macOS 上的全部六个数据位置。不加则数据保留。**macOS 上 Folio 无法判断是否有其他程序持有此数据**，清除前请先退出 Folio。带日期的配置备份不删除。应用文件夹本身不会被删除。清理完成后，删除解压文件夹或将 Folio.app 移至废纸篓；经包管理器安装的，用对应的包管理器卸载应用。
+
+macOS 通知权限和缓存的服务条目由系统管理，删除应用包后可能需要一段时间才会反映。Windows 通知记录和包管理器信息同样由各自的管理方维护。
+
+已经删除了 Folio？参阅[删除 Folio 后的恢复](recovery-after-deleting-folio.zh-CN.md)。
 
 ## 已知问题
 

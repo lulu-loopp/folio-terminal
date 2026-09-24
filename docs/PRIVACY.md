@@ -82,6 +82,12 @@ rm -rf ~/Library/Application\ Support/Folio/diagnostics*.log \
        ~/Library/Application\ Support/Folio/hang-reports
 ```
 
+The local diagnostics log can also contain file-read totals by lane and up to
+three repeatedly read file **basenames**. The file-read ledger never writes
+parent directories or file contents; it clears its bounded name table each
+minute. Basenames may still be meaningful, so review them before attaching a
+log to an issue. These diagnostics are not sent anywhere automatically.
+
 ### The web preview's profile
 
 A separate place from the directory above, and where it is depends on the
@@ -324,3 +330,12 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
   也不按。卡本身记下的只有一件事：它已经出现过。
 - 若干 `BT_*` 环境变量会让 Folio 把终端内容写到你指定的文件——`BT_PTY_DUMP` 写的是每个
   窗格的每一个字节。你不设，它们就都不生效。全部列在 `docs/BT-ENVIRONMENT.md`。
+
+### Input recordings (2026-09-20)
+
+`BT_PTY_INPUT_DUMP=<path>` is the send-side companion to `BT_PTY_DUMP`. It is off
+unless you explicitly set a nonempty path, including in release builds. It writes raw
+queued input and a timed, per-pane manifest with the caller's reason label to
+`<path>.in` and `<path>.in.chunks` (later panes add `.2`, `.3`, etc. to the raw path).
+It **records your keystrokes, including anything typed at a password prompt; for a
+diagnosis you run yourself, never to be shared unread**. See [BT-ENVIRONMENT.md](BT-ENVIRONMENT.md).

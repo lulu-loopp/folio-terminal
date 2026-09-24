@@ -10,15 +10,16 @@
 #     cargo test --workspace --locked -- --ignored --list
 #
 # Why any of them are ignored at all — the policy this list exists to state.
-# Twenty-eight of the thirty are **probes**, not regressions:
+# All but a few of these are **probes**, not regressions:
 #
 #   * nineteen in `bt-pty` drive real ConPTY sessions against a real PowerShell
 #     and read what comes back. Their assertions are about host timing and about
 #     upstream PSReadLine versions, so they answer "what does this machine do",
 #     which is a question with a different right answer on every machine.
-#   * two in `bt-transcript` are the reference-resolution probes over a printed
-#     scrollback.
-#   * five in `bt-app`: one writes a picture for a person to look at, two
+#   * one in `bt-transcript` is the reference-resolution probe over a printed
+#     scrollback. Its neighbour, the unquoted space-cut prefix, left this list on
+#     2026-09-21 when §7.30 gained the readings that settle it.
+#   * seven in `bt-app`: one writes a picture for a person to look at, two
 #     are the large-document typing benchmarks (T-MD-TYPING-PATH; the eager one is the reference), which time
 #     the whole input-to-layout path on docs/DESIGN.md and prints a table --
 #     wall-clock on a shared machine, so it is read by a person and never
@@ -29,6 +30,18 @@
 #     person; the byte budgets it proves are asserted in the normal suite.
 #     The fifth (T-PASTE-1) measures direct MSVC CRT argv parsing against a separately
 #     compiled fixture, with no shell or window; its pure encoder fixtures run normally.
+#     The sixth (T-STALL-REPORT-FINER) times one hang-watch station enter/leave and one
+#     thread-CPU read on this machine and prints both; the accounting it costs is pinned
+#     by value tests in the normal suite.
+#     The seventh (T-CJK-FONT-PICKER) lays the whole settings page out with this machine's real
+#     fonts and the installed CJK list and prints the time, for the settings_layout stall that
+#     was never reproduced; the page's row and line budgets are pinned in the normal suite.
+#
+# One more in `bt-app` is not a probe but a fixture the harness cannot always build:
+# `shell_integration_symlink_profile_and_linked_parent_are_refused` creates a real symbolic
+# link and a linked parent directory, which on Windows needs a privilege an ordinary CI
+# account does not hold. The refusal itself is pinned in the normal suite through injected
+# metadata; this one is run by hand on a machine that may create links.
 #   * one in `bt-math` (`minus_probe`, tests/unary_minus.rs) prints, for a handful of
 #     formulas, every run the typesetter set on this machine -- face, glyph ids,
 #     advances -- to be diffed against another machine when a glyph goes missing
@@ -38,6 +51,15 @@
 #     pump, which is the same "what does this machine do" question the ConPTY
 #     probes ask. Run it with
 #     `cargo test -p bt-platform -- --ignored --nocapture`.
+#
+# One is neither a probe nor a regression: it is a **writer**, like
+# the symbol sheet above it. `highlight::tests::regenerate_the_powershell_packdump`
+# rebuilds `assets/syntaxes/PowerShell.packdump` from the `.sublime-syntax`
+# beside it, and it is ignored because a test that writes into the source tree
+# must be asked for. What it would otherwise assert is asserted, in CI, by
+# `the_powershell_packdump_is_the_vendored_grammar`, which rebuilds the same
+# thing in memory and fails if the checked-in dump is not it. Run it with
+# `cargo test -p bt-app --bin folio regenerate_the_powershell_packdump -- --ignored`.
 #
 # A test that belongs in CI does not go on this list; it stops being ignored.
 #
@@ -60,12 +82,15 @@
 # two come off this list first.
 
 minus_probe
+hang_watch::tests::measure_cpu_sampler_and_station_cost
+highlight::tests::regenerate_the_powershell_packdump
 marks::tests::the_symbol_sheet_is_written_for_a_person_to_look_at
 paths::tests::a_scrollback_relative_reference_keeps_the_directory_it_was_printed_under
-paths::tests::an_unquoted_path_cut_at_a_space_does_not_link_its_prefix
 preview_typing::md_typing_path_benchmark
 preview_typing::md_typing_path_eager_benchmark
 preview::tests::md_loading_worker_benchmark
+settings::tests::cjk_settings_layout_timing_probe
+shell_integration::tests::shell_integration_symlink_profile_and_linked_parent_are_refused
 tests::a_long_chinese_session_never_runs_the_atlas_out_of_room
 tests::a_recall_carved_into_the_prompt_is_the_child_s_own_console_buffer
 tests::a_session_long_enough_to_wear_the_packer_out_gets_its_text_back
@@ -92,3 +117,8 @@ webview::webview2_runtime_probe::a_local_page_reaches_only_its_own_folder
 # T-PASTE-1: defined MSVC wmain argv consumer must be compiled separately; native acceptance
 # runs it directly with CREATE_NO_WINDOW, no clipboard, shell, keys or Folio. Pure literals run normally.
 shell_literal::tests::direct_crt_receives_the_exact_literal_after_the_program_token
+
+# T-B native config-link and executable-alias fixture needs symlink privilege.
+# The decision itself is pinned everywhere by the injected-facts test
+# attention_a_link_is_followed_only_inside_the_agents_own_folder.
+attention_ownership::tests::attention_a_linked_config_is_edited_at_its_target_inside_the_agents_folder

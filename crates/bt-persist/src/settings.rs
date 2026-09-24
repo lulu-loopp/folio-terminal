@@ -290,7 +290,40 @@ use serde::{Deserialize, Serialize};
 /// machine's capabilities, so a file carried from a Mac to a Windows box arrives whole and means
 /// the same thing on the day it is carried back. What decides whether the row is *shown* is
 /// `bt_app::settings::visible_rows`, where every other platform-shaped row is decided.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 34;
+///
+/// **v35 carries `terminal_cjk_font_family`**, the terminal grid's CJK face. It is the v8 font
+/// family's shape one more time: an empty string means automatic, because a file that has never
+/// been asked must follow this build's platform chain rather than pinning today's first family.
+/// The migration writes that absence of a choice, so upgrading changes only who owns the fallback
+/// decision, not what the reader said.
+///
+/// **v36 carries `repair_row_breaks`**, the Rendered blocks page's switch over the detector's
+/// repair of the row separators a coding agent's own redraw of its finished answer eats.
+///
+/// **It lands on**, and that is carrying a behaviour forward rather than imposing a new one: every
+/// build that could have written a v35 document made this repair unconditionally, with no way to
+/// ask for anything else, so a reader upgrading has been watching it work for as long as they have
+/// had typeset matrices — and a migration that wrote `false` would take a working screen away from
+/// them without being asked.
+///
+/// **v37 carries `multiline_paste_ask`**, the Terminal page's switch over the card a paste of
+/// several lines raises in a shell that would run them one by one (owner's ruling 2026-09-22:
+/// "one row, 'ask before pasting several lines', on by default").
+///
+/// **It lands on**, and unlike v36 that is the ruling rather than a behaviour carried forward:
+/// every build before this one sent the lines straight in, and the owner ruled that a paste into
+/// such a shell asks first. The row is what keeps the question a choice — a reader who wants the
+/// old road has one press that gives it back.
+///
+/// **v38 carries `web_color_scheme`**, the Appearance page's `Web pages` row: which colour scheme a
+/// web pane tells the page to prefer (`prefers-color-scheme`) — Folio's own theme, or always light,
+/// or always dark (owner's ruling 2026-09-21, 0.4.4 ticket 09) — see [`WebColorSchemeV1`].
+///
+/// **It lands on `FollowTheme`**, which is the ruling rather than a behaviour carried forward:
+/// every build before this one told the page nothing, so the engine answered with the operating
+/// system's own mode, and the owner ruled that a page follows Folio instead. The row is what keeps
+/// that a choice — `Light` or `Dark` pins either.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 38;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -316,6 +349,12 @@ pub const DEFAULT_PROFILE_UNSET: &str = "";
 /// reader already has to handle, because a family the file names may equally have
 /// been uninstalled since.
 pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "";
+
+/// The CJK family a `settings.json` that has never named one is read as.
+///
+/// Empty means the renderer's platform chain. A concrete family here would turn
+/// an automatic fallback into a choice the reader never made.
+pub const DEFAULT_TERMINAL_CJK_FONT_FAMILY: &str = "";
 
 /// The terminal font size, in logical pixels, of a file that has never named one.
 ///
@@ -507,6 +546,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
+///   "repair_row_breaks": true | false,
 ///   "tables": true | false,
 ///   "block_max_height": 0 | 120 | 240 | 480,
 ///   "default_profile": "pwsh" | "wsl" | "gitbash" | "cmd" | "",
@@ -528,6 +568,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "scrollback_lines": 25000 | 50000 | 100000 | 200000,
 ///   "focus_mode": true | false,
 ///   "minimum_contrast": "Off" | "Ratio2" | "Ratio3" | "Ratio45",
+///   "web_color_scheme": "FollowTheme" | "Light" | "Dark",
 ///   "terminal_notifications": true | false,
 ///   "powershell_integration_offer": true | false
 ///   "focus_card_height": 160 | 240 | 320,
@@ -536,6 +577,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "turn_end_notification": true | false,
 ///   "cards_gesture_hint_offer": true | false,
 ///   "copy_on_select": true | false,
+///   "multiline_paste_ask": true | false,
 ///   "update_check": true | false,
 ///   "quake_height": 20..=100,
 ///   "quake_width": 30..=100,
@@ -569,8 +611,22 @@ pub struct SettingsV1 {
     /// who wants typeset blocks but wants every `$` in a log left alone must be
     /// able to say so, and that is one switch, not a preference we guess.
     pub inline_formulas: bool,
+    /// Whether the detector repairs the row separators that a coding agent's own
+    /// final redraw of a finished answer eats — `\\` at the end of a row comes
+    /// back as `\` — before handing a display block to the typesetter.
+    ///
+    /// Unlike the two switches above this one is not presentation policy: it
+    /// decides what *text* the typesetter is given, and it is here because the
+    /// damage it compensates for is another program's, which means the day that
+    /// program stops doing it, this stops being a repair and becomes a guess.
+    /// A reader who would rather see a formula fail than see Folio touch it must
+    /// be able to say so without waiting for a release. What the switch never
+    /// changes is the terminal's own bytes: copy and show-source answer with the
+    /// text that arrived either way.
+    #[serde(default = "default_repair_row_breaks")]
+    pub repair_row_breaks: bool,
     /// Whether a detected GFM pipe table in command output is *drawn* as a
-    /// rendered block. The third switch on the Rendered blocks page, and
+    /// rendered block. The last switch on the Rendered blocks page, and
     /// presentation policy in exactly the sense the two above it are: off leaves
     /// the scanner running and simply keeps the pipe text on screen, so turning
     /// it back on costs one frame and re-arms the same proven tables.
@@ -699,6 +755,13 @@ pub struct SettingsV1 {
     /// unnamed case; a named family that this machine does not have degrades the
     /// same way, to the build's default face, per §5.4 逐叶降级.
     pub terminal_font_family: String,
+    /// Which installed family draws Han, kana and hangul in the terminal grid.
+    ///
+    /// Empty is automatic: the renderer walks its named platform chain. This is
+    /// separate from [`Self::terminal_font_family`] so choosing a proportional
+    /// CJK face cannot move ASCII off the monospace grid.
+    #[serde(default)]
+    pub terminal_cjk_font_family: String,
     /// How large the grid's face is drawn, in **logical** pixels — the number
     /// before the monitor's scale factor multiplies it.
     ///
@@ -887,6 +950,14 @@ pub struct SettingsV1 {
     /// duty, so the floor is offered rather than assumed.
     #[serde(default)]
     pub minimum_contrast: MinimumContrastV1,
+    /// **Which colour scheme a web pane tells its page to prefer** (v38, owner's ruling
+    /// 2026-09-21) — see [`WebColorSchemeV1`].
+    ///
+    /// `#[serde(default)]` because [`WebColorSchemeV1::FollowTheme`] is both the shipped answer
+    /// and the honest reading of a file that never named one: nobody who left the line out asked
+    /// for a page that disagrees with the window it is in.
+    #[serde(default)]
+    pub web_color_scheme: WebColorSchemeV1,
 
     /// **Whether a program may put a message on the desktop** — the Terminal page's
     /// `Notifications` row, and the switch behind `OSC 9` / `OSC 777;notify` (DESIGN §7.6).
@@ -1048,6 +1119,14 @@ pub struct SettingsV1 {
     /// closes it.
     #[serde(default = "default_copy_on_select")]
     pub copy_on_select: bool,
+    /// **Whether a paste of several lines into a shell that would run them one by one asks
+    /// first** (v37, owner's ruling 2026-09-22).
+    ///
+    /// Only a shell that has not asked for bracketed paste is ever asked about: a program that
+    /// set `?2004` receives the block as one lump and runs nothing, so there is nothing to ask.
+    /// Off, every paste takes the road it took before this key existed.
+    #[serde(default = "default_multiline_paste_ask")]
+    pub multiline_paste_ask: bool,
     /// **Whether this build asks the releases page whether a newer one exists** (v26,
     /// `docs/DESIGN.md` §7.51).
     ///
@@ -1353,6 +1432,19 @@ fn default_update_check() -> bool {
     true
 }
 
+/// The same door for a v36 key missing from a file this build is reading, and the same reason
+/// `false` must not be what an absent line means: `false` here is a reader who asked Folio to stop
+/// repairing an agent's eaten row separators, which is an answer nobody gives by leaving a line out.
+fn default_repair_row_breaks() -> bool {
+    true
+}
+
+/// The same door for a v37 key missing from a file this build is reading: `false` here is a
+/// reader who turned the question off, which is an answer nobody gives by leaving a line out.
+fn default_multiline_paste_ask() -> bool {
+    true
+}
+
 impl Default for SettingsV1 {
     fn default() -> Self {
         Self {
@@ -1360,6 +1452,7 @@ impl Default for SettingsV1 {
             theme_mode: ThemeModeV1::default(),
             display_formulas: true,
             inline_formulas: true,
+            repair_row_breaks: true,
             tables: true,
             block_max_height: DEFAULT_BLOCK_MAX_HEIGHT,
             default_profile: DEFAULT_PROFILE_UNSET.to_owned(),
@@ -1368,6 +1461,7 @@ impl Default for SettingsV1 {
             search_engine: SearchEngineV1::default(),
             language: LanguageV1::default(),
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
+            terminal_cjk_font_family: DEFAULT_TERMINAL_CJK_FONT_FAMILY.to_owned(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             psreadline_invite: PsReadLineInviteV1::default(),
             light_scheme: DEFAULT_LIGHT_SCHEME.to_owned(),
@@ -1387,6 +1481,8 @@ impl Default for SettingsV1 {
             focus_mode: false,
             // Every colour a program asks for, drawn as it was asked for.
             minimum_contrast: MinimumContrastV1::Off,
+            // A page asks the window it is in, which is the owner's ruling of 2026-09-21.
+            web_color_scheme: WebColorSchemeV1::FollowTheme,
 
             terminal_notifications: true,
             // A PowerShell with no integration is told so, once, in its own pane.
@@ -1407,6 +1503,8 @@ impl Default for SettingsV1 {
             // A drag that lets go of a selection has always written it to the clipboard; the row
             // gives that habit a name rather than choosing it.
             copy_on_select: true,
+            // The owner's ruling of 2026-09-22: on by default.
+            multiline_paste_ask: true,
             // A preview has no other way to say that it has been superseded.
             update_check: true,
             // Tall enough to read a command's output, short enough that the window it came down
@@ -1617,6 +1715,24 @@ pub enum MinimumContrastV1 {
     Ratio45,
 }
 
+/// **Which colour scheme a web pane asks its page for** — the `prefers-color-scheme` the engine
+/// reports (owner's ruling 2026-09-21, 0.4.4 ticket 09).
+///
+/// Three values and not a switch, because none of them is the absence of another: `FollowTheme`
+/// reads Folio's light or dark at the moment it is asked, and the other two pin one. What a page
+/// does with the answer is the page's: a site with no dark style looks the same under all three,
+/// and nothing here forces one on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum WebColorSchemeV1 {
+    /// Light while Folio's ground is light, dark while it is dark.
+    #[default]
+    FollowTheme,
+    /// Always light.
+    Light,
+    /// Always dark.
+    Dark,
+}
+
 /// `docs/DESIGN.md` §7.1.6: "主题 System/Light/Dark 跟随系统".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThemeModeV1 {
@@ -1735,9 +1851,13 @@ mod tests {
     /// machine it knows nothing about. It is `default_profile`'s ruling, and the
     /// same empty string carries it.
     #[test]
-    fn the_default_terminal_font_is_unnamed_and_sixteen_logical_pixels() {
+    fn the_default_terminal_fonts_are_unnamed_and_sixteen_logical_pixels() {
         let defaults = SettingsV1::default();
         assert_eq!(defaults.terminal_font_family, DEFAULT_TERMINAL_FONT_FAMILY);
+        assert_eq!(
+            defaults.terminal_cjk_font_family,
+            DEFAULT_TERMINAL_CJK_FONT_FAMILY
+        );
         assert_eq!(defaults.terminal_font_size, DEFAULT_TERMINAL_FONT_SIZE);
         assert_eq!(
             DEFAULT_TERMINAL_FONT_SIZE, 16,
@@ -1747,6 +1867,10 @@ mod tests {
         );
         let wire = serde_json::to_value(&defaults).unwrap();
         assert_eq!(wire["terminal_font_family"], serde_json::Value::from(""));
+        assert_eq!(
+            wire["terminal_cjk_font_family"],
+            serde_json::Value::from("")
+        );
         assert!(
             wire["terminal_font_family"].is_string(),
             "a family is named, never numbered — an index into a machine's font \
@@ -1799,20 +1923,22 @@ mod tests {
     /// persistence layer holding an opinion about the row's options.
     #[test]
     fn a_chosen_family_and_size_survive_a_round_trip_including_an_unlisted_size() {
-        for (family, size) in [
-            ("Cascadia Mono", 14u8),
-            ("MS Gothic", 24),
-            ("Consolas", 17),
-            ("", 10),
+        for (family, cjk_family, size) in [
+            ("Cascadia Mono", "Microsoft YaHei UI", 14u8),
+            ("MS Gothic", "DengXian", 24),
+            ("Consolas", "SimSun", 17),
+            ("", "", 10),
         ] {
             let settings = SettingsV1 {
                 terminal_font_family: family.to_owned(),
+                terminal_cjk_font_family: cjk_family.to_owned(),
                 terminal_font_size: size,
                 ..SettingsV1::default()
             };
             let text = serde_json::to_string(&settings).unwrap();
             let read: SettingsV1 = serde_json::from_str(&text).unwrap();
             assert_eq!(read.terminal_font_family, family);
+            assert_eq!(read.terminal_cjk_font_family, cjk_family);
             assert_eq!(read.terminal_font_size, size);
             assert_eq!(read, settings);
         }

@@ -34,9 +34,11 @@
 //! through [`WebHost::set_request_rules`], which is a door on every arm and does
 //! nothing on the one whose engine asks per request.
 //!
-//! The local seat's other half — *this folder and no other* — is not a pattern
-//! at all. It is `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with the
-//! minted file's own folder, which X-2 measured enforcing it with no rule list
+//! Which of the disk a local page may read by markup is not a pattern at all.
+//! It is `-[WKWebView loadFileURL:allowingReadAccessToURL:]` with the minted
+//! file's own folder — the grant Safari itself gives a `file://` page, measured
+//! on Safari 26.6.2 for ticket 0.4.4-13 (the page's folder and below load; `../`
+//! and another folder do not) — which X-2 measured enforcing with no rule list
 //! in the room and no callback fired for the refusal.
 //!
 //! # What this arm does not promise, stated rather than implied
@@ -97,7 +99,10 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
-use objc2_app_kit::{NSResponder, NSView};
+use objc2_app_kit::{
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSResponder, NSView,
+};
 use objc2_foundation::{
     NSBundle, NSError, NSHTTPURLResponse, NSObjectProtocol, NSRect, NSString, NSURL,
     NSURLAuthenticationChallenge, NSURLAuthenticationMethodServerTrust, NSURLCredential,
@@ -113,9 +118,9 @@ use objc2_web_kit::{
 
 use super::{
     CloseStep, INSTALL_SEQUENCE, InstallStep, PageVisual, RehostCompensation, RehostOutcome,
-    RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebDpiOwnership, WebEvent,
-    WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict, WebRequestVerdict,
-    WebSetting, install_rollback,
+    RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebColorScheme,
+    WebDpiOwnership, WebEvent, WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict,
+    WebRequestVerdict, WebSetting, install_rollback,
 };
 use crate::macos_impl::{window_for, window_thread};
 use crate::{Compositor, NativeWindow};
@@ -275,9 +280,9 @@ impl Shared {
     }
 
     /// **Point the page at an address** — and, for a local file, at the one
-    /// folder it may read.
+    /// folder it may read, which is the folder Safari grants a `file://` page.
     ///
-    /// This is where the local seat's folder rule actually stands.
+    /// This is where the local seat's folder bound actually stands.
     /// `loadFileURL:allowingReadAccessToURL:` is the whole of it: X-2 measured a
     /// picture and a frame naming a sibling folder refused by this call with no
     /// rule list in the room, and no callback fired for either — which is why
@@ -380,6 +385,15 @@ struct ThirdDoor {
             Retained<WKContentRuleList>,
         )>,
     >,
+    /// **Where this seat is going, if it is not there yet** — and the only copy
+    /// of that fact (audit 3 A-1).
+    ///
+    /// Written by [`ThirdDoor::destined_for`] on **both** of its branches, which
+    /// is what makes it the seat's current destination rather than a record of
+    /// one it was once given: an address that has been superseded by a later
+    /// `navigate` is not somewhere this seat is going, and replaying it a
+    /// compile round-trip later would take the reader off the document they
+    /// asked for last.
     parked: RefCell<Option<String>>,
     compiling: Cell<bool>,
     /// Whether a list is on the page — which is the whole of what
@@ -433,6 +447,26 @@ impl ThirdDoor {
             // has said something and has no list has.
             None => wanted.is_empty(),
         }
+    }
+
+    /// **Take the seat's one destination**, and say whether it may be loaded
+    /// now — the pure half of [`WebHost::navigate`] (audit 3 A-1).
+    ///
+    /// A seat goes to one address and it is the last one it was given, so this
+    /// writes [`ThirdDoor::parked`] on both branches. The branch that was
+    /// missing is the one that loads: a door that is settled loads straight
+    /// away, and leaving a `parked` address behind it left the seat holding a
+    /// destination it had already been taken off. The cost of that is one
+    /// compile round-trip later, in [`ThirdDoor::answer_what_waited`], which
+    /// finds the door standing and navigates a reader who is reading their
+    /// second report to the address they typed before it.
+    fn destined_for(&self, url: &str) -> bool {
+        if self.settled() {
+            *self.parked.borrow_mut() = None;
+            return true;
+        }
+        *self.parked.borrow_mut() = Some(url.to_owned());
+        false
     }
 
     /// **Whether this door's `stands` is a statement about the page it is
@@ -605,11 +639,13 @@ fn compile(door: &Rc<ThirdDoor>) {
             let error = unsafe { &*error };
             Err(error.localizedDescription().to_string())
         };
-        // **Is this still the page this compile was started for?** Everything
-        // below writes the door, and a block that has been overtaken may write
-        // none of it. This is also what clears `compiling` and starts the
-        // compile the current page is owed.
-        if compile_is_stale(&again, mint) {
+        // **Is this still the page and the policy this compile was started
+        // for?** Everything below writes the door, and a block that has been
+        // overtaken on either count may write none of it — the two WebKit calls
+        // in the arm below are the ones that put a list on a live page, so the
+        // question is asked before them and not after. This is also what clears
+        // `compiling` and starts the compile the current page is owed.
+        if compile_is_stale(&again, mint, &compiled_from) {
             return;
         }
         match outcome {
@@ -640,8 +676,9 @@ fn compile(door: &Rc<ThirdDoor>) {
     }
 }
 
-/// **Whether a finished compile is still about the page it was started for** —
-/// and the whole of what one that is not does (RA-3).
+/// **Whether a finished compile is still about the page *and* the policy it was
+/// started for** — and the whole of what one that is not does (RA-3; audit 3
+/// A-1).
 ///
 /// A rule list belongs to the controller it was compiled for. The door is
 /// shared across every controller a seat makes, so a completion that lands
@@ -652,22 +689,47 @@ fn compile(door: &Rc<ThirdDoor>) {
 /// [`WebEvent::Controller`] `owed` names belongs to the *current* attempt and
 /// would be a false certification of it.
 ///
+/// **And the second fact, for the same reason as the first** (audit 3 A-1). A
+/// compile carries a *page* and a *policy*, and the mint moves only when the
+/// page does: a seat re-minted in place — a reader clicking an `http://` link
+/// printed in a local report, then opening a second report out of the files
+/// column — moves `wanted` across a category boundary and back while one
+/// compile is in flight, and the block that lands is holding the browsing
+/// seat's list for a page showing a local document. The mint has not moved, so
+/// asking about the page alone answers *this is current*, and the caller's very
+/// next two lines put a list on the live page that says `http` and `https` are
+/// allowed. So both facts are asked here, before either WebKit call, and a
+/// compile that answers for a policy the seat has moved off is dropped exactly
+/// as one for a page it has moved off is — never attached and then corrected,
+/// because for the length of that correction the document on the glass is being
+/// judged by a policy nobody asked for.
+///
 /// Two things it must still do, and they are why this is a function rather than
 /// an early `return` in the block. `compiling` is cleared, because it is the
 /// latch that stops a second compile from starting and this compile is over;
 /// and [`compile`] is called, because the page that took over is owed a list of
 /// its own and nothing else is going to start one — `request_controller`
 /// already tried and found the latch set.
-fn compile_is_stale(door: &Rc<ThirdDoor>, mint: u64) -> bool {
+fn compile_is_stale(door: &Rc<ThirdDoor>, mint: u64, compiled_from: &str) -> bool {
     door.compiling.set(false);
-    if mint == door.mint.get() {
+    let page_moved = mint != door.mint.get();
+    // The borrow ends here: `compile` below reads `wanted` itself.
+    let policy_moved = *door.wanted.borrow() != compiled_from;
+    if !page_moved && !policy_moved {
         return false;
     }
-    eprintln!(
-        "BT_MAC_WEB a rule list compiled for page {mint} arrived after page {} took over; \
-         it is dropped and the current page is compiled for",
-        door.mint.get()
-    );
+    if page_moved {
+        eprintln!(
+            "BT_MAC_WEB a rule list compiled for page {mint} arrived after page {} took over; \
+             it is dropped and the current page is compiled for",
+            door.mint.get()
+        );
+    } else {
+        eprintln!(
+            "BT_MAC_WEB a rule list compiled for a resource rule the seat has moved off arrived \
+             for page {mint}; it is dropped and the rule the seat states now is compiled for"
+        );
+    }
     compile(door);
     true
 }
@@ -1190,6 +1252,32 @@ pub struct WebHost {
     /// The window the page's view belongs to, kept so that
     /// [`WebHost::focus_page`] can reach the responder chain.
     window: Option<NativeWindow>,
+    /// **The colour scheme this seat's pages are told to prefer**, as last said by the caller
+    /// (0.4.4 ticket 09) — the Windows arm's field, for its reason: a page rebuilt after a crash
+    /// is told again in [`WebHost::configure`], before anything navigates.
+    color_scheme: Cell<Option<WebColorScheme>>,
+}
+
+/// **Tell one page which colour scheme it prefers** — the view's own `appearance`
+/// (0.4.4 ticket 09).
+///
+/// WebKit answers `prefers-color-scheme` from the view's *effective* appearance, which a view
+/// with none of its own inherits from its window — and `macos_impl::set_window_dark_mode` already
+/// sets the window's from Folio's ground. So with the reader following Folio's theme this call
+/// states what the page would have inherited anyway, and it is made regardless: the two pinned
+/// answers are exactly the case where the page must **not** inherit the window's, and one door
+/// that always says the answer is simpler to trust than one that says it only when it differs.
+fn apply_color_scheme(view: &WKWebView, scheme: WebColorScheme) -> Result<(), String> {
+    let what = "the page's colour scheme";
+    // SAFETY: two `NSString` constants AppKit exports; reading one is reading a pointer.
+    let name = match scheme {
+        WebColorScheme::Light => unsafe { NSAppearanceNameAqua },
+        WebColorScheme::Dark => unsafe { NSAppearanceNameDarkAqua },
+    };
+    let appearance = NSAppearance::appearanceNamed(name)
+        .ok_or_else(|| format!("{what}: this system has no appearance named {name}"))?;
+    view.setAppearance(Some(&appearance));
+    Ok(())
 }
 
 /// What every door of this host answers with when the page is not there.
@@ -1228,7 +1316,29 @@ impl WebHost {
             gate: None,
             pending_view: None,
             window: None,
+            color_scheme: Cell::new(None),
         }
+    }
+
+    /// **Which colour scheme this seat's pages prefer** (0.4.4 ticket 09).
+    ///
+    /// Remembered whether or not there is a page yet, so that the view this seat is given later
+    /// is told in [`Self::configure`], and told at once when there is one up.
+    pub fn set_color_scheme(&self, scheme: WebColorScheme) -> Result<(), String> {
+        self.color_scheme.set(Some(scheme));
+        match self.view.as_ref() {
+            Some(view) => {
+                window_thread("the page's colour scheme")?;
+                apply_color_scheme(view, scheme)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The scheme this host was last told, `None` before it was told one.
+    #[must_use]
+    pub fn color_scheme(&self) -> Option<WebColorScheme> {
+        self.color_scheme.get()
     }
 
     /// Everything the engine has said since the last time it was asked.
@@ -1536,6 +1646,11 @@ impl WebHost {
                 unapplied.push(setting);
             }
         }
+        // **The colour scheme a page prefers, in the same step and before anything navigates**
+        // (0.4.4 ticket 09) — the Windows arm's line, for its reason.
+        if let Some(scheme) = self.color_scheme.get() {
+            apply_color_scheme(view, scheme)?;
+        }
         Ok(unapplied)
     }
 
@@ -1674,11 +1789,12 @@ impl WebHost {
         let what = "going to an address";
         let view = self.view.as_ref().ok_or_else(|| no_page(what))?;
         window_thread(what)?;
-        if self.door.settled() {
+        // **One destination, and this is it** — whether it is loaded now or
+        // waited for. See [`ThirdDoor::destined_for`].
+        if self.door.destined_for(url) {
             self.shared.load(view, url);
             return Ok(());
         }
-        *self.door.parked.borrow_mut() = Some(url.to_owned());
         compile(&self.door);
         Ok(())
     }
@@ -2062,8 +2178,12 @@ mod door_tests {
     /// the same order the block writes it so that the thing under test is the
     /// thing that ships; the calls it leaves out (`removeAllContentRuleLists`,
     /// `addContentRuleList`) change the page, not the door.
-    fn land(door: &Rc<ThirdDoor>, mint: u64, outcome: Result<String, String>) {
-        if compile_is_stale(door, mint) {
+    ///
+    /// `compiled_from` is the rule the compile went out with, which is the
+    /// block's own captured copy: on the success path it is what the list was
+    /// built from, and on the failure path it is what would not build.
+    fn land(door: &Rc<ThirdDoor>, mint: u64, compiled_from: &str, outcome: Result<String, String>) {
+        if compile_is_stale(door, mint, compiled_from) {
             return;
         }
         rules_compiled(door, outcome);
@@ -2106,7 +2226,7 @@ mod door_tests {
 
         // Page 1's list lands, successfully, compiled from exactly what page 2
         // wants.
-        land(&door, first, Ok(rules.to_owned()));
+        land(&door, first, rules, Ok(rules.to_owned()));
 
         assert!(
             !door.stands.get(),
@@ -2137,6 +2257,120 @@ mod door_tests {
         );
     }
 
+    /// RED — **a rule list compiled for a resource rule the seat has moved off
+    /// is never put on the page** (audit 3 A-1).
+    ///
+    /// The shape that makes this invisible without the policy: the *page* has
+    /// not changed, so every question about the mint answers "this is current".
+    /// One seat, one controller, and the seat's rule flipped category and back
+    /// inside one compile — a reader clicking an `http://` link printed in a
+    /// local report, then opening a second report out of the files column. The
+    /// list that lands is the browsing seat's, and the document on the glass is
+    /// a local one; attaching it opens `http` and `https` to that document for
+    /// as long as the corrective compile takes.
+    ///
+    /// MUTATION: drop the `wanted` comparison in [`compile_is_stale`] and this
+    /// goes red on `attached`, on `stands` and on the recompile — and on the
+    /// real page the browsing list has by then already been added.
+    #[test]
+    fn a_rule_list_compiled_for_a_superseded_rule_is_never_attached() {
+        const FILE_RULES: &str =
+            r#"[{"trigger":{"url-filter":"^http://"},"action":{"type":"block"}}]"#;
+        const BROWSING_RULES: &str =
+            r#"[{"trigger":{"url-filter":"^file:"},"action":{"type":"block"}}]"#;
+
+        let door = a_door(FILE_RULES);
+        let mint = door.mint.get();
+        *door.attached.borrow_mut() = Some(Attached {
+            json: FILE_RULES.to_owned(),
+            mint,
+        });
+        door.stands.set(true);
+        assert!(
+            door.settled(),
+            "the first report is settled on its own rule"
+        );
+
+        // Gesture one: an `http://` link. The rule flips and a compile goes out
+        // for the browsing seat's list.
+        *door.wanted.borrow_mut() = BROWSING_RULES.to_owned();
+        door.compiling.set(true);
+
+        // Gesture two: a second report out of the files column. The rule flips
+        // back before the first compile has landed, so the door is settled
+        // again and the report loads under the rule it is owed.
+        *door.wanted.borrow_mut() = FILE_RULES.to_owned();
+
+        // And now gesture one's compile lands, for this very page.
+        land(&door, mint, BROWSING_RULES, Ok(BROWSING_RULES.to_owned()));
+
+        assert_eq!(
+            door.attached.borrow().as_ref().map(|it| it.json.as_str()),
+            Some(FILE_RULES),
+            "the local report is still judged by the local report's rule"
+        );
+        assert!(
+            door.stands.get(),
+            "and the list it had is still on the page"
+        );
+        assert!(door.settled());
+        assert!(
+            said(&door).is_empty(),
+            "an overtaken completion certifies nobody"
+        );
+        assert!(
+            !door.compiling.get(),
+            "the latch is cleared, or the seat never compiles again"
+        );
+    }
+
+    /// RED — **a seat goes to the last address it was given, and to no other**
+    /// (audit 3 A-1, the second surprise on the same path).
+    ///
+    /// An address handed to [`WebHost::navigate`] while the door is unsettled
+    /// waits for the door. One handed over after it has settled is loaded on
+    /// the spot — and that is the moment the waiting one stops being a
+    /// destination. Left behind, it is loaded a compile round-trip later by
+    /// [`ThirdDoor::answer_what_waited`], which takes the reader off the report
+    /// they opened last and onto the address they typed before it.
+    ///
+    /// MUTATION: take the `parked` clear out of [`ThirdDoor::destined_for`]'s
+    /// settled branch and the last two assertions go red — the seat is still
+    /// holding `http://example.com/` and answers it.
+    #[test]
+    fn a_seat_goes_to_the_last_address_it_was_given() {
+        let door = a_door("[]");
+        *door.attached.borrow_mut() = Some(Attached {
+            json: String::from("[]"),
+            mint: door.mint.get(),
+        });
+        door.stands.set(true);
+
+        // Unsettled: the address waits.
+        *door.wanted.borrow_mut() = String::from("[\"other\"]");
+        assert!(!door.destined_for("http://example.com/"));
+        assert_eq!(
+            door.parked.borrow().as_deref(),
+            Some("http://example.com/"),
+            "an address the door cannot judge yet is where the seat is going"
+        );
+
+        // Settled again, and a second address arrives: it loads now, and it is
+        // the only place this seat is going.
+        *door.wanted.borrow_mut() = String::from("[]");
+        assert!(door.destined_for("file:///D:/seat/open/report2.html"));
+        assert!(
+            door.parked.borrow().is_none(),
+            "a superseded address is not still a destination"
+        );
+
+        door.answer_what_waited();
+        assert!(
+            said(&door).is_empty(),
+            "nothing waited, so nothing is loaded and nothing is refused"
+        );
+    }
+
     /// RED — **a close during an outstanding compile ends the in-flight state
     /// rather than latching it** (RA-3, the second half).
     ///
@@ -2159,7 +2393,7 @@ mod door_tests {
         door.let_go();
         assert!(!door.compiling.get(), "a close un-latches the door");
 
-        land(&door, first, Ok(rules.to_owned()));
+        land(&door, first, rules, Ok(rules.to_owned()));
         assert!(!door.compiling.get());
         assert!(
             !door.stands.get(),
@@ -2178,7 +2412,7 @@ mod door_tests {
         door.compiling.set(true);
         let mint = door.mint.get();
 
-        land(&door, mint, Ok(rules.to_owned()));
+        land(&door, mint, rules, Ok(rules.to_owned()));
 
         assert!(door.stands.get());
         assert!(door.stands_for_this_mint());
@@ -2211,7 +2445,12 @@ mod door_tests {
         *door.parked.borrow_mut() = Some(String::from("file:///tmp/a.html"));
         let mint = door.mint.get();
 
-        land(&door, mint, Err(String::from("rule list parse error")));
+        land(
+            &door,
+            mint,
+            "[this is not a rule list]",
+            Err(String::from("rule list parse error")),
+        );
 
         assert!(!door.stands.get());
         assert!(!door.stands_for_this_mint());
@@ -2250,7 +2489,7 @@ mod door_tests {
         let rules = "[]";
         let door = a_door(rules);
         let mint = door.mint.get();
-        land(&door, mint, Ok(rules.to_owned()));
+        land(&door, mint, rules, Ok(rules.to_owned()));
         assert!(
             door.stands_for_this_mint(),
             "the list is on the page it was made for"

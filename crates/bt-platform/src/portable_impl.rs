@@ -555,6 +555,9 @@ pub enum ShellPickKind {
     /// reason: what may be started is the operating system's answer rather than
     /// this dialog's.
     Program,
+    /// An exported settings file (0.4.4 ticket 05: `Settings ▸ Import…`),
+    /// filtered to `*.json` — the one type an export is written as.
+    SettingsFile,
 }
 
 /// The public name for [`ShellPickKind`], as on Windows.
@@ -664,6 +667,38 @@ impl ImagePicker {
     }
 
     /// The chooser's answer. There is never one.
+    #[must_use]
+    pub fn take_result(&self) -> Option<Result<Option<PathBuf>, String>> {
+        None
+    }
+}
+
+/// **The save dialog, on a platform with no panel to put up** (0.4.4 ticket 05
+/// wrote the Windows and macOS arms).
+///
+/// As [`ImagePicker`]: constructed harmlessly, refuses when asked, and
+/// **Linux-only** — macOS sheets a real `NSSavePanel` onto the window
+/// (`macos_dialogs::SaveFilePicker`).
+#[cfg(not(any(windows, target_os = "macos")))]
+pub struct SaveFilePicker {
+    #[expect(dead_code, reason = "a Linux arm would put its panel over this window")]
+    window: NativeWindow,
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+impl SaveFilePicker {
+    /// Install the deferred dialog. Never fails.
+    pub fn new(window: NativeWindow) -> Result<Self, String> {
+        Ok(Self { window })
+    }
+
+    /// Ask for the dialog. Refused.
+    pub fn request(&self, start: Option<&Path>, name: &str) -> Result<bool, String> {
+        let _ = (start, name);
+        Err(not_here("the save dialog"))
+    }
+
+    /// The dialog's answer. There is never one.
     #[must_use]
     pub fn take_result(&self) -> Option<Result<Option<PathBuf>, String>> {
         None
@@ -887,6 +922,16 @@ pub fn pointer_position() -> Option<(i32, i32)> {
     None
 }
 
+/// Where the pointer is inside one window's client area, in physical pixels from
+/// its top-left corner. `NSEvent.mouseLocation` put through the window and the
+/// view; GitHub issue #1 ②.
+#[cfg(not(any(windows, target_os = "macos")))]
+#[must_use]
+pub fn pointer_position_in_window(window: NativeWindow) -> Option<(i32, i32)> {
+    let _ = window;
+    None
+}
+
 /// Which top-level window the window manager puts under a screen point. M1-3.
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
@@ -904,6 +949,35 @@ pub fn top_level_window_at(x: i32, y: i32) -> Option<NativeWindow> {
 #[must_use]
 pub fn thread_mouse_capture() -> Option<NativeWindow> {
     None
+}
+
+/// **Let the system translate touch into the mouse** — and off Windows there
+/// is nothing to let (N, a harmless no-op; owner ruling 2026-09-21).
+///
+/// On Windows this undoes a registration winit makes and hands four messages
+/// back to `DefWindowProc`, because that registration switches the system's own
+/// gesture engine off for the window. Neither half has a subject here.
+///
+/// **macOS never took the engine away.** A trackpad's clicks, drags and
+/// two-finger scrolling arrive as ordinary `NSEvent` mouse and scroll-wheel
+/// events, which winit already delivers as `CursorMoved`, `MouseInput` and
+/// `MouseWheel` — the very events this program has always read — and a Mac with
+/// a touch screen does not exist. So there is nothing to unregister, nothing to
+/// route around, and no ticket behind this: it is not deferred work, it is work
+/// the platform does.
+///
+/// The `report` is dropped for that reason rather than kept: it says *a touch
+/// arrived and was handed over*, and a host that hands nothing over would be
+/// reporting a road it has not got. `panned` is dropped for the same reason: a
+/// trackpad's two-finger scroll already arrives as `MouseWheel` with a
+/// `PixelDelta`, so there is no pan gesture here for anything to answer.
+pub fn let_the_system_translate_touch(
+    window: NativeWindow,
+    report: Box<dyn Fn()>,
+    panned: Box<dyn Fn(crate::PanStep)>,
+) -> Result<(), String> {
+    let _ = (window, report, panned);
+    Ok(())
 }
 
 /// Whether this window is iconic. `isMiniaturized`; M1-3.
@@ -1138,6 +1212,24 @@ pub fn recycle(path: &Path) -> Result<bool, String> {
 #[must_use]
 pub fn monospace_font_families() -> Vec<crate::MonospaceFamily> {
     crate::order_monospace_families(Vec::new())
+}
+
+/// **One family by name**, on a platform with no font system written (ticket
+/// 50). `None`: there is no family this arm can locate, and the renderer then
+/// draws the face it falls back to — the same one-row answer
+/// [`monospace_font_families`] gives here.
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn monospace_family_named(name: &str) -> Option<crate::MonospaceFamily> {
+    let _ = name;
+    None
+}
+
+/// No portable font-database enumeration is available on this target.
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn cjk_font_families() -> Vec<crate::CjkFamily> {
+    Vec::new()
 }
 
 /// **Whether this volume treats two spellings of one name as one file.**
@@ -1419,6 +1511,70 @@ pub fn redirect_std_streams_to_file(path: &Path) -> bool {
     false
 }
 
+/// **Put these bytes on this process's standard error without taking Rust's
+/// shared `Stderr` lock** (X-7).
+///
+/// For the one writer that can be stuck in this call for seconds: the trace
+/// sink's thread, writing a batch to a terminal whose reader has stopped
+/// reading. `eprintln!` reaches the same descriptor through one process-wide
+/// lock, so a writer parked inside `write` while holding it parks every other
+/// thread that says anything — the window thread included, which is the fault
+/// the sink was built to remove, moved one layer out. Writing the descriptor
+/// directly leaves those threads to wait on the *device* they chose and never
+/// on this one's turn at a mutex.
+///
+/// `EINTR` is retried because a signal is not an answer about the bytes. A
+/// short write is continued from where the kernel stopped; a `write` that
+/// reports nothing written without an error is a descriptor that will never
+/// take them, and looping on it would be the wait this refuses.
+///
+/// Answers whether every byte reached the descriptor.
+#[cfg(unix)]
+pub fn write_std_error(bytes: &[u8]) -> bool {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        // SAFETY: the pointer and length name this call's own slice, which
+        // outlives the synchronous call; the descriptor is the platform's
+        // constant and is not owned, borrowed or closed here.
+        let written = unsafe {
+            libc::write(
+                libc::STDERR_FILENO,
+                rest.as_ptr().cast::<libc::c_void>(),
+                rest.len(),
+            )
+        };
+        if written < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return false;
+        }
+        let Ok(written) = usize::try_from(written) else {
+            return false;
+        };
+        let Some(remaining) = rest.get(written..) else {
+            return false;
+        };
+        if remaining.len() == rest.len() {
+            return false;
+        }
+        rest = remaining;
+    }
+    true
+}
+
+/// **The same door where there is no descriptor to write to.**
+///
+/// The pair to [`redirect_std_streams_to_file`]'s `not(unix)` arm, and the same
+/// honesty: no such target is built from this workspace today, and a build for
+/// one is better told that nothing was written than given a lock this function
+/// exists to avoid.
+#[cfg(not(unix))]
+pub fn write_std_error(bytes: &[u8]) -> bool {
+    let _ = bytes;
+    false
+}
+
 /// **Send `stdout` and `stderr` nowhere at all** (M3-7).
 ///
 /// The floor under [`redirect_std_streams_to_file`], and the Unix spelling of
@@ -1579,6 +1735,7 @@ mod refusal_tests {
             assert!(MathContextMenu::new(window()).is_ok(), "the formula menu");
             assert!(FolderPicker::new(window()).is_ok(), "the folder chooser");
             assert!(ImagePicker::new(window()).is_ok(), "the picture chooser");
+            assert!(SaveFilePicker::new(window()).is_ok(), "the save dialog");
         }
         // The settings watch is only this module's where no backend has one:
         // on macOS it is `macos_impl`'s, and the constructor that has to be
@@ -1629,6 +1786,13 @@ mod refusal_tests {
                 picture.request(ShellPickKind::Image, None).is_err(),
                 "there is no panel to sheet"
             );
+
+            let save = SaveFilePicker::new(window()).expect("built above");
+            assert!(
+                save.request(None, "folio-settings.json").is_err(),
+                "there is no save panel to sheet"
+            );
+            assert!(save.take_result().is_none());
         }
 
         // The composition is only this module's where no backend has one:

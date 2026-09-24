@@ -8,10 +8,14 @@ pub use ledger::{
 };
 use ledger::{OwnershipRecorder, source_line_of, structural_kind};
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 pub use bt_doc::{
-    BlockKind, DecorationLifecycle, DetectionRevision, GridGeneration, GridPoint,
+    BlockKind, DecorationLifecycle, DetectionRevision, GridGeneration, GridPoint, InlineMathSite,
     InlineRunPlacement, LayoutKey, MathMode, SUBPIXELS_PER_PX, ScreenId, SourceLifecycle,
     VersionStamp, ViewGeneration,
 };
@@ -381,13 +385,25 @@ impl DecorationRecord {
         }
     }
 
+    /// **Whether a scan of this line could have an outcome at all** — one frozen line, with no
+    /// answer of its own yet and none in flight.
+    ///
+    /// The condition the two schedulers below already refuse on, given a name so that it can be
+    /// asked *before* the work of building a scan window rather than after (review 2026-09-18
+    /// round 2, P2). One spelling and one reader's rule: a second copy of it in the session would
+    /// be a second chance for the two to drift.
+    #[must_use]
+    pub fn may_be_scanned(&self) -> bool {
+        self.source == SourceLifecycle::Frozen && self.decoration == DecorationLifecycle::None
+    }
+
     pub fn schedule(
         &mut self,
         transcript_id: TranscriptId,
         block_end: TranscriptId,
         span: MathSpan,
     ) -> Option<DetectionTask> {
-        if self.source != SourceLifecycle::Frozen || self.decoration != DecorationLifecycle::None {
+        if !self.may_be_scanned() {
             return None;
         }
         self.decoration = DecorationLifecycle::Pending;
@@ -415,7 +431,7 @@ impl DecorationRecord {
         inputs: Arc<[DetectionInput]>,
         options: DetectionOptions,
     ) -> Option<DetectionTask> {
-        if self.source != SourceLifecycle::Frozen || self.decoration != DecorationLifecycle::None {
+        if !self.may_be_scanned() {
             return None;
         }
         self.decoration = DecorationLifecycle::Pending;
@@ -610,56 +626,6 @@ fn is_math_environment(environment: &str) -> bool {
             | "Vmatrix"
             | "smallmatrix"
     )
-}
-
-/// Where a logical line was printed, as far as the terminal's own bookkeeping can prove it.
-///
-/// This is the *structural* half of the inline disambiguator (user ruling 2026-08-10, scheme A).
-/// It is deliberately not something this crate can work out for itself: bt-detect sees text and
-/// nothing else, and the question "was this line printed by a command, or typed at a prompt?" is
-/// answered by the terminal's semantic region bookkeeping in bt-term. Making it a parameter is
-/// what keeps the authority in the one place that actually holds it.
-///
-/// Two sites permit inline rendering and one forbids it. The legislative intent behind the
-/// original single-site rule was never "OSC 133 specifically" — it was **protect the shell's
-/// literal text**, the prompt a user typed at and the command line they typed. The alternate
-/// screen has neither: an application that has switched to it owns the whole surface, there is
-/// structurally no prompt and no input line anywhere on it, and so the thing gate A was built to
-/// protect is not present to be damaged. Extending eligibility there costs nothing the rule was
-/// buying and recovers the case users have already accepted for display math across many
-/// sessions (Claude Code renders in the alternate screen today).
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum InlineMathSite {
-    /// Between `133;C` and `133;D` — a line a command *printed*.
-    CommandOutput,
-    /// The content area of the alternate screen, whose occupant owns every cell on it.
-    ///
-    /// Eligible for the structural reason above, and *only* structurally: nothing here relaxes a
-    /// single content gate. An alternate screen is where a user edits a shell script in `vim` and
-    /// reads a price table in a TUI, so it is at least as adversarial a site as command output —
-    /// the `$PATH`, `$1` and `$12 │ $34` that arrive on it are stopped by gate D and the
-    /// completeness rule, exactly as their command-output twins are.
-    AltScreenContent,
-    /// Anything else: the prompt (`A..B`), the typed command line (`B..C`), the region after
-    /// `133;D`, and — the case that carries the most weight — **every line on a primary screen
-    /// that has never emitted OSC 133 at all**.
-    ///
-    /// No shell integration therefore means no inline rendering on the primary screen, ever. That
-    /// is the ruling's price and it is worth naming: a `$…$` printed by an unintegrated session
-    /// stays source text. The alternative is guessing which half of the screen is output, and a
-    /// terminal that guesses wrong renders the user's literal text as mathematics.
-    Ineligible,
-}
-
-impl InlineMathSite {
-    /// Is a lone `$` on this line allowed to be read as a delimiter at all?
-    ///
-    /// Gate A in one place, so that adding a site is a decision made here rather than a condition
-    /// drifting apart across the call sites that ask it.
-    #[must_use]
-    pub fn permits_inline(self) -> bool {
-        matches!(self, Self::CommandOutput | Self::AltScreenContent)
-    }
 }
 
 /// Conservatively detect one or more `$...$` runs on a single logical line.
@@ -946,14 +912,30 @@ pub fn may_carry_inline_math(text: &str) -> bool {
     }
 }
 
-/// Could this row carry the closing half of a formula the row above left open, and *only* that?
+/// Could this row carry the closing half of a formula the row above left open?
 ///
-/// [`may_carry_inline_math`] minus the pair: the question the frozen scan window asks before it
-/// reaches one line further back, where a row that can prove a run by itself needs no such reach.
-/// Same single pass, same bounded column walk.
+/// **The frozen scan window's question, and it has to be the join's own.** The window asks this to
+/// decide whether to reach one line further back than the candidate, and the row above is the only
+/// place the opening fragment can be. So an answer narrower than
+/// [`detect_inline_math_across_rows`] would give is not a conservatism, it is a silent loss: the
+/// pair the detector is perfectly willing to join never reaches it, and the formula stays raw
+/// source with nothing anywhere recording why. This is therefore not a second rule about closing
+/// rows — it is [`first_inline_closer`], the join's own closer test, asked without the row above.
+///
+/// It once read the row's dollars as a census and demanded a *lone* one, which is the question
+/// [`may_carry_inline_math`] asks and not the question the join asks. A closing row may carry
+/// dollars of its own: the closer is the row's **first** `$`, and everything past it re-pairs from
+/// a clean state, which is how `…the quadratic formula $x` over `= \frac{…}{2a}$, and the density
+/// $\varphi(x) = e^{-x^2/2}$.` keeps both of its formulas. Under the census the second one made
+/// the first one unreachable — the window opened at the closing row, the fragment above was never
+/// in it, and the sentence that reported the split lost the very formula it reported (release
+/// review 2026-09-17, X-6).
+///
+/// One `$` scan and the same bounded column walk: the budget on [`may_carry_inline_math`] holds
+/// here unchanged.
 #[must_use]
 pub fn may_close_row_split_inline_math(text: &str) -> bool {
-    matches!(dollar_census(text), DollarCensus::Lone(close) if closes_a_row_split(text, close))
+    first_inline_closer(text).is_some()
 }
 
 /// Can the `$` at `close` be read as the closer of a formula the row above left open?
@@ -1015,6 +997,11 @@ fn lone_trailing_opener(text: &str) -> Option<usize> {
 }
 
 /// The row's first `$`, when it can be read as the closer of a formula opened above.
+///
+/// The one closer rule there is. [`detect_inline_math_across_rows`] pairs with it and
+/// [`may_close_row_split_inline_math`] arms the scan window with it, so the two sides of the join
+/// cannot drift apart: whatever this refuses is never joined, and whatever it accepts is always
+/// read with the row above it.
 fn first_inline_closer(text: &str) -> Option<usize> {
     let close = text.find('$')?;
     closes_a_row_split(text, close).then_some(close)
@@ -1309,12 +1296,17 @@ fn provisional_cell_column(line: &str, byte: u32) -> u32 {
 /// it. Two multi-letter Latin words count as prose, while one-letter algebra such as `x = y` stays
 /// valid. Refusing the whole block is the honest response when either proof fails.
 fn block_body_looks_like_prose(source: &str) -> bool {
-    source.lines().any(|line| {
-        let trimmed = line.trim();
-        !trimmed.is_empty()
-            && !trimmed.contains('\\')
-            && (trimmed.chars().any(is_cjk_prose_char) || ascii_line_looks_like_prose(trimmed))
-    })
+    source.lines().any(body_line_looks_like_prose)
+}
+
+/// The whole of the rule above, for one line. `block_body_looks_like_prose` is an `any` over the
+/// lines of a body, which is what lets a caller holding the body one row at a time ask the same
+/// question without joining them first: a body is prose exactly when one of its rows is.
+fn body_line_looks_like_prose(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains('\\')
+        && (trimmed.chars().any(is_cjk_prose_char) || ascii_line_looks_like_prose(trimmed))
 }
 
 fn ascii_line_looks_like_prose(line: &str) -> bool {
@@ -1350,51 +1342,232 @@ fn is_cjk_prose_char(character: char) -> bool {
 
 type DisplayDelimiter = DelimiterKind;
 
-/// Advance the compact frozen-history parser proof by one immutable logical line. This mirrors the
-/// structural state transitions in `detect_math_blocks_in_context`; it deliberately records no
-/// body text, so retaining checkpoints is O(resident lines), not O(total source bytes squared).
-pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptId, text: &str) {
-    if context.opening.is_none() && commonmark_indented_code(text) {
-        return;
+/// What one line does to the structural state a scan carries from line to line — the code fence it
+/// is inside, and the display delimiter it has open.
+///
+/// **There is one of these, and both readers of that state call it.** The authoritative scanner
+/// keeps far more per line (body text, the index a block opened at, an ownership ledger, the
+/// look-ahead witnesses that rescue a lost opener), but the part that decides *whether a line is
+/// read as structure at all* is this, and it used to exist twice: once in `scan_math_blocks_impl`
+/// and once, written out again, in `advance_detection_context`. The copy drifted — it never learned
+/// the swallow-radius bound below — and a copy that drifts is a caller being told the parser is in a
+/// state it is not in, which is how a picture ends up on a line the scanner disowns.
+enum StructuralStep {
+    /// Four columns of indentation with nothing open: CommonMark code, and no structure at all.
+    IndentedCode,
+    /// A fence marker. `fence` has been updated; the caller abandons whatever it had open.
+    FenceMarker,
+    /// A line inside an open fence.
+    InsideFence,
+    /// Ordinary structure — read the line. `abandon` names a bound the open delimiter has just
+    /// crossed, if any: it is given up first, and the line is then read as though nothing were open.
+    Read { abandon: Option<AbandonedOpening> },
+}
+
+/// Why an open display delimiter is given up at a line rather than at a closer. Both are the same
+/// judgement — this opening cannot close into a block, and the earliest line that proves it is this
+/// one — and both hand the line on to the ordinary opening-is-none paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AbandonedOpening {
+    /// The swallow-radius bound: an unfinished environment has met a `$$`/`\[` display opener.
+    EnvironmentSwallow,
+    /// A row of natural-language prose while a display delimiter is open. A display body is refused
+    /// when ANY of its rows is prose (`block_body_looks_like_prose`), so from this row on there is
+    /// no closer anywhere below that could make this opening into a block.
+    ProseBody,
+}
+
+fn structural_line_step(
+    text: &str,
+    fence: &mut Option<(char, usize)>,
+    opening: Option<&DisplayDelimiter>,
+) -> StructuralStep {
+    if opening.is_none() && commonmark_indented_code(text) {
+        return StructuralStep::IndentedCode;
     }
-    if context.opening.is_none()
+    if opening.is_none()
         && let Some(marker) = commonmark_fence_marker(text)
     {
-        match context.fence {
-            Some(active) if commonmark_fence_closes(text, active) => context.fence = None,
-            None => context.fence = Some(marker),
+        match *fence {
+            Some(active) if commonmark_fence_closes(text, active) => *fence = None,
+            None => *fence = Some(marker),
             _ => {}
         }
-        context.opening = None;
-        return;
+        return StructuralStep::FenceMarker;
     }
-    if context.fence.is_some() {
-        return;
+    if fence.is_some() {
+        return StructuralStep::InsideFence;
     }
-    if let Some((delimiter, ..)) = complete_display_on_line(text) {
-        if delimiter == DisplayDelimiter::Dollars
-            && context
-                .opening
-                .as_ref()
-                .is_some_and(|(_, active)| *active == DisplayDelimiter::Dollars)
-        {
-            context.opening = None;
+    // Swallow-radius bound. A math *environment* body can never legally contain a `$$`/`\[` display
+    // opener — those switch display mode and are a syntax error inside `\begin{env}…\end{env}`. So
+    // when one appears while an environment opening is still unclosed, that environment's closer was
+    // lost (mangled by a reflow, scrolled out of this window, or malformed), and continuing to
+    // swallow would consume every following display block as phantom environment body (the
+    // `\end{pmatrix},`-poisoning failure mode). The environment opening is given up, and the line is
+    // then read by the ordinary opening-is-none paths under every existing guard — prose body,
+    // escapes, CommonMark code, ambiguous-prefix pairing. This never fires for an active `$$`/`\[`
+    // opening: inner `\begin`/`\end` directional environments are not display openers, so a
+    // genuinely nested environment is still swallowed as body.
+    if matches!(opening, Some(DisplayDelimiter::Environment(_)))
+        && opening_delimiter(text).is_some_and(|(kind, _)| {
+            matches!(kind, DelimiterKind::Dollars | DelimiterKind::Brackets)
+        })
+    {
+        return StructuralStep::Read {
+            abandon: Some(AbandonedOpening::EnvironmentSwallow),
+        };
+    }
+    // Prose bound, and the same argument one step earlier. A display body is refused outright when
+    // any one of its rows is natural language, so an open delimiter that has just read such a row
+    // has no closer below it that could make a block: the pairing is decided here, not at whatever
+    // `$$` happens to come next. Waiting for that `$$` was the second half of the reported defect —
+    // an orphan `$$` reached past a heading to the closing `$$` of the block underneath, the joined
+    // body was refused for the heading, and both delimiters went down together, so the block below
+    // was not refused but never seen. Ending the opening at the heading leaves the rows under it to
+    // be read for what they are, and the orphan stays one row of text.
+    //
+    // This is a line's own verdict, which is why it is here and not in the scan: the walker reaches
+    // the same state from the same line, and a caller's checkpoint still says what the scanner would
+    // have said. Only prose is decidable this way — whether a body is empty, or longer than the
+    // source limit, is not known until the closer, and those refusals stay where they were.
+    //
+    // The question asked is the whole-body one, not the per-row one under it: a logical line can
+    // carry a newline of its own, and then the two do not agree — which is the point, because what
+    // has to be predicted here is exactly what the closer would decide about these same bytes.
+    if opening.is_some() && block_body_looks_like_prose(text) {
+        return StructuralStep::Read {
+            abandon: Some(AbandonedOpening::ProseBody),
+        };
+    }
+    StructuralStep::Read { abandon: None }
+}
+
+/// What one line does to the display delimiter a scan has open.
+///
+/// **The other half of the one state machine, and it drifted for the same reason the first did.**
+/// The walker used to ask "is this line a complete display block?" before anything else and stop
+/// there whatever the answer, while the scanner asks it only when the open delimiter is `$$` or
+/// there is none — so a one-line `\begin{align}…\end{align}` arriving under an unfinished
+/// `\begin{align}` closes that environment for the scanner and did not for the walker, and every
+/// line below was read in a state no scan was ever in.
+///
+/// Sharing the structural half taught the lesson: two machines that must agree will disagree one
+/// case at a time. So the whole per-line decision lives here, in the scanner's own precedence — a
+/// self-contained block, then a closer for what is open, then an opener — and the two callers differ
+/// only in what they *do* with it. The scanner emits blocks and feeds its ownership ledger; the
+/// walker keeps the delimiter and throws the rest away, which is what makes a checkpoint O(line)
+/// instead of a rescan of everything above it.
+///
+/// The scan-level recoveries are deliberately *not* here: the clip witness and the two phantom-opener
+/// resyncs read ahead over the whole line list and are gated on inputs a walker never has. They
+/// rescue an opener the window lost; they are not what a line means.
+enum PairingStep {
+    /// A complete display block on this line. `closes_opening` is the scanner's rule that a
+    /// self-contained `$$…$$` consumes an abandoned `$$` opener rather than pairing with it.
+    SelfContained {
+        delimiter: DelimiterKind,
+        open_start: usize,
+        body_start: usize,
+        body_end: usize,
+        close_end: usize,
+        closes_opening: bool,
+    },
+    /// This line closes what is open.
+    Closes { body_end: usize, close_end: usize },
+    /// This line opens a multi-line display block.
+    Opens {
+        delimiter: DelimiterKind,
+        body_start: usize,
+    },
+    /// This line would open one, but a `$$` under an ambiguous prefix may not be paired on a guess.
+    OpensSuppressed { delimiter: DelimiterKind },
+    /// Body, prose, or a delimiter that is not this level's: nothing to do.
+    Inert,
+}
+
+fn pairing_line_step(
+    text: &str,
+    opening: Option<&DisplayDelimiter>,
+    prefix: PrefixKnowledge,
+) -> PairingStep {
+    // A self-contained block is read only from a state that can hold one: nothing open, or a `$$`
+    // opener this block is about to orphan. Under any other opening the line is first of all a
+    // candidate closer for *that* opening, which is the precedence the whole scan runs on.
+    let self_contained_state = match opening {
+        None => true,
+        Some(DisplayDelimiter::Dollars) => true,
+        Some(_) => false,
+    };
+    if self_contained_state
+        && let Some((delimiter, open_start, body_start, body_end, close_end)) =
+            complete_display_on_line(text)
+        && (opening.is_none() || delimiter == DelimiterKind::Dollars)
+    {
+        return PairingStep::SelfContained {
+            delimiter,
+            open_start,
+            body_start,
+            body_end,
+            close_end,
+            closes_opening: opening.is_some(),
+        };
+    }
+    if let Some(active) = opening {
+        return match closing_delimiter(text, active) {
+            Some((body_end, close_end)) => PairingStep::Closes {
+                body_end,
+                close_end,
+            },
+            // Directional environments commonly nest inside an outer display block. Only the
+            // delimiter which matches the active opener is structural at this level.
+            None => PairingStep::Inert,
+        };
+    }
+    let Some((delimiter, body_start)) = opening_delimiter(text) else {
+        return PairingStep::Inert;
+    };
+    if delimiter == DisplayDelimiter::Dollars && prefix == PrefixKnowledge::Ambiguous {
+        return PairingStep::OpensSuppressed { delimiter };
+    }
+    PairingStep::Opens {
+        delimiter,
+        body_start,
+    }
+}
+
+/// Advance the compact frozen-history parser proof by one immutable logical line. Both halves of the
+/// step are [`structural_line_step`] and [`pairing_line_step`], shared with the authoritative
+/// scanner; what this adds is only that it records no body text, so retaining checkpoints is
+/// O(resident lines), not O(total source bytes squared).
+pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptId, text: &str) {
+    {
+        let DetectionContext { fence, opening, .. } = &mut *context;
+        match structural_line_step(text, fence, opening.as_ref().map(|(_, kind)| kind)) {
+            StructuralStep::IndentedCode | StructuralStep::InsideFence => return,
+            StructuralStep::FenceMarker => {
+                *opening = None;
+                return;
+            }
+            StructuralStep::Read { abandon } => {
+                if abandon.is_some() {
+                    *opening = None;
+                }
+            }
         }
-        return;
     }
-    if context
-        .opening
-        .as_ref()
-        .is_some_and(|(_, delimiter)| closing_delimiter(text, delimiter).is_some())
-    {
-        context.opening = None;
-        return;
-    }
-    if context.opening.is_none()
-        && let Some((delimiter, _)) = opening_delimiter(text)
-        && (delimiter != DisplayDelimiter::Dollars || context.prefix == PrefixKnowledge::Known)
-    {
-        context.opening = Some((id, delimiter));
+    match pairing_line_step(
+        text,
+        context.opening.as_ref().map(|(_, kind)| kind),
+        context.prefix,
+    ) {
+        PairingStep::SelfContained { closes_opening, .. } => {
+            if closes_opening {
+                context.opening = None;
+            }
+        }
+        PairingStep::Closes { .. } => context.opening = None,
+        PairingStep::Opens { delimiter, .. } => context.opening = Some((id, delimiter)),
+        PairingStep::OpensSuppressed { .. } | PairingStep::Inert => {}
     }
 }
 
@@ -1538,7 +1711,7 @@ fn scan_math_blocks_impl<'a>(
     sites: Option<&[InlineMathSite]>,
     captured_columns: Option<&[u32]>,
     live_grid_boundary: Option<usize>,
-    clipped_open_index: Option<u32>,
+    clipped: Option<ClippedTail>,
     mut recorder: Option<&mut OwnershipRecorder>,
     frozen_resync: bool,
     final_neutral: Option<&mut bool>,
@@ -1570,28 +1743,40 @@ fn scan_math_blocks_impl<'a>(
     let mut inline_carry: Option<usize> = None;
     for (index, (_, text)) in lines.iter().enumerate() {
         let inline_predecessor = inline_carry.take();
-        if opening.is_none() && commonmark_indented_code(text) {
+        // The body of a clipped block, whose opener is above this window (see `ClippedTail`). These
+        // rows are inside a block exactly as the rows under an in-window opener are, and they are
+        // passed over for the same reason: a block's body is text to be rendered, not structure to
+        // be read. Read as structure they are a second block — `\begin{aligned}` opens one on its
+        // own — drawn from a strict sub-range of a block whose closing `$$` then stays on screen as
+        // text. Taking the predecessor first and dropping it is the rule every other body path
+        // follows: no inline run joins across a block body.
+        if clipped.is_some_and(|tail| tail.covers_body(index)) {
             continue;
         }
-        if opening.is_none()
-            && let Some(marker) = commonmark_fence_marker(text)
-        {
-            match fence {
-                Some(active) if commonmark_fence_closes(text, active) => fence = None,
-                None => fence = Some(marker),
-                _ => {}
+        // The structural half of this line, from the one place that decides it. The abandon verdict
+        // is taken here with the rest and applied at its own place below, so that the clip resync
+        // still gets the first word and the ownership ledger still records the abandon exactly where
+        // it always did.
+        let abandoned = match structural_line_step(
+            text,
+            &mut fence,
+            opening.as_ref().map(|active| &active.delimiter),
+        ) {
+            StructuralStep::IndentedCode => continue,
+            StructuralStep::FenceMarker => {
+                opening = None;
+                continue;
             }
-            opening = None;
-            continue;
-        }
-        if fence.is_some() {
-            if let Some(rec) = recorder.as_deref_mut() {
-                record_code_context_delimiter(rec, index, text);
+            StructuralStep::InsideFence => {
+                if let Some(rec) = recorder.as_deref_mut() {
+                    record_code_context_delimiter(rec, index, text);
+                }
+                continue;
             }
-            continue;
-        }
-        // Row-0 clip resync (④ / evidence-driven ②). `clipped_open_index` is the decidable evidence
-        // that the live grid's row 0 is inside a display block whose opener scrolled above grid row 0
+            StructuralStep::Read { abandon } => abandon,
+        };
+        // Row-0 clip resync (④ / evidence-driven ②). `clipped` is the decidable evidence that the
+        // live grid begins inside a display block whose opener scrolled above grid row 0
         // (Codex's in-place scroll-region compression) and that the parser reached the frozen→live
         // seam in the CLOSED phase — so this first grid `$$` is really that block's CLOSER, not a
         // fresh opener. Reading it as an opener consumes it into a spurious forward pair and shifts
@@ -1602,10 +1787,9 @@ fn scan_math_blocks_impl<'a>(
         // frozen→live bridge). The grid then re-pairs from a clean closed state and every block below
         // — including one freshly streamed with no prior hold — is detected and rendered. Any active
         // opening at this exact index is an upstream-poison phantom (the clip evidence proved the seam
-        // is closed); it is abandoned into the same account. This never fires for a pure-grid or
-        // frozen-only context, nor when the seam carries a genuine opener (`clipped_open_index` is
-        // then `None`), nor when grid row 0 is itself a valid opener.
-        if clipped_open_index == u32::try_from(index).ok() {
+        // is closed); it is abandoned into the same account. This never fires when the seam carries a
+        // genuine opener (`clipped` is then `None`), nor when grid row 0 is itself a valid opener.
+        if clipped.is_some_and(|tail| tail.closer as usize == index) {
             if let Some(rec) = recorder.as_deref_mut() {
                 rec.close_rejected(
                     index,
@@ -1617,28 +1801,21 @@ fn scan_math_blocks_impl<'a>(
             opening = None;
             continue;
         }
-        // Swallow-radius bound. A math *environment* body can never legally contain a `$$`/`\[`
-        // display opener — those switch display mode and are a syntax error inside
-        // `\begin{env}…\end{env}`. So when one appears while an environment opening is still
-        // unclosed, that environment's closer was lost (mangled by a reflow, scrolled out of this
-        // window, or malformed), and continuing to swallow would consume every following display
-        // block as phantom environment body (the `\end{pmatrix},`-poisoning failure mode). Abandon
-        // the stale environment opening here; the line is then handled by the normal
-        // opening-is-none paths below (single-line complete block, or a fresh multi-line opener)
-        // under every existing guard — prose body, escapes, CommonMark code, ambiguous-prefix
-        // pairing. This never fires for an active `$$`/`\[` opening: inner `\begin`/`\end`
-        // directional environments are not display openers, so a genuinely nested environment is
-        // still swallowed as body by the catch-all further down.
-        if opening
-            .as_ref()
-            .is_some_and(|active| matches!(active.delimiter, DisplayDelimiter::Environment(_)))
-            && opening_delimiter(text).is_some_and(|(kind, _)| {
-                matches!(kind, DelimiterKind::Dollars | DelimiterKind::Brackets)
-            })
-        {
+        // The swallow-radius bound, decided by `structural_line_step` above and applied here, where
+        // it has always been applied: the line is then handled by the normal opening-is-none paths
+        // below (single-line complete block, or a fresh multi-line opener) under every existing
+        // guard — prose body, escapes, CommonMark code, ambiguous-prefix pairing. A prose row ends
+        // an opening for the same reason and is accounted the same way the closer used to account
+        // it: the opener is refused for the body it was going to have.
+        if let Some(reason) = abandoned {
             opening = None;
             if let Some(rec) = recorder.as_deref_mut() {
-                rec.abandon_pending(LegitimateRejection::EnvironmentSwallowAbandoned);
+                rec.abandon_pending(match reason {
+                    AbandonedOpening::EnvironmentSwallow => {
+                        LegitimateRejection::EnvironmentSwallowAbandoned
+                    }
+                    AbandonedOpening::ProseBody => LegitimateRejection::GuardRejectedBody,
+                });
             }
         }
         // Frozen→live `$$` boundary resync. A Dollars opening whose opener lies in the frozen
@@ -1684,13 +1861,29 @@ fn scan_math_blocks_impl<'a>(
                 }
             }
         }
-        if opening
-            .as_ref()
-            .is_some_and(|active| active.delimiter == DisplayDelimiter::Dollars)
-            && let Some((delimiter, open_start, body_start, body_end, close_end)) =
-                complete_display_on_line(text)
-            && delimiter == DelimiterKind::Dollars
+        // The pairing half of this line, from the one place that decides it. Every arm below is the
+        // body it always had; only the question they are asked has moved.
+        let pairing = pairing_line_step(
+            text,
+            opening.as_ref().map(|active| &active.delimiter),
+            initial_context.prefix,
+        );
+        if let PairingStep::SelfContained {
+            delimiter,
+            open_start,
+            body_start,
+            body_end,
+            close_end,
+            closes_opening: true,
+        } = &pairing
         {
+            let (delimiter, open_start, body_start, body_end, close_end) = (
+                delimiter.clone(),
+                *open_start,
+                *body_start,
+                *body_end,
+                *close_end,
+            );
             // A self-contained dollars block cannot close a prior abandoned dollars opener: doing
             // so would swallow its own opening token into the render body.
             opening = None;
@@ -1737,10 +1930,22 @@ fn scan_math_blocks_impl<'a>(
             }
             continue;
         }
-        if opening.is_none()
-            && let Some((delimiter, open_start, body_start, body_end, close_end)) =
-                complete_display_on_line(text)
+        if let PairingStep::SelfContained {
+            delimiter,
+            open_start,
+            body_start,
+            body_end,
+            close_end,
+            closes_opening: false,
+        } = &pairing
         {
+            let (delimiter, open_start, body_start, body_end, close_end) = (
+                delimiter.clone(),
+                *open_start,
+                *body_start,
+                *body_end,
+                *close_end,
+            );
             let body = &text[body_start..body_end];
             let original = &text[open_start..close_end];
             let render = if matches!(delimiter, DisplayDelimiter::Environment(_)) {
@@ -1816,14 +2021,16 @@ fn scan_math_blocks_impl<'a>(
                 continue;
             }
         }
-        if let Some(active) = opening.as_ref()
-            && let Some((body_end, close_end)) = closing_delimiter(text, &active.delimiter)
+        if let PairingStep::Closes {
+            body_end,
+            close_end,
+        } = pairing
         {
-            let active = opening.take().expect("active opening was just observed");
+            let active = opening.take().expect("a closer implies an active opening");
             let closer_kind = structural_kind(&active.delimiter, false);
             let Some(start_index) = active.start_index else {
-                // The opener is before this bounded window. Its exact state proves that this is a
-                // closer, but the missing source means there is no occurrence to render.
+                // The opener is before this bounded window. Its exact state proves that this is
+                // a closer, but the missing source means there is no occurrence to render.
                 if let Some(rec) = recorder.as_deref_mut() {
                     rec.close_rejected(
                         index,
@@ -1889,41 +2096,40 @@ fn scan_math_blocks_impl<'a>(
             });
             continue;
         }
-        if opening.is_some() {
-            // Directional environments commonly nest inside an outer display block. Only the
-            // delimiter which matches the active opener is structural at this level.
-            continue;
-        }
-        let Some((delimiter, body_start)) = opening_delimiter(text) else {
-            continue;
-        };
         let open_byte = delimiter_start(text);
-        if delimiter == DisplayDelimiter::Dollars
-            && initial_context.prefix == PrefixKnowledge::Ambiguous
-        {
-            if let Some(rec) = recorder.as_deref_mut() {
-                rec.reject_single(
-                    index,
-                    open_byte,
-                    StructuralDelimiterKind::Dollars,
-                    LegitimateRejection::AmbiguousPrefixSuppressed,
-                );
+        match pairing {
+            PairingStep::OpensSuppressed { delimiter } => {
+                if let Some(rec) = recorder.as_deref_mut() {
+                    rec.reject_single(
+                        index,
+                        open_byte,
+                        StructuralDelimiterKind::Dollars,
+                        LegitimateRejection::AmbiguousPrefixSuppressed,
+                    );
+                }
+                result.ambiguous.push(AmbiguousMathBlock {
+                    start: lines[index].0,
+                    end: lines[index].0,
+                    delimiter_kind: delimiter,
+                });
             }
-            result.ambiguous.push(AmbiguousMathBlock {
-                start: lines[index].0,
-                end: lines[index].0,
-                delimiter_kind: delimiter,
-            });
-            continue;
+            PairingStep::Opens {
+                delimiter,
+                body_start,
+            } => {
+                if let Some(rec) = recorder.as_deref_mut() {
+                    rec.open(index, open_byte, structural_kind(&delimiter, true));
+                }
+                opening = Some(ActiveOpening {
+                    start_index: Some(index),
+                    delimiter,
+                    body_start,
+                });
+            }
+            // An opening this line is not the closer of, or no delimiter at all.
+            PairingStep::Inert | PairingStep::Closes { .. } | PairingStep::SelfContained { .. } => {
+            }
         }
-        if let Some(rec) = recorder.as_deref_mut() {
-            rec.open(index, open_byte, structural_kind(&delimiter, true));
-        }
-        opening = Some(ActiveOpening {
-            start_index: Some(index),
-            delimiter,
-            body_start,
-        });
     }
     // The resync-corrected parser phase after the last line. A caller certifying a repair frontier
     // (session frozen scheduling, review §B) treats `opening.is_none() && fence.is_none()` as a
@@ -1932,7 +2138,13 @@ fn scan_math_blocks_impl<'a>(
     if let Some(slot) = final_neutral {
         *slot = opening.is_none() && fence.is_none();
     }
-    append_table_blocks(&lines, captured_columns, initial_fence, &mut result);
+    append_table_blocks(
+        &lines,
+        captured_columns,
+        initial_fence,
+        clipped,
+        &mut result,
+    );
     result
 }
 
@@ -1955,6 +2167,7 @@ fn append_table_blocks(
     lines: &[(TranscriptId, &str)],
     captured_columns: Option<&[u32]>,
     initial_fence: Option<(char, usize)>,
+    clipped: Option<ClippedTail>,
     result: &mut MathScanResult,
 ) {
     if lines.len() < 2 {
@@ -1976,12 +2189,34 @@ fn append_table_blocks(
         })
         .collect();
     let texts: Vec<&str> = lines.iter().map(|(_, text)| *text).collect();
+    // One pass to place every line, then one range per block: a block's rows are consecutive lines,
+    // so its extent is its two endpoints and nothing has to be compared against every line. Asking
+    // each line whether it fell inside each block cost a pass per occurrence, which is the same
+    // answer at the price of the product.
+    let row_of = lines
+        .iter()
+        .enumerate()
+        .map(|(index, (id, _))| (*id, index))
+        .collect::<BTreeMap<_, _>>();
     let mut claimed = vec![false; lines.len()];
     for block in &result.blocks {
-        for (index, (id, _)) in lines.iter().enumerate() {
-            if *id >= block.start && *id <= block.end {
-                claimed[index] = true;
-            }
+        if let (Some(&start), Some(&end)) = (row_of.get(&block.start), row_of.get(&block.end))
+            && start <= end
+        {
+            claimed[start..=end].fill(true);
+        }
+    }
+    // A clipped block's tail is claimed too, for the reason the math loop skips it: those rows are
+    // the body of a block that began above this window, and a pipe table drawn out of part of that
+    // body is the same sub-range of a block the whole clip rule exists to refuse. The tail is
+    // claimed whole, closer included.
+    if let Some(tail) = clipped {
+        for slot in claimed
+            .iter_mut()
+            .take((tail.closer as usize + 1).min(lines.len()))
+            .skip(tail.body_start as usize)
+        {
+            *slot = true;
         }
     }
     let mut fence = initial_fence;
@@ -2161,8 +2396,13 @@ fn grid_dollars_opens_valid_block(
     .any(|block| block.start == opener_id)
 }
 
+/// The chip a full-screen program draws over its own output, which lands in the middle of a formula
+/// and is not part of it. Named once because two places ask the same question of it: the body of a
+/// whole block, and one row of a clipped block's tail.
+const CLAUDE_CODE_JUMP_CHIP: &str = "Jump to bottom (ctrl+End)";
+
 fn valid_display_body(body: &str, render_source: &str, options: DetectionOptions) -> bool {
-    if options.reject_claude_code_jump_chip_overlay && body.contains("Jump to bottom (ctrl+End)") {
+    if options.reject_claude_code_jump_chip_overlay && body.contains(CLAUDE_CODE_JUMP_CHIP) {
         return false;
     }
     !body.trim().is_empty()
@@ -2256,11 +2496,88 @@ struct MathEnvironmentRange {
     name: String,
     content_start: usize,
     close_start: usize,
+    /// Brace-group depth in force where this environment's body begins. A row separator is a token
+    /// of the body itself, so it stands at exactly this depth; anything deeper belongs to an inner
+    /// group whose grammar this function does not know.
+    open_depth: u32,
+}
+
+/// The environments in which `\\` separates rows, and therefore the only ones in which a
+/// backslash at a row end can be read as half of one.
+///
+/// Deliberately narrower on one side and wider on the other than [`is_math_environment`], which
+/// answers a different question — what may *delimit* a display block:
+///
+/// * `equation` and `equation*` are out. They hold **one** formula and have no rows, so `\\` is
+///   not a separator there; a backslash at a line end inside one is either a real command the
+///   producer split across lines or a control space, and inventing a row break would typeset
+///   something nobody wrote.
+/// * `array` and `subarray` are in. Neither may open a display block on its own — hence their
+///   absence from [`is_math_environment`] — but both are ordinary nested tabular bodies inside
+///   `$$…$$`, and until now the scan below could not see them at all, so a damaged
+///   `\begin{array}{cc}` kept its collapsed rows.
+fn is_row_based_environment(environment: &str) -> bool {
+    matches!(
+        environment,
+        "align"
+            | "align*"
+            | "alignat"
+            | "alignat*"
+            | "aligned"
+            | "alignedat"
+            | "array"
+            | "bmatrix"
+            | "Bmatrix"
+            | "cases"
+            | "flalign"
+            | "flalign*"
+            | "gather"
+            | "gather*"
+            | "gathered"
+            | "matrix"
+            | "multline"
+            | "multline*"
+            | "pmatrix"
+            | "smallmatrix"
+            | "split"
+            | "subarray"
+            | "vmatrix"
+            | "Vmatrix"
+    )
+}
+
+/// [`environment_token`] restricted to the environments that have rows.
+fn row_environment_token(text: &str, open: bool) -> Option<(String, usize)> {
+    let prefix = if open { r"\begin{" } else { r"\end{" };
+    let rest = text.strip_prefix(prefix)?;
+    let name_end = rest.find('}')?;
+    let environment = &rest[..name_end];
+    is_row_based_environment(environment)
+        .then_some((environment.to_owned(), prefix.len() + name_end + 1))
 }
 
 /// Claude Code currently turns a LaTeX environment row separator (`\\\\`) into a bare trailing
 /// backslash. A bare `\\` at a logical-line boundary is not a LaTeX command, so restoring its
 /// missing mate is syntax recovery rather than a probabilistic content guess.
+///
+/// The recovery holds only where a row separator is a thing that can exist. Three conditions say
+/// where that is, and each one excludes a reading under which the surviving backslash means
+/// something else:
+///
+/// 1. **A row-based environment** ([`is_row_based_environment`]) must enclose the backslash. In
+///    `equation` there are no rows to separate.
+/// 2. **Brace depth zero** relative to that environment's body. A separator is a token of the
+///    body; a backslash inside `\text{…}`, `\frac{…}` or any other argument is a token of that
+///    argument, where a line break means something else entirely or nothing at all.
+/// 3. **Another row must follow** before `\end{…}`. On the body's last line a `\\` would add an
+///    empty row rather than separate two written ones, so the damage there is not recoverable —
+///    and costs nothing, because there is no row after it to be run together with.
+///
+/// What remains outside the proof is stated plainly: a producer *could* have written a lone `\`
+/// (control space) at a row end and had it survive the redraw unchanged, and this function would
+/// read it as damage. Conditions 1–3 are what make that reading a space at the right-hand edge of
+/// a row — invisible in every left-aligned column and at most one space of column width elsewhere
+/// — rather than a mathematical statement.
 ///
 /// This function only sees detector-joined logical lines. Live-grid soft wraps have already been
 /// merged before `joined_range` creates these `\n` boundaries. Original terminal source remains
@@ -2274,34 +2591,55 @@ fn restore_stripped_environment_newlines(
         return source.to_owned();
     }
 
-    let mut stack = Vec::<(String, usize)>::new();
+    let mut stack = Vec::<(String, usize, u32)>::new();
     let mut environments = Vec::<MathEnvironmentRange>::new();
+    // Brace-group depth as each logical-line boundary is passed, recorded in ascending byte order.
+    // Every `\n` in `source` is visited below — the only jumps this loop makes are over environment
+    // tokens and over an escaped brace, neither of which can contain one — so the second pass reads
+    // this back with a cursor rather than searching it.
+    let mut depth_at_newline = Vec::<(usize, u32)>::new();
+    let mut depth = 0u32;
     let mut byte = 0usize;
     while byte < source.len() {
         if source.as_bytes()[byte] != b'\\' || delimiter_is_escaped(source, byte) {
+            match source.as_bytes()[byte] {
+                b'{' => depth += 1,
+                b'}' => depth = depth.saturating_sub(1),
+                b'\n' => depth_at_newline.push((byte, depth)),
+                _ => {}
+            }
             byte += source[byte..].chars().next().map_or(1, char::len_utf8);
             continue;
         }
-        if let Some((environment, token_len)) = environment_token(&source[byte..], true) {
-            stack.push((environment, byte + token_len));
+        if let Some((environment, token_len)) = row_environment_token(&source[byte..], true) {
+            stack.push((environment, byte + token_len, depth));
             byte += token_len;
             continue;
         }
-        if let Some((environment, token_len)) = environment_token(&source[byte..], false)
+        if let Some((environment, token_len)) = row_environment_token(&source[byte..], false)
             && stack
                 .last()
-                .is_some_and(|(active, _)| *active == environment)
+                .is_some_and(|(active, _, _)| *active == environment)
         {
-            let (_, content_start) = stack.pop().expect("matching environment is active");
+            let (_, content_start, open_depth) =
+                stack.pop().expect("matching environment is active");
             environments.push(MathEnvironmentRange {
                 name: environment,
                 content_start,
                 close_start: byte,
+                open_depth,
             });
             byte += token_len;
             continue;
         }
-        byte += 1;
+        // An unescaped backslash that opens no environment begins a control sequence. Step over it,
+        // and over a brace it escapes, so `\{` is counted as the character it is rather than as a
+        // group that would leave every later row apparently one level deep.
+        byte += if matches!(source.as_bytes().get(byte + 1), Some(b'{' | b'}')) {
+            2
+        } else {
+            1
+        };
     }
     if environments.is_empty() {
         return source.to_owned();
@@ -2309,8 +2647,13 @@ fn restore_stripped_environment_newlines(
 
     let mut insertions = Vec::new();
     let mut line_start = 0usize;
+    let mut depths = depth_at_newline.iter();
     while let Some(relative_newline) = source[line_start..].find('\n') {
         let newline = line_start + relative_newline;
+        let line_depth = depths
+            .next()
+            .filter(|(recorded, _)| *recorded == newline)
+            .map(|(_, depth)| *depth);
         let line = &source[line_start..newline];
         let trimmed_end = line.trim_end().len();
         let slash = line_start + trimmed_end;
@@ -2325,9 +2668,10 @@ fn restore_stripped_environment_newlines(
             .max_by_key(|environment| environment.content_start);
         if has_bare_trailing_slash
             && active_environment.is_some_and(|environment| {
-                source[newline + 1..environment.close_start]
-                    .chars()
-                    .any(|character| !character.is_whitespace())
+                line_depth == Some(environment.open_depth)
+                    && source[newline + 1..environment.close_start]
+                        .chars()
+                        .any(|character| !character.is_whitespace())
             })
         {
             insertions.push(slash);
@@ -2680,7 +3024,7 @@ pub fn detect_live_math_blocks_in_context<'a>(
     options: DetectionOptions,
     sites: Option<&[InlineMathSite]>,
     live_grid_boundary: Option<usize>,
-    clipped_open_index: Option<u32>,
+    clipped: Option<ClippedTail>,
 ) -> Vec<DetectedMathBlock> {
     scan_live_math_blocks_in_context(
         lines,
@@ -2689,7 +3033,7 @@ pub fn detect_live_math_blocks_in_context<'a>(
         sites,
         None,
         live_grid_boundary,
-        clipped_open_index,
+        clipped,
     )
     .blocks
 }
@@ -2704,7 +3048,7 @@ pub fn scan_live_math_blocks_in_context<'a>(
     sites: Option<&[InlineMathSite]>,
     captured_columns: Option<&[u32]>,
     live_grid_boundary: Option<usize>,
-    clipped_open_index: Option<u32>,
+    clipped: Option<ClippedTail>,
 ) -> MathScanResult {
     scan_math_blocks_impl(
         lines,
@@ -2713,7 +3057,7 @@ pub fn scan_live_math_blocks_in_context<'a>(
         sites,
         captured_columns,
         live_grid_boundary,
-        clipped_open_index,
+        clipped,
         None,
         false,
         None,
@@ -2801,17 +3145,19 @@ pub fn live_detection_isolation_gap(
 ) -> usize {
     let logical = live_logical_lines(inputs);
     let boundary = live_grid_boundary_index(&logical, inputs);
-    let clipped = clipped_open_index(
+    let sites = live_logical_sites(&logical);
+    let clipped = clipped_tail(
         &logical,
         live_grid_first_index(&logical, inputs),
         &initial_context,
         options,
+        Some(&sites),
     );
     let full = detect_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context,
         options,
-        Some(&live_logical_sites(&logical)),
+        Some(&sites),
         boundary,
         clipped,
     );
@@ -2867,11 +3213,13 @@ pub fn live_detection_ownership_ledger(
 ) -> OwnershipLedger {
     let logical = live_logical_lines(inputs);
     let boundary = live_grid_boundary_index(&logical, inputs);
-    let clipped = clipped_open_index(
+    let sites = live_logical_sites(&logical);
+    let clipped = clipped_tail(
         &logical,
         live_grid_first_index(&logical, inputs),
         &initial_context,
         options,
+        Some(&sites),
     );
 
     // Lineage: a logical line's source row is its first physical fragment's input source.
@@ -2897,7 +3245,9 @@ pub fn live_detection_ownership_ledger(
         false,
         None,
     );
-    let mut ledger = recorder.finish(boundary, source_of, clipped);
+    // The ledger's fallback reclassification is keyed to the closer alone: the body rows carry no
+    // delimiter of their own, so the tail's extent has nothing to say about any entry's fate.
+    let mut ledger = recorder.finish(boundary, source_of, clipped.map(|tail| tail.closer));
     // Batch ③: carry the display blocks the same scan Owned, keyed by the exact `original_source` the
     // presentation layer preserves holds on. Inline `$…$` runs never enter a hold, so they are
     // excluded here — this vector is exactly the Owned structural-display set (`ledger.detected()`).
@@ -2910,11 +3260,48 @@ pub fn live_detection_ownership_ledger(
     ledger
 }
 
-/// Detect the round-3 clipped-open topology: the live grid's row 0 is inside a display block body
-/// whose opener scrolled above it, and the scanner reaches the seam in the closed phase (no opener
-/// carried). Returns the logical index of the first grid `$$` — really the clipped block's closer —
-/// so the ledger can mark it a `ClippedOpen` orphan. Decidable purely from the reconstructed rows
-/// and the parser phase at the boundary; hold-independent, exactly what `isolation_gap` cannot see.
+/// The visible tail of a clipped display block: the rows this window can see of a block whose
+/// opening `$$` is above grid row 0, and the lone `$$` that closes it. `body_start` is the top of
+/// the proven body, `closer` the delimiter that ends it, and every row between them is body — not
+/// structure — because the block that owns them began off the top of the window.
+///
+/// The scanner reads the tail as one thing for the same reason it reads any block as one thing, and
+/// the tail is exactly the rows above the delimiter that no complete occurrence claims. That is what
+/// is left of a block whose opener went off the top of the window: a run of body and, where the
+/// block was written as an environment, a bare `\end{aligned}` whose `\begin` went with the opener.
+/// A pipe table among those rows would be the same sub-range by another route, so the table pass is
+/// handed the tail too. Nothing here is rendered: the detector never owns a block whose opener it
+/// has not read, so a clipped tail's rows stay source, and only the blocks below the clip — whose
+/// openers and closers are both on this screen — are detected.
+///
+/// **That is not the same as saying a picture is lost whenever an opener goes off the top.** The two
+/// cases differ by what has been proven, not by what is on screen. A block this session already
+/// proved whole keeps its picture when its opener scrolls above row 0: the session holds the record
+/// and clips its top rows (`clipped_top_rows`), which is preservation of an occurrence, not a fresh
+/// detection. What a window cannot do is *first meet* a block already clipped and decide from the
+/// tail alone what the whole of it was. So a formula that scrolls off the top keeps its picture, and
+/// a screen that arrives already clipped stays source until the opener comes back into view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClippedTail {
+    pub body_start: u32,
+    pub closer: u32,
+}
+
+impl ClippedTail {
+    /// Whether `index` is one of the body rows the clipped block owns (the closer excluded — it has
+    /// its own branch in the scanner).
+    fn covers_body(self, index: usize) -> bool {
+        (self.body_start as usize..self.closer as usize).contains(&index)
+    }
+}
+
+/// Detect the round-3 clipped-open topology: the live grid begins inside a display block body whose
+/// opener scrolled above it, and the scanner reaches the seam in the closed phase (no opener
+/// carried). Returns the clipped block's visible tail — the proven body rows and the first grid `$$`,
+/// really that block's closer — so the scanner can consume the tail whole and the ledger can mark the
+/// closer a `ClippedOpen` orphan when a caller scanned without the evidence. Decidable purely from
+/// the reconstructed rows and the parser phase at the boundary; hold-independent, exactly what
+/// `isolation_gap` cannot see.
 ///
 /// `first_grid` is [`live_grid_first_index`] and **not** the frozen→live seam: whether a screen
 /// begins inside a block has nothing to do with whether any frozen line stands in front of it, and
@@ -2922,12 +3309,13 @@ pub fn live_detection_ownership_ledger(
 /// a full-screen program's alternate screen, which owns its window and moves its content by
 /// redrawing rather than scrolling, so no row is ever removed and nothing advances that screen's
 /// context — unable to state it at all (§4.6b).
-fn clipped_open_index(
+fn clipped_tail(
     logical: &[LiveLogicalLine],
     first_grid: Option<usize>,
     initial_context: &DetectionContext,
     options: DetectionOptions,
-) -> Option<u32> {
+    sites: Option<&[InlineMathSite]>,
+) -> Option<ClippedTail> {
     let b = first_grid?;
     // Parser phase at the seam. If a Dollars opener is carried in (`opening.is_some()`) the block's
     // opener is accounted above the window (a genuine bridge / carry, not a clip); if inside a code
@@ -2951,25 +3339,109 @@ fn clipped_open_index(
     if first_dollars == b {
         return None;
     }
-    // No display opener may appear among the body rows before it (that would put the opener in the
-    // grid), and those rows must form a valid display body (real math, not prose/blank) — the proof
-    // that row 0 is genuinely inside a block.
-    if (b..first_dollars).any(|i| opening_delimiter(logical[i].text.as_str()).is_some()) {
+    // The phase must still be closed where the scan reaches that `$$`. This is the same question as
+    // at the seam, asked again over the grid rows in front of the delimiter, and it is what makes
+    // "the opener is above the window" a statement rather than a guess: if anything among those rows
+    // opens a block that is still open here, then THIS `$$` is that block's closer and the opener is
+    // on screen — an ordinary grid block (`$$ x = y` / `z = w` / `$$`), which reading it as a clip
+    // would destroy. A fence left open says the same for code: the `$$` is inert text inside it.
+    for line in &logical[b..first_dollars] {
+        advance_detection_context(&mut context, line.id, &line.text);
+    }
+    if context.opening.is_some() || context.fence.is_some() {
         return None;
     }
-    // Nor may a CommonMark fence open among them. The scanner skips a fenced region whole, so a
-    // `$$` reached inside one is inert text and the rows above it are code, not a block body — and
-    // `valid_display_body` cannot say so, because a bare fence marker is a single token with no
-    // whitespace in it and reads as math rather than prose.
-    if (b..first_dollars).any(|i| commonmark_fence_marker(logical[i].text.as_str()).is_some()) {
-        return None;
-    }
-    let body = logical[b..first_dollars]
+    let lines = logical
         .iter()
-        .map(|line| line.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !valid_display_body(&body, &body, options) {
+        .map(|line| (line.id, line.text.as_str()))
+        .collect::<Vec<_>>();
+    // **The floor: how far up the tail is allowed to reach. Only rows that belong to NO complete
+    // occurrence can be tail body.** Seen from this window alone, `[a complete thing][a lone $$]` is
+    // two readings at once — a standalone occurrence and then a `$$` whose block is still being
+    // typed, or the tail of a block clipped at the top — and neither the rows nor the phase can tell
+    // them apart. So the tie goes to what the window can prove: a complete occurrence is a block
+    // this window owns, and a reading that turns an owned block back into text on evidence the
+    // window does not have is the worse of the two, permanently, for output that has stopped.
+    //
+    // A clipped block's visible remainder does not look like that. What is left of it is rows no
+    // occurrence claims — a run of body and, when the block was written as an environment, a bare
+    // `\end{aligned}` whose `\begin` went off the top with the opener. That is the shape this rule
+    // recognises, and a complete `\begin{env}…\end{env}` is not it.
+    //
+    // The floors are read off a scan of the rows in front of the delimiter — the detector's own
+    // answer to "what does this window prove on its own", not a second reading of it, and the same
+    // device the convergence guard below uses in the other direction. The sites travel with it,
+    // because an inline run is only an occurrence where the terminal says a command printed the row.
+    let prefix = scan_math_blocks_impl(
+        lines[..first_dollars].iter().copied(),
+        initial_context.clone(),
+        options,
+        sites.map(|sites| &sites[..first_dollars.min(sites.len())]),
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
+    let occurrence_ends = prefix
+        .blocks
+        .iter()
+        .map(|block| block.end)
+        .collect::<BTreeSet<_>>();
+    let occurrence_floor = lines[..first_dollars]
+        .iter()
+        .enumerate()
+        .filter(|(_, (id, _))| occurrence_ends.contains(id))
+        .map(|(index, _)| index + 1)
+        .max()
+        .unwrap_or(b);
+    // A CommonMark fence marker is not an occurrence and has to be named separately. The scanner
+    // skips a fenced region whole, so rows across a marker are code rather than body, and
+    // `valid_display_body` cannot say so: a bare marker is a single token with no whitespace in it
+    // and reads as math rather than prose. Both markers bound the tail, so the last one does.
+    let fence_floor = (b..first_dollars)
+        .rev()
+        .find(|&index| commonmark_fence_marker(logical[index].text.as_str()).is_some())
+        .map_or(b, |index| index + 1);
+    let floor = occurrence_floor.max(fence_floor).max(b);
+    // **The body proof, over the maximal suffix `[body_start, first_dollars)` of what is left.** Not
+    // unconditionally from row 0: what the clip has to establish is that the row above the `$$` is
+    // inside a block, and that is a property of the rows nearest the delimiter. A window simply
+    // begins where it begins, and its first row is whatever the program happened to have printed
+    // there — on the screen this was reported from it was the program's own echoed prompt, one line
+    // of Chinese read as prose, and an unmistakable `\end{aligned}` tail two rows below it went
+    // unclaimed because of it.
+    //
+    // One upward pass and no joining. `valid_display_body` over a run of rows is the conjunction of
+    // three facts that each grow one way only — no row is prose, no row carries the overlay chip,
+    // and the joined length is inside the source limit — so the first row walking up that breaks one
+    // of them breaks it for every longer suffix too, and where the walk stops is the maximum.
+    let mut body_start = first_dollars;
+    let mut bytes = 0usize;
+    let mut has_content = false;
+    for index in (floor..first_dollars).rev() {
+        let text = logical[index].text.as_str();
+        if options.reject_claude_code_jump_chip_overlay && text.contains(CLAUDE_CODE_JUMP_CHIP) {
+            break;
+        }
+        if block_body_looks_like_prose(text) {
+            break;
+        }
+        // The joined body is the rows with one `\n` between them, so every row but the lowest costs
+        // its own length and one separator.
+        let separator = usize::from(body_start != first_dollars);
+        let Some(grown) = bytes
+            .checked_add(text.len() + separator)
+            .filter(|grown| *grown <= MAX_MATH_SOURCE_BYTES)
+        else {
+            break;
+        };
+        bytes = grown;
+        has_content |= !text.trim().is_empty();
+        body_start = index;
+    }
+    if body_start == first_dollars || !has_content {
         return None;
     }
     // The convergence guard, the same one the two resyncs use: a symmetric `$$` is never re-read on
@@ -2980,12 +3452,10 @@ fn clipped_open_index(
     // so pairing forward from the closer encloses the prose between them and is refused. Without
     // this, one row of ordinary text above a block — a single word, which is not enough whitespace
     // to read as prose — was enough to eat that block's opening `$$` as an above-window closer.
-    let lines = logical
-        .iter()
-        .map(|line| (line.id, line.text.as_str()))
-        .collect::<Vec<_>>();
-    (!grid_dollars_opens_valid_block(&lines, first_dollars, options))
-        .then_some(first_dollars as u32)
+    (!grid_dollars_opens_valid_block(&lines, first_dollars, options)).then_some(ClippedTail {
+        body_start: body_start as u32,
+        closer: first_dollars as u32,
+    })
 }
 
 /// Run the authoritative detector on a worker-owned frozen snapshot. The session thread only
@@ -3095,17 +3565,19 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
         return false;
     };
     let live_grid_boundary = live_grid_boundary_index(&logical, &task.inputs);
-    let clipped = clipped_open_index(
+    let sites = live_logical_sites(&logical);
+    let clipped = clipped_tail(
         &logical,
         live_grid_first_index(&logical, &task.inputs),
         &task.initial_context,
         task.options,
+        Some(&sites),
     );
     let scan = scan_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         task.initial_context.clone(),
         task.options,
-        Some(&live_logical_sites(&logical)),
+        Some(&sites),
         Some(&live_logical_captured_columns(&logical)),
         live_grid_boundary,
         clipped,
@@ -3135,17 +3607,19 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
     let logical = live_logical_lines(&inputs);
     let row_to_logical = live_grid_logical_ids(&logical, &inputs);
     let live_grid_boundary = live_grid_boundary_index(&logical, &inputs);
-    let clipped = clipped_open_index(
+    let sites = live_logical_sites(&logical);
+    let clipped = clipped_tail(
         &logical,
         live_grid_first_index(&logical, &inputs),
         &initial_context,
         options,
+        Some(&sites),
     );
     let scan = scan_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context.clone(),
         options,
-        Some(&live_logical_sites(&logical)),
+        Some(&sites),
         Some(&live_logical_captured_columns(&logical)),
         live_grid_boundary,
         clipped,
@@ -3263,7 +3737,7 @@ fn apply_live_detected_block(
 ///
 /// This is where the scanned window stops being frozen text and starts being the screen, and two
 /// different questions are asked at that coordinate. [`live_grid_boundary_index`] asks the narrower
-/// one; [`clipped_open_index`] asks this one, because "does this screen begin inside a block" is a
+/// one; [`clipped_tail`] asks this one, because "does this screen begin inside a block" is a
 /// question a window with no frozen prefix at all can be asked just as well.
 fn live_grid_first_index(
     logical: &[LiveLogicalLine],
@@ -3567,6 +4041,207 @@ mod tests {
         let spans = detect_block_math("  $$x^2$$  ");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].render_source, "x^2");
+    }
+
+    /// Every kind of line that can move the carried parser state, and a few that must not.
+    const DRIFT_ALPHABET: &[&str] = &[
+        // Environment openers: one the scanner accepts as a standalone opener, one it does not.
+        r"\begin{align}",
+        r"\begin{pmatrix}",
+        // A complete environment on one line — the shape that closes an active environment for the
+        // scanner, and used not to for the walker.
+        r"\begin{align}x=y\end{align}",
+        r"\end{align}",
+        // Dollars and brackets: open, close, and self-contained.
+        "$$",
+        "$$x^2$$",
+        r"\[",
+        r"\]",
+        r"\[y\]",
+        // Fences: both markers, an info string, and one longer than the usual three.
+        "```",
+        "```rust",
+        "````",
+        "~~~",
+        // Code by indentation, in spaces and in tabs.
+        "    indented",
+        "\tindented",
+        // Prefixes the detector reads through.
+        "- $$a$$",
+        "> $$b$$",
+        "# $$c$$",
+        "# heading",
+        // Ordinary text, and two shapes a terminal leaves behind.
+        "prose line",
+        "",
+        "trailing blanks   ",
+        "carriage\r",
+    ];
+
+    /// Is the parser state this context carries settled — nothing open, no fence?
+    fn context_is_settled(context: &DetectionContext) -> bool {
+        context.opening.is_none() && context.fence.is_none()
+    }
+
+    /// The same question, asked of the authoritative scanner after it has read `lines`.
+    fn scan_is_settled(lines: &[(TranscriptId, &str)], initial_context: DetectionContext) -> bool {
+        let mut settled = false;
+        scan_math_blocks_impl(
+            lines.iter().copied(),
+            initial_context,
+            DetectionOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some(&mut settled),
+        );
+        settled
+    }
+
+    /// **The prefix walker and the scanner are one state machine, and this is what says so.**
+    ///
+    /// `advance_detection_context` exists so a caller can ask what parser state a line is in without
+    /// rescanning everything above it, and every answer it gives is worth exactly the scanner's
+    /// agreement. It was a second copy of the scanner's rules and it drifted twice, one review
+    /// apart: first the structural half — it never learned to abandon an unfinished environment, so
+    /// it never saw the fence below one — and then the pairing half, where it stopped at every
+    /// complete one-line block, so a one-line `\begin{align}…\end{align}` did not close the
+    /// environment above it. Both were found one case at a time, which is the argument for not
+    /// testing them one case at a time.
+    ///
+    /// So the test is the equivalence itself, over thousands of generated corpora and every point
+    /// each could be split at, in two halves that catch different things:
+    ///
+    /// * the blocks below the split must be the ones a single scan of the whole finds there, and
+    /// * the state left behind must be the state a whole walk arrives at — which is the half that
+    ///   reaches a split *inside* a multi-line block, where there are no blocks below to compare and
+    ///   a streaming `\begin{align}` seam lives.
+    ///
+    /// The corpora are generated from a fixed seed by a plain arithmetic recurrence: no dependency,
+    /// and the same corpora on every machine and every run, so a failure names a corpus that can be
+    /// read and pasted into `DIRECTED`.
+    #[test]
+    fn walking_a_prefix_leaves_the_scanner_where_scanning_it_would_have() {
+        const DIRECTED: &[&[&str]] = &[
+            // Round 4: an environment nobody closed, a block that ends its swallow, and a fence
+            // that only a reader who noticed the abandon can see.
+            &[
+                r"\begin{align}",
+                "$$z^2$$",
+                "```",
+                "code",
+                "$$x^2$$",
+                "```",
+                "tail",
+            ],
+            // Round 5: the same, where what ends the swallow is a complete environment on one line.
+            &[
+                r"\begin{align}",
+                r"\begin{align}x=y\end{align}",
+                "```",
+                "code",
+                "$$x^2$$",
+                "```",
+                "tail",
+            ],
+            // The same with the fence left open.
+            &[
+                r"\begin{align}",
+                r"\begin{align}x=y\end{align}",
+                "```",
+                "code",
+                "$$x^2$$",
+                "more code",
+            ],
+            // The bracket forms of both.
+            &[r"\begin{align}", r"\[y\]", "```", "$$x^2$$", "```"],
+            &[r"\begin{align}", r"\[", "body", r"\]", "```", "$$x^2$$"],
+            // A fence opened inside an unfinished environment, and never closed.
+            &[r"\begin{align}", "$$z^2$$", "```", "code", "more code"],
+            // Fence markers of both kinds, one inside the other's body.
+            &["~~~", "```", "$$a$$", "~~~", "$$b$$", "```", "$$c$$"],
+            // The environment does close, later: nothing may be abandoned.
+            &[
+                r"\begin{align}",
+                "x &= y",
+                r"\end{align}",
+                "```",
+                "$$d$$",
+                "```",
+                "$$e$$",
+            ],
+            // Abandon, and then the closer of the thing that was abandoned.
+            &[r"\begin{align}", "$$x^2$$", r"\end{align}", "$$y^2$$"],
+            // Indented code under an unfinished environment, then a block.
+            &[r"\begin{align}", "    indented", "$$f$$", "tail"],
+        ];
+        const GENERATED: usize = 4_000;
+        const LINES: usize = 8;
+
+        let mut corpora = DIRECTED
+            .iter()
+            .map(|corpus| corpus.to_vec())
+            .collect::<Vec<_>>();
+        let mut state = 0x2026_0917_u64;
+        for _ in 0..GENERATED {
+            let mut corpus = Vec::with_capacity(LINES);
+            for _ in 0..LINES {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                corpus.push(DRIFT_ALPHABET[(state >> 33) as usize % DRIFT_ALPHABET.len()]);
+            }
+            corpora.push(corpus);
+        }
+
+        let mut checks = 0usize;
+        for (corpus_index, corpus) in corpora.iter().enumerate() {
+            let numbered = corpus
+                .iter()
+                .enumerate()
+                .map(|(index, text)| (TranscriptId(index as u64 + 1), *text))
+                .collect::<Vec<_>>();
+            let whole = detect_math_blocks_in_context(
+                numbered.iter().copied(),
+                DetectionContext::default(),
+            );
+            let mut walked = DetectionContext::default();
+            for (id, text) in &numbered {
+                advance_detection_context(&mut walked, *id, text);
+            }
+            for split in 0..=corpus.len() {
+                let mut context = DetectionContext::default();
+                for (id, text) in &numbered[..split] {
+                    advance_detection_context(&mut context, *id, text);
+                }
+                let tail = &numbered[split..];
+                let found = detect_math_blocks_in_context(tail.iter().copied(), context.clone())
+                    .iter()
+                    .map(|block| (block.start, block.end))
+                    .collect::<Vec<_>>();
+                let expected = whole
+                    .iter()
+                    .filter(|block| block.start.0 > split as u64)
+                    .map(|block| (block.start, block.end))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    found, expected,
+                    "corpus {corpus_index} {corpus:?} split at {split}: the blocks below the split \
+                     are not the ones a whole scan finds there"
+                );
+                assert_eq!(
+                    scan_is_settled(tail, context),
+                    context_is_settled(&walked),
+                    "corpus {corpus_index} {corpus:?} split at {split}: the state left behind is \
+                     not the state a whole walk arrives at"
+                );
+                checks += 1;
+            }
+        }
+        assert!(checks > 30_000, "only {checks} split checks ran");
     }
 
     #[test]
@@ -4135,12 +4810,52 @@ mod tests {
             r"= \frac{-b}{2a}$, and the rest",
             "4ac}}{2a}$ and so on",
             "a}$ text",
+            // A closer with a whole formula of its own behind it. The row carries three dollars
+            // and is a closing row all the same: the closer is the first of them (X-6).
+            r"= \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$, and the density $\varphi(x) = e^{-x^2/2}$.",
         ] {
             assert!(
                 may_close_row_split_inline_math(text),
                 "{text:?} could close a formula left open above and must be asked about"
             );
         }
+    }
+
+    /// **One closer rule, asked by both sides.** The frozen scan window decides whether the row
+    /// above a candidate is read at all; the join decides what happens when it is. Let the two
+    /// disagree and the formula is simply lost — the worker is handed one row, the opening fragment
+    /// is not in it, and nothing anywhere records that a join was refused. That is exactly what
+    /// happened to the reported sentence, whose closing row the window read as a census of dollars
+    /// and therefore refused for carrying a second, whole formula (release review 2026-09-17, X-6).
+    ///
+    /// So the window's question is [`first_inline_closer`], the join's own, and this holds the two
+    /// answers together over every line of the false-positive corpus and over both halves of the
+    /// report. It is a property of the code rather than of the corpus, which is the point: no new
+    /// closing row can be admitted on one side alone.
+    #[test]
+    fn the_scan_window_and_the_join_agree_on_every_closing_row() {
+        let mut disagreed = Vec::new();
+        for text in INLINE_FALSE_POSITIVE_CORPUS
+            .iter()
+            .map(|(line, _)| *line)
+            .chain([SPLIT_HEAD, SPLIT_TAIL, "and Pro costs $15", "no dollars"])
+        {
+            if join(SPLIT_HEAD, text).is_some() && !may_close_row_split_inline_math(text) {
+                disagreed.push(format!("{text:?} joins, but its row above is never read"));
+            }
+        }
+        assert!(
+            disagreed.is_empty(),
+            "{} closing rows the window refuses and the join accepts:\n  {}",
+            disagreed.len(),
+            disagreed.join("\n  ")
+        );
+        assert!(
+            may_close_row_split_inline_math(SPLIT_TAIL),
+            "the reported sentence's own closing row carries three dollars and has to reach the \
+             row above it: the closer is the first of them, and the density behind it is a run of \
+             its own"
+        );
     }
 
     #[test]
@@ -5181,6 +5896,219 @@ abla f",
         assert!(!detected[0].span.render_source.contains("y &= 1\\\\\n"));
     }
 
+    /// Detect one block out of a whole answer's worth of lines and return its span.
+    fn one_block(text: &str) -> MathOccurrence {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let detected = detect_math_blocks(
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+        );
+        assert_eq!(detected.len(), 1, "expected exactly one block in:\n{text}");
+        detected[0].span.clone()
+    }
+
+    fn blocks_in(text: &str) -> Vec<DetectedMathBlock> {
+        let lines: Vec<&str> = text.split('\n').collect();
+        detect_math_blocks(
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+        )
+    }
+
+    /// The same body, with every row end damaged the way an agent's own final redraw damages it.
+    fn damaged(intact: &str) -> String {
+        intact.replace("\\\\\n", "\\\n")
+    }
+
+    /// A1 — an agent's redraw runs a finished answer through CommonMark with no math protection,
+    /// and `\\` at a line end comes out as `\`. Inside a row-based environment the damaged block
+    /// must reach the typesetter as the undamaged one does, byte for byte: identical renderer
+    /// input is the strongest available statement of "typesets identically", and it holds without
+    /// rasterising anything.
+    ///
+    /// These four shapes already passed before the row-based restriction below was written; they
+    /// are pinned here so that narrowing the rule cannot quietly take them away.
+    #[test]
+    fn a_damaged_row_end_reaches_the_typesetter_as_the_undamaged_one_does() {
+        for intact in [
+            "$$\n\\begin{aligned}\na &= b + c \\\\\nd &= e - f\n\\end{aligned}\n$$",
+            "$$\n\\begin{pmatrix}\na & b \\\\\nc & d\n\\end{pmatrix}\n$$",
+            "$$\nf(x) = \\begin{cases}\n1 & x > 0 \\\\\n0 & x = 0 \\\\\n-1 & x < 0\n\\end{cases}\n$$",
+            "$$\n\\begin{bmatrix}\nx \\\\\ny\n\\end{bmatrix}\n$$",
+        ] {
+            let broken = damaged(intact);
+            assert_ne!(broken, intact, "the fixture must actually be damaged");
+            let repaired = one_block(&broken);
+            assert_eq!(
+                repaired.render_source,
+                one_block(intact).render_source,
+                "damaged and undamaged must reach the typesetter alike:\n{broken}"
+            );
+            // A4 — copy and show-source answer with the bytes the terminal received.
+            assert_eq!(repaired.original_source, broken.trim_end_matches('\n'));
+        }
+    }
+
+    /// A1, the half that fails on `main`: `equation` holds one formula and has no rows, so there
+    /// is no row separator for a surviving backslash to be half of. Before the row-based
+    /// restriction, `render_source` here came out with `E = mc^2 \\`, which sets a row break
+    /// nobody wrote — the second assertion is the one that was red.
+    #[test]
+    fn a_single_formula_environment_gains_no_row_it_never_had() {
+        for body in [
+            "$$\n\\begin{equation}\nE = mc^2 \\\n\\qquad\\text{(rest mass)}\n\\end{equation}\n$$",
+            "$$\n\\begin{equation*}\na = b \\\nc\n\\end{equation*}\n$$",
+        ] {
+            let span = one_block(body);
+            assert!(
+                !span.render_source.contains("\\\\"),
+                "a single-formula environment must keep the bytes it was given: {}",
+                span.render_source
+            );
+            assert_eq!(
+                span.render_source,
+                restore_stripped_environment_newlines(&span.render_source, false, false),
+                "the repaired input must equal the unrepaired input"
+            );
+        }
+    }
+
+    /// A1, second half that fails on `main`: a row separator is a token of an environment's own
+    /// body. A backslash standing one brace deep belongs to whatever opened that brace —
+    /// `\text{…}` running over a line end is text, not a row — so it is left exactly as it came.
+    /// Before this restriction the `\text{ and \` line gained a `\\` and broke the argument open.
+    #[test]
+    fn a_backslash_inside_a_group_is_not_a_row_end() {
+        let inside_text = "$$\n\\begin{aligned}\na &= b \\text{ and \\\nmore text }\\\\\nc &= d\n\\end{aligned}\n$$";
+        let span = one_block(inside_text);
+        assert!(
+            span.render_source.contains("\\text{ and \\\n"),
+            "a backslash inside \\text{{}} stays a backslash: {}",
+            span.render_source
+        );
+        assert!(
+            span.render_source.contains("more text }\\\\\n"),
+            "the real separator one brace out is untouched: {}",
+            span.render_source
+        );
+
+        // The depth is counted in groups, not in backslashes: `\{` and `\}` are the characters
+        // they draw, so a row that balances them is still at the body's own depth.
+        let escaped_braces = "$$\n\\begin{aligned}\na &= \\{1\\} \\\nb &= 2\n\\end{aligned}\n$$";
+        assert_eq!(
+            one_block(escaped_braces).render_source,
+            one_block("$$\n\\begin{aligned}\na &= \\{1\\} \\\\\nb &= 2\n\\end{aligned}\n$$")
+                .render_source,
+            "an escaped brace must not read as a group"
+        );
+    }
+
+    /// A1, third half that fails on `main`: `array` and `subarray` are row-based bodies that may
+    /// not open a display block on their own, so the environment scan — which used the *delimiter*
+    /// allow-list — could not see them, and a damaged `\begin{array}{cc}` kept its rows run
+    /// together. Both assertions were red.
+    #[test]
+    fn a_nested_tabular_body_gets_its_rows_back() {
+        for intact in [
+            "$$\n\\begin{array}{cc}\na & b \\\\\nc & d\n\\end{array}\n$$",
+            "$$\n\\begin{aligned}\nM &= \\begin{array}{cc}\na & b \\\\\nc & d\n\\end{array}\n\\end{aligned}\n$$",
+        ] {
+            assert_eq!(
+                one_block(&damaged(intact)).render_source,
+                one_block(intact).render_source,
+                "a nested tabular body's rows must survive the redraw:\n{intact}"
+            );
+        }
+    }
+
+    /// A3 — the rest of the redraw's damage has no unique inverse and must be left alone. `\,`,
+    /// `\!` and `\[` all become an ordinary character that is legitimate mathematics on its own,
+    /// and a line holding only `=` is *deleted* outright (it turns the paragraph above into a
+    /// setext heading). Putting any of them back would be inventing an equation: `a , b` is a
+    /// list, `[x]` is a bracket, and nobody knows which side of a vanished `=` was which.
+    #[test]
+    fn damage_without_a_unique_inverse_is_left_exactly_as_it_arrived() {
+        for body in [
+            "$$\n\\begin{aligned}\na &= b, c \\\\\nd &= e\n\\end{aligned}\n$$",
+            "$$\nf(x; \\theta) = 1\n$$",
+            "$$\n[x] = y\n$$",
+            "$$\n\\begin{aligned}\nA &= B \\\\\nC &= D\n\\end{aligned}\n$$",
+            "$$\na ! b\n$$",
+        ] {
+            let span = one_block(body);
+            let bare = restore_stripped_environment_newlines(&span.render_source, false, false);
+            assert_eq!(
+                span.render_source, bare,
+                "nothing but a row separator is ever restored: {body}"
+            );
+        }
+    }
+
+    /// A5 — the user's switch. On, the damage is repaired; off, renderer input is the terminal's
+    /// own bytes with the delimiters removed, exactly as it was before any of this existed.
+    #[test]
+    fn the_repair_switch_decides_the_whole_of_it() {
+        let broken =
+            damaged("$$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$").to_owned();
+        let lines: Vec<&str> = broken.split('\n').collect();
+        let numbered = || {
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line))
+        };
+        let off = detect_math_blocks_with_options(
+            numbered(),
+            DetectionOptions {
+                restore_stripped_environment_newlines: false,
+                restore_stripped_inline_environment_newlines: false,
+                ..DetectionOptions::default()
+            },
+        );
+        assert_eq!(off.len(), 1);
+        assert_eq!(
+            off[0].span.render_source, "\\begin{aligned}\na &= b \\\nc &= d\n\\end{aligned}",
+            "off must hand the typesetter the damaged bytes, unchanged"
+        );
+        assert_eq!(off[0].span.original_source, broken);
+        assert!(
+            detect_math_blocks(numbered())[0]
+                .span
+                .render_source
+                .contains("a &= b \\\\\n"),
+            "on is the default"
+        );
+    }
+
+    /// A2 — Codex's redraw prints the opener of a display block as `# $$`. That marker is accepted
+    /// only where a `$$` block is what follows: an ordinary heading, and a heading that merely
+    /// mentions `$$` in its text, open nothing.
+    #[test]
+    fn an_atx_marked_opener_is_an_opener_only_when_a_closer_answers_it() {
+        let marked = blocks_in("# $$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$");
+        assert_eq!(marked.len(), 1, "a marked opener with a closer is a block");
+        assert_eq!(
+            marked[0].span.render_source,
+            "\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}"
+        );
+
+        for text in [
+            "# $$\nprose only here\nand more of it\n",
+            "# Title\nnot math at all\n",
+            "# Costs in $$ per unit\nnot math\n$$\n",
+            "# $$ and $ in the shell\nmore prose\n$$\n",
+        ] {
+            assert!(
+                blocks_in(text).is_empty(),
+                "nothing here opens a block:\n{text}"
+            );
+        }
+    }
+
     /// The completeness rule, isolated from the rest of the gates.
     ///
     /// Every pair here sits at `CommandOutput` with a genuine math signal present, so site and
@@ -5529,11 +6457,12 @@ abla f",
         let inputs = boundary_inputs(&rows);
         let logical = live_logical_lines(&inputs);
         let boundary = live_grid_boundary_index(&logical, &inputs);
-        let clipped = clipped_open_index(
+        let clipped = clipped_tail(
             &logical,
             live_grid_first_index(&logical, &inputs),
             &DetectionContext::default(),
             DetectionOptions::default(),
+            Some(&live_logical_sites(&logical)),
         );
         let blocks = detect_live_math_blocks_in_context(
             logical
@@ -5679,6 +6608,12 @@ abla f",
     /// GREEN containment: an odd-`$$` frozen-history reflow (a lost opener) is contained by the
     /// resync — the phantom frozen opener is abandoned (`PhantomOpenerAbandoned`) and the live grid
     /// re-pairs cleanly. The damage does not spill: zero orphans (the live-norender class).
+    ///
+    /// The row under the phantom is blank, and deliberately: a row of PROSE there ends the opening
+    /// where it stands (`AbandonedOpening::ProseBody`), which contains the same damage one witness
+    /// earlier and would leave this resync with nothing to do. A blank row is a body a closer could
+    /// still legitimately arrive for, so the phantom survives to the seam and the resync is the
+    /// thing under test again.
     #[test]
     fn contained_phantom_abandon_leaves_no_orphan() {
         let ledger = ledger_of(
@@ -5687,7 +6622,7 @@ abla f",
                 hist(2, r"\alpha = 1"),
                 hist(3, "$$"),
                 hist(4, "$$"), // dangling phantom opener from a reflow
-                hist(5, "some prose here now"),
+                hist(5, ""),
                 grid(0, "$$"),
                 grid(1, r"\gamma = 2"),
                 grid(2, "$$"),
@@ -5990,7 +6925,7 @@ abla f",
     }
 
     /// False-positive guard: a live grid whose row 0 is itself a valid `$$` opener is an ordinary grid
-    /// block, never a clip. `clipped_open_index` requires the first grid `$$` to be PRECEDED by grid
+    /// block, never a clip. `clipped_tail` requires the first grid `$$` to be PRECEDED by grid
     /// body rows (row 0 mid-body); a `$$` at row 0 fails that, so the clip branch stays inert and the
     /// block is detected normally — no spurious above-window closer.
     #[test]
@@ -6014,23 +6949,25 @@ abla f",
         );
     }
 
-    /// False-positive guard (M1.9k prose red line): grid row 0 that is natural-language PROSE is not a
-    /// clipped math body, so the first grid `$$` below it is NOT consumed as an above-window closer.
-    /// The clip predicate requires the pre-`$$` grid rows to be a valid display body; prose fails it,
-    /// the clip stays inert, and no prose is typeset as a clipped block.
+    /// False-positive guard (M1.9k prose red line): a window whose WHOLE pre-`$$` region is prose is
+    /// not a clip, so the first grid `$$` below it is NOT consumed as an above-window closer. The
+    /// clip predicate proves a body somewhere among those rows; when no suffix of them is one —
+    /// natural language all the way up — nothing is proven, the clip stays inert, and no prose is
+    /// typeset as a clipped block.
     #[test]
-    fn prose_grid_row_zero_is_not_a_clipped_body() {
+    fn a_wholly_prose_region_above_a_dollars_is_not_a_clipped_body() {
         let ledger = ledger_of(
             &[
                 hist(1, "intro paragraph text"),
                 grid(0, "the quick brown fox jumps over"),
-                grid(1, "$$"),
+                grid(1, "and then keeps running until evening"),
+                grid(2, "$$"),
             ],
             DetectionContext::default(),
         );
         assert!(
             !has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
-            "prose row 0 must not turn the `$$` into a clip closer"
+            "a prose region must not turn the `$$` into a clip closer"
         );
         assert!(has_reason(
             &ledger,
@@ -6038,6 +6975,546 @@ abla f",
         ));
         assert!(!ledger.containment(&[]).clipped_open);
         assert_eq!(ledger.containment(&[]).orphans, 0);
+    }
+
+    /// Whether `ledger` marks the delimiter on logical row `index` with `reason`.
+    fn rejected_at(ledger: &OwnershipLedger, index: u32, reason: LegitimateRejection) -> bool {
+        ledger.entries.iter().any(|entry| {
+            entry.logical_index == index && entry.fate == TokenFate::Rejected(reason.clone())
+        })
+    }
+
+    /// Whether `ledger` owns a block running from logical row `start` to logical row `end`.
+    fn owns_block(ledger: &OwnershipLedger, start: u32, end: u32) -> bool {
+        ledger.entries.iter().any(|entry| {
+            entry.fate
+                == TokenFate::Owned {
+                    block_start: start,
+                    block_end: end,
+                }
+        })
+    }
+
+    /// The screen this was reported from. A multi-line `$$` block has scrolled until only its
+    /// `\end{aligned}` and its closing `$$` are left on the alternate screen, and the window's first
+    /// row is the program's own echoed prompt — a line of Chinese which happens to mention `$$`.
+    ///
+    /// The clipped-body proof used to run from row 0 unconditionally, so that one prose row decided
+    /// the whole question: the clip declined, the orphan `$$` was read as a fresh OPENER, and it
+    /// swallowed the heading and the opening `$$` of the block below as body. That body is prose, so
+    /// the pairing was refused (`GuardRejectedBody`) and the formula below stayed source — a
+    /// formula three rows away from the accident, undone by a prompt eight rows above it. Proving
+    /// the body over the maximal suffix reads the `\end{aligned}` tail for what it is, the `$$`
+    /// closes the block above, and the block below re-pairs from a clean state.
+    #[test]
+    fn a_prose_first_row_does_not_cost_the_clip_the_block_below_it() {
+        let ledger = ledger_of(
+            &[
+                grid(0, "❯ 帮我把这几个方程排成公式,用 $$ 包起来"),
+                grid(
+                    1,
+                    r"\nabla \times \mathbf{E} &= -\frac{\partial \mathbf{B}}{\partial t} \\",
+                ),
+                grid(2, r"\nabla \cdot \mathbf{B} &= 0 \\"),
+                grid(3, r"\nabla \cdot \mathbf{E} &= \frac{\rho}{\varepsilon_0}"),
+                grid(4, r"\end{aligned}"),
+                grid(5, "$$"),
+                grid(6, ""),
+                grid(7, "7. 薛定谔方程"),
+                grid(
+                    8,
+                    r"$$i\hbar \frac{\partial}{\partial t}\Psi(x, t) = \hat{H}",
+                ),
+                grid(9, r"\Psi(x, t)$$"),
+            ],
+            DetectionContext::default(),
+        );
+        let verdict = ledger.containment(&[]);
+        assert!(
+            rejected_at(&ledger, 5, LegitimateRejection::OpenerAboveWindow),
+            "the orphan `$$` closes the block whose opener is above the window"
+        );
+        assert!(
+            owns_block(&ledger, 8, 9),
+            "the wrapped block below the clip is owned and typeset"
+        );
+        assert!(
+            !has_reason(&ledger, LegitimateRejection::GuardRejectedBody),
+            "nothing is left refused for a body it never had"
+        );
+        assert_eq!(verdict.detected, 1);
+        assert_eq!(verdict.orphans, 0);
+        assert!(!verdict.red);
+    }
+
+    /// The owner's screen one screen earlier, where the environment's own `\begin{aligned}` is still
+    /// visible and only the enclosing `$$` opener has gone off the top.
+    ///
+    /// Three things have to be true together and each of them was once false. The environment is a
+    /// complete occurrence this window proves on its own, so it is a block: nothing about a `$$`
+    /// underneath it may turn a block back into text. The `$$` is an orphan — its opener is above
+    /// the window and there is nothing here that says which rows it once enclosed — so it is one row
+    /// of text and no picture is drawn from part of anything. And the wrapped block below is
+    /// detected, which is the half that used to be lost: read as an opener, the orphan reached past
+    /// the heading to that block's own closing `$$`, the joined body was refused for the heading,
+    /// and the two delimiters went down together, so the block below was never seen at all. The
+    /// heading ends the orphan's opening where it stands, and the rows under it are read for what
+    /// they are.
+    #[test]
+    fn an_orphan_dollars_under_a_complete_environment_costs_neither_of_its_neighbours() {
+        let ledger = ledger_of(
+            &[
+                grid(0, r"\begin{aligned}"),
+                grid(1, r"\nabla \cdot \mathbf{D} &= \rho_f \\"),
+                grid(2, r"\nabla \cdot \mathbf{B} &= 0"),
+                grid(3, r"\end{aligned}"),
+                grid(4, "$$"),
+                grid(5, ""),
+                grid(6, "8. 连续性方程"),
+                grid(7, r"$$\frac{\partial \rho}{\partial t} + \nabla \cdot"),
+                grid(8, r"\mathbf{J} = 0$$"),
+            ],
+            DetectionContext::default(),
+        );
+        let verdict = ledger.containment(&[]);
+        assert!(
+            owns_block(&ledger, 0, 3),
+            "the environment is a complete occurrence and stays one"
+        );
+        assert!(
+            owns_block(&ledger, 7, 8),
+            "the wrapped block below the orphan is owned and typeset"
+        );
+        assert!(
+            !has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+            "nothing here proves a clipped tail: the rows above the `$$` are a block of their own"
+        );
+        assert_eq!(
+            verdict.detected, 2,
+            "the environment and the block below it, and nothing drawn from part of either"
+        );
+    }
+
+    /// The convergence guard still decides, and a wider body proof does not weaken it: a `$$` that
+    /// DOES pair forward into a valid block is an opener, however unmistakably the rows above it
+    /// read as the tail of a clipped one. The reading in force is never re-read on a guess, only
+    /// when it is provably broken — and a `$$` that opens a block that closes is not broken.
+    #[test]
+    fn a_dollars_that_pairs_forward_is_an_opener_under_a_math_tail() {
+        let ledger = ledger_of(
+            &[
+                grid(0, r"\alpha &= \beta \\"),
+                grid(1, r"\gamma &= \delta"),
+                grid(2, "$$"),
+                grid(3, r"\zeta = \eta"),
+                grid(4, "$$"),
+            ],
+            DetectionContext::default(),
+        );
+        let verdict = ledger.containment(&[]);
+        assert!(
+            !has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+            "a `$$` that opens a block that closes is not a clipped closer"
+        );
+        assert!(owns_block(&ledger, 2, 4), "it opens the block it opens");
+        assert_eq!(verdict.detected, 1);
+        assert_eq!(verdict.orphans, 0);
+    }
+
+    /// The shapes a long `$$…$$` one-liner takes when the pane is narrower than it is: the program
+    /// breaks it wherever it runs out of columns, and each of these is one block, not two rows of
+    /// text. None of them is a clip — no row of any of them is a lone `$$` — and the point of
+    /// pinning them beside the clip tests is that widening the clipped-body proof must not reach any
+    /// of them.
+    #[test]
+    fn a_wrapped_one_line_block_is_one_block_in_every_shape_it_wraps_into() {
+        let shapes: [(&str, &[&str]); 4] = [
+            (
+                "broken mid-superscript",
+                &[
+                    r"$$\Psi(x, t) = \sum_n c_n \psi_n(x) e^{-iE_n",
+                    r"t/\hbar}$$",
+                ],
+            ),
+            (
+                "three rows, the middle one ending in a comma",
+                &[
+                    r"$$\mathcal{L}(q, \dot{q}, t) = T(\dot{q},",
+                    "t) - V(q,",
+                    "t)$$",
+                ],
+            ),
+            (
+                "broken after the `=` and again before the `\\right]`",
+                &[
+                    r"$$\Omega =",
+                    r"\left[ \frac{\partial^2 S}{\partial q \partial p}",
+                    r"\right]$$",
+                ],
+            ),
+            (
+                "indented two columns under a list item",
+                &[
+                    r"  $$\oint_{\partial \Sigma} \mathbf{B} \cdot d\boldsymbol{\ell} =",
+                    r"  \mu_0 I_{\mathrm{enc}}$$",
+                ],
+            ),
+        ];
+        for (shape, rows) in shapes {
+            let inputs = rows
+                .iter()
+                .enumerate()
+                .map(|(row, text)| grid(row as u32, text))
+                .collect::<Vec<_>>();
+            let ledger = ledger_of(&inputs, DetectionContext::default());
+            let verdict = ledger.containment(&[]);
+            assert!(
+                owns_block(&ledger, 0, rows.len() as u32 - 1),
+                "{shape}: the whole wrap is one block"
+            );
+            assert_eq!(verdict.detected, 1, "{shape}: and only one");
+            assert_eq!(verdict.orphans, 0, "{shape}");
+            assert!(
+                !has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+                "{shape}: a wrapped block is not a clipped tail"
+            );
+        }
+    }
+
+    /// The same rows a ledger fixture is built from, but every one of them claimed by the shell as
+    /// command output — the site an inline `$…$` run needs before it is an occurrence at all.
+    fn output_inputs(rows: &[(LiveDetectionSource, &str)]) -> Arc<[LiveDetectionInput]> {
+        rows.iter()
+            .map(|(source, text)| LiveDetectionInput {
+                source: *source,
+                text: (*text).to_owned(),
+                continues: false,
+                captured_columns: 0,
+                cell_boundaries: scalar_boundaries(text),
+                site: InlineMathSite::CommandOutput,
+            })
+            .collect()
+    }
+
+    /// Every occurrence the live detector owns on these rows, clip evidence and sites included —
+    /// the whole answer, where `ledger_of` shows only the structural display delimiters.
+    fn live_blocks_of(inputs: &[LiveDetectionInput]) -> Vec<DetectedMathBlock> {
+        let logical = live_logical_lines(inputs);
+        let boundary = live_grid_boundary_index(&logical, inputs);
+        let sites = live_logical_sites(&logical);
+        let clipped = clipped_tail(
+            &logical,
+            live_grid_first_index(&logical, inputs),
+            &DetectionContext::default(),
+            DetectionOptions::default(),
+            Some(&sites),
+        );
+        let lines = logical
+            .iter()
+            .map(|line| (line.id, line.text.clone()))
+            .collect::<Vec<_>>();
+        detect_live_math_blocks_in_context(
+            lines.iter().map(|(id, text)| (*id, text.as_str())),
+            DetectionContext::default(),
+            DetectionOptions::default(),
+            Some(&sites),
+            boundary,
+            clipped,
+        )
+    }
+
+    /// Whether the detector owns an occurrence of `mode` whose render source contains `needle`.
+    fn owns_occurrence(blocks: &[DetectedMathBlock], mode: MathMode, needle: &str) -> bool {
+        blocks
+            .iter()
+            .any(|block| block.span.mode == mode && block.span.render_source.contains(needle))
+    }
+
+    /// **A complete `$$…$$` above a lone `$$` is a block, and the tail may not reach over it.**
+    ///
+    /// Seen from this window alone the rows `[a complete thing][a lone $$]` read two ways at once —
+    /// a standalone occurrence followed by an opener whose block is still being typed, or the tail
+    /// of a block clipped at the top — and the rows cannot tell them apart. What can is the grammar:
+    /// a complete `$$…$$` can never stand inside a display block, so a window that proves one has
+    /// proved the tail does not reach over it. Bounding the tail only at what OPENS a block let the
+    /// suffix take the wrapped block's closing row as body, and the block went with it.
+    #[test]
+    fn a_complete_dollars_block_above_a_lone_dollars_keeps_its_own_rows() {
+        for (shape, rows) in [
+            (
+                "a streaming opener below it",
+                vec![
+                    grid(0, "$$x=y"),
+                    grid(1, "+z$$"),
+                    grid(2, "$$"),
+                    grid(3, "a=b"),
+                ],
+            ),
+            (
+                "a fully visible refused block below it",
+                vec![
+                    grid(0, "$$x=y"),
+                    grid(1, "+z$$"),
+                    grid(2, "$$"),
+                    grid(3, "ordinary prose here"),
+                    grid(4, "$$"),
+                ],
+            ),
+        ] {
+            let ledger = ledger_of(&rows, DetectionContext::default());
+            assert!(
+                owns_block(&ledger, 0, 1),
+                "{shape}: the wrapped block above keeps both of its rows"
+            );
+            assert!(
+                !has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+                "{shape}: the `$$` below a complete block is not a clipped closer"
+            );
+        }
+    }
+
+    /// The same rule for the other delimiter that cannot nest: a complete `\[…\]` is a block in its
+    /// own right, so the tail stops under it.
+    #[test]
+    fn a_complete_bracket_block_above_a_lone_dollars_keeps_its_own_rows() {
+        let ledger = ledger_of(
+            &[
+                grid(0, r"\["),
+                grid(1, "x=y"),
+                grid(2, r"\]"),
+                grid(3, "$$"),
+                grid(4, "a=b"),
+            ],
+            DetectionContext::default(),
+        );
+        assert!(owns_block(&ledger, 0, 2), "the bracket block is a block");
+        assert!(!has_reason(&ledger, LegitimateRejection::OpenerAboveWindow));
+    }
+
+    /// And for an inline run, which is the third thing TeX will not put inside a display block. An
+    /// inline `$…$` row reads as perfectly good display body — no prose, no delimiter of its own —
+    /// so a tail bounded only by openers walked straight over it and the run was never detected.
+    /// Both shapes: the run on one row, and one a producer's own wrapping split across two.
+    #[test]
+    fn an_inline_run_above_a_lone_dollars_keeps_its_own_rows() {
+        let single = output_inputs(&[
+            grid(0, "ordinary prose here"),
+            grid(1, "$x^2$"),
+            grid(2, "$$"),
+            grid(3, "a=b"),
+        ]);
+        let blocks = live_blocks_of(&single);
+        assert!(
+            owns_occurrence(&blocks, MathMode::Inline, "x^2"),
+            "the inline run above the lone `$$` is still an occurrence: {blocks:?}"
+        );
+
+        let joined = output_inputs(&[
+            grid(0, "The expression $x^2+"),
+            grid(1, "y^2$"),
+            grid(2, "$$"),
+            grid(3, "ordinary prose here"),
+            grid(4, "$$q=r$$"),
+        ]);
+        let blocks = live_blocks_of(&joined);
+        assert!(
+            owns_occurrence(&blocks, MathMode::Inline, "y^2"),
+            "a run the producer wrapped across two rows is one occurrence: {blocks:?}"
+        );
+        assert!(
+            owns_occurrence(&blocks, MathMode::Display, "q=r"),
+            "and the block below is still detected: {blocks:?}"
+        );
+    }
+
+    /// **A complete environment is a floor like any other complete occurrence.** It was briefly not
+    /// one: `\begin{aligned}…\end{aligned}` inside `$$…$$` is the ordinary way to write a multi-line
+    /// formula, so it seemed the body of a clipped block would be full of them. But an environment
+    /// that is complete ON THIS SCREEN is a block this screen proves, and the window holds nothing
+    /// that says otherwise — so a reading which turns it into somebody else's body turns a block
+    /// into text, and for output that has stopped it does so for good. The clipped remainder of a
+    /// block written that way does not look like this in any case: when the enclosing `$$` went off
+    /// the top, the `\begin{aligned}` went with it, and what is left is a bare `\end{aligned}` that
+    /// no occurrence claims.
+    ///
+    /// Both shapes, multi-row and one-line, and in every state the `$$` under them can be in: still
+    /// being typed, closed into a valid block, and closed into one that is refused for its body.
+    #[test]
+    fn a_complete_environment_above_a_lone_dollars_keeps_its_own_rows() {
+        for (state, below) in [
+            ("still being typed", vec![grid(6, "a=b")]),
+            (
+                "closed into a valid block",
+                vec![grid(6, "a=b"), grid(7, "$$")],
+            ),
+            (
+                "closed into a block refused for its body",
+                vec![grid(6, "ordinary prose here"), grid(7, "$$")],
+            ),
+        ] {
+            let mut rows = vec![
+                grid(0, r"\begin{aligned}"),
+                grid(1, "x&=y"),
+                grid(2, r"\end{aligned}"),
+                grid(3, r"\begin{aligned}"),
+                grid(4, "z&=w"),
+                grid(5, r"\end{aligned}"),
+                grid(6, "$$"),
+            ];
+            rows.extend(below.iter().enumerate().map(|(offset, (source, text))| {
+                let _ = source;
+                grid(7 + offset as u32, text)
+            }));
+            let ledger = ledger_of(&rows, DetectionContext::default());
+            assert!(
+                owns_block(&ledger, 0, 2) && owns_block(&ledger, 3, 5),
+                "{state}: both environments are blocks of their own"
+            );
+            assert!(
+                !has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+                "{state}: rows that are complete occurrences are not a clipped tail"
+            );
+        }
+
+        let one_line = ledger_of(
+            &[
+                grid(0, r"\begin{aligned}x&=y\end{aligned}"),
+                grid(1, "z=w"),
+                grid(2, "$$"),
+                grid(3, "ordinary prose here"),
+                grid(4, "$$q=r$$"),
+            ],
+            DetectionContext::default(),
+        );
+        assert!(
+            owns_block(&one_line, 0, 0),
+            "a one-line environment is a complete occurrence too"
+        );
+        assert!(owns_block(&one_line, 4, 4), "and the block below survives");
+        // Row 1 belongs to no occurrence, so it may be tail body and the clip may read it as one.
+        // That is the rule doing its job, not an exception to it: what the floor protects is the
+        // environment's own rows, and they are untouched either way.
+    }
+
+    /// **A row of prose ends an open delimiter where it stands.** A display body is refused outright
+    /// when any one of its rows is natural language, so an opening that has just read such a row has
+    /// no closer anywhere below it that could make a block — the pairing is already decided, and
+    /// waiting for the next `$$` to decide it is what cost the owner a formula. Read as an opener,
+    /// an orphan `$$` reached past a heading to the closing `$$` of the block underneath; the joined
+    /// body was refused for the heading; and both delimiters went down together, so the block below
+    /// was not refused but never seen.
+    ///
+    /// It is a line's own verdict, which is why it lives in the shared per-line step: a caller
+    /// holding a walker's checkpoint stands where the scanner stands.
+    #[test]
+    fn a_prose_row_ends_an_opening_and_leaves_the_block_under_it_alone() {
+        let ledger = ledger_of(
+            &[
+                grid(0, "$$"),
+                grid(1, ""),
+                grid(2, "7. 薛定谔方程"),
+                grid(3, r"$$i\hbar \frac{\partial \Psi}{\partial t} ="),
+                grid(4, r"\hat{H}\Psi$$"),
+            ],
+            DetectionContext::default(),
+        );
+        assert!(
+            rejected_at(&ledger, 0, LegitimateRejection::GuardRejectedBody),
+            "the orphan is refused for the body it was going to have, and stays one row of text"
+        );
+        assert!(
+            owns_block(&ledger, 3, 4),
+            "the block below it is found on its own"
+        );
+        assert_eq!(ledger.containment(&[]).detected, 1);
+        assert_eq!(ledger.containment(&[]).orphans, 0);
+
+        // The same line, asked of the walker: a checkpoint taken over these rows must stand where
+        // the scan stands, or a caller scanning from it reads the rows below in a state no scan was
+        // ever in. (`walking_a_prefix_leaves_the_scanner_where_scanning_it_would_have` is the
+        // general form of this over generated corpora; this is the case that motivated the rule.)
+        let mut context = DetectionContext::default();
+        for (index, text) in ["$$", "", "7. 薛定谔方程"].iter().enumerate() {
+            advance_detection_context(&mut context, TranscriptId(index as u64 + 1), text);
+        }
+        assert!(
+            context.opening.is_none(),
+            "the walker gives the opening up at the heading, exactly as the scan does"
+        );
+    }
+
+    /// A chain of openers that each meet prose costs one pass, not one pass each. Deciding a refused
+    /// pairing at the row that refuses it, rather than at whatever `$$` comes next, is what makes
+    /// that true: there is no point at which the scan goes back over rows it has read, so no row is
+    /// ever tried as an opener twice and a window of refusals is read exactly once. The ledger is the
+    /// witness — one entry per delimiter and no row named twice — and the valid block at the bottom
+    /// proves the chain poisons nothing below it.
+    #[test]
+    fn a_chain_of_refused_openers_reads_every_row_once() {
+        const LINKS: u32 = 40;
+        let mut rows = Vec::new();
+        for link in 0..LINKS {
+            rows.push(grid(link * 2, "$$"));
+            rows.push(grid(link * 2 + 1, "ordinary prose here"));
+        }
+        rows.push(grid(LINKS * 2, "$$"));
+        rows.push(grid(LINKS * 2 + 1, r"\gamma = 2"));
+        rows.push(grid(LINKS * 2 + 2, "$$"));
+        let ledger = ledger_of(&rows, DetectionContext::default());
+
+        let mut seen = BTreeSet::new();
+        for entry in &ledger.entries {
+            assert!(
+                seen.insert(entry.logical_index),
+                "row {} was read as a delimiter twice",
+                entry.logical_index
+            );
+        }
+        assert_eq!(
+            ledger.entries.len() as u32,
+            LINKS + 2,
+            "one entry for each refused opener, and two for the block that closes"
+        );
+        assert!(
+            owns_block(&ledger, LINKS * 2, LINKS * 2 + 2),
+            "the block below the chain is detected"
+        );
+        assert_eq!(ledger.containment(&[]).detected, 1);
+        assert_eq!(ledger.containment(&[]).orphans, 0);
+    }
+
+    /// A complete pipe table is a complete occurrence, so it is a floor like the rest — the table
+    /// pass decides separately from the math loop, but it decides the same thing, and a reading that
+    /// turned its rows into somebody else's body would take a drawn table away for good.
+    ///
+    /// The tail exclusion the table pass is handed stays for the case the floor scan cannot see: it
+    /// runs without capture geometry, so a table that only exists once wrapped rows are joined is
+    /// invisible to it, and without the exclusion that table would be drawn out of the middle of a
+    /// clipped body. Below, nothing is clipped — the rows above the `$$` are the table and one blank
+    /// row, and a body of nothing but blanks is no proof at all.
+    #[test]
+    fn a_complete_table_above_a_lone_dollars_keeps_its_own_rows() {
+        let inputs = output_inputs(&[
+            grid(0, "ordinary prose here"),
+            grid(1, "| a | b |"),
+            grid(2, "|---|---|"),
+            grid(3, "| x | y |"),
+            grid(4, ""),
+            grid(5, "$$"),
+            grid(6, "ordinary prose here"),
+            grid(7, "$$q=r$$"),
+        ]);
+        let blocks = live_blocks_of(&inputs);
+        assert!(
+            blocks
+                .iter()
+                .any(|block| block.span.delimiter_kind == DelimiterKind::Table),
+            "the table above the lone `$$` is still a table: {blocks:?}"
+        );
+        assert!(
+            owns_occurrence(&blocks, MathMode::Display, "q=r"),
+            "and the block below it is detected: {blocks:?}"
+        );
     }
 
     /// A determinant identity line `=ad-bc` is display math, not prose: the earlier prose heuristic

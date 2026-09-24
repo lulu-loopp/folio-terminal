@@ -91,6 +91,75 @@ fn rows_between_the_delimiters(engine: &MathEngine, source: &str) -> usize {
     bands.len()
 }
 
+/// The ink a source draws, top to bottom.
+fn ink_height(engine: &MathEngine, source: &str) -> u32 {
+    let key = MathRenderKey {
+        dpi_milli: NonZeroU32::new(2000).expect("2000 is not zero"),
+        font_milli_pt: NonZeroU32::new(24_000).expect("24000 is not zero"),
+        foreground_rgb: [255, 255, 255],
+        mode: MathMode::Display,
+    };
+    engine
+        .render(source, key)
+        .unwrap_or_else(|error| panic!("{source} must render: {error:?}"))
+        .content_height_px
+}
+
+/// The other half of the claim for `array`, which `bt_detect`'s row-separator repair reaches as
+/// of 2026-09-20.
+///
+/// `array` may not open a display block on its own, so until that change the repair's environment
+/// scan — which used the *delimiter* allow-list — could not see a nested `\begin{array}{cc}` at
+/// all, and a damaged one kept its rows run together. Widening the scan is worth nothing unless a
+/// restored `\\` makes a row here, which is what this measures.
+///
+/// It measures against `matrix` rather than against the same array with one row fewer, and the
+/// reason is a defect found on the way: a **single-row** `\begin{array}{cc} a & b \end{array}`
+/// comes out 140px tall and 46px wide — the width of one letter — while the `matrix` saying the
+/// same thing is 60 x 126. MiTeX mis-reads the column spec when no separator follows it. That is
+/// not this change's doing and not in its reach, but a test that compared one row against two
+/// would have been reading it and calling it a measurement. Every array here has its separators,
+/// which is the state the repair puts one back into, and in that state array and matrix agree.
+///
+/// MUTATION: set `array`'s `\\` as a space and its rows collapse while matrix's do not, which is
+/// the picture the repair exists to prevent.
+#[test]
+fn a_nested_array_is_set_in_as_many_rows_as_it_has_separators() {
+    let engine = MathEngine::new();
+    for (rows, array, matrix) in [
+        (
+            2,
+            r"\begin{array}{cc} a & b \\ c & d \end{array}",
+            r"\begin{matrix} a & b \\ c & d \end{matrix}",
+        ),
+        (
+            3,
+            r"\begin{array}{cc} a & b \\ c & d \\ e & f \end{array}",
+            r"\begin{matrix} a & b \\ c & d \\ e & f \end{matrix}",
+        ),
+    ] {
+        let (array_height, matrix_height) =
+            (ink_height(&engine, array), ink_height(&engine, matrix));
+        println!("ARRAY-ROWS rows={rows} array={array_height} matrix={matrix_height}");
+        assert!(
+            array_height.abs_diff(matrix_height) <= 2,
+            "an array with {rows} separated rows stands as tall as the matrix saying the same \
+             thing: {array_height} against {matrix_height}"
+        );
+    }
+
+    // And the separator is what makes the row, measured on the array itself.
+    let two = ink_height(&engine, r"\begin{array}{cc} a & b \\ c & d \end{array}");
+    let three = ink_height(
+        &engine,
+        r"\begin{array}{cc} a & b \\ c & d \\ e & f \end{array}",
+    );
+    assert!(
+        three > two + 80,
+        "a third separated row is a third row of ink: {two} then {three}"
+    );
+}
+
 /// RED GATE (user report 2026-09-14) — a `\\` ends a row whether or not the row
 /// has an `&` in it.
 ///

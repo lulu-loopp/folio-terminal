@@ -48,16 +48,17 @@
 //! # The thread
 //!
 //! CoreText is a C API over the font database, not AppKit: nothing here owns a
-//! view and nothing here is the main thread's. Apple's *Thread Safety Summary*
-//! rule for what it does not list applies — "in most cases, you can use these
-//! classes from any thread as long as you use them from only one thread at a
-//! time" — and this is called from one place, `settings::monospace_families`,
-//! behind a lock of its own. See `handoff::macos_handoff`'s header for the same
-//! statement made about `NSWorkspace`.
+//! view and nothing here is the main thread's. Since ticket 50 two threads call
+//! in at once: the walk runs on `bt-app`'s font lane, and the lookup of one
+//! family by name ([`monospace_family_named`]) on the window thread at launch.
+//! That is within CoreText's own contract — its overview states that every
+//! individual Core Text function is thread-safe and that font objects may be
+//! used by several threads simultaneously — and the two share no object: each
+//! call makes its own collection or descriptor and drops it before returning.
 
 use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFString, CFType};
 use objc2_core_text::{
-    CTFontCollection, CTFontDescriptor, CTFontSymbolicTraits, kCTFontFamilyNameAttribute,
+    CTFont, CTFontCollection, CTFontDescriptor, CTFontSymbolicTraits, kCTFontFamilyNameAttribute,
     kCTFontSymbolicTrait, kCTFontTraitsAttribute,
 };
 
@@ -75,6 +76,106 @@ use crate::MonospaceFamily;
 #[must_use]
 pub fn monospace_font_families() -> Vec<MonospaceFamily> {
     crate::order_monospace_families(collect_monospace_families())
+}
+
+/// **One family, looked up by its name** — the CoreText twin of the Windows
+/// arm's `FindFamilyName` door (ticket 50).
+///
+/// A descriptor carrying only `kCTFontFamilyNameAttribute`, matched against the
+/// font database: CoreText answers with the one descriptor it prefers for that
+/// family, or — when the family is not installed — with whatever it falls back
+/// to, which is why the answer's own family name is compared with the one asked
+/// for. The row is built by [`monospace_family_entry`], the same derivation the
+/// walk makes for every face it keeps, so a family is monospaced here exactly
+/// when it is a row of [`monospace_font_families`], and its `files` are empty
+/// for the reason this module's header gives.
+#[must_use]
+pub fn monospace_family_named(name: &str) -> Option<MonospaceFamily> {
+    let wanted = CFString::from_str(name);
+    // SAFETY: a CoreText constant string, read for the length of the call that
+    // copies it into the dictionary.
+    let key: &CFString = unsafe { kCTFontFamilyNameAttribute };
+    let attributes = CFDictionary::<CFString, CFString>::from_slices(&[key], &[&*wanted]);
+    // SAFETY: the dictionary is keyed by a CoreText attribute name and holds a
+    // string under it, which is the type that attribute is documented to take.
+    let descriptor = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
+    // SAFETY: the descriptor above is live and no mandatory attributes are
+    // passed; the match comes back owned or not at all.
+    let matched = unsafe { descriptor.matching_font_descriptor(None) }?;
+    monospace_family_entry(&matched).filter(|family| family.name.eq_ignore_ascii_case(name))
+}
+
+/// Every visible CJK family, read once on the font worker.
+#[must_use]
+pub fn cjk_font_families() -> Vec<crate::CjkFamily> {
+    static FAMILIES: std::sync::OnceLock<Vec<crate::CjkFamily>> = std::sync::OnceLock::new();
+    FAMILIES
+        .get_or_init(|| crate::order_cjk_families(collect_cjk_families()))
+        .clone()
+}
+
+fn collect_cjk_families() -> Vec<crate::CjkFamily> {
+    use objc2_core_text::{CTFontTableOptions, kCTFontFamilyNameKey};
+    let collection = unsafe { CTFontCollection::from_available_fonts(None) };
+    let Some(descriptors) = (unsafe { collection.matching_font_descriptors() }) else {
+        return Vec::new();
+    };
+    let descriptors: &CFArray<CTFontDescriptor> = unsafe { descriptors.cast_unchecked() };
+    let mut families = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for descriptor in descriptors.iter() {
+        let Some(name) = family_name(&descriptor) else {
+            continue;
+        };
+        if name.starts_with('.') || name.trim().is_empty() || !seen.insert(name.clone()) {
+            continue;
+        }
+        let font = unsafe { CTFont::with_font_descriptor(&descriptor, 0.0, std::ptr::null()) };
+        let table = |tag: &[u8; 4]| {
+            unsafe { font.table(u32::from_be_bytes(*tag), CTFontTableOptions::NoOptions) }
+                .map(|data| unsafe { data.as_bytes_unchecked() }.to_vec())
+        };
+        let os2 = table(b"OS/2");
+        let cmap = table(b"cmap");
+        let coverage = crate::CjkCoverage::from_tables(os2.as_deref(), cmap.as_deref());
+        if !coverage.any() {
+            continue;
+        }
+        let mut localized_names = Vec::new();
+        // CoreText's own localized name API supplies its native UI-language
+        // answer. Explicit name-table records handle an app language different
+        // from macOS, without changing the process-global language preferences.
+        if let Some(localized) =
+            unsafe { font.localized_name(kCTFontFamilyNameKey, std::ptr::null_mut()) }
+        {
+            localized_names.push((crate::os_ui_language(), localized.to_string()));
+        }
+        if let Some(bytes) = table(b"name")
+            && let Some(names) = ttf_parser::name::Table::parse(&bytes)
+        {
+            for record in names.names {
+                if record.name_id != ttf_parser::name_id::FAMILY {
+                    continue;
+                }
+                let locale = match record.language_id {
+                    0x0804 => "zh-CN",
+                    0x0409 => "en-US",
+                    _ => continue,
+                };
+                if let Some(text) = record.to_string() {
+                    localized_names.retain(|(lang, _)| lang != locale);
+                    localized_names.push((locale.into(), text));
+                }
+            }
+        }
+        families.push(crate::CjkFamily {
+            name,
+            files: Vec::new(),
+            localized_names,
+            coverage,
+        });
+    }
+    families
 }
 
 /// The enumeration itself: one collection, one pass, one predicate.
@@ -118,25 +219,28 @@ fn collect_monospace_families() -> Vec<MonospaceFamily> {
     // as an array of them is reading it as what it holds.
     let descriptors: &CFArray<CTFontDescriptor> = unsafe { descriptors.cast_unchecked() };
 
-    let mut families = Vec::new();
-    for descriptor in descriptors.iter() {
-        if !is_monospaced(&descriptor) {
-            continue;
-        }
-        let Some(name) = family_name(&descriptor) else {
-            continue;
-        };
-        if name.starts_with('.') || name.trim().is_empty() {
-            continue;
-        }
-        families.push(MonospaceFamily {
-            name,
-            // Nothing to load: `bt-render`'s macOS font system already holds
-            // every installed face. See this module's own header.
-            files: Vec::new(),
-        });
+    descriptors
+        .iter()
+        .filter_map(|descriptor| monospace_family_entry(&descriptor))
+        .collect()
+}
+
+/// **One face as a picker row**, or `None` when it is not one: the one
+/// derivation the walk and the lookup by name share (`CONVENTIONS` §十 rule 9).
+fn monospace_family_entry(descriptor: &CTFontDescriptor) -> Option<MonospaceFamily> {
+    if !is_monospaced(descriptor) {
+        return None;
     }
-    families
+    let name = family_name(descriptor)?;
+    if name.starts_with('.') || name.trim().is_empty() {
+        return None;
+    }
+    Some(MonospaceFamily {
+        name,
+        // Nothing to load: `bt-render`'s macOS font system already holds
+        // every installed face. See this module's own header.
+        files: Vec::new(),
+    })
 }
 
 /// Whether this face's own traits carry the monospace bit.

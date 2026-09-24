@@ -1,0 +1,54 @@
+name: Build Windows release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, tag or branch to build (resolved once at checkout)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+        with:
+          cache: false
+      - name: Build the shipped profile
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p bt-app
+          if ($LASTEXITCODE -ne 0) { throw 'release build failed' }
+      - name: Bill of materials from this checkout
+        shell: pwsh
+        run: ./scripts/release/sbom.ps1
+      - name: Record and verify the unsigned build
+        id: build
+        shell: pwsh
+        run: |
+          ./scripts/release/write-buildinfo.ps1 -Out target/ci-release
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'cannot resolve HEAD' }
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: folio-windows-release-${{ steps.build.outputs.commit }}
+          path: target/ci-release
+          if-no-files-found: error
+          retention-days: 30

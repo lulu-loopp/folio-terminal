@@ -701,8 +701,9 @@ pub const PALETTE_TOP_LOGICAL_PX: f32 = 84.0;
 pub const PALETTE_RADIUS_LOGICAL_PX: f32 = 10.0;
 /// `border: 1px solid var(--border)`.
 pub const PALETTE_BORDER_LOGICAL_PX: f32 = 1.0;
-/// `font-size: 13.5px` in the input.
-pub const FIELD_FONT_LOGICAL_PX: f32 = 13.5;
+/// Primary text (`UI-SPEC.md` T3), not the mock-up's own `font-size: 13.5px`
+/// in the input.
+pub const FIELD_FONT_LOGICAL_PX: f32 = 13.0;
 /// The `14px` of the input's `padding: 12px 14px`.
 pub const FIELD_PADDING_X_LOGICAL_PX: f32 = 14.0;
 /// The `12px` of the same, doubled around an 18px line box, which is the
@@ -717,30 +718,31 @@ pub const FIELD_CARET_INSET_LOGICAL_PX: f32 = 11.0;
 pub const LIST_MAX_HEIGHT_LOGICAL_PX: f32 = 336.0;
 /// `padding: 5px` on `.pal-list`.
 pub const LIST_PADDING_LOGICAL_PX: f32 = 5.0;
-/// `.pal-item`'s `padding: 7px 10px` around a 12.5px line, rounded to an even
-/// number of logical pixels so that no two rows in a column disagree by half a
-/// pixel about where their middle is.
+/// `.pal-item`'s `padding: 7px 10px` around a 13px line (`UI-SPEC.md` T4),
+/// rounded to an even number of logical pixels so that no two rows in a
+/// column disagree by half a pixel about where their middle is.
 pub const ROW_HEIGHT_LOGICAL_PX: f32 = 30.0;
-/// `.pal-item { border-radius: 7px }`.
-pub const ROW_RADIUS_LOGICAL_PX: f32 = 7.0;
+/// List-row corners follow UI-SPEC.md R3, as in the restore list.
+pub const ROW_RADIUS_LOGICAL_PX: f32 = 6.0;
 /// The `10px` of `.pal-item`'s padding.
 pub const ROW_PADDING_X_LOGICAL_PX: f32 = 10.0;
-/// `.pal-item { gap: 9px }` — between the mark's column and the text.
-pub const ROW_GAP_LOGICAL_PX: f32 = 9.0;
+/// The mark-to-label gap follows UI-SPEC.md G3.
+pub const ROW_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.pico { width: 16px }` — the column, reserved on every row.
 pub const ROW_ICON_COLUMN_LOGICAL_PX: f32 = 16.0;
 /// `.pico svg { width: 14px }` — the mark inside that column.
 pub const ROW_ICON_LOGICAL_PX: f32 = 14.0;
+/// Primary text (`UI-SPEC.md` T4), not the mock-up's own
 /// `.pal-item { font-size: 12.5px }`.
-pub const ROW_FONT_LOGICAL_PX: f32 = 12.5;
+pub const ROW_FONT_LOGICAL_PX: f32 = 13.0;
 /// `.pal-hint { font-size: 11px }`.
 pub const HINT_FONT_LOGICAL_PX: f32 = 11.0;
 /// `.pal-hint { max-width: 45% }` — the hint never takes the row.
 pub const HINT_MAX_FRACTION: f32 = 0.45;
 /// The status dot's diameter, on the tab strip's own reading of the same fact.
 pub const DOT_LOGICAL_PX: f32 = 6.0;
-/// The air between the label and the dot after it.
-pub const DOT_GAP_LOGICAL_PX: f32 = 7.0;
+/// The label-to-dot gap follows UI-SPEC.md G3.
+pub const DOT_GAP_LOGICAL_PX: f32 = 8.0;
 /// A section heading's own size — the hint's, because both are the muted voice.
 pub const HEADING_FONT_LOGICAL_PX: f32 = 11.0;
 /// The band a section heading is laid out in.
@@ -1245,13 +1247,14 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
 
 /// The palette as one overlay layer.
 ///
-/// One layer, so it carries one fade — [`crate::keyhint::build`]'s own reason.
+/// One layer, so it fades as one — and the fade is the band's
+/// (`Popup::Palette` through `arrival::Passages`), which is why this takes no
+/// opacity: its only caller passed `1.0` (the fade audit's F5).
 #[must_use]
 pub fn build(
     layout: &PaletteLayout,
     palette: &ChromePalette,
     selected: usize,
-    opacity: f32,
 ) -> Vec<OverlayLayer> {
     let scale = layout.scale;
     let px = |logical: f32| logical * scale;
@@ -1281,7 +1284,6 @@ pub fn build(
 
     let mut layer = OverlayLayer {
         quads,
-        opacity,
         ..OverlayLayer::default()
     };
 
@@ -2585,7 +2587,7 @@ mod list_tests {
             &mut ten_per_char,
         );
         let colours = bt_render::chrome_palette();
-        let painted = super::build(&layout, &colours, 0, 1.0);
+        let painted = super::build(&layout, &colours, 0);
         let layer = painted.first().expect("one layer, one fade");
         let list = layout.list;
         // The row the selection is on is the top one, and half of it is above

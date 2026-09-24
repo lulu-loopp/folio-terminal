@@ -12,9 +12,9 @@ wherever you keep programs, and run `folio.exe`. There is no installer; keep the
 extracted files together in one folder. `SHA256SUMS.txt` is the hash of what you
 downloaded. Needs **Windows 10 1809 or newer, or Windows 11, 64-bit**.
 
-The archive holds nine files that belong together: `folio.exe`, the two console
+The archive holds ten files that belong together: `folio.exe`, the two console
 libraries it needs to start a shell, `folio.msix` for the Explorer menu,
-`folio-here.cmd` for VS Code, and the licences and notices. `folio.msix` is not
+`folio-here.cmd` for VS Code, `uninstall.cmd` for cleanup, and the licences and notices. `folio.msix` is not
 an installer and is not run: it is the sparse package that lets Windows 11 put
 "Open in Folio" on the first page of a folder's right-click menu, and it names
 the folder it was unpacked into — which is why moving `folio.exe` out on its own
@@ -146,6 +146,34 @@ own, and every item in it carries the same key as the row it has in
 The three rows on the Agent page read the tool's own configuration file and
 report what is in it. On a new machine all three files are absent, so all three
 read Off.
+
+## Uninstalling
+
+Close Folio, then run one command from another terminal:
+
+- **Windows:** `folio.exe --uninstall-cleanup` from the extracted folder, or
+  double-click its `uninstall.cmd`.
+- **macOS:** `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`.
+
+The command opens no window. It removes Folio's integrations, keeps hooks and
+Explorer entries belonging to another existing copy, and reports each result.
+Exit `0` means cleanup succeeded; `1` names a refusal to fix and retry; `2`
+means Folio is running or, with purge, a process still holds its data.
+
+Add `--purge` to the same command to also delete settings, sessions and browser
+data, including both Windows data roots and legacy data, or all six macOS data
+locations. Without it, your data stays. **On macOS, Folio cannot tell whether
+another program is holding that data** — there is no equivalent of the Windows
+check — so quit Folio before you purge; the command says so as it starts. Dated recovery copies beside user
+configuration files are kept. The application folder is never deleted.
+After cleanup succeeds, delete the extracted folder or move Folio.app to the Bin;
+for a managed installation, use its package manager to remove the application.
+
+macOS notification permission and cached Services entries are managed by the OS;
+removing the bundle may take time to be reflected. Windows notification history
+and package-manager records are also managed by their owners.
+
+Already deleted Folio? See [recovery after deleting Folio](recovery-after-deleting-folio.md).
 
 ## Known issues
 

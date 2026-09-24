@@ -64,7 +64,7 @@ const DIALOG_PADDING_BOTTOM_LOGICAL_PX: f32 = 16.0;
 
 // ── `.restore h1` ──────────────────────────────────────────────────────────
 /// `font-size: 15px; font-weight: 600`.
-const TITLE_FONT_LOGICAL_PX: f32 = 15.0;
+pub const TITLE_FONT_LOGICAL_PX: f32 = 15.0;
 /// The 15px line box, measured in the mock-up's own renderer.
 const TITLE_LINE_LOGICAL_PX: f32 = 18.0;
 /// `margin: 0 0 5px`.
@@ -2477,6 +2477,387 @@ pub fn invite_build(
     }]
 }
 
+// ── the multi-line paste card (0.4.4 ticket 02) ─────────────────────────────
+//
+// The fourth dialog on this surface and of this craft (owner's ruling 2026-09-22: "a small card
+// centred on the window, the same family as the first-run card and the refusal card — one
+// position, no pane anchoring, no clamping rules"). The same `push_float_window` face, the same
+// `.btn` pair, the same padding, the same scrim: it is modal (ruling 2026-09-23), so it dims and
+// it swallows every press, its own scrim included.
+//
+// What differs is the size. It has one line to say — `N lines → <shell>` — and no sentence under
+// it (界面字要少), so it is as wide as that line and its two words need and no wider than the
+// family's `min(400px, 92%)`. When the two words do not fit side by side in a narrow window they
+// stack, the default on top, rather than running out of the card.
+
+/// **What a point on the paste card is over.** Always an answer, on [`gate_hit`]'s rule: the card
+/// is modal, so a press anywhere is the card's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PasteCardTarget {
+    /// The face or the scrim: answers nothing.
+    Panel,
+    /// The `×`: cancels.
+    Close,
+    /// `Join into one line` — the default for a block wrapped with the shell's continuation mark
+    /// (0.4.4 ticket 45).
+    Join,
+    /// `Run line by line` — the default for every other block.
+    Run,
+}
+
+/// Everything the paste card draws that had to be measured with a real font.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PasteCardContent {
+    /// `N lines → <shell>`, from `i18n::paste_card_title`.
+    pub title: String,
+    pub title_width: f32,
+    pub run_text: &'static str,
+    pub join_text: &'static str,
+    pub run_text_width: f32,
+    pub join_text_width: f32,
+    /// The word `Enter` presses — [`PasteCardTarget::Run`] or [`PasteCardTarget::Join`] — which
+    /// stands on the right (on top when they stack) and wears the accent.
+    pub default: PasteCardTarget,
+}
+
+/// Every rectangle the paste card draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PasteCardLayout {
+    scale: f32,
+    frame: [f32; 4],
+    title: [f32; 4],
+    title_text: String,
+    close: [f32; 4],
+    join: [f32; 4],
+    run: [f32; 4],
+    join_text: &'static str,
+    run_text: &'static str,
+    default: PasteCardTarget,
+    /// The word the keyboard's focus ring stands on, once a key has moved it (`:focus-visible`,
+    /// owner's ruling 2026-09-23: the card is a standard two-button dialog).
+    ring: Option<PasteCardTarget>,
+}
+
+impl PasteCardLayout {
+    /// The same card with the focus ring on `ring`'s word, or on neither.
+    #[must_use]
+    pub fn with_ring(self, ring: Option<PasteCardTarget>) -> Self {
+        Self { ring, ..self }
+    }
+}
+
+/// The `×`'s square, and the gap that keeps the title off it — the toast's own close box, which
+/// is the house's cross on a card.
+const PASTE_CLOSE_LOGICAL_PX: f32 = 18.0;
+const PASTE_CLOSE_GAP_LOGICAL_PX: f32 = 8.0;
+const PASTE_CLOSE_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// The weight the card's line is drawn in, and therefore the weight it is measured in: a line
+/// measured regular and drawn semibold is a line the card is a few pixels too narrow for, and
+/// its last letter goes under the `×` (owner's screenshot 2026-09-23, next89).
+const PASTE_TITLE_WEIGHT: ChromeLabelWeight = ChromeLabelWeight::SemiBold;
+
+/// **The card's words, measured** (0.4.4 ticket 44) — `measure` is the caller's font, asked for
+/// a string at a size in a weight.
+///
+/// The line is measured in the weight it is drawn in ([`PASTE_TITLE_WEIGHT`]). And the card grows
+/// only up to the family's measure: past it, the room the line has is what is left of the card's
+/// widest face beside the `×` and its gap, and the profile's name — the one part of the line that
+/// is the reader's own and has no bound — gives way from its end (`settings::ellipsized`, the
+/// back cut [`crate::seats::LeadCut::Back`] names), so the count and the arrow stay whole and the
+/// line never runs under the cross.
+#[must_use]
+pub fn paste_card_content(
+    lines: usize,
+    shell: &str,
+    default: PasteCardTarget,
+    surface_width: f32,
+    scale: f32,
+    measure: &mut dyn FnMut(&str, f32, ChromeLabelWeight) -> f32,
+) -> PasteCardContent {
+    let px = |value: f32| value * scale;
+    let title_font = px(TITLE_FONT_LOGICAL_PX);
+    let room = dialog_width(surface_width, scale)
+        - paste_card_chrome(scale)
+        - px(PASTE_CLOSE_GAP_LOGICAL_PX + PASTE_CLOSE_LOGICAL_PX);
+    let shell = crate::settings::ellipsized(shell, room, title_font, &mut |shell, size| {
+        measure(
+            &crate::i18n::paste_card_title(lines, shell),
+            size,
+            PASTE_TITLE_WEIGHT,
+        )
+    });
+    let title = crate::i18n::paste_card_title(lines, &shell);
+    let run_text = crate::i18n::Text::PasteCardRun.text();
+    let join_text = crate::i18n::Text::PasteCardJoin.text();
+    let button_font = px(BUTTON_FONT_LOGICAL_PX);
+    PasteCardContent {
+        title_width: measure(&title, title_font, PASTE_TITLE_WEIGHT),
+        title,
+        run_text,
+        join_text,
+        run_text_width: measure(run_text, button_font, ChromeLabelWeight::Regular),
+        join_text_width: measure(join_text, button_font, ChromeLabelWeight::Regular),
+        default,
+    }
+}
+
+/// The card's border and side padding, both sides: what its face gives up before any word.
+fn paste_card_chrome(scale: f32) -> f32 {
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    2.0 * (border + DIALOG_PADDING_X_LOGICAL_PX * scale)
+}
+
+/// Where every part of the paste card lands in a window this size.
+#[must_use]
+pub fn paste_card_layout(
+    content: &PasteCardContent,
+    surface_width: f32,
+    surface_height: f32,
+    scale: f32,
+) -> PasteCardLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let button_height =
+        2.0 * border + px(2.0 * BUTTON_PADDING_Y_LOGICAL_PX + BUTTON_LINE_LOGICAL_PX);
+    let button_width =
+        |text_width: f32| 2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + text_width;
+    let (run_width, join_width) = (
+        button_width(content.run_text_width),
+        button_width(content.join_text_width),
+    );
+    let row_width = join_width + px(ACTIONS_GAP_LOGICAL_PX) + run_width;
+    let head_width = content.title_width + px(PASTE_CLOSE_GAP_LOGICAL_PX + PASTE_CLOSE_LOGICAL_PX);
+    let chrome = paste_card_chrome(scale);
+    // As wide as its line and its two words ask, never wider than the family's measure.
+    let width = (row_width.max(head_width) + chrome)
+        .ceil()
+        .min(dialog_width(surface_width, scale));
+    let room = width - chrome;
+    let side_by_side = row_width <= room;
+    let rows = if side_by_side { 1.0 } else { 2.0 };
+    let height = (2.0 * border
+        + px(DIALOG_PADDING_TOP_LOGICAL_PX)
+        + px(TITLE_LINE_LOGICAL_PX)
+        + px(SUB_MARGIN_BOTTOM_LOGICAL_PX)
+        + rows * button_height
+        + (rows - 1.0) * px(ACTIONS_GAP_LOGICAL_PX)
+        + px(DIALOG_PADDING_BOTTOM_LOGICAL_PX))
+    .round();
+
+    let left = ((surface_width - width) / 2.0).round();
+    let top = ((surface_height - height) / 2.0).round();
+    let frame = [left, top, left + width, top + height];
+
+    let content_left = frame[0] + border + px(DIALOG_PADDING_X_LOGICAL_PX);
+    let content_right = frame[2] - border - px(DIALOG_PADDING_X_LOGICAL_PX);
+    let mut cursor = frame[1] + border + px(DIALOG_PADDING_TOP_LOGICAL_PX);
+    let line_middle = cursor + px(TITLE_LINE_LOGICAL_PX) / 2.0;
+    let close = [
+        content_right - px(PASTE_CLOSE_LOGICAL_PX),
+        (line_middle - px(PASTE_CLOSE_LOGICAL_PX) / 2.0).round(),
+        content_right,
+        (line_middle + px(PASTE_CLOSE_LOGICAL_PX) / 2.0).round(),
+    ];
+    let title = [
+        content_left,
+        cursor,
+        close[0] - px(PASTE_CLOSE_GAP_LOGICAL_PX),
+        cursor + px(TITLE_LINE_LOGICAL_PX),
+    ];
+    cursor = title[3] + px(SUB_MARGIN_BOTTOM_LOGICAL_PX);
+
+    // `justify-content: flex-end`, and the default is the right-hand word and the one in the
+    // accent — the invitation's arrangement, because `Enter` presses it. Which word that is is
+    // the paste's (0.4.4 ticket 45), so the two are placed as *default* and *other*.
+    let joins = content.default == PasteCardTarget::Join;
+    let (default_width, other_width) = if joins {
+        (join_width, run_width)
+    } else {
+        (run_width, join_width)
+    };
+    let (default, other) = if side_by_side {
+        let default = [
+            content_right - default_width,
+            cursor,
+            content_right,
+            cursor + button_height,
+        ];
+        let other = [
+            default[0] - px(ACTIONS_GAP_LOGICAL_PX) - other_width,
+            cursor,
+            default[0] - px(ACTIONS_GAP_LOGICAL_PX),
+            cursor + button_height,
+        ];
+        (default, other)
+    } else {
+        let default = [content_left, cursor, content_right, cursor + button_height];
+        let below = default[3] + px(ACTIONS_GAP_LOGICAL_PX);
+        let other = [content_left, below, content_right, below + button_height];
+        (default, other)
+    };
+    let (join, run) = if joins {
+        (default, other)
+    } else {
+        (other, default)
+    };
+    PasteCardLayout {
+        scale,
+        frame,
+        title,
+        title_text: content.title.clone(),
+        close,
+        join,
+        run,
+        join_text: content.join_text,
+        run_text: content.run_text,
+        default: content.default,
+        ring: None,
+    }
+}
+
+/// The card's own rectangle, for the tests that pin where it stands.
+#[cfg(test)]
+#[must_use]
+pub fn paste_card_frame(layout: &PasteCardLayout) -> [f32; 4] {
+    layout.frame
+}
+
+/// What a point is over.
+#[must_use]
+pub fn paste_card_hit(layout: &PasteCardLayout, x: f64, y: f64) -> PasteCardTarget {
+    let (x, y) = (x as f32, y as f32);
+    if contains(layout.close, x, y) {
+        return PasteCardTarget::Close;
+    }
+    if contains(layout.run, x, y) {
+        return PasteCardTarget::Run;
+    }
+    if contains(layout.join, x, y) {
+        return PasteCardTarget::Join;
+    }
+    PasteCardTarget::Panel
+}
+
+/// The paste card as one overlay layer, **scrim and all**.
+#[must_use]
+pub fn paste_card_build(
+    layout: &PasteCardLayout,
+    surface: (f32, f32),
+    hover: Option<PasteCardTarget>,
+) -> Vec<OverlayLayer> {
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = vec![OverlayQuad {
+        rect: [0.0, 0.0, surface.0, surface.1],
+        color: palette.modal_scrim,
+        alpha: alpha(palette.modal_scrim_alpha),
+    }];
+    let mut labels = Vec::new();
+    let mut sprites = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(FLOAT_WINDOW_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.dialog_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_shadow_inner_alpha),
+        alpha(palette.menu_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+    // Clipped at the `×`: a profile's title is the reader's own and may be long, and a line that
+    // ran under the cross would be a cross nobody could read.
+    labels.push(ChromeLabel {
+        mono: false,
+        text: layout.title_text.clone(),
+        rect: layout.title,
+        font_size_px: px(TITLE_FONT_LOGICAL_PX),
+        color: palette.dialog_title_text,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: PASTE_TITLE_WEIGHT,
+        tabular_numerals: false,
+        clip: Some(layout.title),
+    });
+    let lit = hover == Some(PasteCardTarget::Close);
+    if lit {
+        sprites.push(ChromeSprite::new(
+            ChromeMark::ControlPill {
+                radius_px: px(PASTE_CLOSE_RADIUS_LOGICAL_PX).round().max(1.0) as u32,
+            },
+            layout.close,
+            palette.menu_item_hover,
+        ));
+    }
+    let glyph = px(crate::seats::compact_head_glyph_logical_px(
+        ChromeMark::PaneClose,
+    ))
+    .round();
+    let (x, y) = (
+        (layout.close[0] + (layout.close[2] - layout.close[0] - glyph) / 2.0).round(),
+        (layout.close[1] + (layout.close[3] - layout.close[1] - glyph) / 2.0).round(),
+    );
+    sprites.push(ChromeSprite::new(
+        ChromeMark::PaneClose,
+        [x, y, x + glyph, y + glyph],
+        if lit {
+            palette.menu_item_text_selected
+        } else {
+            palette.menu_item_text
+        },
+    ));
+    push_button(
+        &mut quads,
+        &mut labels,
+        layout.join,
+        layout.join_text,
+        layout.default == PasteCardTarget::Join,
+        hover == Some(PasteCardTarget::Join),
+        scale,
+        border,
+        palette,
+    );
+    push_button(
+        &mut quads,
+        &mut labels,
+        layout.run,
+        layout.run_text,
+        layout.default == PasteCardTarget::Run,
+        hover == Some(PasteCardTarget::Run),
+        scale,
+        border,
+        palette,
+    );
+    // `:focus-visible` on the word the keyboard moved to — the first-run card's ring, the house's
+    // one outline for a focused button.
+    match layout.ring {
+        Some(PasteCardTarget::Join) => quads.extend(crate::first_run::button_focus_ring(
+            layout.join,
+            scale,
+            palette.accent,
+        )),
+        Some(PasteCardTarget::Run) => quads.extend(crate::first_run::button_focus_ring(
+            layout.run,
+            scale,
+            palette.accent,
+        )),
+        _ => {}
+    }
+    vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+        ..Default::default()
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3879,6 +4260,275 @@ in the folders you left them, as new shells."
                 .iter()
                 .all(|label| label.text != gate_discard_text()),
             "and never Discard beside it"
+        );
+    }
+
+    /// RED (0.4.4 ticket 02) — **the paste card stands in the middle of the window and inside it,
+    /// at every scale and in a narrow window as in a wide one** (owner's ruling 2026-09-22: "one
+    /// position, no pane anchoring, no clamping rules").
+    ///
+    /// Text widths are measured as the dialog's font would at each scale (a proportional
+    /// estimate, since there is no font here): the claim is about where the card goes for any
+    /// width it is handed. In the narrowest window the two words no longer fit side by side and
+    /// stack, and they stay inside the card when they do.
+    ///
+    /// MUTATION: anchor the card at the window's left edge (`left = 0.0`) in `paste_card_layout`,
+    /// or drop the stacking branch — the centre or the containment assertion goes red.
+    #[test]
+    fn the_card_is_centred_on_the_window_at_every_scale() {
+        let inside = |outer: [f32; 4], inner: [f32; 4]| {
+            inner[0] >= outer[0]
+                && inner[1] >= outer[1]
+                && inner[2] <= outer[2]
+                && inner[3] <= outer[3]
+        };
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            // Logical window sizes: the narrowest a lone terminal comes to, and a desktop one.
+            for (logical_width, logical_height) in [(320.0_f32, 240.0_f32), (1600.0, 900.0)] {
+                let (width, height) = (logical_width * scale, logical_height * scale);
+                let content = PasteCardContent {
+                    title: "12 lines → Command Prompt".to_owned(),
+                    title_width: 185.0 * scale,
+                    run_text: "Run line by line",
+                    join_text: "Join into one line",
+                    run_text_width: 100.0 * scale,
+                    join_text_width: 112.0 * scale,
+                    default: PasteCardTarget::Run,
+                };
+                let layout = paste_card_layout(&content, width, height, scale);
+                let frame = paste_card_frame(&layout);
+                let centre = ((frame[0] + frame[2]) / 2.0, (frame[1] + frame[3]) / 2.0);
+                assert!(
+                    (centre.0 - width / 2.0).abs() <= 1.0 && (centre.1 - height / 2.0).abs() <= 1.0,
+                    "{scale}x {logical_width}x{logical_height}: centred at {centre:?}, window \
+                     {width}x{height}"
+                );
+                assert!(
+                    inside([0.0, 0.0, width, height], frame),
+                    "{scale}x {logical_width}: the card runs out of the window: {frame:?}"
+                );
+                for (name, rect) in [
+                    ("run", layout.run),
+                    ("join", layout.join),
+                    ("close", layout.close),
+                    ("title", layout.title),
+                ] {
+                    assert!(
+                        inside(frame, rect),
+                        "{scale}x {logical_width}: {name} {rect:?} runs out of the card {frame:?}"
+                    );
+                }
+                // Every point on the card answers, and the words answer as themselves.
+                let middle = |rect: [f32; 4]| {
+                    (
+                        f64::from((rect[0] + rect[2]) / 2.0),
+                        f64::from((rect[1] + rect[3]) / 2.0),
+                    )
+                };
+                let (x, y) = middle(layout.run);
+                assert_eq!(paste_card_hit(&layout, x, y), PasteCardTarget::Run);
+                let (x, y) = middle(layout.join);
+                assert_eq!(paste_card_hit(&layout, x, y), PasteCardTarget::Join);
+                let (x, y) = middle(layout.close);
+                assert_eq!(paste_card_hit(&layout, x, y), PasteCardTarget::Close);
+                assert_eq!(paste_card_hit(&layout, 1.0, 1.0), PasteCardTarget::Panel);
+                // And it is small: never wider than the family's measure.
+                assert!(frame[2] - frame[0] <= dialog_width(width, scale) + 0.5);
+                // One layer, scrim first, then the face — the modal family's paint.
+                let layer = paste_card_build(&layout, (width, height), None);
+                assert_eq!(layer.len(), 1);
+                assert_eq!(layer[0].quads[0].rect, [0.0, 0.0, width, height]);
+            }
+        }
+    }
+
+    /// RED (44) — **the card's line ends before the `×`, however long the profile's name is.**
+    ///
+    /// The owner's screenshot (2026-09-23, next89, dark, cmd) showed `7 行 → Command Prompt` with
+    /// its last letter under the `×`. The line was measured in the regular weight and drawn
+    /// semibold, so the card was sized for a line a few pixels shorter than the one it drew; and
+    /// a profile name longer than the family's measure had no bound at all. The face here is a
+    /// stand-in that draws semibold 8% wider than regular and a CJK character twice as wide as a
+    /// Latin one, which is the shape of the real face; the claim is about where the drawn line
+    /// ends against the cross, for Latin and CJK names, at every scale.
+    ///
+    /// MUTATION: measure the title without the `×` box (drop
+    /// `- px(PASTE_CLOSE_GAP_LOGICAL_PX + PASTE_CLOSE_LOGICAL_PX)` from the room in
+    /// `paste_card_content`) — the long names' lines run under the cross and the first
+    /// assertion goes red; measure its width regular (`ChromeLabelWeight::Regular` in place of
+    /// `PASTE_TITLE_WEIGHT` for `title_width`) and the drawn line outruns the card it sized, and
+    /// the same assertion goes red.
+    #[test]
+    fn the_paste_cards_line_ends_before_its_close_box() {
+        let mut face = |text: &str, size: f32, weight: ChromeLabelWeight| {
+            let em: f32 = text
+                .chars()
+                .map(|c| if c.is_ascii() { 0.5 } else { 1.0 })
+                .sum();
+            let bold = if weight == ChromeLabelWeight::SemiBold {
+                1.08
+            } else {
+                1.0
+            };
+            em * size * bold
+        };
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let (width, height) = (1600.0 * scale, 900.0 * scale);
+            for shell in [
+                "Command Prompt",
+                "cmd",
+                "Developer Command Prompt for Visual Studio 2022 (x64 Native Tools)",
+                "命令提示符 — 开发人员命令提示符 Visual Studio 2022 本机工具",
+            ] {
+                let content =
+                    paste_card_content(7, shell, PasteCardTarget::Run, width, scale, &mut face);
+                let layout = paste_card_layout(&content, width, height, scale);
+                let drawn = face(
+                    &layout.title_text,
+                    TITLE_FONT_LOGICAL_PX * scale,
+                    PASTE_TITLE_WEIGHT,
+                );
+                let limit = layout.close[0] - PASTE_CLOSE_GAP_LOGICAL_PX * scale;
+                assert!(
+                    layout.title[0] + drawn <= limit + 0.5,
+                    "{scale}x {shell:?}: the line ends at {} and the × gap starts at {limit}",
+                    layout.title[0] + drawn
+                );
+                assert!(layout.title[2] <= limit + 0.5, "{scale}x {shell:?}");
+                // The count and the arrow stay whole; only the name gives way, from its end.
+                assert!(
+                    layout.title_text.starts_with("7 "),
+                    "{:?}",
+                    layout.title_text
+                );
+                let frame = paste_card_frame(&layout);
+                assert!(frame[2] - frame[0] <= dialog_width(width, scale) + 0.5);
+            }
+        }
+        // A long name is cut, and a short one is not.
+        let long = paste_card_content(
+            7,
+            "Developer Command Prompt for Visual Studio 2022 (x64 Native Tools)",
+            PasteCardTarget::Run,
+            1600.0,
+            1.0,
+            &mut face,
+        );
+        assert!(long.title.ends_with('\u{2026}'), "{:?}", long.title);
+        let short = paste_card_content(7, "cmd", PasteCardTarget::Run, 1600.0, 1.0, &mut face);
+        assert!(short.title.ends_with("cmd"), "{:?}", short.title);
+    }
+
+    /// RED (45) — **the default word stands on the right and wears the accent, whichever it is.**
+    ///
+    /// `Enter` presses the default, and the card's arrangement says which one that is: the right
+    /// hand (the top when the two stack), accent-filled. For a wrapped block the default is
+    /// `Join`, and the two words change places.
+    ///
+    /// MUTATION: place `run` on the right whatever `default` says in `paste_card_layout` — the
+    /// `Join` card's first assertion goes red.
+    #[test]
+    fn the_default_word_stands_on_the_right_and_wears_the_accent() {
+        let accent = chrome_palette().accent;
+        for default in [PasteCardTarget::Run, PasteCardTarget::Join] {
+            for (width, stacked) in [(1440.0_f32, false), (240.0, true)] {
+                let content = PasteCardContent {
+                    title: "3 lines → Command Prompt".to_owned(),
+                    title_width: 170.0,
+                    run_text: "Run line by line",
+                    join_text: "Join into one line",
+                    run_text_width: 100.0,
+                    join_text_width: 112.0,
+                    default,
+                };
+                let layout = paste_card_layout(&content, width, 756.0, 1.0);
+                let (first, second) = match default {
+                    PasteCardTarget::Join => (layout.join, layout.run),
+                    _ => (layout.run, layout.join),
+                };
+                if stacked {
+                    assert!(first[1] < second[1], "{default:?}: the default is on top");
+                } else {
+                    assert!(
+                        first[0] > second[0],
+                        "{default:?}: the default is on the right"
+                    );
+                }
+                let layer = paste_card_build(&layout, (width, 756.0), None);
+                assert!(
+                    layer[0].quads.iter().any(|quad| quad.color == accent
+                        && quad.rect[0] >= first[0] - 1.0
+                        && quad.rect[2] <= first[2] + 1.0
+                        && quad.rect[1] >= first[1] - 1.0
+                        && quad.rect[3] <= first[3] + 1.0),
+                    "{default:?}: the default wears the accent"
+                );
+                assert!(
+                    !layer[0].quads.iter().any(|quad| quad.color == accent
+                        && quad.rect[0] >= second[0] - 1.0
+                        && quad.rect[2] <= second[2] + 1.0
+                        && quad.rect[1] >= second[1] - 1.0
+                        && quad.rect[3] <= second[3] + 1.0),
+                    "{default:?}: and the other word does not"
+                );
+            }
+        }
+    }
+
+    /// RED (45b) — **the focus ring stands on the word the keyboard moved to, and on nothing until
+    /// a key has moved it** (`:focus-visible`, owner's ruling 2026-09-23).
+    ///
+    /// MUTATION: drop the ring's `match` from `paste_card_build` — "a ring is drawn" goes red.
+    #[test]
+    fn the_paste_cards_ring_stands_on_the_focused_word() {
+        let accent = chrome_palette().accent;
+        let content = PasteCardContent {
+            title: "3 lines → Command Prompt".to_owned(),
+            title_width: 170.0,
+            run_text: "Run line by line",
+            join_text: "Join into one line",
+            run_text_width: 100.0,
+            join_text_width: 112.0,
+            default: PasteCardTarget::Run,
+        };
+        let layout = paste_card_layout(&content, 1440.0, 756.0, 1.0);
+        let rest = paste_card_build(&layout, (1440.0, 756.0), None);
+        let ring_on = |target| {
+            let moved = paste_card_build(
+                &layout.clone().with_ring(Some(target)),
+                (1440.0, 756.0),
+                None,
+            );
+            // What the ring added, over the same card at rest.
+            moved[0].quads[rest[0].quads.len()..].to_vec()
+        };
+        for (target, rect, other) in [
+            (PasteCardTarget::Join, layout.join, layout.run),
+            (PasteCardTarget::Run, layout.run, layout.join),
+        ] {
+            let ring = ring_on(target);
+            assert!(!ring.is_empty(), "{target:?}: a ring is drawn");
+            assert!(ring.iter().all(|quad| quad.color == accent));
+            let reach = 6.0;
+            assert!(
+                ring.iter().all(|quad| quad.rect[0] >= rect[0] - reach
+                    && quad.rect[2] <= rect[2] + reach
+                    && quad.rect[1] >= rect[1] - reach
+                    && quad.rect[3] <= rect[3] + reach),
+                "{target:?}: the ring stands around its own word"
+            );
+            assert!(
+                ring.iter()
+                    .all(|quad| quad.rect[2] <= other[0] || quad.rect[0] >= other[2]),
+                "{target:?}: and not over the other"
+            );
+        }
+        assert_eq!(
+            paste_card_build(&layout.clone().with_ring(None), (1440.0, 756.0), None)[0]
+                .quads
+                .len(),
+            rest[0].quads.len(),
+            "no ring until a key has moved the focus"
         );
     }
 }

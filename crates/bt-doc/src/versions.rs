@@ -171,6 +171,64 @@ pub struct VersionStamp {
     pub view: ViewGeneration,
 }
 
+/// Where a logical line was printed, as far as the terminal's own bookkeeping can prove it.
+///
+/// This is the *structural* half of the inline disambiguator (user ruling 2026-08-10, scheme A).
+/// It is deliberately not something a detector can work out for itself: bt-detect sees text and
+/// nothing else, and the question "was this line printed by a command, or typed at a prompt?" is
+/// answered by the terminal's semantic region bookkeeping in bt-term. Making it a parameter is
+/// what keeps the authority in the one place that actually holds it.
+///
+/// It lives here, beside the other things a line's identity is made of, because it is one of
+/// them: a frozen line carries its own site ([`crate::HistoryEntry::inline_site`]) the way it carries the
+/// width it was captured at, and a detector is handed that record rather than a live query.
+///
+/// Two sites permit inline rendering and one forbids it. The legislative intent behind the
+/// original single-site rule was never "OSC 133 specifically" — it was **protect the shell's
+/// literal text**, the prompt a user typed at and the command line they typed. The alternate
+/// screen has neither: an application that has switched to it owns the whole surface, there is
+/// structurally no prompt and no input line anywhere on it, and so the thing gate A was built to
+/// protect is not present to be damaged. Extending eligibility there costs nothing the rule was
+/// buying and recovers the case users have already accepted for display math across many
+/// sessions (Claude Code renders in the alternate screen today).
+/// The default is [`InlineMathSite::Ineligible`], and it is the default for the reason the type
+/// exists: a row nothing has yet claimed to have printed is a row no lone `$` may be read on. Every
+/// holder of a site starts there and is told otherwise, never the reverse.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum InlineMathSite {
+    /// Between `133;C` and `133;D` — a line a command *printed*.
+    CommandOutput,
+    /// The content area of the alternate screen, whose occupant owns every cell on it.
+    ///
+    /// Eligible for the structural reason above, and *only* structurally: nothing here relaxes a
+    /// single content gate. An alternate screen is where a user edits a shell script in `vim` and
+    /// reads a price table in a TUI, so it is at least as adversarial a site as command output —
+    /// the `$PATH`, `$1` and `$12 │ $34` that arrive on it are stopped by gate D and the
+    /// completeness rule, exactly as their command-output twins are.
+    AltScreenContent,
+    /// Anything else: the prompt (`A..B`), the typed command line (`B..C`), the region after
+    /// `133;D`, and — the case that carries the most weight — **every line on a primary screen
+    /// that has never emitted OSC 133 at all**.
+    ///
+    /// No shell integration therefore means no inline rendering on the primary screen, ever. That
+    /// is the ruling's price and it is worth naming: a `$…$` printed by an unintegrated session
+    /// stays source text. The alternative is guessing which half of the screen is output, and a
+    /// terminal that guesses wrong renders the user's literal text as mathematics.
+    #[default]
+    Ineligible,
+}
+
+impl InlineMathSite {
+    /// Is a lone `$` on this line allowed to be read as a delimiter at all?
+    ///
+    /// Gate A in one place, so that adding a site is a decision made here rather than a condition
+    /// drifting apart across the call sites that ask it.
+    #[must_use]
+    pub fn permits_inline(self) -> bool {
+        matches!(self, Self::CommandOutput | Self::AltScreenContent)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -725,6 +725,31 @@ pub fn forget_web_environment() {
     ENVIRONMENT.with(|cell| *cell.borrow_mut() = None);
 }
 
+/// **The options the process-wide environment is created with: the runtime's
+/// defaults, and the system's overlay scrollbars** (0.4.5 ticket 40; owner ruling
+/// 2026-09-23: the engine's setting, never page CSS).
+///
+/// A web pane drew Chromium's classic 17 px scrollbars beside Folio's own thin
+/// ones. The scrollbar belongs to the page, so a page that styles its own keeps
+/// it; what changes is the engine's default, through WebView2's documented
+/// `ScrollBarStyle` (`ICoreWebView2EnvironmentOptions8`,
+/// `COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY`: Windows 11's thin bar that
+/// fades while nothing scrolls). No browser command line is written for it.
+///
+/// **Which runtime reads it is the runtime's question.** This options object is
+/// this process's own (`webview2-com` implements every options interface on it),
+/// and the runtime is the side that asks: a runtime from 125.0.2535.41 on asks
+/// for `ICoreWebView2EnvironmentOptions8` and reads the style, an older one never
+/// asks and draws the classic bars. Either way nothing fails.
+#[cfg(windows)]
+fn environment_options() -> ICoreWebView2EnvironmentOptions {
+    let options = CoreWebView2EnvironmentOptions::default();
+    // The object is not yet shared with anybody, which is the whole of what the
+    // setter's `unsafe` asks.
+    unsafe { options.set_scroll_bar_style(COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY) };
+    options.into()
+}
+
 /// The runtime's version, asked of the loader rather than of the registry.
 ///
 /// The registry lies and the API does not: gate 7 removed the runtime and the
@@ -1124,6 +1149,25 @@ pub struct WebDpiOwnership {
     pub bounds_mode_is_raw_pixels: bool,
 }
 
+/// **Which colour scheme a page is told to prefer** — what `prefers-color-scheme` answers inside
+/// it (0.4.4 ticket 09, owner's ruling 2026-09-21).
+///
+/// Two values and no third, because the question a host is asked is already answered: whether
+/// the reader pinned one or follows Folio's theme is decided in `bt_app::webhost`, and what
+/// reaches an engine is the answer. There is deliberately no "auto" here — an engine left on its
+/// own default follows the operating system, which is exactly the disagreement with the window
+/// this type exists to end.
+///
+/// **A preference, and nothing more.** Each engine is told this one fact and no other: a page
+/// that has a dark style uses it, and a page that has none looks exactly as it did. Nothing in
+/// either host forces a style on a page (`ForceDark`, injected CSS) — that would be changing a
+/// page's content, which this product does not do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebColorScheme {
+    Light,
+    Dark,
+}
+
 // ── The host ───────────────────────────────────────────────────────────────
 
 /// Everything a callback needs to reach: the queue it pushes onto, the chord
@@ -1222,6 +1266,49 @@ pub struct WebHost {
     /// search capsule whose match count stopped moving for the rest of the
     /// session.
     find_attached: std::cell::Cell<bool>,
+    /// **The colour scheme this seat's pages are told to prefer**, as last said by the caller
+    /// (0.4.4 ticket 09) — `None` until it has said one.
+    ///
+    /// Kept on the host rather than handed to [`WebHost::install`], because it outlives any one
+    /// controller: a seat rebuilt after a crash, or for a new runtime version, has to be told the
+    /// same thing in the same pre-navigation step, and nobody above this crate knows that a
+    /// rebuild happened. So [`WebHost::configure`] reads it, and
+    /// [`WebHost::set_color_scheme`] writes it and tells a live page at once.
+    ///
+    /// **Not a [`CloseStep`]**, deliberately: it is not something install created, it is a fact
+    /// about what the reader wants, and a seat closed and opened again still wants it.
+    color_scheme: std::cell::Cell<Option<WebColorScheme>>,
+}
+
+/// **Tell one engine which colour scheme its pages prefer** — the profile's
+/// `PreferredColorScheme` (0.4.4 ticket 09).
+///
+/// On the **profile** and not on the settings object, because that is where WebView2 keeps it:
+/// `ICoreWebView2_13::Profile` hands back the profile the view was created in, and this product
+/// has one — every seat shares the persistent `%LOCALAPPDATA%\Folio\WebView2` folder. Telling it
+/// through one seat is therefore telling every seat, which is right for a single setting and costs
+/// nothing when every seat says the same.
+///
+/// **Every call propagates its failure** (`SECURITY.md`, "The web preview"): the cast, the profile
+/// and the setter each name themselves in the error, and nothing here is `let _ =`.
+#[cfg(windows)]
+fn apply_color_scheme(webview: &ICoreWebView2, scheme: WebColorScheme) -> Result<(), String> {
+    let view13: ICoreWebView2_13 = webview
+        .cast()
+        .map_err(|error| failure("ICoreWebView2_13", &error))?;
+    let profile = unsafe { view13.Profile() }
+        .map_err(|error| failure("ICoreWebView2_13::Profile", &error))?;
+    unsafe { profile.SetPreferredColorScheme(preferred_color_scheme(scheme)) }
+        .map_err(|error| failure("SetPreferredColorScheme", &error))
+}
+
+/// The engine's own spelling of a scheme. Never `AUTO` — see [`WebColorScheme`].
+#[cfg(windows)]
+fn preferred_color_scheme(scheme: WebColorScheme) -> COREWEBVIEW2_PREFERRED_COLOR_SCHEME {
+    match scheme {
+        WebColorScheme::Light => COREWEBVIEW2_PREFERRED_COLOR_SCHEME_LIGHT,
+        WebColorScheme::Dark => COREWEBVIEW2_PREFERRED_COLOR_SCHEME_DARK,
+    }
 }
 
 #[cfg(windows)]
@@ -1256,12 +1343,34 @@ impl WebHost {
             pending_controller: None,
             environment_events: None,
             find_attached: std::cell::Cell::new(false),
+            color_scheme: std::cell::Cell::new(None),
         }
     }
 
     /// Everything the engine has said since the last time it was asked.
     pub fn drain(&self) -> Vec<WebEvent> {
         self.shared.events.borrow_mut().drain(..).collect()
+    }
+
+    /// **Which colour scheme this seat's pages prefer** (0.4.4 ticket 09).
+    ///
+    /// Remembered whether or not there is an engine yet, so that the controller this seat is
+    /// given later is told in [`Self::configure`] — before anything navigates — and told at once
+    /// when there is a page up. What a page that is already showing does with the change is the
+    /// engine's and the page's: `prefers-color-scheme` is a live media query, and a page listening
+    /// to it restyles without a reload.
+    pub fn set_color_scheme(&self, scheme: WebColorScheme) -> Result<(), String> {
+        self.color_scheme.set(Some(scheme));
+        match self.webview.as_ref() {
+            Some(webview) => apply_color_scheme(webview, scheme),
+            None => Ok(()),
+        }
+    }
+
+    /// The scheme this host was last told, `None` before it was told one.
+    #[must_use]
+    pub fn color_scheme(&self) -> Option<WebColorScheme> {
+        self.color_scheme.get()
     }
 
     /// The chords the window takes back from a focused page.
@@ -1369,8 +1478,10 @@ impl WebHost {
         // on this window's own glass — so the argument has nothing left to
         // permit, and a command line kept "in case" is a command line nobody
         // re-reads.
-        let options: ICoreWebView2EnvironmentOptions =
-            CoreWebView2EnvironmentOptions::default().into();
+        //
+        // The overlay scrollbars (0.4.5 ticket 40) are an option on the
+        // environment, not an argument: see [`environment_options`].
+        let options = environment_options();
         unsafe {
             CreateCoreWebView2EnvironmentWithOptions(
                 PCWSTR::null(),
@@ -1830,6 +1941,14 @@ impl WebHost {
             controller3
                 .SetShouldDetectMonitorScaleChanges(false)
                 .map_err(|error| failure("SetShouldDetectMonitorScaleChanges", &error))?;
+        }
+        // **The colour scheme a page prefers, in the same step and before anything navigates**
+        // (0.4.4 ticket 09). Here rather than after the first page is up, because a page that
+        // loaded under the operating system's scheme and then changed would be a flash of the
+        // wrong one on every seat that opens. A failure is this step's failure, like every other
+        // call in it.
+        if let Some(scheme) = self.color_scheme.get() {
+            apply_color_scheme(webview, scheme)?;
         }
         Ok(unapplied)
     }
@@ -3105,6 +3224,33 @@ mod bounds_geometry_tests {
 mod engine_settings_tests {
     use super::*;
 
+    /// RED (0.4.4 ticket 09) — **a page is told light or dark, and never left on the engine's
+    /// own `AUTO`.**
+    ///
+    /// `AUTO` is WebView2's default and it follows the operating system, which is the very
+    /// disagreement with Folio's window the ruling of 2026-09-21 ends: a site in a dark window
+    /// drawing its light style because the desktop is light.
+    ///
+    /// MUTATION: answer `COREWEBVIEW2_PREFERRED_COLOR_SCHEME_AUTO` for either arm of
+    /// `preferred_color_scheme` and this fails on that arm.
+    #[test]
+    fn a_page_is_told_light_or_dark_and_never_left_on_auto() {
+        assert_eq!(
+            preferred_color_scheme(WebColorScheme::Light),
+            COREWEBVIEW2_PREFERRED_COLOR_SCHEME_LIGHT
+        );
+        assert_eq!(
+            preferred_color_scheme(WebColorScheme::Dark),
+            COREWEBVIEW2_PREFERRED_COLOR_SCHEME_DARK
+        );
+        for scheme in [WebColorScheme::Light, WebColorScheme::Dark] {
+            assert_ne!(
+                preferred_color_scheme(scheme),
+                COREWEBVIEW2_PREFERRED_COLOR_SCHEME_AUTO
+            );
+        }
+    }
+
     /// RED — **the switch set, and the two that were missing from it.**
     ///
     /// Release audit 2026-08-27 (Codex 漏 10): `rg 'IsGeneralAutofillEnabled|IsPasswordAutosaveEnabled'`
@@ -3243,6 +3389,123 @@ mod engine_settings_tests {
         let count = named.len();
         named.dedup();
         assert_eq!(named.len(), count, "two switches share one method name");
+    }
+
+    /// Every option an environment is created with, read back through the COM
+    /// interfaces the runtime itself reads them through, in a fixed order: the
+    /// command line first, the scrollbar style last.
+    fn read_back(options: &ICoreWebView2EnvironmentOptions) -> Vec<(&'static str, String)> {
+        fn text(get: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> String {
+            let mut value = PWSTR::null();
+            get(&mut value).expect("the options answer");
+            take_pwstr(value)
+        }
+        fn flag(get: impl FnOnce(*mut BOOL) -> windows::core::Result<()>) -> String {
+            let mut value = BOOL::default();
+            get(&mut value).expect("the options answer");
+            value.as_bool().to_string()
+        }
+        let two: ICoreWebView2EnvironmentOptions2 = options.cast().expect("options 2");
+        let three: ICoreWebView2EnvironmentOptions3 = options.cast().expect("options 3");
+        let four: ICoreWebView2EnvironmentOptions4 = options.cast().expect("options 4");
+        let five: ICoreWebView2EnvironmentOptions5 = options.cast().expect("options 5");
+        let six: ICoreWebView2EnvironmentOptions6 = options.cast().expect("options 6");
+        let seven: ICoreWebView2EnvironmentOptions7 = options.cast().expect("options 7");
+        let eight: ICoreWebView2EnvironmentOptions8 = options.cast().expect("options 8");
+        let mut schemes = 0u32;
+        let mut registrations = std::ptr::null_mut();
+        unsafe { four.GetCustomSchemeRegistrations(&mut schemes, &mut registrations) }
+            .expect("the options answer");
+        let mut search = COREWEBVIEW2_CHANNEL_SEARCH_KIND::default();
+        unsafe { seven.ChannelSearchKind(&mut search) }.expect("the options answer");
+        let mut channels = COREWEBVIEW2_RELEASE_CHANNELS::default();
+        unsafe { seven.ReleaseChannels(&mut channels) }.expect("the options answer");
+        let mut scrollbars = COREWEBVIEW2_SCROLLBAR_STYLE::default();
+        unsafe { eight.ScrollBarStyle(&mut scrollbars) }.expect("the options answer");
+        vec![
+            (
+                "AdditionalBrowserArguments",
+                text(|value| unsafe { options.AdditionalBrowserArguments(value) }),
+            ),
+            ("Language", text(|value| unsafe { options.Language(value) })),
+            (
+                "TargetCompatibleBrowserVersion",
+                text(|value| unsafe { options.TargetCompatibleBrowserVersion(value) }),
+            ),
+            (
+                "AllowSingleSignOnUsingOSPrimaryAccount",
+                flag(|value| unsafe { options.AllowSingleSignOnUsingOSPrimaryAccount(value) }),
+            ),
+            (
+                "ExclusiveUserDataFolderAccess",
+                flag(|value| unsafe { two.ExclusiveUserDataFolderAccess(value) }),
+            ),
+            (
+                "IsCustomCrashReportingEnabled",
+                flag(|value| unsafe { three.IsCustomCrashReportingEnabled(value) }),
+            ),
+            ("CustomSchemeRegistrations", schemes.to_string()),
+            (
+                "EnableTrackingPrevention",
+                flag(|value| unsafe { five.EnableTrackingPrevention(value) }),
+            ),
+            (
+                "AreBrowserExtensionsEnabled",
+                flag(|value| unsafe { six.AreBrowserExtensionsEnabled(value) }),
+            ),
+            ("ChannelSearchKind", search.0.to_string()),
+            ("ReleaseChannels", channels.0.to_string()),
+            ("ScrollBarStyle", scrollbars.0.to_string()),
+        ]
+    }
+
+    /// RED (0.4.5 ticket 40) — **the environment asks the engine for its overlay
+    /// scrollbars, and passes no browser arguments.**
+    ///
+    /// A web pane on Windows drew Chromium's classic 17 px bars beside Folio's own
+    /// thin ones. The owner ruled (2026-09-23) that the fix is the engine's
+    /// setting and never CSS put into a page; the engine's documented setting is
+    /// `ScrollBarStyle`, so the one option that may differ from the runtime's
+    /// defaults is that one, and the browser command line stays empty (route B's
+    /// claim, held in source by `the_environment_is_created_with_no_browser_arguments_at_all`).
+    /// This runs the real producer — `environment_options`, the value
+    /// `request_environment` hands to `CreateCoreWebView2EnvironmentWithOptions`
+    /// — and reads it back the way the runtime does, through the options
+    /// interfaces, next to a default-built set.
+    ///
+    /// MUTATION: drop the `set_scroll_bar_style` line from `environment_options`
+    /// and the style comes back as `COREWEBVIEW2_SCROLLBAR_STYLE_DEFAULT`.
+    #[test]
+    fn the_environment_asks_for_the_overlay_scrollbars_and_for_no_browser_arguments() {
+        let built = read_back(&environment_options());
+        let default = read_back(&CoreWebView2EnvironmentOptions::default().into());
+        let last = built.len() - 1;
+        assert_eq!(
+            built[last],
+            (
+                "ScrollBarStyle",
+                COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY.0.to_string()
+            ),
+            "the engine is asked for the overlay scrollbars"
+        );
+        assert_eq!(
+            default[last],
+            (
+                "ScrollBarStyle",
+                COREWEBVIEW2_SCROLLBAR_STYLE_DEFAULT.0.to_string()
+            ),
+            "which is not what the runtime would have chosen by itself"
+        );
+        assert_eq!(
+            built[0],
+            ("AdditionalBrowserArguments", String::new()),
+            "and the browser command line is empty"
+        );
+        assert_eq!(
+            built[..last],
+            default[..last],
+            "nothing but the scrollbar style differs from the runtime's defaults"
+        );
     }
 }
 

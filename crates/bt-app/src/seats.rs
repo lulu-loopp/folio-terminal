@@ -309,6 +309,75 @@ pub const FLIGHT_SHADOW_ALPHA: f32 = 0.18;
 /// module's vocabulary and the one soft edge the mark rasterizer already makes.
 pub const FLIGHT_SHADOW_SPREAD_LOGICAL_PX: f32 = 3.0;
 
+/// **An outset decoration grows from the body as that body is drawn, and is
+/// clamped no second time.**
+///
+/// Half the rule; [`outset_reach`] beside it is the other half and settles *how
+/// far*. A scroller in this module crops what it shows by *clamping a rectangle*
+/// — `clip_to_list`, three copies of it, one per surface — and clamping is
+/// exactly right for a rectangle whose own edge is the thing's edge: the fill,
+/// the border, the mark slot. It is exactly wrong for a rectangle grown *outward*
+/// from one. A ring is rasterised to fill the box it is handed, so clamping the
+/// grown box does not crop the ring — it redraws a smaller one, concentric with
+/// nothing, with its corner radius now wrong by the growth it lost.
+///
+/// That is what the first card's waiting halo did on every frame the column was
+/// ever drawn: `cards[0].body[1] == list_top` exactly (see `focus_rail_geometry`,
+/// where the first card's top *is* the list's top), so the top outset was
+/// clamped away and a 3px halo came back as a 3px halo on three sides and none
+/// at the top — measured at 6 device px on the owner's 200% screen, 2026-09-20.
+/// The two flight shadows are the same shape and were the same bug.
+///
+/// So: clamp the body once, then grow by one amount on all four sides. A card
+/// scrolled half out of the list is clamped to the crop and its halo follows the
+/// crop, which is what "concentric with the card as drawn" means at every scroll
+/// offset.
+fn outset(body: [f32; 4], by: f32) -> [f32; 4] {
+    [body[0] - by, body[1] - by, body[2] + by, body[3] + by]
+}
+
+/// **How far a decoration on `body` may actually reach: what it wants, or what
+/// the room its layout gives it can pay — whichever is less.**
+///
+/// The other half of [`outset`]'s rule, and the correction of 2026-09-20 (review
+/// of `b16f7592`). Taking the second clamp off the grown rectangle took it off
+/// the **bottom** too, and the bottom is not the roomy side: the panel keeps
+/// [`bt_render::RAIL_PADDING_TOP_LOGICAL_PX`]'s 6 logical px above its list and
+/// only [`bt_render::RAIL_NEW_MARGIN_TOP_LOGICAL_PX`] plus the rail's gap — 3 —
+/// below it, which is *exactly* what a decoration wants. The growth is rounded
+/// to device pixels at its call site and that margin is not, both off the same
+/// `3.0 * scale`, so at every scale where `frac(3.0 * scale) >= 0.5` the rounded
+/// growth is larger than the unrounded room: at 150% the halo asks for 5 device
+/// px into 4.5, and half a pixel of it lands on the `+` row's own top edge. 125%,
+/// 225% and 250% are the same story. Reachable on any overflowing list scrolled
+/// far enough to clamp a card's bottom — an everyday scroll.
+///
+/// **One fact, one owner.** The room is not the decoration's opinion and not a
+/// constant written here: it is `room`, the box the layout that built the list
+/// hands down — the panel's own rectangle with the `+` row's top edge for a
+/// floor, which is the whole of the empty ground kept around the list. The
+/// decoration says what it wants, the layout says what there is, and the two are
+/// reconciled here and nowhere else.
+///
+/// **One amount and not four.** A ring drawn 5px past three edges and 4px past
+/// the fourth is not concentric with the card under it, which is the very shape
+/// [`outset`] exists to stop — so the tightest side sets the reach for all four.
+/// A card in the middle of the list is nowhere near an edge and pays nothing for
+/// this; only a card the scroller has clamped against the list's own rim does.
+///
+/// **Floored to whole device pixels**, because a reach is a count of pixels: the
+/// mark it is drawn with takes a `u32` stroke and a `u32` radius, and a rectangle
+/// grown by 4.5 with a 4px band in it is a ring that does not fill its own box.
+fn outset_reach(body: [f32; 4], wanted: f32, room: [f32; 4]) -> f32 {
+    wanted
+        .min(body[0] - room[0])
+        .min(body[1] - room[1])
+        .min(room[2] - body[2])
+        .min(room[3] - body[3])
+        .floor()
+        .max(0.0)
+}
+
 /// How dark the shadow under a thing in flight is drawn this frame.
 ///
 /// A pure function of [`TabContent::flight`], so the three surfaces cannot
@@ -824,7 +893,7 @@ impl Seats {
     /// The whole map at once, and the `bool` is the caller's gate on a re-solve —
     /// [`Self::set_notices`]'s contract exactly, for its reason: an address row
     /// arriving where a breadcrumb row stood changes the pane's height (the
-    /// breadcrumb takes the foot's twenty-eight and the address adds its own),
+    /// breadcrumb takes the foot's strip height and the address adds its own),
     /// so a change here is a layout change.
     pub fn set_rails(&mut self, rails: BTreeMap<SeatId, PreviewRailKind>) -> bool {
         let changed = self.rails != rails;
@@ -2047,7 +2116,16 @@ pub fn fit_what_fits(
         hidden: others - shown,
         row: device(row_rect(rows - 1)),
     });
-    (SeatLayout { rects }, overflow)
+    (
+        SeatLayout {
+            rects,
+            // The posture is the tab's and this is only the shape it had to be
+            // drawn in: a window too small for the solver still has the zoom the
+            // user asked for, and its head goes on saying so.
+            stage: seats.zoom,
+        },
+        overflow,
+    )
 }
 
 /// One seat's geometry stopped being what it was at the last commit (T230).
@@ -2678,6 +2756,10 @@ pub enum ChromeTarget {
     /// a button that shared the header's target would begin a tear-out on the
     /// way to a menu.
     PaneMenu(SeatId),
+    /// **A terminal pane head's text-size mark** (ticket 37): `125%` while the pane is not at
+    /// 100 %, and a click puts it back. Its own target for [`Self::PaneClose`]'s reason: the head
+    /// is a drag handle and this is a button inside it.
+    PaneTextSize(SeatId),
     /// One row of one files column's tree (C30/C155).
     ///
     /// **By index and not by id.** The hit test's whole job is "which rectangle
@@ -6224,7 +6306,13 @@ pub fn hit_chrome(
             // The border box, hairline included, rounded the way the drawing and
             // `pane_body_viewport` both round it: the header you can grab is
             // exactly the header you can see.
-            let head = pane_head_geometry(rect, placement.kind, scale);
+            let head = pane_head_geometry(
+                rect,
+                placement.kind,
+                layout.seat_is_on_stage(placement.id),
+                false,
+                scale,
+            );
             // What this head is *showing*, asked once for the whole trailing
             // run: `⌄ 🗀 ×` on a terminal, `⧉ ×` on a column, all four of them
             // hung off the one `.pane:hover` the painter hangs them off.
@@ -6727,14 +6815,16 @@ fn pixel_snapped(rect: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// The tool box in a head (`UI-SPEC.md` H3; [`PREVIEW_TOOL_BOX_LOGICAL_PX`]
+/// below), not the mock-up's own
 /// `.tab-files, .pane-files { width: 19px; height: 19px }` (mock-up 753-755),
-/// and `.files-head .pane-float` is given the same box at line 516-517.
+/// and `.files-head .pane-float` given the same box at line 516-517.
 ///
 /// One constant for all three because the mock-up writes one rule for the first
 /// two and repeats its numbers for the third: they are the same control in three
 /// places, and the note at line 752 says why — "同一个字形两处用,因为它是同一个
 /// 动作".
-pub const PANE_HEAD_TRIGGER_BOX_LOGICAL_PX: f32 = 19.0;
+pub const PANE_HEAD_TRIGGER_BOX_LOGICAL_PX: f32 = PREVIEW_TOOL_BOX_LOGICAL_PX;
 /// `border-radius: 5px` on the same three.
 pub const PANE_HEAD_TRIGGER_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.tab-files svg, .pane-files svg { width: 13px }`.
@@ -6814,14 +6904,8 @@ fn caption_glyph_logical_px(mark: ChromeMark) -> f32 {
 /// `.tab:hover .tab-files { opacity: .6 }` — the middle rung of the tab's own
 /// reveal ladder (H76/H104).
 pub const TAB_FILES_TRIGGER_REVEAL: f32 = 0.6;
-/// `.pane:hover .panehead .pane-files { opacity: .7 }` — the middle rung of the
-/// reveal ladder, where the pane is hovered but the control itself is not.
-///
-/// `.tab`'s own ladder rests at `.6` instead (mock-up 763). Two numbers for what
-/// looks like one idea, and the mock-up writes both: a pane head is already a
-/// quiet surface, while a tab is a lit one, so the same apparent weight costs a
-/// different alpha on each.
-pub const PANE_HEAD_TRIGGER_REVEAL: f32 = 0.7;
+/// UI-SPEC.md C1: hover-revealed controls share the 0.6 resting opacity.
+pub const PANE_HEAD_TRIGGER_REVEAL: f32 = 0.6;
 
 // ── the lone pane's corner ghost (user ruling 2026-08-20, DESIGN §7.1.6i A) ──
 //
@@ -7001,9 +7085,44 @@ pub fn pane_ghost_folder_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]
     pane_ghost_door_geometry(rect, scale, crate::icons::ActionIcon::OpenFilesPane)
 }
 
+/// **Where a terminal pane's text-size mark stands: beside its top-right controls, to their
+/// left** (ticket 37; owner ruling 2026-09-24).
+///
+/// One rule for a pane with a head and a pane without one, because the controls it stands
+/// beside are on every terminal pane — the head's run (`⌄ 🗀 ×`) or the headless pane's corner
+/// (`⌄ 🗀`) — while a head's title is not. `chevron` is the run's first box, the `⌄`; the mark
+/// ends where it begins (the run's boxes abut, so the mark is one more slot in the same rhythm),
+/// shares its top and height, and is [`PANE_TEXT_SIZE_MARK_WIDTH_LOGICAL_PX`] wide. `None` when
+/// it would start left of `floor` — there is no room, and a mark over the pane's own leading
+/// furniture is worse than none.
+#[must_use]
+pub fn text_size_mark_beside(chevron: [f32; 4], floor: f32, scale: f32) -> Option<[f32; 4]> {
+    let right = chevron[0];
+    let left = right
+        - (PANE_TEXT_SIZE_MARK_WIDTH_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
+    (left >= floor).then_some([left, chevron[1], right, chevron[3]])
+}
+
+/// **A headless terminal pane's text-size mark** (ticket 37) — [`text_size_mark_beside`] asked
+/// of the corner's own `⌄` ([`pane_ghost_geometry`]): a lone terminal, a pane in focus mode, a
+/// pane whose head is not drawn. `None` when the corner has no `⌄` or no room left of it.
+#[must_use]
+pub fn pane_ghost_text_size_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+    text_size_mark_beside(pane_ghost_geometry(rect, scale)?, rect[0], scale)
+}
+
 /// The zoom state mark's own box, in physical pixels — 13 logical, the size the
 /// seat marks beside it are cut at.
 pub const PANE_ZOOM_MARK_LOGICAL_PX: f32 = 13.0;
+
+/// **How wide a pane head's text-size mark is**, in logical pixels (ticket 37): room for the
+/// widest label the ladder can put in it, `300%`, in the head's own caption type with tabular
+/// numerals and a small inset either side. One width for every rung, so the title beside it
+/// does not move as the size is stepped — and so the box can be derived without a renderer,
+/// which is what lets the painter and the hit test ask one function.
+pub const PANE_TEXT_SIZE_MARK_WIDTH_LOGICAL_PX: f32 = 38.0;
 
 /// **How far a head's run dissolves the title under it** — one character of the
 /// title's own type (user ruling, 2026-08-27:「渐变底…宽度约控件运宽 + 一个字
@@ -7015,54 +7134,37 @@ pub const PANE_ZOOM_MARK_LOGICAL_PX: f32 = 13.0;
 /// the type is ever re-sized, which a `12.0` here would not.
 pub const HEAD_RUN_SCRIM_FADE_LOGICAL_PX: f32 = bt_render::SEAT_TITLE_FONT_LOGICAL_PX;
 
-/// Where the zoom mark stands in a head, or `None` when the head has no room for
-/// it (§7.1.6l).
+/// **The head's own band** — its border box and the content box the flex row
+/// centres in — which is a fact about the pane's rectangle and the scale, and
+/// about nothing else.
 ///
-/// **Second in the leading run**, taking its box off the seat's own mark and
-/// leaving the head's `gap: 7px` between the two, so the run reads left to right
-/// as *this kind of pane, zoomed, called this*. It is derived from
-/// [`PaneHeadGeometry`] rather than recomputed from the rectangle for
-/// [`pane_ghost_geometry`]'s reason: the mark the painter draws and the box the
-/// title has to start after are one derivation, so the name cannot come to
-/// overlap the mark at the one fractional scale nobody tested.
-///
-/// `None` when it would run into the trailing run's own space, on the rule every
-/// control in this head keeps: a mark half under the `×` is worse than no mark,
-/// and the pane is still legibly zoomed from the fact that it is the only pane
-/// on the stage plus the menu row that says `Restore pane`.
+/// Its own function because the callers that want only the band are the ones
+/// that have no business knowing what is *in* the head: a preview's rail hangs
+/// under it, a column's foot is measured from it, and an overlay asks where the
+/// caption stops. Those three would otherwise have to hand
+/// [`pane_head_geometry`] a kind and a posture in order to be told a number
+/// neither one moves — and a caller that passes "not zoomed" to get an answer
+/// that does not depend on it is a caller that will still be passing it the day
+/// the answer does.
 #[must_use]
-pub fn pane_zoom_mark_box(head: &PaneHeadGeometry, scale: f32) -> Option<[f32; 4]> {
-    let size = (PANE_ZOOM_MARK_LOGICAL_PX * scale).round().max(1.0);
-    let left = (head.mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale).round();
-    let top = ((head.mark[1] + head.mark[3] - size) / 2.0).round();
-    let right = left + size;
-    // `control_limit` and not the title's own right edge: the name may run
-    // under the trailing run and dissolve into it, and a state mark may not.
-    (right <= head.control_limit).then_some([left, top, right, top + size])
+pub fn pane_head_band(rect: [f32; 4], scale: f32) -> PaneHeadBand {
+    let bar = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round();
+    let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
+    let head_bottom = (rect[1] + bar).min(rect[3]);
+    PaneHeadBand {
+        head: [rect[0], rect[1], rect[2], head_bottom],
+        content_bottom: (head_bottom - edge).max(rect[1]),
+    }
 }
 
-/// Where the name starts in a head that may be wearing the zoom mark.
-///
-/// One function so the mark's box and the title's left edge are one number: a
-/// label laid out as if the mark were not there would print the pane's name
-/// through it.
-#[must_use]
-pub fn pane_title_box(
-    head: &PaneHeadGeometry,
-    zoom_mark: Option<[f32; 4]>,
-    scale: f32,
-) -> [f32; 4] {
-    match zoom_mark {
-        None => head.title,
-        Some(mark) => [
-            (mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale)
-                .round()
-                .min(head.title[2]),
-            head.title[1],
-            head.title[2],
-            head.title[3],
-        ],
-    }
+/// The two numbers every pane head has, whatever it is heading — see
+/// [`pane_head_band`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneHeadBand {
+    /// The head's border box — 30 logical pixels including the hairline.
+    pub head: [f32; 4],
+    /// The content box the flex row centres in: the border box less its border.
+    pub content_bottom: f32,
 }
 
 /// Where everything inside one pane head stands, in physical pixels.
@@ -7079,6 +7181,38 @@ pub struct PaneHeadGeometry {
     pub content_bottom: f32,
     /// The seat's own mark, at its per-kind size.
     pub mark: [f32; 4],
+    /// **The zoom state mark's box** (§7.1.6l), or `None` on a head that is not
+    /// zoomed or has no room for it.
+    ///
+    /// **Second in the leading run**, taking its box off the seat's own mark and
+    /// leaving the head's `gap: 7px` between the two, so the run reads left to
+    /// right as *this kind of pane, zoomed, called this*. It is a slot of this
+    /// geometry and not a box derived from it beside it, which is the whole of
+    /// the 2026-09-20 report: a mark computed one place and a title started at
+    /// another put a web pane's first letter under the mark, because the
+    /// geometry that owned [`Self::title`] did not know the mark existed and
+    /// every head but the terminal's read [`Self::title`] directly.
+    ///
+    /// `None` when it would run into the trailing run's own space, on the rule
+    /// every control in this head keeps: a mark half under the `×` is worse than
+    /// no mark, and the pane is still legibly zoomed from the fact that it is the
+    /// only pane on the stage plus the menu row that says `Restore pane`.
+    pub zoom_mark: Option<[f32; 4]>,
+    /// **The text-size mark's box** (ticket 37; owner rulings 2026-09-23, 2, and 2026-09-24),
+    /// or `None` on a head whose pane is at 100 %, that is not a terminal's, or that has no room
+    /// for it.
+    ///
+    /// **Beside the pane's top-right controls, to their left** — [`text_size_mark_beside`], the
+    /// one placement rule a head and a headless pane's corner ([`pane_ghost_text_size_geometry`])
+    /// both ask, because those controls are on every terminal pane and a head's title is not. It
+    /// ends where [`Self::chevron`] begins, in the run's own slot rhythm (the run's boxes abut),
+    /// and a head with no `⌄` has no room for it either. It is a slot of this geometry and the
+    /// head's other occupants give way to it: the name stops a gap short of it
+    /// ([`Self::title`]'s right edge), and so do the leading controls ([`Self::control_limit`]).
+    /// Unlike the run it rests visible, because it is state, not a verb waiting for a hover. It
+    /// is set in chrome type at window scale — never at the pane's own text size — and shows the
+    /// pane's **requested** percentage; a click on it is the `text-actual-size` verb.
+    pub text_size: Option<[f32; 4]>,
     /// **The whole of the row after the leading mark**, less the head's own
     /// trailing padding — and *not* less the trailing run (user report,
     /// 2026-08-27).
@@ -7096,6 +7230,15 @@ pub struct PaneHeadGeometry {
     /// those are controls and a control half under another control is the bug
     /// this house has fixed twice. What may run under the buttons is type, and
     /// only type.
+    ///
+    /// **Its left edge is the leading run's right edge**, whichever slots that
+    /// run is actually wearing this frame — the kind's mark always, and
+    /// [`Self::zoom_mark`] when the pane holds the stage. Every head reads this
+    /// one number for where its name starts: the terminal's caption, the preview
+    /// head's name pill ([`preview_head_geometry`]) and the files head's root
+    /// button ([`files_root_box`]). That is the 2026-09-20 report's fix stated as
+    /// an invariant — a second opinion about where the name begins is a name
+    /// printed through the mark in front of it.
     pub title: [f32; 4],
     /// **The trailing run's own box**, `[left, top, right, bottom]` over every
     /// control in it, or `None` on a head with room for none.
@@ -7105,8 +7248,14 @@ pub struct PaneHeadGeometry {
     /// wall every control in the *leading* run has to stop at.
     pub run: Option<[f32; 4]>,
     /// **The ground the run stands on** — [`Self::run`] grown left by one
-    /// character of the title's own type and right to the head's edge, or
+    /// character of the title's own type, ending where [`Self::title`] ends, or
     /// `None` when there is no run.
+    ///
+    /// Not out to the head's own edge (2026-09-23): the ground exists to cover
+    /// letters and the letters stop at the title's right edge, so the trailing
+    /// padding beyond it has nothing to cover — and on a pane drawn as a
+    /// resizing card that padding is where the card's rounded top-right corner
+    /// is cut.
     ///
     /// Drawn in the head's ground colour over the title, at the run's own
     /// opacity, so the two arrive and leave together: see
@@ -7196,12 +7345,29 @@ pub fn pane_head_control_boxes(
 /// two belong to the Files and floating-window blocks. They arrive by taking
 /// their box off `trailing` before the `×` does, in the mock-up's own DOM order,
 /// and nothing else here has to change.
-pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHeadGeometry {
-    let bar = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round();
-    let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
-    let head_bottom = (rect[1] + bar).min(rect[3]);
-    let content_bottom = (head_bottom - edge).max(rect[1]);
-    let head = [rect[0], rect[1], rect[2], head_bottom];
+///
+/// **`zoomed` is the head's other slot-deciding fact** (§7.1.6l), and it is a
+/// parameter for the reason `kind` is one: what stands in the leading run
+/// decides where the name starts, so the run and the name have to be cut by one
+/// derivation. It arrives from [`bt_layout::SeatLayout::stage`] — the solver's
+/// own answer about which seat holds the viewport alone — rather than from a
+/// painter's guess, so the head a hit test measures and the head the frame draws
+/// cannot be wearing different postures.
+///
+/// **`text_size` is the third** (ticket 37): whether this head wears the text-size mark — a
+/// terminal pane that is not at 100 % — and, like `zoomed`, a parameter because it decides where
+/// the name starts. It is ignored on every kind but a terminal's.
+pub fn pane_head_geometry(
+    rect: [f32; 4],
+    kind: SeatKind,
+    zoomed: bool,
+    text_size: bool,
+    scale: f32,
+) -> PaneHeadGeometry {
+    let PaneHeadBand {
+        head,
+        content_bottom,
+    } = pane_head_band(rect, scale);
 
     // `.preview-head` sets its own left inset — eleven where `.panehead` uses
     // twelve (P13) — so the padding is read off the kind rather than shared.
@@ -7301,36 +7467,81 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
     // field's own note. What it stops at is the head's padding and nothing
     // else.
     let title_right = rect[2] - trailing_pad;
+    // What the title's right edge was before the ruling, kept under the name
+    // that says what it is for. Cut before the zoom mark because the mark has to
+    // stop at it: `control_limit` is a fact about the *trailing* run, and a
+    // leading slot that moved it would be the two deciding each other.
+    // **The text-size mark, left of the `⌄`** (ticket 37) — [`text_size_mark_beside`], the rule
+    // a headless corner asks too. The kind's mark is the floor it may not cross.
+    let text_size = (text_size && kind == SeatKind::Terminal)
+        .then(|| {
+            text_size_mark_beside(chevron?, mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale, scale)
+        })
+        .flatten();
+    let control_limit = match text_size.map(|mark| mark[0]).or(run_left) {
+        Some(left) => left - SEAT_TITLE_GAP_LOGICAL_PX * scale,
+        None => title_right,
+    }
+    .max(mark[2]);
+    // **The second slot of the leading run** (§7.1.6l) — see
+    // [`PaneHeadGeometry::zoom_mark`]. Cut here, between the mark it follows and
+    // the title it pushes, because those three are one run and a run laid out in
+    // two places is a run with two opinions about where it ends.
+    let zoom_mark = zoomed
+        .then(|| {
+            let size = (PANE_ZOOM_MARK_LOGICAL_PX * scale).round().max(1.0);
+            let left = (mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale).round();
+            let top = ((mark[1] + mark[3] - size) / 2.0).round();
+            let right = left + size;
+            // `control_limit` and not the title's own right edge: the name may
+            // run under the trailing run and dissolve into it, and a state mark
+            // may not.
+            (right <= control_limit).then_some([left, top, right, top + size])
+        })
+        .flatten();
+    // The name starts after the last slot the leading run is actually wearing —
+    // the kind's mark, or the zoom mark when there is one — and stops a gap short of the
+    // text-size mark when the pane wears one (ticket 37).
+    let title_right = text_size.map_or(title_right, |size| {
+        (size[0] - SEAT_TITLE_GAP_LOGICAL_PX * scale).min(title_right)
+    });
+    let title_left = match zoom_mark {
+        None => mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale,
+        Some(slot) => (slot[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale)
+            .round()
+            .min(title_right.max(mark[2])),
+    };
     PaneHeadGeometry {
         head,
         content_bottom,
         mark,
+        zoom_mark,
+        text_size,
         title: [
-            mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale,
+            title_left,
             rect[1],
             title_right.max(mark[2]),
             content_bottom,
         ],
         run,
         // One character of the title's own type at the left edge, and the
-        // head's own right edge at the other: the ramp is a fact about the
-        // letters it dissolves, and what lies under the run's own boxes and
-        // under the padding beside them is covered flat.
+        // title's own right edge at the other: the ramp is a fact about the
+        // letters it dissolves, what lies under the run's own boxes is covered
+        // flat, and the trailing padding past the last letter is left alone —
+        // there is nothing in it to cover (2026-09-23, see the field). The two
+        // right edges are the same place said twice — the `×` stands at
+        // `padding-right` and so does the name — except that the `×`'s box is
+        // snapped to the pixel and the name's edge is not, so at a fractional
+        // scale they part by up to half a pixel; the ground covers both.
         scrim: run.map(|run| {
             [
                 (run[0] - HEAD_RUN_SCRIM_FADE_LOGICAL_PX * scale).max(rect[0]),
                 rect[1],
-                rect[2],
+                title_right.max(run[2]),
                 content_bottom,
             ]
         }),
-        // What the title's right edge was before the ruling, kept under the
-        // name that says what it is for.
-        control_limit: match run_left {
-            Some(left) => left - SEAT_TITLE_GAP_LOGICAL_PX * scale,
-            None => title_right,
-        }
-        .max(mark[2]),
+        control_limit,
         close,
         files: trigger.and_then(|(is_float, box_)| (!is_float).then_some(box_)),
         float: trigger.and_then(|(is_float, box_)| is_float.then_some(box_)),
@@ -8295,6 +8506,9 @@ static NO_FILES_NAMES: BTreeMap<SeatId, String> = BTreeMap::new();
 /// name nobody has measured has no width for one to be built from.
 #[cfg(test)]
 static NO_FILES_NAME_WIDTHS: BTreeMap<SeatId, f32> = BTreeMap::new();
+/// And for the panes' text sizes: "every pane here is at 100 %" (ticket 37).
+#[cfg(test)]
+static NO_TEXT_SIZES: BTreeMap<SeatId, u16> = BTreeMap::new();
 /// And once more for the rows: "no files column here has been walked".
 ///
 /// A column with no entry draws no tree and no notice — which is what every
@@ -8428,6 +8642,7 @@ pub fn build_chrome_with_preview(
             search_seat: None,
             head_raised: None,
             resizing_cards: None,
+            text_sizes: &NO_TEXT_SIZES,
         },
     )
     .flattened()
@@ -8615,12 +8830,48 @@ pub struct TabMarkState {
     /// bell is a thing that *rang*, and a ringing bell you have not looked at is
     /// not a program standing still waiting for you to type.
     ///
-    /// A number and not a `bool` for [`Self::opacity`]'s reason one line up:
-    /// this module holds no clock, so the phase is sampled where the clocks are
-    /// and arrives here already resolved. `None` under reduced motion, at every
-    /// phase — the border stays warn and only the motion goes, because motion
-    /// was never the message.
-    pub pulse: Option<f32>,
+    /// A sample and not a `bool` for [`Self::opacity`]'s reason one line up:
+    /// this module holds no clock, so the breath is taken where the clocks are
+    /// and arrives here already resolved. `Some` at every phase under reduced
+    /// motion too — the presence of the sample is the claim and the numbers in
+    /// it are the motion, so the border stays warn and only the movement goes,
+    /// because motion was never the message.
+    pub pulse: Option<WaitPulse>,
+}
+
+/// **One breath, sampled once, worn by everything that says the same thing.**
+///
+/// `docs/DESIGN.md` §7.1.5b (user ruling 2026-07-18) gives a waiting tab two
+/// channels — *"等你回答（橙点脉动……卡片同时橙框）"* — and §7.1.5b's attention
+/// block restates it on 2026-08-25 as three things reading one answer. Two
+/// channels saying one fact must therefore breathe **together**, which is the
+/// owner's ruling of 2026-09-20: the dot is on the halo's clock and the halo's
+/// curve (the window's one 1.7s breath), not on a period of its own.
+///
+/// The mock-up asked for a period of its own — `.unreaddot.await { animation:
+/// fcpulse .9s infinite }` (`docs/design/ui-mockup.html:346`) — and never
+/// defined `@keyframes fcpulse`. An undefined `animation-name` is valid CSS that
+/// does nothing, so the mock-up's dot never pulsed either, and the transcription
+/// inherited a name with no curve behind it. That is the whole reason this type
+/// exists: the curve had to be chosen, and the ruling chose the one already in
+/// the window.
+///
+/// Two fields and not one number, because reduced motion is where the two
+/// channels part: an animation with no `0%` frame that is turned off has no
+/// shadow at all, and a dot whose animation is turned off is simply the dot. So
+/// each face carries its own value and one sampler decides both — see
+/// `crate::wait_pulse`, the only thing that may build one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaitPulse {
+    /// The halo's strength this frame, `0.0..=1.0` of
+    /// [`bt_render::FOCUS_CARD_WAIT_HALO_OPACITY`] — a glow that grows out of
+    /// nothing and goes back into nothing, and a flat `0.0` under reduced
+    /// motion.
+    pub halo: f32,
+    /// The status dot's own alpha this frame, `0.0..=1.0` — the same curve at
+    /// the same phase, mapped onto a dot that is always there, and a flat `1.0`
+    /// under reduced motion.
+    pub dot: f32,
 }
 
 impl Default for TabMarkState {
@@ -9016,6 +9267,12 @@ pub struct ChromeContent<'a> {
     /// ends when the button comes up, whereas the card's 100ms is measured from
     /// the release; so this field would exist even once E52 lands.
     pub resizing_cards: Option<ResizingCards>,
+    /// **Each terminal pane that is not at 100 %, and the percentage it asked for** (ticket 37).
+    ///
+    /// Built for this frame from each pane's own rung and handed down, the way
+    /// [`Self::terminal_names`] is: a reading of the pane, not a copy of its size kept anywhere.
+    /// A pane missing from it wears no text-size mark.
+    pub text_sizes: &'a BTreeMap<SeatId, u16>,
     /// Which pane has a **search capsule** open on it, if any — the one fact the
     /// corner ghost's existence depends on and `Seats` cannot answer
     /// ([`Seats::seat_wears_ghost`]).
@@ -9341,6 +9598,7 @@ pub fn build_chrome_for_tabs(
         search_seat,
         head_raised,
         resizing_cards: carded,
+        text_sizes,
     } = content;
     // Each seat is asked about *itself*. Written as a closure beside the two
     // call sites rather than inlined at each, so the collapsed bar and the pane
@@ -9549,7 +9807,17 @@ pub fn build_chrome_for_tabs(
                 // nothing in flight is geometry. A grid that reflowed on the
                 // transition would hand ConPTY a resize per frame.
                 let head_box = card_rect_of(placement.id, rect).unwrap_or(rect);
-                let head = pane_head_geometry(head_box, placement.kind, scale);
+                // The posture off the solved layout (§7.1.6l): the answer this
+                // frame is being drawn from is the one that says which seat is
+                // alone on the stage, so the head's slots and the rectangles
+                // around it come from one solve.
+                let head = pane_head_geometry(
+                    head_box,
+                    placement.kind,
+                    layout.seat_is_on_stage(placement.id),
+                    text_sizes.contains_key(&placement.id),
+                    scale,
+                );
                 let head_bottom = head.head[3];
                 let title_bottom = head.content_bottom;
                 // The floor a seat that draws no body of its own stands on.
@@ -9636,16 +9904,44 @@ pub fn build_chrome_for_tabs(
                 // furniture, it is the answer to "why can I only see one pane",
                 // and D38's rule that focus must not move a hue is about the
                 // *kind* mark beside it, which goes on obeying it.
-                let zoom_mark = seats
-                    .seat_is_zoomed(placement.id)
-                    .then(|| pane_zoom_mark_box(&head, scale))
-                    .flatten();
-                if let Some(box_) = zoom_mark {
+                if let Some(box_) = head.zoom_mark {
                     pane_sprites.push(ChromeSprite::new(
                         crate::icons::ActionIcon::ZoomPane.engaged(true),
                         box_,
                         palette.accent,
                     ));
+                }
+                // **The text size, while it is not 100 %** (ticket 37; owner ruling 2026-09-23,
+                // 2): the requested percentage in the head's own caption type — chrome at window
+                // scale, never the pane's text size — and a click puts the pane back. The pill
+                // under it appears under the pointer only, as the files head's root button's
+                // does, so a head at rest shows a number and not a control.
+                if let (Some(box_), Some(percent)) = (head.text_size, text_sizes.get(&placement.id))
+                {
+                    if pointer.hover == Some(ChromeTarget::PaneTextSize(placement.id)) {
+                        pane_sprites.push(ChromeSprite::new(
+                            ChromeMark::ControlPill {
+                                radius_px: (FILES_ROOT_BUTTON_RADIUS_LOGICAL_PX * scale)
+                                    .round()
+                                    .max(1.0) as u32,
+                            },
+                            box_,
+                            palette.pane_close_pill,
+                        ));
+                    }
+                    pane_labels.push(ChromeLabel {
+                        mono: false,
+                        text: crate::i18n::zoom_percent(f64::from(*percent) / 100.0),
+                        rect: box_,
+                        font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                        color: palette.pane_title,
+                        align_right: false,
+                        align_center: true,
+                        letter_spacing_em: seat_title_face(focused).letter_spacing_em,
+                        weight: seat_title_face(focused).weight,
+                        tabular_numerals: true,
+                        clip: None,
+                    });
                 }
                 // B15/B16 — a files head's name is a button, and the chevron
                 // beside it is the whole of what says so. The fill only appears
@@ -9789,9 +10085,10 @@ pub fn build_chrome_for_tabs(
                         rect: {
                             // The name starts after the zoom mark when there is
                             // one (§7.1.6l) and where it always did when there
-                            // is not, and *then* the files head's own button
-                            // takes its bite out of the right end.
-                            let title = pane_title_box(&head, zoom_mark, scale);
+                            // is not — the head's own geometry already says so —
+                            // and *then* the files head's own button takes its
+                            // bite out of the right end.
+                            let title = head.title;
                             match root_button {
                                 Some(button) => [
                                     title[0],
@@ -10120,7 +10417,7 @@ pub fn build_chrome_for_tabs(
                     )),
                     SeatKind::Files => Some(match files_view {
                         Some(_) => files_pane_geometry(head_box, scale, true),
-                        None => pane_foot_geometry(head_box, placement.kind, scale),
+                        None => pane_foot_geometry(head_box, scale),
                     }),
                     SeatKind::Terminal | SeatKind::Placeholder => None,
                 };
@@ -10432,6 +10729,40 @@ pub fn build_chrome_for_tabs(
                 if seats.seat_wears_ghost(placement.kind, placement.id, search_seat) =>
             {
                 let ghost_box = card_rect_of(placement.id, rect).unwrap_or(rect);
+                // **The text size, beside the corner's `⌄`** (ticket 37; owner ruling
+                // 2026-09-24) — the head's rule asked of the corner, and resting visible. It
+                // floats over the pane's own text, so it brings its own ground, as a lit door
+                // does.
+                if let (Some(box_), Some(percent)) = (
+                    pane_ghost_text_size_geometry(ghost_box, scale),
+                    text_sizes.get(&placement.id),
+                ) {
+                    pane_sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (PANE_GHOST_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                                as u32,
+                        },
+                        box_,
+                        palette.menu_surface,
+                    ));
+                    pane_labels.push(ChromeLabel {
+                        mono: false,
+                        text: crate::i18n::zoom_percent(f64::from(*percent) / 100.0),
+                        rect: box_,
+                        font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                        color: if pointer.hover == Some(ChromeTarget::PaneTextSize(placement.id)) {
+                            palette.accent
+                        } else {
+                            palette.pane_title
+                        },
+                        align_right: false,
+                        align_center: true,
+                        letter_spacing_em: 0.0,
+                        weight: ChromeLabelWeight::Regular,
+                        tabular_numerals: true,
+                        clip: None,
+                    });
+                }
                 if let Some(ghost) = pane_ghost_geometry(ghost_box, scale) {
                     // **One door, written once, drawn twice** (user proposal,
                     // Claude 认可 2026-08-25). The corner carries 🗀 and `⌄`
@@ -11007,20 +11338,31 @@ fn resizing_cards(
         ] {
             quads.push(ChromeQuad::ink(band, floor));
         }
+        // **The corners are the card's clip, so they are drawn over the card**
+        // (2026-09-23). Everything the pane drew is already in `sprites` — the
+        // pane loop ran first — and part of it went to the pass after the
+        // letters: the head run and the scrim it stands on. A corner left in
+        // the pass under the letters was painted over by that scrim and the
+        // card's top-right came out square. In the last pass and pushed after
+        // every mark the pane made, no mark a pane makes, today's or a later
+        // one, can stand on a corner the card has cut away.
         for (corner, at) in [
             (Corner::TopLeft, [card[0], card[1]]),
             (Corner::TopRight, [card[2] - radius, card[1]]),
             (Corner::BottomLeft, [card[0], card[3] - radius]),
             (Corner::BottomRight, [card[2] - radius, card[3] - radius]),
         ] {
-            sprites.push(ChromeSprite::new(
-                ChromeMark::CardCorner {
-                    radius_px: radius as u32,
-                    corner,
-                },
-                [at[0], at[1], at[0] + radius, at[1] + radius],
-                floor,
-            ));
+            sprites.push(
+                ChromeSprite::new(
+                    ChromeMark::CardCorner {
+                        radius_px: radius as u32,
+                        corner,
+                    },
+                    [at[0], at[1], at[0] + radius, at[1] + radius],
+                    floor,
+                )
+                .above_text(),
+            );
         }
     }
 }
@@ -11731,10 +12073,16 @@ fn window_tab_strip(
                         (mark_rect[1] + WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX * scale).round();
                     let dot_rect = [dot_left, dot_top, dot_left + dot, dot_top + dot];
                     if within_strip(viewport, dot_rect) {
-                        // Filled or hollow by the claim's own answer, in one
-                        // place for all four surfaces that draw this badge —
-                        // see `crate::marks::status_dot_sprite`.
-                        sprites.push(crate::marks::status_dot_sprite(dot_color, dot_rect, scale));
+                        // Filled or hollow by the claim's own answer, and
+                        // breathing or still by the same claim's other answer,
+                        // in one place for all four surfaces that draw this
+                        // badge — see `crate::marks::status_dot_sprite`.
+                        sprites.push(crate::marks::status_dot_sprite(
+                            dot_color,
+                            dot_rect,
+                            scale,
+                            content.mark.pulse,
+                        ));
                     }
                 }
                 let label_left = mark_left + mark + content_gap;
@@ -12461,6 +12809,19 @@ fn rail_chrome(
             rect[3].min(list_bottom),
         ]
     };
+    // **The room the rail keeps around its list** — see [`outset_reach`], which
+    // is the one place a decoration's wish and this answer meet. The rail's own
+    // rectangle for three sides, and for the fourth whichever piece of furniture
+    // stands there: the heading's foot above the list when there is a heading,
+    // the panel's own top when the rail is parked and there is not, and the `+`
+    // row's top edge below. A row's flight shadow may reach into that ground and
+    // no further.
+    let room = [
+        geometry.body[0],
+        geometry.label.map_or(geometry.body[1], |label| label[3]),
+        geometry.body[2],
+        geometry.new_tab[1],
+    ];
 
     // ── the rail's own ground ──
     //
@@ -12584,18 +12945,18 @@ fn rail_chrome(
                 (&mut *labels, &mut *sprites)
             };
             if flying {
-                let spread = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+                let body = clip_to_list(row.body);
+                let spread = outset_reach(
+                    body,
+                    (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0),
+                    room,
+                );
                 let mut shadow = ChromeSprite::new(
                     ChromeMark::ControlPillRing {
                         radius_px: row_radius as u32 + spread as u32,
-                        stroke_px: spread as u32,
+                        stroke_px: (spread as u32).max(1),
                     },
-                    clip_to_list([
-                        row.body[0] - spread,
-                        row.body[1] - spread,
-                        row.body[2] + spread,
-                        row.body[3] + spread,
-                    ]),
+                    outset(body, spread),
                     palette.rail_edge,
                 );
                 shadow.opacity = flight_shadow_opacity(content.flight);
@@ -12735,6 +13096,7 @@ fn rail_chrome(
                             dot_color,
                             clip_to_list(dot_rect),
                             scale,
+                            content.mark.pulse,
                         ));
                     }
                 }
@@ -13478,6 +13840,20 @@ fn focus_rail_chrome(
             rect[3].min(list_bottom),
         ]
     };
+    // **The room the panel keeps around its list** — see [`outset_reach`], which
+    // is the one place a decoration's wish and this answer meet. The panel's own
+    // rectangle for three sides and the `+` row's top edge for the fourth, which
+    // is the whole of the empty ground around the list:
+    // `RAIL_PADDING_TOP_LOGICAL_PX` above it, the `+`'s own margin and the rail's
+    // gap below it, and the panel's x padding either side. A halo or a flight
+    // shadow may reach into that ground and no further — the furniture standing
+    // in it is not ground.
+    let room = [
+        geometry.body[0],
+        geometry.body[1],
+        geometry.body[2],
+        geometry.new_tab[1],
+    ];
 
     // ── the cards ──
     //
@@ -13539,18 +13915,17 @@ fn focus_rail_chrome(
         // the alpha rides `ChromeSprite::opacity` so a shadow fading over 200ms
         // is one raster and not two hundred.
         if flying {
-            let spread = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+            let spread = outset_reach(
+                body,
+                (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0),
+                room,
+            );
             let mut shadow = ChromeSprite::new(
                 ChromeMark::ControlPillRing {
                     radius_px: card_radius + spread as u32,
-                    stroke_px: spread as u32,
+                    stroke_px: (spread as u32).max(1),
                 },
-                clip_to_list([
-                    card.body[0] - spread,
-                    card.body[1] - spread,
-                    card.body[2] + spread,
-                    card.body[3] + spread,
-                ]),
+                outset(body, spread),
                 palette.rail_edge,
             );
             shadow.opacity = flight_shadow_opacity(content.flight);
@@ -13666,22 +14041,28 @@ fn focus_rail_chrome(
         // breath, which is the discipline `marks::ChromeIcon::opacity` was
         // written for and the one
         // `a_waiting_cards_halo_is_one_raster_at_every_phase` pins here.
-        if let Some(phase) = content.mark.pulse.filter(|phase| *phase > 0.0) {
-            let halo = (FOCUS_CARD_WAIT_HALO_LOGICAL_PX * scale).round().max(1.0);
+        //
+        // The rectangle is [`outset`]'s and the reach is [`outset_reach`]'s: the
+        // card as it was *drawn*, grown by one amount on all four sides and
+        // clamped no second time, so the ring is concentric with the border
+        // under it at every scroll offset — including the first card's, whose
+        // own top is the list's top, and the last one's, whose bottom is the
+        // list's bottom and whose room below is only what the panel kept.
+        if let Some(pulse) = content.mark.pulse.filter(|pulse| pulse.halo > 0.0) {
+            let halo = outset_reach(
+                body,
+                (FOCUS_CARD_WAIT_HALO_LOGICAL_PX * scale).round().max(1.0),
+                room,
+            );
             let mut ring = ChromeSprite::new(
                 ChromeMark::ControlPillRing {
                     radius_px: card_radius + halo as u32,
-                    stroke_px: halo as u32,
+                    stroke_px: (halo as u32).max(1),
                 },
-                clip_to_list([
-                    card.body[0] - halo,
-                    card.body[1] - halo,
-                    card.body[2] + halo,
-                    card.body[3] + halo,
-                ]),
+                outset(body, halo),
                 palette.status_warn,
             );
-            ring.opacity = phase * FOCUS_CARD_WAIT_HALO_OPACITY;
+            ring.opacity = pulse.halo * FOCUS_CARD_WAIT_HALO_OPACITY;
             sprites.push(ring);
         }
 
@@ -13754,6 +14135,7 @@ fn focus_rail_chrome(
                         dot_color,
                         clip_to_list(dot_rect),
                         scale,
+                        content.mark.pulse,
                     ));
                 }
             }
@@ -15000,8 +15382,8 @@ pub const FILES_TREE_PADDING_BOTTOM_LOGICAL_PX: f32 = 8.0;
 pub const FILES_ROW_HEIGHT_LOGICAL_PX: f32 = 24.0;
 /// `.frow { padding: 0 6px }` — and the `6` of C31's `6 + depth * 14`.
 pub const FILES_ROW_PADDING_X_LOGICAL_PX: f32 = 6.0;
-/// `.frow { gap: 6px }`, between triangle, icon and name.
-pub const FILES_ROW_GAP_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC.md G1: the icon-to-label gap is 8, including triangle, icon and name.
+pub const FILES_ROW_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.frow { border-radius: 5px }` — the hover and selection pill.
 pub const FILES_ROW_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// The `14` of C31: one level of depth, in pixels.
@@ -15019,13 +15401,14 @@ pub const FILES_TREE_FONT_LOGICAL_PX: f32 = 13.0;
 /// where a list went — and they used to run at 120 and 140 for no reason either
 /// file could state. One rhythm for one gesture ([`bt_render::motion`]).
 pub const FILES_ROW_TRI_TURN_MS: u64 = bt_render::MOTION_BASE_MS;
-/// `.files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px }` (C32).
-pub const FILES_ROW_FOCUS_RING_LOGICAL_PX: f32 = 1.5;
+/// UI-SPEC.md F1: the files-row focus ring uses the shared 2-point width.
+pub const FILES_ROW_FOCUS_RING_LOGICAL_PX: f32 = 2.0;
 /// `.files-root { padding: 2px 5px; margin: 0 -3px }` — the two together are the
 /// 2px the button's fill reaches past its own text (B15).
 pub const FILES_ROOT_BUTTON_INSET_LOGICAL_PX: f32 = 2.0;
-/// The button's box height: an 11px line in 2px of padding, top and bottom.
-pub const FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX: f32 = 19.0;
+/// The tool box in a head (`UI-SPEC.md` H3; [`PREVIEW_TOOL_BOX_LOGICAL_PX`]),
+/// not the mock-up's own 11px line in 2px of padding, top and bottom.
+pub const FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX: f32 = PREVIEW_TOOL_BOX_LOGICAL_PX;
 /// `.files-root { border-radius: 5px }`.
 pub const FILES_ROOT_BUTTON_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.files-root { gap: 4px }`, between the name and its chevron.
@@ -15102,14 +15485,11 @@ pub fn files_root_name_width(
 // flyout's" — and it is the same role deliberately: the head names the leaf and
 // changes root, the foot says where you actually are and gives it to the OS.
 //
-// Its numbers are *not* the float foot's, and the mock-up writes both: this one
-// is 28px tall with 12px of padding on both sides, the float's is 30px with 10
-// and 18, because the float has a resize grip living in its bottom-right corner
-// and a docked column does not.
+// UI-SPEC.md H5 gives both feet the strip height. Side padding remains 12
+// here; the float uses 10 and 18 for the resize grip in its trailing corner.
 
-/// `.files-pane .files-foot { height: 28px }`, border included — the same
-/// `box-sizing: border-box` reading the pane head is built on.
-pub const FILES_FOOT_BAR_LOGICAL_PX: f32 = 28.0;
+/// UI-SPEC.md H5: a 30-point strip, border included, like the pane head and segment bar.
+pub const FILES_FOOT_BAR_LOGICAL_PX: f32 = 30.0;
 /// `border-top: 1px solid var(--border-soft)`, the head's hairline read from the
 /// other end of the pane. Written as the head's own constant rather than as a
 /// second `1.0`, because they are one declaration's worth of separation and the
@@ -15117,8 +15497,8 @@ pub const FILES_FOOT_BAR_LOGICAL_PX: f32 = 28.0;
 pub const FILES_FOOT_EDGE_LOGICAL_PX: f32 = SEAT_TITLE_EDGE_LOGICAL_PX;
 /// `.files-pane .files-foot { padding: 0 12px }`.
 pub const FILES_FOOT_PADDING_X_LOGICAL_PX: f32 = 12.0;
-/// `.files-pane .files-foot { gap: 6px }`, between the mark and the path.
-pub const FILES_FOOT_GAP_LOGICAL_PX: f32 = 6.0;
+/// UI-SPEC.md G1: the mark and path use the shared 8-point icon-to-label gap.
+pub const FILES_FOOT_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.files-pane .files-foot .foot-ico { width: 13px; height: 13px }`.
 pub const FILES_FOOT_MARK_LOGICAL_PX: f32 = 13.0;
 /// `.files-pane .files-foot { font-size: 11px }`.
@@ -15146,6 +15526,8 @@ pub fn files_root_box(head: &PaneHeadGeometry, scale: f32, name_width: f32) -> O
     let height = (FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX * scale)
         .round()
         .max(1.0);
+    // The button hugs the name, so it starts where the name does — after every
+    // slot the leading run is wearing, the zoom mark included.
     let left = head.title[0] - inset;
     // Clamped to the run's own wall rather than to the title's right edge: this
     // is a *button*, and half of it under the `⧉` would be half of it unpressable.
@@ -15196,9 +15578,7 @@ pub const PREVIEW_TOOL_BOX_LOGICAL_PX: f32 = 22.0;
 pub const PREVIEW_TOOL_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.pv-tool svg { width: 13px; height: 13px }`.
 pub const PREVIEW_TOOL_GLYPH_LOGICAL_PX: f32 = 13.0;
-/// `.pane:hover .pv-tool { opacity: .7 }` — the resting rung of the same reveal
-/// ladder `.pane-files` climbs (P21), and the reason it is a separate constant
-/// from [`PANE_HEAD_TRIGGER_REVEAL`] is only that the mock-up writes it twice.
+/// UI-SPEC.md C1: preview tools share the pane trigger's 0.6 reveal opacity.
 pub const PREVIEW_TOOL_REVEAL: f32 = PANE_HEAD_TRIGGER_REVEAL;
 /// `.pv-nav svg { width: 11px; height: 11px }` — the three navigation buttons
 /// carry a smaller glyph than the tools beside them, in the same 22px box.
@@ -15238,10 +15618,10 @@ pub const PREVIEW_NAV_SPENT: f32 = 0.22;
 /// name's box grown five each way, and the negative margin is what keeps it from
 /// pushing the row wider (P18, the `.files-root` trick).
 pub const PREVIEW_SWITCH_INSET_X_LOGICAL_PX: f32 = 5.0;
-/// The pill's height: a 12.5px name's line box plus its `padding: 2px` top and
-/// bottom. The same nineteen the files head's root button lands on, and not a
-/// coincidence — both are "a name plus its padding" inside the same 30px head.
-pub const PREVIEW_SWITCH_HEIGHT_LOGICAL_PX: f32 = 19.0;
+/// The tool box in a head (`UI-SPEC.md` H3; [`PREVIEW_TOOL_BOX_LOGICAL_PX`]),
+/// not the mock-up's own 12.5px name's line box plus its `padding: 2px` top
+/// and bottom.
+pub const PREVIEW_SWITCH_HEIGHT_LOGICAL_PX: f32 = PREVIEW_TOOL_BOX_LOGICAL_PX;
 /// `.pv-name.switch { border-radius: 5px }`.
 pub const PREVIEW_SWITCH_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// `.pv-name.switch { gap: 4px }`, between the name, the chevron and the badge.
@@ -15673,6 +16053,11 @@ pub fn preview_head_geometry(
     let gap = SEAT_TITLE_GAP_LOGICAL_PX * scale;
     let box_ = (PREVIEW_TOOL_BOX_LOGICAL_PX * scale).round().max(1.0);
     let middle = (head.title[1] + head.content_bottom) / 2.0;
+    // Where a name may start in this head, whatever the head is wearing: the
+    // kind's mark, and the zoom mark after it when this pane is the one on the
+    // stage (§7.1.6l). One number, [`PaneHeadGeometry::title`]'s — this head
+    // laid its name out from `mark[2] + gap` for one day in September and
+    // printed a zoomed page's first letter under the mark.
     let floor = head.title[0];
 
     // Right to left from the `×`. A control that would reach the name's own left
@@ -15738,18 +16123,31 @@ pub fn preview_head_geometry(
         .round()
         .max(1.0);
     let switch_gap = PREVIEW_SWITCH_GAP_LOGICAL_PX * scale;
-    let count_width = tools.switcher.then(|| {
-        (tools.count_width + PREVIEW_COUNT_PADDING_X_LOGICAL_PX * 2.0 * scale)
-            .round()
-            .max(1.0)
-    });
+    // The room the flexible half of the row has: what is left of the head after
+    // the floor a name starts at, the tools it stops before and the dot's own
+    // reserved slot.
+    let available = (content_right - floor - gap - dirty_slot).max(0.0);
+    let count_width = tools
+        .switcher
+        .then(|| {
+            (tools.count_width + PREVIEW_COUNT_PADDING_X_LOGICAL_PX * 2.0 * scale)
+                .round()
+                .max(1.0)
+        })
+        // **A switcher with no room for its own two boxes is not drawn at all**
+        // — `take_wide`'s rule above, which this row owed and did not keep: the
+        // `⌄` and the count are placed *after* the name, and on a head with no
+        // room for a name at all they were placed after a name of no width,
+        // which put them under the tools. Found by
+        // `nothing_in_a_pane_head_stands_on_anything_else_in_it` at 1.0 in a
+        // 700px window, where the badge and `Save` shared four columns.
+        .filter(|count| switch_gap + chevron_width + switch_gap + count <= available);
     let trimmings =
         count_width.map_or(0.0, |count| switch_gap + chevron_width + switch_gap + count);
     let wanted = tools.name_width + trimmings;
     // The flex answer for both cases at once: a short name leaves the slack to the
     // spacer, and a long one is cropped so that the dot still lands beside it
     // rather than under the save button.
-    let available = (content_right - floor - gap - dirty_slot).max(0.0);
     let bits_right = floor + wanted.min(available);
     let name = [
         floor,
@@ -15823,7 +16221,7 @@ pub fn preview_head_geometry(
 // One band, two fillings, and the reason they are one band rather than two
 // surfaces is the reason the head's own run is one function: the row's height,
 // its hairline and the pane geometry that has to give way for it are identical,
-// and a second copy of "the seat less its head less twenty-eight" is the
+// and a second copy of "the seat less its head less the strip" is the
 // off-by-a-hairline `preview_body_viewport`'s own note is about.
 //
 // What each filling carries is the ruling's, verbatim:
@@ -15844,7 +16242,7 @@ pub fn preview_head_geometry(
 // you approach it cannot be aimed at — the same sentence `PREVIEW_NAV_REST`
 // already makes about the three buttons that used to be upstairs.
 
-/// The rail's height, border included — **the foot's own twenty-eight** (P33).
+/// The rail's height, border included — **the foot's own thirty** (UI-SPEC.md H5).
 ///
 /// One number and not a new one: this row and the path strip along the bottom
 /// are the same piece of furniture answering the same question from the two ends
@@ -15877,11 +16275,10 @@ pub const PREVIEW_RAIL_NAV_GLYPH_LOGICAL_PX: f32 = PREVIEW_NAV_GLYPH_LOGICAL_PX;
 pub const PREVIEW_RAIL_FONT_LOGICAL_PX: f32 = 12.0;
 /// `.pv-addr { padding: 0 10px }` — the address's own inset inside its field.
 pub const PREVIEW_ADDRESS_PAD_X_LOGICAL_PX: f32 = 10.0;
-/// `.pv-addr { height: 20px }` — the field's box, which is the row's twenty-eight
-/// less four of breathing room on each side.
+/// The address field remains 20 points tall inside the strip (UI-SPEC.md R12).
 pub const PREVIEW_ADDRESS_HEIGHT_LOGICAL_PX: f32 = 20.0;
-/// `.pv-addr { border-radius: 5px }`.
-pub const PREVIEW_ADDRESS_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// UI-SPEC.md R12: the 20-point address chip shares the crumb radius, 4.
+pub const PREVIEW_ADDRESS_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// `.crumb { padding: 2px 5px }` — the horizontal half; the vertical half is
 /// spent by [`PREVIEW_CRUMB_HEIGHT_LOGICAL_PX`].
 pub const PREVIEW_CRUMB_PAD_X_LOGICAL_PX: f32 = 5.0;
@@ -16083,9 +16480,8 @@ pub struct PreviewRailGeometry {
 /// pointer that is not in it, and the paint has to draw its hairline.
 #[must_use]
 pub fn preview_rail_band(rect: [f32; 4], scale: f32) -> [f32; 4] {
-    let head = pane_head_geometry(rect, SeatKind::Preview, scale);
     let bar = (PREVIEW_RAIL_BAR_LOGICAL_PX * scale).round().max(1.0);
-    let top = head.head[3];
+    let top = pane_head_band(rect, scale).head[3];
     // The rail keeps its whole height and the body is what gives way, which is
     // the rule the foot and the notice strip already follow — and never past the
     // pane's own floor.
@@ -16460,7 +16856,7 @@ pub enum PreviewRailPart {
 /// the band that lands on no control is [`PreviewRailPart::Band`], because the
 /// row stands between a drag handle and a document and a press falling through
 /// it would either drag the pane by something that is not its head or land in a
-/// document twenty-eight pixels below where it was aimed.
+/// document thirty pixels below where it was aimed.
 #[must_use]
 pub fn preview_rail_part(
     geometry: &PreviewRailGeometry,
@@ -16661,13 +17057,92 @@ pub fn hit_files_root(
             device.right as f32,
             device.bottom as f32,
         ];
-        let head = pane_head_geometry(rect, placement.kind, scale);
+        // The button hugs the name, and the name starts after the zoom mark when
+        // the column is the one on the stage — so this asks for the head the
+        // painter drew, posture and all, rather than for a tiled one.
+        let head = pane_head_geometry(
+            rect,
+            placement.kind,
+            layout.seat_is_on_stage(placement.id),
+            false,
+            scale,
+        );
         let width = name_widths.get(&placement.id).copied().unwrap_or(0.0);
         if files_root_box(&head, scale, width).is_some_and(|button| contains(button, x, y)) {
             return Some(ChromeTarget::FilesRoot(placement.id));
         }
     }
     None
+}
+
+/// **One terminal pane's text-size mark, where the painter drew it** (ticket 37), or `None`
+/// when that pane is at 100 % or has no room for the mark.
+///
+/// Left of the pane's `⌄` whether the pane wears a head (its run) or not (its corner) —
+/// [`text_size_mark_beside`], asked through [`pane_head_geometry`] or
+/// [`pane_ghost_text_size_geometry`] from the same posture the painter used, so the mark you can
+/// press, the mark whose tip is registered and the mark you can see are one box. `capsule` is the
+/// pane the search capsule is standing on, whose corner it takes ([`Seats::seat_wears_ghost`]).
+#[must_use]
+pub fn pane_text_size_box(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    text_sizes: &BTreeMap<SeatId, u16>,
+    scale: f32,
+    capsule: Option<SeatId>,
+) -> Option<[f32; 4]> {
+    if !text_sizes.contains_key(&seat) {
+        return None;
+    }
+    let placement = layout.rects.iter().find(|placement| {
+        placement.id == seat
+            && placement.kind == SeatKind::Terminal
+            && matches!(placement.presentation, Presentation::Full)
+    })?;
+    let device = placement.device_rect?;
+    let rect = [
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ];
+    if seats.seat_wears_head(placement.kind) {
+        return pane_head_geometry(
+            rect,
+            placement.kind,
+            layout.seat_is_on_stage(placement.id),
+            true,
+            scale,
+        )
+        .text_size;
+    }
+    seats
+        .seat_wears_ghost(placement.kind, placement.id, capsule)
+        .then(|| pane_ghost_text_size_geometry(rect, scale))
+        .flatten()
+}
+
+/// **Which terminal pane's text-size mark the pointer is on** (ticket 37).
+///
+/// [`hit_files_root`]'s sentence for the other button that lives inside a head's drag handle,
+/// and asked before [`hit_chrome`] for the same reason: the smaller affordance answers first.
+#[must_use]
+pub fn hit_text_size(
+    seats: &Seats,
+    layout: &SeatLayout,
+    text_sizes: &BTreeMap<SeatId, u16>,
+    scale: f32,
+    capsule: Option<SeatId>,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    text_sizes.keys().copied().find_map(|seat| {
+        pane_text_size_box(seats, layout, seat, text_sizes, scale, capsule)
+            .filter(|mark| contains(*mark, x, y))
+            .map(|_| ChromeTarget::PaneTextSize(seat))
+    })
 }
 
 /// What one files column is showing this frame.
@@ -17075,9 +17550,8 @@ pub const FILES_SEG_PADDING_X_LOGICAL_PX: f32 = 12.0;
 pub const FILES_SEG_PADDING_TOP_LOGICAL_PX: f32 = 8.0;
 /// `.fseg { gap: 14px }`.
 pub const FILES_SEG_GAP_LOGICAL_PX: f32 = 14.0;
-/// `.fseg button { font-size: 11.5px }` — the pane head's own size, because the
-/// switch is chrome and not content.
-pub const FILES_SEG_FONT_LOGICAL_PX: f32 = 11.5;
+/// UI-SPEC.md T5: the Files/Git words use the 11-point caption size.
+pub const FILES_SEG_FONT_LOGICAL_PX: f32 = 11.0;
 /// `.fseg button { padding: 2px 1px 6px }` — the one horizontal pixel each side,
 /// which is what the underline is drawn across.
 pub const FILES_SEG_BUTTON_PADDING_X_LOGICAL_PX: f32 = 1.0;
@@ -17167,7 +17641,7 @@ pub fn files_seg_geometry(strip: [f32; 4], widths: [f32; 2], scale: f32) -> File
 /// the same reason every animated value reaches it as a number.
 #[must_use]
 pub fn files_pane_geometry(rect: [f32; 4], scale: f32, segmented: bool) -> FilesPaneGeometry {
-    let mut geometry = pane_foot_geometry(rect, SeatKind::Files, scale);
+    let mut geometry = pane_foot_geometry(rect, scale);
     if segmented {
         let bar = (FILES_SEG_BAR_LOGICAL_PX * scale).round();
         let bottom = (geometry.body[1] + bar).min(geometry.body[3]);
@@ -17182,11 +17656,14 @@ pub fn files_pane_geometry(rect: [f32; 4], scale: f32, segmented: bool) -> Files
 /// The mock-up writes the two feet as one rule — `.files-pane .files-foot,
 /// .preview-pane .files-foot` share every declaration (P33) — because they are
 /// one control: a full path along the bottom whose whole width reveals it in
-/// Explorer. So they are one derivation here too, and the only thing the kind
-/// decides is the head above it, whose left inset differs by a pixel.
+/// Explorer. So they are one derivation here too, and the kind decides nothing
+/// in it: what the two feet stand under is the head's *band*
+/// ([`pane_head_band`]), which is the same thirty pixels over either kind — the
+/// inset that differs by a pixel moves the mark inside that head and no boundary
+/// of it.
 #[must_use]
-pub fn pane_foot_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> FilesPaneGeometry {
-    let head = pane_head_geometry(rect, kind, scale);
+pub fn pane_foot_geometry(rect: [f32; 4], scale: f32) -> FilesPaneGeometry {
+    let head = pane_head_band(rect, scale);
     let bar = (FILES_FOOT_BAR_LOGICAL_PX * scale).round();
     let edge = (FILES_FOOT_EDGE_LOGICAL_PX * scale).max(1.0);
     let foot_top = (rect[3] - bar).max(head.head[3]);
@@ -17247,7 +17724,7 @@ pub fn preview_pane_geometry(
     scale: f32,
     rail: Option<PreviewRailKind>,
 ) -> FilesPaneGeometry {
-    let mut geometry = pane_foot_geometry(rect, SeatKind::Preview, scale);
+    let mut geometry = pane_foot_geometry(rect, scale);
     if rail.is_none() {
         return geometry;
     }
@@ -17549,7 +18026,7 @@ pub fn search_capsule_host(
     ];
     let head = seats
         .seat_wears_head(placement.kind)
-        .then(|| pane_head_geometry(rect, placement.kind, scale).content_bottom);
+        .then(|| pane_head_band(rect, scale).content_bottom);
     Some((rect, head))
 }
 
@@ -17588,7 +18065,14 @@ pub fn pane_chevron_box(
         device.bottom as f32,
     ];
     if seats.seat_wears_head(placement.kind) {
-        return pane_head_geometry(rect, placement.kind, scale).chevron;
+        return pane_head_geometry(
+            rect,
+            placement.kind,
+            layout.seat_is_on_stage(placement.id),
+            false,
+            scale,
+        )
+        .chevron;
     }
     seats
         .seat_wears_ghost(placement.kind, placement.id, capsule)
@@ -17630,7 +18114,14 @@ pub fn pane_files_box(
         device.bottom as f32,
     ];
     if seats.seat_wears_head(placement.kind) {
-        return pane_head_geometry(rect, placement.kind, scale).files;
+        return pane_head_geometry(
+            rect,
+            placement.kind,
+            layout.seat_is_on_stage(placement.id),
+            false,
+            scale,
+        )
+        .files;
     }
     seats
         .seat_wears_ghost(placement.kind, placement.id, capsule)
@@ -17671,7 +18162,13 @@ pub fn pane_control_boxes(
         device.bottom as f32,
     ];
     if seats.seat_wears_head(placement.kind) {
-        return pane_head_control_boxes(&pane_head_geometry(rect, placement.kind, scale));
+        return pane_head_control_boxes(&pane_head_geometry(
+            rect,
+            placement.kind,
+            layout.seat_is_on_stage(placement.id),
+            false,
+            scale,
+        ));
     }
     if !seats.seat_wears_ghost(placement.kind, placement.id, capsule) {
         return Vec::new();
@@ -17710,7 +18207,7 @@ pub fn files_body_rect(
 /// sentence about itself.
 /// **`seats` is here for the rail** (user ruling 2026-08-24): a preview wearing
 /// a breadcrumb row has no foot at all — the row took the path over — and its
-/// bottom twenty-eight pixels are document. Asking `pane_foot_geometry` here
+/// bottom thirty pixels are document. Asking `pane_foot_geometry` here
 /// while the paint asks [`preview_pane_geometry`] would be exactly the invisible
 /// button this module's standing law is about, one strip lower.
 #[must_use]
@@ -17737,7 +18234,7 @@ pub fn hit_files_foot(
             SeatKind::Preview => {
                 preview_pane_geometry(rect, scale, seats.seat_rail(placement.id)).foot
             }
-            _ => pane_foot_geometry(rect, placement.kind, scale).foot,
+            _ => pane_foot_geometry(rect, scale).foot,
         };
         if contains(foot, x, y) {
             return Some(target);
@@ -17994,7 +18491,13 @@ pub fn hit_preview_head(
         else {
             continue;
         };
-        let head = pane_head_geometry(rect, placement.kind, scale);
+        let head = pane_head_geometry(
+            rect,
+            placement.kind,
+            layout.seat_is_on_stage(placement.id),
+            false,
+            scale,
+        );
         let geometry = preview_head_geometry(&head, scale, tools);
         let hit = |box_: [f32; 4]| contains(box_, x, y);
         // **A tool nobody can see does not take a press** — [`hit_chrome`]'s own
@@ -18281,8 +18784,7 @@ pub(crate) fn push_files_tree(
                 if selected { ink.selected } else { ink.hover },
             ));
         }
-        // `.files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px
-        // var(--accent) }` — the ring is the whole of what tells you an arrow key
+        // UI-SPEC.md F1: the 2-point accent ring tells you an arrow key
         // belongs to this list rather than to the shell beside it, so it is drawn
         // on the selection and only while the list is showing that it has the
         // keyboard. **`:focus-visible`, not `:focus`** — see `focus_ring`.
@@ -19567,7 +20069,7 @@ pub struct FootStrip<'a> {
     /// says "this is where the content lives, and pressing hands it to the
     /// system", and for a page that is a URL and the default browser rather than
     /// a path and Explorer. Which end the text is cut from is decided one level
-    /// up, in [`FootDress::cut_left`], because that is a property of the string
+    /// up, in [`FootDress::cut`], because that is a property of the string
     /// and not of the strip.
     pub web: bool,
     /// **The site's own icon**, where the session has one (the favicon slice, `docs/DESIGN.md` §7.13).
@@ -19640,6 +20142,20 @@ pub struct FootWords {
     pub dissolved: f32,
 }
 
+/// **Which part of a foot's lead is expendable** — a property of the string,
+/// decided by the surface that knows what kind of string it handed over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeadCut {
+    /// From the back: a URL, whose scheme and host are its identity.
+    Back,
+    /// From the front: a path to a file, whose name is its identity (P35).
+    Front,
+    /// From the middle: a folder's address on the glance card (user ruling
+    /// 2026-09-20, 「地址过长从中间省略」), whose root and whose last folder are
+    /// the two halves a reader needs.
+    Middle,
+}
+
 /// What to dress one foot with, before it is measured.
 #[derive(Clone, Copy, Debug)]
 pub struct FootDress<'a> {
@@ -19647,16 +20163,15 @@ pub struct FootDress<'a> {
     /// strip's trailing padding.
     pub run: [f32; 4],
     /// What stands on the left when nothing is being confirmed — a path in a
-    /// pane or a float, the glance card's fixed sentence.
+    /// pane or a float, the glance card's folder address.
     pub lead: &'a str,
     /// The word the strip is flashing **instead of** `lead`: "Revealed in File
     /// Explorer", "Saved".
     pub flash: Option<&'a str>,
     /// The standing fact this surface owes, or empty.
     pub notice: &'a str,
-    /// Cut the lead from the front (a path — P35 keeps the file name) rather
-    /// than from the back (a sentence, which reads forwards).
-    pub cut_left: bool,
+    /// Which end of the lead gives way when it does not fit — see [`LeadCut`].
+    pub cut: LeadCut,
     pub font_px: f32,
     pub gap_px: f32,
     /// How far the lead has dissolved, `0.0` at rest — see
@@ -19682,7 +20197,7 @@ pub fn dress_foot(dress: FootDress<'_>, measure: &mut impl FnMut(&str, f32) -> f
         lead,
         flash,
         notice,
-        cut_left,
+        cut,
         font_px,
         gap_px,
         dissolved,
@@ -19697,10 +20212,10 @@ pub fn dress_foot(dress: FootDress<'_>, measure: &mut impl FnMut(&str, f32) -> f
     let (lead_box, notice_box) = foot_notice_split(run, notice_width, gap_px);
     let lead = flash.unwrap_or(lead);
     let room = lead_box[2] - lead_box[0];
-    let lead = if cut_left {
-        crate::settings::ellipsized_left(lead, room, font_px, measure)
-    } else {
-        crate::settings::ellipsized(lead, room, font_px, measure)
+    let lead = match cut {
+        LeadCut::Front => crate::settings::ellipsized_left(lead, room, font_px, measure),
+        LeadCut::Back => crate::settings::ellipsized(lead, room, font_px, measure),
+        LeadCut::Middle => crate::settings::ellipsized_middle(lead, room, font_px, measure),
     };
     // Measured **after** the cut, because what a bubble has to hug is the text
     // that is going to be drawn and not the one that was asked for.
@@ -20253,10 +20768,8 @@ const PREVIEW_CARD_GAP_LOGICAL_PX: f32 = 10.0;
 const PREVIEW_CARD_PADDING_LOGICAL_PX: f32 = 16.0;
 /// `.pv-unknown { font-size: 12.5px }`.
 const PREVIEW_CARD_FONT_LOGICAL_PX: f32 = 12.5;
-/// `.pv-blank .pvb-detail { font: 11.5px/1.5 Consolas, … }` — the fact line
-/// (§7.7 ④), a shade smaller than the sentence and set in the monospace face
-/// this window writes every other quotable fact in.
-const PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX: f32 = 11.5;
+/// UI-SPEC.md T5: the monospace fact line uses the 11-point caption size.
+const PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX: f32 = 11.0;
 /// `.pv-unknown button { font-size: 12px }`.
 pub const PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX: f32 = 12.0;
 /// `.pv-unknown button { padding: 5px 12px }`, and the 1px border around it.
@@ -20678,14 +21191,8 @@ pub fn preview_play_button_sprites(
     sprites
 }
 
-/// The speaker's glyph inside its box — twelve, between the `×`'s eight and the
-/// pin's thirteen.
-///
-/// A speaker is a silhouette rather than a rule: outlined at the `×`'s eight it
-/// is a cone two pens wide with an arc beside it, which resolves into a blot.
-/// It stops short of the pin's thirteen because the pin has to survive a
-/// forty-five degree turn and this never turns.
-const WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX: f32 = 12.0;
+/// UI-SPEC.md I2: the speaker uses the nearest icons::MarkSlot size, 13.
+const WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX: f32 = 13.0;
 
 /// **The speaker in one tab's row**, in either strip (user ruling 2026-08-27;
 /// `docs/DESIGN.md` §7.23 ⑩).
@@ -20893,8 +21400,8 @@ pub(crate) const CHROME_LINE_HEIGHT: f32 = 1.4;
 /// The drag ghost's box and the two things standing in it, in physical pixels
 /// (J114).
 ///
-/// `.drag-ghost` is a two-item flex row — `mark + name`, `gap: 7px`,
-/// `align-items: center` — inside `padding: 5px 12px` and a 1px border, so the
+/// The drag ghost is a two-item flex row — mark and name, eight pixels apart
+/// (UI-SPEC.md G3), inside 5px by 10px padding (S9) and a 1px border, so the
 /// box shrink-wraps whatever is in it and there is no wrapping, no ellipsis and
 /// no width bound. That last part is the mock-up's, not an omission here: the
 /// label is a short name by construction (`seat_short_caption`), and a ghost
@@ -21971,6 +22478,112 @@ mod tests {
     use bt_persist::{
         SESSION_SCHEMA_VERSION, SessionV1, TabV1, read_session, write_session_atomic,
     };
+
+    /// RED (26) — **Pane and files chrome follows the shared UI values.**
+    ///
+    /// The baseline uses separate gaps, heights, captions and control values.
+    /// UI-SPEC.md gives each role one rule; collect every mismatch so BASE
+    /// reports each changed value, including private cross-module numeric rules.
+    /// MUTATION: restore FILES_ROW_GAP_LOGICAL_PX to 6.0.
+    /// MUTATION: restore FILES_FOOT_GAP_LOGICAL_PX to 6.0.
+    /// MUTATION: restore FILES_FOOT_BAR_LOGICAL_PX to 28.0.
+    /// MUTATION: restore FILES_SEG_FONT_LOGICAL_PX to 11.5.
+    /// MUTATION: restore PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX to 11.5.
+    /// MUTATION: restore WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX to 12.0.
+    /// MUTATION: restore FILES_ROW_FOCUS_RING_LOGICAL_PX to 1.5.
+    /// MUTATION: restore PREVIEW_ADDRESS_RADIUS_LOGICAL_PX to 5.0.
+    /// MUTATION: restore PANE_HEAD_TRIGGER_REVEAL to 0.7.
+    #[test]
+    fn ui_spec_pane_head_rest_values_follow_the_rule() {
+        let rules = [
+            (
+                FILES_ROW_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G1: FILES_ROW_GAP_LOGICAL_PX",
+            ),
+            (
+                FILES_FOOT_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G1: FILES_FOOT_GAP_LOGICAL_PX",
+            ),
+            (
+                FILES_FOOT_BAR_LOGICAL_PX,
+                SEAT_TITLE_BAR_LOGICAL_PX,
+                "UI-SPEC.md H5: FILES_FOOT_BAR_LOGICAL_PX",
+            ),
+            (
+                FILES_SEG_FONT_LOGICAL_PX,
+                11.0,
+                "UI-SPEC.md T5 caption: FILES_SEG_FONT_LOGICAL_PX",
+            ),
+            (
+                PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX,
+                11.0,
+                "UI-SPEC.md T5 caption: PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX",
+            ),
+            (
+                WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX,
+                crate::icons::MarkSlot::CompactHead.house_box_logical_px(),
+                "UI-SPEC.md I2 icons::MarkSlot: WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX",
+            ),
+            (
+                FILES_ROW_FOCUS_RING_LOGICAL_PX,
+                2.0,
+                "UI-SPEC.md F1 settings::FOCUS_RING_WIDTH_LOGICAL_PX / first_run::FOCUS_RING_WIDTH_LOGICAL_PX: FILES_ROW_FOCUS_RING_LOGICAL_PX",
+            ),
+            (
+                PREVIEW_ADDRESS_RADIUS_LOGICAL_PX,
+                PREVIEW_CRUMB_RADIUS_LOGICAL_PX,
+                "UI-SPEC.md R12: PREVIEW_ADDRESS_RADIUS_LOGICAL_PX",
+            ),
+            (
+                PANE_HEAD_TRIGGER_REVEAL,
+                TAB_FILES_TRIGGER_REVEAL,
+                "UI-SPEC.md C1: PANE_HEAD_TRIGGER_REVEAL",
+            ),
+            (
+                FILES_FOOT_BAR_LOGICAL_PX,
+                FILES_SEG_BAR_LOGICAL_PX,
+                "UI-SPEC.md H5: FILES_SEG_BAR_LOGICAL_PX",
+            ),
+            (
+                PANE_HEAD_TRIGGER_REVEAL,
+                FILES_ROOT_CHEVRON_OPACITY,
+                "UI-SPEC.md C1: FILES_ROOT_CHEVRON_OPACITY",
+            ),
+        ];
+        let deviations: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, rule, _)| actual != rule)
+            .collect();
+        assert!(deviations.is_empty(), "{deviations:?}");
+    }
+
+    /// RED (ticket 19) — **the pane head's `⌄`, the preview switch and the
+    /// files root button stand in the tool box every other head control uses,
+    /// not a smaller one of their own.**
+    ///
+    /// `UI-SPEC.md` H3: these three used to sit in a 19-pt box where
+    /// [`PREVIEW_TOOL_BOX_LOGICAL_PX`] (22) is the tool box in a head.
+    ///
+    /// MUTATION: revert any of `PANE_HEAD_TRIGGER_BOX_LOGICAL_PX`,
+    /// `PREVIEW_SWITCH_HEIGHT_LOGICAL_PX` or
+    /// `FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX` to a literal and this goes red.
+    #[test]
+    fn ui_spec_pane_head_class_a_values_follow_the_rule() {
+        assert_eq!(
+            PANE_HEAD_TRIGGER_BOX_LOGICAL_PX, PREVIEW_TOOL_BOX_LOGICAL_PX,
+            "UI-SPEC.md H3"
+        );
+        assert_eq!(
+            PREVIEW_SWITCH_HEIGHT_LOGICAL_PX, PREVIEW_TOOL_BOX_LOGICAL_PX,
+            "UI-SPEC.md H3"
+        );
+        assert_eq!(
+            FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX, PREVIEW_TOOL_BOX_LOGICAL_PX,
+            "UI-SPEC.md H3"
+        );
+    }
 
     fn viewport_of(width: u32, height: u32, dpi_milli: u32) -> LogicalRect {
         logical_viewport(
@@ -23100,6 +23713,7 @@ mod tests {
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         );
         let WindowChrome { seats, .. } = chrome;
@@ -23189,6 +23803,7 @@ mod tests {
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             );
             chrome
@@ -23321,6 +23936,7 @@ mod tests {
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             );
             let drawn: Vec<&ChromeLabel> = chrome
@@ -23426,7 +24042,7 @@ mod tests {
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let seat = seats.preview().expect("the preview seat");
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
-        pane_head_geometry(rect, SeatKind::Preview, 1.0).head
+        pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0).head
     }
 
     /// PIN (P11-P31) — **the preview head's whole run, and the reveal ladder it
@@ -23768,7 +24384,7 @@ mod tests {
     #[test]
     fn the_preview_foot_hangs_its_phrase_in_one_bars_right_hand() {
         let palette = bt_render::chrome_palette();
-        let geometry = pane_foot_geometry([0.0, 0.0, 400.0, 300.0], SeatKind::Preview, 1.0);
+        let geometry = pane_foot_geometry([0.0, 0.0, 400.0, 300.0], 1.0);
         let notice = "Read-only · 64 KB";
         let notice_width = 96.0;
         let (mut quads, mut labels, mut sprites) = (Vec::new(), Vec::new(), Vec::new());
@@ -23837,7 +24453,7 @@ mod tests {
     /// its body is shortened by exactly the strip's height.
     ///
     /// The second half is the assertion that matters: the day a foot appears,
-    /// every reader of "the seat less its head" is wrong by 28 pixels at once.
+    /// every reader of "the seat less its head" is wrong by 30 pixels at once.
     ///
     /// **Exactly one strip, and this is the one** (user ruling, 2026-08-15).
     /// There were two for a while — a read-only bar of the same 28 pixels stood
@@ -23864,7 +24480,7 @@ mod tests {
             "the strip's height comes off the document, not out of it"
         );
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
-        let geometry = pane_foot_geometry(rect, SeatKind::Preview, 1.0);
+        let geometry = pane_foot_geometry(rect, 1.0);
         assert_eq!(
             geometry.foot[3] - geometry.foot[1],
             FILES_FOOT_BAR_LOGICAL_PX
@@ -23903,7 +24519,7 @@ mod tests {
     /// a page that already had a row of address. **So a rail of either kind
     /// retires the foot, and a pane with a rail keeps exactly the body it had.**
     ///
-    /// And the foot really is gone, not merely undrawn: the bottom twenty-eight
+    /// And the foot really is gone, not merely undrawn: the bottom thirty
     /// pixels of such a pane are document, and a hit test still answering
     /// `PreviewFoot` there is the invisible button this module's standing law is
     /// about.
@@ -23915,7 +24531,7 @@ mod tests {
     ///
     /// MUTATIONS:
     /// ① subtract the rail without retiring the foot — the document loses
-    ///    fifty-six pixels to chrome and the height equalities go red;
+    ///    sixty pixels to chrome and the height equalities go red;
     /// ② retire the foot for a breadcrumb only — the page's arm goes red again,
     ///    with the number the report was about;
     /// ③ leave `seats` out of `hit_files_foot` and answer from
@@ -23935,7 +24551,7 @@ mod tests {
             let railed = preview_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
             assert_eq!(
                 railed.height, footed.height,
-                "{kind:?}: the row takes the foot's twenty-eight and gives none \
+                "{kind:?}: the row takes the foot's thirty and gives none \
                  of the document away"
             );
             assert_eq!(
@@ -23947,7 +24563,7 @@ mod tests {
 
         // ③ The retired foot is retired for the pointer too.
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
-        let foot = pane_foot_geometry(rect, SeatKind::Preview, 1.0).foot;
+        let foot = pane_foot_geometry(rect, 1.0).foot;
         let (x, y) = (
             f64::from((foot[0] + foot[2]) / 2.0),
             f64::from((foot[1] + foot[3]) / 2.0),
@@ -24211,7 +24827,7 @@ mod tests {
             name_width: 60.0,
             count_width: 8.0,
         };
-        let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0);
         let geometry = preview_head_geometry(&head, 1.0, tools);
         let centre = |box_: [f32; 4]| {
             (
@@ -24309,7 +24925,7 @@ mod tests {
             name_width: 60.0,
             count_width: 8.0,
         };
-        let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0);
         let geometry = preview_head_geometry(&head, 1.0, tools);
         let centre = |box_: Option<[f32; 4]>| {
             let box_ = box_.expect("a head this wide seats every control");
@@ -24408,7 +25024,7 @@ mod tests {
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let seat = seats.preview().expect("the preview seat");
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
-        let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0);
         let page = PreviewHeadTools {
             web: true,
             name_width: 60.0,
@@ -26334,7 +26950,11 @@ mod tests {",
     ///
     /// Everything the resize machinery is handed — the grid, and the pixel size
     /// ConPTY is told — is a function of the terminal seat's rectangle and
-    /// nothing else (`grid_for_pixels(seat)`, `terminal_pty_physical(seat)`), so
+    /// whether the pane has a command rail, and nothing else
+    /// (`cmdrail::terminal_grid_for(metrics, seat, has_rail)`, and the seat's own
+    /// pixel size; since 2026-09-23, when a pane with a rail began reserving the
+    /// rail's resting band). Whether a pane has a rail is a fact about its shell
+    /// and not about the layout, so neither path below can change it, and
     /// the pin is that the rectangle a preview leaves the terminal is *exactly*
     /// the rectangle a lone leaf gets from a window of that size. If that holds
     /// at every DPI, the two paths cannot hand the coalescer different numbers,
@@ -29223,6 +29843,7 @@ mod tests {",
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             )
             .flattened();
@@ -29503,6 +30124,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened()
@@ -29615,6 +30237,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened();
@@ -29936,7 +30559,7 @@ mod tests {",
             device.right as f32,
             device.bottom as f32,
         ];
-        let head = pane_head_geometry(rect, SeatKind::Files, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Files, false, false, 1.0);
 
         let short = files_root_box(&head, 1.0, 30.0).expect("a named head has a button");
         assert!(
@@ -30016,7 +30639,7 @@ mod tests {",
             device.right as f32,
             device.bottom as f32,
         ];
-        let head = pane_head_geometry(rect, SeatKind::Files, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Files, false, false, 1.0);
         let close = head.close.expect("the head is wide enough for its ×");
 
         // A name wide enough to want the whole head is still clamped clear of
@@ -30299,14 +30922,14 @@ mod tests {",
         }
     }
 
-    /// PIN — the foot is the mock-up's, declaration for declaration.
+    /// PIN — the foot follows UI-SPEC.md and its shared geometry metrics.
     ///
-    /// Every number here is one the mock-up writes at 529-536, and they are
+    /// UI-SPEC.md H5/G1 sets the height and gap; the other foot metrics are
     /// asserted separately because any one of them can be right while the others
-    /// are not: a 28px strip with 10px padding is still wrong, and it is wrong in
+    /// are not: a 30px strip with 10px padding is still wrong, and it is wrong in
     /// a way only a ruler catches.
     #[test]
-    fn the_foot_is_twenty_eight_pixels_of_hairline_padding_mark_and_path() {
+    fn the_foot_is_thirty_pixels_of_hairline_padding_mark_and_path() {
         let rect = [0.0, 0.0, 260.0, 600.0];
         for scale in [1.0_f32, 1.5, 2.0] {
             let rect = [rect[0], rect[1], rect[2] * scale, rect[3] * scale];
@@ -30314,7 +30937,7 @@ mod tests {",
             assert_eq!(
                 geometry.foot[3] - geometry.foot[1],
                 (FILES_FOOT_BAR_LOGICAL_PX * scale).round(),
-                "{scale}: `height: 28px`, border included"
+                "{scale}: UI-SPEC.md H5: height 30, border included"
             );
             assert_eq!(
                 geometry.foot[3], rect[3],
@@ -30347,7 +30970,7 @@ mod tests {",
             assert_eq!(
                 geometry.foot_path[0] - geometry.foot_mark[2],
                 FILES_FOOT_GAP_LOGICAL_PX * scale,
-                "{scale}: `gap: 6px`"
+                "{scale}: UI-SPEC.md G1: gap 8"
             );
             // Centred in the flex row, which is the strip below its hairline.
             let above = geometry.foot_mark[1] - geometry.foot_edge[3];
@@ -30568,7 +31191,7 @@ mod tests {",
             "with no folder to open and so no mark offering to"
         );
         // And the sentence in the body is centred in the *body*, not in a pane
-        // whose bottom 28 pixels belong to the foot.
+        // whose bottom 30 pixels belong to the foot.
         let notice = chrome
             .labels
             .iter()
@@ -30631,7 +31254,7 @@ mod tests {",
         let mut trees = BTreeMap::new();
         trees.insert(column, content.clone());
         let rect = device_rect_of(&layout, column);
-        let head = pane_head_geometry(rect, SeatKind::Files, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Files, false, false, 1.0);
         let body = [rect[0], head.head[3], rect[2], rect[3]];
         let geometry = files_tree_geometry(body, content.rows.len(), 0.0, 1.0);
         for index in 0..content.rows.len() {
@@ -31045,7 +31668,7 @@ mod tests {",
             "and a row twenty down has been scrolled into view"
         );
         let rect = device_rect_of(&layout, column);
-        let head = pane_head_geometry(rect, SeatKind::Files, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Files, false, false, 1.0);
         // Nothing may *straddle* the seam between the head and the body: the
         // head's own mark sits wholly above it and every row's glyph wholly
         // below, and a glyph that spans it is a row bleeding into the caption.
@@ -31568,6 +32191,7 @@ mod tests {",
                 chevron_turn: 1.0,
                 pane_motion: PaneMotionFrame::default(),
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         );
         (chrome, ghost)
@@ -34072,6 +34696,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened()
@@ -34285,6 +34910,7 @@ mod tests {",
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             )
             .flattened();
@@ -34405,6 +35031,7 @@ mod tests {",
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             )
             .flattened()
@@ -34615,7 +35242,7 @@ mod tests {",
     /// place nothing but that picture may be.
     fn body_centre(layout: &SeatLayout, seat: SeatId, kind: SeatKind, scale: f32) -> [f32; 2] {
         let rect = device_rect_of(layout, seat);
-        let head = pane_head_geometry(rect, kind, scale);
+        let head = pane_head_geometry(rect, kind, false, false, scale);
         [(rect[0] + rect[2]) / 2.0, (head.head[3] + rect[3]) / 2.0]
     }
 
@@ -34718,6 +35345,7 @@ mod tests {",
                 search_seat,
                 head_raised,
                 resizing_cards: cards,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened()
@@ -34827,7 +35455,7 @@ mod tests {",
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = [100.0_f32, 40.0, 700.0, 500.0];
-            let head = pane_head_geometry(rect, SeatKind::Terminal, scale);
+            let head = pane_head_geometry(rect, SeatKind::Terminal, false, false, scale);
             let close = head.close.expect("a 600px head seats a 17px button");
             let box_px = (17.0 * scale).round();
 
@@ -34891,7 +35519,7 @@ mod tests {",
     fn a_head_at_rest_gives_its_name_the_whole_row() {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = [100.0_f32, 40.0, 700.0, 500.0];
-            let head = pane_head_geometry(rect, SeatKind::Terminal, scale);
+            let head = pane_head_geometry(rect, SeatKind::Terminal, false, false, scale);
             let chevron = head.chevron.expect("a 600px head seats the whole run");
             let files = head.files.expect("and the folder");
             let close = head.close.expect("and the `×`");
@@ -34920,8 +35548,9 @@ mod tests {",
             assert!(head.control_limit <= run[0], "and no control does");
 
             // The scrim: one character of the title's type of ramp at its left
-            // edge, and every pixel of the run and the padding beside it
-            // covered flat.
+            // edge, every pixel of the run covered flat, and nothing past the
+            // last letter (2026-09-23: the padding beyond is where a resizing
+            // card cuts its corner).
             let scrim = head.scrim.expect("a head with a run stands it on a ground");
             assert_eq!(
                 scrim[0],
@@ -34929,17 +35558,612 @@ mod tests {",
                 "the ramp is one character of the caption's own type at {scale}x",
             );
             assert!(scrim[2] >= run[2], "and the ground covers the whole run");
-            assert_eq!(scrim[2], rect[2], "out to the head's own edge");
+            assert_eq!(
+                scrim[2],
+                head.title[2].max(run[2]),
+                "out to where the letters and the run stop, and no further",
+            );
+            assert!(
+                scrim[2] < rect[2],
+                "the trailing padding is not the ground's at {scale}x",
+            );
             assert_eq!([scrim[1], scrim[3]], [rect[1], head.content_bottom]);
         }
 
         // A head too narrow for even the `×` has no run, so it has no ground
         // to stand one on and nothing to dissolve.
-        let narrow = pane_head_geometry([0.0, 0.0, 30.0, 200.0], SeatKind::Terminal, 1.0);
+        let narrow = pane_head_geometry(
+            [0.0, 0.0, 30.0, 200.0],
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
         assert_eq!(narrow.close, None);
         assert_eq!(narrow.run, None);
         assert_eq!(narrow.scrim, None);
         assert_eq!(narrow.control_limit, narrow.title[2]);
+    }
+
+    /// **Every slot in a pane head is cut by one derivation, so no two of them
+    /// stand on each other** — whatever kind the pane is, whichever posture it
+    /// is in and whichever way the tab list runs (owner's report 2026-09-20,
+    /// §7.1.6l).
+    ///
+    /// RED EVIDENCE (2026-09-20, real machine, 3840x2160 at 2.0): a zoomed web
+    /// pane's head read `[globe] Ṃock 13b — 两栏`, the accent zoom mark printed
+    /// over the `M`. Measured off the capture, the mark's ink ran 628–646 and
+    /// the `M`'s 626–644 — one column, two drawings. The cause was two owners of
+    /// "where the name starts": the geometry put `title[0]` one gap after the
+    /// kind mark and knew nothing of the zoom, a second function put the zoom
+    /// mark at that very `x`, and only a third — read by the terminal head alone
+    /// — pushed the name past it. Every other head read `title[0]` directly.
+    ///
+    /// MUTATION: in [`pane_head_geometry`], derive `title_left` from
+    /// `mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale` whatever `zoom_mark` says.
+    /// Run 2026-09-20: the zoomed `Preview` cell goes red naming the name box
+    /// (`the zoom mark [32,49,45,62] stands on the name [32,40,62,69]`), the
+    /// zoomed `Files` cell names the caption, **and so does `Terminal`** — what
+    /// this test measures is the *geometry*, and pre-fix every kind's
+    /// `head.title` was wrong there. What made the terminal head look right on
+    /// the glass was the third function the painter alone called, which is the
+    /// second owner this ticket deleted; that the terminal's drawn caption did
+    /// not move is pinned by value in
+    /// [`folding_the_zoom_mark_into_the_head_moved_no_other_pixel`], not here.
+    ///
+    /// **One documented exception**: a caption may run under the *trailing* run
+    /// and be dissolved into it (user ruling 2026-08-27 — see
+    /// [`PaneHeadGeometry::title`] and [`PaneHeadGeometry::scrim`]), so the pair
+    /// "a name against a control in the trailing run" is not asserted disjoint.
+    /// What is asserted about that pair is the other half of the same ruling:
+    /// the name may be covered by type-dissolving chrome and no *control* may,
+    /// which the leading-run floor below states from the front.
+    #[test]
+    fn nothing_in_a_pane_head_stands_on_anything_else_in_it() {
+        /// Which of the head's three runs a box belongs to — the distinction the
+        /// 2026-08-27 ruling turns on.
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        enum Slot {
+            /// The kind's mark and the zoom mark: what the pane *is*.
+            Leading,
+            /// Type — the caption, or a preview's name.
+            Name,
+            /// A control standing beside the name (the switcher's `⌄` and its
+            /// buffer count), which is neither leading nor hover-revealed.
+            Middle,
+            /// The hover-revealed run at the right end: `⌄ 🗀 ×` and a preview's
+            /// tools.
+            Trailing,
+        }
+
+        // A ground drawn *under* a name group — a preview's switcher pill wraps
+        // its name, its `⌄` and its count, and a files head's root button wraps
+        // its caption and its own chevron. They are supposed to overlap what
+        // they wrap, so they are held to the floor rule rather than to
+        // disjointness.
+        let on_screen = |box_: [f32; 4]| box_[2] > box_[0] && box_[3] > box_[1];
+        let overlap = |a: [f32; 4], b: [f32; 4]| {
+            a[0].max(b[0]) < a[2].min(b[2]) && a[1].max(b[1]) < a[3].min(b[3])
+        };
+
+        for dpi_milli in [1_000_u32, 1_250, 1_500, 2_000] {
+            let scale = dpi_milli as f32 / 1_000.0;
+            let metrics = seat_metrics(dpi_milli);
+            let ppm = scale_ppm(dpi_milli);
+            for (tabs, rail) in [
+                ("the horizontal strip", RailState::default()),
+                (
+                    "the vertical rail",
+                    RailState {
+                        layout: TabLayoutMode::Vertical,
+                        ..RailState::default()
+                    },
+                ),
+            ] {
+                let inset = rail_inset_device_px(rail, ppm);
+                for (room, width_px, height_px) in
+                    [("a wide window", 1920, 1080), ("a narrow window", 700, 600)]
+                {
+                    let viewport = logical_viewport(
+                        width_px,
+                        height_px,
+                        ppm,
+                        inset,
+                        folio_band_device_px(ppm),
+                    );
+                    // A tab of one pane cannot be zoomed at all (`toggle_zoom`
+                    // refuses it), so the postures are walked by staging each
+                    // seat of a three-pane tab in turn: `None` presents all
+                    // three unzoomed, and each `Some` presents exactly the one
+                    // head this loop is about, wearing the mark.
+                    let stages: Vec<Option<usize>> = vec![None, Some(0), Some(1), Some(2)];
+                    for stage in stages {
+                        let mut seats = term_beside_files();
+                        let preview = seats.add_preview(&metrics).expect("a preview lands");
+                        let ids: Vec<SeatId> = seats
+                            .tree()
+                            .seats_in_order()
+                            .into_iter()
+                            .map(|seat| seat.id)
+                            .collect();
+                        assert!(ids.contains(&preview));
+                        if let Some(which) = stage {
+                            assert!(
+                                seats.toggle_zoom(ids[which]),
+                                "a three-pane tab can put any of them on the stage"
+                            );
+                        }
+                        // `Sovereign`: the window is a rectangle the reader
+                        // chose, and the narrow one is the whole point — the
+                        // minima are advice there (user ruling 2026-08-08), so
+                        // the solver answers instead of refusing.
+                        let layout = seats
+                            .solve(viewport, &metrics, SizePolicy::Sovereign)
+                            .expect("a rectangle the user chose is never refused");
+                        for placement in &layout.rects {
+                            if !matches!(placement.presentation, Presentation::Full) {
+                                continue;
+                            }
+                            let Some(device) = placement.device_rect else {
+                                continue;
+                            };
+                            let rect = [
+                                device.left as f32,
+                                device.top as f32,
+                                device.right as f32,
+                                device.bottom as f32,
+                            ];
+                            for name_width in [30.0_f32, 4_000.0] {
+                                // `Placeholder` rides the same rectangle: no
+                                // verb in `bt-app` makes one yet, and the head
+                                // has to draw what the solver can say rather
+                                // than only what today's verbs can ask for —
+                                // `one_collapsed_seat`'s own reason.
+                                for kind in [placement.kind, SeatKind::Placeholder] {
+                                    let zoomed = layout.seat_is_on_stage(placement.id);
+                                    let head = pane_head_geometry(rect, kind, zoomed, false, scale);
+                                    let where_ = format!(
+                                        "{kind:?} at {scale}x in {tabs}, {room}, \
+                                         {} (name {name_width}px)",
+                                        if zoomed { "zoomed" } else { "tiled" },
+                                    );
+                                    let mut boxes: Vec<(String, [f32; 4], Slot)> = vec![(
+                                        "the kind mark".to_owned(),
+                                        head.mark,
+                                        Slot::Leading,
+                                    )];
+                                    if let Some(zoom) = head.zoom_mark {
+                                        boxes.push((
+                                            "the zoom mark".to_owned(),
+                                            zoom,
+                                            Slot::Leading,
+                                        ));
+                                    }
+                                    assert!(
+                                        zoomed || head.zoom_mark.is_none(),
+                                        "{where_}: a tiled head wears no zoom mark",
+                                    );
+                                    for (verb, box_) in pane_head_control_boxes(&head) {
+                                        boxes.push((format!("{verb:?}"), box_, Slot::Trailing));
+                                    }
+                                    // The ground a name group is drawn on, held
+                                    // to the leading-run floor below rather than
+                                    // to disjointness: it wraps what it fills.
+                                    let mut grounds: Vec<(String, [f32; 4])> = Vec::new();
+                                    match kind {
+                                        SeatKind::Preview => {
+                                            let tools = PreviewHeadTools {
+                                                save: true,
+                                                flip: true,
+                                                stop: false,
+                                                web: true,
+                                                switcher: true,
+                                                locked: false,
+                                                name_width,
+                                                count_width: 8.0 * scale,
+                                            };
+                                            let furniture =
+                                                preview_head_geometry(&head, scale, tools);
+                                            boxes.push((
+                                                "the name".to_owned(),
+                                                furniture.name,
+                                                Slot::Name,
+                                            ));
+                                            if let Some(chevron) = furniture.chevron {
+                                                boxes.push((
+                                                    "the switcher's chevron".to_owned(),
+                                                    chevron,
+                                                    Slot::Middle,
+                                                ));
+                                            }
+                                            if let Some(count) = furniture.count {
+                                                boxes.push((
+                                                    "the buffer count badge".to_owned(),
+                                                    count,
+                                                    Slot::Middle,
+                                                ));
+                                            }
+                                            if let Some(pill) = furniture.pill {
+                                                grounds
+                                                    .push(("the switcher's pill".to_owned(), pill));
+                                            }
+                                            for (tool, box_) in preview_head_tool_boxes(&furniture)
+                                            {
+                                                boxes.push((
+                                                    format!("{tool:?}"),
+                                                    box_,
+                                                    Slot::Trailing,
+                                                ));
+                                            }
+                                        }
+                                        SeatKind::Files => {
+                                            boxes.push((
+                                                "the caption".to_owned(),
+                                                head.title,
+                                                Slot::Name,
+                                            ));
+                                            if let Some(button) =
+                                                files_root_box(&head, scale, name_width)
+                                            {
+                                                grounds
+                                                    .push(("the root button".to_owned(), button));
+                                            }
+                                        }
+                                        SeatKind::Terminal | SeatKind::Placeholder => {
+                                            boxes.push((
+                                                "the caption".to_owned(),
+                                                head.title,
+                                                Slot::Name,
+                                            ));
+                                        }
+                                    }
+
+                                    // ① Nothing overlaps anything, with the one
+                                    // documented exception.
+                                    for (i, (a_name, a, a_slot)) in boxes.iter().enumerate() {
+                                        for (b_name, b, b_slot) in boxes.iter().skip(i + 1) {
+                                            if !on_screen(*a) || !on_screen(*b) {
+                                                continue;
+                                            }
+                                            let dissolves = matches!(
+                                                (a_slot, b_slot),
+                                                (Slot::Name, Slot::Trailing)
+                                                    | (Slot::Trailing, Slot::Name)
+                                            );
+                                            if dissolves {
+                                                continue;
+                                            }
+                                            assert!(
+                                                !overlap(*a, *b),
+                                                "{where_}: {a_name} {a:?} stands on \
+                                                 {b_name} {b:?}",
+                                            );
+                                        }
+                                    }
+
+                                    // ② A name — and the ground it is drawn on —
+                                    // starts after the whole leading run. This
+                                    // is the assertion the report failed.
+                                    let leading_right = boxes
+                                        .iter()
+                                        .filter(|(_, _, slot)| *slot == Slot::Leading)
+                                        .map(|(_, box_, _)| box_[2])
+                                        .fold(f32::MIN, f32::max);
+                                    for (name, box_) in boxes
+                                        .iter()
+                                        .filter(|(_, _, slot)| *slot == Slot::Name)
+                                        .map(|(name, box_, _)| (name, *box_))
+                                        .chain(grounds.iter().map(|(name, box_)| (name, *box_)))
+                                    {
+                                        if !on_screen(box_) {
+                                            continue;
+                                        }
+                                        assert!(
+                                            box_[0] >= leading_right,
+                                            "{where_}: {name} starts at {} — inside the \
+                                             leading run, which ends at {leading_right}",
+                                            box_[0],
+                                        );
+                                    }
+
+                                    // ③ And everything the head draws is inside
+                                    // the head.
+                                    for (name, box_) in boxes
+                                        .iter()
+                                        .map(|(name, box_, _)| (name, *box_))
+                                        .chain(grounds.iter().map(|(name, box_)| (name, *box_)))
+                                    {
+                                        if !on_screen(box_) {
+                                            continue;
+                                        }
+                                        assert!(
+                                            box_[0] >= head.head[0]
+                                                && box_[2] <= head.head[2]
+                                                && box_[1] >= head.head[1]
+                                                && box_[3] <= head.head[3],
+                                            "{where_}: {name} {box_:?} is outside the head \
+                                             {:?}",
+                                            head.head,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Folding the zoom mark into the head moved nothing else** — the pin the
+    /// 2026-09-20 fix owes, stated as the arithmetic the two deleted functions
+    /// used to do.
+    ///
+    /// A tiled head of any kind is the head it always was, slot for slot; a
+    /// zoomed one differs from it in exactly two fields, and both of those carry
+    /// the numbers `pane_zoom_mark_box` and `pane_title_box` produced — so the
+    /// terminal head, the one caller that read the second of them, draws its
+    /// caption at the very pixel it drew it at before.
+    #[test]
+    fn folding_the_zoom_mark_into_the_head_moved_no_other_pixel() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let gap = SEAT_TITLE_GAP_LOGICAL_PX * scale;
+            for kind in [
+                SeatKind::Terminal,
+                SeatKind::Files,
+                SeatKind::Preview,
+                SeatKind::Placeholder,
+            ] {
+                let rect = [100.0_f32, 40.0, 700.0, 500.0];
+                let tiled = pane_head_geometry(rect, kind, false, false, scale);
+                assert_eq!(tiled.zoom_mark, None, "{kind:?}: a tiled head is bare");
+                assert_eq!(
+                    tiled.title[0],
+                    tiled.mark[2] + gap,
+                    "{kind:?} at {scale}x: a tiled name starts one gap after the mark, \
+                     which is where it started before there was a slot between them",
+                );
+
+                let zoomed = pane_head_geometry(rect, kind, true, false, scale);
+                let mark = zoomed.zoom_mark.expect("a 600px head seats the mark");
+                // `pane_zoom_mark_box`'s own arithmetic, kept as the pin.
+                let size = (PANE_ZOOM_MARK_LOGICAL_PX * scale).round().max(1.0);
+                let left = (tiled.mark[2] + gap).round();
+                let top = ((tiled.mark[1] + tiled.mark[3] - size) / 2.0).round();
+                assert_eq!(
+                    mark,
+                    [left, top, left + size, top + size],
+                    "{kind:?} at {scale}x: the mark stands where it stood",
+                );
+                // And `pane_title_box`'s, which only the terminal head read.
+                assert_eq!(
+                    zoomed.title[0],
+                    (mark[2] + gap).round().min(tiled.title[2]),
+                    "{kind:?} at {scale}x: the caption starts where the terminal head \
+                     already started it",
+                );
+                // Every other field is the tiled head's, to the bit — the zoom
+                // moves the name and puts a mark in front of it, and touches
+                // nothing else in the row.
+                assert_eq!(
+                    PaneHeadGeometry {
+                        zoom_mark: None,
+                        title: tiled.title,
+                        ..zoomed
+                    },
+                    tiled,
+                    "{kind:?} at {scale}x: the zoom moved a slot it does not own",
+                );
+            }
+        }
+
+        // The 2026-09-20 diagnosis pinned a preview head at 2.0 beginning at
+        // 560. UI-SPEC.md G3 (ticket 26) makes each gap 8: the zoom mark now
+        // spans 626–652, and the name starts at 668, one scaled gap later.
+        let head = pane_head_geometry(
+            [560.0, 100.0, 1_900.0, 900.0],
+            SeatKind::Preview,
+            true,
+            false,
+            2.0,
+        );
+        assert_eq!(
+            head.zoom_mark.map(|mark| [mark[0], mark[2]]),
+            Some([626.0, 652.0])
+        );
+        assert_eq!(head.title[0], 668.0);
+    }
+
+    /// **And the press lands where the drawing says** — the same fix read
+    /// through the hit test (owner's report 2026-09-20).
+    ///
+    /// The zoom mark is a state and not a button (§7.1.6l), so what must be true
+    /// of it is that it takes no press *from* anything: the pointer over the
+    /// mark is over the head — the drag handle — and the name's own target
+    /// begins after it. A preview head answers on its name pill and a files head
+    /// on its root button, and before the fix both of those boxes started at the
+    /// mark's own left edge.
+    ///
+    /// MUTATION: the same one-line revert as the test above, and both
+    /// `assert_eq!(…, None)` here go red naming the target that ate the mark.
+    #[test]
+    fn a_zoomed_heads_name_does_not_take_the_zoom_marks_pixels() {
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1600, 900, 1_000);
+        let tools = PreviewHeadTools {
+            save: true,
+            flip: true,
+            stop: false,
+            web: true,
+            switcher: true,
+            locked: false,
+            name_width: 60.0,
+            count_width: 8.0,
+        };
+        let centre = |box_: [f32; 4]| {
+            (
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            )
+        };
+
+        // A zoomed preview head.
+        let mut seats = Seats::lone_terminal();
+        let preview = seats.add_preview(&metrics).expect("the preview seat lands");
+        assert!(seats.toggle_zoom(preview), "the preview takes the stage");
+        let layout = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("the stage fits");
+        let rect = full_pane_rect(&layout, preview).expect("a full pane");
+        let head = pane_head_geometry(rect, SeatKind::Preview, true, false, 1.0);
+        let mark = head.zoom_mark.expect("a zoomed head wears the mark");
+        let geometry = preview_head_geometry(&head, 1.0, tools);
+        let (x, y) = centre(mark);
+        assert_eq!(
+            hit_preview_head(
+                &layout,
+                1.0,
+                &[(preview, tools)],
+                HeadRun::hovered(preview),
+                x,
+                y
+            ),
+            None,
+            "the mark's pixels belong to the head, not to the name",
+        );
+        let (x, y) = centre(geometry.pill.expect("a switcher pill"));
+        assert_eq!(
+            hit_preview_head(
+                &layout,
+                1.0,
+                &[(preview, tools)],
+                HeadRun::hovered(preview),
+                x,
+                y
+            ),
+            Some(ChromeTarget::PreviewName(preview)),
+            "and the switcher still answers for its own box",
+        );
+        assert!(
+            geometry.name[0] >= mark[2],
+            "the name starts after the mark: {:?} against {mark:?}",
+            geometry.name,
+        );
+
+        // A zoomed files column, whose root button is the other box that used to
+        // start at the mark's left edge.
+        let mut seats = term_beside_files();
+        let column = seats
+            .tree()
+            .seats_in_order()
+            .into_iter()
+            .find(|seat| seat.kind == SeatKind::Files)
+            .expect("a files column")
+            .id;
+        assert!(seats.toggle_zoom(column), "the column takes the stage");
+        let layout = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("the stage fits");
+        let rect = full_pane_rect(&layout, column).expect("a full pane");
+        let head = pane_head_geometry(rect, SeatKind::Files, true, false, 1.0);
+        let mark = head.zoom_mark.expect("a zoomed head wears the mark");
+        let button = files_root_box(&head, 1.0, 30.0).expect("a named head has a button");
+        let mut widths = BTreeMap::new();
+        widths.insert(column, 30.0);
+        let (x, y) = centre(mark);
+        assert_eq!(
+            hit_files_root(&layout, &widths, 1.0, x, y),
+            None,
+            "the mark's pixels belong to the head, not to the root button",
+        );
+        let (x, y) = centre(button);
+        assert_eq!(
+            hit_files_root(&layout, &widths, 1.0, x, y),
+            Some(ChromeTarget::FilesRoot(column)),
+            "and the button still answers for its own box",
+        );
+        assert!(
+            button[0] >= mark[2],
+            "the button starts after the mark: {button:?} against {mark:?}",
+        );
+    }
+
+    /// **A head too narrow for its switcher still has a name — to read, to
+    /// press, and to hang the list from** (closure review, 2026-09-21).
+    ///
+    /// The head drops the switcher's `⌄` and its badge when the two do not fit,
+    /// which is the rule the tools beside them already keep. What may not go
+    /// with them is the *route*: the name is still drawn, it still answers the
+    /// pointer (ruling 2026-08-19 — "the name answers the pointer whether or not
+    /// it is a switcher"), and it is still a rectangle a menu can stand on.
+    ///
+    /// That last clause is what `Runtime::preview_menu_stand` falls back to.
+    /// Before it, the switcher's menu hung on the pill alone: in this very cell
+    /// the pill is `None`, so a press on the name opened a menu that drew
+    /// nothing while the window went on swallowing every keystroke — P137's
+    /// defect, third instance.
+    ///
+    /// The pane is narrowed the only way a pane can be narrowed this far: a
+    /// window the reader dragged past the program's own minimum, where the
+    /// minima are advice (ruling 2026-08-08).
+    #[test]
+    fn a_preview_head_too_narrow_for_its_switcher_still_answers_on_its_name() {
+        let metrics = seat_metrics(1_000);
+        let tools = PreviewHeadTools {
+            save: true,
+            flip: true,
+            stop: false,
+            web: true,
+            switcher: true,
+            locked: false,
+            name_width: 30.0,
+            count_width: 8.0,
+        };
+        // **The band, found rather than assumed**: the window is narrowed a few
+        // pixels at a time until the head has given the switcher up and still
+        // has a name in it. That there is such a band is half of what this pins
+        // — a head does not lose its name the moment it loses its `⌄`.
+        let narrowed = (480_u32..=900).step_by(4).find_map(|width| {
+            let mut seats = term_beside_files();
+            let preview = seats.add_preview(&metrics).expect("a preview lands");
+            let viewport = logical_viewport(
+                width,
+                600,
+                scale_ppm(1_000),
+                0,
+                folio_band_device_px(scale_ppm(1_000)),
+            );
+            let layout = seats
+                .solve(viewport, &metrics, SizePolicy::Sovereign)
+                .expect("a rectangle the user chose is never refused");
+            let rect = full_pane_rect(&layout, preview)?;
+            let head = pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0);
+            let geometry = preview_head_geometry(&head, 1.0, tools);
+            (geometry.pill.is_none() && geometry.name[2] > geometry.name[0])
+                .then_some((layout, preview, geometry))
+        });
+        let (layout, preview, geometry) = narrowed.expect(
+            "some window the reader can drag to leaves a preview head without a \
+             switcher and with a name",
+        );
+        assert_eq!(geometry.chevron, None, "the switcher is gone");
+        assert_eq!(geometry.count, None);
+        let (x, y) = (
+            f64::from((geometry.name[0] + geometry.name[2]) / 2.0),
+            f64::from((geometry.name[1] + geometry.name[3]) / 2.0),
+        );
+        assert_eq!(
+            hit_preview_head(
+                &layout,
+                1.0,
+                &[(preview, tools)],
+                HeadRun::hovered(preview),
+                x,
+                y
+            ),
+            Some(ChromeTarget::PreviewName(preview)),
+            "the press still lands on the name, which is what the menu hangs from",
+        );
     }
 
     /// **And the run is drawn over the letters, on its own ground, at its own
@@ -34961,7 +36185,13 @@ mod tests {",
         let viewport = viewport_of(1200, 800, 1_000);
         let layout = solved(&seats, viewport, &metrics);
         let terminal = layout.rects[0].id;
-        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let head = pane_head_geometry(
+            device_rect_of(&layout, terminal),
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
         let scrim = head.scrim.expect("the head has a run to cover with");
         let run = head.run.expect("and the run itself");
 
@@ -35046,7 +36276,13 @@ mod tests {",
         let viewport = viewport_of(1200, 800, 1_000);
         let layout = solved(&seats, viewport, &metrics);
         let terminal = layout.rects[0].id;
-        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let head = pane_head_geometry(
+            device_rect_of(&layout, terminal),
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
         let close = head.close.expect("the head is wide enough");
 
         let middle_y = f64::from((close[1] + close[3]) / 2.0);
@@ -35169,7 +36405,13 @@ mod tests {",
             .expect("the second seat is the files column")
             .id;
 
-        let column_head = pane_head_geometry(device_rect_of(&layout, column), SeatKind::Files, 1.0);
+        let column_head = pane_head_geometry(
+            device_rect_of(&layout, column),
+            SeatKind::Files,
+            false,
+            false,
+            1.0,
+        );
         let float = column_head.float.expect("a files head carries the pop-out");
         let close = column_head.close.expect("and the `×` beside it");
         let centre = |box_: [f32; 4]| {
@@ -35208,7 +36450,13 @@ mod tests {",
         );
 
         // ── the terminal head's own three, on the same terms ─────────────────
-        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let head = pane_head_geometry(
+            device_rect_of(&layout, terminal),
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
         for (target, box_) in [
             (
                 ChromeTarget::PaneMenu(terminal),
@@ -35300,7 +36548,13 @@ mod tests {",
             .find(|placement| placement.kind == SeatKind::Files)
             .expect("the second seat is the files column")
             .id;
-        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let head = pane_head_geometry(
+            device_rect_of(&layout, terminal),
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
         let centre = |box_: [f32; 4]| {
             (
                 f64::from((box_[0] + box_[2]) / 2.0),
@@ -35339,10 +36593,15 @@ mod tests {",
 
         // ── and the menu lights its own head and nobody else's ───────────────
         assert!(!head_run_revealed(standing, column));
-        let column_close =
-            pane_head_geometry(device_rect_of(&layout, column), SeatKind::Files, 1.0)
-                .close
-                .expect("a files head carries a `×`");
+        let column_close = pane_head_geometry(
+            device_rect_of(&layout, column),
+            SeatKind::Files,
+            false,
+            false,
+            1.0,
+        )
+        .close
+        .expect("a files head carries a `×`");
         let (x, y) = centre(column_close);
         assert_eq!(
             hit_chrome(&seats, &layout, 1.0, standing, x, y),
@@ -35435,7 +36694,13 @@ mod tests {",
         let viewport = viewport_of(1200, 800, 1_000);
         let layout = solved(&seats, viewport, &metrics);
         let terminal = layout.rects[0].id;
-        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let head = pane_head_geometry(
+            device_rect_of(&layout, terminal),
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
         let centre = |box_: [f32; 4]| {
             (
                 f64::from((box_[0] + box_[2]) / 2.0),
@@ -35559,18 +36824,22 @@ mod tests {",
         // MUTATION: drop the `HoverFloat::Flyout` arm and the first block here
         // names it; go back to reading `pane_menu` in `head_run` and the second
         // does.
-        const SOURCE: &str = include_str!("main.rs");
+        //
+        // **P3's deletion commit for this pin** (`docs/plans/bt-app-split-prep.md`
+        // §6.3, and §6.0 rule 3). The commit before this one read both
+        // derivations twice — once as a slice of `main.rs`, once as the body of
+        // an item of this crate — and asserted the two were the same bytes;
+        // this one removes the older of the two, because two implementations of
+        // one judgement do not vouch for each other (`docs/CONVENTIONS.md`
+        // §十 rule 4). The pattern is `main.rs::pty_drain_budget_tests`' and is
+        // not re-derived here. The owner is an argument now rather than
+        // whatever `impl` the first declaration of a name in the file belongs
+        // to.
+        let index = bt_source::Index::of_package("bt-app");
         let body = |name: &str| {
-            let head = format!("\n    fn {name}(");
-            let start = SOURCE
-                .find(&head)
-                .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
-                + head.len();
-            let end = start
-                + SOURCE[start..]
-                    .find("\n    }\n")
-                    .expect("a method is closed at the `impl`'s indentation");
-            &SOURCE[start..end]
+            index
+                .body_of(&bt_source::ItemQuery::method("Runtime", name))
+                .unwrap_or_else(|failure| panic!("{failure}"))
         };
         let derivation = body("head_that_raised_a_layer");
         for arm in [
@@ -35588,10 +36857,22 @@ mod tests {",
             body("head_run").contains("self.head_that_raised_a_layer()"),
             "the run's second arm is no longer the derivation"
         );
-        assert!(
-            SOURCE.contains("head_raised: self.head_that_raised_a_layer(),"),
-            "the paint is no longer handed the derivation"
-        );
+        // The product's own spelling of the paint, and only the product's:
+        // this file compiles into the product and carries the same text once
+        // more, as this reading's own needle. The file grain alone would be
+        // answered by that literal, which is the shape a migrated guard exists
+        // to stop being satisfied by.
+        let handed = !index
+            .search(&bt_source::Search::new(
+                bt_source::needle!(bt_source::Pattern::text(
+                    "head_raised: self.head_that_raised_a_layer(),"
+                )),
+                bt_source::View::Raw,
+            ))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(index)
+            .is_empty();
+        assert!(handed, "the paint is no longer handed the derivation");
     }
 
     /// PIN (user rulings, 2026-08-15 and 2026-08-16): **the `⌄` is a third box
@@ -35628,11 +36909,11 @@ mod tests {",
         // The mock-up's own numbers first, never read back off the geometry that
         // reads them: an expectation derived from the value under test is a
         // tautology.
-        assert_eq!(PANE_HEAD_TRIGGER_BOX_LOGICAL_PX, 19.0);
+        assert_eq!(PANE_HEAD_TRIGGER_BOX_LOGICAL_PX, 22.0);
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = device_rect_of(&layout, terminal);
-            let head = pane_head_geometry(rect, SeatKind::Terminal, scale);
+            let head = pane_head_geometry(rect, SeatKind::Terminal, false, false, scale);
             let split = head.chevron.expect("the head is wide enough for all three");
             let files = head.files.expect("and for the folder");
             let close = head.close.expect("and for the `×`");
@@ -35641,7 +36922,7 @@ mod tests {",
             assert_eq!(
                 split[2] - split[0],
                 box_px,
-                "the divider stands in the folder's own 19px box at {scale}x"
+                "the divider stands in the folder's own 22px box at {scale}x"
             );
             assert_eq!(split[3] - split[1], box_px, "square, at {scale}x");
             assert_eq!(
@@ -35687,7 +36968,13 @@ mod tests {",
         let viewport = viewport_of(1200, 800, 1_000);
         let layout = solved(&seats, viewport, &metrics);
         let terminal = layout.rects[0].id;
-        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let head = pane_head_geometry(
+            device_rect_of(&layout, terminal),
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
         let split = head.chevron.expect("the head is wide enough");
         let middle_y = f64::from((split[1] + split[3]) / 2.0);
 
@@ -35762,7 +37049,13 @@ mod tests {",
         let layout = solved(&seats, viewport, &metrics);
         let terminal = layout.rects[0].id;
         let palette = chrome_palette();
-        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let head = pane_head_geometry(
+            device_rect_of(&layout, terminal),
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
 
         let run = |pane_hover: Option<SeatId>, hover: Option<ChromeTarget>| {
             let (_, _, sprites) = head_chrome(
@@ -35862,8 +37155,22 @@ mod tests {",
     ///
     /// Red gate: write `11.0` into the constant instead of the sum and this
     /// still passes — until the scroll lane moves, which is the day the rail and
-    /// the ghost would part company; change the box to 19 (the head run's size)
-    /// and both dimension assertions go.
+    /// the ghost would part company; change the box away from 22 and the two
+    /// dimension assertions below go.
+    ///
+    /// **The ghost's 22 and the head run's own 22 (`UI-SPEC.md` H3, since
+    /// 2026-09-23) are no longer provably different numbers, and that is a
+    /// coincidence and not a merger.** The ghost's own `.pane-ghost { width:
+    /// 22px; height: 22px }` predates the head run entirely and is asserted a
+    /// few lines up as the literal `22.0` — never as
+    /// `PANE_HEAD_TRIGGER_BOX_LOGICAL_PX`'s value — so there is still no wire
+    /// from one constant to the other for a `assert_ne!` to have been guarding
+    /// against; it only ever caught the two literals disagreeing by accident.
+    /// Now that the head run's own box has grown to 22 too, the same equality
+    /// stops being distinguishable from "the ghost started wearing the head's
+    /// box", so the comparison is retired rather than fixed to read `assert_eq!`
+    /// — asserting equality would itself be the tautology this test's own
+    /// opening paragraph warns against.
     #[test]
     fn the_corner_ghost_stands_in_the_command_rails_own_lane() {
         assert_eq!(PANE_GHOST_TOP_LOGICAL_PX, 10.0);
@@ -35874,10 +37181,6 @@ mod tests {",
         );
         assert_eq!(PANE_GHOST_BOX_LOGICAL_PX, 22.0);
         assert_eq!(PANE_GHOST_RADIUS_LOGICAL_PX, 6.0);
-        assert_ne!(
-            PANE_GHOST_BOX_LOGICAL_PX, PANE_HEAD_TRIGGER_BOX_LOGICAL_PX,
-            "the ghost is not a member of the head's run and does not wear its box"
-        );
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = [100.0_f32, 40.0, 700.0, 500.0];
@@ -36009,6 +37312,8 @@ mod tests {",
         let head = pane_head_geometry(
             device_rect_of(&split_layout, terminal),
             SeatKind::Terminal,
+            false,
+            false,
             1.0,
         );
         let chevron = head.chevron.expect("a terminal head carries the chevron");
@@ -36313,6 +37618,8 @@ mod tests {",
         let head = pane_head_geometry(
             device_rect_of(&split_layout, terminal),
             SeatKind::Terminal,
+            false,
+            false,
             1.0,
         );
         assert!(head.files.is_some(), "a terminal head carries the folder");
@@ -36514,15 +37821,26 @@ mod tests {",
         let terminal = layout.rects[0].id;
         let column = layout.rects[1].id;
 
-        let term_head =
-            pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let term_head = pane_head_geometry(
+            device_rect_of(&layout, terminal),
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
         assert!(term_head.files.is_some(), "a terminal peeks its own folder");
         assert!(
             term_head.float.is_none(),
             "and has no column of its own to pop out"
         );
 
-        let files_head = pane_head_geometry(device_rect_of(&layout, column), SeatKind::Files, 1.0);
+        let files_head = pane_head_geometry(
+            device_rect_of(&layout, column),
+            SeatKind::Files,
+            false,
+            false,
+            1.0,
+        );
         assert!(
             files_head.float.is_some(),
             "a column offers to become a window"
@@ -36553,9 +37871,15 @@ mod tests {",
             "a column does not — there is no second tree to seat beside it"
         );
         assert!(
-            pane_head_geometry(device_rect_of(&layout, column), SeatKind::Preview, 1.0)
-                .chevron
-                .is_none(),
+            pane_head_geometry(
+                device_rect_of(&layout, column),
+                SeatKind::Preview,
+                false,
+                false,
+                1.0
+            )
+            .chevron
+            .is_none(),
             "and neither does a preview"
         );
     }
@@ -36770,7 +38094,13 @@ mod tests {",
         assert_eq!(lit, Some(palette.pane_close_glyph_on_pill));
         // The pill is the button's own box, so the lit area is exactly the area
         // that answers the press.
-        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let head = pane_head_geometry(
+            device_rect_of(&layout, terminal),
+            SeatKind::Terminal,
+            false,
+            false,
+            1.0,
+        );
         assert_eq!(pill, head.close);
     }
 
@@ -37047,6 +38377,138 @@ mod tests {",
                 SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
             );
         }
+    }
+
+    /// A files column on the left of a terminal — [`term_beside_files`] the
+    /// other way round, so the pane whose head keeps the pointer when a divider
+    /// is pressed from its left is the column.
+    fn files_beside_term() -> Seats {
+        Seats::from_persisted(&LayoutNodeV1::Split(SplitNodeV1 {
+            dir: SplitDirV1::Row,
+            ratio: 300_000,
+            children: [
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
+                    bt_persist::FilesLeafV1 {
+                        view: bt_persist::FilesViewV1::Files,
+                        root: "D:\\".to_owned(),
+                        open: Vec::new(),
+                        sel: None,
+                        width: 240,
+                        remotes_open: false,
+                    },
+                ))),
+                term_leaf(),
+            ],
+        }))
+    }
+
+    /// **A resizing card's corners are its clip: nothing its pane draws is
+    /// painted over one** (owner's screenshots 2026-09-23 13:35 and 13:36).
+    ///
+    /// RED EVIDENCE: with a divider held, the card left of it came out with a
+    /// square top-right corner — the files column in one capture, a terminal in
+    /// the other — while its other three corners and all four of the card on
+    /// the right were round. The pane under the pointer shows its head run
+    /// (`⌄ □ ×` on a terminal, `↗ ×` on a column), and that run stands on
+    /// [`PaneHeadGeometry::scrim`], drawn in the pass after the letters. The
+    /// four `CardCorner` marks were in the pass before them, so the scrim, which
+    /// ran out to the card's right edge, was painted over the top-right mask.
+    ///
+    /// What this measures is the renderer's paint order, read off the chrome:
+    /// every mark in the under pass in push order, then the letters, then every
+    /// mark in the over pass in push order (`bt_render`'s
+    /// `partition(|icon| !icon.above_text)`). Nothing drawn after a corner may
+    /// overlap the corner's box.
+    ///
+    /// The letters count too, as their laid-out box: a corner in the pass
+    /// before the letters has every caption box that reaches the card's edge
+    /// drawn after it.
+    ///
+    /// RED (run 2026-09-23): on base the terminal cell fails, naming the
+    /// `HeadRunScrim` at `[517,45,595,74]` over the left card's top-right
+    /// corner `[587,45,595,53]`. MUTATION: drop
+    /// `.above_text()` from the corners in [`resizing_cards`], keeping the
+    /// shortened scrim, and both cells still go red on the scrim
+    /// (`[517,45,589,74]` against the corner `[587,45,595,53]`): the name and
+    /// its ground stop at `padding-right: 6px`, which is inside the 8px corner
+    /// box, so the corners being last is what keeps them, and the scrim's
+    /// shorter reach is the scrim covering only what it is for.
+    #[test]
+    fn nothing_a_pane_draws_is_painted_over_its_resizing_cards_corners() {
+        // Every cell is walked before anything is asserted, so a red run names
+        // each head it fails for rather than the first.
+        let mut painted_over = Vec::new();
+        for (head, seats) in [
+            ("terminal", two_terminals()),
+            ("files", files_beside_term()),
+        ] {
+            let metrics = seat_metrics(1_000);
+            let viewport = viewport_of(1200, 800, 1_000);
+            let layout = solved(&seats, viewport, &metrics);
+            let split = seats.split_slots(&layout)[0].id;
+            let left = layout
+                .rects
+                .iter()
+                .map(|placement| placement.id)
+                .min_by(|a, b| {
+                    device_rect_of(&layout, *a)[0].total_cmp(&device_rect_of(&layout, *b)[0])
+                })
+                .expect("two panes");
+            // Pressed from the left side of the band: the pointer is still in
+            // the left pane, so its run is revealed — the owner's gesture.
+            let pointer = ChromePointer {
+                dragging: Some(split),
+                pane_hover: Some(left),
+                ..ChromePointer::default()
+            };
+            let (_, labels, sprites) = head_chrome(&seats, &layout, 1.0, pointer);
+            assert!(
+                sprites
+                    .iter()
+                    .any(|sprite| matches!(sprite.mark, ChromeMark::HeadRunScrim { .. })),
+                "the {head} head's run is revealed, standing on its ground",
+            );
+
+            // The order the renderer paints them in.
+            let under: Vec<&ChromeSprite> =
+                sprites.iter().filter(|sprite| !sprite.above_text).collect();
+            let over: Vec<&ChromeSprite> =
+                sprites.iter().filter(|sprite| sprite.above_text).collect();
+            let order: Vec<&ChromeSprite> = under.iter().chain(over.iter()).copied().collect();
+
+            let mut corners = 0;
+            for (at, corner) in order.iter().enumerate() {
+                if !matches!(corner.mark, ChromeMark::CardCorner { .. }) {
+                    continue;
+                }
+                corners += 1;
+                for later in &order[at + 1..] {
+                    if box_intersection(later.rect, corner.rect).is_some() {
+                        painted_over.push(format!(
+                            "{head}: {:?} at {:?} over {:?} at {:?}",
+                            later.mark, later.rect, corner.mark, corner.rect,
+                        ));
+                    }
+                }
+                // The letters go down between the two passes.
+                if !corner.above_text {
+                    for label in &labels {
+                        if box_intersection(label.rect, corner.rect).is_some() {
+                            painted_over.push(format!(
+                                "{head}: the letters {:?} at {:?} over {:?} at {:?}",
+                                label.text, label.rect, corner.mark, corner.rect,
+                            ));
+                        }
+                    }
+                }
+            }
+            assert_eq!(corners, 8, "{head}: four corners on each of the two cards");
+        }
+        assert!(
+            painted_over.is_empty(),
+            "drawn after a card corner and over it:\n{}",
+            painted_over.join("\n"),
+        );
     }
 
     /// PIN — B22. The cards keep drawing after the divider is let go, and draw
@@ -37743,7 +39205,12 @@ mod tests {",
     // U4: the drag ghost (J114, J115, J116)
     // ---------------------------------------------------------------------
 
-    /// `.drag-ghost` is a shrink-wrapped flex row, so every number in its box is
+    /// RED (23) — **the drag ghost spends the single-line tag's padding and gap.**
+    ///
+    /// MUTATION: restore DRAG_GHOST_GAP_LOGICAL_PX to 7.0.
+    /// MUTATION: restore DRAG_GHOST_PADDING_X_LOGICAL_PX to 12.0.
+    ///
+    /// UI-SPEC.md G3/S9: the ghost is a shrink-wrapped flex row; its box is
     /// the sum of a declaration and its contents — and the contents are a 15px
     /// mark and one line of 12.5px text.
     ///
@@ -37752,12 +39219,12 @@ mod tests {",
     /// take the row's height off the mark instead of off the taller of the two.
     /// Each of the four assertions below fails on exactly one of them.
     #[test]
-    fn the_ghost_shrink_wraps_its_mark_and_its_name_inside_the_mockups_padding() {
+    fn the_ghost_shrink_wraps_its_mark_and_its_name_inside_the_float_tags_padding() {
         let ghost = drag_ghost_layout([100.0, 200.0], 15.0, 60.0, 1.0, None);
-        // 12 + 1 either side, 15 of mark, 7 of gap, 60 of text.
+        // Single-line tag padding plus border on either side, then mark, gap and text.
         assert_eq!(
             ghost.frame[2] - ghost.frame[0],
-            2.0 * (12.0 + 1.0) + 15.0 + 7.0 + 60.0,
+            2.0 * (crate::tooltip::PEEK_PADDING_X_LOGICAL_PX + 1.0) + 15.0 + 8.0 + 60.0,
             "border + padding on both sides, then mark, gap and name"
         );
         // The row is `max(15, round(12.5 × 1.4)) = 18`, not the mark's 15.
@@ -37769,12 +39236,12 @@ mod tests {",
         );
         assert_eq!(
             ghost.mark[0],
-            ghost.frame[0] + 1.0 + 12.0,
+            ghost.frame[0] + 1.0 + crate::tooltip::PEEK_PADDING_X_LOGICAL_PX,
             "the mark stands at the leading padding, inside the border"
         );
         assert_eq!(
             ghost.label[0],
-            ghost.mark[2] + 7.0,
+            ghost.mark[2] + 8.0,
             "and the name one gap after it"
         );
         // Both are centred on the row rather than on boxes of their own — to
@@ -38159,6 +39626,8 @@ mod tests {",
                 }),
                 presentation,
             }],
+            // Hand-placed and tiled: a collapsed bar is not a stage.
+            stage: None,
         }
     }
 
@@ -38256,6 +39725,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened();
@@ -38330,6 +39800,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened();
@@ -39140,6 +40611,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .rail
@@ -39422,6 +40894,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened()
@@ -39688,6 +41161,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened();
@@ -39859,6 +41333,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
         .flattened();
@@ -41441,6 +42916,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         )
     }
@@ -42209,7 +43685,10 @@ mod tests {",
                 ink: palette.status_warn,
                 hollow: false,
             }),
-            pulse: Some(1.0),
+            pulse: Some(WaitPulse {
+                halo: 1.0,
+                dot: 1.0,
+            }),
             ..TabMarkState::default()
         };
         // Rang, and nothing more: the same warn dot, no place in the queue.
@@ -42314,7 +43793,10 @@ mod tests {",
                         ink: palette.status_warn,
                         hollow: false,
                     }),
-                    pulse: Some(phase),
+                    pulse: Some(WaitPulse {
+                        halo: phase,
+                        dot: phase,
+                    }),
                     ..TabMarkState::default()
                 },
                 false,
@@ -42331,11 +43813,25 @@ mod tests {",
                 .copied()
                 .collect();
             // The outer of the two is the halo: it reaches past the card on
-            // every side, which is what `box-shadow`'s spread means.
+            // **every** side, which is what `box-shadow`'s spread means.
+            //
+            // All four sides and not the x axis alone. This used to ask only
+            // `rect[0] < card.body[0]`, and the left edge is the one edge no
+            // scroller ever clamps — so a halo that had lost its whole top
+            // outset to `clip_to_list` answered this filter exactly as a correct
+            // one does, for as long as the column has existed (owner's
+            // screenshot, 2026-09-20). The rectangle itself is pinned by
+            // `an_outset_decoration_is_the_body_as_drawn_grown_and_kept_inside_its_room`;
+            // this is that test's guard standing in this one's doorway.
             let halo = rings
                 .iter()
                 .copied()
-                .find(|sprite| sprite.rect[0] < card.body[0])
+                .find(|sprite| {
+                    sprite.rect[0] < card.body[0]
+                        && sprite.rect[1] < card.body[1]
+                        && sprite.rect[2] > card.body[2]
+                        && sprite.rect[3] > card.body[3]
+                })
                 .expect("a waiting card wears a halo");
             let edge = rings
                 .iter()
@@ -42373,6 +43869,595 @@ mod tests {",
             (1.0, 1.0),
             "and it is drawn at full strength at both, so a reader who catches \
              the trough is not shown a fainter claim"
+        );
+    }
+
+    /// The focus column **painted at a stated scale, with the list scrolled** —
+    /// the two dials every other fixture here holds at 1.0 and 0.0.
+    ///
+    /// Straight at [`focus_rail_chrome`] rather than through
+    /// [`window_chrome_with_thumbnails_in`], because the pair of numbers this
+    /// exists to vary are the two that fixture pins: it builds a seat layout at
+    /// dpi 1000 and hands the column `rail_scroll: 0.0`. A test about a
+    /// rectangle that is only ever wrong at the edge of the list has to be able
+    /// to move that edge.
+    ///
+    /// Returns the geometry the paint was solved from beside the two groups, so
+    /// an assertion can name the card it is talking about.
+    fn focus_column_paint(
+        height: f32,
+        scale: f32,
+        scroll: f32,
+        tabs: &[TabContent],
+    ) -> (FocusRailGeometry, ChromeGroup, ChromeGroup) {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let geometry = focus_rail_geometry(height, scale, FOLIO_BAR, tabs.len(), 0, scroll, state)
+            .expect("focus mode puts a column on screen");
+        let mut rest = ChromeGroup::default();
+        let mut flight = ChromeGroup::default();
+        focus_rail_chrome(
+            height,
+            scale,
+            FOLIO_BAR,
+            None,
+            FocusRail {
+                tabs,
+                active_tab: 0,
+                grabbed: None,
+                preview: None,
+                thumbnails: &[],
+                scroll,
+                state,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                reveal: 1.0,
+                nudge_rows: 0.0,
+                ink: TabInk::default(),
+            },
+            chrome_palette(),
+            &mut rest,
+            &mut flight,
+        );
+        (geometry, rest, flight)
+    }
+
+    /// The rail's rows **painted at a stated scale, with the list scrolled** —
+    /// [`focus_column_paint`]'s twin on the other panel, and there for its
+    /// reason: `rail_paint_of_in` pins `rail_scroll` at 0, and a rectangle that
+    /// is only ever wrong at the edge of a list needs the edge to move.
+    fn rail_rows_paint(
+        height: f32,
+        scale: f32,
+        scroll: f32,
+        tabs: &[TabContent],
+    ) -> (RailGeometry, ChromeGroup, ChromeGroup) {
+        let state = expanded_rail();
+        let trailers: Vec<TabTrailer> = tabs.iter().map(|tab| tab.trailer).collect();
+        let geometry = rail_geometry(
+            height,
+            scale,
+            FOLIO_BAR,
+            &trailers,
+            pinned_run_len(&trailers),
+            scroll,
+            state,
+        )
+        .expect("an expanded rail is on screen");
+        let mut rest = ChromeGroup::default();
+        let mut flight = ChromeGroup::default();
+        rail_chrome(
+            height,
+            scale,
+            FOLIO_BAR,
+            None,
+            Rail {
+                tabs,
+                active_tab: 0,
+                grabbed: None,
+                preview: None,
+                scroll,
+                state,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                shown: &[],
+            },
+            chrome_palette(),
+            &mut rest,
+            &mut flight,
+        );
+        (geometry, rest, flight)
+    }
+
+    /// One outward decoration, measured against the body it belongs to: how far
+    /// it reaches on each of the four sides.
+    ///
+    /// Four numbers and not one on purpose — the assertion that they are all the
+    /// same number is the whole of "concentric", and a helper that returned one
+    /// would have assumed it.
+    fn reaches(body: [f32; 4], decoration: [f32; 4]) -> [f32; 4] {
+        [
+            body[0] - decoration[0],
+            body[1] - decoration[1],
+            decoration[2] - body[2],
+            decoration[3] - body[3],
+        ]
+    }
+
+    /// PIN (owner's screenshot 2026-09-20; closure review of `b16f7592`, same
+    /// day) — **an outset decoration is the body as drawn, grown by one amount
+    /// on all four sides, and it never leaves the room its layout kept for it.**
+    ///
+    /// Two rules and one test, because they are two halves of one obligation and
+    /// a test of either alone passes the other's counterexample. [`outset`] says
+    /// the growth is not clamped a second time — the defect that took the first
+    /// card's whole top outset, since `cards[0].body[1] == list_top` exactly, and
+    /// that no test here could see because the old one identified the halo by the
+    /// x axis, the one axis a vertical scroller never touches. [`outset_reach`]
+    /// says how far: the panel keeps 6 logical px above its list and **3** below
+    /// it, the growth is rounded to device pixels and that margin is not, and at
+    /// 125%, 150%, 225% and 250% the rounded growth is the larger of the two — so
+    /// taking the second clamp off put half a pixel of a bottom-clamped card's
+    /// halo on the `+` row's own top edge.
+    ///
+    /// Eight scales, every card the list is showing, and three scroll offsets —
+    /// home, mid-list and scrolled to the end — so that the top rim, the bottom
+    /// rim and the roomy middle are all walked at every scale. The two witnesses
+    /// at the foot are what make that a fact rather than a hope.
+    ///
+    /// Red gate: put `clip_to_list` back around the grown rectangle and the first
+    /// card goes red at every scale; drop [`outset_reach`]'s room and the last
+    /// card at 125/150/225/250% leaves the panel's ground and lands on the `+`.
+    #[test]
+    fn an_outset_decoration_is_the_body_as_drawn_grown_and_kept_inside_its_room() {
+        let palette = chrome_palette();
+        let waiting = TabMarkState {
+            dot: crate::StatusClaim::Awaiting.dot(&palette),
+            pulse: Some(WaitPulse {
+                halo: 0.9,
+                dot: 0.9,
+            }),
+            ..TabMarkState::default()
+        };
+        // Every side of every decoration, at every scale, has to be walked with
+        // a card clamped at each rim at least once, or a green run proves
+        // nothing about the rims (CONVENTIONS §三: 默认值会掩盖 bug).
+        let mut saw_top_rim = 0_usize;
+        let mut saw_bottom_rim = 0_usize;
+
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0] {
+            let border_px = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0) as u32;
+            let halo_wish = (FOCUS_CARD_WAIT_HALO_LOGICAL_PX * scale).round().max(1.0);
+            let spread_wish = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+            // Short enough that the list overflows and long enough to show
+            // three cards, so "first", "middle" and "last" are all on screen
+            // across the three offsets.
+            let height = 700.0 * scale;
+            let resting: Vec<TabContent> = (0..6)
+                .map(|index| card_tab(&format!("waiting {index}"), 1, waiting, false))
+                .collect();
+            let lifted: Vec<TabContent> = resting
+                .iter()
+                .map(|tab| TabContent {
+                    flight: 0.5,
+                    ..tab.clone()
+                })
+                .collect();
+            let settled = focus_column_paint(height, scale, 0.0, &resting).0;
+            assert!(
+                settled.max_scroll > 0.0,
+                "scale {scale}: the fixture has to overflow, or no card is ever \
+                 clamped against a rim"
+            );
+
+            for scroll in [0.0, settled.max_scroll / 2.0, settled.max_scroll] {
+                // Pass one: the halo, on resting cards. Pass two: the flight
+                // shadow, on the same cards in flight — the same rule, the
+                // second decoration that obeys it (CONVENTIONS §十 rule 6).
+                for flying in [false, true] {
+                    let tabs = if flying { &lifted } else { &resting };
+                    let (geometry, rest, flight) = focus_column_paint(height, scale, scroll, tabs);
+                    let group = if flying { &flight } else { &rest };
+                    let [list_top, list_bottom] = geometry.viewport;
+                    // The ground the panel keeps around its list, said here
+                    // from the geometry's own rectangles rather than from the
+                    // constants the paint uses — two ways to the same box.
+                    let room = [
+                        geometry.body[0],
+                        geometry.body[1],
+                        geometry.body[2],
+                        geometry.new_tab[1],
+                    ];
+                    let (wish, ink) = if flying {
+                        (spread_wish, palette.rail_edge)
+                    } else {
+                        (halo_wish, palette.status_warn)
+                    };
+
+                    for (index, card) in geometry.cards.iter().enumerate() {
+                        if !(card.body[3] > list_top && card.body[1] < list_bottom) {
+                            continue;
+                        }
+                        let case = format!(
+                            "scale {scale}, scroll {scroll}, flying {flying}, card {index}"
+                        );
+                        let body = [
+                            card.body[0],
+                            card.body[1].max(list_top),
+                            card.body[2],
+                            card.body[3].min(list_bottom),
+                        ];
+                        let middle = (body[1] + body[3]) / 2.0;
+                        // **Found by where it is, never by how big it is.**
+                        // The reach is what this test is about, so keying the
+                        // lookup on the stroke would be the assertion asking
+                        // the answer to identify itself.
+                        let rings = |ink: [u8; 3]| {
+                            group
+                                .sprites
+                                .iter()
+                                .copied()
+                                .filter(|sprite| {
+                                    matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+                                        && sprite.color == ink
+                                        && sprite.rect[1] <= middle
+                                        && sprite.rect[3] >= middle
+                                })
+                                .collect::<Vec<ChromeSprite>>()
+                        };
+                        let warn = rings(palette.status_warn);
+                        assert!(
+                            warn.iter().any(|sprite| {
+                                sprite.rect == body
+                                    && matches!(
+                                        sprite.mark,
+                                        ChromeMark::ControlPillRing { stroke_px, .. }
+                                            if stroke_px == border_px
+                                    )
+                            }),
+                            "{case}: the border is the card as the scroller cropped it"
+                        );
+                        let drawn = body;
+                        let outer: Vec<ChromeSprite> = if flying {
+                            rings(palette.rail_edge)
+                        } else {
+                            warn.iter()
+                                .copied()
+                                .filter(|sprite| sprite.rect != body)
+                                .collect()
+                        };
+                        assert_eq!(
+                            outer.len(),
+                            1,
+                            "{case}: exactly one decoration in {ink:?} outside this card"
+                        );
+                        let decoration = outer[0].rect;
+                        let reach = reaches(drawn, decoration);
+
+                        // One amount on all four sides: concentric or it is not
+                        // a ring.
+                        assert!(
+                            reach.iter().all(|side| (side - reach[0]).abs() < 1e-4),
+                            "{case}: the decoration reaches {reach:?} — one amount, or the \
+                             ring is not concentric with the card under it"
+                        );
+                        assert!(
+                            reach[0] >= 1.0 && reach[0] <= wish,
+                            "{case}: it reaches {} against a wish of {wish}",
+                            reach[0]
+                        );
+                        // And inside the room, which is the half the review
+                        // sent this branch back for.
+                        assert!(
+                            decoration[0] >= room[0]
+                                && decoration[1] >= room[1]
+                                && decoration[2] <= room[2]
+                                && decoration[3] <= room[3],
+                            "{case}: {decoration:?} left the panel's own ground {room:?}"
+                        );
+                        assert!(
+                            !overlaps(decoration, geometry.new_tab)
+                                && !overlaps(decoration, geometry.new_tab_menu),
+                            "{case}: {decoration:?} landed on the `+` row {:?}",
+                            geometry.new_tab
+                        );
+
+                        // A card the scroller has not touched is nowhere near a
+                        // rim and pays nothing for any of this.
+                        if card.body[1] > list_top && card.body[3] < list_bottom {
+                            assert_eq!(
+                                reach[0], wish,
+                                "{case}: a card clear of both rims wears its whole decoration"
+                            );
+                        }
+                        if card.body[1] <= list_top {
+                            saw_top_rim += 1;
+                        }
+                        if card.body[3] >= list_bottom {
+                            saw_bottom_rim += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_top_rim > 0 && saw_bottom_rim > 0,
+            "the witnesses: {saw_top_rim} cards clamped at the top rim and \
+             {saw_bottom_rim} at the bottom one"
+        );
+    }
+
+    /// PIN (closure review of `b16f7592`) — **the rail's rows obey the same
+    /// rule, on a list whose room above it is a heading rather than a margin.**
+    ///
+    /// The third instance of the class and the tightest room in the product: a
+    /// rail row's flight shadow sits under a list that starts one gap below the
+    /// `Tabs` heading, so what it may grow into above is that gap and not the
+    /// panel's 6px pad. [`outset_reach`] takes the room from the layout, so this
+    /// needed no second rule — which is the claim being pinned.
+    ///
+    /// Red gate: hand `outset_reach` the panel's box instead of the heading's
+    /// foot and a scrolled row's shadow prints over the heading.
+    #[test]
+    fn a_rail_rows_shadow_stays_between_the_heading_and_the_new_tab_row() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0] {
+            let spread_wish = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+            let height = 300.0 * scale;
+            let tabs: Vec<TabContent> = (0..20)
+                .map(|index| {
+                    let mut tab =
+                        card_tab(&format!("row {index}"), 1, TabMarkState::default(), false);
+                    tab.flight = 0.5;
+                    tab
+                })
+                .collect();
+            let settled = rail_rows_paint(height, scale, 0.0, &tabs).0;
+            assert!(
+                settled.max_scroll > 0.0,
+                "scale {scale}: the rail has to overflow"
+            );
+
+            for scroll in [0.0, settled.max_scroll / 2.0, settled.max_scroll] {
+                let (geometry, _, flight) = rail_rows_paint(height, scale, scroll, &tabs);
+                let [list_top, list_bottom] = geometry.viewport;
+                let heading = geometry.label.expect("an expanded rail wears its heading");
+                let room = [
+                    geometry.body[0],
+                    heading[3],
+                    geometry.body[2],
+                    geometry.new_tab[1],
+                ];
+                for (index, row) in geometry.tabs.iter().enumerate() {
+                    if !(row.body[3] > list_top && row.body[1] < list_bottom) {
+                        continue;
+                    }
+                    let case = format!("scale {scale}, scroll {scroll}, row {index}");
+                    let body = [
+                        row.body[0],
+                        row.body[1].max(list_top),
+                        row.body[2],
+                        row.body[3].min(list_bottom),
+                    ];
+                    // A row is 28px tall and a shadow reaches 3px past it, so
+                    // at the list's rim a row cropped to a sliver sits inside
+                    // its *neighbour's* shadow as well as its own. Its own is
+                    // the tightest box that still holds all of it.
+                    let mut shadows: Vec<ChromeSprite> = flight
+                        .sprites
+                        .iter()
+                        .copied()
+                        .filter(|sprite| {
+                            matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+                                && sprite.color == palette.rail_edge
+                                && sprite.rect[0] <= body[0]
+                                && sprite.rect[1] <= body[1]
+                                && sprite.rect[2] >= body[2]
+                                && sprite.rect[3] >= body[3]
+                        })
+                        .collect();
+                    shadows.sort_by(|a, b| {
+                        (a.rect[3] - a.rect[1])
+                            .partial_cmp(&(b.rect[3] - b.rect[1]))
+                            .expect("finite heights")
+                    });
+                    let decoration = shadows
+                        .first()
+                        .unwrap_or_else(|| panic!("{case}: this row wears a shadow"))
+                        .rect;
+                    let reach = reaches(body, decoration);
+                    assert!(
+                        reach.iter().all(|side| (side - reach[0]).abs() < 1e-4),
+                        "{case}: the shadow reaches {reach:?} — one amount on all four sides"
+                    );
+                    assert!(
+                        reach[0] >= 0.0 && reach[0] <= spread_wish,
+                        "{case}: it reaches {} against a wish of {spread_wish}",
+                        reach[0]
+                    );
+                    assert!(
+                        decoration[1] >= room[1] && decoration[3] <= room[3],
+                        "{case}: {decoration:?} left the ground between the heading and the \
+                         `+` row, {room:?}"
+                    );
+                    assert!(
+                        !overlaps(decoration, heading) && !overlaps(decoration, geometry.new_tab),
+                        "{case}: {decoration:?} printed over the rail's own furniture"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every sprite in `sprites` that is this claim's status dot, found by the
+    /// one size the badge is ever drawn at.
+    ///
+    /// By size and ink rather than by shape, because the shape is the claim's
+    /// own second axis — `Awaiting` is a filled pill and `Bell` is that pill's
+    /// ring — and a helper that looked for one of them would be a helper that
+    /// could only ever find half the ladder.
+    fn status_dots(
+        sprites: &[ChromeSprite],
+        dot: crate::StatusDot,
+        scale: f32,
+    ) -> Vec<ChromeSprite> {
+        let side = (WINDOW_TAB_STATUS_DOT_LOGICAL_PX * scale).round().max(1.0);
+        sprites
+            .iter()
+            .copied()
+            .filter(|sprite| {
+                sprite.color == dot.ink
+                    && (sprite.rect[2] - sprite.rect[0] - side).abs() < 0.01
+                    && (sprite.rect[3] - sprite.rect[1] - side).abs() < 0.01
+            })
+            .collect()
+    }
+
+    /// PIN (`docs/DESIGN.md` §7.1.5b, 2026-07-18; the clock ruled 2026-09-20) —
+    /// **a waiting tab's dot breathes, on all three of this module's surfaces,
+    /// and only a waiting tab's does.**
+    ///
+    /// *"等你回答（橙点脉动……卡片同时橙框）"* — two channels, and the dot is
+    /// named first. It never moved: the mock-up asks for
+    /// `animation: fcpulse .9s infinite` and never defines `@keyframes fcpulse`,
+    /// so the mock-up's dot did not pulse either and the transcription inherited
+    /// a name with no curve behind it. Nothing on any dot path read
+    /// [`TabMarkState::pulse`] at all until this test existed.
+    ///
+    /// The strip and the rail's rows are the half that matters most: they wear
+    /// no halo (the frame is the card's, by the same ruling), so the dot is the
+    /// *only* channel a waiting tab has there, and a still one leaves the
+    /// loudest state in the taxonomy with no motion anywhere on screen.
+    ///
+    /// Red gate: drop the sample at `marks::status_dot_sprite` and the two
+    /// phases come back equal on all three surfaces; let a claim that does not
+    /// pulse carry one and the bell's rows go red.
+    #[test]
+    fn a_waiting_dot_breathes_on_every_surface_and_only_a_waiting_one_does() {
+        let palette = chrome_palette();
+        let awaiting = crate::StatusClaim::Awaiting
+            .dot(&palette)
+            .expect("the attention queue's own dot");
+        let rang = crate::StatusClaim::Bell
+            .dot(&palette)
+            .expect("and the bell's, which shares its ink");
+        assert!(
+            crate::StatusClaim::Awaiting.pulses() && !crate::StatusClaim::Bell.pulses(),
+            "the ladder's own answer to which of the two warns breathes"
+        );
+
+        const SURFACES: [&str; 3] = ["horizontal strip", "vertical rail row", "card head"];
+        let dots = |dot: crate::StatusDot, pulse: Option<WaitPulse>| -> [ChromeSprite; 3] {
+            let mark = TabMarkState {
+                dot: Some(dot),
+                pulse,
+                ..TabMarkState::default()
+            };
+            let tabs = vec![card_tab("waiting", 1, mark, false)];
+            let strip = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false).2;
+            let rail = rail_paint_of(1.0, &tabs, 0, None, None, expanded_rail(), None).2;
+            let column = focus_column_paint(TALL_FIXTURE_HEIGHT, 1.0, 0.0, &tabs)
+                .1
+                .sprites;
+            let one = |sprites: &[ChromeSprite], surface: &str| {
+                let found = status_dots(sprites, dot, 1.0);
+                assert_eq!(found.len(), 1, "{surface}: exactly one status dot");
+                found[0]
+            };
+            [
+                one(&strip, SURFACES[0]),
+                one(&rail, SURFACES[1]),
+                one(&column, SURFACES[2]),
+            ]
+        };
+
+        let trough = dots(
+            awaiting,
+            Some(WaitPulse {
+                halo: 0.1,
+                dot: 0.4,
+            }),
+        );
+        let crest = dots(
+            awaiting,
+            Some(WaitPulse {
+                halo: 0.9,
+                dot: 0.95,
+            }),
+        );
+        let still = dots(rang, None);
+        for (index, surface) in SURFACES.iter().enumerate() {
+            assert!(
+                (trough[index].opacity - 0.4).abs() < 1e-6
+                    && (crest[index].opacity - 0.95).abs() < 1e-6,
+                "{surface}: the dot wears the sample it was handed — {:?} and {:?}",
+                trough[index],
+                crest[index]
+            );
+            assert_eq!(
+                (trough[index].mark, trough[index].color),
+                (crest[index].mark, crest[index].color),
+                "{surface}: two phases of one breath are one raster key — the alpha \
+                 rides beside the pixels and never in the ink"
+            );
+            assert_eq!(
+                still[index].opacity, 1.0,
+                "{surface}: a bell rang and does not breathe (§7.1.5b: bell 的橙点明确不脉动)"
+            );
+        }
+    }
+
+    /// PIN (§7.1.5b, restated in the attention block 2026-08-25) — **the halo
+    /// and the dot spend one sample in one frame.**
+    ///
+    /// *"所以点、脉动与卡片橙框读的就是这个答案"* — three faces of one
+    /// answer, and the owner's 2026-09-20 ruling put the dot on the halo's own
+    /// clock so that the two visibly breathe together. One frame is built here
+    /// and both channels are read out of it, so the day either grows a sampler
+    /// of its own the two stop agreeing and this goes red.
+    ///
+    /// Red gate: give the dot a phase of its own anywhere between
+    /// `TabState::mark_state` and the sprite and the second assertion fails.
+    #[test]
+    fn a_waiting_cards_halo_and_dot_spend_one_sample_in_one_frame() {
+        let palette = chrome_palette();
+        let dot = crate::StatusClaim::Awaiting
+            .dot(&palette)
+            .expect("the attention queue's own dot");
+        let pulse = WaitPulse {
+            halo: 0.7,
+            dot: 0.82,
+        };
+        let tabs = vec![card_tab(
+            "waiting",
+            1,
+            TabMarkState {
+                dot: Some(dot),
+                pulse: Some(pulse),
+                ..TabMarkState::default()
+            },
+            false,
+        )];
+        let (geometry, column, _) = focus_column_paint(TALL_FIXTURE_HEIGHT, 1.0, 0.0, &tabs);
+        let card = &geometry.cards[0];
+        let halo = column
+            .sprites
+            .iter()
+            .find(|sprite| {
+                sprite.color == palette.status_warn
+                    && sprite.rect[0] < card.body[0]
+                    && sprite.rect[1] < card.body[1]
+            })
+            .expect("a waiting card wears a halo");
+        assert!(
+            (halo.opacity - pulse.halo * FOCUS_CARD_WAIT_HALO_OPACITY).abs() < 1e-6,
+            "the halo is its own face of the sample, at the mock-up's 24%: {halo:?}"
+        );
+        let dots = status_dots(&column.sprites, dot, 1.0);
+        assert_eq!(dots.len(), 1, "and the card head wears one dot");
+        assert!(
+            (dots[0].opacity - pulse.dot).abs() < 1e-6,
+            "which is the other face of that same sample: {:?}",
+            dots[0]
         );
     }
 
@@ -43132,7 +45217,7 @@ mod tests {",
     /// `TabMarkState::pulse` is `Some(0.0)` under reduced motion and not `None`:
     /// the presence of the number is the claim, and the number is the motion.
     ///
-    /// Red gate: answer `None` from `wait_halo_opacity` under `Reduced` and the
+    /// Red gate: answer `None` from `wait_pulse` under `Reduced` and the
     /// second assertion goes red, because the edge would fall through to the
     /// resting one.
     #[test]
@@ -43149,8 +45234,11 @@ mod tests {",
                     ink: palette.status_warn,
                     hollow: false,
                 }),
-                // What `wait_halo_opacity` answers under `Motion::Reduced`.
-                pulse: Some(0.0),
+                // What `wait_pulse` answers under `Motion::Reduced`.
+                pulse: Some(WaitPulse {
+                    halo: 0.0,
+                    dot: 1.0,
+                }),
                 ..TabMarkState::default()
             },
             false,
@@ -43584,9 +45672,10 @@ mod tests {",
         .expect("focus mode puts a column on screen")
     }
 
-    /// One frame of the clock this runs on — [`STRIP_ANIMATION_FRAME`] in
-    /// `main.rs`, spelled here because a `seats` test cannot see it and because
-    /// what the gate is about is the *integration*, not the cadence.
+    /// One frame of the clock this runs on — the window's display frame at
+    /// 60 Hz (`crate::pace::DEFAULT_FRAME_INTERVAL`), spelled here because a
+    /// `seats` test cannot see it and because what the gate is about is the
+    /// *integration*, not the cadence.
     const AUTOSCROLL_FIXTURE_FRAME: Duration = Duration::from_millis(16);
 
     /// Where in the column's own box a hand is, for a stated point on its axis.
@@ -46665,6 +48754,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         );
 
@@ -48494,7 +50584,7 @@ mod tests {",
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let seat = seats.preview().expect("the preview seat");
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
-        let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
+        let head = pane_head_geometry(rect, SeatKind::Preview, false, false, 1.0);
         let geometry = preview_head_geometry(&head, 1.0, tools);
         (seat, layout, geometry)
     }
@@ -48617,7 +50707,13 @@ mod tests {",
         for width in [
             480.0_f32, 640.0, 900.0, 1_280.0, 1_600.0, 1_920.0, 2_560.0, 3_840.0,
         ] {
-            let head = pane_head_geometry([0.0, 0.0, width, 900.0], SeatKind::Preview, 1.0);
+            let head = pane_head_geometry(
+                [0.0, 0.0, width, 900.0],
+                SeatKind::Preview,
+                false,
+                false,
+                1.0,
+            );
             let geometry = preview_head_geometry(&head, 1.0, tools);
             let close = head.close.expect("a head this wide seats its `×`");
             assert!(
@@ -48868,6 +50964,7 @@ mod tests {",
                     search_seat: None,
                     head_raised: None,
                     resizing_cards: None,
+                    text_sizes: &NO_TEXT_SIZES,
                 },
             );
             let label = chrome
@@ -49011,6 +51108,7 @@ mod tests {",
                 search_seat: None,
                 head_raised: None,
                 resizing_cards: None,
+                text_sizes: &NO_TEXT_SIZES,
             },
         );
         let WindowChrome { seats, .. } = chrome;
@@ -49735,6 +51833,55 @@ mod drop_geometry_tests {
             aim(&stage, x, pane.top as f64 + h * 0.9),
             Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Bottom))
         );
+    }
+
+    /// **The band and the middle a *file* drag reads** (§7.1.1, user ruling
+    /// 2026-09-16), at two scales.
+    ///
+    /// The ruling that reopened a terminal's middle to a path gave the gesture
+    /// two meanings over one pane, and it rests on the two being told apart by
+    /// where the hand is: the outer band is the split zone a card or a tab drag
+    /// already aims at, and what is left in the middle is the paste. So the
+    /// geometry a file drag reads is not a second geometry — it is
+    /// [`aim_at_layout`], unchanged and asked the same way — and this says so at
+    /// both ends of the scale range, because a band that shifted with the
+    /// display would move the line between "open it beside" and "paste it" for
+    /// the same hand on two monitors.
+    ///
+    /// All four sides of one pane, and the middle, at 100% and 200%. The points
+    /// are fractions of the pane, which is what makes the answers scale-free;
+    /// the rim is *not* a fraction ([`DROP_RIM_LOGICAL_PX`]), so the band points
+    /// are taken at 30% rather than at 10% — far enough in that the 48-logical
+    /// px rim, twice as deep in device pixels at 200%, does not answer first.
+    ///
+    /// Red gate: make [`DROP_EDGE_FRACTION`] a device-pixel distance and the
+    /// 200% column stops agreeing with the 100% one.
+    #[test]
+    fn a_pane_offers_one_middle_and_four_bands_at_every_scale() {
+        for dpi_milli in [1_000u32, 2_000] {
+            let stage = stage(side_by_side(), dpi_milli);
+            let pane = rect_of(&stage.0, 1);
+            let (w, h) = (pane.width() as f64, pane.height() as f64);
+            let at =
+                |fx: f64, fy: f64| aim(&stage, pane.left as f64 + w * fx, pane.top as f64 + h * fy);
+            assert_eq!(
+                at(0.5, 0.5),
+                Some(LayoutAim::SeatCentre(SeatId(1))),
+                "the middle is the middle at {dpi_milli} milli-DPI"
+            );
+            for (fx, fy, edge) in [
+                (0.30, 0.50, DropEdge::Left),
+                (0.70, 0.50, DropEdge::Right),
+                (0.50, 0.30, DropEdge::Top),
+                (0.50, 0.70, DropEdge::Bottom),
+            ] {
+                assert_eq!(
+                    at(fx, fy),
+                    Some(LayoutAim::SeatEdge(SeatId(1), edge)),
+                    "the {edge:?} band at {dpi_milli} milli-DPI"
+                );
+            }
+        }
     }
 
     /// **K132 — no pane under the pointer means nothing to aim at.** That is a
@@ -51161,6 +53308,51 @@ mod drop_plan_tests {
                 .plan_content_drop(&metrics(), view(), SeatId(99))
                 .is_none(),
             "a centre aimed at a seat this tree does not have is not a plan"
+        );
+    }
+
+    /// PIN — **a content plan the window is too small for is a refusal, and it
+    /// says so the way every other refusal does** (review 2026-09-17 P1-b).
+    ///
+    /// `plan_content_drop` moves no rectangle, which is exactly why it is easy
+    /// to read it as "always fits". It does not: the plan carries the layout the
+    /// window would have, and a window dragged below what its own tree needs has
+    /// none — so `fits()` is false, the caption comes off the box
+    /// (`Runtime::dock_overlay_layers`) and a dashed outline is drawn instead.
+    ///
+    /// **This is a `bool` a text write now reads.** "Open in this preview"
+    /// behind a refused box costs a pane showing the wrong document; `Paste
+    /// path` behind one costs characters on a command line, so
+    /// `Runtime::paste_offer_kept` asks `fits()` before writing and this is what
+    /// says there is a real answer for it to ask.
+    ///
+    /// Mutation: make `plan_content_drop` skip the `plan_fits` filter and hand
+    /// back the solve unconditionally — the second assertion fails, the outline
+    /// goes solid, and the release starts writing behind it.
+    #[test]
+    fn a_content_drop_into_a_window_below_its_minimum_is_refused() {
+        let seats = window(row(1, term(1), preview(2)));
+        assert!(
+            seats
+                .plan_content_drop(&metrics(), view(), SeatId(2))
+                .is_some_and(|plan| plan.fits()),
+            "the control: at the fixture's own size this centre is offered"
+        );
+        // Two panes side by side cannot both clear `MIN_PANE_W` in a window this
+        // narrow, so the tree the plan describes has no lawful layout.
+        let squeezed = logical_viewport(
+            300,
+            H,
+            scale_ppm(DPI),
+            0,
+            folio_band_device_px(scale_ppm(DPI)),
+        );
+        let plan = seats
+            .plan_content_drop(&metrics(), squeezed, SeatId(2))
+            .expect("the seat is still in the tree — it is the window that shrank");
+        assert!(
+            !plan.fits(),
+            "a window below its own tree's minimum still offered a content drop"
         );
     }
 

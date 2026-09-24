@@ -318,19 +318,20 @@ pub const GRAPH_LINE_ALPHA: i32 = 550;
 pub const GRAPH_PADDING_X_LOGICAL_PX: f32 = 10.0;
 pub const GRAPH_PADDING_TOP_LOGICAL_PX: f32 = 6.0;
 pub const GRAPH_PADDING_BOTTOM_LOGICAL_PX: f32 = 14.0;
-/// `.ggrow { gap:9px; padding:0 8px; border-radius:7px }` (G82).
-pub const GRAPH_ROW_GAP_LOGICAL_PX: f32 = 9.0;
-pub const GRAPH_ROW_PADDING_X_LOGICAL_PX: f32 = 8.0;
-pub const GRAPH_ROW_RADIUS_LOGICAL_PX: f32 = 7.0;
-/// `.ggv-head { padding:10px 6px; font-size:14px }` (G80) — **at 13.5**, which
-/// is R20: the mock-up gave the same fact two sizes half a pixel apart in two
-/// places, and one of them had to go. The panel's masthead is the one this
-/// product had already built, so the graph's head is the one that moved.
+/// Icon-to-label gap, selectable-row inset and list-row radius (`UI-SPEC.md` G3/S8/R4).
+pub const GRAPH_ROW_GAP_LOGICAL_PX: f32 = 8.0;
+pub const GRAPH_ROW_PADDING_X_LOGICAL_PX: f32 = 10.0;
+pub const GRAPH_ROW_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// `.ggv-head { padding:10px 6px; font-size:14px }` (G80) — **at 13**
+/// (`crate::git_panel::GIT_HEAD_FONT_LOGICAL_PX`, `UI-SPEC.md` T3), which is
+/// R20: the mock-up gave the same fact two sizes apart in two places, and one
+/// of them had to go. The panel's masthead is the one this product had already
+/// built, so the graph's head is the one that moved.
 pub const GRAPH_HEAD_PADDING_X_LOGICAL_PX: f32 = 6.0;
 pub const GRAPH_HEAD_PADDING_Y_LOGICAL_PX: f32 = 10.0;
-/// `.gref` (G84): the ref pill worn on a commit row.
-pub const GRAPH_REF_FONT_LOGICAL_PX: f32 = 10.5;
-pub const GRAPH_REF_RADIUS_LOGICAL_PX: f32 = 9.0;
+/// The ref pill uses badge text and half-height corners (`UI-SPEC.md` T6/R13).
+pub const GRAPH_REF_FONT_LOGICAL_PX: f32 = 10.0;
+pub const GRAPH_REF_RADIUS_LOGICAL_PX: f32 = GRAPH_REF_HEIGHT_LOGICAL_PX / 2.0;
 pub const GRAPH_REF_PADDING_X_LOGICAL_PX: f32 = 8.0;
 pub const GRAPH_REF_HEIGHT_LOGICAL_PX: f32 = 16.0;
 pub const GRAPH_REF_EDGE_LOGICAL_PX: f32 = 1.0;
@@ -340,9 +341,9 @@ pub const GRAPH_REF_EDGE_ALPHA: i32 = 450;
 pub const GRAPH_REF_GROUND_ALPHA: i32 = 100;
 /// The tag glyph a tag pill carries in front of its name (T7, v2 ③).
 ///
-/// Nine against the pill's sixteen: a mark inside a pill has to leave the pill
+/// Ten (`UI-SPEC.md` I2) against the pill's sixteen: a mark has to leave the pill
 /// looking like a pill, and a glyph filling it edge to edge reads as a button.
-pub const GRAPH_REF_TAG_MARK_LOGICAL_PX: f32 = 9.0;
+pub const GRAPH_REF_TAG_MARK_LOGICAL_PX: f32 = 10.0;
 /// And the gap between it and the name.
 pub const GRAPH_REF_TAG_GAP_LOGICAL_PX: f32 = 4.0;
 /// `.ggf { padding-left:56px }` (G87) — the expanded commit's files, indented
@@ -353,11 +354,9 @@ pub const GRAPH_FILE_INDENT_LOGICAL_PX: f32 = 56.0;
 
 /// The body prose, at the row text's own size less a step.
 ///
-/// **12 and not the row's 12.5**: a commit's body is the same *kind* of writing
-/// the subject is and wears the same ink, so it cannot be a step quieter without
-/// reading as a caption; a hair smaller is what says "this is the continuation
-/// and that was the headline".
-pub const GRAPH_BODY_FONT_LOGICAL_PX: f32 = 12.0;
+/// Primary text (`UI-SPEC.md` T4) — the same size every menu item, tree row,
+/// tab, button and combo uses, including the row this block continues.
+pub const GRAPH_BODY_FONT_LOGICAL_PX: f32 = 13.0;
 /// The leading prose is set on — [`crate::tooltip`]'s own `font * 1.4`, which is
 /// the line box every multi-line piece of chrome text in this product is shaped
 /// into. A third number invented here would be a guess at what Segoe reports.
@@ -468,7 +467,7 @@ pub const GRAPH_HASH_MIN_BODY_LOGICAL_PX: f32 = 260.0;
 
 /// The column header row's height (V2).
 ///
-/// `.glabel`'s own line and its bottom padding, without its 14px of top padding:
+/// `.glabel`'s own line and its bottom padding, without its 10px of top padding (`UI-SPEC.md` S4):
 /// that padding is the gap *between two sections* of the Git page, and there is
 /// nothing above this row but the masthead's own.
 pub const GRAPH_HEADER_HEIGHT_LOGICAL_PX: f32 = crate::git_panel::GIT_LABEL_LINE_LOGICAL_PX
@@ -1480,8 +1479,8 @@ pub const GRAPH_TOOL_GAP_LOGICAL_PX: f32 = 6.0;
 pub const GRAPH_TOOL_PADDING_X_LOGICAL_PX: f32 = 8.0;
 /// The corner every one of them is cut with.
 pub const GRAPH_TOOL_RADIUS_LOGICAL_PX: f32 = 5.0;
-/// A tool's label.
-pub const GRAPH_TOOL_FONT_LOGICAL_PX: f32 = 11.5;
+/// A tool's caption label (`UI-SPEC.md` T5).
+pub const GRAPH_TOOL_FONT_LOGICAL_PX: f32 = 11.0;
 /// The chevron on the filter button, and the `×` in the search field.
 pub const GRAPH_TOOL_MARK_LOGICAL_PX: f32 = 10.0;
 /// The refresh mark inside its own square button.
@@ -5121,6 +5120,75 @@ fn alpha(thousandths: i32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (25) — **Git spacing, corners, captions, badges and marks follow their UI rules.**
+    ///
+    /// These constants own the drawing metrics; each old value deviates from UI-SPEC.md.
+    /// MUTATION: restore `GRAPH_TOOL_FONT_LOGICAL_PX` to `11.5`.
+    /// MUTATION: restore `GRAPH_REF_TAG_MARK_LOGICAL_PX` to `9.0`.
+    /// MUTATION: restore `GRAPH_REF_FONT_LOGICAL_PX` to `10.5`.
+    /// MUTATION: restore `GRAPH_ROW_GAP_LOGICAL_PX` to `9.0`.
+    /// MUTATION: restore `GRAPH_ROW_PADDING_X_LOGICAL_PX` to `8.0`.
+    /// MUTATION: restore `GRAPH_ROW_RADIUS_LOGICAL_PX` to `7.0`.
+    /// MUTATION: restore `GRAPH_REF_RADIUS_LOGICAL_PX` to `9.0`.
+    #[test]
+    fn ui_spec_git_rest_values_follow_the_rule() {
+        let values = [
+            (
+                GRAPH_TOOL_FONT_LOGICAL_PX,
+                11.0,
+                "UI-SPEC.md T5: GRAPH_TOOL_FONT_LOGICAL_PX",
+            ),
+            (
+                GRAPH_REF_TAG_MARK_LOGICAL_PX,
+                10.0,
+                "UI-SPEC.md I2, icons.rs::CAPTION_EDGE_TO_EDGE_BOX_LOGICAL_PX (private): GRAPH_REF_TAG_MARK_LOGICAL_PX",
+            ),
+            (
+                GRAPH_REF_FONT_LOGICAL_PX,
+                bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+                "UI-SPEC.md T6: GRAPH_REF_FONT_LOGICAL_PX",
+            ),
+            (
+                GRAPH_ROW_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G3: GRAPH_ROW_GAP_LOGICAL_PX",
+            ),
+            (
+                GRAPH_ROW_PADDING_X_LOGICAL_PX,
+                10.0,
+                "UI-SPEC.md S8, profiles.rs::ITEM_PADDING_X_LOGICAL_PX (private): GRAPH_ROW_PADDING_X_LOGICAL_PX",
+            ),
+            (
+                GRAPH_ROW_RADIUS_LOGICAL_PX,
+                6.0,
+                "UI-SPEC.md R4: GRAPH_ROW_RADIUS_LOGICAL_PX",
+            ),
+            (
+                GRAPH_REF_RADIUS_LOGICAL_PX,
+                GRAPH_REF_HEIGHT_LOGICAL_PX / 2.0,
+                "UI-SPEC.md R13: GRAPH_REF_RADIUS_LOGICAL_PX",
+            ),
+        ];
+        let deviations: Vec<_> = values
+            .into_iter()
+            .filter(|(actual, expected, _)| actual != expected)
+            .collect();
+        assert!(deviations.is_empty(), "{deviations:?}");
+    }
+
+    /// RED (ticket 18) — **the graph's commit body is primary text, not a
+    /// half-point-smaller caption.**
+    ///
+    /// `UI-SPEC.md` T4: the graph body used to sit at 12 rather than the 13
+    /// every menu item, tree row, tab, button and combo uses.
+    ///
+    /// MUTATION: revert `GRAPH_BODY_FONT_LOGICAL_PX` to a literal and this
+    /// goes red.
+    #[test]
+    fn ui_spec_git_class_a_values_follow_the_rule() {
+        assert_eq!(GRAPH_BODY_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T4");
+    }
 
     /// A commit with the parents it names and nothing else that matters here.
     fn commit(hash: &str, parents: &[&str]) -> GitCommit {

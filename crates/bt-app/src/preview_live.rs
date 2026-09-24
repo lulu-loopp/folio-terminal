@@ -3,6 +3,15 @@
 //! T4, research `docs/plans/markdown-edit/research-2026-09-10.md` §9.1;
 //! `docs/DESIGN.md` §7.1.3q).
 //!
+//! **Widened by the owner's ruling of 2026-09-23** (「像 Obsidian 那样」): the
+//! blocks drawn as source are the caret's block *and every block its selection
+//! touches*, as one unbroken run ([`SourceSpan`], [`source_span`]). A caret
+//! with nothing selected is exactly the one block below, so a click and an
+//! arrow key draw what they always drew. The one exemption is a table: a
+//! selection sweeping across one leaves it rendered, and only the caret
+//! standing inside it turns it into its pipes — until the 0.5 in-cell table
+//! editor replaces that flip.
+//!
 //! Leaving the block renders it again. There is no third state and no block is
 //! exempt — a table under the caret shows its pipes, a fence shows its markers
 //! and keeps its highlighting, display mathematics shows its delimiters and its
@@ -62,7 +71,10 @@
 
 use std::ops::Range;
 
+use crate::preview::MarkdownBlock;
 use crate::preview_edit;
+use crate::preview_provenance::{self, BlockOrigins};
+use crate::preview_select;
 
 /// **Where the caret is standing, in the document's own terms.**
 ///
@@ -139,6 +151,124 @@ pub fn caret_seat(content: &str, ranges: &[Range<usize>], caret: usize) -> Caret
     }
 }
 
+/// **Which blocks are drawn as source** (owner's ruling 2026-09-23; `docs/DESIGN.md`
+/// §7.1.3q and its entry of that date).
+///
+/// One unbroken run of blocks — the caret's own block and every block its
+/// selection touches — with one exemption carved out of it: a **table** in the
+/// run stays rendered unless the caret itself stands inside it (owner's ruling
+/// 2026-09-23: a table swept by a selection stays rendered until the 0.5
+/// in-cell table editor). Every other block in the run wears the source face
+/// §7.1.3w gives its kind, and every block outside it is rendered.
+///
+/// **It is the document's identity** ([`crate::PreviewDocumentKey`]'s `source`)
+/// and not a paint-time fact, for §7.1.3q's reason: which blocks are source
+/// decides how tall they are. So it carries what the key needs to be exact:
+/// the run by index, the bytes it covers (an edit that leaves the indices
+/// standing under different bytes must still re-key), and the one table the
+/// caret has opened.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SourceSpan {
+    /// The run of block indices, first to one past the last. Never empty.
+    pub blocks: Range<usize>,
+    /// From the first block's first byte to the last block's end.
+    pub bytes: Range<usize>,
+    /// The table the caret stands in, when it stands in one — the only table
+    /// in the run that is drawn as source.
+    pub table: Option<usize>,
+}
+
+impl SourceSpan {
+    /// **Whether block `index` is drawn as source**: inside the run, and not a
+    /// table the caret has not opened.
+    #[must_use]
+    pub fn draws(&self, index: usize, blocks: &[MarkdownBlock]) -> bool {
+        self.blocks.contains(&index)
+            && (self.table == Some(index)
+                || !matches!(blocks.get(index), Some(MarkdownBlock::Table { .. })))
+    }
+
+    /// Every block drawn as source, in document order.
+    pub fn drawn<'a>(&'a self, blocks: &'a [MarkdownBlock]) -> impl Iterator<Item = usize> + 'a {
+        self.blocks
+            .clone()
+            .filter(move |&index| self.draws(index, blocks))
+    }
+}
+
+/// **The ruling as a function**: which blocks a caret and its selection draw as
+/// source.
+///
+/// `selection` is the file bytes the selection covers — the caret's own
+/// selection, or a rendered selection mapped back to the file
+/// ([`source_band`]) — and `head` is where the caret itself stands. `None` only
+/// when nothing is source: a collapsed caret in a gap, or a selection that
+/// covers nothing but the blank lines between blocks with the caret in them.
+///
+/// **Touched is half-open, on both sides.** A block is touched when its range
+/// and the selection share a byte, so a selection ending at a block's first byte
+/// does not reach into it and one starting at a block's end has already left it.
+/// The caret's own block ([`caret_seat`]) is always in the run — the caret has
+/// to stand in something the painter draws as source — which is the whole of the
+/// collapsed case: no byte selected, one block, exactly §7.1.3q's.
+///
+/// **One unbroken run, by construction.** The blocks a range of bytes touches
+/// are consecutive, because the ranges are ordered and do not overlap; and the
+/// run is stretched to hold the caret's block, which for a selection the caret
+/// ends is adjacent to or inside it already. When a rendered selection stands
+/// apart from the caret (a drag begun on a link leaves one), the run is the
+/// smallest one holding both, so the page never shows two islands of source.
+#[must_use]
+pub fn source_span(
+    content: &str,
+    ranges: &[Range<usize>],
+    blocks: &[MarkdownBlock],
+    selection: Range<usize>,
+    head: usize,
+) -> Option<SourceSpan> {
+    let seat = caret_seat(content, ranges, head).block();
+    let touched = (!selection.is_empty())
+        .then(|| {
+            let first = ranges.partition_point(|range| range.end <= selection.start);
+            let end = ranges.partition_point(|range| range.start < selection.end);
+            (first < end).then_some(first..end)
+        })
+        .flatten();
+    let run = match (touched, seat) {
+        (Some(touched), Some(seat)) => touched.start.min(seat)..touched.end.max(seat + 1),
+        (Some(touched), None) => touched,
+        (None, Some(seat)) => seat..seat + 1,
+        (None, None) => return None,
+    };
+    let bytes = ranges.get(run.start)?.start..ranges.get(run.end - 1)?.end;
+    Some(SourceSpan {
+        bytes,
+        table: seat.filter(|&seat| matches!(blocks.get(seat), Some(MarkdownBlock::Table { .. }))),
+        blocks: run,
+    })
+}
+
+/// **The source span a caret and a page's rendered selection draw** —
+/// [`source_band`] and [`source_span`] asked as one question, which is the
+/// question every rebuild asks (2026-09-23).
+///
+/// The selection is the caret's own when it has one and otherwise the rendered
+/// pieces' mapped back to the file; no drag reach is read, because while a drag
+/// is in flight the span is not re-asked at all — the one the gesture started
+/// on is held until it ends (the window's `standing_source_span`).
+#[must_use]
+pub fn selection_span(
+    content: &str,
+    blocks: &[MarkdownBlock],
+    ranges: &[Range<usize>],
+    maps: &[BlockOrigins],
+    caret: &preview_edit::EditCaret,
+    pieces: Option<&preview_select::Selection>,
+) -> Option<SourceSpan> {
+    let selection = source_band(caret.range(), pieces, None, blocks, ranges, maps);
+    source_span(content, ranges, blocks, selection, caret.caret)
+}
+
 /// **The bytes one block is drawn from**, its own trailing line ending off.
 ///
 /// The ending is dropped and nothing else is: a block's range covers it
@@ -208,6 +338,63 @@ pub fn place_in_block(
     let column =
         preview_edit::column_of(preview_edit::line_text(text, &starts, line), local - start);
     Some((line, column))
+}
+
+/// **What the source block bands, in the file's own bytes** (2026-09-23;
+/// `docs/DESIGN.md`'s entry of that date).
+///
+/// A rendered page has two selection models (research §10 Q3): the caret's,
+/// which is a range of the file, and the rendered pieces' (`md_select`), which
+/// is two places on the page. The block drawn as source pushes no pieces, so
+/// the pieces' band has nothing to be drawn on there — a selection dragged
+/// across it drew the paragraphs either side and left the source block as the
+/// one unbanded island in it. This is the one range the source block's painter
+/// cuts instead, and it is chosen in this order:
+///
+/// * **the caret's own selection, when it has one** — on a page with a caret
+///   selection it is the only selection there is;
+/// * otherwise **the pieces' selection, mapped back to file bytes** through
+///   [`preview_provenance::file_offset_of`], the inverse of the mapping the
+///   caret's band is drawn through in the other direction;
+/// * and **while a drag is in flight, stretched to `reached`**, the last byte
+///   of the file the hand reached: a piece place cannot name a byte inside the
+///   source block (there are no pieces there), so a hand standing in it would
+///   otherwise stop the band at the block's edge.
+///
+/// What is selected and what a copy takes are unchanged by it: the pieces go on
+/// drawing every rendered block and this draws the source blocks they cannot,
+/// so the two halves meet at their edges. Since the owner's ruling of the same
+/// day it is also what decides *which* blocks are source ([`selection_span`]).
+///
+/// An empty range when neither model has anything selected — the caret's own
+/// collapsed range, which bands nothing.
+#[must_use]
+pub fn source_band(
+    caret: Range<usize>,
+    pieces: Option<&preview_select::Selection>,
+    reached: Option<usize>,
+    blocks: &[MarkdownBlock],
+    ranges: &[Range<usize>],
+    maps: &[BlockOrigins],
+) -> Range<usize> {
+    if !caret.is_empty() {
+        return caret;
+    }
+    let Some(selection) = pieces else {
+        return caret;
+    };
+    let (start, end) = selection.range_in(blocks);
+    let (Some(from), Some(to)) = (
+        preview_provenance::file_offset_of(&start, blocks, ranges, maps),
+        preview_provenance::file_offset_of(&end, blocks, ranges, maps),
+    ) else {
+        return caret;
+    };
+    let (from, to) = (from.min(to), from.max(to));
+    match reached {
+        Some(reached) => from.min(reached)..to.max(reached),
+        None => from..to,
+    }
 }
 
 /// **The source block as something a caret can be walked through** (T5,
@@ -1491,5 +1678,496 @@ mod tests {
         // else to be.
         assert_eq!(rows.row_of(9), Some((1, 30.0)));
         assert_eq!(rows.row_of(10), None, "past the block is not the block's");
+    }
+
+    /// A page with a link in its first paragraph, a table, and two more
+    /// paragraphs — the shape of the report (`docs/ARCHITECTURE.md` §12.3 and
+    /// its appendix table), made up.
+    const BAND_PAGE: &str = "Intro with a [link](https://example.com/) in it.\n\n\
+        | name | value |\n|------|-------|\n| one  | 1     |\n\n\
+        Middle **words** here.\n\nLast line.\n";
+
+    type Page = (Vec<MarkdownBlock>, Vec<Range<usize>>, Vec<BlockOrigins>);
+
+    fn band_page() -> Page {
+        let page = crate::preview::parse_markdown_mapped(BAND_PAGE);
+        assert!(
+            matches!(page.0[1], MarkdownBlock::Table { .. }),
+            "the second block is the table: {:?}",
+            page.0
+        );
+        page
+    }
+
+    /// Where block `index`'s own text ends in the file — the last byte its
+    /// source block could band.
+    fn text_end(ranges: &[Range<usize>], index: usize) -> usize {
+        ranges[index].start + block_source(BAND_PAGE, &ranges[index]).len()
+    }
+
+    /// The last place in block `index`, which is where the nearest piece to a
+    /// hand standing just under that block is.
+    fn block_end(blocks: &[MarkdownBlock], index: usize) -> preview_select::Place {
+        let last = preview_select::pieces(blocks)
+            .into_iter()
+            .rfind(|piece| piece.at.block == index)
+            .expect("the block has text");
+        preview_select::Place {
+            offset: last.text.len(),
+            ..last.at
+        }
+    }
+
+    fn drag(
+        anchor: preview_select::Place,
+        head: preview_select::Place,
+    ) -> preview_select::Selection {
+        preview_select::Selection {
+            anchor,
+            head,
+            grain: preview_select::Grain::Character,
+        }
+    }
+
+    /// RED (preview report 2026-09-23, A ①) — **a rendered selection dragged
+    /// across the source block bands the source block too.**
+    ///
+    /// The drag began in the paragraph above and is standing in the paragraph
+    /// below; the caret is still where an earlier gesture left it, collapsed,
+    /// so the block it stands in is drawn as source and has no pieces for the
+    /// rendered band to be drawn on. The painter used to cut the caret's own
+    /// range, which is empty, and the source block was the one unbanded island
+    /// in the middle of the band (screenshot 004703). Asked for both faces the
+    /// source block can wear: the table (monospace) and the paragraph (prose).
+    ///
+    /// MUTATION: return `caret` whenever it is empty in `source_band` — the old
+    /// painter's only source — and neither block is banded.
+    #[test]
+    fn a_rendered_selection_across_the_source_block_bands_it() {
+        let (blocks, ranges, maps) = band_page();
+        let across = drag(preview_select::Place::new(0, 0, 2), block_end(&blocks, 3));
+        for seat in [1, 2] {
+            let caret = ranges[seat].start + 1;
+            let band = source_band(caret..caret, Some(&across), None, &blocks, &ranges, &maps);
+            assert!(
+                band.start <= ranges[seat].start && band.end >= text_end(&ranges, seat),
+                "block {seat}, drawn as source, is banded whole: {band:?} against {:?}",
+                ranges[seat],
+            );
+        }
+    }
+
+    /// RED (preview report 2026-09-23, A ②) — **a drag whose release never
+    /// came still bands the source block to where the hand had got to.**
+    ///
+    /// A screenshot tool that takes the focus mid-drag leaves the drag in
+    /// flight (the 2026-09-21 entry: `Focused(false)` does not end it), and the
+    /// hand was standing inside the table. No piece stands there, so the
+    /// rendered selection's head is the nearest one — the end of the paragraph
+    /// above — and the only record of the byte the hand reached is the drag's
+    /// own `reached`. The band runs to it and no further, and stays there for
+    /// as long as the drag is left standing, because nothing in it moves.
+    ///
+    /// MUTATION: ignore `reached` in `source_band` and the band stops short of
+    /// the table, before the row the hand is on.
+    #[test]
+    fn a_drag_left_in_flight_bands_the_source_block_to_the_byte_it_reached() {
+        let (blocks, ranges, maps) = band_page();
+        let caret = ranges[1].start;
+        let reached = ranges[1].start + BAND_PAGE[ranges[1].clone()].find("one").unwrap();
+        let standing = drag(preview_select::Place::new(0, 0, 2), block_end(&blocks, 0));
+        let band = source_band(
+            caret..caret,
+            Some(&standing),
+            Some(reached),
+            &blocks,
+            &ranges,
+            &maps,
+        );
+        assert_eq!(band.end, reached, "the band ends where the hand stood");
+        assert!(band.start < ranges[0].end, "and begins where the drag did");
+        assert_eq!(
+            band,
+            source_band(
+                caret..caret,
+                Some(&standing),
+                Some(reached),
+                &blocks,
+                &ranges,
+                &maps,
+            ),
+            "the same drag, left standing, draws the same band",
+        );
+    }
+
+    /// RED (preview report 2026-09-23, A ③) — **Select All on a page with a
+    /// caret in it bands the source block with every other block.**
+    ///
+    /// The menu's Select All sets the rendered selection and leaves the caret
+    /// alone, so the caret's range is empty and the block it stands in was the
+    /// one block of a fully selected page with no band on it.
+    ///
+    /// MUTATION: return `caret` whenever it is empty and the source block is
+    /// the one block left unbanded, whichever block it is.
+    #[test]
+    fn select_all_bands_the_source_block_whichever_block_it_is() {
+        let (blocks, ranges, maps) = band_page();
+        let all = preview_select::select_all(&preview_select::pieces(&blocks))
+            .expect("the page has text");
+        for seat in 0..blocks.len() {
+            let caret = ranges[seat].start;
+            let band = source_band(caret..caret, Some(&all), None, &blocks, &ranges, &maps);
+            assert!(
+                band.start <= ranges[seat].start && band.end >= text_end(&ranges, seat),
+                "block {seat} is banded whole: {band:?} against {:?}",
+                ranges[seat],
+            );
+        }
+    }
+
+    /// RED (preview report 2026-09-23, A ④) — **a drag that began on a link
+    /// bands the source block from the link to the byte the hand reached.**
+    ///
+    /// A press on a link records no press to spend (the 2026-09-21 entry: it
+    /// draws a rendered selection and does not enter the page), so a caret
+    /// already standing in the table keeps it as source while the drag crosses
+    /// it. The band starts at the link's first letter — a byte of the file the
+    /// page draws — and ends at the byte the hand reached inside the table.
+    ///
+    /// MUTATION: drop `reached` from `source_band` and the band ends at the
+    /// paragraph above, short of the table the hand is in.
+    #[test]
+    fn a_drag_begun_on_a_link_bands_the_source_block_from_the_link() {
+        let (blocks, ranges, maps) = band_page();
+        let link = preview_select::pieces(&blocks)
+            .into_iter()
+            .find(|piece| piece.at.block == 0 && piece.text.contains("link"))
+            .expect("the first paragraph has the link's words");
+        let on_link = preview_select::Place {
+            offset: link.text.find("link").unwrap(),
+            ..link.at
+        };
+        let caret = ranges[1].start + 2;
+        let reached = text_end(&ranges, 1) - 1;
+        let band = source_band(
+            caret..caret,
+            Some(&drag(on_link, block_end(&blocks, 0))),
+            Some(reached),
+            &blocks,
+            &ranges,
+            &maps,
+        );
+        assert_eq!(
+            band,
+            BAND_PAGE.find("link").unwrap()..reached,
+            "from the link's first letter to the byte the hand reached",
+        );
+    }
+
+    /// **The caret's own selection is the band whenever it has one** — on a
+    /// page with a caret selection it is the only selection there is (research
+    /// §10 Q3), and a rendered one standing beside it is not consulted.
+    ///
+    /// MUTATION: prefer the rendered selection in `source_band` and a caret
+    /// selection made with Shift+arrows is banded where the last drag was.
+    #[test]
+    fn a_carets_own_selection_is_the_band_whenever_it_has_one() {
+        let (blocks, ranges, maps) = band_page();
+        let all = preview_select::select_all(&preview_select::pieces(&blocks))
+            .expect("the page has text");
+        let caret = ranges[2].start + 1..ranges[2].start + 5;
+        assert_eq!(
+            source_band(caret.clone(), Some(&all), Some(3), &blocks, &ranges, &maps),
+            caret,
+        );
+        assert_eq!(
+            source_band(4..4, None, Some(3), &blocks, &ranges, &maps),
+            4..4,
+            "and with nothing selected in either model nothing is banded",
+        );
+    }
+
+    // ── The source span (owner's ruling 2026-09-23) ─────────────────────────
+
+    /// A page of every kind the ruling names: a heading, two paragraphs, a
+    /// table, a fence and a last paragraph, a blank line between each pair.
+    const SPAN_PAGE: &str = "# Title\n\nfirst paragraph\n\n\
+        | a | b |\n|---|---|\n| 1 | 2 |\n\n\
+        second paragraph\n\n```\ncode\n```\n\nlast paragraph\n";
+
+    /// Seven paragraphs, one word each — nothing exempt anywhere.
+    const PROSE_PAGE: &str = "zero\n\none\n\ntwo\n\nthree\n\nfour\n\nfive\n\nsix\n";
+
+    /// The page through the real parser, with the kinds this test leans on
+    /// checked rather than assumed.
+    fn span_page() -> Page {
+        let page = crate::preview::parse_markdown_mapped(SPAN_PAGE);
+        assert!(
+            matches!(page.0[0], MarkdownBlock::Heading { .. })
+                && matches!(page.0[2], MarkdownBlock::Table { .. })
+                && matches!(page.0[4], MarkdownBlock::Code { .. })
+                && page.0.len() == 6,
+            "heading, paragraph, table, paragraph, fence, paragraph: {:?}",
+            page.0
+        );
+        page
+    }
+
+    /// A byte inside block `index`'s own text, `into` bytes in.
+    fn inside(ranges: &[Range<usize>], index: usize, into: usize) -> usize {
+        ranges[index].start + into
+    }
+
+    /// The blocks a caret selecting from `anchor` to `head` draws as source.
+    fn drawn(content: &str, blocks: &[MarkdownBlock], anchor: usize, head: usize) -> Vec<usize> {
+        let (_, ranges) = crate::preview::parse_markdown_ranged(content);
+        source_span(
+            content,
+            &ranges,
+            blocks,
+            anchor.min(head)..anchor.max(head),
+            head,
+        )
+        .map(|span| span.drawn(blocks).collect())
+        .unwrap_or_default()
+    }
+
+    /// RED (owner's ruling 2026-09-23, B) — **a selection across two blocks
+    /// draws both of them as source.**
+    ///
+    /// Obsidian's rule, and the owner's: the heading the selection began in and
+    /// the paragraph it ends in both put their marks back, in either direction.
+    /// On the old rule only the caret's own block — the paragraph — was source,
+    /// and the heading the selection had reached into stayed rendered.
+    ///
+    /// MUTATION: make `source_span` answer the caret's block alone (drop
+    /// `touched`) and the heading is left rendered.
+    #[test]
+    fn a_selection_across_two_blocks_draws_both_as_source() {
+        let (blocks, ranges, _) = span_page();
+        let heading = inside(&ranges, 0, 3);
+        let paragraph = inside(&ranges, 1, 5);
+        assert_eq!(drawn(SPAN_PAGE, &blocks, heading, paragraph), vec![0, 1]);
+        assert_eq!(
+            drawn(SPAN_PAGE, &blocks, paragraph, heading),
+            vec![0, 1],
+            "and dragged upwards, the same two",
+        );
+    }
+
+    /// RED (owner's ruling 2026-09-23, B) — **a selection across five blocks
+    /// draws all five, as one unbroken run.**
+    ///
+    /// MUTATION: draw only the two blocks the selection's ends stand in and the
+    /// three between them stay rendered — two islands of source with rendered
+    /// prose between, which the ruling's "one unbroken run" forbids.
+    #[test]
+    fn a_selection_across_five_blocks_draws_all_five_as_one_run() {
+        let (blocks, ranges) = crate::preview::parse_markdown_ranged(PROSE_PAGE);
+        assert_eq!(blocks.len(), 7);
+        let from = inside(&ranges, 1, 1);
+        let to = inside(&ranges, 5, 2);
+        let span = source_span(PROSE_PAGE, &ranges, &blocks, from..to, to).expect("a span");
+        assert_eq!(span.blocks, 1..6, "blocks one to five, and not zero or six");
+        assert_eq!(span.bytes, ranges[1].start..ranges[5].end);
+        assert_eq!(
+            span.drawn(&blocks).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5],
+            "every one of them drawn as source",
+        );
+    }
+
+    /// RED (owner's ruling 2026-09-23) — **a table a selection sweeps across
+    /// stays rendered**, while every other block in the run shows its source.
+    ///
+    /// Until the 0.5 in-cell table editor, only the caret entering a table turns
+    /// it into its pipes. The run is still one run — the table is inside it —
+    /// and the paragraphs either side of it are source.
+    ///
+    /// MUTATION: drop the table clause from `SourceSpan::draws` and the table
+    /// flips to its source for having been crossed.
+    #[test]
+    fn a_table_a_selection_sweeps_stays_rendered() {
+        let (blocks, ranges, _) = span_page();
+        let from = inside(&ranges, 1, 2);
+        let to = inside(&ranges, 3, 4);
+        let span = source_span(SPAN_PAGE, &ranges, &blocks, from..to, to).expect("a span");
+        assert_eq!(span.blocks, 1..4, "the run crosses the table");
+        assert!(!span.draws(2, &blocks), "and the table stays rendered");
+        assert_eq!(span.drawn(&blocks).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(
+            drawn(SPAN_PAGE, &blocks, to, from),
+            vec![1, 3],
+            "in either direction",
+        );
+        let fence = inside(&ranges, 4, 1);
+        assert_eq!(
+            drawn(SPAN_PAGE, &blocks, from, fence),
+            vec![1, 3, 4],
+            "a fence is not exempt: only a table is",
+        );
+    }
+
+    /// RED (owner's ruling 2026-09-23) — **the caret standing inside a table
+    /// still opens it**, with or without a selection reaching it.
+    ///
+    /// MUTATION: exempt every table in the run, the caret's own included, and a
+    /// caret clicked into a table has no source to stand in.
+    #[test]
+    fn a_caret_inside_a_table_still_opens_it() {
+        let (blocks, ranges, _) = span_page();
+        let cell = inside(&ranges, 2, 2);
+        assert_eq!(
+            drawn(SPAN_PAGE, &blocks, cell, cell),
+            vec![2],
+            "a click into the table opens it, as it always did",
+        );
+        let from = inside(&ranges, 1, 2);
+        assert_eq!(
+            drawn(SPAN_PAGE, &blocks, from, cell),
+            vec![1, 2],
+            "a selection ending inside the table opens it, because the caret is there",
+        );
+        let past = inside(&ranges, 3, 3);
+        assert_eq!(
+            drawn(SPAN_PAGE, &blocks, cell, past),
+            vec![3],
+            "and once the caret has left it, the table is rendered again \
+             although the selection still starts inside it",
+        );
+    }
+
+    /// RED (owner's ruling 2026-09-23) — **a caret with nothing selected draws
+    /// exactly the block it always drew**, at every byte of the page.
+    ///
+    /// What makes the ruling safe to ship: a click and an arrow key change
+    /// nothing. Held at every position a caret can take in a page with every
+    /// kind of block, the gaps and the end of the file included.
+    ///
+    /// MUTATION: let an empty selection touch the block it stands at the end
+    /// of (`range.end < selection.start` for `<=`) and a caret at the end of a
+    /// paragraph draws the gap's neighbour too.
+    #[test]
+    fn a_collapsed_caret_draws_exactly_its_own_block() {
+        let (blocks, ranges, _) = span_page();
+        for at in 0..=SPAN_PAGE.len() {
+            let span = source_span(SPAN_PAGE, &ranges, &blocks, at..at, at);
+            let expected = caret_seat(SPAN_PAGE, &ranges, at).block();
+            assert_eq!(
+                span.as_ref().map(|span| span.blocks.clone()),
+                expected.map(|index| index..index + 1),
+                "caret at {at}",
+            );
+            assert_eq!(
+                span.map(|span| span.drawn(&blocks).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                expected.into_iter().collect::<Vec<_>>(),
+                "caret at {at}: one block, a table included",
+            );
+        }
+    }
+
+    /// **Touched is half-open**: a selection that ends on a block's first byte
+    /// has not reached into it, and one in the blank lines between blocks
+    /// touches nothing.
+    #[test]
+    fn a_selection_ending_where_a_block_begins_does_not_reach_into_it() {
+        let (blocks, ranges, _) = span_page();
+        let from = inside(&ranges, 1, 3);
+        let upto = ranges[3].start;
+        assert_eq!(
+            drawn(SPAN_PAGE, &blocks, upto, from),
+            vec![1],
+            "anchored on the next block's first byte and dragged up: the table \
+             is crossed (and stays rendered), the next block is not reached",
+        );
+        let gap = ranges[0].end;
+        assert_eq!(
+            drawn(SPAN_PAGE, &blocks, gap, gap),
+            Vec::<usize>::new(),
+            "a caret in a gap draws no block",
+        );
+        assert_eq!(
+            drawn(SPAN_PAGE, &blocks, gap - 1, from),
+            vec![0, 1],
+            "the heading's own line ending is the heading's",
+        );
+    }
+
+    /// **The run is one run, whatever the two ends are** — every pair of
+    /// positions on the page: it holds every block the selection touches and
+    /// the caret's own, has nothing it does not need, and draws every block in
+    /// it but a table the caret is not in.
+    #[test]
+    fn the_source_span_is_always_one_unbroken_run() {
+        let (blocks, ranges, _) = span_page();
+        for anchor in 0..=SPAN_PAGE.len() {
+            for head in 0..=SPAN_PAGE.len() {
+                let selection = anchor.min(head)..anchor.max(head);
+                let seat = caret_seat(SPAN_PAGE, &ranges, head).block();
+                let touched: Vec<usize> = (0..ranges.len())
+                    .filter(|&index| {
+                        ranges[index].start < selection.end && selection.start < ranges[index].end
+                    })
+                    .collect();
+                let Some(span) = source_span(SPAN_PAGE, &ranges, &blocks, selection.clone(), head)
+                else {
+                    assert!(
+                        touched.is_empty() && seat.is_none(),
+                        "{anchor}..{head}: no span only when nothing is touched"
+                    );
+                    continue;
+                };
+                let first = touched.first().copied().into_iter().chain(seat).min();
+                let last = touched.last().copied().into_iter().chain(seat).max();
+                assert_eq!(
+                    Some(span.blocks.clone()),
+                    first.zip(last).map(|(first, last)| first..last + 1),
+                    "{anchor}..{head}: the smallest run holding the caret's block and \
+                     every block touched",
+                );
+                assert_eq!(span.table, seat.filter(|&seat| seat == 2));
+                assert_eq!(
+                    span.drawn(&blocks).collect::<Vec<_>>(),
+                    span.blocks
+                        .clone()
+                        .filter(|&index| index != 2 || seat == Some(2))
+                        .collect::<Vec<_>>(),
+                    "{anchor}..{head}",
+                );
+            }
+        }
+    }
+
+    /// RED (owner's ruling 2026-09-23) — **a rendered selection standing with
+    /// a caret on the page draws the blocks it covers as source too**, mapped
+    /// back to the file through the same provenance its band is drawn through.
+    ///
+    /// The page menu's Select All leaves the caret where it was and selects the
+    /// rendered pieces: every block on the page is then source (a table the
+    /// caret is not in excepted), and the caret still stands in one of them.
+    ///
+    /// MUTATION: build the span from the caret's own range instead of
+    /// `source_band`'s and Select All leaves the page rendered around one block.
+    #[test]
+    fn a_rendered_selection_draws_the_blocks_it_covers_as_source() {
+        let (blocks, ranges, maps) = span_page();
+        let caret = preview_edit::EditCaret {
+            anchor: inside(&ranges, 3, 2),
+            caret: inside(&ranges, 3, 2),
+            ..preview_edit::EditCaret::default()
+        };
+        let all = preview_select::select_all(&preview_select::pieces(&blocks))
+            .expect("the page has text");
+        let span =
+            selection_span(SPAN_PAGE, &blocks, &ranges, &maps, &caret, Some(&all)).expect("a span");
+        assert_eq!(span.blocks, 0..6, "every block");
+        assert_eq!(span.drawn(&blocks).collect::<Vec<_>>(), vec![0, 1, 3, 4, 5]);
+        assert_eq!(
+            selection_span(SPAN_PAGE, &blocks, &ranges, &maps, &caret, None)
+                .map(|span| span.blocks),
+            Some(3..4),
+            "and with the rendered selection let go, the caret's block alone",
+        );
     }
 }

@@ -238,7 +238,7 @@ mod mac {
                 .present(gpu, &mut offscreen)
                 .expect("the page draws into the texture");
             let read_back = offscreen.read_back(gpu).expect("the texture reads back");
-            let metrics = offscreen.metrics();
+            let metrics = offscreen.base_metrics();
 
             println!("macos_glyph_surface: format={format:?}");
             print!(

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad};
 use bt_term::ProgressState;
 
-use crate::marks::OverlayLayer;
+use crate::marks::{Band, OverlayLayer};
 use crate::settings::push_float_window;
 use crate::{EASE, Motion, cubic_bezier};
 
@@ -70,14 +70,18 @@ pub const PEEK_INTENT_DELAY: Duration = Duration::from_millis(120);
 /// this tip is where the archive got the number from.
 pub const TOOLTIP_FADE: Duration = bt_render::MOTION_FAST;
 
-/// `border-radius: 5px`.
-pub const TIP_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// The float-tag family's radius (`UI-SPEC.md` R1; [`PEEK_RADIUS_LOGICAL_PX`]
+/// below), not the mock-up's own `border-radius: 5px` — every other member of
+/// the family is r8.
+pub const TIP_RADIUS_LOGICAL_PX: f32 = PEEK_RADIUS_LOGICAL_PX;
 /// `border: 1px solid var(--border)`.
 pub const TIP_BORDER_LOGICAL_PX: f32 = 1.0;
-/// The `7px` of `padding: 3px 7px`.
-pub const TIP_PADDING_X_LOGICAL_PX: f32 = 7.0;
-/// The `3px` of `padding: 3px 7px`.
-pub const TIP_PADDING_Y_LOGICAL_PX: f32 = 3.0;
+/// The float-tag family's padding (`UI-SPEC.md` S1; [`PEEK_PADDING_X_LOGICAL_PX`]
+/// below), not the mock-up's own `padding: 3px 7px`.
+pub const TIP_PADDING_X_LOGICAL_PX: f32 = PEEK_PADDING_X_LOGICAL_PX;
+/// The float-tag family's padding (`UI-SPEC.md` S1; [`PEEK_PADDING_Y_LOGICAL_PX`]
+/// below), not the mock-up's own `padding: 3px 7px`.
+pub const TIP_PADDING_Y_LOGICAL_PX: f32 = PEEK_PADDING_Y_LOGICAL_PX;
 /// `font-size: 11px`.
 pub const TIP_FONT_LOGICAL_PX: f32 = 11.0;
 /// The one number `showTip` uses for both jobs (mock-up 8698-8703): how far the
@@ -105,15 +109,15 @@ pub const TIP_MAX_WIDTH_LOGICAL_PX: f32 = 360.0;
 // must not be written twice, while the type, the measure and the placement are
 // the card's and are not the tip's in any of the four.
 
-/// `font: 12px/1.5 Consolas, "Cascadia Mono", monospace` — the size.
+/// The 12px size of the monospace command tag; UI-SPEC.md T10 sets its leading.
 ///
 /// A point larger than the chrome tip beside it, and set in the *terminal's* face
 /// rather than the window's, because what it quotes is a command line: the card
 /// shows a thing the reader typed at a grid, and a proportional rendering of it is
 /// a paraphrase.
 pub const PEEK_FONT_LOGICAL_PX: f32 = 12.0;
-/// The `1.5` of the same declaration.
-pub const PEEK_LINE_HEIGHT: f32 = 1.5;
+/// UI-SPEC.md T10: float-tag running text uses the chrome line height (1.4).
+pub const PEEK_LINE_HEIGHT: f32 = 1.4;
 /// The `10px` of `padding: 5px 10px`.
 pub const PEEK_PADDING_X_LOGICAL_PX: f32 = 10.0;
 /// The `5px` of `padding: 5px 10px`.
@@ -228,8 +232,8 @@ impl TipFace {
             Self::Chrome => CHROME_LINE_HEIGHT,
             Self::Peek { .. } => PEEK_LINE_HEIGHT,
             // **The swatch is the line box.** A well 28 logical pixels tall
-            // inside a card sized to a 12/1.5 line would overflow the card by
-            // ten pixels, so the leading is what gives way: one line, as tall as
+            // inside a card sized to the peek text line would overflow it,
+            // so the leading is what gives way: one line, as tall as
             // the well beside it, with the token set on its centre. Derived
             // rather than written as 2.333 so that moving either number keeps
             // the two the same height.
@@ -424,6 +428,9 @@ pub enum TooltipAnchorId {
     /// meaning something else. It is a padlock now and it registers too — see
     /// [`Self::PreviewLock`].)
     PreviewBrowser(bt_layout::SeatId),
+    /// **A terminal pane head's text-size mark** (ticket 37): the reset verb's name, and the
+    /// effective size when the clamp drew the pane at a size its percentage does not say.
+    PaneTextSize(bt_layout::SeatId),
     /// **One control of a preview head's own run** (user ruling 2026-08-27 —
     /// 「头/轨上每一枚可点的东西都必须有 tooltip,且由注册表守着」).
     ///
@@ -892,9 +899,13 @@ impl TooltipHost {
 /// popups you summon by *not moving* — a fade-in is exactly the kind of
 /// unrequested motion the preference is about.
 ///
-/// There is deliberately no fade **out**: the mock-up's `.tip` transitions on the
-/// way in and simply loses `.show` on the way out, and a card that lingers after
-/// the pointer has left is a card answering a question nobody is asking any more.
+/// **This curve is the way in only.** The way out is not this function's: the
+/// tip leaves over [`bt_render::POPUP_EXIT`] through
+/// `arrival::Passages::stage_departure` (DESIGN §7.19 ⑥), a picture of the tip
+/// fading as one surface round the one this curve drew. The glance card has no
+/// way out at all — it goes the instant the pointer does (T-PEEK-FADE, §7.29 ⑭).
+/// (This paragraph used to say that neither surface fades out; the tip gained
+/// its departure after it was written — the fade audit's F4, 2026-09-23.)
 #[must_use]
 pub fn hover_fade_opacity(since: Duration, motion: Motion) -> f32 {
     if motion == Motion::Reduced {
@@ -1227,11 +1238,16 @@ pub fn layout(
     Some(TooltipLayout { frame, lines })
 }
 
-/// Paint the tip — one layer, always the last one handed to the renderer.
+/// Paint the tip — one layer, always the last one handed to the renderer, and
+/// one surface at `opacity`.
 ///
 /// `z-index: 60` against the menu's `30` (mock-up 1207 and the note at 7339):
 /// the tip is the only thing in this window that is *never* covered, because it
 /// is the only thing that exists to explain what is under it.
+///
+/// The fade is the band's group, not the layer's own opacity (ticket 46): the
+/// plate, its hairline, its shadow and its words are drawn whole and put back
+/// once, so they arrive together as `.tip { transition: opacity .09s }` does.
 #[must_use]
 pub fn build(
     layout: &TooltipLayout,
@@ -1239,7 +1255,7 @@ pub fn build(
     scale: f32,
     opacity: f32,
     face: TipFace,
-) -> Vec<OverlayLayer> {
+) -> Band {
     let px = |logical: f32| logical * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
     let mut quads: Vec<OverlayQuad> = Vec::new();
@@ -1339,18 +1355,21 @@ pub fn build(
                 cell_advance: None,
             })
             .collect();
-        return vec![OverlayLayer {
-            quads,
-            body: Some(bt_render::PreviewBody {
-                clip: layout.frame,
-                quads: Vec::new(),
-                paragraphs,
-                blocks: Vec::new(),
-                rasters: Vec::new(),
-            }),
+        return Band::surface(
+            vec![OverlayLayer {
+                quads,
+                body: Some(bt_render::PreviewBody {
+                    clip: layout.frame,
+                    quads: Vec::new(),
+                    paragraphs,
+                    blocks: Vec::new(),
+                    rasters: Vec::new(),
+                }),
+                ..OverlayLayer::default()
+            }],
             opacity,
-            ..OverlayLayer::default()
-        }];
+            [0.0, 0.0],
+        );
     }
 
     let labels = layout
@@ -1371,12 +1390,15 @@ pub fn build(
         })
         .collect();
 
-    vec![OverlayLayer {
-        quads,
-        labels,
+    Band::surface(
+        vec![OverlayLayer {
+            quads,
+            labels,
+            ..OverlayLayer::default()
+        }],
         opacity,
-        ..OverlayLayer::default()
-    }]
+        [0.0, 0.0],
+    )
 }
 
 #[cfg(test)]
@@ -1414,12 +1436,7 @@ mod tests {
         super::layout(text, host, line_widths, window, scale, TipFace::Chrome)
     }
 
-    fn build(
-        layout: &TooltipLayout,
-        palette: &ChromePalette,
-        scale: f32,
-        opacity: f32,
-    ) -> Vec<OverlayLayer> {
+    fn build(layout: &TooltipLayout, palette: &ChromePalette, scale: f32, opacity: f32) -> Band {
         super::build(layout, palette, scale, opacity, TipFace::Chrome)
     }
 
@@ -1582,8 +1599,8 @@ mod tests {
         let (two, ..) = place(anchor, &[50.0, 120.0], WINDOW, SCALE).unwrap();
 
         // Width answers to the widest line, never the first or the last.
-        assert!((one[2] - one[0] - (50.0 + 2.0 * (7.0 + 1.0))).abs() < 1.0);
-        assert!((two[2] - two[0] - (120.0 + 2.0 * (7.0 + 1.0))).abs() < 1.0);
+        assert!((one[2] - one[0] - (50.0 + 2.0 * (10.0 + 1.0))).abs() < 1.0);
+        assert!((two[2] - two[0] - (120.0 + 2.0 * (10.0 + 1.0))).abs() < 1.0);
         // Height answers to the count.
         assert!(((two[3] - two[1]) - (one[3] - one[1]) - line_height).abs() < 1.0);
         assert!((border - 1.0).abs() < 0.001);
@@ -1602,7 +1619,7 @@ mod tests {
         assert!(laid.lines[0].0[1] >= laid.frame[1]);
         assert!(laid.lines[1].0[3] <= laid.frame[3] + 0.001);
         // The text box is inset by the border and the horizontal padding.
-        assert!((laid.lines[0].0[0] - (laid.frame[0] + 1.0 + 7.0)).abs() < 0.001);
+        assert!((laid.lines[0].0[0] - (laid.frame[0] + 1.0 + 10.0)).abs() < 0.001);
     }
 
     // ── M141: an anchor with nothing to say is not an anchor ────────────────
@@ -2041,8 +2058,13 @@ mod tests {
         .unwrap();
         let layers = build(&laid, &palette, SCALE, 0.4);
         assert_eq!(layers.len(), 1, "a tip is one layer");
-        let layer = &layers[0];
-        assert!((layer.opacity - 0.4).abs() < 0.001);
+        let layer = &layers.layers[0];
+        // One surface at the tip's opacity, over the one layer drawn at full
+        // strength (ticket 46).
+        assert_eq!(layers.groups.len(), 1);
+        assert_eq!(layers.groups[0].layers, 0..1);
+        assert!((layers.groups[0].opacity - 0.4).abs() < 0.001);
+        assert!((layer.opacity - 1.0).abs() < 0.001);
         assert_eq!(layer.labels.len(), 2);
         assert_eq!(layer.labels[0].text, "bash");
         assert_eq!(layer.labels[1].text, "Working folder · /tmp");
@@ -2139,7 +2161,7 @@ mod tests {
         let token = host(400.0, 300.0, 449.0, 318.0);
         let laid = super::layout("#7a99ff", token, &[49.0], WINDOW, SCALE, face).unwrap();
         let layers = super::build(&laid, &palette, SCALE, 1.0, face);
-        let layer = &layers[0];
+        let layer = &layers.layers[0];
 
         let well: Vec<&bt_render::OverlayQuad> = layer
             .quads
@@ -2194,7 +2216,7 @@ mod tests {
         };
         let token = host(400.0, 300.0, 465.0, 318.0);
         let laid = super::layout("#7a99ff80", token, &[63.0], WINDOW, SCALE, face).unwrap();
-        let layer = &super::build(&laid, &palette, SCALE, 1.0, face)[0];
+        let layer = &super::build(&laid, &palette, SCALE, 1.0, face).layers[0];
         let inside: Vec<&bt_render::OverlayQuad> = layer
             .quads
             .iter()
@@ -2213,6 +2235,33 @@ mod tests {
         );
     }
 
+    /// RED (23) — **the peek tag uses the chrome line height.**
+    ///
+    /// UI-SPEC.md T10 gives float-tag text the same leading as chrome.
+    /// The real placement producer must spend that leading on every line.
+    /// MUTATION: restore PEEK_LINE_HEIGHT to 1.5.
+    #[test]
+    fn ui_spec_float_tag_rest_values_follow_the_rule() {
+        assert_eq!(PEEK_LINE_HEIGHT, CHROME_LINE_HEIGHT, "UI-SPEC.md T10");
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let face = TipFace::Peek { muted: false };
+            let (frame, line, border) = super::place(
+                host(800.0, 200.0, 820.0, 220.0),
+                &[100.0, 80.0],
+                WINDOW,
+                scale,
+                face,
+            )
+            .unwrap();
+            let expected = (PEEK_FONT_LOGICAL_PX * scale * CHROME_LINE_HEIGHT).round();
+            assert_eq!(line, expected, "UI-SPEC.md T10 at {scale}");
+            assert_eq!(
+                frame[3] - frame[1],
+                (2.0 * expected + 2.0 * (PEEK_PADDING_Y_LOGICAL_PX * scale + border)).round()
+            );
+        }
+    }
+
     // ── `#cmd-peek`: the second face (D-19) ────────────────────────────────
 
     /// A monospace measure with one number in it: every character is `advance`
@@ -2221,12 +2270,15 @@ mod tests {
         move |text: &str| text.chars().count() as f32 * advance
     }
 
-    /// The card's metrics are the card's, and none of them is the tip's.
+    /// RED (23) — **the command tag shares chrome leading while keeping its own type.**
+    ///
+    /// UI-SPEC.md T10 brings the leading into the float-tag family.
+    /// MUTATION: restore PEEK_LINE_HEIGHT to 1.5.
     #[test]
     fn the_glance_cards_face_is_larger_rounder_and_wider_than_the_tips() {
         let peek = TipFace::Peek { muted: false };
         assert_eq!(peek.font_logical_px(), 12.0);
-        assert_eq!(peek.line_height(), 1.5);
+        assert_eq!(peek.line_height(), CHROME_LINE_HEIGHT);
         assert_eq!(peek.padding_logical_px(), (10.0, 5.0));
         assert_eq!(peek.radius_logical_px(), 8.0);
         assert_eq!(peek.max_width_logical_px(), 460.0);
@@ -2236,6 +2288,36 @@ mod tests {
         assert!(TipFace::Chrome.wraps() && !TipFace::Chrome.monospace());
     }
 
+    /// RED (ticket 16) — **the tip's padding and corner are the float-tag
+    /// family's, not the mock-up's own tighter, less rounded `.tip`.**
+    ///
+    /// `UI-SPEC.md` R1/S1: every member of the float-tag family (the glance
+    /// card, the single-line `#cmd-peek` tag) shares one padding and one
+    /// radius; the chrome tip used to be the odd one out at `7×3` / `r5`.
+    ///
+    /// MUTATION: revert `TIP_RADIUS_LOGICAL_PX`, `TIP_PADDING_X_LOGICAL_PX` or
+    /// `TIP_PADDING_Y_LOGICAL_PX` to a literal and this goes red.
+    #[test]
+    fn ui_spec_float_tag_class_a_values_follow_the_rule() {
+        assert_eq!(
+            TIP_RADIUS_LOGICAL_PX, PEEK_RADIUS_LOGICAL_PX,
+            "UI-SPEC.md R1"
+        );
+        assert_eq!(
+            TIP_PADDING_X_LOGICAL_PX, PEEK_PADDING_X_LOGICAL_PX,
+            "UI-SPEC.md S1"
+        );
+        assert_eq!(
+            TIP_PADDING_Y_LOGICAL_PX, PEEK_PADDING_Y_LOGICAL_PX,
+            "UI-SPEC.md S1"
+        );
+    }
+
+    /// RED (23) — **the card uses chrome leading in its placed line box.**
+    ///
+    /// UI-SPEC.md T10 sets the line-height pin; placement invariants stay the same.
+    /// MUTATION: restore PEEK_LINE_HEIGHT to 1.5.
+    ///
     /// **The card stands to the left of its tick and eight pixels above it**, and
     /// is held inside the window on every side.
     ///
@@ -2250,7 +2332,10 @@ mod tests {
         let (frame, line_height, _) = super::place(tick, &[200.0], WINDOW, SCALE, peek).unwrap();
         assert_eq!(frame[2], tick[0] - 12.0, "twelve pixels off the tick");
         assert_eq!(frame[1], tick[1] - 8.0, "eight pixels above it");
-        assert_eq!(line_height, (12.0 * 1.5_f32).round());
+        assert_eq!(
+            line_height,
+            (PEEK_FONT_LOGICAL_PX * CHROME_LINE_HEIGHT).round()
+        );
         assert_eq!(
             frame[3] - frame[1],
             (line_height + 2.0 * (5.0 + 1.0)).round()
@@ -2346,7 +2431,7 @@ mod tests {
         )
         .expect("a card is placed");
         let layers = super::build(&laid, &palette, SCALE, 1.0, peek);
-        let layer = &layers[0];
+        let layer = &layers.layers[0];
         assert!(layer.labels.is_empty(), "not a chrome label");
         let body = layer.body.as_ref().expect("the monospace channel");
         assert_eq!(body.clip, laid.frame);
@@ -2370,7 +2455,7 @@ mod tests {
         // annotation already wears.
         let muted = super::build(&laid, &palette, SCALE, 1.0, TipFace::Peek { muted: true });
         assert_eq!(
-            muted[0].body.as_ref().unwrap().paragraphs[0].runs[0].color,
+            muted.layers[0].body.as_ref().unwrap().paragraphs[0].runs[0].color,
             palette.menu_item_hint_text
         );
         assert_ne!(palette.menu_item_hint_text, palette.menu_item_text);

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     error::Error,
     fs, io,
@@ -113,13 +114,29 @@ struct HeadlessOracle {
     blank_underlined_worst: Option<String>,
     /// Per-row underline dump, opt-in via `BT_PROBE_UNDERLINE`.
     underline_probe: bool,
+    /// Printed-path question meter, opt-in via `BT_PROBE_PATH_REASK`.
+    ///
+    /// When on, the replay runs the app's own two-step — project, then
+    /// `absorb_printed_path_probes` — and answers every `VerifyPath` with **no**, without touching
+    /// a disk. A permanent "no" is the worst case for the 2026-09-20 re-ask rule (every printing of
+    /// every name is a question again), so the count below is a ceiling on what a real recording
+    /// would cost, measured against the real bytes of a real session.
+    /// `BT_PROBE_PATH_REASK=disk` answers off this machine's disk instead, which is what the
+    /// recording's own pane would have been told.
+    path_reask_probe: bool,
+    path_reask_reads_disk: bool,
+    path_questions: u64,
+    path_question_names: BTreeMap<PathBuf, u64>,
 }
 
 impl HeadlessOracle {
     fn new(columns: NonZeroU32, rows: NonZeroU32, started: Instant) -> Self {
         let image_paths_enabled = env::var_os("BT_PROBE_IMAGE_PATHS").is_some();
+        let path_reask_setting = env::var("BT_PROBE_PATH_REASK").unwrap_or_default();
+        let path_reask_probe = !path_reask_setting.is_empty();
+        let path_reask_reads_disk = path_reask_setting == "disk";
         let mut session = DualPlaneSession::new(columns, rows);
-        if image_paths_enabled {
+        if image_paths_enabled || path_reask_probe {
             session.set_math_layout_options(MathLayoutOptions {
                 detect_image_paths: true,
                 ..MathLayoutOptions::default()
@@ -160,6 +177,10 @@ impl HeadlessOracle {
             max_blank_underlined: 0,
             blank_underlined_worst: None,
             underline_probe: env::var_os("BT_PROBE_UNDERLINE").is_some(),
+            path_reask_probe,
+            path_reask_reads_disk,
+            path_questions: 0,
+            path_question_names: BTreeMap::new(),
         }
     }
 
@@ -587,7 +608,7 @@ impl HeadlessOracle {
     }
 
     fn complete_pending_images(&mut self) -> bool {
-        if !self.image_paths_enabled {
+        if !self.image_paths_enabled && !self.path_reask_probe {
             return false;
         }
         let mut changed = false;
@@ -602,8 +623,23 @@ impl HeadlessOracle {
                     changed |= self.session.complete_inline_image_scale(scaled);
                 }
                 SessionDecorationTask::VerifyPath(path) => {
-                    let exists = bt_term::path_exists(&path);
-                    changed |= self.session.complete_path_verification(path, exists);
+                    if self.path_reask_probe {
+                        // Default: answered "no" without a syscall, because a name that is never on
+                        // the disk is asked about every time it is printed again — the ceiling on
+                        // what the rule costs, not a sample of this machine. `=disk` answers off
+                        // the real disk instead, which is what the recorded pane was told.
+                        self.path_questions = self.path_questions.saturating_add(1);
+                        *self.path_question_names.entry(path.clone()).or_insert(0) += 1;
+                        let verdict = if self.path_reask_reads_disk {
+                            bt_term::verify_path(&path)
+                        } else {
+                            bt_term::PathVerdict::absent()
+                        };
+                        changed |= self.session.complete_path_verification(path, verdict);
+                        continue;
+                    }
+                    let verdict = bt_term::verify_path(&path);
+                    changed |= self.session.complete_path_verification(path, verdict);
                 }
                 SessionDecorationTask::Math(_) => {
                     unreachable!("math queues were drained before image completion")
@@ -616,6 +652,13 @@ impl HeadlessOracle {
     fn publish(&mut self, event: &str, elapsed: Duration) -> Result<(), Box<dyn Error>> {
         self.session.refresh_projection(&mut self.projection);
         let frame = self.session.viewport_frame(&mut self.projection)?;
+        if self.path_reask_probe {
+            // The app's own pairing (`crates/bt-app/src/main.rs`): a frame is projected, then the
+            // names it could not answer for are taken off it. Under the probe only, so no recorded
+            // baseline of this replay changes.
+            self.session
+                .absorb_printed_path_probes(&mut self.projection);
+        }
         let (state, rendered_sources, source_rows, source_plane, occluded_sources) = {
             let observation = self.flash_oracle.observe(&frame);
             (
@@ -1295,6 +1338,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             "TEXTURE_AUDIT max_textureless_bands={} worst={}",
             oracle.max_textureless_bands,
             oracle.textureless_band_worst.as_deref().unwrap_or("none"),
+        );
+    }
+    if oracle.path_reask_probe {
+        let distinct = oracle.path_question_names.len();
+        let mut worst = oracle
+            .path_question_names
+            .iter()
+            .map(|(path, count)| (*count, path.components().count()))
+            .collect::<Vec<_>>();
+        worst.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        let top = worst
+            .iter()
+            .take(5)
+            .map(|(count, depth)| format!("{count}@depth{depth}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "PATH_REASK questions={} distinct_names={} frames={} top={}",
+            oracle.path_questions, distinct, oracle.frame_sequence, top,
         );
     }
     if oracle.max_blank_underlined > 0 || env::var_os("BT_PROBE_UNDERLINE").is_some() {

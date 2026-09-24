@@ -45,6 +45,13 @@
 # binary is a file `git grep` skips, and these are the ones worth searching.
 *.btcr binary
 
+# The syntect dump of the vendored PowerShell grammar: a compressed byte string
+# that syntect deserialises, generated from the `.sublime-syntax` beside it. It
+# is small enough that whether Git's eight-thousand-byte guess finds a NUL in it
+# is luck, and a smudged byte in it is not a diff anybody could read — it is a
+# grammar that no longer loads.
+*.packdump binary
+
 # ── bytes that are not ours to normalise ──────────────────────────────────────
 #
 # Everything below was committed with CRLF because that is how its author wrote
@@ -69,3 +76,12 @@ licenses/** -text
 docs/plans/attention/evidence/** -text
 docs/plans/web-preview/codex-final-pass.md -text
 docs/spikes/artifacts/win-landing/probes/** -text
+
+# The MiTeX parser and converter, vendored from crates.io. Their author wrote
+# them with CRLF and the published archives carry it, and
+# `scripts/check-vendor-notices.ps1` proves Apache-2.0 §4(b) by hashing every
+# vendored file against that archive: a checkout that rewrote their endings would
+# make all two hundred of them "differ from upstream" and demand a modification
+# notice on files nobody here has touched.
+vendor/mitex/** -text
+vendor/mitex-parser/** -text

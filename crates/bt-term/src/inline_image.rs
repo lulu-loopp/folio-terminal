@@ -1,6 +1,5 @@
 use std::{
     fmt,
-    fs::File,
     io::{Cursor, Read},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -659,6 +658,15 @@ impl InlineImageDecoder {
         &mut self,
         task: InlineImageTask,
     ) -> Result<DecodedInlineImage, InlineImageDecodeError> {
+        self.decode_in_lane(task, bt_platform::file_reads::Lane::InlineImage)
+    }
+
+    /// Attribution only; both callers retain the same decoder and memo.
+    pub fn decode_in_lane(
+        &mut self,
+        task: InlineImageTask,
+        lane: bt_platform::file_reads::Lane,
+    ) -> Result<DecodedInlineImage, InlineImageDecodeError> {
         let payload = match &task.source {
             InlineImageSource::Osc1337(encoded) => decode_osc_payload(encoded)?,
             InlineImageSource::LocalPath(path) => {
@@ -678,7 +686,7 @@ impl InlineImageDecoder {
                 match self.local_path_cache.get(&cache_key) {
                     Some(cached) if cached.stamp == stamp => cached.decoded.clone()?,
                     _ => {
-                        let decoded = read_and_decode_local_image(path);
+                        let decoded = read_and_decode_local_image(path, lane);
                         self.local_path_cache.insert(
                             cache_key,
                             CachedLocalImage {
@@ -727,7 +735,10 @@ fn decode_osc_payload(encoded: &[u8]) -> Result<DecodedImagePayload, InlineImage
     decode_image_bytes(&bytes)
 }
 
-fn read_and_decode_local_image(path: &Path) -> Result<DecodedImagePayload, InlineImageDecodeError> {
+fn read_and_decode_local_image(
+    path: &Path,
+    lane: bt_platform::file_reads::Lane,
+) -> Result<DecodedImagePayload, InlineImageDecodeError> {
     // The lexical gate, and then the disk's half of it: a drive-rooted name may still be a local
     // spelling of a share, and this is the line the bytes are about to be read behind. Both are
     // the one predicate, and this call is the one that may touch a disk — which is why it is here,
@@ -739,8 +750,8 @@ fn read_and_decode_local_image(path: &Path) -> Result<DecodedImagePayload, Inlin
     {
         return Err(InlineImageDecodeError::InvalidPath);
     }
-    let mut file =
-        File::open(path).map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
+    let mut file = bt_platform::file_reads::open(lane, path)
+        .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
     let metadata = file
         .metadata()
         .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
@@ -1152,7 +1163,8 @@ pub fn decode_background_image(
     if !is_admissible_local_image_path(path) {
         return Err(BackgroundImageError::InvalidPath);
     }
-    let mut file = File::open(path).map_err(|error| BackgroundImageError::Io(error.to_string()))?;
+    let mut file = bt_platform::file_reads::open(bt_platform::file_reads::Lane::InlineImage, path)
+        .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
     let metadata = file
         .metadata()
         .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
@@ -1293,19 +1305,37 @@ pub struct LocalImagePathCandidate {
 /// allowlist**: this is the scan that decides what may become a picture, and admitting a `.txt`
 /// would put a text file in front of an image decoder. Existence, size, content format and decode
 /// remain worker-only.
+///
+/// # Why this scan stops at a space and the link scan does not
+///
+/// [`bt_transcript::paths::TokenSpaces`] is the whole answer, and it is a question about *this*
+/// scan rather than about the boundary table it shares. §7.30 reads a space as a seam and hands the
+/// caller several readings of one token; which of them is real is settled by asking the disk
+/// longest first, and the printed-path chain settles it that way — one token, one link. This scan
+/// has no such judge. Its evidence is the extension allowlist below, which is a filter and not a
+/// judgement, and it decorates **every** reading that filter admits: `D:\a.png and D:\b.png` would
+/// offer `D:\a.png and D:\b.png` and `D:\a.png`, both ending in `.png`, and the line would wear two
+/// bands over each other. So it is given [`TokenSpaces::StopAt`] and reads exactly the extent it
+/// always read. A picture whose name holds a space is still named here the way it always was —
+/// **quoted**, which is a declaration of extent and admits every name there is. Giving this scan
+/// the readings needs an arbitration of its own, and an arbitration is a ruling about what a hover
+/// answers, not a lexical change.
 pub fn detect_local_image_path_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
-    bt_transcript::paths::detect_absolute_path_candidates(text)
-        .into_iter()
-        .filter_map(|candidate| {
-            let path = candidate.path_text(text);
-            is_admissible_local_image_path(Path::new(path)).then(|| LocalImagePathCandidate {
-                path: path.to_owned(),
-                byte_start: candidate.byte_start,
-                byte_end: candidate.byte_end,
-                shape: ImageReferenceShape::Native,
-            })
+    bt_transcript::paths::detect_absolute_path_candidates(
+        text,
+        bt_transcript::paths::TokenSpaces::StopAt,
+    )
+    .into_iter()
+    .filter_map(|candidate| {
+        let path = candidate.path_text(text);
+        is_admissible_local_image_path(Path::new(path)).then(|| LocalImagePathCandidate {
+            path: path.to_owned(),
+            byte_start: candidate.byte_start,
+            byte_end: candidate.byte_end,
+            shape: ImageReferenceShape::Native,
         })
-        .collect()
+    })
+    .collect()
 }
 
 /// The relative references of one line that name a picture this build can show, each still spelled

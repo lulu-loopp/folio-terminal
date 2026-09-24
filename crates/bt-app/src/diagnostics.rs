@@ -1,5 +1,8 @@
 //! **Where this process says things, and when that changes.**
 //!
+//! Presentation freshness uses `note` independently of trace routing and hangs.
+//! Its fixed numeric line formats are documented in `docs/PRESENT-DIAGNOSTICS.md`.
+//!
 //! # The fault
 //!
 //! `folio.exe` is a windows-subsystem binary (`main.rs`'s first line), so the
@@ -226,7 +229,21 @@ pub fn run_footer(now: &str, code: i32) -> String {
 /// Answers which channel the rest of the run has, which is worth one line in a
 /// startup trace and nothing else.
 pub fn enter_resident_run(storage: &Path) -> Channel {
-    let channel = choose_resident_channel(storage);
+    // **The log is opened and headed before the channel is chosen**, and that
+    // order is the whole of who owns this file's first line. See
+    // [`open_run_log`].
+    let previous_run_last_wrote = open_run_log(
+        storage,
+        &crate::hang_watch::utc_timestamp(std::time::SystemTime::now()),
+        std::process::id(),
+    );
+    // **After the header and not before it**, because [`note`]'s destination is
+    // a property of the storage directory and not of which channel won — a run
+    // that kept its console writes its watchdog lines to this file and nothing
+    // else to it — and a `note` that reached the file before the header would
+    // be the line a bug report opens with.
+    let _ = RESIDENT_LOG.set(log_path(storage));
+    let channel = choose_resident_channel(storage, previous_run_last_wrote);
     // Remembered, and this is not bookkeeping: after this call `stdout` is very
     // often *this product's own log file*, and a later caller who asks "is
     // there a screen I can write on" by looking at the handle would be told yes
@@ -234,6 +251,122 @@ pub fn enter_resident_run(storage: &Path) -> Channel {
     let _ = RESIDENT_CHANNEL.set(channel);
     channel
 }
+
+/// **Open this run's `diagnostics.log` and write the line that says whose it
+/// is** — the one owner of that file's first line.
+///
+/// # Why this is a step of its own
+///
+/// The header used to be written from inside [`choose_resident_channel`], by
+/// `eprintln!`, in the arm that had just pointed `stderr` at the log. Which
+/// meant it was written for exactly one of the three channels: a run that kept
+/// its console ([`Channel::Console`]) and a run whose log would not open
+/// ([`Channel::Nowhere`]) wrote no header at all — while [`note`] went on
+/// appending to the same file, because `note` has a handle of its own and does
+/// not care where the streams point. So the first line of the file a bug report
+/// arrives as was whatever the first watchdog line happened to be
+/// (`Folio: the window thread held control for …`), with nothing above it
+/// saying which build wrote it, and `smoke.ps1`'s last step read that and threw
+/// (release of 0.4.2, 2026-09-18).
+///
+/// Written here, it is written by the step that *opens* the file, for every
+/// kind of run, before [`RESIDENT_LOG`] exists for anything else to write
+/// through — so "the first line of this run's block is this run's header" is
+/// true by construction rather than by every later writer remembering it.
+/// Through [`append_note`] and not `eprintln!` for the same reason: the header
+/// belongs to the file, not to whichever stream this run ends up with.
+///
+/// Rotation comes with it, and moves with it for the same reason: a console run
+/// writes to this log too, and on main it was the one kind of run that never
+/// checked the cap.
+///
+/// Answers **when the previous run last wrote**, read before this run touches
+/// the file, because that is the moment
+/// [`report_the_previous_runs_crash`] measures a system crash report against —
+/// and one line further down the header moves the timestamp past every report
+/// there will ever be.
+///
+/// Takes the clock and the process id rather than reading them, so a test can
+/// state the whole of the line it expects.
+pub fn open_run_log(storage: &Path, now: &str, process_id: u32) -> Option<SystemTime> {
+    // The directory is the one `%APPDATA%\Folio\` everything else in this
+    // product already writes into; creating it here costs one call on a path
+    // that almost always exists and is what makes the header land somewhere on
+    // the first launch of all.
+    let _ = std::fs::create_dir_all(storage);
+    let log = log_path(storage);
+    let previous_run_last_wrote = last_written(&log);
+    rotate_if_oversized(&log, &storage.join(PREVIOUS_LOG_FILENAME), LOG_ROTATE_AT);
+    append_note(&log, &run_header(now, process_id));
+    previous_run_last_wrote
+}
+
+/// **One resident diagnostic, written where nothing can be waiting for a
+/// console** (X-7).
+///
+/// # Why there is a second road to the same file
+///
+/// The channel this module installs is `SetStdHandle` and `dup2` precisely so
+/// that no call site has to know where diagnostics go, and for the two hundred
+/// and forty `eprintln!` in this workspace that is still the answer. But a run
+/// that kept its console (a trace run — [`console_was_asked_for`]) writes those
+/// lines into a pipe **somebody else is supposed to be reading**, and a reader
+/// that stops reading stops the writer inside the kernel. Every thread that
+/// then says anything queues behind it, because `eprintln!` is one
+/// process-wide lock in front of one handle.
+///
+/// The two callers that must never queue there are the hang watchdog — whose
+/// whole job is to be the thread still working when the window thread is not —
+/// and the resident UI diagnostics the window thread itself writes. They come
+/// here instead: **a handle of this function's own, opened for this line and
+/// closed after it**, so there is no lock between two callers either, and a
+/// `diagnostics.log` that is a file on the disk rather than somebody's screen.
+///
+/// # And the console still gets the line when somebody asked for one
+///
+/// Through the trace sink's bounded queue, which drops rather than waits — see
+/// [`crate::trace_sink::offer_stderr_line`]. A developer watching a trace goes
+/// on seeing the watchdog's lines; a developer whose shell has stopped reading
+/// loses some of them and holds nobody up, which is the bargain every line in
+/// that module is written under.
+///
+/// Before [`enter_resident_run`] there is no resident log and this says nothing:
+/// the front door's output is [`eprintln!`]'s business and always was.
+pub fn note(text: &str) {
+    if let Some(log) = RESIDENT_LOG.get() {
+        append_note(log, text);
+    }
+    if resident_channel() == Some(Channel::Console) {
+        crate::trace_sink::offer_stderr_line(text.to_owned());
+    }
+}
+
+/// [`note`]'s file half, taking the path so a test can drive it.
+///
+/// Opened, appended to and closed per line. That is more calls than a kept
+/// handle would make and it is the point: a kept handle is a lock, and a lock
+/// is a thread waiting for another thread's stalled write, which is the thing
+/// this road exists to have none of. One `write_all` per line, to a handle the
+/// platform opened in append mode, so two writers of this file interleave whole
+/// lines rather than halves.
+///
+/// Answers whether the line reached the file.
+pub fn append_note(log: &Path, text: &str) -> bool {
+    let mut line = String::with_capacity(text.len() + 1);
+    line.push_str(text);
+    line.push('\n');
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()))
+        .is_ok()
+}
+
+/// **This run's `diagnostics.log`**, remembered for [`note`] whichever channel
+/// the run took — including a console run, where the streams never went near it
+/// and the watchdog's lines are the only thing in it.
+static RESIDENT_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// **Where the rest of this run's diagnostics can be found**, or `None` while
 /// the front door is still open.
@@ -248,7 +381,7 @@ pub fn resident_channel() -> Option<Channel> {
 
 static RESIDENT_CHANNEL: std::sync::OnceLock<Channel> = std::sync::OnceLock::new();
 
-fn choose_resident_channel(storage: &Path) -> Channel {
+fn choose_resident_channel(storage: &Path, previous_run_last_wrote: Option<SystemTime>) -> Channel {
     if console_was_asked_for(std::env::vars_os().map(|(name, _)| name)) {
         // The console was named by this run. Keep it, keep the group membership
         // that comes with it, and rely on the control handler installed at the
@@ -256,18 +389,6 @@ fn choose_resident_channel(storage: &Path) -> Channel {
         return Channel::Console;
     }
     let log = log_path(storage);
-    // The directory is the one `%APPDATA%\Folio\` that everything else in this
-    // product already writes into; creating it here costs one call on a path
-    // that almost always exists.
-    let _ = std::fs::create_dir_all(storage);
-    // **Read before anything of this run's touches the file**, and that order is
-    // the whole of what makes it mean something: it is the moment the *previous*
-    // run last said anything, which is what [`report_the_previous_runs_crash`]
-    // measures a system crash report against. One line further down the
-    // rotation renames the file, and one further still this run's own header
-    // moves the timestamp past every report there will ever be.
-    let previous_run_last_wrote = last_written(&log);
-    rotate_if_oversized(&log, &storage.join(PREVIOUS_LOG_FILENAME), LOG_ROTATE_AT);
     let channel = if bt_platform::redirect_std_streams_to_file(&log) {
         Channel::Log
     } else {
@@ -278,21 +399,12 @@ fn choose_resident_channel(storage: &Path) -> Channel {
     // between the two calls could still reach the console.
     bt_platform::detach_console();
     if channel == Channel::Log {
-        // The file's header and not the run's: a run that kept its console was
-        // started by somebody who is looking at it and already knows which build
-        // they just built. What needs a stamp is the file that will be attached
-        // to a bug report by somebody who does not.
-        eprintln!(
-            "{}",
-            run_header(
-                &crate::hang_watch::utc_timestamp(std::time::SystemTime::now()),
-                std::process::id()
-            )
-        );
         // **Under this run's header and not above it**, so that a reader
         // scrolling the file finds the news about the previous run inside the
         // run that noticed it, next to the build stamp that says which Folio
-        // was doing the noticing.
+        // was doing the noticing. [`open_run_log`] wrote that header a moment
+        // ago, whichever channel this turned out to be; this line is the one
+        // that still depends on there being a stream pointed at the file.
         report_the_previous_runs_crash(previous_run_last_wrote);
     }
     channel
@@ -460,12 +572,156 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        Channel, LOG_ROTATE_AT, console_was_asked_for, named_file, names_a_crash_report,
-        newest_crash_report, rotate_if_oversized, switched_on,
+        Channel, LOG_ROTATE_AT, append_note, console_was_asked_for, named_file,
+        names_a_crash_report, newest_crash_report, rotate_if_oversized, switched_on,
     };
 
     fn names(list: &[&str]) -> Vec<OsString> {
         list.iter().map(|name| OsString::from(*name)).collect()
+    }
+
+    /// This file's own text, for the two source pins below.
+    const DIAGNOSTICS: &str = include_str!("diagnostics.rs");
+
+    /// The channel chooser's declaration, at column zero. Named once so that the
+    /// two pins that read its body cannot come to mean two different functions.
+    const CHOOSER: &str = "\nfn choose_resident_channel(storage: &Path, previous_run_last_wrote: Option<SystemTime>) -> Channel {";
+
+    /// The text of the free function `opener` opens, to the `}` in column zero
+    /// that closes it. The caller and nothing else — a whole-file search would
+    /// answer with this crate's own tests, which quote these names to pin the
+    /// order they are called in.
+    fn body(source: &str, opener: &str) -> String {
+        let at = source
+            .find(opener)
+            .unwrap_or_else(|| panic!("`{opener}` is declared once, at column zero"));
+        let rest = &source[at..];
+        let end = rest
+            .find("\n}\n")
+            .expect("a free function is closed by a `}` at column zero");
+        rest[..end].to_owned()
+    }
+
+    /// RED (D3, the 0.4.2 release of 2026-09-18) — **the first line of a run's
+    /// block in `diagnostics.log` is that run's header, and it is written by the
+    /// step that opens the file rather than by the arm that happens to point a
+    /// stream at it.**
+    ///
+    /// The file a bug report arrives as opened with
+    /// `Folio: the window thread held control for …` and carried no build line
+    /// at all, so nothing in it said which Folio wrote it and `smoke.ps1`'s last
+    /// step threw on an otherwise green release. The cause is the ownership:
+    /// [`super::note`] appends through a handle of its own, from the moment
+    /// `RESIDENT_LOG` is set, while the header was written from inside
+    /// `choose_resident_channel`'s `if channel == Channel::Log` arm — so a run
+    /// that kept its console, or whose log would not take the streams, wrote
+    /// notes into a file it had never headed.
+    ///
+    /// **RED ON MAIN:** the second assertion — that the channel chooser writes
+    /// no header — is false on `main`, where `run_header` is called from inside
+    /// that arm. The behavioural half pins the repair: the header is line 1 and
+    /// the watchdog's line is line 2, for a run of any channel, because the
+    /// header is written before `RESIDENT_LOG` exists for anything else to write
+    /// through.
+    ///
+    /// MUTATION: move the `append_note` of the header back below the
+    /// `RESIDENT_LOG.set` in `enter_resident_run` and the ordering this states
+    /// stops being guaranteed; drop it and the first assertion goes red.
+    #[test]
+    fn a_run_heads_its_log_before_anything_else_can_write_into_it() {
+        let storage = a_reports_directory("run-log");
+        let log = super::log_path(&storage);
+
+        let previous = super::open_run_log(&storage, "2026-09-20T01:02:03.456Z", 4242);
+        assert_eq!(
+            previous, None,
+            "the first launch of all has no previous run to measure a crash report against"
+        );
+
+        // What an ordinary run says next, down the road that owes nobody a lock
+        // — the watchdog's line, which is the one that was arriving as line 1.
+        assert!(append_note(
+            &log,
+            "Folio: the window thread held control for 3971 ms on turn 15341"
+        ));
+
+        let text = std::fs::read_to_string(&log).expect("the log was made");
+        let mut lines = text.lines();
+        let header = lines.next().expect("the log is not empty");
+        assert!(
+            header.contains("run started")
+                && header.contains(&crate::version::banner())
+                && header.contains("pid 4242")
+                && header.contains("2026-09-20T01:02:03.456Z"),
+            "diagnostics.log opens with `{header}`, and that first line is what \
+             smoke.ps1's last step reads and what a bug report is dated by"
+        );
+        assert_eq!(
+            lines.next(),
+            Some("Folio: the window thread held control for 3971 ms on turn 15341"),
+            "and everything the run says afterwards is under its own header"
+        );
+
+        // A second run heads its own block, and reads the moment the first one
+        // last wrote — before its own header moves that moment.
+        let second = super::open_run_log(&storage, "2026-09-20T01:03:00.000Z", 4243);
+        assert!(
+            second.is_some(),
+            "a run with a log already there measures against when it was last written"
+        );
+        let text = std::fs::read_to_string(&log).expect("the log is still there");
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.contains("run started"))
+                .count(),
+            2,
+            "one header per run, and the file is the stack of them"
+        );
+        assert!(
+            text.lines()
+                .next_back()
+                .is_some_and(|line| line.contains("pid 4243")),
+            "the newest run's header is the last line of a file nothing else has written to yet"
+        );
+
+        // The source half: the header has one owner, and it is not the arm that
+        // chose a stream. This is the assertion that is red on `main`.
+        let chooser = body(DIAGNOSTICS, CHOOSER);
+        assert!(
+            !chooser.contains("run_header"),
+            "the channel chooser writes the header again, so a run that kept its \
+             console or could not open its log writes none:\n{chooser}"
+        );
+        assert!(
+            body(DIAGNOSTICS, "\npub fn open_run_log(").contains("append_note(&log, &run_header("),
+            "the header is no longer written by the step that opens the log"
+        );
+
+        let _ = std::fs::remove_dir_all(&storage);
+    }
+
+    /// PIN — **the road that owes nobody a lock takes whole lines and makes its
+    /// own file** (X-7).
+    ///
+    /// Two writers of one log, which is what a run with a `Log` channel actually
+    /// has — the streams on one handle and this on another — and the thing that
+    /// must survive it is a reader's ability to read a line. Appending, so a
+    /// second note does not stand on the first.
+    #[test]
+    fn a_note_appends_a_whole_line_to_a_log_of_its_own() {
+        let directory = a_reports_directory("notes");
+        let log = directory.join(super::LOG_FILENAME);
+        assert!(append_note(&log, "the window thread has not answered"));
+        assert!(append_note(&log, "and then it did"));
+        assert_eq!(
+            std::fs::read_to_string(&log).expect("the log was made"),
+            "the window thread has not answered\nand then it did\n"
+        );
+        assert!(
+            !append_note(&directory, "a directory is not a log"),
+            "a note that could not be written says so"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     // ── M4-11: the system's own crash reports ──────────────────────────────
@@ -614,23 +870,7 @@ mod tests {
     /// whether the file opened.
     #[test]
     fn nothing_branches_on_the_two_console_no_ops() {
-        const DIAGNOSTICS: &str = include_str!("diagnostics.rs");
         const MAIN: &str = include_str!("main.rs");
-
-        /// The text of the free function `opener` opens, to the `}` in column
-        /// zero that closes it. The caller and nothing else — a whole-file
-        /// search would answer with this crate's own tests, which quote these
-        /// names to pin the order they are called in.
-        fn body(source: &str, opener: &str) -> String {
-            let at = source
-                .find(opener)
-                .unwrap_or_else(|| panic!("`{opener}` is declared once, at column zero"));
-            let rest = &source[at..];
-            let end = rest
-                .find("\n}\n")
-                .expect("a free function is closed by a `}` at column zero");
-            rest[..end].to_owned()
-        }
 
         for (source, opener, where_it_is, call) in [
             (
@@ -639,12 +879,7 @@ mod tests {
                 "main.rs",
                 "adopt_parent_console",
             ),
-            (
-                DIAGNOSTICS,
-                "\nfn choose_resident_channel(storage: &Path) -> Channel {",
-                "diagnostics.rs",
-                "detach_console",
-            ),
+            (DIAGNOSTICS, CHOOSER, "diagnostics.rs", "detach_console"),
         ] {
             let caller = body(source, opener);
             let statement = format!("    bt_platform::{call}();\n");

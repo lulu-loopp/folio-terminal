@@ -784,7 +784,38 @@ fn read_scheme_file(path: &Path) -> Result<String, String> {
         Ok(_) => {}
         Err(error) => return Err(format!("the file could not be read: {error}")),
     }
-    std::fs::read_to_string(path).map_err(|error| format!("the file could not be read: {error}"))
+    bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, path)
+        .map_err(|error| format!("the file could not be read: {error}"))
+}
+
+/// **Every scheme file in the reader's folder, as the JSON it holds** — the
+/// `schemes` part of a settings export (0.4.4 ticket 05), keyed by file name.
+///
+/// Read through [`user_sources`], the one door the catalogue reads the folder
+/// by, so the export carries exactly the files the picker was built from. A file
+/// whose text is not JSON cannot be carried as a JSON value and comes back in
+/// the second list with its reason, for the caller to name; a file that is JSON
+/// but not a scheme is carried as it is, and the importing side's
+/// `parse_scheme` is what names it there.
+#[must_use]
+pub fn user_documents() -> (
+    std::collections::BTreeMap<String, serde_json::Value>,
+    Vec<SchemeReject>,
+) {
+    let mut documents = std::collections::BTreeMap::new();
+    let mut rejects = Vec::new();
+    for SchemeSource { file, text, .. } in user_sources() {
+        match text.and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|error| format!("the file is not JSON: {error}"))
+        }) {
+            Ok(document) => {
+                documents.insert(file, document);
+            }
+            Err(reason) => rejects.push(SchemeReject { file, reason }),
+        }
+    }
+    (documents, rejects)
 }
 
 fn user_sources() -> impl Iterator<Item = SchemeSource> {

@@ -1,0 +1,162 @@
+file	symbol	kind	start	end	attributes
+src/attention_hooks.rs	attention_hooks::impl Config	impl_item	669	723	[]
+src/attention_hooks.rs	attention_hooks::impl Config	impl_item	869	914	[]
+src/attention_ownership.rs	attention_ownership::impl Decision	impl_item	13	17	[]
+src/attention_ownership.rs	attention_ownership::impl From<bool> for Decision	impl_item	19	23	[]
+src/attention_ownership.rs	attention_ownership::impl Pending	impl_item	31	39	[]
+src/attention_ownership.rs	attention_ownership::tests	mod_item	293	1214	"[""#[cfg(test)]""]"
+src/clipboard_picture.rs	clipboard_picture::tests	mod_item	447	899	"[""#[cfg(test)]""]"
+src/coalesce.rs	coalesce::impl Pending	impl_item	72	84	[]
+src/coalesce.rs	coalesce::transport_tests	mod_item	154	324	"[""#[cfg(test)]""]"
+src/coalesce.rs	coalesce::transport_tests::impl Pane	impl_item	182	242	[]
+src/coalesce.rs	coalesce::session_tests	mod_item	327	584	"[""#[cfg(test)]""]"
+src/coalesce.rs	coalesce::session_tests::impl Screen	impl_item	359	415	[]
+src/coalesce.rs	coalesce::tests	mod_item	587	833	"[""#[cfg(test)]""]"
+src/explorer_menu.rs	explorer_menu::impl MenuFate	impl_item	888	919	[]
+src/file_reads.rs	file_reads::impl Clock	impl_item	44	82	[]
+src/file_reads.rs	file_reads::tests	mod_item	85	141	"[""#[cfg(test)]""]"
+src/file_reads_source_tests.rs	file_reads_source_tests::impl Doors	impl_item	65	72	[]
+src/file_reads_source_tests.rs	file_reads_source_tests::impl Visit<'ast> for Doors	impl_item	74	181	[]
+src/first_run.rs	first_run::clock_edge_tests	mod_item	3864	3951	"[""#[cfg(test)]""]"
+src/formula_tools.rs	formula_tools::impl FormulaToggleMotion	impl_item	627	790	[]
+src/hang_watch.rs	hang_watch::detail	mod_item	327	327	"[""#[path = \""hang_watch_detail.rs\""]""]"
+src/hang_watch.rs	hang_watch::impl From<Station> for Location	impl_item	2025	2029	[]
+src/hang_watch_detail.rs	hang_watch_detail::impl Node	impl_item	22	30	[]
+src/hang_watch_detail.rs	hang_watch_detail::impl AtomicNode	impl_item	43	67	[]
+src/hang_watch_detail.rs	hang_watch_detail::impl Default for Tree	impl_item	75	82	[]
+src/hang_watch_detail.rs	hang_watch_detail::impl Ledger	impl_item	93	245	[]
+src/hang_watch_detail.rs	hang_watch_detail::impl Tree	impl_item	247	324	[]
+src/hang_watch_detail.rs	hang_watch_detail::tests	mod_item	327	502	"[""#[cfg(test)]""]"
+src/hang_watch_detail.rs	hang_watch_detail::tests::impl Parsed	impl_item	338	388	[]
+src/highlight.rs	highlight::impl Grammar	impl_item	449	461	[]
+src/ime_outbound.rs	ime_outbound::impl Runtime<'_>	impl_item	151	280	[]
+src/ime_outbound.rs	ime_outbound::tests	mod_item	283	495	"[""#[cfg(test)]""]"
+src/ime_report.rs	ime_report::impl Report	impl_item	56	232	[]
+src/ime_report.rs	ime_report::tests	mod_item	245	245	"[""#[cfg(test)]"", ""#[path = \""ime_report_tests.rs\""]""]"
+src/journeys_tests.rs	journeys_tests::impl ToastEntrance	impl_item	123	137	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for ToastEntrance	impl_item	139	158	[]
+src/journeys_tests.rs	journeys_tests::impl ToastExit	impl_item	173	192	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for ToastExit	impl_item	194	213	[]
+src/journeys_tests.rs	journeys_tests::impl TipFade	impl_item	225	246	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for TipFade	impl_item	248	275	[]
+src/journeys_tests.rs	journeys_tests::impl KeyHintFade	impl_item	284	305	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for KeyHintFade	impl_item	307	331	[]
+src/journeys_tests.rs	journeys_tests::impl CardNudge	impl_item	340	350	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for CardNudge	impl_item	352	371	[]
+src/journeys_tests.rs	journeys_tests::impl CommandRail	impl_item	381	387	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for CommandRail	impl_item	389	407	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for CommandFlash	impl_item	414	430	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for ThumbFade	impl_item	446	462	[]
+src/journeys_tests.rs	journeys_tests::impl GlanceCardFade	impl_item	471	483	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for GlanceCardFade	impl_item	496	520	[]
+src/journeys_tests.rs	journeys_tests::impl FloatJourney	impl_item	544	575	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for FloatJourney	impl_item	577	602	[]
+src/journeys_tests.rs	journeys_tests::impl Marks	impl_item	629	652	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for Marks	impl_item	654	687	[]
+src/journeys_tests.rs	journeys_tests::impl BandChangingFace	impl_item	696	722	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for BandChangingFace	impl_item	724	740	[]
+src/journeys_tests.rs	journeys_tests::impl StripTween	impl_item	752	759	[]
+src/journeys_tests.rs	journeys_tests::impl Journey for StripTween	impl_item	761	777	[]
+src/main.rs	attention_ownership	mod_item	46	46	[]
+src/main.rs	clipboard_picture	mod_item	53	53	[]
+src/main.rs	coalesce	mod_item	55	55	[]
+src/main.rs	file_reads	mod_item	62	62	[]
+src/main.rs	file_reads_source_tests	mod_item	64	64	"[""#[cfg(test)]""]"
+src/main.rs	ime_outbound	mod_item	81	81	[]
+src/main.rs	ime_report	mod_item	82	82	[]
+src/main.rs	journeys_tests	mod_item	90	90	"[""#[cfg(test)]"", ""#[path = \""journeys_tests.rs\""]""]"
+src/main.rs	pace	mod_item	99	99	[]
+src/main.rs	present_diagnostics	mod_item	106	106	[]
+src/main.rs	present_gate	mod_item	107	107	[]
+src/main.rs	shell_literal	mod_item	135	135	[]
+src/main.rs	trace_sink	mod_item	149	149	[]
+src/main.rs	uninstall	mod_item	150	150	[]
+src/main.rs	impl ClipboardPictureMailbox	impl_item	876	911	[]
+src/main.rs	impl ClipboardPictureJob	impl_item	957	968	[]
+src/main.rs	impl Drop for ClipboardPictureJob	impl_item	970	974	[]
+src/main.rs	impl KeyboardOwner	impl_item	18289	18312	[]
+src/main.rs	impl Composing	impl_item	18609	18630	[]
+src/main.rs	impl PtyInput	impl_item	19272	19277	[]
+src/main.rs	impl DropBatch	impl_item	23097	23125	[]
+src/main.rs	impl RowVerb	impl_item	30573	30587	[]
+src/main.rs	impl settings::geometry::PointerHost for Runtime<'_>	impl_item	38585	38617	[]
+src/main.rs	endpoint_claim_tests	mod_item	38706	38758	"[""#[cfg(test)]""]"
+src/main.rs	hold_station_tests	mod_item	108898	109089	"[""#[cfg(test)]""]"
+src/main.rs	formula_copy_clock_tests	mod_item	111402	111542	"[""#[cfg(test)]""]"
+src/main.rs	impl MainMenuInputs	impl_item	115245	115259	[]
+src/main.rs	clipboard_picture_race_tests	mod_item	123408	123520	"[""#[cfg(test)]""]"
+src/main.rs	quit_with_no_window_tests	mod_item	128106	128192	"[""#[cfg(test)]""]"
+src/main.rs	clipboard_path_tests	mod_item	128879	130412	"[""#[cfg(test)]""]"
+src/main.rs	clipboard_path_tests::impl ClipboardPort for MemoryClipboard	impl_item	128889	128916	[]
+src/main.rs	clipboard_path_tests::impl KeyboardOwnerCase	impl_item	129801	129814	[]
+src/main.rs	printed_path_provenance_tests	mod_item	130423	131328	"[""#[cfg(test)]""]"
+src/main.rs	printed_path_provenance_tests::impl Ledger<'_>	impl_item	130484	130501	[]
+src/pace.rs	pace::impl Lanes	impl_item	197	203	[]
+src/pace.rs	pace::impl Default for FrameClock	impl_item	205	218	[]
+src/pace.rs	pace::impl FrameClock	impl_item	220	354	[]
+src/pace.rs	pace::tests	mod_item	357	645	"[""#[cfg(test)]""]"
+src/persist.rs	persist::impl SaveRefusal	impl_item	309	323	[]
+src/present_diagnostics.rs	present_diagnostics::impl Outcome	impl_item	55	82	[]
+src/present_diagnostics.rs	present_diagnostics::impl State	impl_item	130	196	[]
+src/present_diagnostics.rs	present_diagnostics::impl Attempt	impl_item	212	304	[]
+src/present_diagnostics.rs	present_diagnostics::tests	mod_item	332	332	"[""#[cfg(test)]"", ""#[path = \""present_diagnostics_tests.rs\""]""]"
+src/present_gate.rs	present_gate::impl PresentGate	impl_item	58	93	[]
+src/present_gate.rs	present_gate::tests	mod_item	96	323	"[""#[cfg(test)]""]"
+src/profiles.rs	profiles::paste_tests	mod_item	24649	24935	"[""#[cfg(test)]""]"
+src/profiles.rs	profiles::paste_tests::impl ShellEnvironment for EmptyMachine	impl_item	24656	24663	[]
+src/psreadline.rs	psreadline::installed_disk	mod_item	1229	1294	[]
+src/psreadline.rs	psreadline::installed_disk::impl Disk for System	impl_item	1245	1266	[]
+src/psreadline.rs	psreadline::tests::impl installed_disk::Disk for CountingDisk	impl_item	1624	1656	[]
+src/psreadline.rs	psreadline::tests::impl Drop for DiskOverride	impl_item	1660	1664	[]
+src/quit.rs	quit::impl WriteVerdict	impl_item	196	202	[]
+src/search.rs	search::impl HistoryWindow	impl_item	903	935	[]
+src/search.rs	search::impl HistoryScan	impl_item	944	957	[]
+src/search.rs	search::tests::impl Rng	impl_item	1870	1881	[]
+src/settings.rs	settings::impl CjkFamilySlot	impl_item	1669	1720	[]
+src/settings.rs	settings::impl MenuSource	impl_item	12119	12134	[]
+src/settings.rs	settings::geometry	mod_item	15336	15336	"[""#[path = \""settings_geometry.rs\""]""]"
+src/settings.rs	settings::tests::impl geometry::PointerHost for SettingsPointerHarness	impl_item	15456	15489	[]
+src/settings_geometry.rs	settings_geometry::impl Inputs	impl_item	34	100	[]
+src/settings_geometry.rs	settings_geometry::impl Geometry	impl_item	111	155	[]
+src/settings_geometry.rs	settings_geometry::tests	mod_item	178	361	"[""#[cfg(test)]""]"
+src/shell_integration.rs	shell_integration::profile_marks	mod_item	50	50	[]
+src/shell_integration.rs	shell_integration::profile_runtime	mod_item	51	51	[]
+src/shell_integration/profile_marks.rs	shell_integration::profile_marks::impl Forms	impl_item	46	74	[]
+src/shell_integration/profile_marks.rs	shell_integration::profile_marks::impl Decoded	impl_item	94	137	[]
+src/shell_integration/profile_marks.rs	shell_integration::profile_marks::impl Default for PowerShellState	impl_item	213	217	[]
+src/shell_integration/profile_marks.rs	shell_integration::profile_marks::impl Default for Marks	impl_item	238	250	[]
+src/shell_integration/profile_marks.rs	shell_integration::profile_marks::impl Marks	impl_item	252	325	[]
+src/shell_integration/profile_marks.rs	shell_integration::profile_marks::impl Asker	impl_item	407	414	[]
+src/shell_integration/profile_marks.rs	shell_integration::profile_marks::impl Report	impl_item	465	538	[]
+src/shell_integration/profile_marks.rs	shell_integration::profile_marks::tests	mod_item	621	783	"[""#[cfg(test)]""]"
+src/shell_integration/profile_runtime.rs	shell_integration::profile_runtime::tests	mod_item	348	980	"[""#[cfg(test)]""]"
+src/shell_literal.rs	shell_literal::impl ShellGrammar	impl_item	20	32	[]
+src/shell_literal.rs	shell_literal::impl PathSpelling	impl_item	42	53	[]
+src/shell_literal.rs	shell_literal::impl Refusal	impl_item	79	91	[]
+src/shell_literal.rs	shell_literal::impl Encoder	impl_item	117	164	[]
+src/shell_literal.rs	shell_literal::impl Recipient	impl_item	175	193	[]
+src/shell_literal.rs	shell_literal::tests	mod_item	245	690	"[""#[cfg(test)]""]"
+src/tests.rs	tests::impl PtyPresentationHarness	impl_item	12134	12269	[]
+src/tests.rs	tests::impl TwoPaneHarness	impl_item	13946	14060	[]
+src/tests.rs	tests::impl ResizeGateHarness	impl_item	20569	20672	[]
+src/trace.rs	trace::impl TraceFile	impl_item	53	103	[]
+src/trace.rs	trace::impl Dump	impl_item	204	219	[]
+src/trace_sink.rs	trace_sink::impl Queue	impl_item	90	139	[]
+src/trace_sink.rs	trace_sink::impl Drop for Shutdown	impl_item	171	175	[]
+src/trace_sink.rs	trace_sink::impl std::io::Write for ProcessStderr	impl_item	340	352	[]
+src/trace_sink.rs	trace_sink::impl StalledWriter	impl_item	450	498	"[""#[cfg(test)]""]"
+src/trace_sink.rs	trace_sink::impl Drop for StalledWriter	impl_item	501	514	"[""#[cfg(test)]""]"
+src/trace_sink.rs	trace_sink::impl std::io::Write for BlockedStderr	impl_item	525	539	"[""#[cfg(test)]""]"
+src/trace_sink.rs	trace_sink::tests	mod_item	550	824	"[""#[cfg(test)]""]"
+src/uninstall.rs	uninstall::impl Entry	impl_item	237	275	[]
+src/uninstall.rs	uninstall::impl Report	impl_item	286	319	[]
+src/uninstall.rs	uninstall::impl Scope	impl_item	330	457	[]
+src/uninstall.rs	uninstall::impl std::fmt::Display for HeldFile	impl_item	756	765	[]
+src/uninstall.rs	uninstall::impl std::error::Error for HeldFile	impl_item	766	766	[]
+src/uninstall.rs	uninstall::impl HeldFile	impl_item	767	771	[]
+src/uninstall.rs	uninstall::tests	mod_item	939	939	"[""#[cfg(test)]"", ""#[path = \""uninstall_tests.rs\""]""]"
+src/uninstall_tests.rs	uninstall_tests::uninstall_source_guard_pins_known_writers_and_inventory::impl Visit<'ast> for Functions	impl_item	526	545	[]
+src/webnav.rs	webnav::impl PartialEq for LocalFileUrl	impl_item	217	221	[]
+src/webnav.rs	webnav::impl Eq for LocalFileUrl	impl_item	223	223	[]
+src/webnav.rs	webnav::impl LocalFileUrl	impl_item	225	356	[]
+src/webnav.rs	webnav::file_url_tests	mod_item	1782	2178	"[""#[cfg(test)]""]"

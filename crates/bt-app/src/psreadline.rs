@@ -46,6 +46,7 @@
 //! the first bump, and the symptom — a module installed that the script still
 //! treats as unproven — is invisible from either side.
 
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -442,7 +443,10 @@ fn run_probe() -> Probe {
     };
     let output = command
         .args(["-NoProfile", "-NonInteractive", "-Command", PROBE_COMMAND])
-        .output();
+        .output()
+        .inspect(|output| {
+            bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Settings, output)
+        });
     let Ok(output) = output else {
         return Probe::default();
     };
@@ -515,24 +519,44 @@ pub enum RowState {
     AlreadyCurrent,
     /// `settings.json` says Folio installed it and it is not there any more.
     RemovedElsewhere,
+    /// **A module somebody else wrote is standing in the directory Folio
+    /// installs into** (audit 3, E-1).
+    ///
+    /// The hole this closes: `installed_copy` answered `None` for *"nothing is
+    /// there"* and for *"somebody else's module is there"* alike, so the row
+    /// read an occupied directory as an empty one and offered `On` over it —
+    /// from `Outdated` whenever the one-shot probe was stale or blind, and from
+    /// `RemovedElsewhere` with no race at all. Both verbs are dark here: this is
+    /// not Folio's module to replace and not Folio's to delete.
+    NotOurs,
 }
 
-/// Which Folio-written copy, if any, is on disk under a Documents root.
+/// Who owns the module directory under a Documents root.
 ///
-/// Three answers and not a `bool`, because the middle one is the whole of the
-/// 2026-08-18 ruling: "there is a module here and Folio's family wrote it, but
-/// not this build" is a different sentence from either "this build wrote it" or
-/// "nothing of ours is here", and a caller handed a `bool` has to pick one of
-/// the two to lie with.
+/// Four answers and not a `bool`, because each of the middle two is a ruling.
+/// `OlderBuild` is the 2026-08-18 one: "there is a module here and Folio's
+/// family wrote it, but not this build" is a different sentence from either
+/// "this build wrote it" or "nothing of ours is here", and a caller handed a
+/// `bool` has to pick one of the two to lie with.
+///
+/// [`Self::Foreign`] is audit 3's (E-1) and it is the same mistake one step
+/// further out: until it existed, "nothing is there" and "somebody else's module
+/// is there" were both [`Self::None`], so the *install* door could not tell an
+/// empty directory from an occupied one and wrote over a module PowerShellGet
+/// had put in the reader's own `Documents`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum InstalledCopy {
-    /// Nothing of Folio's family is in the module directory.
+    /// **The place is Folio's to write** — nothing is there, or what is there is
+    /// this build's own work in a state `is_folios_copy` will not vouch for:
+    /// an interrupted write, or an edit somebody made to Folio's own files.
     #[default]
     None,
     /// Byte for byte, or build for build, what this executable carries.
     ThisBuild,
     /// A `2.4.6-bt.*` that is not this one — an older Folio's work.
     OlderBuild,
+    /// **A module Folio did not write.** Neither verb on the row touches it.
+    Foreign,
 }
 
 /// Reconcile the probe with the stored state.
@@ -554,6 +578,14 @@ pub fn row_state(
         // under `AlreadyCurrent` — the row telling a reader their module is
         // fine while shipping a newer repair for it.
         InstalledCopy::OlderBuild => return RowState::UpdateAvailable,
+        // **Ahead of the stored state as well as the probe** (audit 3, E-1).
+        // `RemovedElsewhere` used to be answered before the disk was consulted
+        // at all, so a reader whose invitation said `Installed` was offered `On`
+        // over a gallery module however fresh the reading of the machine was.
+        // What is on the disk is a fact about the disk; what `settings.json`
+        // remembers is a fact about this reader — and the first one decides
+        // whether the directory may be written to.
+        InstalledCopy::Foreign => return RowState::NotOurs,
         InstalledCopy::None => {}
     }
     if invite == bt_persist::PsReadLineInviteV1::Installed {
@@ -608,6 +640,14 @@ pub fn row_description_in(state: RowState, lang: i18n::Lang) -> &'static str {
     match state {
         RowState::Probing => Text::PsReadLineProbing.in_lang(lang),
         RowState::RemovedElsewhere => Text::PsReadLineRowGone.in_lang(lang),
+        // **Not `AlreadyCurrent`'s sentence, though the directory is a 2.4.6
+        // leaf.** That line names what the *probe* found, and the machines this
+        // state exists for are exactly the ones whose probe is stale or blind —
+        // it would tell a reader their PSReadLine is 2.0.0 while a 2.4.6 sits
+        // in front of the row. What is true here is about ownership, not about
+        // a version, and it takes no runtime value, so it is an entry rather
+        // than a cached line.
+        RowState::NotOurs => Text::PsReadLineRowNotOurs.in_lang(lang),
         // **Two sentences, because there are two situations** (§7.47): a module
         // that is merely old, and a module that is old on a machine whose
         // execution policy will not take the replacement. The second reader's
@@ -880,18 +920,101 @@ pub fn documents_directory() -> Option<PathBuf> {
     }
 }
 
-/// Write the nine bundled files into `documents`.
+/// What a write into the module directory did.
 ///
-/// Creates the directories it needs and overwrites what is there, which is the
-/// right behaviour for the only case that reaches it: a previous install that
-/// was interrupted, or a file that was edited. It never touches a *different*
-/// version's directory — `2.4.6` is a leaf of its own, which is how PowerShell's
-/// module path is organised and why a per-version directory is the unit here.
+/// A second answer beside the path, and not an `io::Error`, because a directory
+/// that belongs to somebody else is not a failure of the machine's: nothing went
+/// wrong, and the sentence the reader is owed names an owner rather than quoting
+/// Windows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Wrote {
+    /// The nine files are on disk, under this root.
+    Module(PathBuf),
+    /// The directory holds a module Folio did not write. **Nothing was
+    /// written.**
+    NotOurs,
+}
+
+/// Write the nine bundled files into `documents`, and record the root first.
 ///
 /// Takes a Documents root rather than reading one, so a test can install into a
 /// temporary directory and read back exactly what a real install would write.
-pub fn install_into(documents: &Path) -> io::Result<PathBuf> {
+///
+/// The record is taken **before** the first byte lands and inside the same
+/// occupancy check as the write, so an install interrupted halfway still leaves
+/// the cleanup door something to find, and a directory that is refused leaves no
+/// claim on a path Folio never wrote to.
+pub fn install_recorded(documents: &Path, data: &Path) -> io::Result<Wrote> {
+    use crate::shell_integration::profile_marks::{self, Marks};
+    install_checked(documents, |root| {
+        if !root.is_absolute() {
+            return Err(io::Error::other(crate::i18n::Text::ShellMarksPath.text()));
+        }
+        // One of Folio's own writers: this is a press on the invitation or on
+        // the Settings row, so it stands in the queue rather than reporting one.
+        let lock = profile_marks::lock(data, profile_marks::Asker::InApp)?;
+        let mut marks = Marks::read(data)?;
+        if !marks.psreadline_module_roots.iter().any(|it| it == root) {
+            marks.psreadline_module_roots.push(root.to_owned());
+        }
+        marks.write(data)?;
+        // Held across the write, as it was when this function did both halves
+        // itself.
+        Ok(lock)
+    })
+}
+
+/// Historical roots must have exactly the shape this writer owns.
+pub fn documents_for_module_root(root: &Path) -> Option<PathBuf> {
+    let documents = root
+        .ancestors()
+        .find(|parent| module_directory(parent) == root)?;
+    Some(documents.to_owned())
+}
+
+/// Write the nine bundled files into `documents`, recording nothing.
+///
+/// Creates the directories it needs and overwrites what is there, which is the
+/// right behaviour for the cases that reach it: a previous install of Folio's
+/// that was interrupted, an older Folio build being updated, or a file of
+/// Folio's that was edited. It never touches a *different* version's directory —
+/// `2.4.6` is a leaf of its own, which is how PowerShell's module path is
+/// organised and why a per-version directory is the unit here.
+///
+/// **Tests only**, as [`apply`] is and for its reason: the product's one road to
+/// the disk records the root it is about to write to, and a second road that
+/// skipped the record would be a module the cleanup door cannot find.
+#[cfg(test)]
+pub fn install_into(documents: &Path) -> io::Result<Wrote> {
+    install_checked(documents, |_| Ok(()))
+}
+
+/// **The only writer, and the occupancy check is inside it** (audit 3, E-1).
+///
+/// This is [`remove_from`]'s own rule turned round, in the words that function's
+/// doc comment has carried since the feature was written: *a delete guarded from
+/// outside is a delete that the next caller performs unguarded* — and so is a
+/// write. Until this check existed the whole guard was a [`RowState`] the caller
+/// computed, out of a probe read once per process, and two of that table's
+/// states let the write through over a module PowerShellGet had installed in the
+/// reader's own `Documents`: `Outdated` whenever the probe was stale or blind,
+/// and `RemovedElsewhere` with no race at all.
+///
+/// The disk is read **here**, at the moment of the write. That is an edge — a
+/// press — and not a poll, so it owes nothing to the clock-run budget.
+///
+/// `before` is what the caller wants done between the check passing and the
+/// first byte landing, and its return value is held until the write is over:
+/// [`install_recorded`] takes the marks lock there.
+fn install_checked<G>(
+    documents: &Path,
+    before: impl FnOnce(&Path) -> io::Result<G>,
+) -> io::Result<Wrote> {
     let root = module_directory(documents);
+    if installed_copy(documents) == InstalledCopy::Foreign {
+        return Ok(Wrote::NotOurs);
+    }
+    let _held = before(&root)?;
     for (name, bytes) in BUNDLED_FILES {
         let path = root.join(name);
         if let Some(parent) = path.parent() {
@@ -899,7 +1022,7 @@ pub fn install_into(documents: &Path) -> io::Result<PathBuf> {
         }
         std::fs::write(&path, bytes)?;
     }
-    Ok(root)
+    Ok(Wrote::Module(root))
 }
 
 /// Whether the directory under `documents` holds **this build's** copy, byte for
@@ -915,15 +1038,36 @@ pub fn install_into(documents: &Path) -> io::Result<PathBuf> {
 ///
 /// Every file is compared, not a sample: a directory holding eight of the nine
 /// plus somebody's own edit of the ninth is not this build's copy.
+///
+/// **Tests only.** The product asks [`installed_copy`], which needs the same
+/// comparison with the `is_dir` already answered and calls `is_folios_copy_at`
+/// directly; this is that question asked from a Documents root.
+#[cfg(test)]
 #[must_use]
 pub fn is_folios_copy(documents: &Path) -> bool {
     let root = module_directory(documents);
-    if !root.is_dir() {
-        return false;
-    }
+    installed_disk::is_dir(&root) && is_folios_copy_at(&root)
+}
+
+/// Whether the module directory holds this build's copy, byte for byte, with
+/// the directory question already answered.
+///
+/// Split so that [`installed_copy`] asks `is_dir` exactly once for the whole of
+/// its decision — the clock-run budget counts that call, and a second one would
+/// be a second reading of a fact this function was handed.
+fn is_folios_copy_at(root: &Path) -> bool {
     BUNDLED_FILES.iter().all(|(name, bytes)| {
-        std::fs::read(root.join(name)).is_ok_and(|found| found.as_slice() == *bytes)
+        installed_disk::read(&root.join(name)).is_ok_and(|found| found.as_slice() == *bytes)
     })
+}
+
+/// The bytes this build ships under one of the [`BUNDLED_FILES`] names.
+fn bundled(name: &str) -> &'static [u8] {
+    BUNDLED_FILES
+        .iter()
+        .find(|(bundled, _)| *bundled == name)
+        .expect("a name out of BUNDLED_FILES")
+        .1
 }
 
 /// The `ProductVersion` stamped into the module installed under `documents`, if
@@ -945,7 +1089,7 @@ pub fn is_folios_copy(documents: &Path) -> bool {
 #[must_use]
 pub fn installed_build(documents: &Path) -> Option<String> {
     let stamp = module_directory(documents).join(BUILD_STAMP_FILE);
-    let build = file_product_version(&stamp)?;
+    let build = installed_disk::product_version(&stamp)?;
     build.starts_with(&family_prefix()).then_some(build)
 }
 
@@ -968,7 +1112,11 @@ pub fn installed_build(documents: &Path) -> Option<String> {
 /// there it is the only claim anybody can make.
 #[must_use]
 pub fn installed_copy(documents: &Path) -> InstalledCopy {
-    if is_folios_copy(documents) {
+    let root = module_directory(documents);
+    if !installed_disk::is_dir(&root) {
+        return InstalledCopy::None;
+    }
+    if is_folios_copy_at(&root) {
         return InstalledCopy::ThisBuild;
     }
     match installed_build(documents) {
@@ -976,7 +1124,172 @@ pub fn installed_copy(documents: &Path) -> InstalledCopy {
         // this directory has been edited since Folio wrote it. See above.
         Some(build) if build == PATCHED_BUILD => InstalledCopy::None,
         Some(_) => InstalledCopy::OlderBuild,
-        None => InstalledCopy::None,
+        None => unclaimed_or_foreign(&root),
+    }
+}
+
+/// Whether a directory that carries no `-bt` stamp is **free** or **somebody
+/// else's** (audit 3, E-1).
+///
+/// Reached only when the two claims above have failed, so what is known on the
+/// way in is: the leaf exists, its nine files are not byte for byte this
+/// build's, and nothing in it carries Folio's family stamp.
+///
+/// **The assembly decides, and the rest of the leaf only when there is none.**
+/// PSReadLine is a binary module: `PSReadLine.psd1` names
+/// `Microsoft.PowerShell.PSReadLine.dll` as its `RootModule`, so whoever wrote
+/// that file wrote the module PowerShell loads, and the files beside it are
+/// bookkeeping. That is what makes the *mixed* leaf decidable — Folio's own
+/// assembly with PowerShellGet's `PSGetModuleInfo.xml`, `en-US\` and catalog
+/// still standing beside it, which is the damaged state a Folio before this fix
+/// left on real machines. The module there is Folio's, so the directory is
+/// Folio's to update; the sidecars are not Folio's to delete, and
+/// [`remove_from`] leaves them.
+///
+/// **Byte identity and not the stamp**, which the caller has already tried: a
+/// host with no version resources to read — every non-Windows build of this
+/// crate — must answer the same question the same way, and the bytes are
+/// readable everywhere.
+///
+/// With no assembly at all there is no module of anybody's here, so the names
+/// answer: a leaf holding nothing but the names this build writes is a write of
+/// Folio's that was interrupted before the assembly landed, and anything else in
+/// it belongs to somebody.
+fn unclaimed_or_foreign(root: &Path) -> InstalledCopy {
+    let assembly = root.join(BUILD_STAMP_FILE);
+    match installed_disk::read(&assembly) {
+        Ok(found) if found.as_slice() == bundled(BUILD_STAMP_FILE) => InstalledCopy::None,
+        Ok(_) => InstalledCopy::Foreign,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if nothing_but_our_names(root) {
+                InstalledCopy::None
+            } else {
+                InstalledCopy::Foreign
+            }
+        }
+        // A leaf whose assembly cannot be read is a leaf whose owner cannot be
+        // established, and an unestablished owner is never Folio.
+        Err(_) => InstalledCopy::Foreign,
+    }
+}
+
+/// Whether every entry under `root` is one this build writes.
+///
+/// Walks the leaf rather than sampling it, and the walk is bounded by the rule
+/// itself: the only directories [`BUNDLED_FILES`] puts anything in are
+/// `net6plus` and `netstd`, so any other directory is answered `false` where it
+/// is found rather than descended into.
+fn nothing_but_our_names(root: &Path) -> bool {
+    let mut pending = vec![PathBuf::new()];
+    while let Some(relative) = pending.pop() {
+        let Ok(entries) = installed_disk::entries(&root.join(&relative)) else {
+            return false;
+        };
+        for (name, is_directory) in entries {
+            let child = relative.join(&name);
+            let ours = BUNDLED_FILES.iter().any(|(bundled, _)| {
+                let bundled = Path::new(bundled);
+                if is_directory {
+                    bundled.starts_with(&child) && bundled != child
+                } else {
+                    bundled == child
+                }
+            });
+            if !ours {
+                return false;
+            }
+            if is_directory {
+                pending.push(child);
+            }
+        }
+    }
+    true
+}
+
+/// Read the shared App fact after a module write or a Terminal-page visit.
+pub fn refresh_installed(cache: &mut Option<InstalledCopy>, documents: Option<&Path>) {
+    *cache = Some(documents.map_or(InstalledCopy::None, installed_copy));
+}
+
+/// The headless part of the clock-run invite check. `None` means unread, not
+/// "no module"; all windows borrow the same App-owned slot.
+pub fn installed_on_probe(
+    cache: &mut Option<InstalledCopy>,
+    documents: Option<&Path>,
+    probe: Option<Probe>,
+) -> InstalledCopy {
+    if cache.is_none() && probe.is_some() {
+        refresh_installed(cache, documents);
+    }
+    cache.unwrap_or_default()
+}
+
+/// The installed-module IO door. Tests replace all four operations on this
+/// thread; neither a real account's module nor its version resource is touched.
+mod installed_disk {
+    use super::*;
+
+    pub(super) trait Disk {
+        fn is_dir(&self, path: &Path) -> bool;
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
+        fn product_version(&self, path: &Path) -> Option<String>;
+        /// What is directly in `directory`, and which of it is itself a
+        /// directory. **Names, not content** — no file is opened, so this door
+        /// carries no lane: the read ledger counts bytes of file content and
+        /// there are none here.
+        fn entries(&self, directory: &Path) -> std::io::Result<Vec<(OsString, bool)>>;
+    }
+
+    struct System;
+
+    impl Disk for System {
+        fn is_dir(&self, path: &Path) -> bool {
+            path.is_dir()
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            // Through the read ledger: this is the door that ran away on
+            // 2026-09-20, and the tripwire has to be able to see it.
+            bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path)
+        }
+        fn product_version(&self, path: &Path) -> Option<String> {
+            file_product_version(path)
+        }
+        fn entries(&self, directory: &Path) -> std::io::Result<Vec<(OsString, bool)>> {
+            let mut entries = Vec::new();
+            for entry in std::fs::read_dir(directory)? {
+                let entry = entry?;
+                let is_directory = entry.file_type()?.is_dir();
+                entries.push((entry.file_name(), is_directory));
+            }
+            Ok(entries)
+        }
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        pub(super) static OVERRIDE: std::cell::RefCell<Option<std::rc::Rc<dyn Disk>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    fn with<R>(f: impl FnOnce(&dyn Disk) -> R) -> R {
+        #[cfg(test)]
+        if let Some(disk) = OVERRIDE.with(|slot| slot.borrow().clone()) {
+            return f(disk.as_ref());
+        }
+        f(&System)
+    }
+
+    pub(super) fn is_dir(path: &Path) -> bool {
+        with(|disk| disk.is_dir(path))
+    }
+    pub(super) fn read(path: &Path) -> std::io::Result<Vec<u8>> {
+        with(|disk| disk.read(path))
+    }
+    pub(super) fn product_version(path: &Path) -> Option<String> {
+        with(|disk| disk.product_version(path))
+    }
+    pub(super) fn entries(directory: &Path) -> std::io::Result<Vec<(OsString, bool)>> {
+        with(|disk| disk.entries(directory))
     }
 }
 
@@ -1017,12 +1330,68 @@ fn file_product_version(path: &Path) -> Option<String> {
 /// — they have no `2.4.6-bt.` in them. The old guard could not delete what an
 /// older Folio had written, which left the reader with a module this product had
 /// put on their machine and would not take off it.
-pub fn remove_from(documents: &Path) -> io::Result<bool> {
-    if installed_copy(documents) == InstalledCopy::None {
-        return Ok(false);
+///
+/// **Narrowed from the directory to the files on 2026-09-20** (audit 3, E-1).
+/// It used to `remove_dir_all` the version leaf once the guard said yes, which
+/// answered the wrong question: the guard establishes that the *module* is
+/// Folio's, and it says nothing about what stands beside it. On a machine an
+/// older Folio had already written over, what stood beside it was
+/// PowerShellGet's `PSGetModuleInfo.xml`, `en-US\` and catalog — the gallery's
+/// own record of the module Folio replaced — and `Off` took those too. Now the
+/// nine names go, and the directories go only while they are empty.
+pub fn remove_from(documents: &Path) -> io::Result<Removed> {
+    let root = module_directory(documents);
+    match installed_copy(documents) {
+        InstalledCopy::None => return Ok(Removed::Nothing),
+        InstalledCopy::Foreign => return Ok(Removed::NotOurs),
+        InstalledCopy::ThisBuild | InstalledCopy::OlderBuild => {}
     }
-    std::fs::remove_dir_all(module_directory(documents))?;
-    Ok(true)
+    for (name, _) in BUNDLED_FILES {
+        match std::fs::remove_file(root.join(name)) {
+            Ok(()) => {}
+            // An interrupted install leaves some of the nine missing, and a
+            // removal that refused over one absent file would be a module this
+            // product could not take off a machine it half-wrote.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    // Deepest first, and `remove_dir` rather than `remove_dir_all`: each of
+    // these goes only if the nine files were the whole of what was in it.
+    for name in ["net6plus", "netstd"] {
+        let _ = std::fs::remove_dir(root.join(name));
+    }
+    if std::fs::remove_dir(&root).is_ok() {
+        return Ok(Removed::Took { left: Vec::new() });
+    }
+    let left = installed_disk::entries(&root).map_or_else(
+        |_| Vec::new(),
+        |entries| {
+            entries
+                .into_iter()
+                .map(|(name, _)| root.join(name))
+                .collect()
+        },
+    );
+    Ok(Removed::Took { left })
+}
+
+/// What [`remove_from`] did to the module directory.
+///
+/// Three answers and not `bool`, because the door that runs unattended
+/// (`folio --uninstall-cleanup`) prints one line per mark and each of these is a
+/// different line: *removed*, *not present*, and *left standing because it is
+/// not Folio's*. The last two were one `Ok(false)` until 2026-09-20, which is
+/// how a machine carrying somebody else's PSReadLine reported "not present".
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Removed {
+    /// Folio's own files went. `left` is what stood beside them and stayed,
+    /// because Folio did not write it — empty when the directory itself went.
+    Took { left: Vec<PathBuf> },
+    /// Nothing of Folio's was there to take.
+    Nothing,
+    /// A module Folio did not write. It is exactly where it was.
+    NotOurs,
 }
 
 // ── one door, and it always says something (§7.47) ──────────────────────────
@@ -1056,6 +1425,13 @@ pub enum Refusal {
     AlreadyCurrent { found: String, path: PathBuf },
     /// `On` over a directory that already holds this build's module.
     AlreadyThere { path: PathBuf },
+    /// **`On` over a module Folio did not write** (audit 3, E-1).
+    ///
+    /// Its own variant and not [`Self::NotOurs`], which is the removal's word:
+    /// the two refusals are about the same ownership and about opposite acts,
+    /// and a card that told a reader nothing was *removed* after they pressed
+    /// `On` would be the door answering a question nobody asked.
+    Occupied { path: PathBuf },
     /// The write failed, and this is what Windows said about it.
     Write { path: PathBuf, message: String },
     /// `Off` over a directory the guard would not touch — somebody else's
@@ -1083,6 +1459,7 @@ impl Refusal {
             Self::AlreadyThere { path } => {
                 i18n::psreadline_already_there(PATCHED_VERSION, &path.display().to_string())
             }
+            Self::Occupied { path } => i18n::psreadline_occupied(&path.display().to_string()),
             Self::Write { path, message } => {
                 i18n::psreadline_install_failed(&path.display().to_string(), message)
             }
@@ -1105,6 +1482,7 @@ impl Refusal {
             Self::NoDocuments => "no-documents",
             Self::AlreadyCurrent { .. } => "already-current",
             Self::AlreadyThere { .. } => "already-there",
+            Self::Occupied { .. } => "occupied",
             Self::Write { .. } => "write-failed",
             Self::NotOurs { .. } => "not-ours",
             Self::Remove { .. } => "remove-failed",
@@ -1138,11 +1516,34 @@ pub enum Outcome {
 /// tables — `the_greyed_item_and_the_refusal_agree_on_every_state` pins them
 /// together.
 #[must_use]
+pub fn apply_recorded(
+    install: bool,
+    documents: Option<&Path>,
+    state: RowState,
+    probe: Option<Probe>,
+    data: &Path,
+) -> Outcome {
+    apply_with(install, documents, state, probe, |documents| {
+        install_recorded(documents, data)
+    })
+}
+
+#[cfg(test)]
 pub fn apply(
     install: bool,
     documents: Option<&Path>,
     state: RowState,
     probe: Option<Probe>,
+) -> Outcome {
+    apply_with(install, documents, state, probe, install_into)
+}
+
+fn apply_with(
+    install: bool,
+    documents: Option<&Path>,
+    state: RowState,
+    probe: Option<Probe>,
+    writer: impl FnOnce(&Path) -> io::Result<Wrote>,
 ) -> Outcome {
     let Some(documents) = documents else {
         return Outcome::Refused(Refusal::NoDocuments);
@@ -1152,8 +1553,10 @@ pub fn apply(
         // The guard lives inside `remove_from`, so this is a report of what it
         // did rather than a second copy of its rule.
         return match remove_from(documents) {
-            Ok(true) => Outcome::Removed(path),
-            Ok(false) => Outcome::Refused(Refusal::NotOurs { path }),
+            Ok(Removed::Took { .. }) => Outcome::Removed(path),
+            // One sentence for the two, which is that refusal's own ruling: a
+            // reader can act on the path either way and not on the distinction.
+            Ok(Removed::Nothing | Removed::NotOurs) => Outcome::Refused(Refusal::NotOurs { path }),
             Err(error) => Outcome::Refused(Refusal::Remove {
                 path,
                 message: error.to_string(),
@@ -1177,6 +1580,9 @@ pub fn apply(
                 path,
             });
         }
+        // The drawing's answer for this one is a dark `On`; this is the press's,
+        // and the writer refuses it a third time on the disk it reads itself.
+        RowState::NotOurs => return Outcome::Refused(Refusal::Occupied { path }),
         // `Probing` cannot be reached with a probe in hand — `row_state` answers
         // it only when there is none — and the other three are the states this
         // verb exists for.
@@ -1191,8 +1597,9 @@ pub fn apply(
             path,
         });
     }
-    match install_into(documents) {
-        Ok(root) => Outcome::Installed(root),
+    match writer(documents) {
+        Ok(Wrote::Module(root)) => Outcome::Installed(root),
+        Ok(Wrote::NotOurs) => Outcome::Refused(Refusal::Occupied { path }),
         Err(error) => Outcome::Refused(Refusal::Write {
             path,
             message: error.to_string(),
@@ -1205,6 +1612,319 @@ mod tests {
     use super::*;
     use bt_persist::PsReadLineInviteV1 as State;
 
+    struct CountingDisk {
+        root: PathBuf,
+        reads: std::cell::Cell<usize>,
+        bytes: std::cell::Cell<usize>,
+        directories: std::cell::Cell<usize>,
+        versions: std::cell::Cell<usize>,
+        listings: std::cell::Cell<usize>,
+    }
+
+    impl installed_disk::Disk for CountingDisk {
+        fn is_dir(&self, path: &Path) -> bool {
+            assert_eq!(path, self.root);
+            self.directories.set(self.directories.get() + 1);
+            true
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            assert!(
+                BUNDLED_FILES
+                    .iter()
+                    .any(|(name, _)| path == self.root.join(name))
+            );
+            self.reads.set(self.reads.get() + 1);
+            let bytes = std::fs::read(path)?;
+            self.bytes.set(self.bytes.get() + bytes.len());
+            Ok(bytes)
+        }
+        fn product_version(&self, path: &Path) -> Option<String> {
+            assert_eq!(path, self.root.join(BUILD_STAMP_FILE));
+            self.versions.set(self.versions.get() + 1);
+            Some(format!("{}0", family_prefix()))
+        }
+        fn entries(&self, directory: &Path) -> std::io::Result<Vec<(OsString, bool)>> {
+            self.listings.set(self.listings.get() + 1);
+            let mut entries = Vec::new();
+            for entry in std::fs::read_dir(directory)? {
+                let entry = entry?;
+                let is_directory = entry.file_type()?.is_dir();
+                entries.push((entry.file_name(), is_directory));
+            }
+            Ok(entries)
+        }
+    }
+
+    struct DiskOverride;
+
+    impl Drop for DiskOverride {
+        fn drop(&mut self) {
+            installed_disk::OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    #[test]
+    fn psreadline_clock_run_reads_only_at_edges() {
+        let documents = temp_dir("clock-edges");
+        let root = module_directory(&documents);
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = vec![b'x'; 41_345];
+        std::fs::write(root.join("Changes.txt"), &fixture).unwrap();
+        let disk = std::rc::Rc::new(CountingDisk {
+            root,
+            reads: Default::default(),
+            bytes: Default::default(),
+            directories: Default::default(),
+            versions: Default::default(),
+            listings: Default::default(),
+        });
+        installed_disk::OVERRIDE.with(|slot| *slot.borrow_mut() = Some(disk.clone()));
+        let _override = DiskOverride;
+        let probe = Some(probe_at("2.0.0", ExecutionPolicy::RemoteSigned));
+        let mut app_fact = None;
+        for _ in 0..200 {
+            assert_eq!(
+                installed_on_probe(&mut app_fact, Some(&documents), None),
+                InstalledCopy::None
+            );
+        }
+        assert_eq!(disk.reads.get(), 0);
+        // Several windows borrow this one slot; no window owns a disk snapshot.
+        for _window in 0..4 {
+            for _ in 0..50 {
+                let installed = installed_on_probe(&mut app_fact, Some(&documents), probe);
+                assert_eq!(installed, InstalledCopy::OlderBuild);
+                assert_eq!(
+                    row_state(probe, State::NotAsked, installed),
+                    RowState::UpdateAvailable
+                );
+            }
+        }
+        assert_eq!(
+            disk.reads.get(),
+            1,
+            "200 invite checks must read one Changes.txt"
+        );
+        assert_eq!(disk.bytes.get(), fixture.len());
+        assert_eq!(disk.directories.get(), 1);
+        // **The press is an edge and it reads** (audit 3, E-1): `install_into`
+        // asks who owns the directory at the moment of the write, which is one
+        // module inspection of its own — one `is_dir`, the first bundled file
+        // compared, one version stamp. That is the whole cost of the guard and
+        // it is charged to a press, never to a turn.
+        assert!(matches!(
+            apply(true, Some(&documents), RowState::UpdateAvailable, probe),
+            Outcome::Installed(_)
+        ));
+        // Runtime refreshes once after the successful writer. This time every
+        // bundled file matches: one module inspection, nine content reads.
+        refresh_installed(&mut app_fact, Some(&documents));
+        assert_eq!(disk.directories.get(), 3);
+        assert_eq!(app_fact, Some(InstalledCopy::ThisBuild));
+        assert_eq!(
+            row_state(probe, State::Installed, app_fact.unwrap()),
+            RowState::InstalledByFolio
+        );
+        assert_eq!(disk.reads.get(), 2 + BUNDLED_FILES.len());
+        // An out-of-band replacement becomes visible on opening Terminal.
+        std::fs::write(disk.root.join("Changes.txt"), &fixture).unwrap();
+        refresh_installed(&mut app_fact, Some(&documents));
+        assert_eq!(disk.directories.get(), 4);
+        assert_eq!(app_fact, Some(InstalledCopy::OlderBuild));
+        let edge_reads = 3 + BUNDLED_FILES.len();
+        let edge_bytes = 3 * fixture.len()
+            + BUNDLED_FILES
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>();
+        for _ in 0..200 {
+            installed_on_probe(&mut app_fact, Some(&documents), probe);
+        }
+        assert_eq!(disk.reads.get(), edge_reads);
+        assert_eq!(disk.directories.get(), 4);
+        assert_eq!(disk.versions.get(), 3);
+        assert_eq!(disk.bytes.get(), edge_bytes);
+        // A failed Documents lookup is a known absence, not an unread fact.
+        refresh_installed(&mut app_fact, None);
+        assert_eq!(app_fact, Some(InstalledCopy::None));
+        for _ in 0..200 {
+            assert_eq!(
+                installed_on_probe(&mut app_fact, Some(&documents), probe),
+                InstalledCopy::None
+            );
+        }
+        assert_eq!(
+            disk.reads.get(),
+            edge_reads,
+            "a failed edge never becomes a retry poll"
+        );
+        // A failed content read can still identify an older DLL. Cache that
+        // result too; the next visit/write is the only reason to ask again.
+        std::fs::remove_file(disk.root.join("Changes.txt")).unwrap();
+        refresh_installed(&mut app_fact, Some(&documents));
+        for _ in 0..200 {
+            assert_eq!(
+                installed_on_probe(&mut app_fact, Some(&documents), probe),
+                InstalledCopy::OlderBuild
+            );
+        }
+        assert_eq!(disk.reads.get(), edge_reads + 1);
+        assert_eq!(disk.directories.get(), 5);
+        assert_eq!(disk.versions.get(), 4);
+        assert_eq!(disk.bytes.get(), edge_bytes);
+        assert_eq!(
+            disk.listings.get(),
+            0,
+            "the ownership walk over the leaf's own names is reached only where \
+             no assembly at all is there; a module of Folio's family answers \
+             before it"
+        );
+        std::fs::remove_dir_all(documents).unwrap();
+    }
+
+    // ── what these two pins ask the crate ─────────────────
+    //
+    // **P3's deletion commit for this module**
+    // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). The commit
+    // before this one read every body twice — once as a slice of a named
+    // file, once as the body of an item of this crate — and asserted the two
+    // were the same bytes, and did the same for the counts; this one removes
+    // the older of the two, because two implementations of one judgement do
+    // not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4). The
+    // pattern is `main.rs::pty_drain_budget_tests`', not re-derived here.
+    //
+    // Two readings change shape.
+    //
+    // * The app's **fact** was a line of `main.rs` matched as text; it is a
+    //   field of `App`, so it is asked for as one and the refusal names the
+    //   fields the type does carry if it ever stops carrying this one.
+    // * The count of the refresh edges widens from `main.rs` to the package,
+    //   and is filtered by `in_the_product` — both grains, for the reason
+    //   written there. This file compiles into the product and its own
+    //   assertions below spell the call five more times; `needle!` excludes one
+    //   construction expression rather than every mention.
+    fn source_index() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of `owner::name`, braces included — the identity of §2.4
+    /// rather than a line of a file.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        source_index()
+            .body_of(&bt_source::ItemQuery::method(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// The body of one free function of this crate.
+    fn free_fn_body(name: &str) -> &'static str {
+        source_index()
+            .body_of(&bt_source::ItemQuery::function(name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// One search over the whole package, refusing loudly rather than
+    /// answering a smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source_index()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **How many of these occurrences a product build compiles** —
+    /// `bt_source::Found::in_the_product`, which owns that rule and both of the
+    /// grains it takes: §2.3's file and §2.4's item.
+    ///
+    /// This module needs both, which is why it is asked here rather than left
+    /// to the file grain: the spellings counted below are written again in this
+    /// module's own assertions, and again in whole test files elsewhere in the
+    /// package. The rule used to be written out here, in one of twelve copies
+    /// of it this crate carried.
+    fn in_the_product(found: &bt_source::Found) -> usize {
+        found.in_the_product(source_index()).len()
+    }
+
+    /// The same count of one raw needle — the view `include_str!` handed this
+    /// module.
+    fn in_the_product_raw(needle: bt_source::Needle) -> usize {
+        in_the_product(&found(needle, bt_source::View::Raw))
+    }
+
+    #[test]
+    fn psreadline_clock_run_source_has_an_unread_edge() {
+        let body = method_body("Runtime", "raise_psreadline_invite_if_due");
+        assert!(
+            !body.contains("self.refresh_psreadline_installed()"),
+            "the turn must enter the shared unread gate, never refresh directly"
+        );
+        assert!(body.contains("psreadline::installed_on_probe("));
+        let gate = free_fn_body("installed_on_probe");
+        assert!(gate.contains("if cache.is_none() && probe.is_some() {\n        refresh_installed(cache, documents);\n    }"));
+        assert_eq!(gate.matches("refresh_installed(").count(), 1);
+        assert!(!body.contains("installed_copy("));
+        assert!(body.contains("if installed != psreadline::InstalledCopy::None {"));
+    }
+
+    #[test]
+    fn psreadline_readers_and_refresh_edges_are_wired_to_the_app_fact() {
+        let body = |name: &str| method_body("Runtime", name);
+        assert!(
+            source_index()
+                .declaration_of(&bt_source::ItemQuery::field("App", "psreadline_installed"))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .contains("psreadline_installed: Option<psreadline::InstalledCopy>")
+        );
+        let row = body("psreadline_row_state");
+        assert!(row.contains("self.app.psreadline_installed.unwrap_or_default()"));
+        assert!(!row.contains("installed_copy("));
+        let refresh = body("refresh_psreadline_installed");
+        assert!(refresh.contains("psreadline::refresh_installed("));
+        assert!(refresh.contains("&mut self.app.psreadline_installed"));
+        let apply = body("apply_psreadline");
+        assert_eq!(
+            apply
+                .matches("self.refresh_psreadline_installed();")
+                .count(),
+            2
+        );
+        for outcome in ["Outcome::Installed(root)", "Outcome::Removed(root)"] {
+            assert!(
+                apply
+                    .split_once(outcome)
+                    .unwrap()
+                    .1
+                    .split("Ok(true)")
+                    .next()
+                    .unwrap()
+                    .contains("self.refresh_psreadline_installed();")
+            );
+        }
+        let layout = body("settings_layout");
+        let compact: String = layout.split_whitespace().collect();
+        assert!(compact.contains("self.window.settings.take_psreadline_open_edge("));
+        assert!(layout.contains("if psreadline_opened {"));
+        assert_eq!(
+            layout
+                .matches("self.refresh_psreadline_installed();")
+                .count(),
+            1
+        );
+        let edge = layout
+            .split_once("if psreadline_opened {")
+            .unwrap()
+            .1
+            .split('}')
+            .next()
+            .unwrap();
+        assert!(edge.contains("self.refresh_psreadline_installed();"));
+        assert_eq!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "self.refresh_psreadline_installed();"
+            ))),
+            3,
+            "only install, remove, and Terminal-page open refresh the disk fact"
+        );
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1213,6 +1933,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// [`install_into`] into a place that is Folio's to write, which is what
+    /// every fixture below lays out for itself. A refusal here is the fixture
+    /// being wrong, not the claim, so it panics naming which.
+    fn install_ours(documents: &Path) -> PathBuf {
+        match install_into(documents) {
+            Ok(Wrote::Module(root)) => root,
+            other => panic!("the fixture's own directory was refused: {other:?}"),
+        }
+    }
+
+    /// [`remove_from`] read the way the row's `Off` reads it: did Folio's own
+    /// files go?
+    fn removed_ours(documents: &Path) -> bool {
+        matches!(remove_from(documents).unwrap(), Removed::Took { .. })
     }
 
     /// PIN (N28) — **the version this build installs and the version
@@ -1548,11 +2284,11 @@ mod tests {
         let documents = temp_dir("round-trip");
         assert!(!is_folios_copy(&documents));
         assert!(
-            !remove_from(&documents).unwrap(),
+            !removed_ours(&documents),
             "there is nothing there to remove"
         );
 
-        let root = install_into(&documents).unwrap();
+        let root = install_ours(&documents);
         assert!(
             root.ends_with(PathBuf::from(MODULE_RELATIVE_PATH).join(PATCHED_VERSION)),
             "the module must land where PowerShell's per-user module path looks: \
@@ -1564,7 +2300,7 @@ mod tests {
         }
         assert!(is_folios_copy(&documents));
 
-        assert!(remove_from(&documents).unwrap());
+        assert!(removed_ours(&documents));
         assert!(!root.exists());
         assert!(
             documents.join(MODULE_RELATIVE_PATH).exists(),
@@ -1586,7 +2322,7 @@ mod tests {
     #[test]
     fn a_module_this_build_did_not_write_survives_a_removal() {
         let documents = temp_dir("foreign");
-        let root = install_into(&documents).unwrap();
+        let root = install_ours(&documents);
         // One byte of one file, changed the way a user editing their own module
         // would change it.
         let psm1 = root.join("PSReadLine.psm1");
@@ -1598,14 +2334,310 @@ mod tests {
             !is_folios_copy(&documents),
             "an edited file makes the directory somebody else's"
         );
-        assert!(!remove_from(&documents).unwrap());
+        assert!(!removed_ours(&documents));
         assert!(psm1.exists(), "and nothing in it was deleted");
         assert_eq!(std::fs::read(&psm1).unwrap(), text);
 
         // A directory that is merely incomplete is equally not Folio's.
         std::fs::remove_file(root.join("License.txt")).unwrap();
         assert!(!is_folios_copy(&documents));
-        assert!(!remove_from(&documents).unwrap());
+        assert!(!removed_ours(&documents));
+        std::fs::remove_dir_all(&documents).unwrap();
+    }
+
+    /// Lay somebody else's PSReadLine 2.4.6 into the version leaf, the way
+    /// `Install-Module PSReadLine -RequiredVersion 2.4.6 -Scope CurrentUser`
+    /// leaves it: the module's own files under the names PowerShell resolves,
+    /// **and PowerShellGet's sidecars beside them**.
+    ///
+    /// The sidecars are the half that makes this fixture faithful. They are not
+    /// in [`BUNDLED_FILES`], so they survived Folio's write on a real machine
+    /// and then went with the whole leaf on the next `Off` — files this product
+    /// never wrote and could not hand back.
+    ///
+    /// Returns every path laid and its bytes, so the assertion afterwards is
+    /// "all of it, byte for byte" rather than a sample.
+    fn lay_a_foreign_module(documents: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let root = module_directory(documents);
+        let mut laid = Vec::new();
+        let sidecars = [
+            (
+                "PSGetModuleInfo.xml",
+                "<Objs><Obj><Repository>PSGallery</Repository></Obj></Objs>",
+            ),
+            ("PSReadLine.cat", "catalog"),
+            (
+                "en-US/about_PSReadLine.help.txt",
+                "TOPIC\r\n    about_PSReadLine\r\n",
+            ),
+        ];
+        for (name, bytes) in BUNDLED_FILES
+            .iter()
+            .map(|(name, _)| (*name, format!("the gallery's {name}")))
+            .chain(
+                sidecars
+                    .iter()
+                    .map(|(name, body)| (*name, (*body).to_owned())),
+            )
+        {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes.as_bytes()).unwrap();
+            laid.push((path, bytes.into_bytes()));
+        }
+        laid
+    }
+
+    /// RED GATE (audit 3, E-1) — **a module this build did not write survives
+    /// an install, from every state that used to permit the write.**
+    ///
+    /// The counterpart of `a_module_this_build_did_not_write_survives_a_removal`,
+    /// which has guarded the delete since the feature was written while the
+    /// write beside it had no occupancy check at all. Three ways onto that
+    /// write, all of them ordinary:
+    ///
+    /// 1. `Outdated` with a **stale** probe — the reader ran `Install-Module`
+    ///    in a pane after Folio read the machine, and the probe is a one-shot.
+    /// 2. `Outdated` with a **blind** probe — `powershell.exe` was not found or
+    ///    its output did not parse, so `Probe::default()` reports no version at
+    ///    all and `already_current` is false.
+    /// 3. `RemovedElsewhere` with a **fresh** probe — the stored invitation says
+    ///    Folio installed the module and the directory no longer holds Folio's
+    ///    copy. No race at all: it survives restarts.
+    ///
+    /// What must be true afterwards is the same in all three: every byte the
+    /// gallery put there is still there, none of Folio's nine files is, and the
+    /// press said why.
+    ///
+    /// MUTATION: take the occupancy check out of the writer and all three arms
+    /// fail on the first file compared.
+    #[test]
+    fn a_module_this_build_did_not_write_survives_an_install() {
+        for (tag, state, probe) in [
+            (
+                "stale",
+                RowState::Outdated,
+                Some(probe_at("2.0.0", ExecutionPolicy::RemoteSigned)),
+            ),
+            ("blind", RowState::Outdated, Some(Probe::default())),
+            (
+                "removed-elsewhere",
+                RowState::RemovedElsewhere,
+                Some(probe_at("2.4.6", ExecutionPolicy::RemoteSigned)),
+            ),
+        ] {
+            let documents = temp_dir(&format!("foreign-install-{tag}"));
+            let laid = lay_a_foreign_module(&documents);
+            let root = module_directory(&documents);
+
+            // **The state is handed in, not computed**, which is the whole
+            // claim: even a caller holding a state that permits the write — and
+            // all three of these did, on a machine in exactly this condition —
+            // cannot get past the check inside the writer.
+            let outcome = apply(true, Some(&documents), state, probe);
+            let Outcome::Refused(refusal) = outcome else {
+                panic!("{tag}: the write went ahead over somebody else's module: {outcome:?}");
+            };
+            assert_eq!(refusal.tag(), "occupied");
+            assert!(
+                refusal.sentence().contains(&root.display().to_string()),
+                "{tag}: the card must name the directory: {:?}",
+                refusal.sentence()
+            );
+
+            for (path, bytes) in &laid {
+                assert_eq!(
+                    std::fs::read(path).unwrap().as_slice(),
+                    bytes.as_slice(),
+                    "{tag}: {} was overwritten",
+                    path.display()
+                );
+            }
+            assert!(
+                !is_folios_copy(&documents),
+                "{tag}: Folio's own bytes are now in a directory it does not own"
+            );
+            // Nothing arrived either: the leaf holds exactly what was laid in
+            // it, counted at the top level where a stray file would land.
+            let mut left: Vec<String> = std::fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            let mut expected: Vec<String> = laid
+                .iter()
+                .map(|(path, _)| {
+                    path.strip_prefix(&root)
+                        .unwrap()
+                        .components()
+                        .next()
+                        .unwrap()
+                        .as_os_str()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            left.sort();
+            expected.sort();
+            expected.dedup();
+            left.dedup();
+            assert_eq!(left, expected, "{tag}: the leaf gained or lost an entry");
+
+            // And the row says so, from every stored state — `RemovedElsewhere`
+            // included, which used to be answered before the disk was read at
+            // all.
+            let installed = installed_copy(&documents);
+            assert_eq!(installed, InstalledCopy::Foreign, "{tag}");
+            for invite in [State::NotAsked, State::Declined, State::Installed] {
+                let told = row_state(probe, invite, installed);
+                assert_eq!(told, RowState::NotOurs, "{tag} / {invite:?}");
+                assert!(!install_available(probe, told), "{tag} / {invite:?}");
+                assert!(!remove_available(told), "{tag} / {invite:?}");
+            }
+            // `Off` keeps its hands off it too.
+            assert_eq!(remove_from(&documents).unwrap(), Removed::NotOurs);
+            for (path, bytes) in &laid {
+                assert_eq!(std::fs::read(path).unwrap().as_slice(), bytes.as_slice());
+            }
+            std::fs::remove_dir_all(&documents).unwrap();
+        }
+    }
+
+    /// PIN (audit 3, E-1) — **the four shapes the place may be in and still be
+    /// Folio's to write into.**
+    ///
+    /// The other half of the gate above: a rule that refuses everything is not
+    /// the rule this ticket asked for. Absent, empty, this build's own copy, and
+    /// a copy of ours that was interrupted — all four still take the install,
+    /// and the row offers it.
+    ///
+    /// MUTATION: make the check "the leaf is absent" and the last two fail;
+    /// make it "byte identity" and the fourth fails.
+    #[test]
+    fn an_absent_an_empty_and_folios_own_leaf_all_take_the_install() {
+        // Absent — the ordinary machine, and the only shape the feature was
+        // ever measured on.
+        let documents = temp_dir("free-absent");
+        assert_eq!(installed_copy(&documents), InstalledCopy::None);
+        let root = install_ours(&documents);
+        assert!(is_folios_copy(&documents));
+
+        // This build's own copy: the same verb again, which is what the row's
+        // `Update` performs.
+        assert_eq!(installed_copy(&documents), InstalledCopy::ThisBuild);
+        assert_eq!(
+            install_into(&documents).unwrap(),
+            Wrote::Module(root.clone())
+        );
+
+        // Interrupted, in the two places it can be interrupted: after the
+        // assembly landed, and before it.
+        std::fs::write(root.join("PSReadLine.psd1"), b"truncated").unwrap();
+        assert_eq!(
+            installed_copy(&documents),
+            InstalledCopy::None,
+            "our own assembly with a half-written file beside it is still ours"
+        );
+        assert!(matches!(install_into(&documents), Ok(Wrote::Module(_))));
+
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            installed_copy(&documents),
+            InstalledCopy::None,
+            "an empty leaf is an empty leaf"
+        );
+        std::fs::write(root.join("Changes.txt"), bundled("Changes.txt")).unwrap();
+        assert_eq!(
+            installed_copy(&documents),
+            InstalledCopy::None,
+            "and so is one holding nothing but a file this build writes"
+        );
+        assert!(matches!(install_into(&documents), Ok(Wrote::Module(_))));
+        assert!(is_folios_copy(&documents));
+        std::fs::remove_dir_all(&documents).unwrap();
+    }
+
+    /// PIN (audit 3, E-1) — **the leaf a Folio before this fix left behind: our
+    /// module, the gallery's sidecars still beside it.**
+    ///
+    /// This is the damaged state on real machines, and it is the one the rule
+    /// has to answer in two directions at once. For the **update** it is ours —
+    /// the assembly PowerShell loads is Folio's, and a reader whose module is
+    /// out of date must not be stranded by a guard that reads the litter beside
+    /// it as somebody else's ownership. For the **removal** it is not: the nine
+    /// names go and every file Folio never wrote stays, together with the
+    /// directory holding them.
+    ///
+    /// MUTATION: `remove_dir_all` the leaf again, as the removal did until
+    /// today, and the three sidecar assertions fail together.
+    #[test]
+    fn a_leaf_of_ours_with_somebody_elses_sidecars_updates_and_is_removed_file_by_file() {
+        let documents = temp_dir("mixed-leaf");
+        let root = install_ours(&documents);
+        let sidecars = [
+            (
+                "PSGetModuleInfo.xml",
+                "<Objs><Repository>PSGallery</Repository></Objs>",
+            ),
+            ("PSReadLine.cat", "catalog"),
+            ("en-US/about_PSReadLine.help.txt", "TOPIC"),
+        ];
+        for (name, body) in sidecars {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body.as_bytes()).unwrap();
+        }
+
+        assert_eq!(
+            installed_copy(&documents),
+            InstalledCopy::ThisBuild,
+            "the module here is Folio's; what is beside it is bookkeeping"
+        );
+        assert!(matches!(install_into(&documents), Ok(Wrote::Module(_))));
+
+        let Removed::Took { left } = remove_from(&documents).unwrap() else {
+            panic!("a module of Folio's must come off");
+        };
+        for (name, _) in BUNDLED_FILES {
+            assert!(
+                !root.join(name).exists(),
+                "{name} is Folio's and should have gone"
+            );
+        }
+        for (name, body) in sidecars {
+            assert_eq!(
+                std::fs::read(root.join(name)).unwrap(),
+                body.as_bytes(),
+                "{name} is not Folio's to delete"
+            );
+        }
+        assert!(
+            root.is_dir(),
+            "and the directory holding them stays with them"
+        );
+        assert!(!root.join("net6plus").exists(), "our own subdirectories go");
+        assert!(!root.join("netstd").exists());
+
+        let named: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
+        for (name, _) in sidecars {
+            let head = Path::new(name).components().next().unwrap();
+            let expected = root.join(head.as_os_str()).display().to_string();
+            assert!(
+                named.contains(&expected),
+                "the door must be able to name what it left: {named:?}"
+            );
+        }
+        // **And what is left is not Folio's either.** With the module gone the
+        // leaf still holds PowerShellGet's claim on that version — a second
+        // `Off` says so rather than reporting a removal of nothing, and `On`
+        // will not write back into it. That is the rule holding in the
+        // direction nobody enjoys: `Get-InstalledModule` still reports 2.4.6
+        // installed from this directory, so it is still somebody's, and the way
+        // out is `Uninstall-Module` rather than Folio writing over the claim a
+        // second time.
+        assert_eq!(remove_from(&documents).unwrap(), Removed::NotOurs);
+        assert_eq!(installed_copy(&documents), InstalledCopy::Foreign);
+        assert_eq!(install_into(&documents).unwrap(), Wrote::NotOurs);
         std::fs::remove_dir_all(&documents).unwrap();
     }
 
@@ -1671,7 +2703,7 @@ mod tests {
     #[test]
     fn the_bundled_module_carries_the_build_this_file_names() {
         let documents = temp_dir("build-stamp");
-        install_into(&documents).unwrap();
+        install_ours(&documents);
         assert_eq!(
             installed_build(&documents).as_deref(),
             Some(PATCHED_BUILD),
@@ -1709,7 +2741,7 @@ mod tests {
     #[test]
     fn a_module_an_older_folio_wrote_is_offered_an_update_and_answers_both_verbs() {
         let documents = temp_dir("older-build");
-        let root = install_into(&documents).unwrap();
+        let root = install_ours(&documents);
         assert!(stamp_installed_build(&root, "2.4.6-bt.1") > 0);
 
         assert_eq!(installed_build(&documents).as_deref(), Some("2.4.6-bt.1"));
@@ -1751,7 +2783,7 @@ mod tests {
         }
 
         // On, over the older build.
-        install_into(&documents).unwrap();
+        install_ours(&documents);
         assert!(is_folios_copy(&documents));
         assert_eq!(installed_copy(&documents), InstalledCopy::ThisBuild);
         assert_eq!(
@@ -1762,7 +2794,7 @@ mod tests {
 
         // Off, over an older build again.
         assert!(stamp_installed_build(&root, "2.4.6-bt.1") > 0);
-        assert!(remove_from(&documents).unwrap());
+        assert!(removed_ours(&documents));
         assert!(!root.exists());
         std::fs::remove_dir_all(&documents).unwrap();
     }
@@ -1778,11 +2810,20 @@ mod tests {
     ///
     /// MUTATION: match the family on `PATCHED_VERSION` instead of on
     /// `family_prefix()` and this deletes a stranger's module.
+    ///
+    /// **Rewritten by audit 3 (E-1) where it used to say `AlreadyCurrent`.**
+    /// The old row reached that state through the *probe*, which reported
+    /// `2.4.6` because the machine's own module said so — an accidental
+    /// protection that held only while the probe agreed with the disk, and the
+    /// probe is read once per process. What answers now is the disk: the module
+    /// is somebody's, so the state is [`RowState::NotOurs`] whatever the probe
+    /// says. Both verbs stay dark, which is what the ruling asked for and what
+    /// the old row happened to do.
     #[cfg(windows)]
     #[test]
     fn a_stock_module_at_the_same_version_is_not_folios_and_is_left_alone() {
         let documents = temp_dir("stock-current");
-        let root = install_into(&documents).unwrap();
+        let root = install_ours(&documents);
         assert!(stamp_installed_build(&root, PATCHED_VERSION) > 0);
 
         assert_eq!(
@@ -1791,26 +2832,34 @@ mod tests {
             "no -bt, no family: {:?}",
             installed_build(&documents)
         );
-        assert_eq!(installed_copy(&documents), InstalledCopy::None);
+        assert_eq!(installed_copy(&documents), InstalledCopy::Foreign);
         assert!(
-            !remove_from(&documents).unwrap(),
+            !removed_ours(&documents),
             "and the guard refuses to delete it"
         );
         assert!(root.exists());
 
-        let machine = Some(Probe {
-            version: Version::parse(PATCHED_VERSION),
-            policy: ExecutionPolicy::RemoteSigned,
-        });
-        let state = row_state(machine, State::NotAsked, installed_copy(&documents));
-        assert_eq!(
-            state,
-            RowState::AlreadyCurrent,
-            "a machine whose own module is new enough is told so, and offered \
-             nothing"
-        );
-        assert!(!install_available(machine, state));
-        assert!(!remove_available(state));
+        // **Every probe this machine could have answered with**, because the
+        // point of the state is that none of them decides it: the stale one that
+        // made this write reachable, the blind one, and the fresh one that used
+        // to be the only thing standing in front of the directory.
+        for machine in [
+            Some(probe_at(PATCHED_VERSION, ExecutionPolicy::RemoteSigned)),
+            Some(probe_at("2.0.0", ExecutionPolicy::RemoteSigned)),
+            Some(Probe::default()),
+            None,
+        ] {
+            for invite in [State::NotAsked, State::Declined, State::Installed] {
+                let state = row_state(machine, invite, installed_copy(&documents));
+                assert_eq!(
+                    state,
+                    RowState::NotOurs,
+                    "{machine:?} / {invite:?}: the disk decides this one"
+                );
+                assert!(!install_available(machine, state));
+                assert!(!remove_available(state));
+            }
+        }
         std::fs::remove_dir_all(&documents).unwrap();
     }
 
@@ -1818,14 +2867,14 @@ mod tests {
     #[test]
     fn a_second_install_repairs_a_half_written_one() {
         let documents = temp_dir("repair");
-        install_into(&documents).unwrap();
+        install_ours(&documents);
         let root = module_directory(&documents);
         std::fs::write(root.join("PSReadLine.psd1"), b"truncated").unwrap();
         std::fs::remove_file(root.join("netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll"))
             .unwrap();
         assert!(!is_folios_copy(&documents));
 
-        install_into(&documents).unwrap();
+        install_ours(&documents);
         assert!(is_folios_copy(&documents));
         std::fs::remove_dir_all(&documents).unwrap();
     }
@@ -1875,6 +2924,7 @@ mod tests {
     ///
     /// MUTATION: index the slots with `0` instead of `lang.index()` and this
     /// fails on the first state whose two columns then come back equal.
+    ///
     #[test]
     fn no_line_this_row_has_cached_survives_a_language_switch() {
         for state in [
@@ -1883,6 +2933,7 @@ mod tests {
             RowState::Outdated,
             RowState::InstalledByFolio,
             RowState::AlreadyCurrent,
+            RowState::NotOurs,
         ] {
             let english = row_description_in(state, i18n::Lang::English);
             let chinese = row_description_in(state, i18n::Lang::Chinese);
@@ -1978,7 +3029,7 @@ mod tests {
         let documents = parent.join("Documents");
         assert!(!documents.exists());
 
-        let root = install_into(&documents).expect("an absent root is made, not refused");
+        let root = install_ours(&documents);
         assert_eq!(root, module_directory(&documents));
         for level in [
             documents.clone(),
@@ -2084,6 +3135,7 @@ mod tests {
             RowState::UpdateAvailable,
             RowState::AlreadyCurrent,
             RowState::RemovedElsewhere,
+            RowState::NotOurs,
         ];
         for policy in [
             ExecutionPolicy::Restricted,
@@ -2157,6 +3209,7 @@ mod tests {
                 path: path.clone(),
             },
             Refusal::AlreadyThere { path: path.clone() },
+            Refusal::Occupied { path: path.clone() },
             Refusal::Write {
                 path: path.clone(),
                 message: "Access is denied. (os error 5)".to_owned(),

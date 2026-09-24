@@ -7,20 +7,17 @@
 //!
 //! | profile | mechanism |
 //! |---|---|
-//! | PowerShell | none — the user dot-sources it into `$PROFILE` themselves |
+//! | PowerShell | an exact guarded `$PROFILE` line, installed on explicit opt-in |
 //! | Git Bash | `bash --init-file <script> <its own words, less the login flag>` |
 //! | a zsh | `ZDOTDIR`, pointed at a directory holding the script three times |
 //! | WSL | `wsl.exe … -e sh -c <the login-shell question> folio <script> <zdotdir>` |
 //! | Command Prompt | the `PROMPT` variable, carrying `OSC 7` and `OSC 133;D`/`;A` |
 //! | `sh`, `dash`, anything else | none, and the pane's own state says so |
 //!
-//! PowerShell's absence from that list is not an omission. `pwsh` has one
-//! startup file at one well-known path and no argument that would source a
-//! second one after it, so the only automatic injection available would be
-//! writing into `$PROFILE` — editing a file that belongs to the user. bash has
-//! `--init-file`, which names the startup file for one interactive shell and
-//! touches nothing on disk, so bash gets the automatic install and PowerShell
-//! keeps the manual one. The asymmetry is the shells', not a preference.
+//! PowerShell has no process-scoped init-file argument that runs after the
+//! user's profile. Its explicit opt-in therefore edits that user's file. This
+//! module records where the mark lands, migrates legacy marks at startup and
+//! owns their removal. bash's `--init-file` touches no startup file on disk.
 //!
 //! zsh has neither: no `--init-file`, and a startup file it looks for in a
 //! *directory* rather than at a path. So zsh's automatic install is that
@@ -48,6 +45,13 @@ use bt_pty::ShellEnvironment;
 use crate::{
     persist,
     profiles::{self, Integration, Profile, windows_to_wsl},
+};
+
+pub mod profile_marks;
+mod profile_runtime;
+pub use profile_runtime::{
+    begin_enable, begin_removal, begin_startup_migration, remove_shell_integration,
+    remove_shell_integration_at, take_removal,
 };
 
 /// The script, compiled in.
@@ -344,7 +348,9 @@ fn install() -> Option<PathBuf> {
 /// copy that was never there.
 fn install_script_at(directory: &Path, name: &str, text: &str) -> Option<PathBuf> {
     let path = directory.join(name);
-    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == text) {
+    if bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, &path)
+        .is_ok_and(|existing| existing == text)
+    {
         return Some(path);
     }
     std::fs::create_dir_all(directory).ok()?;
@@ -370,7 +376,11 @@ fn install_zdotdir() -> Option<PathBuf> {
         .join(SCRIPT_DIRECTORY)
         .join(ZDOTDIR_DIRECTORY);
     let stale = ZDOTDIR_FILES.iter().any(|name| {
-        !std::fs::read_to_string(directory.join(name)).is_ok_and(|existing| existing == SCRIPT_ZSH)
+        !bt_platform::file_reads::read_to_string(
+            bt_platform::file_reads::Lane::Settings,
+            directory.join(name),
+        )
+        .is_ok_and(|existing| existing == SCRIPT_ZSH)
     });
     if !stale {
         return Some(directory);
@@ -1041,7 +1051,8 @@ fn crossing_environment() -> Vec<(OsString, OsString)> {
 // file, see that the line is not in it, and write the line if the reader asks
 // for it in so many words. The asymmetry with bash is unchanged, because
 // `--init-file` touches no file at all and this touches one that belongs to
-// somebody, which is why it happens only on a press and never on a spawn.
+// somebody, which is why a new mark is installed only on a press. Startup migrates
+// existing marks; it never installs an absent one.
 
 /// PowerShell's script, under the same roof as bash's.
 const SCRIPT_PS1: &str = include_str!("../../../scripts/shell-integration/folio.ps1");
@@ -1085,7 +1096,7 @@ pub fn is_powershell(program: &Path) -> bool {
 /// may take seconds, and running the reader's startup file in order to find out
 /// where their startup file is would be absurd. `-NonInteractive` so nothing can
 /// stop for a prompt on a thread with no console.
-const PROFILE_COMMAND: &str = "$PROFILE.CurrentUserCurrentHost";
+const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $PROFILE.CurrentUserCurrentHost";
 
 /// **The path is asked of the shell and never composed**, and the machine this
 /// was written on is why.
@@ -1105,10 +1116,97 @@ const PROFILE_COMMAND: &str = "$PROFILE.CurrentUserCurrentHost";
 ///
 /// The answer per program, because the two generations answer differently and a
 /// reader's own profile row may name a third `pwsh` entirely.
-type ProfileAnswers = std::collections::BTreeMap<PathBuf, Option<PathBuf>>;
+type ProfileAnswer = std::sync::Arc<OnceLock<Option<PathBuf>>>;
+type ProfileAnswers = std::collections::BTreeMap<PathBuf, ProfileAnswer>;
 static PROFILE_ANSWERS: OnceLock<std::sync::Mutex<ProfileAnswers>> = OnceLock::new();
-static PROFILE_ASKED: OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
-    OnceLock::new();
+
+fn profile_key(program: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(
+            program
+                .as_os_str()
+                .to_string_lossy()
+                .replace('/', "\\")
+                .to_lowercase(),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        program.to_path_buf()
+    }
+}
+
+fn profile_slot(program: &Path) -> (ProfileAnswer, bool) {
+    let key = profile_key(program);
+    let mut answers = PROFILE_ANSWERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let fresh = !answers.contains_key(&key);
+    (answers.entry(key).or_default().clone(), fresh)
+}
+
+/// Resolving executable aliases can touch disk, so it happens only on workers.
+/// All aliases point at the same OnceLock before any worker asks PowerShell.
+fn cached_profile_answer(program: &Path) -> Option<PathBuf> {
+    let resolved = bt_platform::program_on_path(program).unwrap_or_else(|| program.to_path_buf());
+    let canonical = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
+    let slot = {
+        let mut answers = PROFILE_ANSWERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = answers.entry(profile_key(program)).or_default().clone();
+        let slot = answers
+            .entry(profile_key(&canonical))
+            .or_insert(original)
+            .clone();
+        answers.insert(profile_key(program), slot.clone());
+        slot
+    };
+    answer_once(&slot, || run_profile_probe(&resolved))
+}
+
+fn answer_once(
+    slot: &OnceLock<Option<PathBuf>>,
+    ask: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    slot.get_or_init(ask).clone()
+}
+
+#[cfg(windows)]
+fn installed_powershells() -> Vec<PathBuf> {
+    let mut programs = Vec::new();
+    // Use the same installation discovery as the shipped panes, including
+    // PowerShell 7 installed outside PATH. No Documents paths are composed.
+    let rows = profiles::shipped_for(
+        profiles::SeedPlatform::Windows,
+        &bt_pty::SystemShellEnvironment,
+    );
+    let resolved = profiles::ProfilePrograms::probe_rows(&rows, &bt_pty::SystemShellEnvironment);
+    for id in ["pwsh", "winps"] {
+        if let Some(program) = resolved.program(id).map(PathBuf::from)
+            && is_powershell(&program)
+            && !programs.contains(&program)
+        {
+            programs.push(program);
+        }
+    }
+    for name in ["powershell.exe", "pwsh.exe"] {
+        if let Some(program) = bt_platform::program_on_path(Path::new(name))
+            && !programs.contains(&program)
+        {
+            programs.push(program);
+        }
+    }
+    programs
+}
+
+#[cfg(not(windows))]
+fn installed_powershells() -> Vec<PathBuf> {
+    Vec::new()
+}
 
 /// Every answer this module publishes out of band is published on a thread with
 /// no window, so the window has to be told to come and read it.
@@ -1142,50 +1240,31 @@ pub fn profile_probe(program: &Path) -> Option<Option<PathBuf>> {
     // report "installed" about one file while writing another.
     if let Some(sandbox) = std::env::var_os("BT_POWERSHELL_PROFILE") {
         let sandbox = PathBuf::from(sandbox);
-        if !sandbox.as_os_str().is_empty() {
-            return Some(Some(sandbox));
-        }
+        return Some(sandbox.is_absolute().then_some(sandbox));
     }
-    if let Some(answer) = PROFILE_ANSWERS
-        .get_or_init(Default::default)
-        .lock()
-        .ok()?
-        .get(program)
-    {
+    let (slot, fresh) = profile_slot(program);
+    if let Some(answer) = slot.get() {
         return Some(answer.clone());
     }
-    begin_profile_probe(program);
+    if fresh {
+        begin_profile_probe(program);
+    }
     None
 }
 
-/// Start one program's probe, once per process.
+/// The same OnceLock is shared with startup. A pane never waits for its value.
 fn begin_profile_probe(program: &Path) {
-    let Ok(mut asked) = PROFILE_ASKED.get_or_init(Default::default).lock() else {
-        return;
-    };
-    if !asked.insert(program.to_path_buf()) {
-        return;
-    }
-    drop(asked);
     let program = program.to_path_buf();
-    // In the workers' band, beside the PSReadLine probe: this starts a
-    // PowerShell to ask it a question, and it must never be the reason a frame
-    // was late.
-    bt_platform::spawn_at_priority(
+    let _ = bt_platform::spawn_at_priority(
         "powershell-profile-probe",
         bt_platform::ThreadPriority::BelowNormal,
         move || {
-            let answer = run_profile_probe(&program);
-            if let Ok(mut answers) = PROFILE_ANSWERS.get_or_init(Default::default).lock() {
-                answers.insert(program, answer);
-            }
-            // After the answer is published, never before.
+            cached_profile_answer(&program);
             if let Some(wake) = WAKE.get() {
                 wake();
             }
         },
-    )
-    .ok();
+    );
 }
 
 #[cfg(windows)]
@@ -1198,11 +1277,35 @@ fn run_profile_probe(program: &Path) -> Option<PathBuf> {
     // `CreateProcess` out of the working directory before `PATH`. The probe
     // asks about the program a pane will run, so it asks about the one an
     // administrator installed.
-    let output = bt_platform::quiet_command_named(program)?
+    use std::process::Stdio;
+    let mut child = bt_platform::quiet_command_named(program)?
         .args(["-NoProfile", "-NonInteractive", "-Command", PROFILE_COMMAND])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    parse_profile_answer(&String::from_utf8_lossy(&output.stdout))
+    let _started_pid = child.id(); // Only this owned child may be stopped.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = parse_profile_answer(std::str::from_utf8(&output.stdout).ok()?)?;
+    path.is_absolute().then_some(path)
 }
 
 #[cfg(not(windows))]
@@ -1238,40 +1341,31 @@ pub fn parse_profile_answer(stdout: &str) -> Option<PathBuf> {
 /// a worked example of the line behind a `#`, so a reader who pasted the header
 /// into their profile would otherwise read as installed while their shell went
 /// on emitting nothing — silence about the one machine that needs the offer.
+///
+/// Offer evidence only; editing and recording must use `profile_marks::Forms::owns`.
 #[must_use]
-pub fn profile_declares_integration(text: &str) -> bool {
+pub fn profile_suppresses_integration_offer(text: &str) -> bool {
     text.lines().any(|line| {
         let line = line.trim_start();
         !line.starts_with('#') && line.to_ascii_lowercase().contains(SCRIPT_FILE_PS1)
     })
 }
 
-/// The line to add, spelled the way the shell can re-derive it.
-///
-/// `$env:APPDATA` when the script really is under it, and the literal path when
-/// it is not. The variable is not decoration: a profile is a file that outlives
-/// the account name it was written under, and a line naming
-/// `C:\Users\<name>\AppData\Roaming\…` is a line that breaks on a rename or a
-/// rebuild while the reader is left looking at a shell with no markers and no
-/// error. Where the script is *not* under `%APPDATA%` — a build run with the
-/// variable redirected — the literal path is the only true thing to write.
-///
-/// **The two spellings are quoted differently, and they have to be** (review row
-/// R3-14). A double-quoted PowerShell string is interpolated: `$` opens a
-/// variable and a backtick opens an escape, both of them legal characters in a
-/// Windows directory name, so a literal path holding either was read by the shell
-/// as something other than itself and the line sourced nothing. A single-quoted
-/// string is not interpolated at all — the one thing it needs is its own quote
-/// doubled — so that is what the literal path gets. The `$env:APPDATA` spelling
-/// keeps its double quotes because it *is* an interpolation, and the tail behind
-/// it is this build's own constant path components rather than anything a reader
-/// can name.
+/// Default managed form for injected profile fixtures. Production resolves the
+/// account's data root before selecting either admissible spelling.
+#[cfg(test)]
 #[must_use]
-pub fn integration_line(script: &Path, appdata: Option<&Path>) -> String {
-    match appdata.and_then(|appdata| script.strip_prefix(appdata).ok()) {
-        Some(tail) => format!(". \"$env:APPDATA\\{}\"", tail.display()),
-        None => format!(". '{}'", script.display().to_string().replace('\'', "''")),
-    }
+pub fn integration_line() -> String {
+    profile_marks::MANAGED_LINE.to_owned()
+}
+
+fn account_managed_line(data: &Path) -> std::io::Result<&'static str> {
+    let appdata = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            std::io::Error::other(crate::i18n::Text::ShellProfileScriptLocation.text())
+        })?;
+    profile_marks::managed_line_for(data, &appdata)
 }
 
 /// Where PowerShell's script is on this machine, written out on first use.
@@ -1289,32 +1383,9 @@ pub fn script_path_ps1() -> Option<PathBuf> {
     )
 }
 
-/// **The installed script, compared against the one this build ships, once per
-/// run** (review row R4-6).
-///
-/// [`script_path`]'s discipline for bash, given to PowerShell — and PowerShell
-/// is where it was missing, because the two doors are not the same. Bash's
-/// script is named on every spawn by `--init-file`, so the compare-and-repair
-/// happens whether or not anybody ever pressed anything. PowerShell's is named
-/// by a line inside the reader's own `$PROFILE`, written once, and after that
-/// nothing looked at the file again: an upgrade that changed `folio.ps1`, a
-/// cleaner that deleted it, or a copy that was truncated left the reader's
-/// shells sourcing something that is no longer this build's integration — or
-/// nothing at all — and [`offer_for`] went on reading the line in their profile
-/// and answering [`Offer::Silent`], which is this build saying "installed".
-///
-/// So the file is compared and repaired on the same clock bash's is: once per
-/// process, on the first pane that needs the answer. [`script_path_ps1`] already
-/// *is* the compare-and-repair — it reads the file and rewrites it when it
-/// differs — so what this adds is a caller that runs it without waiting for a
-/// press, and a `OnceLock` so four PowerShell panes are one read rather than
-/// four.
-///
-/// `None` is a directory that could not be written, which is the one case a
-/// repair cannot answer. It is not silent to the reader: their own PowerShell
-/// prints an error about the file its profile dot-sources, on every shell, which
-/// is a louder and more accurate report than anything this side could raise —
-/// and it is the same condition under which the install button itself fails.
+/// Script upkeep is started by the migration worker once per resident run.
+/// Reading a pane's offer is side-effect free; it cannot start migration or write
+/// shared data. Both scripts still use install_script_at's compare-and-repair.
 pub fn powershell_script_repaired() -> Option<&'static Path> {
     static REPAIRED: OnceLock<Option<PathBuf>> = OnceLock::new();
     REPAIRED.get_or_init(script_path_ps1).as_deref()
@@ -1329,108 +1400,212 @@ pub struct ProfileWrite {
     pub backup: Option<PathBuf>,
 }
 
-/// Add `line` to the end of `profile`, keeping a copy of what was there.
-///
-/// **The backup is the whole of the discipline.** This is the one place this
-/// product writes into a file that belongs to the user's shell rather than to
-/// itself, and the answer to "what if I did not want that" has to be a file and
-/// not an apology — the same rule this project already follows when it writes
-/// `~/.claude/settings.json`. It is named `<profile>.bak-<YYYYMMDD>` and it sits
-/// beside the file it copies, so it is found by looking where the change was
-/// made rather than by being told where backups go.
-///
-/// **No backup is ever written over, and none is ever skipped** (review row
-/// R4-4). The copy worth keeping most is the first one — from before this
-/// product touched the file at all — so the day's name is never replaced; but
-/// the rule used to *stop there*, and a second write on the same day therefore
-/// took no copy at all. That is precisely the write with something to lose:
-/// whatever the reader typed into their profile between the two. The taken name
-/// counts up instead, so every write into somebody else's file has a copy of
-/// what that file was a moment before it.
-///
-/// The line ending is the file's own: a profile written with LF keeps LF, and a
-/// file with neither gets CRLF, which is what every Windows editor puts in a
-/// new `.ps1`. A blank line separates what was theirs from what is ours, unless
-/// the file is empty — nothing needs separating from nothing.
-///
-/// **UTF-16 is refused.** A profile saved by an editor that writes UTF-16 is not
-/// bytes an ASCII line can be appended to, and a file half in one encoding is a
-/// profile that no longer loads. The refusal leaves it exactly as it was, which
-/// is the only outcome better than a corrupted one.
+/// Low-level injected-path writer. Production uses install_recorded, which
+/// records intent before the profile write. Existing marks are idempotent.
+#[cfg(test)]
 pub fn add_to_profile(
     profile: &Path,
     line: &str,
     at: std::time::SystemTime,
 ) -> std::io::Result<ProfileWrite> {
-    let existing = match std::fs::read(profile) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
-    if existing
-        .as_deref()
-        .is_some_and(|bytes| matches!(bytes, [0xFF, 0xFE, ..] | [0xFE, 0xFF, ..]))
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "the profile is UTF-16; a line of ASCII cannot be appended to it",
-        ));
-    }
-    let backup = match existing.as_deref() {
-        Some(bytes) => {
-            let path = free_backup_path(profile, at);
-            std::fs::write(&path, bytes)?;
-            Some(path)
-        }
-        None => {
-            if let Some(parent) = profile.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            None
-        }
-    };
-    let mut bytes = existing.unwrap_or_default();
-    let newline: &[u8] = if bytes.windows(2).any(|pair| pair == b"\r\n") {
-        b"\r\n"
-    } else if bytes.contains(&b'\n') {
-        b"\n"
+    add_profile_with_forms(profile, line, &profile_marks::Forms::new(&[]), at)
+}
+
+fn add_profile_with_forms(
+    profile: &Path,
+    line: &str,
+    forms: &profile_marks::Forms,
+    at: std::time::SystemTime,
+) -> std::io::Result<ProfileWrite> {
+    let existing = read_profile_for_edit(profile)?;
+    let original = existing.as_deref().unwrap_or_default();
+    let decoded = profile_marks::Decoded::read(original)?;
+    let changed = profile_marks::rewrite(original, forms, profile_marks::Action::Migrate)?;
+    let bytes = if let Some(bytes) = changed {
+        bytes
+    } else if decoded.text.lines().any(|text| forms.owns(text)) {
+        return Ok(ProfileWrite {
+            profile: profile.to_path_buf(),
+            backup: None,
+        });
     } else {
-        b"\r\n"
-    };
-    // **Blank is empty**, and the user's own two profiles are why: both are a
-    // bare `\r\n`, which is what an editor leaves behind when a file is created
-    // and never typed into. A blank line separates our line from *theirs*, and
-    // there is nothing there to be separated from — but the bytes stay, because
-    // nothing here is allowed to delete any part of a file it did not write.
-    if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
-        if !bytes.ends_with(b"\n") {
-            bytes.extend_from_slice(newline);
+        let newline = if decoded.text.contains("\r\n") {
+            "\r\n"
+        } else if decoded.text.contains('\n') {
+            "\n"
+        } else {
+            "\r\n"
+        };
+        let mut text = decoded.text.clone();
+        if !text.trim().is_empty() {
+            if !text.ends_with('\n') {
+                text.push_str(newline);
+            }
+            text.push_str(newline);
+        } else if !text.is_empty() && !text.ends_with('\n') {
+            text.push_str(newline);
         }
-        bytes.extend_from_slice(newline);
-    } else if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        bytes.extend_from_slice(newline);
-    }
-    bytes.extend_from_slice(line.as_bytes());
-    bytes.extend_from_slice(newline);
-    // **Replaced atomically, not truncated and rewritten** (review row R4-4).
-    // `std::fs::write` opens the reader's `$PROFILE` with `TRUNCATE_EXISTING`
-    // and then writes — so between those two the file is empty, and a machine
-    // that loses power there, or a `PowerShell` that starts there, meets a
-    // profile with nothing in it. It is the one file this product writes that
-    // belongs to somebody else, which makes it the last one that should be
-    // written the least safe way available.
-    //
-    // The temp file is a sibling, which is what makes the rename atomic: it is
-    // on the profile's own volume by construction, and `bt_persist::atomic_write`
-    // is the same temp-then-rename this product's own documents go through. A
-    // failure at any step leaves the profile exactly as it was, which is what
-    // the backup above is otherwise for.
-    bt_persist::atomic_write(profile, &bytes)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        text.push_str(line);
+        text.push_str(newline);
+        decoded.encode(&text)
+    };
+    let backup = replace_profile(profile, original, &bytes, at)?;
     Ok(ProfileWrite {
         profile: profile.to_path_buf(),
         backup,
     })
+}
+
+/// Refuse links/reparse points, including ancestors. PowerShell already
+/// resolved Documents; the writer never follows a different target.
+#[derive(Clone, Copy)]
+enum ProfileAccess {
+    Missing,
+    WritableFile { links: u64 },
+    ReadOnlyFile,
+    Directory,
+    Link,
+}
+
+pub(crate) fn refuse_profile_path(path: &Path) -> std::io::Result<()> {
+    match profile_path_reason(path)? {
+        Some(reason) => Err(std::io::Error::other(reason.text())),
+        None => Ok(()),
+    }
+}
+
+/// **The same predicate, with its answer rather than an error.**
+///
+/// Which of the three the filesystem said is a fact a caller may need: the agents' installers
+/// resolve a link they can account for and say which refusal they are standing on, and a sentence
+/// flattened to "this build cannot read it" was true of none of them (closure review R1). The
+/// profile writer keeps the refusal it always had, by asking this and throwing the answer away.
+pub(crate) fn profile_path_reason(path: &Path) -> std::io::Result<Option<crate::i18n::Text>> {
+    profile_path_reason_with(path, |component| {
+        let metadata = match std::fs::symlink_metadata(component) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ProfileAccess::Missing);
+            }
+            Err(e) => return Err(e),
+        };
+        let linked = metadata.file_type().is_symlink();
+        #[cfg(windows)]
+        let linked = {
+            use std::os::windows::fs::MetadataExt;
+            linked || metadata.file_attributes() & 0x400 != 0
+        };
+        Ok(if linked {
+            ProfileAccess::Link
+        } else if !metadata.is_file() {
+            ProfileAccess::Directory
+        } else if metadata.permissions().readonly() {
+            ProfileAccess::ReadOnlyFile
+        } else {
+            ProfileAccess::WritableFile {
+                links: bt_platform::file_link_count(&std::fs::File::open(component)?)?,
+            }
+        })
+    })
+}
+
+/// The injected-metadata seam, in the refusing shape the two fixtures below press.
+///
+/// Test-only since the agents' installers began asking for the answer rather than for an error:
+/// production has one caller of the decision and it is [`profile_path_reason`].
+#[cfg(test)]
+fn refuse_profile_path_with(
+    path: &Path,
+    inspect: impl Fn(&Path) -> std::io::Result<ProfileAccess>,
+) -> std::io::Result<()> {
+    match profile_path_reason_with(path, inspect)? {
+        Some(reason) => Err(std::io::Error::other(reason.text())),
+        None => Ok(()),
+    }
+}
+
+fn profile_path_reason_with(
+    path: &Path,
+    inspect: impl Fn(&Path) -> std::io::Result<ProfileAccess>,
+) -> std::io::Result<Option<crate::i18n::Text>> {
+    for component in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+        let reason = match inspect(component)? {
+            ProfileAccess::WritableFile { links } if links > 1 => {
+                Some(crate::i18n::Text::ShellProfileHardLink)
+            }
+            ProfileAccess::Link => Some(crate::i18n::Text::ShellProfileLink),
+            ProfileAccess::Directory | ProfileAccess::ReadOnlyFile if component == path => {
+                Some(crate::i18n::Text::ShellProfileReadOnly)
+            }
+            _ => None,
+        };
+        if reason.is_some() {
+            return Ok(reason);
+        }
+    }
+    Ok(None)
+}
+
+fn read_profile_for_edit(profile: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    refuse_profile_path(profile)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(1 | 4); // FILE_SHARE_READ | FILE_SHARE_DELETE
+    }
+    let mut file = match options.open(profile) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut bytes = Vec::new();
+    bt_platform::file_reads::Reader::new(
+        &mut file,
+        bt_platform::file_reads::Lane::Settings,
+        Some(profile),
+    )
+    .read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+fn replace_profile(
+    profile: &Path,
+    original: &[u8],
+    bytes: &[u8],
+    at: std::time::SystemTime,
+) -> std::io::Result<Option<PathBuf>> {
+    use std::io::Write;
+    let existing = read_profile_for_edit(profile)?;
+    if existing.as_deref().unwrap_or_default() != original {
+        return Err(std::io::Error::other(
+            crate::i18n::Text::ShellProfileChanged.text(),
+        ));
+    }
+    let backup = if let Some(before) = existing {
+        let path = free_backup_path(profile, at);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(&before)?;
+        file.sync_all()?;
+        Some(path)
+    } else {
+        if let Some(parent) = profile.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        None
+    };
+    refuse_profile_path(profile)?;
+    if backup.is_some() {
+        bt_persist::atomic_replace_preserving(profile, bytes).map_err(std::io::Error::other)?;
+    } else {
+        bt_persist::atomic_write(profile, bytes).map_err(std::io::Error::other)?;
+    }
+    Ok(backup)
 }
 
 /// `<profile>.bak-<YYYYMMDD>`, beside the file it copies.
@@ -1448,8 +1623,7 @@ pub fn add_to_profile(
 ///
 /// The count is bounded: a hundred writes into one profile in one day is not a
 /// reader, and the hundred-and-first is given the plain day name — which by then
-/// exists, so the copy replaces one from earlier the same day rather than
-/// growing the folder without end.
+/// exists, so create_new refuses the write rather than replacing a backup.
 fn free_backup_path(profile: &Path, at: std::time::SystemTime) -> PathBuf {
     let base = backup_path(profile, at);
     if !base.exists() {
@@ -1558,19 +1732,10 @@ impl Offer {
 /// has never heard of.
 #[must_use]
 pub fn offer_for(profile: &Path) -> Offer {
-    match std::fs::read_to_string(profile) {
-        Ok(text) if profile_declares_integration(&text) => {
-            // **And the file that line points at is checked** (review row
-            // R4-6). A declared integration is only an integration while the
-            // script it names is this build's; the repair is idempotent and
-            // costs one read per run. Its answer is not consulted — see
-            // [`powershell_script_repaired`] for why a directory that cannot be
-            // written is reported by the reader's own shell rather than here.
-            let _ = powershell_script_repaired();
-            Offer::Silent
-        }
-        // A profile that is not there is a profile with no line in it, which is
-        // the case this offer was written for: a reader who has never had one.
+    match bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, profile)
+        .and_then(|bytes| profile_marks::Decoded::read(&bytes))
+    {
+        Ok(decoded) if profile_suppresses_integration_offer(&decoded.text) => Offer::Silent,
         Ok(_) | Err(_) => Offer::Owed(profile.to_path_buf()),
     }
 }
@@ -1622,12 +1787,12 @@ pub fn install_into_profile(
     profile: &Path,
     at: std::time::SystemTime,
 ) -> std::io::Result<ProfileWrite> {
+    let data = persist::storage_dir();
+    let line = account_managed_line(&data)?;
     let script = script_path_ps1().ok_or_else(|| {
         std::io::Error::other("the integration script could not be written to %APPDATA%")
     })?;
-    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
-    let line = integration_line(&script, appdata.as_deref());
-    add_to_profile(profile, &line, at)
+    profile_runtime::install_recorded(profile, &data, &script, line, at)
 }
 
 /// The script's own text, for the tests that check what ships.
@@ -1657,11 +1822,279 @@ pub(crate) const fn script_source_zsh() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profiles::{Origin, ProgramSource, index_of_id};
+    use crate::profiles::{Origin, ProgramSource};
+
+    #[test]
+    fn shell_integration_startup_and_pane_share_one_query_even_on_failure() {
+        for answer in [
+            None,
+            Some(PathBuf::from("D:/redirected Documents/profile.ps1")),
+        ] {
+            let slot = std::sync::Arc::new(OnceLock::new());
+            let queries = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    let slot = slot.clone();
+                    let queries = queries.clone();
+                    let answer = answer.clone();
+                    scope.spawn(move || {
+                        assert_eq!(
+                            answer_once(&slot, || {
+                                queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                answer.clone()
+                            }),
+                            answer
+                        );
+                    });
+                }
+            });
+            assert_eq!(queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn shell_integration_followup_literal_current_account_is_recognised() {
+        let script = persist::storage_dir()
+            .join(SCRIPT_DIRECTORY)
+            .join(SCRIPT_FILE_PS1);
+        assert!(
+            profile_marks::Forms::new(std::slice::from_ref(&script))
+                .owns(&format!(". \"{}\"", script.display()))
+        );
+    }
+
+    #[test]
+    fn shell_integration_followup_hardlink_metadata_refuses_without_edit() {
+        let file = temp_dir("followup-hardlink").join("profile.ps1");
+        let original = profile_marks::LEGACY_LINE.as_bytes();
+        std::fs::write(&file, original).unwrap();
+        for links in [2, 3, 100] {
+            let result = refuse_profile_path_with(&file, |path| {
+                Ok(if path == file {
+                    ProfileAccess::WritableFile { links }
+                } else {
+                    ProfileAccess::Directory
+                })
+            })
+            .and_then(|()| {
+                add_to_profile(&file, profile_marks::MANAGED_LINE, std::time::UNIX_EPOCH)
+            });
+            assert!(result.is_err(), "hardlink count {links} must refuse");
+            assert_eq!(std::fs::read(&file).unwrap(), original);
+        }
+        assert!(
+            refuse_profile_path_with(&file, |_| Ok(ProfileAccess::WritableFile { links: 1 }))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn shell_integration_refuses_links_at_every_path_component_without_following_them() {
+        let file = Path::new("sandbox").join("redirected").join("profile.ps1");
+        for linked in file.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+            let result = refuse_profile_path_with(&file, |path| {
+                Ok(if path == linked {
+                    ProfileAccess::Link
+                } else if path == file {
+                    ProfileAccess::WritableFile { links: 1 }
+                } else {
+                    ProfileAccess::Directory
+                })
+            });
+            assert!(result.is_err(), "{}", linked.display());
+        }
+        assert!(
+            refuse_profile_path_with(&file, |path| Ok(if path == file {
+                ProfileAccess::ReadOnlyFile
+            } else {
+                ProfileAccess::Directory
+            }))
+            .is_err()
+        );
+        assert!(refuse_profile_path_with(&file, |_| Ok(ProfileAccess::Missing)).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_integration_locked_profile_is_byte_identical_and_other_file_is_removed() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = temp_dir("locked-removal");
+        let locked = root.join("locked.ps1");
+        let other = root.join("other.ps1");
+        for path in [&locked, &other] {
+            std::fs::write(path, LINE).unwrap();
+        }
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked)
+            .unwrap();
+        let report = profile_marks::apply(
+            &[locked.clone(), other.clone()],
+            &profile_marks::Forms::new(&[]),
+            profile_marks::Action::Remove,
+        );
+        assert_eq!(report.exit_code(), 1);
+        assert!(report.text(true).contains("locked.ps1"));
+        assert_eq!(std::fs::read(other).unwrap(), b"");
+        drop(handle);
+        assert_eq!(std::fs::read(locked).unwrap(), LINE.as_bytes());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires Windows symlink privilege; injected ancestor refusal runs without it"]
+    fn shell_integration_symlink_profile_and_linked_parent_are_refused() {
+        let root = temp_dir("link-removal");
+        let target = root.join("real.ps1");
+        let link = root.join("linked.ps1");
+        std::fs::write(&target, LINE).unwrap();
+        std::os::windows::fs::symlink_file(&target, &link)
+            .expect("developer mode permits sandbox symlinks");
+        let report = profile_marks::apply(
+            std::slice::from_ref(&link),
+            &profile_marks::Forms::new(&[]),
+            profile_marks::Action::Remove,
+        );
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(std::fs::read(&target).unwrap(), LINE.as_bytes());
+        assert!(
+            std::fs::symlink_metadata(link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let parent_link = root.join("parent-link");
+        let parent = root.join("real-parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::write(parent.join("profile.ps1"), LINE).unwrap();
+        std::os::windows::fs::symlink_dir(&parent, &parent_link).unwrap();
+        assert!(read_profile_for_edit(&parent_link.join("profile.ps1")).is_err());
+        assert_eq!(
+            std::fs::read(parent.join("profile.ps1")).unwrap(),
+            LINE.as_bytes()
+        );
+    }
+
+    #[test]
+    fn shell_integration_startup_and_removal_doors_are_above_window_work() {
+        let source = include_str!("main.rs");
+        let main = source.rsplit_once("fn main()").unwrap().1;
+        let removed = main
+            .find("shell_integration::remove_shell_integration(")
+            .unwrap();
+        for later in [
+            "cli::parse(",
+            "launch_wire::hand_over(",
+            "diagnostics::enter_resident_run(",
+            "EventLoop::<AppEvent>::with_user_event()",
+        ] {
+            assert!(removed < main.find(later).unwrap(), "{later}");
+        }
+        assert!(source.contains("shell_integration::begin_startup_migration();"));
+        assert!(source.contains("shell_integration::begin_removal();"));
+        let runtime = include_str!("shell_integration/profile_runtime.rs");
+        let worker = runtime
+            .split_once("pub fn begin_startup_migration() {")
+            .unwrap()
+            .1
+            .split_once("fn candidates")
+            .unwrap()
+            .0;
+        assert!(worker.find("spawn_at_priority").unwrap() < worker.find("operate(&data").unwrap());
+        let probe = source_for_profile_probe();
+        assert!(probe.contains("quiet_command_named"));
+        assert!(probe.contains("-NoProfile"));
+        assert!(probe.contains("from_secs(5)"));
+    }
+
+    /// PIN — **the window hears a removal only through the report's own answer,
+    /// and the console door keeps its sentence.**
+    ///
+    /// Two doors read the same `Report` and they owe different things. The
+    /// window is not owed a toast about a `$PROFILE` line that was never there
+    /// — that toast was a new machine's first sight of Folio, because the
+    /// first-run card's PowerShell row left off presses the Settings page's
+    /// `Off` and `Off` runs a removal. Somebody who typed
+    /// `--remove-shell-integration` *is* owed an answer, so that door still
+    /// prints `ShellProfileNothing`.
+    ///
+    /// MUTATIONS:
+    /// ① put the empty-text substitution back on the window's door and the
+    ///    corner speaks about nothing again;
+    /// ② take it off the console door and a command answers with silence and an
+    ///    exit code.
+    #[test]
+    fn shell_integration_removal_speaks_to_a_window_only_through_the_report() {
+        // **P3's deletion commit for this pin** (`docs/plans/bt-app-split-prep.md`
+        // §6.3, and §6.0 rule 3). The commit before this one cut each of the two
+        // doors twice — once out of `include_str!("main.rs")`, once out of the
+        // body of the item that owns it — and asserted the two cuts were the
+        // same bytes; this one removes the older of the two, because two
+        // implementations of one judgement do not vouch for each other
+        // (`docs/CONVENTIONS.md` §十 rule 4). The pattern is
+        // `main.rs::pty_drain_budget_tests`', not re-derived here.
+        //
+        // The cuts themselves are unchanged; what changes is where they are
+        // taken. Both doors are arms of one item apiece — the window's
+        // `user_event` and the program's `main` — so the item is named and the
+        // arm is cut inside its body, which is the same door wherever either
+        // one comes to be written.
+        let index = bt_source::Index::of_package("bt-app");
+        let item_body = |query: bt_source::ItemQuery| {
+            index
+                .body_of(&query)
+                .unwrap_or_else(|failure| panic!("{failure}"))
+        };
+        let probed = item_body(
+            bt_source::ItemQuery::method("FolioApp", "user_event").of_trait("ApplicationHandler"),
+        )
+        .split_once("AppEvent::PowerShellProfileProbed => {")
+        .expect("the window's user-event road carries the probe's arm")
+        .1
+        .split_once("AppEvent::UpdateChecked")
+        .expect("and the arm after it")
+        .0;
+        assert!(probed.contains("report.window_text()"));
+        assert!(
+            !probed.contains("ShellProfileNothing"),
+            "the window is being told about a removal that removed nothing"
+        );
+        let console = item_body(bt_source::ItemQuery::function("main"))
+            .split_once("if cli::remove_shell_integration(std::env::args_os().skip(1)) {")
+            .expect("the program's own entry carries the removal door")
+            .1
+            .split_once("if cli::remove_explorer_menu(")
+            .expect("and the door after it")
+            .0;
+        assert!(
+            console.contains("ShellProfileNothing"),
+            "a person who typed the command is owed an answer"
+        );
+    }
+
+    fn source_for_profile_probe() -> &'static str {
+        include_str!("shell_integration.rs")
+            .split_once("fn run_profile_probe(program: &Path)")
+            .unwrap()
+            .1
+            .split_once("#[cfg(not(windows))]")
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn shell_integration_managed_line_is_guarded_and_user_code_is_not_ours() {
+        assert!(!profile_marks::Forms::new(&[]).owns(". D:\\tools\\folio.ps1"));
+        assert!(!profile_marks::Forms::new(&[]).owns("# my note about folio.ps1"));
+        let line = integration_line();
+        assert!(line.starts_with("if (Test-Path -LiteralPath "));
+        assert!(line.ends_with("# Folio shell integration v1"));
+    }
 
     /// One shipped row, whole — what the spawn path is handed.
     fn row(id: &str) -> Profile {
-        profiles::row(index_of_id(id)).expect("a shipped id")
+        profiles::row_of(id).expect("a shipped id")
     }
 
     /// That row with an environment of its own.
@@ -2453,24 +2886,17 @@ mod tests {
     /// is called `C:\$dev` dot-sources a path that is missing a component.
     #[test]
     fn the_profile_line_survives_a_path_powershell_would_have_read() {
+        // The current writer has one form even if an old installation used a
+        // literal operand. Literal historical forms require a known script path.
         for awkward in [
             r"C:\$dev\Folio\folio.ps1",
             "C:\\dev`n\\Folio\\folio.ps1",
             r"C:\it's here\folio.ps1",
         ] {
-            let line = integration_line(Path::new(awkward), None);
-            let expected = format!(". '{}'", awkward.replace('\'', "''"));
-            assert_eq!(line, expected, "{awkward}");
+            assert_eq!(integration_line(), profile_marks::MANAGED_LINE);
+            let forms = profile_marks::Forms::new(&[PathBuf::from(awkward)]);
+            assert!(forms.owns(&format!(". '{}'", awkward.replace('\'', "''"))));
         }
-        // The `%APPDATA%` spelling is an interpolation on purpose, and what
-        // follows it is this build's own constant components.
-        assert_eq!(
-            integration_line(
-                Path::new(r"C:\Users\me\AppData\Roaming\Folio\shell-integration\folio.ps1"),
-                Some(Path::new(r"C:\Users\me\AppData\Roaming"))
-            ),
-            ". \"$env:APPDATA\\Folio\\shell-integration\\folio.ps1\""
-        );
     }
 
     /// PIN — PowerShell is not injected into, by any door.
@@ -3015,7 +3441,7 @@ mod tests {
 
     // ── the PowerShell profile (§7.1.6j) ───────────────────────────────────
 
-    fn temp_dir(tag: &str) -> PathBuf {
+    pub(super) fn temp_dir(tag: &str) -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir =
@@ -3056,12 +3482,7 @@ mod tests {
     fn a_profile_that_already_loads_the_script_owes_nothing() {
         let documents = temp_dir("installed");
         let profile = documents.join(PROFILE_LEAF);
-        std::fs::write(
-            &profile,
-            "\n# Folio OSC 133 shell integration (opt-in)\n. \
-             'D:\\Developer\\folio-terminal\\scripts\\shell-integration\\folio.ps1'\n",
-        )
-        .unwrap();
+        std::fs::write(&profile, LINE).unwrap();
         assert_eq!(offer_for(&profile), Offer::Silent);
         let absent = documents.join("never-written.ps1");
         assert_eq!(
@@ -3110,11 +3531,7 @@ mod tests {
 
         // And a pane that owes nothing does not spend the ask.
         let installed = documents.join("installed.ps1");
-        std::fs::write(
-            &installed,
-            "\n. 'D:\\Developer\\folio-terminal\\scripts\\shell-integration\\folio.ps1'\n",
-        )
-        .unwrap();
+        std::fs::write(&installed, LINE).unwrap();
         let mut spent = false;
         assert_eq!(offer_once_per_run(&installed, &mut spent), Offer::Silent);
         assert!(
@@ -3178,20 +3595,18 @@ mod tests {
     /// silent about the very machine that needs the offer.
     #[test]
     fn only_a_live_line_counts_as_an_installed_integration() {
-        assert!(profile_declares_integration(
-            "Set-Alias ll Get-ChildItem\r\n. \"$env:APPDATA\\Folio\\shell-integration\\folio.ps1\"\r\n"
+        assert!(profile_suppresses_integration_offer(
+            profile_marks::LEGACY_LINE
         ));
-        assert!(
-            profile_declares_integration(
-                ". 'D:\\Developer\\folio-terminal\\scripts\\shell-integration\\FOLIO.PS1'\n"
-            ),
-            "the machine is case-insensitive about file names and so is this"
-        );
-        assert!(!profile_declares_integration(
-            "#   . 'D:\\path\\to\\folio\\scripts\\shell-integration\\folio.ps1'\n"
+        assert!(profile_suppresses_integration_offer(
+            profile_marks::MANAGED_LINE
         ));
-        assert!(!profile_declares_integration("\r\n"));
-        assert!(!profile_declares_integration(""));
+        assert!(profile_suppresses_integration_offer(
+            r". 'D:\Developer\folio-terminal\scripts\shell-integration\FOLIO.PS1'"
+        ));
+        for user in ["# my note about folio.ps1", "\r\n", ""] {
+            assert!(!profile_suppresses_integration_offer(user), "{user}");
+        }
     }
 
     /// The line names the script through `$env:APPDATA` when that is where it
@@ -3199,20 +3614,7 @@ mod tests {
     /// whose machine is rebuilt.
     #[test]
     fn the_line_spells_the_script_the_way_the_shell_can_re_derive_it() {
-        assert_eq!(
-            integration_line(
-                Path::new(r"C:\Users\me\AppData\Roaming\Folio\shell-integration\folio.ps1"),
-                Some(Path::new(r"C:\Users\me\AppData\Roaming"))
-            ),
-            r#". "$env:APPDATA\Folio\shell-integration\folio.ps1""#
-        );
-        // A path that is not under `%APPDATA%` is single-quoted: a
-        // double-quoted PowerShell string is interpolated, and `$` and a
-        // backtick are both legal in a directory name (review row R3-14).
-        assert_eq!(
-            integration_line(Path::new(r"D:\scratch\folio.ps1"), None),
-            r". 'D:\scratch\folio.ps1'"
-        );
+        assert_eq!(integration_line(), profile_marks::MANAGED_LINE);
     }
 
     /// A profile that is not there yet is created, directories and all, and it
@@ -3272,7 +3674,7 @@ mod tests {
             "one blank line between what was theirs and what is ours, in the \
              line ending the file already uses"
         );
-        assert!(profile_declares_integration(
+        assert!(profile_suppresses_integration_offer(
             &std::fs::read_to_string(&profile).unwrap()
         ));
     }
@@ -3293,23 +3695,24 @@ mod tests {
         );
     }
 
-    /// A profile in UTF-16 is refused rather than appended to: these bytes are
-    /// not text this function can add a line of ASCII to, and a file half in one
-    /// encoding is a profile that no longer loads.
+    /// UTF-16LE with a BOM is edited in the original encoding; the backup
+    /// retains the original bytes and the append does not mix encodings.
     #[test]
-    fn a_utf16_profile_is_refused_rather_than_corrupted() {
+    fn a_utf16le_profile_keeps_its_encoding_and_bom() {
         let documents = temp_dir("utf16");
-        let profile = documents.join("PowerShell").join(PROFILE_LEAF);
-        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
-        let mut bytes = vec![0xFF, 0xFE];
-        bytes.extend_from_slice(b"#\0 \0m\0i\0n\0e\0");
+        let profile = documents.join(PROFILE_LEAF);
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend("# mine\r\n".encode_utf16().flat_map(u16::to_le_bytes));
         std::fs::write(&profile, &bytes).unwrap();
-        assert!(add_to_profile(&profile, LINE, EPOCH_DAY).is_err());
-        assert_eq!(
-            std::fs::read(&profile).unwrap(),
-            bytes,
-            "a refusal leaves the file exactly as it was"
+        let written = add_to_profile(&profile, LINE, EPOCH_DAY).unwrap();
+        assert_eq!(std::fs::read(written.backup.unwrap()).unwrap(), bytes);
+        let mut expected = bytes;
+        expected.extend(
+            format!("\r\n{LINE}\r\n")
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
         );
+        assert_eq!(std::fs::read(profile).unwrap(), expected);
     }
 
     /// RED (review row R4-4) — **the first backup of a day is kept, and the
@@ -3337,7 +3740,7 @@ mod tests {
             .expect("a backup");
         // What the reader typed between the two writes, which is exactly what a
         // skipped second backup loses.
-        let between = std::fs::read_to_string(&profile).unwrap() + "# and this is mine too\n";
+        let between = "# mine\n# and this is mine too\n".to_owned();
         std::fs::write(&profile, &between).unwrap();
 
         let second = add_to_profile(&profile, LINE, EPOCH_DAY)
@@ -3393,12 +3796,12 @@ mod tests {
 
         let source = include_str!("shell_integration.rs");
         let body = source
-            .split_once("pub fn add_to_profile(")
+            .split_once("fn replace_profile(")
             .expect("the writer")
             .1;
         let end = body.find("\n}\n").expect("its end");
         assert!(
-            body[..end].contains("bt_persist::atomic_write(profile"),
+            body[..end].contains("bt_persist::atomic_replace_preserving(profile"),
             "the profile is replaced atomically, not truncated and rewritten"
         );
         assert!(
@@ -3458,21 +3861,21 @@ mod tests {
         );
 
         // The second half: a profile that declares the integration is what asks.
-        let source = include_str!("shell_integration.rs");
+        let source = include_str!("shell_integration/profile_runtime.rs");
         let body = source
-            .split_once("pub fn offer_for(profile: &Path) -> Offer {")
-            .expect("the offer")
+            .split_once("fn operate(data: &Path, asker: Asker, action: Action) -> Report {")
+            .expect("startup migration")
             .1;
         let end = body.find("\n}\n").expect("its end");
         assert!(
             body[..end].contains("powershell_script_repaired()"),
-            "a declared integration is compared against what this build ships"
+            "startup compares the installed integration against what this build ships"
         );
     }
 
     /// What the two constants above stand for: one day, and one line.
     const EPOCH_DAY: std::time::SystemTime = std::time::UNIX_EPOCH;
-    const LINE: &str = r#". "$env:APPDATA\Folio\shell-integration\folio.ps1""#;
+    const LINE: &str = profile_marks::MANAGED_LINE;
     /// The name both PowerShells give the file, for the tests that stand one up
     /// rather than asking a shell where it is.
     const PROFILE_LEAF: &str = "Microsoft.PowerShell_profile.ps1";

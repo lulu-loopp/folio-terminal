@@ -1414,18 +1414,95 @@ mod tests {
     /// `placement_on` with the *window's* dpi rather than the summoned display's and the fourth
     /// goes red, which is the same seam `an_arrangement_is_restated_at_the_scale_the_display_now_has`
     /// pins one layer down.
+    // ── what this pin asks the crate ──────────────────────────
+    //
+    // **P3's deletion commit for this module**
+    // (`docs/plans/bt-app-split-prep.md` §6.3, and §6.0 rule 3). The commit
+    // before this one stood both readings side by side and asserted they
+    // answered the same; this one removes the older of the two, because two
+    // implementations of one judgement do not vouch for each other
+    // (`docs/CONVENTIONS.md` §十 rule 4). The pattern is
+    // `main.rs::pty_drain_budget_tests`' and is not re-derived here.
+    //
+    // **The negative is what changes.** "Not in `main.rs`" was the whole ruling
+    // written as one file's text, and it is the shape §6.4's dry run exists to
+    // neutralise: the geometry's callers are `Runtime` methods, and a `Runtime`
+    // method that moves to another file takes the prohibition's subject out of
+    // the text this pin was reading. Asked of the package it is a sentence
+    // about ownership instead — **every mention of the two names stands in this
+    // module** — which is the ruling 「呼出规则唯一…写成一个函数」itself and is
+    // the same answer wherever the callers are written. A package-wide count of
+    // zero would have inverted the guard, since the functions live here.
+    //
+    // `View::Identifiers` rather than raw bytes for the same reason §2.5 gives:
+    // the names are boundary-checked, and the doc comment in `settings.rs` that
+    // points a reader at `quake::summoned_rect` is prose about the rule rather
+    // than a second place doing the arithmetic.
+    fn source_index() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// How many times `name` is written as a name in `scope`.
+    fn mentions(name: &str, scope: bt_source::Scope) -> usize {
+        source_index()
+            .search(
+                &bt_source::Search::new(
+                    bt_source::Needle::new(bt_source::Pattern::identifier(name)),
+                    bt_source::View::Identifiers,
+                )
+                .in_scope(scope),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .len()
+    }
+
+    /// The mentions of `name` that stand anywhere but this module.
+    fn mentions_elsewhere(name: &str) -> usize {
+        mentions(name, bt_source::Scope::Everything)
+            - mentions(name, bt_source::Scope::Module("crate::quake".to_owned()))
+    }
+
+    /// One search over the whole package, refusing loudly rather than
+    /// answering a smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source_index()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **How many of these occurrences a product build compiles** —
+    /// `bt_source::Found::in_the_product`, which owns that rule and both of the
+    /// grains it takes: §2.3's file and §2.4's item.
+    ///
+    /// This module needs both, which is why it is asked here rather than left
+    /// to the file grain: the spellings counted below are written again in this
+    /// module's own assertions, and again in whole test files elsewhere in the
+    /// package. The rule used to be written out here, in one of twelve copies
+    /// of it this crate carried.
+    fn in_the_product(found: &bt_source::Found) -> usize {
+        found.in_the_product(source_index()).len()
+    }
+
+    /// The same count of one raw needle — the view `include_str!` handed this
+    /// module.
+    fn in_the_product_raw(needle: bt_source::Needle) -> usize {
+        in_the_product(&found(needle, bt_source::View::Raw))
+    }
+
     #[test]
     fn a_summon_is_placed_by_one_function_and_main_does_not_do_the_geometry() {
-        const MAIN: &str = include_str!("main.rs");
         for name in ["summoned_rect", "placement_on"] {
-            assert!(
-                !MAIN.contains(name),
+            assert_eq!(
+                mentions_elsewhere(name),
+                0,
                 "`{name}` is the summon's geometry and it is being done outside \
                  `quake::Quake::placement`, which is the one door the ruling asks for"
             );
         }
         assert!(
-            MAIN.contains("self.app.quake.placement(&screen, settings)"),
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "self.app.quake.placement(&screen, settings)"
+            ))) > 0,
             "the one door is not being called from the one place that shows the window"
         );
 

@@ -4,8 +4,8 @@
     exactly the list.
 
 .DESCRIPTION
-    The archive is nine files and the list of them is the point. Two of the
-    nine are a runtime contract rather than a convenience:
+    The archive is ten files and the list of them is the point. Two of the
+    ten are a runtime contract rather than a convenience:
 
       * `conpty.dll` and `OpenConsole.exe` must sit in `folio.exe`'s OWN
         directory. `vendor/conpty/portable-pty/src/win/psuedocon.rs` looks for
@@ -16,7 +16,7 @@
         subdirectory, and this loader never reads it — carrying it would be 1.7
         MiB of a second copy nothing opens.
 
-    One of the nine is not copied from anywhere: `folio.msix` is packed here,
+    One of the ten is not copied from anywhere: `folio.msix` is packed here,
     out of `packaging/msix/`. It is a **sparse** package and there is no program
     inside it — it is the identity and the COM class that put "Open in Folio" on
     the first page of the Windows 11 right-click menu, and the program it names
@@ -78,7 +78,17 @@
 
 .PARAMETER Binaries
     Where the build put `folio.exe` and the ConPTY sidecar. Defaults to
-    `target/release`.
+    `target/release`. Legacy packaging-only input for the CI rehearsal.
+
+.PARAMETER Binary
+    An unsigned directory downloaded by fetch-ci-build.ps1. Rechecks BUILDINFO,
+    hashes and --version against this checkout's HEAD before packaging. Its SBOM
+    is copied into Output. -Sign signs this directory's exe in place, so keep an
+    unsigned copy if it will be packaged again.
+
+.PARAMETER BuildLocal
+    Explicitly opt into a local release build before packaging. This can consume
+    over 8 GB in one rustc and disrupt an active workstation. Prefer -Binary.
 
 .PARAMETER Documents
     Where the two licences, the third-party notices and the trademark notice
@@ -86,7 +96,7 @@
 
 .PARAMETER Packaging
     Where the files that exist only to be shipped are. Defaults to
-    `packaging/`. Today that is `folio-here.cmd`.
+    `packaging/`. Today those are `folio-here.cmd` and `uninstall.cmd`.
 
 .PARAMETER Output
     Where the archive, the copy of it under the stable name and `SHA256SUMS.txt`
@@ -98,6 +108,13 @@
     page — `gh release create` is handed all of it — so a file the previous
     release left behind is a file the next release publishes, which is what
     0.4.0 nearly did with 0.3.0's archive.
+
+    **What it empties is what this lane writes**, by name: the archive and the
+    copy of it under the stable name, `SHA256SUMS.txt`, a bill of materials, the
+    three macOS assets that are fetched in after this script has run, and the two
+    directories this script works in. Anything else there is refused with its own
+    name rather than deleted — a `-Output` pointed somewhere unexpected is the
+    one way this script could take a file that is not a previous release's.
 
 .PARAMETER ToolsOnly
     Find `makeappx.exe`, say which one, and stop. Nothing is read, built,
@@ -140,6 +157,8 @@
 param(
     [string] $Version,
     [string] $Binaries,
+    [string] $Binary,
+    [switch] $BuildLocal,
     [string] $Documents,
     [string] $Packaging,
     [string] $Output,
@@ -155,6 +174,7 @@ if (-not $Binaries) { $Binaries = Join-Path $root 'target\release' }
 if (-not $Documents) { $Documents = $root }
 if (-not $Packaging) { $Packaging = Join-Path $root 'packaging' }
 if (-not $Output) { $Output = Join-Path $root 'target\release-package' }
+$Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 
 # **Where the package is built, and where it does not stay.** `$Output` is the
 # release page: every file in it is uploaded and every file in it is hashed into
@@ -222,6 +242,35 @@ if ($ToolsOnly) {
     return
 }
 
+if ($Binary -and ($PSBoundParameters.ContainsKey('Binaries') -or $BuildLocal)) {
+    throw '-Binary cannot be combined with -Binaries or -BuildLocal'
+}
+if ($BuildLocal) {
+    if ($PSBoundParameters.ContainsKey('Binaries')) { throw '-BuildLocal uses target/release; do not pass -Binaries' }
+    Write-Warning 'Local fat-LTO release builds can use over 8 GB in one rustc and freeze an active workstation. Prefer CI and -Binary.'
+    Push-Location $root
+    try {
+        & cargo build --release --locked -p bt-app
+        if ($LASTEXITCODE -ne 0) { throw 'local release build failed' }
+        & "$PSScriptRoot/sbom.ps1" -Output (Join-Path $Output "folio-$(Get-WorkspaceVersion).cdx.json")
+    } finally { Pop-Location }
+}
+if ($Binary) {
+    . "$PSScriptRoot/ci-build.ps1"
+    $Binaries = (Resolve-Path -LiteralPath $Binary).Path
+    $inputPrefix = $Binaries.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $outputPrefix = $Output.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if ($inputPrefix.StartsWith($outputPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $outputPrefix.StartsWith($inputPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw '-Binary and -Output must be separate, non-nested directories'
+    }
+    $commit = (& git -C $root rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'cannot resolve packaging checkout HEAD' }
+    $buildInfo = Assert-CiBuild -Directory $Binaries -Commit $commit
+    if ($buildInfo.version -ne (Get-WorkspaceVersion)) { throw 'CI build and packaging manifest versions differ' }
+    if ($Version -and $Version -ne $buildInfo.version) { throw '-Version differs from the CI build' }
+}
+
 if (-not $Version) { $Version = Get-WorkspaceVersion }
 
 # ── the output directory is the release page, and it starts empty ────────────
@@ -248,12 +297,60 @@ if (-not $Version) { $Version = Get-WorkspaceVersion }
 # `Get-ChildItem` on that one directory and every entry is removed by its own
 # `-LiteralPath`, so there is no pattern for a name to escape through and no
 # recursion into anything that was not already inside it.
+#
+# **And it clears what this lane wrote, rather than whatever is there.** A
+# directory somebody else's file is in is a directory this script may not empty:
+# `-Output` is a parameter, the default is the only path anybody has ever passed,
+# and the day a second one is passed the difference between "empty the previous
+# release" and "empty that folder" is somebody's afternoon. So the names are
+# written down as shapes — the four assets the Windows lane writes, the three the
+# macOS half is fetched into it as, and the two directories this script works in
+# — and a name that is none of them stops the run with its own name in the
+# message. The version in a shape is left open on purpose: what makes a file the
+# previous release's is that this lane wrote it, and the previous release is
+# exactly the version that is not this one.
+function Test-ReleasePageName {
+    param([string] $Name)
+
+    # A version as a file name can carry it: three numbers, and a pre-release or
+    # build suffix for the archives of a channel that ever spells one out.
+    $v = '\d+\.\d+\.\d+([-+][0-9A-Za-z.]+)?'
+    foreach ($shape in @(
+            "^folio-$v-windows-x64\.zip$",   # the archive
+            '^folio-windows-x64\.zip$',      # the copy under the stable name
+            "^folio-$v\.cdx\.json$",         # sbom.ps1's bill of materials
+            '^SHA256SUMS\.txt$',
+            '^SHA256SUMS-macos\.txt$',
+            "^Folio-$v-macos-arm64\.dmg$",   # fetched from the Mac, after this runs
+            '^Folio-macos-arm64\.dmg$',
+            '^package-work$',                # this script's own working directory
+            "^folio-$v$")) {                 # and its staging folder
+        if ($Name -match $shape) { return $true }
+    }
+    return $false
+}
+
 $sbomName = "folio-$Version.cdx.json"
 [System.IO.Directory]::CreateDirectory($Output) | Out-Null
+$strangers = @(
+    Get-ChildItem -LiteralPath $Output -Force |
+        Where-Object { -not (Test-ReleasePageName -Name $_.Name) } |
+        ForEach-Object { $_.Name }
+)
+if ($strangers.Count -gt 0) {
+    Write-Host "$Output holds $($strangers.Count) file(s) this release lane did not write:"
+    $strangers | ForEach-Object { Write-Host "  $_" }
+    throw ('this directory is emptied before the archive is written, and it is not emptied ' +
+           'while it holds something that was not put there by sbom.ps1, by this script or by ' +
+           'the macOS fetch. Move those out, or point -Output at a directory of this lane''s own.')
+}
 foreach ($previous in (Get-ChildItem -LiteralPath $Output -Force)) {
     if ($previous.Name -eq $sbomName) { continue }
     Write-Host "cleared from $([IO.Path]::GetFileName($Output)): $($previous.Name)"
     Remove-Item -LiteralPath $previous.FullName -Recurse -Force
+}
+if ($Binary) {
+    Copy-Item -LiteralPath (Join-Path $Binaries $sbomName) -Destination (Join-Path $Output $sbomName) -Force
 }
 
 # The archive, in the order a person opening it should meet it: the program,
@@ -291,6 +388,7 @@ $manifest = @(
     @{ Name = 'conpty.dll';               From = $Binaries },
     @{ Name = 'OpenConsole.exe';          From = $Binaries },
     @{ Name = 'folio-here.cmd';           From = $Packaging },
+    @{ Name = 'uninstall.cmd';            From = $Packaging },
     @{ Name = 'LICENSE-MIT';              From = $Documents },
     @{ Name = 'LICENSE-APACHE';           From = $Documents },
     @{ Name = 'THIRD-PARTY-NOTICES.md';   From = $Documents },
@@ -485,7 +583,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive,
     [System.IO.Compression.CompressionLevel]::Optimal,
     # The folder goes in, so that extracting into a downloads directory produces
-    # one folder and not nine loose files — four of which only work while they
+    # one folder and not ten loose files — four of which only work while they
     # are beside each other, and a fifth (`folio.msix`) which names the folder
     # the other four are in.
     $true)

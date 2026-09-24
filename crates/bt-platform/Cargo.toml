@@ -369,6 +369,9 @@ objc2-uniform-type-identifiers = { version = "0.3", default-features = false, fe
     "UTType",
 ] }
 objc2-core-text = { version = "0.3", default-features = false, features = [
+    # A descriptor's cmap, used to keep the CJK picker to families that cover
+    # Folio's fixed Han and Hangul probe.
+    "CTFont",
     # `CTFontCollectionCreateFromAvailableFonts` and
     # `CTFontCollectionCreateMatchingFontDescriptors` — the database and its
     # contents.
@@ -709,6 +712,15 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # more class.
     "NSGraphicsContext",
     "NSPasteboard",
+    # §7.61: the one picture decoder this crate needs, and it is the system's own.
+    # A picture copied out of Preview or Safari reaches the pasteboard as
+    # `public.tiff` and nothing else, and the workspace's `image` crate is built
+    # without its TIFF feature — turning that on would be a package this lock file
+    # does not have. `NSBitmapImageRep` reads the data and writes PNG back out.
+    # **Not a package**: `objc2-app-kit` is already here and this turns on two more
+    # classes, the second of which is only the first one's superclass.
+    "NSBitmapImageRep",
+    "NSImageRep",
     # `NSResponder`, because a window is one and `makeFirstResponder:` takes
     # one; `NSView`, because that is what a `NativeWindow` holds.
     "NSResponder",
@@ -1065,7 +1077,14 @@ windows = { version = "0.62.2", features = [
     # not one line to it or to `THIRD-PARTY-NOTICES.md`, which is
     # `docs/DESIGN.md` §8's bar.
     "Win32_UI_Input_Ime",
+    "Win32_UI_TextServices",
     "Win32_UI_Input_KeyboardAndMouse",
+    # `UnregisterTouchWindow`: the one call that takes back the touch
+    # registration winit makes on every window of a machine with a digitizer,
+    # so that Windows goes on translating touch into gestures and mouse input
+    # the way it does for every other program (`let_the_system_translate_touch`).
+    # A feature and not a package, for `Win32_UI_Input_Ime`'s reason above.
+    "Win32_UI_Input_Touch",
     "Win32_UI_Shell",
     # `COMDLG_FILTERSPEC` and therefore `IFileDialog::SetFileTypes`, which is
     # what filters the picture chooser to the formats the decoder honours.
@@ -1103,3 +1122,7 @@ libc = "0.2"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+[dependencies]
+ttf-parser.workspace = true
+bt-unicode = { path = "../bt-unicode" }

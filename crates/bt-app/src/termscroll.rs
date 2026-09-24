@@ -421,23 +421,48 @@ pub fn visibility(
     }
 }
 
-/// When a thumb whose last reason ended at `rest` next owes a frame.
+/// **Whether a thumb whose last reason ended at `rest` is actually fading at
+/// `now`** (review round 3, 2026-09-18).
+///
+/// [`fade_wait_deadline`]'s complement, and the two must not be confused
+/// for the reason [`visibility`] gives one line above the branch: **a wait is
+/// not a transition.** The nine hundred milliseconds of [`THUMB_REST`] is a bar
+/// standing at full strength with nothing about it changing, and the window read
+/// this host's *deadline* as its liveness — so every pane that had been scrolled
+/// kept the overlay lane alive for nine hundred milliseconds afterwards, and a
+/// neighbouring pane printing rebuilt the overlay on every one of its presents
+/// for the whole of it. Only the fade moves.
+#[must_use]
+pub fn fade_is_moving(rest: Instant, now: Instant, motion: Motion) -> bool {
+    if motion == Motion::Reduced {
+        return false;
+    }
+    let since = now.saturating_duration_since(rest);
+    (THUMB_REST..THUMB_REST + THUMB_FADE).contains(&since)
+}
+
+/// When a thumb whose last reason ended at `rest` next needs waking from its
+/// full-strength rest.
 ///
 /// The **same** two durations [`visibility`] reads, deliberately shared rather
 /// than restated: the deadline that wakes the loop and the paint that runs when
 /// it does have to agree exactly, or the window either spins for ever on a bar
-/// that has finished or leaves one half-faded on the glass. `None` once the fade
-/// has landed, which is what makes a resting terminal cost no wake-ups at all.
+/// that has finished or leaves one at full strength until something else moves.
+/// Once the fade begins this answers `None`: `Runtime::terminal_thumb_work`
+/// owns its frame appointments through the window's absolute animation deadline.
+///
+/// Keeping the wait here and the moving frames in the window is deliberate
+/// (CI follow-up 2, 2026-09-20): this module cannot see the window's frame clock,
+/// and manufacturing `now + frame` here would renew the appointment every time
+/// the fold asks. One window, one absolute rate, read from the glass — see
+/// `crate::pace::FrameClock::deadline`.
 #[must_use]
-pub fn fade_deadline(rest: Instant, now: Instant, motion: Motion) -> Option<Instant> {
+pub fn fade_wait_deadline(rest: Instant, now: Instant) -> Option<Instant> {
     let since = now.saturating_duration_since(rest);
     if since < THUMB_REST {
         return Some(rest + THUMB_REST);
     }
-    if motion == Motion::Reduced || since >= THUMB_REST + THUMB_FADE {
-        return None;
-    }
-    Some(now + crate::STRIP_ANIMATION_FRAME)
+    None
 }
 
 /// The mark, on a layer of its own.
@@ -1026,29 +1051,29 @@ mod tests {
         );
     }
 
-    /// The deadline and the paint read the same two durations, so a window stops
-    /// waking exactly when there is nothing left to draw.
+    /// The wait deadline and the paint read the same rest duration, so the fade
+    /// starts even when nothing else would wake the window.
+    ///
+    /// The fade's frames belong to `Runtime::terminal_thumb_work`, where the
+    /// window's absolute animation deadline is available; this owner reports
+    /// only the transition from waiting to moving.
     #[test]
-    fn the_fade_asks_for_frames_until_it_lands_and_not_one_after() {
+    fn the_fade_wait_wakes_once_when_the_rest_ends() {
         let rest = Instant::now();
         assert_eq!(
-            fade_deadline(rest, rest, Motion::Full),
+            fade_wait_deadline(rest, rest),
             Some(rest + THUMB_REST),
             "the first wake-up owed is the end of the rest"
         );
-        assert!(
-            fade_deadline(rest, rest + THUMB_REST, Motion::Full).is_some(),
-            "the fade's own frames follow it"
+        assert_eq!(
+            fade_wait_deadline(rest, rest + THUMB_REST),
+            None,
+            "once the fade begins, its frames belong to the window"
         );
         assert_eq!(
-            fade_deadline(rest, rest + THUMB_REST + THUMB_FADE, Motion::Full),
+            fade_wait_deadline(rest, rest + THUMB_REST + THUMB_FADE),
             None,
-            "and a landed fade owes nothing"
-        );
-        assert_eq!(
-            fade_deadline(rest, rest + THUMB_REST, Motion::Reduced),
-            None,
-            "under reduced motion there was never a fade to wake for"
+            "and a landed fade owes no owner wake"
         );
     }
 

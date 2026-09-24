@@ -35,7 +35,7 @@
 
 use bt_persist::{
     BackgroundFitV1, LanguageV1, LaunchOpensV1, MinimumContrastV1, SearchEngineV1,
-    SplitDirectionV1, ThemeModeV1,
+    SplitDirectionV1, ThemeModeV1, WebColorSchemeV1,
 };
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
@@ -125,9 +125,11 @@ const HEADER_PADDING_LEFT_LOGICAL_PX: f32 = 22.0;
 /// 12 rather than 22 so the *icon* inside the 30px button ends 22 from the
 /// dialog's edge — the mock-up says so in as many words.
 const HEADER_PADDING_RIGHT_LOGICAL_PX: f32 = 12.0;
+/// The dialog title (`UI-SPEC.md` T2; `first_run.rs::TITLE_FONT_LOGICAL_PX`,
+/// `restore.rs::TITLE_FONT_LOGICAL_PX`), not the mock-up's own
 /// `.settings header h1 { font-size: 16px; font-weight: 600 }`. Weight is not
 /// expressible through a chrome label and is noted as a deviation.
-const HEADER_TITLE_FONT_LOGICAL_PX: f32 = 16.0;
+const HEADER_TITLE_FONT_LOGICAL_PX: f32 = 15.0;
 
 // ── `.dlg-close` ───────────────────────────────────────────────────────────
 /// `width: 30px; height: 30px`. Deliberately not the caption run's 46x40: the
@@ -151,9 +153,10 @@ const CONTENT_PADDING_X_LOGICAL_PX: f32 = 22.0;
 /// Ten is the rail's own `padding-top`, which is the argument for the number
 /// rather than a taste for more air: the body has two columns, they begin at the
 /// same y, and content that scrolls disappears under the same inset the words
-/// beside it start at. The mock-up is written back to `padding: 10px 22px 18px`.
+/// beside it start at. Bottom padding follows `UI-SPEC.md` S10.
 const CONTENT_PADDING_TOP_LOGICAL_PX: f32 = 10.0;
-const CONTENT_PADDING_BOTTOM_LOGICAL_PX: f32 = 18.0;
+/// Dialog bottom padding (UI-SPEC.md S10).
+const CONTENT_PADDING_BOTTOM_LOGICAL_PX: f32 = 16.0;
 
 // ── `.group-label` ─────────────────────────────────────────────────────────
 const GROUP_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
@@ -178,7 +181,9 @@ const GROUP_LABEL_TRACKING_EM: f32 = 0.05;
 const ROW_PADDING_Y_LOGICAL_PX: f32 = 11.0;
 const ROW_PADDING_X_LOGICAL_PX: f32 = 2.0;
 const ROW_GAP_LOGICAL_PX: f32 = 16.0;
-const ROW_TITLE_FONT_LOGICAL_PX: f32 = 13.5;
+/// Primary text (`UI-SPEC.md` T3) — the title used to sit half a point above
+/// its own combo text.
+const ROW_TITLE_FONT_LOGICAL_PX: f32 = 13.0;
 /// The 13.5px line box, measured in the mock-up.
 const ROW_TITLE_LINE_LOGICAL_PX: f32 = 16.5;
 const ROW_DESC_FONT_LOGICAL_PX: f32 = 12.0;
@@ -196,48 +201,46 @@ const ROW_DESC_MARGIN_TOP_LOGICAL_PX: f32 = 1.0;
 /// row grows to hold it; a row whose sentence fits on one line, or that has no
 /// sentence at all, is exactly as tall as it was.
 ///
-/// **The tolerance is the longest ruled exception, measured** (owner ruling
-/// 2026-09-14, which replaces 08-25's flat three). Six, and the six is not a
-/// number anybody chose: it is what the longest sentence on
-/// `tests::OWNER_RULED_EXCEPTIONS` takes in the column that row is actually
-/// drawn in, and `the_ruled_exception_is_drawn_whole_in_the_column_it_stands_in`
-/// re-measures it rather than trusting this line.
+/// **Four: the line the floor pins report, plus the one they report it on**
+/// (owner ruling 2026-09-23, which replaces 2026-09-14's six).
 ///
-/// **Because a sentence the owner ruled byte-exact cannot be cut.** `Option key
-/// sends Alt` is the one entry on that list: the two-line rewrite was taken off
-/// the page and the long sentence put back, the budget ruled off it rather than
-/// it off the budget. A layout that then prints `…` after it has un-done the
-/// ruling — so the tolerance follows the wrap, and the wrap does not follow the
-/// tolerance.
+/// The tolerance is the larger of two numbers, and
+/// `the_row_line_tolerance_is_what_the_pins_and_the_ruled_exceptions_need`
+/// computes both rather than trusting this line:
 ///
-/// **Where the six comes from.** The row is on General, whose pickers stand at
-/// [`COMBO_MAX_ROW_SHARE`], so its sentence is set in the narrowest column this
-/// dialog can draw — 502 − 251 − 16 = 235. At 235 the Chinese takes four lines
-/// (147 columns of a CJK face is 882px of ink, and 882 ÷ 235 = 3.75, so four is
-/// its floor as well as its wrap) and the English takes six (181 characters is
-/// 1086px, and 1086 ÷ 235 = 4.62, which no four lines can hold). Six is the
-/// larger, so six is the tolerance. At the 118px picker floor — the *widest*
-/// column any page has — both take three, which is why no length pin ever saw
-/// this and why the built Mac was the first thing to report it.
+/// - **What the floor pins need to see.** `no_settings_sentence_needs_a_fourth_line`
+///   and its Mac twin count the lines [`wrapped_description`] returns, and that
+///   wrapper stops at this cap. A cap of three would hand them three for a
+///   sentence that wants eight and they would pass it; a fourth line has to be
+///   drawable for a fourth line to be reported. So the floor is
+///   `SETTINGS_DESCRIPTION_FLOOR_MAX_LINES + 1`, and the compiler holds that
+///   relation beside the constant.
+/// - **What the longest owner-ruled exception takes** in the column its row is
+///   really drawn in, because a sentence ruled byte-exact cannot be cut. Between
+///   2026-09-14 and 2026-09-23 that was `Option key sends Alt`'s long sentence,
+///   six lines of General's 235px column, and this constant was six. The owner
+///   then gave that row a two-line sentence and ended its exemption, so the list
+///   `tests::OWNER_RULED_EXCEPTIONS` is empty — its normal state — and asks for
+///   nothing.
 ///
 /// **It is still not the rule the copy is written to.** A sentence past
 /// `SETTINGS_DESCRIPTION_FLOOR_MAX_LINES` is a **copy** fault, not a geometry
 /// one, and `no_settings_sentence_needs_a_fourth_line` is the pin that reports
-/// that fault in the test run rather than in a screenshot. That pin did not move
-/// with this constant: it holds every sentence that is *not* a ruled exception
-/// to three lines of the floor column, which is what it has always meant.
+/// that fault in the test run rather than in a screenshot.
 ///
-/// What this number does for every other row is let a page whose pickers have
-/// outgrown their words grow the row instead of cutting the sentence. That is
+/// What this number does for every row is let a page whose pickers have
+/// outgrown their words — a font family list, a scheme folder, a profile table,
+/// all read off the machine — grow the row by one line before the `…`. That is
 /// the same trade 2026-08-25 made when it replaced the fixed row height — the
 /// reader is given the fact rather than the ellipsis — and nothing here relaxes
 /// what the copy is allowed to be.
-const ROW_DESC_MAX_LINES: usize = 6;
+const ROW_DESC_MAX_LINES: usize = 4;
 
 // ── the description column's copy budget (owner ruling 2026-09-13) ─────────
 //
-// [`ROW_DESC_MAX_LINES`] above is what the *layout* tolerates — as many lines as
-// the longest sentence the owner has ruled whole, and then an `…`. The constants
+// [`ROW_DESC_MAX_LINES`] above is what the *layout* tolerates — one line past
+// what the floor pins allow (or the longest sentence the owner has ruled whole,
+// if one is ever longer), and then an `…`. The constants
 // below are what the *copy* is written to, and they
 // are a tighter line for a different reason: a settings row is scanned, not
 // read, and a sentence that needs three lines is a sentence that has stopped
@@ -267,10 +270,11 @@ const SETTINGS_DESCRIPTION_MAX_LINES: usize = 2;
 /// Written down here because [`ROW_DESC_MAX_LINES`] stopped being able to say it
 /// (owner ruling 2026-09-14). Until that ruling the two numbers were the same
 /// one, so those pins could detect a fourth line by looking for the `…` the wrap
-/// put on the third; the layout's tolerance is now the longest *ruled* sentence
-/// instead, so an `…` reports a line far past the one the copy is refused and
+/// put on the third; the layout's tolerance then became the longest *ruled*
+/// sentence, so an `…` reported a line far past the one the copy is refused and
 /// the pins would have quietly stopped reporting the fault they are named after.
-/// They count lines against this instead.
+/// They count lines against this instead — and since 2026-09-23 the tolerance
+/// is this plus one, the least that lets them count.
 ///
 /// Three and not two, and the gap is deliberate: this is measured at the 118px
 /// picker floor — the widest column any page can have — where a page whose
@@ -295,7 +299,8 @@ const _: () = assert!(
 
 // And the pins' line sits between the two, for the same reason and by the same
 // means: the copy is written to two, an unruled sentence is reported at four,
-// and the layout draws whatever a ruled one needs.
+// and the layout has to be able to draw that fourth line for the pins to count
+// it.
 #[cfg(test)]
 const _: () = assert!(
     SETTINGS_DESCRIPTION_MAX_LINES < SETTINGS_DESCRIPTION_FLOOR_MAX_LINES
@@ -434,12 +439,16 @@ const COMBO_FONT_LOGICAL_PX: f32 = 13.0;
 // measuring moved *into* the geometry (`widest_option`), because every button on
 // the page is now sized from its own options and not just the open one — so the
 // size and the words it measures never leave this file together.
-/// `.combo .chev { font-size: 8.5px }`.
+/// The vector `⌄` mark's box (`UI-SPEC.md` I1) — every other drop-down
+/// opener's ([`crate::icons::MarkSlot::CompactHead`], which
+/// `DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX` below and
+/// `seats::PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX` already draw at) — not the
+/// mock-up's own solid `▼` text glyph at `.combo .chev { font-size: 8.5px }`.
 ///
-/// The chevron's own column is reserved at this same number: `▼` at 8.5px inks
-/// 7.33px wide in the mock-up, so its em box is the tightest bound that cannot
-/// cut the glyph, and a bound is all the value's own rectangle needs.
-const COMBO_CHEVRON_FONT_LOGICAL_PX: f32 = 8.5;
+/// The chevron's own column is reserved at this same number: it is square, so
+/// one number bounds both the mark and the column.
+const COMBO_CHEVRON_BOX_LOGICAL_PX: f32 =
+    crate::icons::MarkSlot::CompactHead.house_box_logical_px();
 // ── `.slider` (§7.1.6c-4b, widened 2026-08-18) ────────────────────────────
 // The dialog's second control form, and the first added since it was built.
 //
@@ -487,9 +496,6 @@ const SLIDER_THUMB_HOVER_SCALE: f32 = 1.15;
 
 /// `.combo > button { gap: 10px }` — between the value and the chevron.
 const COMBO_GAP_LOGICAL_PX: f32 = 10.0;
-/// The mock-up's chevron is the character, not the `#i-chev` symbol: a solid
-/// down-pointing triangle set as text beside the value.
-const COMBO_CHEVRON: &str = "\u{25bc}";
 /// What `text-overflow: ellipsis` puts at the cut — the single character, not
 /// three periods, because that is the glyph the property is named after and the
 /// one the face draws at a width three periods do not have.
@@ -504,7 +510,10 @@ const MENU_PADDING_LOGICAL_PX: f32 = 4.0;
 const MENU_OFFSET_LOGICAL_PX: f32 = 4.0;
 /// The mock-up's own flip test: `menu.bottom > clip.bottom - 8`.
 const MENU_CLEARANCE_LOGICAL_PX: f32 = 8.0;
-const ITEM_HEIGHT_LOGICAL_PX: f32 = 27.5;
+/// The menu row (`UI-SPEC.md` H1; `profiles.rs::ITEM_HEIGHT_LOGICAL_PX`,
+/// private there) — every other menu uses it, and this combo's drop-down used
+/// to be the one that didn't.
+const ITEM_HEIGHT_LOGICAL_PX: f32 = 29.5;
 /// **How many items a picker shows before it starts scrolling** (user ruling
 /// 2026-08-17).
 ///
@@ -512,7 +521,7 @@ const ITEM_HEIGHT_LOGICAL_PX: f32 = 27.5;
 /// the Terminal font picker holds whatever this machine has installed — thirty
 /// or forty faces on an ordinary desk — and a popup as tall as that list is a
 /// popup taller than the dialog it hangs off, flipped up into the caption bar
-/// and cut by the window's own edge. Eight rows of 27.5 is 220px, which is
+/// and cut by the window's own edge. Eight rows of 29.5 is 236px, which is
 /// shorter than the shortest window this dialog opens in has room for below a
 /// row in the middle of a page, so the cap is what makes the direction rule
 /// below hold rather than a second guard on top of it.
@@ -549,7 +558,7 @@ const MENU_SEPARATOR_INSET_LOGICAL_PX: f32 = 6.0;
 /// What a hairline costs the list: the rule and the air on both sides of it.
 ///
 /// **The cap does not grow for it.** [`MENU_MAX_VISIBLE_ITEMS`] is eight ITEMS
-/// and stays eight items — `max-height: calc(8 * 27.5px + 2 * 4px + 2 * 1px)`
+/// and stays eight items — `max-height: calc(8 * 29.5px + 2 * 4px + 2 * 1px)`
 /// counts no rules either — so a hairline inside the visible run costs a
 /// fraction of the ninth item's room and nothing else.
 const MENU_SEPARATOR_BAND_LOGICAL_PX: f32 =
@@ -557,7 +566,7 @@ const MENU_SEPARATOR_BAND_LOGICAL_PX: f32 =
 /// `.combo-item .ci-act { width: 18px; height: 18px }` — one of the two verbs a
 /// row that is a FILE reveals under the pointer.
 ///
-/// Eighteen and not `.pf-act`'s 26: a combo item is 27.5 tall, and a 26px hit
+/// Eighteen and not `.pf-act`'s 26: a combo item is 29.5 tall, and a 26px hit
 /// box inside it would be a button wearing the row.
 const MENU_ACT_SIDE_LOGICAL_PX: f32 = 18.0;
 /// `.ci-acts { gap: 1px }`, the profile row's own gap between two verbs.
@@ -567,8 +576,8 @@ const MENU_ACT_GAP_LOGICAL_PX: f32 = 1.0;
 /// or not, because a popup that grew when the pointer crossed a row would be a
 /// list that moves under the pointer.
 const MENU_ACT_INSET_LOGICAL_PX: f32 = 12.0;
-/// `.ci-act { border-radius: 4px }`, the ground one wears under the pointer.
-const MENU_ACT_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// Tool-box radius (`UI-SPEC.md` R9), the ground one wears under the pointer.
+const MENU_ACT_RADIUS_LOGICAL_PX: f32 = 5.0;
 // `.combo-item .ci-act svg { width: 12px }` and `.ci-del svg { width: 10px }` —
 // **two numbers and one optical size**, which is the compact head slot's whole
 // derivation arrived at by hand on one row: the pencil is drawn on a sixteen
@@ -640,7 +649,7 @@ const NAV_WIDTH_LOGICAL_PX: f32 = 168.0;
 /// Above the first item — the `.group-label`'s own first `margin-top`, so the
 /// rail's first word sits on the same line as the page's first heading.
 const NAV_PADDING_TOP_LOGICAL_PX: f32 = 10.0;
-/// Below the last, matching `.content`'s own bottom padding.
+/// Below the last navigation item; the rail keeps its own bottom padding.
 const NAV_PADDING_BOTTOM_LOGICAL_PX: f32 = 18.0;
 /// The rail's own gutters, inside which the item pills sit.
 const NAV_PADDING_X_LOGICAL_PX: f32 = 10.0;
@@ -648,12 +657,11 @@ const NAV_ITEM_HEIGHT_LOGICAL_PX: f32 = 30.0;
 const NAV_ITEM_GAP_LOGICAL_PX: f32 = 2.0;
 /// The round every control in this dialog wears.
 const NAV_ITEM_RADIUS_LOGICAL_PX: f32 = 6.0;
-/// `.combo > button`'s own left padding, so the rail's words and the page's
-/// pickers start their text the same distance inside their boxes.
-const NAV_ITEM_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
-/// Between `.group-label`'s 11 and `.row .title`'s 13.5: a rail is read at a
-/// glance like a heading and chosen from like a row.
-const NAV_ITEM_FONT_LOGICAL_PX: f32 = 12.5;
+/// Selectable-row text inset (`UI-SPEC.md` S8), shared with menu items.
+const NAV_ITEM_PADDING_LEFT_LOGICAL_PX: f32 = 10.0;
+/// Primary text (`UI-SPEC.md` T4) — the same size every menu item, tree row,
+/// tab, button and combo uses.
+const NAV_ITEM_FONT_LOGICAL_PX: f32 = 13.0;
 /// How strongly a hovered word that is *not* the page shows the ground the
 /// selected word wears at full strength — the pointer's question, half as loud
 /// as the answer.
@@ -685,7 +693,8 @@ pub(crate) const CAP_HEIGHT_LOGICAL_PX: f32 = 20.0;
 pub(crate) const CAP_RADIUS_LOGICAL_PX: f32 = 4.0;
 pub(crate) const CAP_PADDING_X_LOGICAL_PX: f32 = 6.0;
 pub(crate) const CAP_GAP_LOGICAL_PX: f32 = 4.0;
-pub(crate) const CAP_FONT_LOGICAL_PX: f32 = 11.5;
+/// Caption size (`UI-SPEC.md` T5), also used by key and card hints.
+pub(crate) const CAP_FONT_LOGICAL_PX: f32 = 11.0;
 /// A cap is never narrower than it is tall: a single letter in a box a third of
 /// its height wide reads as a sliver, not as a key.
 pub(crate) const CAP_MIN_WIDTH_LOGICAL_PX: f32 = CAP_HEIGHT_LOGICAL_PX;
@@ -784,10 +793,11 @@ const PROFILE_ACT_PADDING_X_LOGICAL_PX: f32 = 6.0;
 /// `.pf-act { font-size: 12.5px }` — a hair under the dialog buttons, because
 /// this run is trim on a row and not a verb of the page.
 const PROFILE_ACT_FONT_LOGICAL_PX: f32 = 12.5;
-/// `.pf-badge` — `margin-left: 8px; padding: 1px 6px; font-size: 10.5px`.
+/// `.pf-badge` — `margin-left: 8px; padding: 1px 6px`.
 const PROFILE_BADGE_MARGIN_LEFT_LOGICAL_PX: f32 = 8.0;
 const PROFILE_BADGE_PADDING_X_LOGICAL_PX: f32 = 6.0;
-const PROFILE_BADGE_FONT_LOGICAL_PX: f32 = 10.5;
+/// Badge size (`UI-SPEC.md` T6), shared with the window-tab badge.
+const PROFILE_BADGE_FONT_LOGICAL_PX: f32 = 10.0;
 const PROFILE_BADGE_HEIGHT_LOGICAL_PX: f32 = 15.0;
 const PROFILE_BADGE_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// `.pf-badge { letter-spacing: .05em }`, the group label's own tracking —
@@ -800,6 +810,9 @@ const PROFILE_BADGE_TRACKING_EM: f32 = 0.05;
 const PROFILE_HIDDEN_MARK_OPACITY: f32 = 0.35;
 const BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
 const BUTTON_FONT_LOGICAL_PX: f32 = 13.0;
+/// `.btn { padding: 6px 14px }` — each side of a button's words (`UI-SPEC.md`
+/// §10.3, the number `first_run.rs` and `restore.rs` size their buttons from).
+const BUTTON_PADDING_X_LOGICAL_PX: f32 = 14.0;
 
 // ── the profile editor (§7.1.6c-6b) ─────────────────────────────────────────
 //
@@ -1309,6 +1322,24 @@ pub const MINIMUM_CONTRAST_OPTIONS: [MinimumContrastV1; 4] = [
 /// A contrast ratio is written `4.5:1` in every language this dialog speaks.
 const MINIMUM_CONTRAST_LABELS: [&str; MINIMUM_CONTRAST_OPTIONS.len()] = ["", "2:1", "3:1", "4.5:1"];
 
+/// What the `Web pages` picker offers (0.4.4 ticket 09) — the shipped answer first, then the two
+/// that pin one, in the theme row's own order.
+pub const WEB_COLOR_SCHEME_OPTIONS: [WebColorSchemeV1; 3] = [
+    WebColorSchemeV1::FollowTheme,
+    WebColorSchemeV1::Light,
+    WebColorSchemeV1::Dark,
+];
+
+/// The words those three wear: the theme row's own `Light` and `Dark`, so one pair of words means
+/// one pair of things across the page.
+fn web_color_scheme_label(scheme: WebColorSchemeV1) -> &'static str {
+    match scheme {
+        WebColorSchemeV1::FollowTheme => Text::OptionFollowTheme.text(),
+        WebColorSchemeV1::Light => Text::OptionLight.text(),
+        WebColorSchemeV1::Dark => Text::OptionDark.text(),
+    }
+}
+
 /// What the profile editor's `Starting directory` picker offers (§7.1.6c-6b).
 ///
 /// **The third one is a verb**, exactly as `Choose…` is on the Background image
@@ -1460,7 +1491,12 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
 ///   [`begin_monospace_scan`] publishes so the button can read the family in
 ///   force from the very first frame — see there for why a seed and not an
 ///   empty list.
-/// - `offered` is where a finished walk leaves its answer.
+/// - `offered` is where a finished walk leaves its answer, **with the number of
+///   the request it answers** (ticket 50), and `answered` is the number of the
+///   answer on screen. A request is numbered when it is made
+///   ([`ScanState::requested`]); the walk reads the number it is serving when it
+///   starts. [`Self::adopt`] takes an answer only if it is at least as new as the
+///   one on screen, so a list can never be replaced by an older one.
 ///
 /// **The rule is that only the window thread publishes.** The worker fills
 /// `offered` and asks for a wake; [`adopt_scanned_families`] moves it across,
@@ -1481,8 +1517,12 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
 struct MonospaceFamilySlot {
     /// `(came from the machine, what a frame draws)`.
     published: std::sync::RwLock<(bool, &'static [bt_platform::MonospaceFamily])>,
-    /// What a finished walk is holding out to the window thread.
-    offered: std::sync::Mutex<Option<Vec<bt_platform::MonospaceFamily>>>,
+    /// What a finished walk is holding out to the window thread, and the
+    /// number of the request it answers.
+    offered: std::sync::Mutex<Option<(u64, Vec<bt_platform::MonospaceFamily>)>>,
+    /// The number of the answer on screen; `0` while the seed is. Written by
+    /// [`Self::adopt`] alone, on the window thread.
+    answered: std::sync::atomic::AtomicU64,
     scan: std::sync::Mutex<ScanState>,
 }
 
@@ -1495,10 +1535,19 @@ struct MonospaceFamilySlot {
 /// — a font may have been installed since that walk started, which is exactly
 /// the gesture `Install fonts…` invites — so it is remembered and the worker
 /// goes round once more.
+///
+/// **`requested` numbers the requests** (ticket 50; `ARCHITECTURE` §5.1's
+/// observation lane: *versioned requests … latest-result replacement only where
+/// the semantics permit*). Every ask bumps it, whether it starts a thread or
+/// rides on the one out; a walk serves the number standing when it starts, so
+/// an ask made during a walk is served by the next round with a larger number.
+/// The bounds are the ones this struct already had: one walk out, one answer
+/// held.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ScanState {
     running: bool,
     again: bool,
+    requested: u64,
 }
 
 impl MonospaceFamilySlot {
@@ -1506,9 +1555,11 @@ impl MonospaceFamilySlot {
         Self {
             published: std::sync::RwLock::new((false, &[])),
             offered: std::sync::Mutex::new(None),
+            answered: std::sync::atomic::AtomicU64::new(0),
             scan: std::sync::Mutex::new(ScanState {
                 running: false,
                 again: false,
+                requested: 0,
             }),
         }
     }
@@ -1602,45 +1653,72 @@ impl MonospaceFamilySlot {
                 // there is nothing here to load. The one press that could ask
                 // for them — choosing this row back off the seed before the walk
                 // lands — goes through [`monospace_family_files`], which sees an
-                // unscanned list and asks the machine.
+                // unscanned list and looks the one family up by name.
                 files: Vec::new(),
             }]
         };
         self.publish(bt_platform::order_monospace_families(named), false);
     }
 
-    /// Hold an answer out to the window thread. **Worker thread.**
-    fn offer(&self, families: Vec<bt_platform::MonospaceFamily>) {
+    /// Hold the answer to request `generation` out to the window thread.
+    /// **Worker thread.**
+    fn offer(&self, generation: u64, families: Vec<bt_platform::MonospaceFamily>) {
         *self
             .offered
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(families);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((generation, families));
     }
 
-    fn take_offer(&self) -> Option<Vec<bt_platform::MonospaceFamily>> {
+    fn take_offer(&self) -> Option<(u64, Vec<bt_platform::MonospaceFamily>)> {
         self.offered
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
 
-    /// Ask for a walk. `true` when this call is the one that has to start the
-    /// thread; `false` when one is already out and has been told to go round
-    /// again.
+    /// **Take the answer a walk left, if it is not older than the one on
+    /// screen. Window thread only.**
+    ///
+    /// `true` when what the picker draws moved and a frame is owed. An answer
+    /// older than the adopted one is dropped and changes nothing — not the
+    /// list, not the number, and no frame (ticket 50).
+    fn adopt(&self) -> bool {
+        let Some((generation, families)) = self.take_offer() else {
+            return false;
+        };
+        let order = std::sync::atomic::Ordering::Relaxed;
+        if generation < self.answered.load(order) {
+            return false;
+        }
+        self.answered.store(generation, order);
+        self.publish(families, true)
+    }
+
+    /// Ask for a walk, numbering the request. `true` when this call is the one
+    /// that has to start the thread; `false` when one is already out and has
+    /// been told to go round again.
     fn claim_scan(&self) -> bool {
         let mut held = self
             .scan
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.requested += 1;
         if held.running {
             held.again = true;
             return false;
         }
-        *held = ScanState {
-            running: true,
-            again: false,
-        };
+        held.running = true;
+        held.again = false;
         true
+    }
+
+    /// The number of the newest request, which is the one a walk starting now
+    /// serves. **Worker thread**, at the top of every round.
+    fn serving(&self) -> u64 {
+        self.scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .requested
     }
 
     /// A walk is done. `true` when it has to be walked once more, because a
@@ -1660,6 +1738,94 @@ impl MonospaceFamilySlot {
 }
 
 static MONOSPACE_FAMILIES: MonospaceFamilySlot = MonospaceFamilySlot::new();
+// Both language projections are published together. Switching UI language
+// selects an already sorted list; it never opens a font collection.
+struct CjkFamilySlot {
+    published: std::sync::RwLock<(bool, [&'static [bt_platform::CjkFamily]; 2])>,
+    offered: std::sync::Mutex<Option<Vec<bt_platform::CjkFamily>>>,
+}
+impl CjkFamilySlot {
+    const fn new() -> Self {
+        Self {
+            published: std::sync::RwLock::new((false, [&[], &[]])),
+            offered: std::sync::Mutex::new(None),
+        }
+    }
+    fn adopted(&self) -> &'static [bt_platform::CjkFamily] {
+        self.published
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1[crate::i18n::current().index()]
+    }
+    fn scanned(&self) -> bool {
+        self.published
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+    }
+    fn publish(&self, families: Vec<bt_platform::CjkFamily>, scanned: bool) -> bool {
+        let en = with_automatic_cjk(bt_platform::cjk::order_for_language(
+            families.clone(),
+            "en-US",
+        ));
+        let zh = with_automatic_cjk(bt_platform::cjk::order_for_language(families, "zh-CN"));
+        let mut held = self
+            .published
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.0 |= scanned;
+        if held.1[0] == en && held.1[1] == zh {
+            return false;
+        }
+        held.1 = [
+            Box::leak(en.into_boxed_slice()),
+            Box::leak(zh.into_boxed_slice()),
+        ];
+        true
+    }
+    fn offer(&self, families: Vec<bt_platform::CjkFamily>) {
+        *self
+            .offered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(families);
+    }
+    fn take_offer(&self) -> Option<Vec<bt_platform::CjkFamily>> {
+        self.offered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+static CJK_FAMILIES: CjkFamilySlot = CjkFamilySlot::new();
+
+fn cjk_ui_locale() -> &'static str {
+    match crate::i18n::current() {
+        crate::i18n::Lang::English => "en-US",
+        crate::i18n::Lang::Chinese => "zh-CN",
+    }
+}
+
+fn cjk_language_note(
+    family: &bt_platform::CjkFamily,
+    lang: crate::i18n::Lang,
+) -> Option<&'static str> {
+    let c = family.coverage;
+    if family.name.is_empty() || (lang == crate::i18n::Lang::Chinese && c.simplified) {
+        return None;
+    }
+    let text = if c.simplified {
+        Text::CjkSimplified
+    } else if c.traditional {
+        Text::CjkTraditional
+    } else if c.japanese {
+        Text::CjkJapanese
+    } else if c.korean {
+        Text::CjkKorean
+    } else {
+        Text::CjkUndeclared
+    };
+    Some(text.in_lang(lang))
+}
 
 /// **The list before anybody has asked the machine anything** — one row, and it
 /// is the family the grid falls back to.
@@ -1682,14 +1848,40 @@ fn default_families() -> &'static [bt_platform::MonospaceFamily] {
     })
 }
 
-/// **How many times this process has walked the machine's font collection.**
-///
-/// A counter rather than a trace line, because what has to be provable here is
-/// a *negative*: that opening the dialog and drawing every row of it performs
-/// none. A number a test can read before and after a call says that; a log a
-/// human reads does not. See
-/// `opening_the_dialog_walks_no_font_collection_on_the_calling_thread`.
-static MONOSPACE_SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn with_automatic_cjk(families: Vec<bt_platform::CjkFamily>) -> Vec<bt_platform::CjkFamily> {
+    let mut families = bt_platform::order_cjk_families(families);
+    families.retain(|family| !family.name.is_empty());
+    families.insert(0, bt_platform::CjkFamily::default());
+    families
+}
+
+fn automatic_cjk_families() -> &'static [bt_platform::CjkFamily] {
+    static LIST: std::sync::OnceLock<&'static [bt_platform::CjkFamily]> =
+        std::sync::OnceLock::new();
+    LIST.get_or_init(|| Box::leak(with_automatic_cjk(Vec::new()).into_boxed_slice()))
+}
+
+thread_local! {
+    /// **How many times this thread has walked the machine's font collection.**
+    ///
+    /// A counter rather than a trace line, because what has to be provable here
+    /// is a *negative*: that opening the dialog, drawing every row of it, and
+    /// loading the face `settings.json` names at launch perform none on the
+    /// thread that asks. A number a test can read before and after a call says
+    /// that; a log a human reads does not. See
+    /// `opening_the_dialog_asks_the_machine_for_no_fonts` and
+    /// `launching_with_a_stored_font_family_walks_no_font_collection_on_the_window_thread`.
+    ///
+    /// **Per thread since ticket 50**, because the launch road now *starts* a
+    /// walk on the lane while it returns: a process-wide count would move under
+    /// a test on the lane's schedule and state nothing about the caller.
+    static MONOSPACE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Record one walk of a font collection on this thread.
+fn count_walk() {
+    MONOSPACE_SCANS.with(|walks| walks.set(walks.get() + 1));
+}
 
 /// How the worker's answer brings the event loop round — `psreadline::WAKE`'s
 /// shape, for its reason: the answer is published on a thread with no window,
@@ -1712,7 +1904,19 @@ pub fn monospace_families() -> &'static [bt_platform::MonospaceFamily] {
     MONOSPACE_FAMILIES.published()
 }
 
-/// How many font-collection walks this process has performed.
+/// CJK-capable families already published by the worker. The empty-name first
+/// entry is the Automatic choice and requires no font file.
+#[must_use]
+pub fn cjk_families() -> &'static [bt_platform::CjkFamily] {
+    let adopted = CJK_FAMILIES.adopted();
+    if adopted.is_empty() {
+        automatic_cjk_families()
+    } else {
+        adopted
+    }
+}
+
+/// How many font-collection walks the calling thread has performed.
 ///
 /// **A door for the pins and nothing else**, which is what the `cfg` says out
 /// loud: the product never asks this — it is the reader of a counter that exists
@@ -1725,7 +1929,7 @@ pub fn monospace_families() -> &'static [bt_platform::MonospaceFamily] {
 #[cfg(test)]
 #[must_use]
 pub fn monospace_scans() -> u64 {
-    MONOSPACE_SCANS.load(std::sync::atomic::Ordering::Acquire)
+    MONOSPACE_SCANS.with(std::cell::Cell::get)
 }
 
 /// Teach the scan how to bring the event loop round when its answer lands.
@@ -1761,8 +1965,30 @@ pub fn install_font_scan_wake(wake: impl Fn() + Send + Sync + 'static) {
 /// and a font face per family, which is exactly the cost
 /// `bt_render::terminal_font_system` refuses to pay at launch, and it must
 /// never be the reason a frame was late.
-pub fn begin_monospace_scan(in_force: &str) {
+pub fn begin_monospace_scan(in_force: &str, cjk_in_force: &str) {
     MONOSPACE_FAMILIES.seed(in_force);
+    if CJK_FAMILIES.adopted().is_empty() {
+        let named = if cjk_in_force.is_empty() {
+            Vec::new()
+        } else {
+            vec![bt_platform::CjkFamily {
+                name: cjk_in_force.to_owned(),
+                ..Default::default()
+            }]
+        };
+        CJK_FAMILIES.publish(with_automatic_cjk(named), false);
+    }
+    request_font_walk();
+}
+
+/// **Number a request for the machine's families and see that a walk serves
+/// it** — the lane's one entrance, for both roads that ask: the dialog opening
+/// ([`begin_monospace_scan`]) and a family named before any walk has landed
+/// ([`monospace_family_files`]).
+///
+/// Coalesced by [`MonospaceFamilySlot::claim_scan`]: one walk out at a time,
+/// and one more round for every request made while it was.
+fn request_font_walk() {
     if !MONOSPACE_FAMILIES.claim_scan() {
         return;
     }
@@ -1784,8 +2010,33 @@ pub fn begin_monospace_scan(in_force: &str) {
 /// if somebody asked while this one was out.
 fn scan_monospace_families() {
     loop {
-        MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
-        MONOSPACE_FAMILIES.offer(bt_platform::monospace_font_families());
+        // The number is read before the walk, so a request made while it runs
+        // has a larger one and is served by the next round.
+        let generation = MONOSPACE_FAMILIES.serving();
+        count_walk();
+        let start = std::time::Instant::now();
+        let families = bt_platform::monospace_font_families();
+        if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty()) {
+            crate::trace_sink::stderr_line(format!(
+                "BT_PERF_TRACE monospace_enumeration_us={} families={} generation={generation}",
+                start.elapsed().as_micros(),
+                families.len()
+            ));
+        }
+        MONOSPACE_FAMILIES.offer(generation, families);
+        if !CJK_FAMILIES.scanned() {
+            count_walk();
+            let start = std::time::Instant::now();
+            let families = bt_platform::cjk_font_families();
+            if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty()) {
+                crate::trace_sink::stderr_line(format!(
+                    "BT_PERF_TRACE cjk_enumeration_us={} families={}",
+                    start.elapsed().as_micros(),
+                    families.len()
+                ));
+            }
+            CJK_FAMILIES.offer(with_automatic_cjk(families));
+        }
         // After the answer is in the mailbox and never before: a wake that
         // raced the offer would send the loop to adopt nothing, and the frame
         // the reader is waiting for would then be owed to a wake that is not
@@ -1803,41 +2054,74 @@ fn scan_monospace_families() {
 /// [`MonospaceFamilySlot`]'s rule.
 ///
 /// `true` when the list a frame draws has changed and a frame is therefore
-/// owed. `false` when there was nothing waiting, and `false` when the machine
-/// answered with the families it had last time, which is every walk but the one
-/// after somebody installs a font.
+/// owed. `false` when there was nothing waiting, `false` when the answer is
+/// older than the one on screen (ticket 50: it is dropped, see
+/// [`MonospaceFamilySlot::adopt`]), and `false` when the machine answered with
+/// the families it had last time, which is every walk but the one after
+/// somebody installs a font.
 pub fn adopt_scanned_families() -> bool {
-    let Some(families) = MONOSPACE_FAMILIES.take_offer() else {
-        return false;
-    };
-    MONOSPACE_FAMILIES.publish(families, true)
+    let monospace_changed = MONOSPACE_FAMILIES.adopt();
+    let cjk_changed = CJK_FAMILIES
+        .take_offer()
+        .is_some_and(|families| CJK_FAMILIES.publish(families, true));
+    monospace_changed || cjk_changed
 }
 
-/// **The files one family's outlines live in** — the renderer's question, and
-/// the one caller in this process that is allowed to wait for the machine.
+/// **The files one family's outlines live in** — the renderer's question,
+/// asked before the first frame and whenever the face changes.
 ///
 /// `apply_stored_terminal_font` needs a path before it can draw a single frame
 /// in the face `settings.json` names, and there is no frame yet to put a
-/// placeholder in; a default install names no family and still walks nothing,
-/// which is the cost `bt_render::terminal_font_system` refuses to pay at launch
-/// and this must not reintroduce.
+/// placeholder in; a default install names no family and asks nothing.
 ///
-/// It walks only while the drawn list is the seed. Everything it learns is
-/// published, so a startup that paid for the walk hands the dialog a list that
-/// is already there — and a session that never names a family never walks here
-/// at all.
+/// **It never walks the collection** (ticket 50, `ARCHITECTURE` §5.3 row 5).
+/// Once the lane's list is on screen the answer is that list's row. Before
+/// then the family is looked up by its name
+/// ([`bt_platform::monospace_family_named`], one family and not the machine),
+/// the family is seeded as the picker's row in force, and a walk is requested
+/// so the picker's list follows on the lane. The looked-up family is **not**
+/// published as the list: only the lane's answer is the machine's list, and
+/// only [`adopt_scanned_families`] puts it on screen.
+///
+/// Drawing the first frame in the default face and re-applying this one when
+/// the walk lands was the cheaper shape, and the CJK slot's. It was refused for
+/// the primary face because it changes the cell metrics after the shells have
+/// started: every pane's grid would move a moment after launch, a resize each
+/// shell sees.
 #[must_use]
 pub fn monospace_family_files(name: &str) -> Vec<std::path::PathBuf> {
     if name.is_empty() {
         return Vec::new();
     }
-    if !MONOSPACE_FAMILIES.scanned() {
-        MONOSPACE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Release);
-        MONOSPACE_FAMILIES.publish(bt_platform::monospace_font_families(), true);
+    if MONOSPACE_FAMILIES.scanned() {
+        return monospace_families()
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+            .map(|candidate| candidate.files.clone())
+            .unwrap_or_default();
     }
-    monospace_families()
+    let files = bt_platform::monospace_family_named(name)
+        .map(|family| family.files)
+        .unwrap_or_default();
+    MONOSPACE_FAMILIES.seed(name);
+    request_font_walk();
+    files
+}
+
+/// Files already published by the font worker. A cold stored selection starts
+/// the worker and is applied again on FontsScanned; no window-thread enumeration.
+#[must_use]
+pub fn cjk_family_files(name: &str) -> Vec<std::path::PathBuf> {
+    if name.is_empty() {
+        return Vec::new();
+    }
+    if !CJK_FAMILIES.scanned() {
+        begin_monospace_scan("", name);
+        return Vec::new();
+    }
+    cjk_families()
         .iter()
-        .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+        .find(|candidate| candidate.has_name(name))
         .map(|candidate| candidate.files.clone())
         .unwrap_or_default()
 }
@@ -1860,6 +2144,15 @@ pub fn family_index(name: &str) -> usize {
                     .eq_ignore_ascii_case(bt_platform::DEFAULT_MONOSPACE_FAMILY)
             })
         })
+        .unwrap_or(0)
+}
+
+/// Which CJK picker row a stored family names; zero is Automatic.
+#[must_use]
+pub fn cjk_family_index(name: &str) -> usize {
+    cjk_families()
+        .iter()
+        .position(|family| family.has_name(name))
         .unwrap_or(0)
 }
 
@@ -2876,7 +3169,20 @@ pub enum SettingsRow {
     /// who wants typeset blocks with every `$` in a log left alone has to be
     /// able to say exactly that.
     InlineFormulas,
-    /// The third switch of the Rendered blocks page (2026-08-18): whether a GFM pipe table a
+    /// **The one row on this page that is not about Folio.** Coding agents
+    /// redraw a finished answer through their own CommonMark renderer, which
+    /// eats the `\\` that ends a row of a matrix or an aligned block; the
+    /// detector puts it back where that is the only reading, and this row is how
+    /// a reader says not to. Under the two switches it depends on — there is
+    /// nothing to repair in a block that is not being typeset — and above
+    /// `Tables`, which is about a different kind of block entirely.
+    ///
+    /// It is a row and not a constant because the damage belongs to another
+    /// program: the day that program stops doing it, this stops being a repair
+    /// and becomes a guess, and a reader must not have to wait for a release of
+    /// Folio to say so.
+    RepairRowBreaks,
+    /// The last switch of the Rendered blocks page (2026-08-18): whether a GFM pipe table a
     /// program printed is drawn as a table. Its own row for the reason `InlineFormulas` has one —
     /// a pipe is ordinary punctuation and a `$$` is not, so the two carry different risk and a
     /// reader must be able to answer them separately.
@@ -3145,6 +3451,14 @@ pub enum SettingsRow {
     /// where they are: this is a repair applied *to* a scheme, so it reads after the row that
     /// picks one, not before it.
     MinimumContrast,
+    /// **Which colour scheme a web pane asks its page for** (0.4.4 ticket 09, owner's ruling
+    /// 2026-09-21: 「加设置项 跟随主题/总是浅色/总是深色」) — a picker with three items.
+    ///
+    /// Under `Appearance ▸ Advanced`, directly under `Minimum contrast`: both are about how the
+    /// window's light or dark reaches content that is not the window's own — a program's colours
+    /// there, a site's style here — and a reader who has not gone looking for either is served by
+    /// the shipped answer, which follows the theme.
+    WebPages,
     /// Mock-up 2464-2474, the Startup group's only row — and the first picker in
     /// this dialog whose items carry a mark (7645-7648).
     ///
@@ -3177,6 +3491,26 @@ pub enum SettingsRow {
     AboutIssues,
     /// The notices for everything this window is built out of.
     AboutLicences,
+    /// **`Export…`** (0.4.4 ticket 05, owner rulings 2026-09-22 and 2026-09-23):
+    /// `settings.json`, `profiles.json`, `keybindings.json` and the reader's
+    /// colour schemes, written as one JSON file where a save dialog says.
+    ///
+    /// On the About page, under the three doors, because it is a door too and
+    /// holds no setting of its own — the page's own rule — and because what it
+    /// carries is every other page of this dialog at once, which no one of
+    /// them could be the home of.
+    ExportSettings,
+    /// **`Import…`** — the same file read back, each part through the door the
+    /// same file takes when it is edited by hand, and what is valid put in force
+    /// at once. No question first: importing is the reader's deliberate gesture
+    /// (ticket 05's scope).
+    ImportSettings,
+    /// **`Open`** on the folder these files live in — `%APPDATA%\Folio` or
+    /// `~/Library/Application Support/Folio` — through the reveal door every
+    /// other `Show in Explorer` goes through. Syncing that folder to another
+    /// machine is a folder-sync tool's job; Folio speaks no network protocol for
+    /// it (owner ruling 2026-09-22).
+    SettingsFolder,
     /// **Which language the window writes in** (user ruling 2026-08-10, shipped
     /// 2026-08-17) — `General`'s first row, above the two that were already here.
     ///
@@ -3204,6 +3538,9 @@ pub enum SettingsRow {
     /// startup — which the sans loader's two-file stack depends on. Both are
     /// argued in `docs/DESIGN.md` §7.1.6c-3b.
     TerminalFont,
+    /// The family used for Han, kana and Hangul cells; an empty choice follows
+    /// Folio's platform chain while leaving the ASCII grid face untouched.
+    TerminalCjkFont,
     /// How large that face is drawn, in logical pixels.
     ///
     /// Hot, like the family: the whole DPI path already exists to re-measure a
@@ -3293,6 +3630,15 @@ pub enum SettingsRow {
     /// rows that say what a pane does rather than with the one row whose answer
     /// is visible outside this window.
     CopyOnSelect,
+    /// **Whether a paste of several lines into a shell that would run them one by one asks
+    /// first** — the one row the owner ruled for the multi-line paste card (2026-09-22: "One row,
+    /// 'ask before pasting several lines', on by default").
+    ///
+    /// **Under [`Self::CopyOnSelect`]**: that row says what a pane does with lines the reader
+    /// drags across, and this says what it does with lines the reader pastes in. Both are the
+    /// pane's own behaviour, and the row below them is the page's one row whose answer shows up
+    /// outside this window.
+    MultilinePaste,
     /// **Whether a program may put a message on the desktop** — the Terminal
     /// page's third row (§7.6, Windows landing slice 3, 2026-08-20).
     ///
@@ -3476,7 +3822,9 @@ impl SettingsRow {
             | Self::Sidebar
             | Self::SplitDirection
             | Self::MinimumContrast
+            | Self::WebPages
             | Self::TerminalFont
+            | Self::TerminalCjkFont
             | Self::FontSize
             // The window's ground and the window's postures (§7.1.6c-4b). All
             // six are Appearance, including `Always on top`: it is not a look,
@@ -3504,6 +3852,7 @@ impl SettingsRow {
             | Self::Scrollback
             | Self::LineWrapping
             | Self::CopyOnSelect
+            | Self::MultilinePaste
             | Self::Notifications => SettingsCategory::Terminal,
             // **The rows about the program running in the pane** (user ruling
             // 2026-08-25). `Notifications` deliberately stayed on `Terminal`: it
@@ -3516,9 +3865,11 @@ impl SettingsRow {
             | Self::TurnEndNotifications => SettingsCategory::Agents,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
-            Self::Formulas | Self::InlineFormulas | Self::Tables | Self::BlockMaxHeight => {
-                SettingsCategory::RenderedBlocks
-            }
+            Self::Formulas
+            | Self::InlineFormulas
+            | Self::RepairRowBreaks
+            | Self::Tables
+            | Self::BlockMaxHeight => SettingsCategory::RenderedBlocks,
             // Both were headings over one row apiece — `FILES` and `STARTUP` —
             // and both are the same kind of question: not a look, not a block, no
             // page of their own to fill. See [`SettingsCategory::General`].
@@ -3551,7 +3902,10 @@ impl SettingsRow {
             | Self::AboutPlatform
             | Self::AboutReleaseNotes
             | Self::AboutIssues
-            | Self::AboutLicences => SettingsCategory::About,
+            | Self::AboutLicences
+            // The three configuration doors (0.4.4 ticket 05), under the three
+            // that leave for an address — see [`Self::ExportSettings`].
+            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => SettingsCategory::About,
             // **The eight rows of one window** (§7.54e ⑤, user ruling 2026-09-05). Four of them
             // stood on `General` until that ruling, under `Default profile`, on the argument that
             // the row above said what a new terminal starts as; what the page they are on now says
@@ -3659,11 +4013,13 @@ impl SettingsRow {
             Self::Cursor => Text::RowCursor.text(),
             Self::Formulas => Text::RowFormulas.text(),
             Self::InlineFormulas => Text::RowInlineFormulas.text(),
+            Self::RepairRowBreaks => Text::RowRepairRowBreaks.text(),
             Self::Tables => Text::RowTables.text(),
             Self::BlockMaxHeight => Text::RowBlockMaxHeight.text(),
             Self::Scrollback => Text::RowScrollback.text(),
             Self::LineWrapping => Text::RowLineWrapping.text(),
             Self::CopyOnSelect => Text::RowCopyOnSelect.text(),
+            Self::MultilinePaste => Text::RowMultilinePaste.text(),
             Self::Notifications => Text::RowNotifications.text(),
             Self::TurnEndNotifications => Text::RowTurnEndNotifications.text(),
             Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
@@ -3686,10 +4042,12 @@ impl SettingsRow {
             Self::SearchEngine => Text::RowSearchEngine.text(),
             Self::LaunchOpens => Text::RowLaunchOpens.text(),
             Self::MinimumContrast => Text::RowMinimumContrast.text(),
+            Self::WebPages => Text::RowWebPages.text(),
             // Mock-up 2467.
             Self::DefaultProfile => Text::RowDefaultProfile.text(),
             Self::Language => Text::RowLanguage.text(),
             Self::TerminalFont => Text::RowTerminalFont.text(),
+            Self::TerminalCjkFont => Text::RowTerminalCjkFont.text(),
             Self::FontSize => Text::RowFontSize.text(),
             Self::LightScheme => Text::RowLightScheme.text(),
             Self::DarkScheme => Text::RowDarkScheme.text(),
@@ -3721,6 +4079,9 @@ impl SettingsRow {
             Self::AboutReleaseNotes => Text::RowAboutReleaseNotes.text(),
             Self::AboutIssues => Text::RowAboutIssues.text(),
             Self::AboutLicences => Text::RowAboutLicences.text(),
+            Self::ExportSettings => Text::RowExportSettings.text(),
+            Self::ImportSettings => Text::RowImportSettings.text(),
+            Self::SettingsFolder => Text::RowSettingsFolder.text(),
         }
     }
 
@@ -3769,6 +4130,10 @@ impl SettingsRow {
             // typeset, and a user who reads only this line should not go away
             // expecting one to be.
             Self::InlineFormulas => Text::DescInlineFormulas.text(),
+            // Names the damage a reader can see on their own screen — a matrix
+            // that arrived as one row — and not the CommonMark round-trip that
+            // causes it, which is another program's business and not theirs.
+            Self::RepairRowBreaks => Text::DescRepairRowBreaks.text(),
             // Says "in command output" for the reason the row above it does, and says "the pipe
             // text" because a reader who is told only that tables stop being drawn will expect
             // them to disappear rather than to go back to being what the program printed.
@@ -3801,6 +4166,7 @@ impl SettingsRow {
             }
             Self::Scrollback => Text::DescScrollback.text(),
             Self::CopyOnSelect => Text::DescCopyOnSelect.text(),
+            Self::MultilinePaste => Text::DescMultilinePaste.text(),
             Self::Notifications => Text::DescNotifications.text(),
             Self::TurnEndNotifications => Text::DescTurnEndNotifications.text(),
             // **The one row on this page whose line is a function of something
@@ -3818,12 +4184,20 @@ impl SettingsRow {
             // is written, and where. The second is there because a reader who
             // does not know a terminal is about to edit a file belonging to
             // another program has been told something they would want to know.
-            Self::ClaudeHooks => Text::DescClaudeHooks.text(),
+            // **Not a constant either**, and the reason is the row above's: when the file is one
+            // this build will not edit — a link out of the agent's own folder, a file shared by
+            // hard links, a read-only one — the switch beside it has nothing true to say, so the
+            // sentence says what the machine is instead (closure review R1).
+            Self::ClaudeHooks => {
+                values.agent_config_refusals[0].unwrap_or(Text::DescClaudeHooks.text())
+            }
             // Two facts and no third, the row above's shape: what is written and
             // where, then which of the two things an agent can say this one
             // carries — because a reader who installs it expecting a dot on a
             // waiting pane has been told something that is not true.
-            Self::CodexNotify => Text::DescCodexNotify.text(),
+            Self::CodexNotify => {
+                values.agent_config_refusals[1].unwrap_or(Text::DescCodexNotify.text())
+            }
             // **Not a constant, and it is the row above's two facts plus a third
             // that is only sometimes true**: a copilot older than `1.0.26`
             // reported a permission prompt for tool calls nobody was ever asked
@@ -3832,9 +4206,9 @@ impl SettingsRow {
             // to fix before the switch means anything, so the sentence says which
             // one they are looking at instead of describing a switch that would
             // not work. See `attention_copilot::row_description`.
-            Self::CopilotHooks => {
+            Self::CopilotHooks => values.agent_config_refusals[2].unwrap_or_else(|| {
                 crate::attention_copilot::row_description(values.copilot_readiness)
-            }
+            }),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -3860,13 +4234,19 @@ impl SettingsRow {
             // **Not a constant**, on the row above's footing: the sentence names
             // the version the releases page named, and a row that only said "a
             // newer version is out" would send the reader to the page to find
-            // out which one. See `update::row_description`, which is also where
-            // the `&'static str` a `String` becomes is argued for.
+            // out which one. See `update::row_description`, and `i18n::intern`
+            // for where the `&'static str` a `String` becomes is argued for.
             Self::UpdateCheck => crate::update::row_description(),
             // Mock-up 2361.
             Self::TabLayout => Text::DescTabLayout.text(),
-            // Mock-up 4155.
-            Self::FocusMode => Text::DescFocusMode.text(),
+            // Mock-up 4155. **Not a constant** since 0.4.4 ticket 06: the
+            // sentence names the chord the shortcut table holds, which differs
+            // by platform and moves when the reader records another one. Interned
+            // for `update::row_description`'s reason (see `i18n::intern`).
+            Self::FocusMode => crate::i18n::intern(crate::i18n::focus_mode_row_in(
+                crate::i18n::current(),
+                values.focus_mode_chord.as_deref(),
+            )),
             // `DescBlockMaxHeight`'s constraint again: a `&'static str` that does
             // not read its own value, so it says what the number buys rather
             // than what this reader picked. The one fact a picker of pixels
@@ -3884,6 +4264,7 @@ impl SettingsRow {
             Self::SearchEngine => Text::DescSearchEngine.text(),
             Self::LaunchOpens => Text::DescLaunchOpens.text(),
             Self::MinimumContrast => Text::DescMinimumContrast.text(),
+            Self::WebPages => Text::DescWebPages.text(),
             // Mock-up 2468, word for word. It is also the *scope* of the setting
             // and the reason `profiles::index_of_id` does not read it: a tab and
             // a launch are the two things it answers for, and a pane coming back
@@ -3896,6 +4277,7 @@ impl SettingsRow {
             // settings page reads as "all the text" and the chrome keeps its
             // own face.
             Self::TerminalFont => Text::DescTerminalFont.text(),
+            Self::TerminalCjkFont => Text::DescTerminalCjkFont.text(),
             Self::FontSize => Text::DescFontSize.text(),
             // The folder is named on the dark half alone — see the two strings.
             Self::LightScheme => Text::DescLightScheme.text(),
@@ -4000,6 +4382,9 @@ impl SettingsRow {
             Self::AboutReleaseNotes => Text::DescAboutReleaseNotes.text(),
             Self::AboutIssues => Text::DescAboutIssues.text(),
             Self::AboutLicences => Text::DescAboutLicences.text(),
+            Self::ExportSettings => Text::DescExportSettings.text(),
+            Self::ImportSettings => Text::DescImportSettings.text(),
+            Self::SettingsFolder => Text::DescSettingsFolder.text(),
         }
     }
 
@@ -4069,6 +4454,11 @@ impl SettingsRow {
             Self::AboutReleaseNotes | Self::AboutIssues | Self::AboutLicences => {
                 SettingsControl::Link
             }
+            // A door with a verb on it, drawn the way the three above are: the
+            // row names what it does and the verb is the one thing to press.
+            Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => {
+                SettingsControl::Link
+            }
             _ => SettingsControl::Combo,
         }
     }
@@ -4091,7 +4481,7 @@ impl SettingsRow {
     /// **`General`, `Terminal` and `Rendered blocks` have no advanced rows**, and
     /// the reasoning is per row rather than per page: `Language`, `Git panel`
     /// and `Default profile` are the three questions that page exists to answer;
-    /// the three switches *are* the Rendered blocks page; and the
+    /// the switches *are* the Rendered blocks page; and the
     /// PSReadLine row is expert in subject and elementary in purpose — it is the
     /// one row in the dialog that repairs something the reader has already seen
     /// go wrong, so it is the last row that may be hidden. The Shortcuts page is
@@ -4109,11 +4499,14 @@ impl SettingsRow {
             // Which way an untold split cuts.
             | Self::SplitDirection
             // The one row that overrides a colour a program named.
-            | Self::MinimumContrast => true,
+            | Self::MinimumContrast
+            // And what a site is asked for, which the shipped answer already makes right.
+            | Self::WebPages => true,
             Self::Theme
             | Self::LightScheme
             | Self::DarkScheme
             | Self::TerminalFont
+            | Self::TerminalCjkFont
             | Self::FontSize
             | Self::Cursor
             // An everyday row: a reader who types a word into an address field
@@ -4140,6 +4533,7 @@ impl SettingsRow {
             | Self::Sidebar
             | Self::Formulas
             | Self::InlineFormulas
+            | Self::RepairRowBreaks
             | Self::Tables
             | Self::BlockMaxHeight
             | Self::GitPanel
@@ -4186,6 +4580,7 @@ impl SettingsRow {
             | Self::Scrollback
             | Self::LineWrapping
             | Self::CopyOnSelect
+            | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
             // The everyday half of the editor, in the order somebody decides a
@@ -4202,7 +4597,8 @@ impl SettingsRow {
             | Self::AboutPlatform
             | Self::AboutReleaseNotes
             | Self::AboutIssues
-            | Self::AboutLicences => false,
+            | Self::AboutLicences
+            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => false,
             // And the four the disclosure exists for — by the same measure that
             // put `Customise scheme…` behind one.
             Self::ProfileArgs
@@ -4302,12 +4698,14 @@ impl SettingsRow {
             Self::Cursor => CURSOR_OPTIONS.len(),
             Self::Formulas
             | Self::InlineFormulas
+            | Self::RepairRowBreaks
             | Self::Tables
             | Self::GitPanel
             | Self::KeyHints
             | Self::OptionSendsAlt
             | Self::PsReadLine
             | Self::CopyOnSelect
+            | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
             | Self::PowerShellOffer
@@ -4324,6 +4722,7 @@ impl SettingsRow {
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
             Self::TerminalFont => monospace_families().len(),
+            Self::TerminalCjkFont => cjk_families().len(),
             Self::FontSize => FONT_SIZE_OPTIONS.len(),
             Self::LightScheme => scheme_labels(true).len(),
             Self::DarkScheme => scheme_labels(false).len(),
@@ -4335,6 +4734,7 @@ impl SettingsRow {
             Self::SearchEngine => SEARCH_ENGINE_OPTIONS.len(),
             Self::LaunchOpens => LAUNCH_OPENS_OPTIONS.len(),
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS.len(),
+            Self::WebPages => WEB_COLOR_SCHEME_OPTIONS.len(),
             Self::Language => LANGUAGE_OPTIONS.len(),
             // The picker is built from the same list the `˅` menu is built from
             // (mock-up 7645: "the default-profile picker is built from the same
@@ -4379,7 +4779,8 @@ impl SettingsRow {
             | Self::AboutPlatform
             | Self::AboutReleaseNotes
             | Self::AboutIssues
-            | Self::AboutLicences => 0,
+            | Self::AboutLicences
+            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => 0,
         }
     }
 
@@ -4397,12 +4798,14 @@ impl SettingsRow {
             Self::Cursor => CURSOR_OPTIONS.get(index).copied().map(cursor_label),
             Self::Formulas
             | Self::InlineFormulas
+            | Self::RepairRowBreaks
             | Self::Tables
             | Self::GitPanel
             | Self::KeyHints
             | Self::OptionSendsAlt
             | Self::PsReadLine
             | Self::CopyOnSelect
+            | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
             | Self::PowerShellOffer
@@ -4430,6 +4833,13 @@ impl SettingsRow {
             Self::TerminalFont => monospace_families()
                 .get(index)
                 .map(|family| family.name.as_str()),
+            Self::TerminalCjkFont => cjk_families().get(index).map(|family| {
+                if family.name.is_empty() {
+                    Text::OptionAutomatic.text()
+                } else {
+                    family.display_name(cjk_ui_locale())
+                }
+            }),
             Self::FontSize => FONT_SIZE_LABELS.get(index).copied(),
             // Four quantities and not one word among them, so none of the four
             // goes through the i18n table — see [`SCROLLBACK_LABELS`].
@@ -4466,6 +4876,10 @@ impl SettingsRow {
                     MINIMUM_CONTRAST_LABELS[index]
                 }
             }),
+            Self::WebPages => WEB_COLOR_SCHEME_OPTIONS
+                .get(index)
+                .copied()
+                .map(web_color_scheme_label),
             Self::Language => LANGUAGE_OPTIONS.get(index).copied().map(language_label),
             Self::DefaultProfile => (index < profiles::count()).then(|| profiles::title(index)),
             Self::BackgroundImage => IMAGE_SOURCE_OPTIONS
@@ -4515,7 +4929,10 @@ impl SettingsRow {
             | Self::AboutPlatform
             | Self::AboutReleaseNotes
             | Self::AboutIssues
-            | Self::AboutLicences => None,
+            | Self::AboutLicences
+            | Self::ExportSettings
+            | Self::ImportSettings
+            | Self::SettingsFolder => None,
         }
     }
 
@@ -4541,6 +4958,7 @@ impl SettingsRow {
         match self {
             Self::LightScheme | Self::DarkScheme => Some(Text::AddScheme.text()),
             Self::TerminalFont => Some(Text::InstallFonts.text()),
+            Self::TerminalCjkFont => Some(Text::InstallFonts.text()),
             // No ellipsis, unlike the two above: those two open a further asking
             // and this one hands an address to the browser and is over — which
             // is also why it wears a different mark, see
@@ -4781,6 +5199,15 @@ impl SettingsRow {
                 Some(false) => values.psreadline_remove_available,
                 None => false,
             },
+            // **The three agent rows, when the file is one this build will not edit** (re-review
+            // f): a link out of the agent's own folder, a file shared by hard links, a read-only
+            // one. `PsReadLine`'s rule above, for its reason — the row's line already says what
+            // the machine is, and a switch that stayed pressable would be offering an action the
+            // line says will not happen. Neither `On` nor `Off`: there is no press that reaches
+            // that file, in either direction.
+            Self::ClaudeHooks => values.agent_config_refusals[0].is_none(),
+            Self::CodexNotify => values.agent_config_refusals[1].is_none(),
+            Self::CopilotHooks => values.agent_config_refusals[2].is_none(),
             // **`ContextMenu` was the third such row for one afternoon** (user
             // ruling 2026-09-07) and is not one now: its greyed rung went with
             // the picker. A machine that cannot reach the first page can still
@@ -4807,6 +5234,9 @@ impl SettingsRow {
             Self::InlineFormulas => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.inline_formulas),
+            Self::RepairRowBreaks => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.repair_row_breaks),
             Self::Tables => FORMULA_OPTIONS.iter().position(|it| *it == values.tables),
             // **`None` for a height this build's list does not offer**, which is
             // the honest reading and not a fallback: `bt_persist` deliberately
@@ -4846,6 +5276,9 @@ impl SettingsRow {
             Self::CopyOnSelect => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.copy_on_select),
+            Self::MultilinePaste => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.multiline_paste_ask),
             Self::Notifications => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.terminal_notifications),
@@ -4920,10 +5353,14 @@ impl SettingsRow {
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS
                 .iter()
                 .position(|it| *it == values.minimum_contrast),
+            Self::WebPages => WEB_COLOR_SCHEME_OPTIONS
+                .iter()
+                .position(|it| *it == values.web_color_scheme),
             Self::Language => LANGUAGE_OPTIONS
                 .iter()
                 .position(|it| *it == values.language),
             Self::TerminalFont => Some(values.terminal_font),
+            Self::TerminalCjkFont => Some(values.terminal_cjk_font),
             Self::FontSize => Some(values.font_size),
             Self::LightScheme => Some(values.light_scheme),
             Self::DarkScheme => Some(values.dark_scheme),
@@ -4993,7 +5430,10 @@ impl SettingsRow {
             | Self::AboutPlatform
             | Self::AboutReleaseNotes
             | Self::AboutIssues
-            | Self::AboutLicences => None,
+            | Self::AboutLicences
+            | Self::ExportSettings
+            | Self::ImportSettings
+            | Self::SettingsFolder => None,
         }
     }
 
@@ -5014,6 +5454,9 @@ impl SettingsRow {
             Self::AboutReleaseNotes | Self::AboutIssues | Self::AboutLicences => {
                 Some(Text::AboutOpen.text())
             }
+            Self::ExportSettings => Some(Text::ExportVerb.text()),
+            Self::ImportSettings => Some(Text::ImportVerb.text()),
+            Self::SettingsFolder => Some(Text::AboutOpen.text()),
             _ => None,
         }
     }
@@ -5035,8 +5478,29 @@ impl SettingsRow {
             Self::AboutReleaseNotes => Some(LinkDestination::Address(crate::update::RELEASES_PAGE)),
             Self::AboutIssues => Some(LinkDestination::Address(ISSUES_PAGE)),
             Self::AboutLicences => Some(notices_destination()),
+            Self::ExportSettings => Some(LinkDestination::Configuration(ConfigurationDoor::Export)),
+            Self::ImportSettings => Some(LinkDestination::Configuration(ConfigurationDoor::Import)),
+            Self::SettingsFolder => Some(LinkDestination::Configuration(ConfigurationDoor::Folder)),
             _ => None,
         }
+    }
+
+    /// **Whether this row's verb opens a dialog of the system's own** rather
+    /// than leaving the window — the two rows that end in `…`, which is the
+    /// mark a verb that asks something first already wears, so they carry no
+    /// `↗` beside it.
+    #[must_use]
+    pub const fn opens_a_dialog(self) -> bool {
+        matches!(self, Self::ExportSettings | Self::ImportSettings)
+    }
+
+    /// **Whether this row's button wears the `↗`**: a door whose press is
+    /// answered outside this window. The control form and not the destination
+    /// — resolving *where* a row goes touches the disk, and the width solve and
+    /// the draw ask this on every frame.
+    #[must_use]
+    pub fn leaves_the_window(self) -> bool {
+        matches!(self.control(), SettingsControl::Link) && !self.opens_a_dialog()
     }
 }
 
@@ -5056,6 +5520,18 @@ pub enum LinkDestination {
     Address(&'static str),
     /// A file on this machine, opened with its own default handler.
     File(&'static std::path::Path),
+    /// One of the three configuration doors (0.4.4 ticket 05). Not a place: the
+    /// window answers it itself — a save dialog, an open dialog, or the storage
+    /// folder handed to the reveal door.
+    Configuration(ConfigurationDoor),
+}
+
+/// **Which configuration door a row is** — see [`SettingsRow::ExportSettings`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigurationDoor {
+    Export,
+    Import,
+    Folder,
 }
 
 /// **The tracker a defect is filed in.**
@@ -5277,6 +5753,7 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         SettingsRow::LightScheme,
         SettingsRow::DarkScheme,
         SettingsRow::TerminalFont,
+        SettingsRow::TerminalCjkFont,
         SettingsRow::FontSize,
         SettingsRow::Cursor,
         SettingsRow::TabLayout,
@@ -5338,9 +5815,13 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::AlwaysOnTop);
     rows.push(SettingsRow::SplitDirection);
     rows.push(SettingsRow::MinimumContrast);
+    // **Directly under it** (0.4.4 ticket 09): the row above says how the window's light or dark
+    // reaches a program's colours, this one how it reaches a site's.
+    rows.push(SettingsRow::WebPages);
     // ── the other three pages, none of which has an advanced row ──
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
+    rows.push(SettingsRow::RepairRowBreaks);
     rows.push(SettingsRow::Tables);
     rows.push(SettingsRow::BlockMaxHeight);
     rows.push(SettingsRow::Language);
@@ -5421,6 +5902,9 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // behaviour, and the row below is the only one on this page whose answer is
     // visible outside this window.
     rows.push(SettingsRow::CopyOnSelect);
+    // **Directly under it** (0.4.4 ticket 02): the row above is what a pane does with lines
+    // dragged across it, this one what it does with several lines pasted into it.
+    rows.push(SettingsRow::MultilinePaste);
     // **Last on its page**, the judgement `Explorer context menu` is filed under
     // in General: the two rows above say what a pane keeps and what one shell is
     // patched with, and this is the only row here whose answer shows up outside
@@ -5455,6 +5939,12 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::AboutReleaseNotes);
     rows.push(SettingsRow::AboutIssues);
     rows.push(SettingsRow::AboutLicences);
+    // **The configuration doors, last** (0.4.4 ticket 05): take everything this
+    // dialog holds away in one file, bring it back, and the folder it all lives
+    // in — the order a reader moving to a new machine does them in.
+    rows.push(SettingsRow::ExportSettings);
+    rows.push(SettingsRow::ImportSettings);
+    rows.push(SettingsRow::SettingsFolder);
     rows
 }
 
@@ -5724,6 +6214,20 @@ impl SettingsContent<'_> {
             .any(|row| *row == SettingsRow::CopilotHooks && row.category() == category)
     }
 
+    /// **Whether this page carries a row about an agent's own configuration file.**
+    ///
+    /// [`Self::probes_psreadline`]'s shape and for its reason: the rows are what need the answer,
+    /// so moving one moves the trigger and a build that has lost them re-reads nothing.
+    #[must_use]
+    pub fn shows_agents(&self, category: SettingsCategory) -> bool {
+        self.rows.iter().any(|row| {
+            matches!(
+                row,
+                SettingsRow::ClaudeHooks | SettingsRow::CodexNotify | SettingsRow::CopilotHooks
+            ) && row.category() == category
+        })
+    }
+
     /// The category a dialog opened now would land on: the first the rail holds.
     ///
     /// Asked rather than assumed, because `General` is only the answer while
@@ -5763,8 +6267,20 @@ pub struct SettingsValues {
     /// row, so what the picker ticks is what `settings.json` says, and every
     /// window is wearing it already.
     pub focus_card_height: u32,
+    /// **The chord the shortcut table holds for `focus-mode` right now**, in its
+    /// own caps spelling — `Shortcuts::accelerator(Action::ToggleFocusMode)` of
+    /// the one effective table, read on every draw (0.4.4 ticket 06). `None` when
+    /// the reader has unbound it.
+    ///
+    /// Handed in, on `agent_config_refusals`' footing: the `Cards` row names this
+    /// chord, and a sentence that spelled it by hand named `Ctrl+Shift+Z` on a Mac
+    /// (where the table holds `Shift+Cmd+E`) and went on naming it after a rebind.
+    pub focus_mode_chord: Option<String>,
     pub display_formulas: bool,
     pub inline_formulas: bool,
+    /// Whether the detector puts back the row separators a coding agent's own
+    /// redraw of its finished answer eats before a display block is typeset.
+    pub repair_row_breaks: bool,
     /// Whether a proven markdown table in command output is drawn as a block.
     pub tables: bool,
     /// How tall a rendered block may stand before it scrolls inside itself, in
@@ -5790,6 +6306,9 @@ pub struct SettingsValues {
     /// Whether letting go of a drag-selection writes it to the clipboard
     /// (gesture audit 2026-08-26, 丙4).
     pub copy_on_select: bool,
+    /// Whether a paste of several lines into a shell that would run them one by one asks first
+    /// (0.4.4 ticket 02).
+    pub multiline_paste_ask: bool,
     /// Whether a program may put a message on the desktop (§7.6).
     pub terminal_notifications: bool,
     /// Whether the end of a turn may reach the desktop — a taskbar flash on a
@@ -5868,6 +6387,15 @@ pub struct SettingsValues {
     /// `attention_copilot::begin_probe`, and `SettingsRow::description`'s own note on why a
     /// sentence that varies with the machine may still only ever be one of a few literals.
     pub copilot_readiness: crate::attention_copilot::Readiness,
+    /// **Why each agent's configuration file will not be edited, when it will not be** — Claude
+    /// Code, codex, copilot, the order `App::agent_takeovers` keeps.
+    ///
+    /// The three switches above answer "are this copy's marks in that file". This answers the
+    /// question that has no `On`/`Off`: a file that is a link out of the agent's own folder,
+    /// shared by hard links or read-only is not a file whose hooks are off, and the row says which
+    /// instead of offering a press that cannot happen (closure review R1). Handed in for
+    /// `copilot_readiness`'s reason — the answer is a file on disk and this row is drawn per frame.
+    pub agent_config_refusals: [Option<&'static str>; 3],
     /// Whether the releases page is asked once a day (§7.51).
     pub update_check: bool,
     /// Which way a split with no direction of its own cuts.
@@ -5878,6 +6406,8 @@ pub struct SettingsValues {
     pub launch_opens: LaunchOpensV1,
     /// The floor a cell's ink is held to against its own paper (DESIGN §2.6).
     pub minimum_contrast: MinimumContrastV1,
+    /// Which colour scheme a web pane asks its page for (0.4.4 ticket 09).
+    pub web_color_scheme: WebColorSchemeV1,
     /// Which language the window writes in — **the stored mode**, not the
     /// resolved language.
     ///
@@ -5904,6 +6434,8 @@ pub struct SettingsValues {
     /// uninstalled since it was chosen ticks the face the grid really has. The
     /// stored name is left alone by that resolution.
     pub terminal_font: usize,
+    /// Which CJK family row is ticked; zero is Automatic.
+    pub terminal_cjk_font: usize,
     /// Which row of the size picker is ticked. An index for `terminal_font`'s
     /// reason — a size this build's list does not offer resolves to the default
     /// rather than leaving the combo blank.
@@ -6038,14 +6570,20 @@ impl SettingsValues {
             tab_layout: TabLayoutMode::Horizontal,
             focus_mode: false,
             focus_card_height: bt_persist::DEFAULT_FOCUS_CARD_HEIGHT,
+            // The table this machine ships, read through the same door the
+            // runtime reads the effective one through.
+            focus_mode_chord: crate::shortcuts::Shortcuts::defaults()
+                .accelerator(crate::shortcuts::Action::ToggleFocusMode),
             sidebar: RailMode::Expanded,
             display_formulas: true,
             inline_formulas: true,
+            repair_row_breaks: true,
             tables: true,
             block_max_height: bt_persist::DEFAULT_BLOCK_MAX_HEIGHT,
             scrollback_lines: bt_persist::DEFAULT_SCROLLBACK_LINES,
             line_wrapping: true,
             copy_on_select: true,
+            multiline_paste_ask: true,
             terminal_notifications: true,
             turn_end_notification: true,
             powershell_integration_offer: true,
@@ -6067,14 +6605,17 @@ impl SettingsValues {
             codex_notify: false,
             copilot_hooks: false,
             copilot_readiness: crate::attention_copilot::Readiness::Unknown,
+            agent_config_refusals: [None; 3],
             update_check: true,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
             launch_opens: LaunchOpensV1::NewWindow,
             minimum_contrast: MinimumContrastV1::Off,
+            web_color_scheme: WebColorSchemeV1::FollowTheme,
             language: LanguageV1::System,
             default_profile: profiles::fallback_profile(),
             terminal_font: 0,
+            terminal_cjk_font: 0,
             font_size: font_size_index(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
             light_scheme: scheme_index(bt_persist::DEFAULT_LIGHT_SCHEME, true),
             dark_scheme: scheme_index(bt_persist::DEFAULT_DARK_SCHEME, false),
@@ -6216,6 +6757,14 @@ impl EditorSubject {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SettingsPanel {
     open: bool,
+    /// Whether this visit has consumed the PSReadLine row's disk-read edge.
+    /// Reset by the panel's own page/open/close transitions, even if no layout
+    /// was requested between closing and reopening.
+    psreadline_visit_read: bool,
+    /// The same latch for the three agent rows. Their switches are inert while the file they name
+    /// is one this build will not edit, so a press cannot be what notices that the reader has
+    /// unpicked the link or cleared the read-only bit — opening the page is (re-review, round 3).
+    agents_visit_read: bool,
     /// **Which page is up** (user ruling Q3 = A, 2026-08-17). One page per
     /// category, so this is the whole of "where am I" — and it is state on the
     /// panel rather than on the runtime because the panel is what a key press
@@ -6511,6 +7060,26 @@ impl SettingsPanel {
         self.category
     }
 
+    /// Consume the first showing of the PSReadLine row on this page visit.
+    pub fn take_psreadline_open_edge(&mut self, showing: bool) -> bool {
+        if !self.open || !showing {
+            return false;
+        }
+        !std::mem::replace(&mut self.psreadline_visit_read, true)
+    }
+
+    /// Consume the first showing of the agent rows on this page visit.
+    ///
+    /// [`Self::take_psreadline_open_edge`]'s twin, and the same three properties: an edge and not
+    /// a state, reset by every road off the page (another category, a close, a reopen, a page the
+    /// dialog fell back to), and false while the page is merely being redrawn.
+    pub fn take_agents_open_edge(&mut self, showing: bool) -> bool {
+        if !self.open || !showing {
+            return false;
+        }
+        !std::mem::replace(&mut self.agents_visit_read, true)
+    }
+
     /// Which line of the shortcut page is listening for a chord, if one is.
     #[must_use]
     pub fn recording_row(&self) -> Option<usize> {
@@ -6549,6 +7118,8 @@ impl SettingsPanel {
             return false;
         }
         self.category = category;
+        self.psreadline_visit_read = false;
+        self.agents_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.recording = None;
@@ -6578,6 +7149,8 @@ impl SettingsPanel {
     /// a rail is that the way back is one word away.
     pub fn toggle(&mut self, content: SettingsContent<'_>) {
         self.open = !self.open;
+        self.psreadline_visit_read = false;
+        self.agents_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.hover = None;
@@ -6649,6 +7222,8 @@ impl SettingsPanel {
     /// Shut everything, whatever was open.
     pub fn close(&mut self) {
         self.open = false;
+        self.psreadline_visit_read = false;
+        self.agents_visit_read = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.hover = None;
@@ -6920,6 +7495,8 @@ impl SettingsPanel {
         // existing under it.
         if !content.has_content(self.category) {
             self.category = content.first_category();
+            self.psreadline_visit_read = false;
+            self.agents_visit_read = false;
             self.menu = None;
             self.recording = None;
             self.focus = None;
@@ -8783,9 +9360,31 @@ pub struct SettingsLayout {
     menu_bar: Option<crate::preview::ScrollBar>,
     /// The furthest the open menu's list may be pushed up inside its body.
     menu_max_scroll: f32,
+    /// Measurements needed to reposition the picker without remeasuring the page.
+    menu_source: Option<MenuSource>,
 }
 
 impl SettingsLayout {
+    fn move_menu_to(&mut self, scroll: f32) {
+        let Some(source) = &self.menu_source else {
+            return;
+        };
+        let menu = source.layout(scroll);
+        // Placement stays in `menu_layout`, including separators and the bar.
+        // The file-verb presence was resolved with the page's content already.
+        for (acts, item) in self.menu_acts.iter_mut().zip(&menu.items) {
+            if acts.is_some() {
+                *acts = Some(MenuItemActs::placed(*item, self.scale));
+            }
+        }
+        self.menu = Some(menu.frame);
+        self.menu_body = Some(menu.body);
+        self.items = menu.items;
+        self.menu_separators = menu.separators;
+        self.menu_bar = menu.bar;
+        self.menu_max_scroll = menu.max_scroll;
+    }
+
     /// Where a row landed, or `None` when the dialog is not holding it.
     ///
     /// The `Option` is the whole point and is why this is the only way to ask:
@@ -9189,6 +9788,16 @@ pub fn inline_formulas_requested(target: SettingsTarget) -> Option<bool> {
     }
 }
 
+#[must_use]
+pub fn repair_row_breaks_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::RepairRowBreaks, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
 /// The split direction a press asks for, if it asks at all.
 #[must_use]
 pub fn split_direction_requested(target: SettingsTarget) -> Option<SplitDirectionV1> {
@@ -9217,6 +9826,18 @@ pub fn launch_opens_requested(target: SettingsTarget) -> Option<LaunchOpensV1> {
     match target {
         SettingsTarget::Choice(SettingsRow::LaunchOpens, index) => {
             LAUNCH_OPENS_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The colour scheme a press on the `Web pages` picker asks for, if it asks at all (0.4.4 ticket
+/// 09).
+#[must_use]
+pub fn web_color_scheme_requested(target: SettingsTarget) -> Option<WebColorSchemeV1> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::WebPages, index) => {
+            WEB_COLOR_SCHEME_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -9256,6 +9877,17 @@ pub fn terminal_font_requested(target: SettingsTarget) -> Option<&'static str> {
         SettingsTarget::Choice(SettingsRow::TerminalFont, index) => monospace_families()
             .get(index)
             .map(|family| family.name.as_str()),
+        _ => None,
+    }
+}
+
+/// The CJK grid face requested by the picker; the empty string means Automatic.
+#[must_use]
+pub fn terminal_cjk_font_requested(target: SettingsTarget) -> Option<&'static str> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::TerminalCjkFont, index) => {
+            cjk_families().get(index).map(|family| family.name.as_str())
+        }
         _ => None,
     }
 }
@@ -9403,6 +10035,17 @@ pub fn quake_profile_requested(target: SettingsTarget) -> Option<Option<usize>> 
 pub fn copy_on_select_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::CopyOnSelect, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether a paste of several lines asks first, as a press on its picker (0.4.4 ticket 02).
+#[must_use]
+pub fn multiline_paste_ask_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::MultilinePaste, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -10066,6 +10709,58 @@ pub(crate) fn ellipsized_left(
     format!("{ELLIPSIS}{}", &text[start..])
 }
 
+/// The same, cut from the **middle**: `text` if it fits, else its first and last
+/// characters with a `…` between them, as many of each as fit.
+///
+/// The rule for a *folder address* (user ruling 2026-09-20: 「地址过长从中间省略」).
+/// A path cut from the front loses the drive or the home it stands on, and one cut
+/// from the back loses the folder it names; the middle is the part of an address
+/// a reader reconstructs anyway. The tail takes the odd character, because the end
+/// of an address is the half that answers "which folder".
+///
+/// The search is over how many characters survive, which a measure grows with
+/// monotonically for the left-to-right chrome face — the premise the two cuts
+/// above already stand on — and over char boundaries, never bytes.
+pub(crate) fn ellipsized_middle(
+    text: &str,
+    max_width: f32,
+    font_size_px: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> String {
+    if measure(text, font_size_px) <= max_width {
+        return text.to_owned();
+    }
+    let bounds: Vec<usize> = text
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let chars = bounds.len() - 1;
+    let kept = |count: usize| {
+        let head = count / 2;
+        let tail = count - head;
+        format!(
+            "{}{ELLIPSIS}{}",
+            &text[..bounds[head]],
+            &text[bounds[chars - tail]..]
+        )
+    };
+    // The floor is a lone `…`, for the reason both searches above give it; the
+    // whole string was refused, so at most `chars - 1` characters can survive.
+    let mut best = 0;
+    let (mut low, mut high) = (1, chars);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if measure(&kept(middle), font_size_px) <= max_width {
+            best = middle;
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    kept(best)
+}
+
 /// Where every part of the dialog lands in a window this size, or `None` when
 /// the window cannot host it.
 ///
@@ -10148,6 +10843,8 @@ pub fn layout_for_menus(
     menu_scroll: f32,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Option<SettingsLayout> {
+    #[cfg(test)]
+    LAYOUT_CALLS.set(LAYOUT_CALLS.get() + 1);
     // **Every question below goes through the memo** (see [`MeasureMemo`]): this
     // function asks the face for the same few hundred strings a few thousand
     // times, because the dialog is as tall as its tallest page and every sweep
@@ -10327,6 +11024,15 @@ pub fn layout_for_menus(
     // folded ones included, so opening the advanced group never moves the
     // buttons above it. See `page_combo_width`.
     let button = metrics.page_button(content_of, category, row_span, measure);
+    // **One width for every door button on the page**, flush with the column's
+    // right edge — see `door_button_width`.
+    let door = door_button_width(
+        &content_of.category_rows(category),
+        metrics.scale,
+        metrics.border,
+        button,
+        measure,
+    );
     // **The reveal, in this page's own pixels** (animation block, second slice).
     //
     // The bands the disclosure holds are placed exactly where an open group puts
@@ -10476,8 +11182,15 @@ pub fn layout_for_menus(
                 let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
                 cursor += height;
                 let combo_top = top + (metrics.row_content_height_for(lines) - combo_height) / 2.0;
+                // A door is a button, not the column: its box is what is drawn,
+                // pressed and ringed, so all three are one rectangle.
+                let control_width = if matches!(row.control(), SettingsControl::Link) {
+                    door
+                } else {
+                    button
+                };
                 let combo = [
-                    row_right - button,
+                    row_right - control_width,
                     combo_top,
                     row_right,
                     combo_top + combo_height,
@@ -10486,8 +11199,12 @@ pub fn layout_for_menus(
                 // apart — and `min-width: 0`, which is why the control's own cap
                 // (`COMBO_MAX_ROW_SHARE`) is what keeps this column off zero. The
                 // sentence that does not fit what is left **wraps into it** and is
-                // never allowed to run under the button: see `build`.
-                let text_column_right = combo[0] - px(ROW_GAP_LOGICAL_PX);
+                // never allowed to run under the button: see `build`. Measured
+                // from the page's column and not from this row's own control,
+                // because the sentence's lines were counted against the column
+                // (`desc_lines` above) and a door narrower than it must not
+                // hand its sentence room the height was not solved for.
+                let text_column_right = row_right - button - px(ROW_GAP_LOGICAL_PX);
                 let title = [
                     row_left,
                     top,
@@ -10981,6 +11698,17 @@ pub fn layout_for_menus(
         // popup that grew when the pointer crossed a row would be a list that
         // moves under the pointer.
         let mut widest = widest_option(row, scale, measure) + option_icon_advance(row, scale);
+        if row == SettingsRow::TerminalCjkFont {
+            for family in cjk_families() {
+                if let Some(note) = cjk_language_note(family, crate::i18n::current()) {
+                    widest = widest.max(
+                        measure(family.display_name(cjk_ui_locale()), font)
+                            + px(ITEM_GAP_LOGICAL_PX)
+                            + measure(note, font),
+                    );
+                }
+            }
+        }
         if let Some(label) = action {
             widest = widest.max(measure(label, font));
         }
@@ -11090,6 +11818,7 @@ pub fn layout_for_menus(
         menu_kind: active.map(|(row, _)| row),
         menu_body: popup.map(|menu| menu.body),
         menu_bar: popup.and_then(|menu| menu.bar),
+        menu_source: popup.map(|menu| menu.source.clone()),
         menu_max_scroll: popup.map_or(0.0, |menu| menu.max_scroll),
     })
 }
@@ -11641,7 +12370,7 @@ fn combo_width(
         + px(COMBO_PADDING_LEFT_LOGICAL_PX)
         + px(COMBO_PADDING_RIGHT_LOGICAL_PX)
         + px(COMBO_GAP_LOGICAL_PX)
-        + px(COMBO_CHEVRON_FONT_LOGICAL_PX)
+        + px(COMBO_CHEVRON_BOX_LOGICAL_PX)
         // **And the mark column on a marked row, reserved whether this
         // particular value has a mark or not** — the popup's own rule one
         // surface out (`the run of verbs is reserved in the width, revealed or
@@ -11686,6 +12415,43 @@ fn page_combo_width(
     rows.iter()
         .map(|row| combo_width(*row, scale, border, row_span, measure))
         .fold(COMBO_MIN_WIDTH_LOGICAL_PX * scale, f32::max)
+}
+
+/// **How wide every door button on a page is** (owner question 2026-09-23:
+/// "shouldn't the boxes be the same size?" — yes).
+///
+/// One `.btn` chassis for every [`SettingsControl::Link`] row on the page,
+/// `Open ↗` and `Export…` alike: the widest verb the page's doors say, with the
+/// button's padding each side and, on a door that leaves the window, the `↗`
+/// column beside it, floored at the picker's 118. A door that opens a dialog of
+/// the system's own wears no mark but takes the same width, so the column of
+/// buttons is read as one column. Capped at the page's control column
+/// (`column`), which is solved from these same verbs and is never narrower
+/// than any control on it is meant to be.
+fn door_button_width(
+    rows: &[SettingsRow],
+    scale: f32,
+    border: f32,
+    column: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> f32 {
+    let px = |value: f32| value * scale;
+    rows.iter()
+        .filter(|row| matches!(row.control(), SettingsControl::Link))
+        .map(|row| {
+            let verb = measure(
+                row.stated_value().unwrap_or_default(),
+                px(BUTTON_FONT_LOGICAL_PX),
+            );
+            let mark = if row.leaves_the_window() {
+                px(COMBO_GAP_LOGICAL_PX + COMBO_CHEVRON_BOX_LOGICAL_PX)
+            } else {
+                0.0
+            };
+            (2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + verb + mark).ceil()
+        })
+        .fold(px(COMBO_MIN_WIDTH_LOGICAL_PX), f32::max)
+        .min(column)
 }
 
 /// What a rail of this many words costs, pills and the gaps between them.
@@ -11733,6 +12499,7 @@ fn place_nav(items: &[SettingsCategory], nav: [f32; 4], scale: f32) -> Vec<NavLa
 /// the visible part of a whole pill rather than a shorter pill.
 #[derive(Clone, Debug)]
 struct MenuGeometry {
+    source: MenuSource,
     /// The hairlines between the runs, in the order they were asked for.
     separators: Vec<[f32; 4]>,
     frame: [f32; 4],
@@ -11746,6 +12513,37 @@ struct MenuGeometry {
     items: Vec<[f32; 4]>,
     bar: Option<crate::preview::ScrollBar>,
     max_scroll: f32,
+}
+
+/// The measured menu inputs. Scrolling runs the existing numeric placement
+/// function with these measurements, never the whole-page layout or shaper.
+#[derive(Clone, Debug, PartialEq)]
+struct MenuSource {
+    combo: [f32; 4],
+    surface: [f32; 2],
+    scale: f32,
+    border: f32,
+    option_count: usize,
+    separators_before: Vec<usize>,
+    widest_option: f32,
+    ticks: bool,
+}
+
+impl MenuSource {
+    fn layout(&self, scroll: f32) -> MenuGeometry {
+        menu_layout(
+            self.combo,
+            self.surface[0],
+            self.surface[1],
+            self.scale,
+            self.border,
+            self.option_count,
+            &self.separators_before,
+            self.widest_option,
+            self.ticks,
+            scroll,
+        )
+    }
 }
 
 /// The theme picker's popup: `min-width: 100%` and `right: 0` off the button,
@@ -11906,6 +12704,16 @@ fn menu_layout(
         scale,
     );
     MenuGeometry {
+        source: MenuSource {
+            combo,
+            surface: [surface_width, surface_height],
+            scale,
+            border,
+            option_count,
+            separators_before: separators_before.to_vec(),
+            widest_option,
+            ticks,
+        },
         separators,
         frame,
         body,
@@ -12678,24 +13486,32 @@ pub fn build(
             // The table draws itself below, with its ghosts; the row's own box
             // is the area it occupies and carries no face of its own.
             SettingsControl::EnvTable => {}
-            // **A fact, and a fact with a door on it** (T-SETTINGS-ABOUT). No
-            // border and no ground: a box would say "press me" on the two rows
-            // where nothing happens, and the three where something does say it
-            // with the `↗` instead — the mark this dialog already wears
-            // wherever an address leaves the window.
-            SettingsControl::Text | SettingsControl::Link => {
+            // **A fact** (T-SETTINGS-ABOUT). No border and no ground: a box
+            // would say "press me" on a row where nothing happens.
+            SettingsControl::Text => {
                 push_stated_value(
                     &mut content_stack,
                     placed.combo,
                     placed.row.stated_value().unwrap_or_default(),
-                    // **The control form and not the destination.** Whether
-                    // this row leaves the window is a fact about the row;
-                    // resolving *where* it goes touches the disk, and a draw
-                    // that asked it would ask on every hover.
-                    matches!(placed.row.control(), SettingsControl::Link)
-                        .then_some(MENU_ACTION_MARK_AWAY),
+                    scale,
+                    palette,
+                    measure,
+                );
+            }
+            // **A door is a button** (owner question 2026-09-23): the `.btn`
+            // chassis every other verb in this dialog stands in, one width for
+            // every door on the page (`door_button_width`). The `↗` inside it
+            // marks the doors that leave the window; `Export…` and `Import…`
+            // open a dialog of the system's own and wear the `…` instead.
+            SettingsControl::Link => {
+                push_door_button(
+                    &mut content_stack,
+                    placed.combo,
+                    placed.row.stated_value().unwrap_or_default(),
+                    placed.row.leaves_the_window(),
                     hover == Some(SettingsTarget::Link(placed.row)),
                     scale,
+                    border,
                     palette,
                     measure,
                 );
@@ -12932,13 +13748,40 @@ pub fn build(
                 }
                 menu_stack.sprites.push(sprite);
             }
+            let note = (row == SettingsRow::TerminalCjkFont)
+                .then(|| cjk_families().get(index))
+                .flatten()
+                .and_then(|family| cjk_language_note(family, crate::i18n::current()));
+            let note_width = note.map_or(0.0, |note| {
+                measure(note, px(COMBO_FONT_LOGICAL_PX)) + px(ITEM_GAP_LOGICAL_PX)
+            });
+            if let Some(note) = note {
+                menu_stack.labels.push(ChromeLabel {
+                    mono: false,
+                    text: note.to_owned(),
+                    rect: [
+                        (item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - note_width).max(text_left),
+                        item[1],
+                        item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
+                        item[3],
+                    ],
+                    font_size_px: px(COMBO_FONT_LOGICAL_PX),
+                    color: palette.menu_item_hint_text,
+                    align_right: true,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: Some(*item),
+                });
+            }
             menu_stack.labels.push(ChromeLabel {
                 mono: false,
                 text: label.to_owned(),
                 rect: [
                     text_left,
                     item[1],
-                    item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
+                    (item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - note_width).max(text_left),
                     item[3],
                 ],
                 font_size_px: px(COMBO_FONT_LOGICAL_PX),
@@ -14468,23 +15311,17 @@ pub(crate) fn push_cap(
     });
 }
 
-/// `.btn` (mock-up 2000-2008): a bordered, rounded box with a word centred in
-/// it, at the picker's own height so a row's right-hand control is one object
-/// wherever it appears.
-#[allow(clippy::too_many_arguments)]
-fn push_button(
+/// `.btn`'s box without its words: the hairline edge, and inside it the
+/// dialog's surface, or its hover ground under the pointer.
+fn push_button_face(
     quads: &mut Vec<OverlayQuad>,
-    labels: &mut Vec<ChromeLabel>,
     rect: [f32; 4],
-    text: &str,
     hovered: bool,
     scale: f32,
     border: f32,
     palette: bt_render::ChromePalette,
-    measure: &mut dyn FnMut(&str, f32) -> f32,
 ) {
-    let px = |value: f32| value * scale;
-    let radius = px(BUTTON_RADIUS_LOGICAL_PX);
+    let radius = BUTTON_RADIUS_LOGICAL_PX * scale;
     quads.extend(rounded_overlay_fill(
         rect,
         radius,
@@ -14506,7 +15343,25 @@ fn push_button(
         },
         1.0,
     ));
-    let font_size_px = px(BUTTON_FONT_LOGICAL_PX);
+}
+
+/// `.btn` (mock-up 2000-2008): a bordered, rounded box with a word centred in
+/// it, at the picker's own height so a row's right-hand control is one object
+/// wherever it appears.
+#[allow(clippy::too_many_arguments)]
+fn push_button(
+    quads: &mut Vec<OverlayQuad>,
+    labels: &mut Vec<ChromeLabel>,
+    rect: [f32; 4],
+    text: &str,
+    hovered: bool,
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    push_button_face(quads, rect, hovered, scale, border, palette);
+    let font_size_px = BUTTON_FONT_LOGICAL_PX * scale;
     labels.push(ChromeLabel {
         mono: false,
         text: ellipsized(text, rect[2] - rect[0], font_size_px, measure),
@@ -14551,44 +15406,21 @@ fn focus_ring(rect: [f32; 4], scale: f32, accent: [u8; 3]) -> Vec<OverlayQuad> {
     )
 }
 
-/// **The closed control** — its face, the value in force, and on a marked row
-/// the mark that value wears (user report 2026-09-13, DESIGN §7.1.6c-9‴).
-///
-/// `icon_advance` is the row's reserved `.ticon` column and is spent whether
-/// `mark` is `Some` or not; `mark` is what this particular value carries, which
-/// on the summoned terminal's row is nothing at all for its first item. The two
-/// are separate arguments for exactly that reason — see
-/// [`SettingsRow::value_mark`] and [`option_icon_advance`].
 /// **A row's answer when the answer is not a choice** (T-SETTINGS-ABOUT).
 ///
 /// Drawn in the box a picker would have stood in, right-aligned, so the About
-/// page's answers end on the column every other page's buttons end on — which
+/// page's facts end on the column every other page's buttons end on — which
 /// is [`page_combo_width`]'s own ruling read one step further: a reader
-/// comparing pages is comparing one column.
-///
-/// `mark` is the `↗` on a row that leaves the window, and it is given the width
-/// a picker reserves for its chevron so that the two land on the same x. The
-/// ink follows the same three-way rule the rest of the dialog uses: a stated
-/// fact is muted, a door is titled, and a door under the pointer is accented.
-#[allow(clippy::too_many_arguments)]
+/// comparing pages is comparing one column. Muted: a fact is read, not pressed.
 fn push_stated_value(
     stack: &mut OverlayLayer,
     rect: [f32; 4],
     value: &str,
-    mark: Option<&str>,
-    lit: bool,
     scale: f32,
     palette: bt_render::ChromePalette,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) {
-    let px = |logical: f32| logical * scale;
-    let mark_span = px(COMBO_CHEVRON_FONT_LOGICAL_PX);
-    let text_right = if mark.is_some() {
-        rect[2] - mark_span - px(COMBO_GAP_LOGICAL_PX)
-    } else {
-        rect[2]
-    };
-    let font_size_px = px(COMBO_FONT_LOGICAL_PX);
+    let font_size_px = COMBO_FONT_LOGICAL_PX * scale;
     stack.labels.push(ChromeLabel {
         mono: false,
         // **Ellipsised on the same terms every picker's value is** — this
@@ -14597,16 +15429,10 @@ fn push_stated_value(
         // every other, so what this can reach is a window too narrow to hold
         // the version at all, and a string running out under the sentence
         // beside it would be worse than one that says it was cut.
-        text: ellipsized(value, text_right - rect[0], font_size_px, measure),
-        rect: [rect[0], rect[1], text_right, rect[3]],
+        text: ellipsized(value, rect[2] - rect[0], font_size_px, measure),
+        rect,
         font_size_px,
-        color: if lit {
-            palette.accent
-        } else if mark.is_some() {
-            palette.dialog_title_text
-        } else {
-            palette.dialog_muted_text
-        },
+        color: palette.dialog_muted_text,
         align_right: true,
         align_center: false,
         letter_spacing_em: 0.0,
@@ -14614,24 +15440,75 @@ fn push_stated_value(
         tabular_numerals: false,
         clip: None,
     });
-    let Some(mark) = mark else {
-        return;
+}
+
+/// **A door on the About page** (owner question 2026-09-23): the `.btn`
+/// chassis ([`push_button_face`]), its verb, and on a door that leaves the
+/// window the `↗` beside it.
+///
+/// The verb and its mark are centred in the box as one run, the way a `.btn`
+/// centres its words. The mark takes the column [`door_button_width`] reserved
+/// for it (`COMBO_GAP`, then the chevron's square), so the width solved and the
+/// width spent are one arithmetic. The ink is a button's: title ink at rest,
+/// the hover ground under the pointer.
+#[allow(clippy::too_many_arguments)]
+fn push_door_button(
+    stack: &mut OverlayLayer,
+    rect: [f32; 4],
+    verb: &str,
+    leaves_the_window: bool,
+    hovered: bool,
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    let px = |logical: f32| logical * scale;
+    push_button_face(&mut stack.quads, rect, hovered, scale, border, palette);
+    let font_size_px = px(BUTTON_FONT_LOGICAL_PX);
+    let inner_left = rect[0] + border + px(BUTTON_PADDING_X_LOGICAL_PX);
+    let inner_right = rect[2] - border - px(BUTTON_PADDING_X_LOGICAL_PX);
+    let mark_column = if leaves_the_window {
+        px(COMBO_GAP_LOGICAL_PX + COMBO_CHEVRON_BOX_LOGICAL_PX)
+    } else {
+        0.0
     };
+    let text = ellipsized(
+        verb,
+        inner_right - inner_left - mark_column,
+        font_size_px,
+        measure,
+    );
+    let run = measure(&text, font_size_px) + mark_column;
+    let text_left = inner_left + ((inner_right - inner_left) - run).max(0.0) / 2.0;
+    let text_right = text_left + run - mark_column;
     stack.labels.push(ChromeLabel {
         mono: false,
-        text: mark.to_owned(),
+        text,
+        rect: [text_left, rect[1], text_right, rect[3]],
+        font_size_px,
+        color: palette.dialog_title_text,
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
+    if !leaves_the_window {
+        return;
+    }
+    stack.labels.push(ChromeLabel {
+        mono: false,
+        text: MENU_ACTION_MARK_AWAY.to_owned(),
         rect: [
             text_right + px(COMBO_GAP_LOGICAL_PX),
             rect[1],
-            rect[2],
+            text_right + mark_column,
             rect[3],
         ],
         font_size_px: px(MENU_ACTION_MARK_FONT_LOGICAL_PX),
-        color: if lit {
-            palette.accent
-        } else {
-            palette.menu_item_hint_text
-        },
+        color: palette.menu_item_hint_text,
         align_right: false,
         align_center: true,
         letter_spacing_em: 0.0,
@@ -14641,6 +15518,14 @@ fn push_stated_value(
     });
 }
 
+/// **The closed control** — its face, the value in force, and on a marked row
+/// the mark that value wears (user report 2026-09-13, DESIGN §7.1.6c-9‴).
+///
+/// `icon_advance` is the row's reserved `.ticon` column and is spent whether
+/// `mark` is `Some` or not; `mark` is what this particular value carries, which
+/// on the summoned terminal's row is nothing at all for its first item. The two
+/// are separate arguments for exactly that reason — see
+/// [`SettingsRow::value_mark`] and [`option_icon_advance`].
 #[allow(clippy::too_many_arguments)]
 fn push_combo(
     stack: &mut OverlayLayer,
@@ -14681,7 +15566,7 @@ fn push_combo(
         },
         1.0,
     ));
-    let chevron_column = px(COMBO_CHEVRON_FONT_LOGICAL_PX + COMBO_GAP_LOGICAL_PX);
+    let chevron_column = px(COMBO_CHEVRON_BOX_LOGICAL_PX + COMBO_GAP_LOGICAL_PX);
     // `.combo > button` is a fixed 118px beside a value that is whatever the
     // chosen option is called, and the two do not negotiate: the button's width is
     // the design's, so it is the *text* that gives way. Cropping it mid-glyph is
@@ -14729,24 +15614,23 @@ fn push_combo(
         tabular_numerals: false,
         clip: None,
     });
-    stack.labels.push(ChromeLabel {
-        mono: false,
-        text: COMBO_CHEVRON.to_owned(),
-        rect: [
-            rect[0],
-            rect[1],
-            rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX),
-            rect[3],
+    // The vector `⌄` mark every other drop-down opener wears (`UI-SPEC.md`
+    // I1), not the mock-up's own solid `▼` text glyph — the combo's own ink,
+    // since this chevron (unlike a hover-revealed control's) is always
+    // visible.
+    let chevron_box = px(COMBO_CHEVRON_BOX_LOGICAL_PX).round().max(1.0);
+    let chevron_right = rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX);
+    let chevron_top = ((rect[1] + rect[3] - chevron_box) / 2.0).round();
+    stack.sprites.push(ChromeSprite::new(
+        ChromeMark::Chevron { turned_degrees: 0 },
+        [
+            chevron_right - chevron_box,
+            chevron_top,
+            chevron_right,
+            chevron_top + chevron_box,
         ],
-        font_size_px: px(COMBO_CHEVRON_FONT_LOGICAL_PX),
-        color: palette.dialog_muted_text,
-        align_right: true,
-        align_center: false,
-        letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::Regular,
-        tabular_numerals: false,
-        clip: None,
-    });
+        palette.dialog_muted_text,
+    ));
 }
 
 /// The dialog's other control: a track, the part of it that is filled, a thumb
@@ -14910,9 +15794,575 @@ pub(crate) fn push_float_window(
     ));
 }
 
+#[path = "settings_geometry.rs"]
+pub mod geometry;
+
+#[cfg(test)]
+thread_local! {
+    static LAYOUT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (24) — **Settings key caps, badges, row insets, dialog padding and
+    /// row-menu corners follow their UI roles.**
+    ///
+    /// UI-SPEC.md T5/T6/S8/S10/R9 replace the five remaining Settings
+    /// deviations. Restore's bottom-padding constant is private, so that
+    /// assertion cites its rule instead of widening the constant's visibility.
+    ///
+    /// MUTATION: restore CAP_FONT_LOGICAL_PX to 11.5.
+    /// MUTATION: restore PROFILE_BADGE_FONT_LOGICAL_PX to 10.5.
+    /// MUTATION: restore NAV_ITEM_PADDING_LEFT_LOGICAL_PX to 12.0.
+    /// MUTATION: restore CONTENT_PADDING_BOTTOM_LOGICAL_PX to 18.0.
+    /// MUTATION: restore MENU_ACT_RADIUS_LOGICAL_PX to 4.0.
+    #[test]
+    fn ui_spec_settings_rest_values_follow_the_rule() {
+        let rules = [
+            (CAP_FONT_LOGICAL_PX, 11.0, "UI-SPEC.md T5: caption"),
+            (
+                PROFILE_BADGE_FONT_LOGICAL_PX,
+                bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+                "UI-SPEC.md T6: theme::WINDOW_TAB_BADGE_FONT_LOGICAL_PX",
+            ),
+            (
+                NAV_ITEM_PADDING_LEFT_LOGICAL_PX,
+                ITEM_PADDING_X_LOGICAL_PX,
+                "UI-SPEC.md S8: settings::ITEM_PADDING_X_LOGICAL_PX",
+            ),
+            (
+                CONTENT_PADDING_BOTTOM_LOGICAL_PX,
+                16.0,
+                "UI-SPEC.md S10: restore::DIALOG_PADDING_BOTTOM_LOGICAL_PX",
+            ),
+            (
+                MENU_ACT_RADIUS_LOGICAL_PX,
+                crate::seats::PREVIEW_TOOL_RADIUS_LOGICAL_PX,
+                "UI-SPEC.md R9: seats::PREVIEW_TOOL_RADIUS_LOGICAL_PX",
+            ),
+        ];
+        let deviations: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, rule, _)| actual != rule)
+            .collect();
+        assert!(deviations.is_empty(), "Settings deviations: {deviations:?}");
+    }
+
+    /// RED (ticket 17) — **every Settings combo wears the same `⌄` every
+    /// other drop-down opener wears, the dialog title and the combo
+    /// drop-down rows are on the primary scale, and the row titles and nav
+    /// items are 13.**
+    ///
+    /// `UI-SPEC.md` I1/T2/H1/T3/T4: the combo used to draw a solid `▼` text
+    /// glyph at 8.5; the title sat at 16 against `first_run.rs::TITLE_FONT_LOGICAL_PX`
+    /// (15, private there); the drop-down rows sat at 27.5 against
+    /// `profiles.rs::ITEM_HEIGHT_LOGICAL_PX` (29.5, private there); the row
+    /// title and nav item sat at 13.5 and 12.5.
+    ///
+    /// MUTATION: revert `HEADER_TITLE_FONT_LOGICAL_PX`, `ITEM_HEIGHT_LOGICAL_PX`,
+    /// `ROW_TITLE_FONT_LOGICAL_PX` or `NAV_ITEM_FONT_LOGICAL_PX` to a literal,
+    /// or make `push_combo` draw a text run again, and this goes red.
+    #[test]
+    fn ui_spec_settings_class_a_values_follow_the_rule() {
+        assert_eq!(
+            HEADER_TITLE_FONT_LOGICAL_PX, 15.0,
+            "UI-SPEC.md T2, first_run.rs::TITLE_FONT_LOGICAL_PX"
+        );
+        assert_eq!(
+            ITEM_HEIGHT_LOGICAL_PX, 29.5,
+            "UI-SPEC.md H1, profiles.rs::ITEM_HEIGHT_LOGICAL_PX"
+        );
+        assert_eq!(ROW_TITLE_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T3");
+        assert_eq!(NAV_ITEM_FONT_LOGICAL_PX, 13.0, "UI-SPEC.md T4");
+
+        let placed = open(1.0, false);
+        let combo = combo_of(&placed, SettingsRow::Theme);
+        let sprites = sprites_of(&placed, None, &values());
+        let labels = labels_of(&placed, None, &values());
+        assert!(
+            labels.iter().all(|label| !label.text.contains('\u{25bc}')),
+            "UI-SPEC.md I1: no combo draws the solid ▼ text glyph"
+        );
+        assert!(
+            sprites.iter().any(|sprite| within(sprite.rect, combo)
+                && matches!(sprite.mark, ChromeMark::Chevron { turned_degrees: 0 })),
+            "UI-SPEC.md I1: the combo draws the vector ⌄ mark instead"
+        );
+    }
+
+    #[test]
+    fn psreadline_page_open_is_an_edge_even_without_a_closed_layout() {
+        let rows = [SettingsRow::PsReadLine];
+        let mut panel = SettingsPanel::default();
+        assert!(!panel.take_psreadline_open_edge(true));
+        panel.toggle(content(&rows, &[]));
+        assert!(panel.take_psreadline_open_edge(true));
+        for _ in 0..200 {
+            assert!(!panel.take_psreadline_open_edge(true));
+        }
+        assert!(!panel.select_category(SettingsCategory::Terminal));
+        assert!(!panel.take_psreadline_open_edge(true));
+        panel.select_category(SettingsCategory::General);
+        assert!(!panel.take_psreadline_open_edge(false));
+        panel.select_category(SettingsCategory::Terminal);
+        assert!(panel.take_psreadline_open_edge(true));
+        panel.close();
+        panel.toggle(content(&rows, &[]));
+        assert!(
+            panel.take_psreadline_open_edge(true),
+            "close/reopen needs no intervening layout"
+        );
+        panel.toggle(content(&rows, &[]));
+        assert!(!panel.take_psreadline_open_edge(true));
+        panel.toggle(content(&rows, &[]));
+        assert!(panel.take_psreadline_open_edge(true));
+        panel.select_category(SettingsCategory::General);
+        panel.keep_focus_reachable(content(&rows, &[]));
+        assert_eq!(panel.category(), SettingsCategory::Terminal);
+        assert!(
+            panel.take_psreadline_open_edge(true),
+            "fallback also opens a new visit"
+        );
+        assert!(panel.close_one_layer());
+        panel.toggle(content(&rows, &[]));
+        assert!(
+            panel.take_psreadline_open_edge(true),
+            "Escape also rearms the visit"
+        );
+    }
+
+    /// **A refused agent row looks again when its page is opened, and only then.**
+    ///
+    /// The switch takes no press while the file it names is one this build will not edit, so the
+    /// press cannot be what notices that the reader has unpicked the link or cleared the read-only
+    /// bit. Opening the page is, on `PsReadLine`'s own latch: an edge per visit, rearmed by every
+    /// road off the page, and never a per-frame read — two hundred layouts on the open page ask
+    /// the disk nothing.
+    ///
+    /// MUTATION: make `take_agents_open_edge` answer `self.open` and the two hundred become two
+    /// hundred reads of three configuration files on somebody's machine.
+    #[test]
+    fn attention_rows_look_again_when_their_page_opens() {
+        let rows = [
+            SettingsRow::ClaudeHooks,
+            SettingsRow::CodexNotify,
+            SettingsRow::CopilotHooks,
+        ];
+        let page = content(&rows, &[]);
+        assert!(page.shows_agents(SettingsCategory::Agents));
+        assert!(!page.shows_agents(SettingsCategory::Terminal));
+        assert!(!content(&[SettingsRow::PsReadLine], &[]).shows_agents(SettingsCategory::Agents));
+
+        let mut panel = SettingsPanel::default();
+        assert!(
+            !panel.take_agents_open_edge(true),
+            "a shut dialog is no visit"
+        );
+        panel.toggle(content(&rows, &[]));
+        panel.select_category(SettingsCategory::Agents);
+        assert!(panel.take_agents_open_edge(true));
+        for _ in 0..200 {
+            assert!(
+                !panel.take_agents_open_edge(true),
+                "a redraw of the open page is not an edge"
+            );
+        }
+        // Every road off the page rearms it, and a page without the rows takes no edge at all.
+        panel.select_category(SettingsCategory::Terminal);
+        assert!(!panel.take_agents_open_edge(false));
+        panel.select_category(SettingsCategory::Agents);
+        assert!(panel.take_agents_open_edge(true));
+        panel.close();
+        panel.toggle(content(&rows, &[]));
+        assert!(
+            panel.take_agents_open_edge(true),
+            "close and reopen is a new visit"
+        );
+        assert!(panel.close_one_layer());
+        panel.toggle(content(&rows, &[]));
+        assert!(panel.take_agents_open_edge(true), "Escape rearms it too");
+
+        // And the edge is joined to the three reads: the window asks on it and nowhere else.
+        assert!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "take_agents_open_edge(content.shows_agents("
+            ))) > 0
+        );
+        assert_eq!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "self.refresh_agent_rows();"
+            ))),
+            1
+        );
+        assert_eq!(
+            source_index()
+                .find(&bt_source::ItemQuery::method(
+                    "Runtime",
+                    "refresh_agent_rows"
+                ))
+                .map_or(0, |declarations| declarations.len()),
+            1
+        );
+    }
+
+    // ── what these two pins ask the crate ─────────────────
+    //
+    // **P3's deletion commit for this module** (`docs/plans/bt-app-split-prep.md`
+    // §6.3, and §6.0 rule 3). The commit before this one took every reading
+    // above and below twice — once from `include_str!("main.rs")`, once from
+    // `bt-source` — and asserted the two answered the same; this one removes
+    // the older of the two, because two implementations of one judgement do
+    // not vouch for each other (`docs/CONVENTIONS.md` §十 rule 4). The
+    // pattern is `main.rs::pty_drain_budget_tests`', not re-derived here.
+    //
+    // The counts widen from one file to the package, which is the scope each
+    // claim wants: a second refresh written in another file is exactly the
+    // second owner these numbers exist to refuse, and the file reading could
+    // not have seen one. What that widening has to be careful of is written on
+    // `in_the_product`, and this module is where it bites twice over — the test
+    // harness below implements the same pointer host and calls the same
+    // function, and the older reading standing beside the newer one spells
+    // every counted text a second time, all inside a file the product compiles.
+    //
+    // Two readings are not counts at all. The refresh's **declaration** is an
+    // identity, so it is asked for as one and a second declaration is a refusal
+    // naming both. The production handler is an `impl` header, which stands in
+    // no callable and so has no owner to ask about; it keeps the scope the old
+    // reading had — module `crate` — and says so here.
+    fn source_index() -> &'static bt_source::Index {
+        bt_source::Index::of_package("bt-app")
+    }
+
+    /// The body of one inherent method of `owner`, braces included — the
+    /// identity of §2.4 rather than a line of `main.rs`.
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        source_index()
+            .body_of(&bt_source::ItemQuery::method(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// One search over the whole package, refusing loudly rather than
+    /// answering a smaller question.
+    fn found(needle: bt_source::Needle, view: bt_source::View) -> bt_source::Found {
+        source_index()
+            .search(&bt_source::Search::new(needle, view))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// One search over a named scope — a Rust path, never a file.
+    fn found_in(
+        needle: bt_source::Needle,
+        view: bt_source::View,
+        scope: bt_source::Scope,
+    ) -> bt_source::Found {
+        source_index()
+            .search(&bt_source::Search::new(needle, view).in_scope(scope))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **How many of these occurrences a product build compiles** —
+    /// `bt_source::Found::in_the_product`, which owns that rule and both of the
+    /// grains it takes: §2.3's file and §2.4's item.
+    ///
+    /// This module needs both, which is why it is asked here rather than left
+    /// to the file grain: the spellings counted below are written again in this
+    /// module's own assertions, and again in whole test files elsewhere in the
+    /// package. The rule used to be written out here, in one of twelve copies
+    /// of it this crate carried.
+    fn in_the_product(found: &bt_source::Found) -> usize {
+        found.in_the_product(source_index()).len()
+    }
+
+    /// The same count of one raw needle — the view `include_str!` handed this
+    /// module.
+    fn in_the_product_raw(needle: bt_source::Needle) -> usize {
+        in_the_product(&found(needle, bt_source::View::Raw))
+    }
+
+    struct SettingsPointerHarness {
+        geometry: geometry::Geometry,
+        inputs: geometry::Inputs,
+        panel: SettingsPanel,
+        repaints: usize,
+    }
+
+    impl geometry::PointerHost for SettingsPointerHarness {
+        fn settings_geometry(&mut self) -> Option<std::sync::Arc<SettingsLayout>> {
+            if !self.panel.is_open() {
+                self.geometry.clear();
+                return None;
+            }
+            // Rebuild the input description from the CURRENT panel, just like
+            // Runtime. Accidentally keying geometry on hover/focus must go red.
+            let inputs = geometry::Inputs::new(
+                self.inputs.surface,
+                self.inputs.scale,
+                self.inputs.font_revision,
+                &self.panel,
+                self.inputs.scroll,
+                self.inputs.content(),
+            );
+            self.geometry
+                .read(inputs, |inputs| inputs.layout(&mut measure))
+        }
+        fn settings_drag(&mut self, _: &SettingsLayout, _: f64, _: f64) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn settings_values(&self) -> SettingsValues {
+            self.inputs.values.clone()
+        }
+        fn settings_hover(&mut self, target: SettingsTarget) -> anyhow::Result<()> {
+            if self.panel.set_hover(Some(target)) {
+                self.repaints += 1;
+                // The overlay draw is another reader in the COMPLETE operation.
+                self.settings_geometry();
+            }
+            Ok(())
+        }
+    }
+
+    fn settings_pointer_harness() -> SettingsPointerHarness {
+        let rows = visible_rows_for(
+            bt_platform::HostPlatform::Windows,
+            TabLayoutMode::Horizontal,
+        );
+        let content = content(&rows, &[]);
+        let mut panel = SettingsPanel::default();
+        panel.toggle(content);
+        panel.select_category(SettingsCategory::General);
+        let inputs = geometry::Inputs::new([1200.0, 900.0], 1.0, 0, &panel, 0.0, content);
+        SettingsPointerHarness {
+            geometry: geometry::Geometry::default(),
+            inputs,
+            panel,
+            repaints: 0,
+        }
+    }
+
+    #[test]
+    fn settings_pointer_complete_operation_layout_budget() {
+        use geometry::PointerHost;
+        let mut host = settings_pointer_harness();
+        LAYOUT_CALLS.set(0);
+        let layout = host.settings_geometry().unwrap();
+        assert_eq!(LAYOUT_CALLS.get(), 1, "opening: one layout");
+        // Move between scrim and real row targets, exercising hover repaint too.
+        let row = layout.rows[0].band;
+        for index in 0..64 {
+            let (x, y) = if index % 2 == 0 {
+                (1.0, 1.0)
+            } else {
+                (f64::from(row[0] + 2.0), f64::from(row[1] + 2.0))
+            };
+            host.settings_geometry(); // the preview-hover exclusion reader
+            assert!(geometry::pointer_moved(&mut host, x, y).unwrap());
+            host.settings_geometry(); // later chrome / keyboard / scroll reader
+        }
+        assert!(
+            host.repaints > 1,
+            "reachability: real hit test and changed hover"
+        );
+        assert_eq!(
+            LAYOUT_CALLS.get(),
+            1,
+            "64 pointer moves and their draws: zero layouts"
+        );
+        host.panel
+            .press(SettingsTarget::Combo(SettingsRow::GitPanel));
+        assert_eq!(
+            host.panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::GitPanel))
+        );
+        host.settings_geometry();
+        assert_eq!(
+            LAYOUT_CALLS.get(),
+            1,
+            "focus alone does not change geometry"
+        );
+        host.inputs.values.key_hints = !host.inputs.values.key_hints;
+        geometry::pointer_moved(&mut host, 1.0, 1.0).unwrap();
+        host.settings_geometry();
+        assert_eq!(
+            LAYOUT_CALLS.get(),
+            2,
+            "value change and all readers: one layout"
+        );
+        for _ in 0..32 {
+            host.settings_geometry();
+        }
+        assert_eq!(
+            LAYOUT_CALLS.get(),
+            2,
+            "settled operation stays at zero work"
+        );
+        host.panel.close();
+        assert!(host.settings_geometry().is_none());
+        assert_eq!(LAYOUT_CALLS.get(), 2, "closed readers do zero work");
+        host.panel.toggle(host.inputs.content());
+        host.settings_geometry();
+        assert_eq!(LAYOUT_CALLS.get(), 3, "reopening computes once");
+    }
+
+    #[test]
+    fn settings_pointer_production_wiring_uses_the_counted_handler_and_owner() {
+        let body = |name: &str| method_body("Runtime", name);
+        let pointer = body("pointer_moved");
+        assert!(
+            pointer.contains("settings::geometry::pointer_moved(self, position.x, position.y)?")
+        );
+        let layout = body("settings_layout");
+        assert!(layout.contains("self.window.settings_geometry.read(inputs,"));
+        assert!(layout.contains("self.window.settings_geometry.clear();"));
+        assert_eq!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "inputs.layout(&mut measure)"
+            ))),
+            1
+        );
+        // The test host substitutes only window/GPU effects, not the handler.
+        assert!(
+            !found_in(
+                bt_source::needle!(bt_source::Pattern::text(
+                    "impl settings::geometry::PointerHost for Runtime<'_>"
+                )),
+                bt_source::View::Raw,
+                bt_source::Scope::Module("crate".to_owned()),
+            )
+            .is_empty()
+        );
+        let content = body("settings_dialog");
+        assert!(content.contains(".advanced_reveal_sample"));
+        assert!(!content.contains("tween.sample(Instant::now()"));
+    }
+
+    #[test]
+    fn cjk_settings_reads_and_language_notes_do_not_enumerate_fonts() {
+        let before = monospace_scans();
+        for _ in 0..3 {
+            let _ = cjk_family_index("saved family");
+            for (i, family) in cjk_families().iter().enumerate() {
+                let _ = SettingsRow::TerminalCjkFont.option_label(i);
+                let _ = cjk_language_note(family, crate::i18n::Lang::Chinese);
+            }
+        }
+        assert_eq!(before, monospace_scans());
+        let source = include_str!("settings.rs");
+        let files = source
+            .split("pub fn cjk_family_files(")
+            .nth(1)
+            .unwrap()
+            .split("/// Which row")
+            .next()
+            .unwrap();
+        assert!(!files.contains("bt_platform::cjk_font_families()"));
+        assert!(files.contains("begin_monospace_scan"));
+    }
+    #[test]
+    fn cjk_settings_foreign_language_note_comes_from_declared_coverage() {
+        let jp = bt_platform::CjkFamily {
+            name: "Japanese face".into(),
+            coverage: bt_platform::CjkCoverage::from_code_pages(1 << 17),
+            ..Default::default()
+        };
+        let sc = bt_platform::CjkFamily {
+            name: "Chinese face".into(),
+            coverage: bt_platform::CjkCoverage::from_code_pages(1 << 18),
+            ..Default::default()
+        };
+        assert_eq!(
+            cjk_language_note(&jp, crate::i18n::Lang::English),
+            Some("Japanese")
+        );
+        assert_eq!(cjk_language_note(&sc, crate::i18n::Lang::Chinese), None);
+        assert_eq!(
+            cjk_language_note(&jp, crate::i18n::Lang::Chinese),
+            Some(Text::CjkJapanese.in_lang(crate::i18n::Lang::Chinese))
+        );
+        assert_eq!(
+            cjk_language_note(
+                &bt_platform::CjkFamily::default(),
+                crate::i18n::Lang::English
+            ),
+            None
+        );
+    }
+    #[test]
+    fn cjk_settings_publication_keeps_both_language_views_and_stored_names() {
+        let slot = CjkFamilySlot::new();
+        let family = bt_platform::CjkFamily {
+            name: "Stored family".into(),
+            localized_names: vec![("zh-CN".into(), "Localized family".into())],
+            coverage: bt_platform::CjkCoverage::from_code_pages(1 << 18),
+            ..Default::default()
+        };
+        slot.offer(vec![family]);
+        assert!(slot.adopted().is_empty());
+        assert!(slot.publish(slot.take_offer().unwrap(), true));
+        assert!(slot.scanned());
+        let held = slot.published.read().unwrap();
+        assert_eq!(held.1[0][0].name, "");
+        assert_eq!(held.1[1][1].display_name("zh-CN"), "Localized family");
+        assert!(held.1[1][1].has_name("Stored family"));
+    }
+    /// One-off headless timing probe. No window, GPU, clipboard or input.
+    #[test]
+    #[ignore = "explicit timing run only; publishes a real font list and switches the test process language"]
+    fn cjk_settings_layout_timing_probe() {
+        let families = std::thread::spawn(bt_platform::cjk_font_families)
+            .join()
+            .unwrap();
+        CJK_FAMILIES.publish(families, true);
+        let mut fonts = bt_render::preview_measure_font_system();
+        let rows = every_row_of_the_dialog(TabLayoutMode::Horizontal);
+        let content = content(&rows, &[]);
+        for lang in [crate::i18n::Lang::English, crate::i18n::Lang::Chinese] {
+            crate::i18n::install(lang);
+            for pass in 0..2 {
+                let start = std::time::Instant::now();
+                let mut shape_us = 0;
+                let mut calls = 0;
+                let mut measure = |text: &str, size: f32| {
+                    let at = std::time::Instant::now();
+                    let width = bt_render::measure_preview_paragraph_width(
+                        &mut fonts,
+                        &[bt_render::PreviewRun {
+                            text: text.into(),
+                            color: [255; 3],
+                            mono: false,
+                            bold: false,
+                            italic: false,
+                            font_scale: 1.0,
+                            inline_box_px: None,
+                        }],
+                        size,
+                        size * 1.4,
+                    );
+                    shape_us += at.elapsed().as_micros();
+                    calls += 1;
+                    width
+                };
+                let layout = layout_for_menus(
+                    2048.0,
+                    1152.0,
+                    2.0,
+                    None,
+                    None,
+                    content,
+                    SettingsCategory::General,
+                    0.0,
+                    0.0,
+                    &mut measure,
+                );
+                assert!(layout.is_some());
+                eprintln!(
+                    "BT_PERF_TRACE cjk_settings_layout lang={lang:?} pass={pass} total_us={} shape_us={shape_us} calls={calls}",
+                    start.elapsed().as_micros()
+                );
+            }
+        }
+    }
 
     /// RED — **the family the picker promises is the family the grid draws**
     /// (M2-4).
@@ -14942,6 +16392,21 @@ mod tests {
             bt_render::DEFAULT_PRIMARY_FONT_FAMILY,
             "the picker promises a row for a family the grid is not drawn in"
         );
+    }
+
+    #[test]
+    fn the_cjk_picker_is_directly_below_the_terminal_font_and_starts_automatic() {
+        let rows = every_row_of_the_dialog(TabLayoutMode::Horizontal);
+        let primary = rows
+            .iter()
+            .position(|row| *row == SettingsRow::TerminalFont)
+            .expect("the terminal font row exists");
+        assert_eq!(rows.get(primary + 1), Some(&SettingsRow::TerminalCjkFont));
+        assert_eq!(
+            SettingsRow::TerminalCjkFont.option_label(0),
+            Some(Text::OptionAutomatic.text())
+        );
+        assert_eq!(cjk_family_index(""), 0);
     }
 
     /// One family, as the machine would report it.
@@ -15048,16 +16513,17 @@ mod tests {
         slot.seed("Cascadia Mono");
         let seeded = slot.published();
 
-        slot.offer(vec![family("Cascadia Mono"), family("Consolas")]);
+        assert!(slot.claim_scan(), "the open asks for a walk");
+        let first = slot.serving();
+        slot.offer(first, vec![family("Cascadia Mono"), family("Consolas")]);
         assert_eq!(
             slot.published().as_ptr(),
             seeded.as_ptr(),
             "an offer nobody has taken changes no frame"
         );
 
-        let answer = slot.take_offer().expect("the walk left its answer");
         assert!(
-            slot.publish(answer, true),
+            slot.adopt(),
             "the machine's list is not the seed, so a frame is owed"
         );
         assert!(slot.scanned(), "and it is the machine's from here on");
@@ -15070,12 +16536,13 @@ mod tests {
         );
 
         // The next open: another walk, the same machine.
-        slot.offer(vec![family("Cascadia Mono"), family("Consolas")]);
-        let again = slot.take_offer().expect("and its answer");
-        assert!(
-            !slot.publish(again, true),
-            "a walk that found nothing new owes no frame"
+        assert!(!slot.finish_scan(), "the first walk is done");
+        assert!(slot.claim_scan(), "and the next open starts another");
+        slot.offer(
+            slot.serving(),
+            vec![family("Cascadia Mono"), family("Consolas")],
         );
+        assert!(!slot.adopt(), "a walk that found nothing new owes no frame");
         assert_eq!(
             slot.published().as_ptr(),
             adopted.as_ptr(),
@@ -15123,6 +16590,123 @@ mod tests {
         );
     }
 
+    /// RED (50) — **An answer older than the one on screen is never adopted.**
+    ///
+    /// The lane numbers every request and every answer carries the number of
+    /// the request it was walked for (`ARCHITECTURE` §5.1: versioned requests,
+    /// latest-result replacement). One walk out at a time means the numbers
+    /// normally arrive in order; the number is what makes that a checked fact
+    /// rather than a property of today's scheduling, so a list the window
+    /// thread has put on screen is never replaced by one the machine gave
+    /// before it — and the arm that adopts reads "older" as "nothing changed",
+    /// asking for no frame.
+    ///
+    /// MUTATION: drop the generation comparison in `MonospaceFamilySlot::adopt`
+    /// (the one `adopt_scanned_families` calls) and the older list is drawn.
+    #[test]
+    fn an_answer_older_than_the_one_on_screen_is_never_adopted() {
+        let slot = MonospaceFamilySlot::new();
+        assert!(slot.claim_scan(), "the first request starts a walk");
+        let g1 = slot.serving();
+        assert!(!slot.claim_scan(), "the second rides on it");
+        let g2 = slot.serving();
+        assert!(g2 > g1, "and carries a larger number: {g1} then {g2}");
+
+        slot.offer(g2, vec![family("Newer Mono"), family("Consolas")]);
+        assert!(slot.adopt(), "the newer answer is put on screen");
+        let on_screen = slot.published();
+
+        slot.offer(g1, vec![family("Older Mono"), family("Consolas")]);
+        assert!(
+            !slot.adopt(),
+            "an older answer changes nothing, so it owes no frame"
+        );
+        assert_eq!(
+            slot.published()
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Newer Mono", "Consolas"],
+            "the list on screen is still the newer answer's"
+        );
+        assert_eq!(slot.published().as_ptr(), on_screen.as_ptr());
+        assert!(
+            slot.take_offer().is_none(),
+            "and the older answer is gone, not waiting to be adopted later"
+        );
+    }
+
+    /// RED (50) — **Launching with a stored font family walks no font
+    /// collection on the window thread.**
+    ///
+    /// `apply_stored_terminal_font` runs on the event-loop thread before the
+    /// first frame of every launch whose `settings.json` names a terminal font,
+    /// and until ticket 50 it walked every family on the machine there — the
+    /// same walk GitHub issue #3 took off the gear. The answer it needs is one
+    /// family's files, and the system can give that by name. This calls the
+    /// real road with the real platform door on the test thread: the thread's
+    /// walk count does not move, and the files are the ones the lookup of that
+    /// family answers with (on Windows the default family's real files, on a
+    /// Mac none, because CoreText's families need no loading).
+    ///
+    /// MUTATION: restore the `MONOSPACE_FAMILIES.publish(
+    /// bt_platform::monospace_font_families(), true)` line (with its
+    /// `count_walk()`) in `monospace_family_files` and the count moves.
+    #[test]
+    fn launching_with_a_stored_font_family_walks_no_font_collection_on_the_window_thread() {
+        let name = bt_platform::DEFAULT_MONOSPACE_FAMILY;
+        let expected = bt_platform::monospace_family_named(name)
+            .map(|found| found.files)
+            .unwrap_or_default();
+        let before = monospace_scans();
+        let files = monospace_family_files(name);
+        assert_eq!(
+            monospace_scans(),
+            before,
+            "loading the stored face walked the font collection on the calling thread"
+        );
+        assert_eq!(files, expected, "and the files are the named family's");
+    }
+
+    /// RED (50) — **The family named at launch comes from a lookup by name,
+    /// and the list the picker draws comes from the lane.**
+    ///
+    /// Two answers, two owners. The renderer's face at launch is one family,
+    /// asked of the system by name; the picker's list is the machine's, and it
+    /// arrives only through the lane and `adopt_scanned_families`. So after the
+    /// launch road has answered, the list is still the seed — the named family
+    /// and the default beside it, with no files and not marked as the
+    /// machine's — until an answer is adopted between two frames.
+    ///
+    /// MUTATION: publish the looked-up family into `MONOSPACE_FAMILIES` as if
+    /// scanned (`publish(vec![found], true)`) and the list claims to be the
+    /// machine's.
+    #[test]
+    fn the_launch_face_is_looked_up_by_name_and_the_picker_list_comes_from_the_lane() {
+        let name = bt_platform::DEFAULT_MONOSPACE_FAMILY;
+        let looked_up = bt_platform::monospace_family_named(name);
+        let files = monospace_family_files(name);
+        assert_eq!(
+            files,
+            looked_up.map(|found| found.files).unwrap_or_default(),
+            "the launch road answers with the lookup's files"
+        );
+        assert!(
+            !MONOSPACE_FAMILIES.scanned(),
+            "the list is not the machine's until the lane's answer is adopted"
+        );
+        let list = monospace_families();
+        assert!(
+            list.iter()
+                .any(|entry| entry.name.eq_ignore_ascii_case(name)),
+            "the picker's seed holds the family in force: {list:?}"
+        );
+        assert!(
+            list.iter().all(|entry| entry.files.is_empty()),
+            "and every row of it is the seed's, with nothing to load: {list:?}"
+        );
+    }
+
     /// PIN (GitHub issue #3, T-SETTINGS-ABOUT) — **the window can say which
     /// Folio it is, and where to take that.**
     ///
@@ -15160,8 +16744,11 @@ mod tests {
                 SettingsRow::AboutReleaseNotes,
                 SettingsRow::AboutIssues,
                 SettingsRow::AboutLicences,
+                SettingsRow::ExportSettings,
+                SettingsRow::ImportSettings,
+                SettingsRow::SettingsFolder,
             ],
-            "what this is, then where to go about it"
+            "what this is, then where to go about it, then the configuration doors"
         );
 
         let banner = crate::version::banner();
@@ -15213,8 +16800,11 @@ mod tests {
                 SettingsTarget::Link(SettingsRow::AboutReleaseNotes),
                 SettingsTarget::Link(SettingsRow::AboutIssues),
                 SettingsTarget::Link(SettingsRow::AboutLicences),
+                SettingsTarget::Link(SettingsRow::ExportSettings),
+                SettingsTarget::Link(SettingsRow::ImportSettings),
+                SettingsTarget::Link(SettingsRow::SettingsFolder),
             ],
-            "the keyboard reaches the three doors and stops on neither fact"
+            "the keyboard reaches the six doors and stops on neither fact"
         );
         for row in page {
             assert_eq!(
@@ -15223,6 +16813,180 @@ mod tests {
                 "{row:?} offers a picker onto something that is not a choice"
             );
         }
+    }
+
+    /// PIN (owner question 2026-09-23, "shouldn't the boxes be the same size?")
+    /// — **every button on the About page is one chassis at one width.**
+    ///
+    /// `Open ↗` and `Export…` / `Import…` are all doors, so all of them stand in
+    /// the `.btn` box at the page's one door width, at the button's own height,
+    /// flush with the control column's right edge. The widest verb sets the
+    /// width, and the pin is taken at three readings of the face — the flat test
+    /// advance at two scales, and an advance wide enough that the verbs, not the
+    /// 118 floor, decide — so "the same" cannot mean "all at the floor".
+    ///
+    /// The draw is held to the same box: the chassis' edge spans exactly the
+    /// placed rectangle, every verb is printed whole inside it, and the `↗` is
+    /// on the three doors that leave the window and on neither dialog verb.
+    ///
+    /// MUTATIONS:
+    /// (1) size a door by its own verb instead of the page's widest — `Open`
+    ///     and `Export…` come apart and this goes red;
+    /// (2) place a door at the page's column width — the wide-face reading
+    ///     leaves the door width and this goes red on the floor assertion;
+    /// (3) draw a door without `push_button_face` — the edge assertion fails.
+    #[test]
+    fn every_about_page_button_reports_the_same_width() {
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let shortcuts = shortcut_lines();
+        let palette = chrome_palette();
+        let width = |rect: [f32; 4]| rect[2] - rect[0];
+        for (scale, advance) in [
+            (1.0, TEST_ADVANCE_PER_EM),
+            (1.5, TEST_ADVANCE_PER_EM),
+            (1.0, 1.5),
+        ] {
+            let mut face = |text: &str, font_size_px: f32| {
+                text.chars().count() as f32 * font_size_px * advance
+            };
+            let placed = layout_for_menu(
+                SURFACE.0 * scale,
+                SURFACE.1 * scale,
+                scale,
+                None,
+                None,
+                content(&rows, &shortcuts),
+                SettingsCategory::About,
+                UNSCROLLED,
+                MENU_UNSCROLLED,
+                &mut face,
+            )
+            .expect("the settings dialog fits");
+            let doors: Vec<RowLayout> = placed
+                .rows
+                .iter()
+                .filter(|entry| matches!(entry.row.control(), SettingsControl::Link))
+                .copied()
+                .collect();
+            assert_eq!(doors.len(), 6, "the About page's six doors");
+            let column_right = combo_of(&placed, SettingsRow::AboutVersion)[2];
+            let door_width = width(doors[0].combo);
+            let widest_need = doors
+                .iter()
+                .map(|door| {
+                    let verb = face(
+                        door.row.stated_value().unwrap_or_default(),
+                        BUTTON_FONT_LOGICAL_PX * scale,
+                    );
+                    let mark = if door.row.leaves_the_window() {
+                        (COMBO_GAP_LOGICAL_PX + COMBO_CHEVRON_BOX_LOGICAL_PX) * scale
+                    } else {
+                        0.0
+                    };
+                    verb + mark + 2.0 * BUTTON_PADDING_X_LOGICAL_PX * scale
+                })
+                .fold(0.0_f32, f32::max);
+            assert!(
+                door_width >= widest_need,
+                "scale {scale}, advance {advance}: {door_width} cannot hold the widest verb \
+                 ({widest_need})"
+            );
+            assert!(
+                door_width >= COMBO_MIN_WIDTH_LOGICAL_PX * scale,
+                "scale {scale}: a door is never narrower than the picker's floor"
+            );
+            if advance > TEST_ADVANCE_PER_EM {
+                assert!(
+                    door_width > COMBO_MIN_WIDTH_LOGICAL_PX * scale,
+                    "the wide face is meant to put the verbs, not the floor, in charge"
+                );
+            }
+            for door in &doors {
+                assert_eq!(
+                    width(door.combo),
+                    door_width,
+                    "scale {scale}, advance {advance}: {:?} is not the width of {:?}",
+                    door.row,
+                    doors[0].row
+                );
+                assert!(
+                    (door.combo[3] - door.combo[1] - BUTTON_HEIGHT_LOGICAL_PX * scale).abs() < 1e-3,
+                    "{:?} is a button and stands at the button's height",
+                    door.row
+                );
+                assert_eq!(
+                    door.combo[2], column_right,
+                    "{:?} ends on the column every control on the page ends on",
+                    door.row
+                );
+            }
+        }
+
+        // The draw, at the face the test build measures with.
+        let placed = open_page(
+            1.0,
+            None,
+            TabLayoutMode::Horizontal,
+            SettingsCategory::About,
+            0.0,
+        );
+        let quads = quads_of(&placed, None, &values());
+        let labels = labels_of(&placed, None, &values());
+        for row in [
+            SettingsRow::AboutReleaseNotes,
+            SettingsRow::AboutIssues,
+            SettingsRow::AboutLicences,
+            SettingsRow::ExportSettings,
+            SettingsRow::ImportSettings,
+            SettingsRow::SettingsFolder,
+        ] {
+            let combo = combo_of(&placed, row);
+            let inside = |rect: [f32; 4]| {
+                rect[0] >= combo[0] - 1e-3
+                    && rect[2] <= combo[2] + 1e-3
+                    && rect[1] >= combo[1] - 1e-3
+                    && rect[3] <= combo[3] + 1e-3
+            };
+            let edge: Vec<[f32; 4]> = quads
+                .iter()
+                .filter(|quad| quad.color == palette.menu_border && inside(quad.rect))
+                .map(|quad| quad.rect)
+                .collect();
+            let left = edge
+                .iter()
+                .map(|rect| rect[0])
+                .fold(f32::INFINITY, f32::min);
+            let right = edge
+                .iter()
+                .map(|rect| rect[2])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                (left - combo[0]).abs() < 0.5 && (right - combo[2]).abs() < 0.5,
+                "{row:?}'s chassis spans {left}..{right}, its box {}..{}",
+                combo[0],
+                combo[2]
+            );
+            let verb = row.stated_value().unwrap_or_default();
+            assert!(
+                labels
+                    .iter()
+                    .any(|label| label.text == verb && inside(label.rect)),
+                "{row:?} prints `{verb}` whole inside its button"
+            );
+            assert_eq!(
+                labels
+                    .iter()
+                    .any(|label| label.text == MENU_ACTION_MARK_AWAY && inside(label.rect)),
+                row.leaves_the_window(),
+                "{row:?}: the `↗` is on a door that leaves the window and on no other"
+            );
+        }
+        assert!(
+            !SettingsRow::ExportSettings.leaves_the_window()
+                && !SettingsRow::ImportSettings.leaves_the_window(),
+            "the two dialog verbs stay inside Folio and wear the `…` instead"
+        );
+        assert!(Text::ExportVerb.text().ends_with('…') && Text::ImportVerb.text().ends_with('…'));
     }
 
     /// PIN (owner ruling 2026-09-15) — **the licences row falls back to *this
@@ -15386,7 +17150,8 @@ mod tests {
     /// A page's closing verb and the air above it: `14 + 27.5`.
     const FOOT_ADVANCE: f32 = 41.5;
 
-    /// One page's own height at scale 1: `10 + (10 + 13 + 2) + rows * 54 + 18` —
+    /// One page's own height at scale 1: `10 + (10 + 13 + 2) + rows * 54 + 16` —
+    /// the 16 being the UI-SPEC bottom padding ticket 24 restored (it was 18) —
     /// the content's two paddings and its one heading around the rows.
     ///
     /// **One heading, never more** since the rail arrived: a page holds one
@@ -15397,7 +17162,7 @@ mod tests {
     /// mock-up's own anchor measurement moved by eight: a scrollport cut a
     /// hairline under the header sliced a row's title against the dialog's lid.
     fn page_height(rows: usize) -> f32 {
-        53.0 + ROW_HEIGHT * rows as f32
+        51.0 + ROW_HEIGHT * rows as f32
     }
 
     /// The same page ending in an open `Advanced` group: its heading row, and
@@ -16074,7 +17839,7 @@ mod tests {
             + COMBO_PADDING_LEFT_LOGICAL_PX
             + COMBO_PADDING_RIGHT_LOGICAL_PX
             + COMBO_GAP_LOGICAL_PX
-            + COMBO_CHEVRON_FONT_LOGICAL_PX;
+            + COMBO_CHEVRON_BOX_LOGICAL_PX;
 
         let split = combo_of(&placed, SettingsRow::SplitDirection);
         let widest = SettingsRow::SplitDirection
@@ -16307,11 +18072,12 @@ mod tests {
     /// **Counted rather than read off the `…`** (owner ruling 2026-09-14). Until
     /// that ruling three was also what [`ROW_DESC_MAX_LINES`] tolerated, so a
     /// fourth line arrived here as an ellipsis on the third and the walk looked
-    /// for one. The layout's tolerance is now the longest *ruled* sentence — see
-    /// the constant — so an `…` reports a line far past the one this pin is
-    /// about. A pin that kept looking for it would have gone on passing while
-    /// saying nothing, which is the one way a length gate fails without anybody
-    /// noticing.
+    /// for one. The layout's tolerance is no longer tied to this line — see the
+    /// constant — so an `…` may report a line past the one this pin is about. A
+    /// pin that kept looking for it would have gone on passing while saying
+    /// nothing, which is the one way a length gate fails without anybody
+    /// noticing. What the pin *does* need from the constant is one line more
+    /// than it allows, or the wrap could never hand it a fourth to count.
     ///
     /// Every page and every row this build can draw, at the dialog's own width
     /// and **the design's own control column** — the 118px floor a picker takes
@@ -16594,7 +18360,7 @@ mod tests {
     /// read off this machine, so their length is a fact about the machine rather
     /// than about the copy. What is held here instead is the entry each of them
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 23] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 25] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -16673,10 +18439,12 @@ mod tests {
                 Text::DescExplorerFirstPageAwaitingShell,
                 Windows,
             ),
-            // The two PSReadLine states that are an entry rather than a composed
-            // line. See this constant's own note for the four that are not.
+            // The three PSReadLine states that are an entry rather than a
+            // composed line. See this constant's own note for the four that are
+            // not.
             (SettingsRow::PsReadLine, Text::PsReadLineProbing, Windows),
             (SettingsRow::PsReadLine, Text::PsReadLineRowGone, Windows),
+            (SettingsRow::PsReadLine, Text::PsReadLineRowNotOurs, Windows),
             // The sentence with no version in it, for the row above's reason.
             (SettingsRow::UpdateCheck, Text::DescUpdateCheck, Windows),
             // The Mac columns. `LaunchOpens`, `TurnEndNotifications`,
@@ -16690,6 +18458,9 @@ mod tests {
             ),
             (SettingsRow::QuakeHotkey, Text::DescQuakeHotkey, MacOs),
             (SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt, MacOs),
+            // The folder a reader's own schemes go in, which is a different
+            // folder on each machine (0.4.4 ticket 07).
+            (SettingsRow::DarkScheme, Text::DescDarkScheme, MacOs),
         ]
     };
 
@@ -16722,37 +18493,26 @@ mod tests {
     /// long. The gates skip exactly what is on it, in both languages and on both
     /// platform columns, and nothing else.
     ///
-    /// **`DescOptionSendsAlt` is on it because the owner put the sentence
-    /// back.** The rewrite this ticket made of it — `On, Option is a terminal's
-    /// Alt key. Off, Option types accents.` — fitted the budget by dropping the
-    /// two halves that are the row's whole reason for existing: *which* programs
-    /// want Option to be Alt, and that the characters it types otherwise are the
-    /// ones every other Mac app types. A reader whose `⌥a` has just done the
-    /// wrong thing is the reader this row was written for, and neither half is
-    /// spare to them. The owner restored the longer sentence and ruled the
-    /// budget off it rather than the sentence off the page.
+    /// **Empty is its normal state** (owner ruling 2026-09-23). The one entry it
+    /// has held — `DescOptionSendsAlt`, from 2026-09-13 to 2026-09-23 — came off
+    /// when the owner gave `Option key sends Alt` a two-line sentence and ended
+    /// its exemption. The mechanism stays so that the next exemption, if one is
+    /// ever ruled, is an entry written here and not a sentence that happens to be
+    /// long.
     ///
-    /// It still obeys the *layout*: `no_settings_sentence_needs_a_fourth_line`
+    /// An entry still obeys the *layout*: `no_settings_sentence_needs_a_fourth_line`
     /// and `no_sentence_a_mac_reads_needs_a_fourth_line` measure it like every
-    /// other line, and it fits their three. What it is excused from is the
-    /// tighter copy rule, and only that.
-    ///
-    /// **Their three is the 118px floor column, and the page it is drawn on is
-    /// narrower** (owner ruling 2026-09-14). `Option key sends Alt` is a General
-    /// row, and General's pickers stand at [`COMBO_MAX_ROW_SHARE`] — so the
-    /// column this sentence is really set in is the narrowest this dialog can
-    /// draw, and there it takes four lines in Chinese and six in English. A
-    /// sentence ruled byte-exact cannot then be cut, so
-    /// [`ROW_DESC_MAX_LINES`] is that six: the tolerance is the longest entry on
-    /// this list, measured, and
-    /// [`the_ruled_exception_is_drawn_whole_in_the_column_it_stands_in`] is where
-    /// it is measured.
+    /// other line. What it is excused from is the tighter copy rule, and only
+    /// that — and because a sentence ruled byte-exact cannot then be cut,
+    /// [`ROW_DESC_MAX_LINES`] must hold the longest entry whole in the column its
+    /// row is really drawn in, which
+    /// [`the_row_line_tolerance_is_what_the_pins_and_the_ruled_exceptions_need`]
+    /// measures.
     ///
     /// [`the_description_budget_is_the_column_this_dialog_draws`] holds the
     /// other half of the bargain: an entry here that no longer *needs* the
     /// exemption is an exemption to delete, and it says so by name.
-    const OWNER_RULED_EXCEPTIONS: [(SettingsRow, Text); 1] =
-        [(SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt)];
+    const OWNER_RULED_EXCEPTIONS: [(SettingsRow, Text); 0] = [];
 
     /// Whether this sentence is one of them — asked of the string rather than of
     /// the entry, because the page walk has a row and its words and no map back
@@ -16781,8 +18541,9 @@ mod tests {
     /// Leaving them out costs nothing on the two pages that matter: `Default
     /// profile` and the summoned terminal's profile row are on pages already
     /// standing at [`COMBO_MAX_ROW_SHARE`], where no label can widen anything.
-    const MACHINE_READ_PICKERS: [SettingsRow; 5] = [
+    const MACHINE_READ_PICKERS: [SettingsRow; 6] = [
         SettingsRow::TerminalFont,
+        SettingsRow::TerminalCjkFont,
         SettingsRow::LightScheme,
         SettingsRow::DarkScheme,
         SettingsRow::DefaultProfile,
@@ -16962,37 +18723,41 @@ mod tests {
         }
     }
 
-    /// RED (owner ruling 2026-09-14) — **the sentence the budget was ruled off
-    /// is drawn whole in the column it actually stands in.**
+    /// RED (owner rulings 2026-09-14 and 2026-09-23) — **the layout's line
+    /// tolerance is the least that lets the floor pins count, or the longest
+    /// ruled exception, whichever is larger — and a ruled exception is drawn
+    /// whole in the column it actually stands in.**
     ///
     /// An exemption from the *copy* rule that the *layout* then cuts is not an
-    /// exemption, and that is what the built Mac showed: `Option key sends Alt`
-    /// is a General row, General's pickers stand at [`COMBO_MAX_ROW_SHARE`], and
-    /// the sentence the owner had put back whole came out of the window as three
-    /// lines and an `…`. **Byte-exact means byte-exact**: neither cutting it nor
-    /// rewriting it is on the table, so [`ROW_DESC_MAX_LINES`] is whatever this
-    /// sentence needs, and this is where that number is decided.
+    /// exemption, and that is what the built Mac showed on 2026-09-14: `Option
+    /// key sends Alt` is a General row, General's pickers stand at
+    /// [`COMBO_MAX_ROW_SHARE`], and the sentence the owner had put back whole
+    /// came out of the window as three lines and an `…`. **Byte-exact means
+    /// byte-exact**, so for every entry on [`OWNER_RULED_EXCEPTIONS`] neither
+    /// cutting it nor rewriting it is on the table and [`ROW_DESC_MAX_LINES`]
+    /// has to hold it.
+    ///
+    /// **The other half of the number is the floor pins'.**
+    /// `no_settings_sentence_needs_a_fourth_line` and its Mac twin count what
+    /// [`wrapped_description`] returns, and that wrapper stops at the cap — so
+    /// the cap has to be at least one line past
+    /// [`SETTINGS_DESCRIPTION_FLOOR_MAX_LINES`] or those pins could never see the
+    /// line they are named after. Since 2026-09-23 the list is empty, its normal
+    /// state, and this half is the whole answer: four.
     ///
     /// **The tolerance is computed here and only checked against the constant.**
-    /// The walk wraps every entry on [`OWNER_RULED_EXCEPTIONS`], in both
-    /// languages and both platform columns, with [`crate::tooltip::wrap`] — the
-    /// *uncapped* wrapper, because [`wrapped_description`] cannot report a count
-    /// above the cap it is being asked about — and asserts that
-    /// [`ROW_DESC_MAX_LINES`] is exactly the largest of them. Too small and the
-    /// ruled sentence is cut; too large and the dialog carries room for a line
-    /// nothing asks for. Shorten one of these sentences, or widen the column,
-    /// and this names the number to put back.
+    /// The walk starts from the pins' line and wraps every entry on the list, in
+    /// both languages and both platform columns, with [`crate::tooltip::wrap`] —
+    /// the *uncapped* wrapper, because [`wrapped_description`] cannot report a
+    /// count above the cap it is being asked about — and asserts that
+    /// [`ROW_DESC_MAX_LINES`] is exactly the largest of them. Too small and a
+    /// ruled sentence is cut, or a pin goes blind; too large and the dialog
+    /// carries room for a line nothing asks for.
     ///
-    /// **The column is the narrowest this dialog can draw**, which for this row
-    /// is not a worst case but the case: 502 − 251 − 16 = 235, and
-    /// [`the_description_budget_is_the_column_this_dialog_draws`] is where that
-    /// arithmetic and the dialog's own are held together. In it the Chinese
-    /// sentence is 147 columns of a CJK face — 882px of ink at
-    /// [`ROW_DESC_FONT_LOGICAL_PX`], and 882 ÷ 235 = 3.75, so four lines is its
-    /// floor and its wrap — and the English is 181 characters at [`measure`]'s
-    /// half em, 1086px, so 1086 ÷ 235 = 4.62 puts five out of reach before the
-    /// wrapper's own break points make it six. Six is the larger, so six is the
-    /// tolerance.
+    /// **The column is the one the row's page draws**, which for a General or
+    /// Summoned terminal row is the narrowest this dialog can draw: 502 − 251 −
+    /// 16 = 235, and [`the_description_budget_is_the_column_this_dialog_draws`]
+    /// is where that arithmetic and the dialog's own are held together.
     ///
     /// **Why the height is asserted through [`StackMetrics`] and not off a
     /// shaped page.** This row is drawn only where `Capability::OptionKey` is,
@@ -17006,10 +18771,12 @@ mod tests {
     /// [`a_rows_sentence_wraps_inside_its_own_column_and_never_runs_under_the_control`]'s,
     /// on a page this process can shape.
     ///
-    /// MUTATION: put [`ROW_DESC_MAX_LINES`] back to three, or to four, and the
-    /// first assertion names the `…` and the language it cut.
+    /// MUTATION: put [`ROW_DESC_MAX_LINES`] to three, or to five, and the last
+    /// assertion names the number to put back. Put a sentence on the list that
+    /// wants more lines than the constant and the first assertion names the `…`
+    /// and the language it cut.
     #[test]
-    fn the_ruled_exception_is_drawn_whole_in_the_column_it_stands_in() {
+    fn the_row_line_tolerance_is_what_the_pins_and_the_ruled_exceptions_need() {
         use crate::i18n::Lang;
         use bt_platform::HostPlatform::{MacOs, Windows};
         fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
@@ -17038,8 +18805,10 @@ mod tests {
         let editing = editing_content(&rows, &[], editor_subject(true));
         let dialog_pages = pages(held, editing);
 
-        // What the tolerance has to be, found rather than assumed.
-        let mut needed = 0_usize;
+        // What the tolerance has to be, found rather than assumed — starting from
+        // the least the floor pins can count with, which is the whole answer
+        // while the list is empty.
+        let mut needed = SETTINGS_DESCRIPTION_FLOOR_MAX_LINES + 1;
         for (row, entry) in OWNER_RULED_EXCEPTIONS {
             let page = &dialog_pages
                 .iter()
@@ -17155,22 +18924,12 @@ mod tests {
         }
 
         // ⑤ **And the tolerance is that number and no other.** Under it a
-        // sentence the owner ruled byte-exact is cut; over it the dialog carries
-        // room for a line nothing on the list asks for.
+        // sentence the owner ruled byte-exact is cut, or a floor pin cannot see
+        // the line it reports; over it the dialog carries room for a line
+        // nothing asks for.
         assert_eq!(
             ROW_DESC_MAX_LINES, needed,
-            "the tolerance is the longest ruled exception, measured: the list \
-             wants {needed} lines of its own columns and the constant says \
-             {ROW_DESC_MAX_LINES}"
-        );
-        // And the exemption is still buying something. A list whose longest
-        // entry fits the line every other sentence is held to is a list that has
-        // stopped needing the tolerance, and the tolerance should come back down
-        // with it.
-        assert!(
-            needed > SETTINGS_DESCRIPTION_FLOOR_MAX_LINES,
-            "every ruled exception now fits {SETTINGS_DESCRIPTION_FLOOR_MAX_LINES} \
-             lines of its own column — the tolerance is not earning its place"
+            "the tolerance is one line past the floor pins'              {SETTINGS_DESCRIPTION_FLOOR_MAX_LINES}, or the longest ruled              exception if that is longer: {needed} is needed and the constant              says {ROW_DESC_MAX_LINES}"
         );
     }
 
@@ -17195,15 +18954,15 @@ mod tests {
     /// the fixture walk alone is not the whole set and which two sentences are
     /// deliberately outside it.
     ///
-    /// **Except what [`OWNER_RULED_EXCEPTIONS`] names**, which is one sentence
-    /// and is skipped by the string it says rather than by its row — a row draws
-    /// several sentences and only one of them was ruled on. The list's own note
-    /// carries the ruling; the budget test refuses to let an entry sit on it
-    /// after it stops needing to.
+    /// **Except what [`OWNER_RULED_EXCEPTIONS`] names**, which is nothing since
+    /// 2026-09-23 and is skipped by the string it says rather than by its row —
+    /// a row draws several sentences and a ruling is about one of them. The
+    /// list's own note carries the rule; the budget test refuses to let an entry
+    /// sit on it after it stops needing to.
     ///
     /// MUTATION: put the pre-2026-09-13 `DescLaunchOpens`, `DescSidebar` or
-    /// `DescQuakeRestore` back and this names the row and the line count. (Not
-    /// `DescOptionSendsAlt`: its old sentence is the one standing, by ruling.)
+    /// `DescQuakeRestore` back, or the pre-2026-09-23 `DescOptionSendsAlt`, and
+    /// this names the row and the line count.
     #[test]
     fn no_settings_sentence_needs_a_third_line() {
         use crate::i18n::Lang;
@@ -17226,7 +18985,7 @@ mod tests {
         //
         // The page's own wrapper, so this gate and the glass break the sentence
         // the same way. It is capped at `ROW_DESC_MAX_LINES`, so a sentence that
-        // wanted eight lines is reported as six — which is why the offending
+        // wanted eight lines is reported as four — which is why the offending
         // sentence is printed beside the count rather than only the number.
         let count = |row: SettingsRow, sentence: &str| {
             let page = &dialog_pages
@@ -17292,6 +19051,189 @@ mod tests {
         }
     }
 
+    /// RED (0.4.4 ticket 07) — **the Dark scheme row names the folder this
+    /// platform keeps scheme files in, and says it in two lines.**
+    ///
+    /// Until 0.4.4 the sentence was one `pick` for every machine, so a Mac
+    /// reader looking for where their own scheme files go was sent to
+    /// `%APPDATA%\Folio\schemes` — a folder that machine does not have. The
+    /// folder is `persist::storage_dir`'s on each platform with
+    /// `schemes::USER_SCHEME_DIR` under it, and both halves are read from the
+    /// constants the product itself uses rather than written out again here.
+    ///
+    /// Every column in both languages, each held to the budget
+    /// [`no_settings_sentence_needs_a_third_line`] holds the English to, wrapped
+    /// in the column the Appearance page really draws — the Mac sentence is the
+    /// longer of the two and the one no walk of the host's own dialog measures
+    /// on a Windows build server. The Chinese of the Mac column is owed
+    /// (`Text::CHINESE_PENDING`) and stands on the English until opus46 writes it.
+    ///
+    /// MUTATION: turn `Text::DescDarkScheme` back into a `pick` of the Windows
+    /// pair, and the Mac half of this names `%APPDATA%`.
+    #[test]
+    fn the_dark_scheme_row_names_this_platforms_folder() {
+        use crate::i18n::{Lang, Text};
+        use bt_platform::HostPlatform;
+        fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
+            bt_unicode::graphemes(text)
+                .map(|cluster| bt_unicode::cluster_width(cluster) as f32)
+                .sum::<f32>()
+                * font_size_px
+                * TEST_ADVANCE_PER_EM
+        }
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let dialog_pages = pages(held, editing);
+        let row = SettingsRow::DarkScheme;
+        let page = &dialog_pages
+            .iter()
+            .find(|(category, _)| *category == row.category())
+            .expect("the Dark scheme row is on a page")
+            .1;
+        assert!(page.contains(&row), "the walk reached the row it measures");
+        let column = page_description_column(page, span);
+
+        let windows = format!(
+            r"%APPDATA%\{}\{}",
+            crate::persist::STORAGE_NAME,
+            crate::schemes::USER_SCHEME_DIR
+        );
+        let mac = format!(
+            "~/Library/Application Support/{}/{}",
+            crate::persist::STORAGE_NAME,
+            crate::schemes::USER_SCHEME_DIR
+        );
+        for (platform, folder, not_this) in [
+            (HostPlatform::Windows, &windows, "~/Library"),
+            (HostPlatform::MacOs, &mac, "APPDATA"),
+        ] {
+            for lang in Lang::ALL {
+                let said = Text::DescDarkScheme.on(lang, platform);
+                assert!(
+                    said.contains(folder.as_str()),
+                    "{platform:?} ({lang:?}) should name {folder}: {said:?}"
+                );
+                assert!(
+                    !said.contains(not_this),
+                    "{platform:?} ({lang:?}) names the other machine's folder: {said:?}"
+                );
+                let lines = match lang {
+                    Lang::English => {
+                        wrapped_description(said, column, ROW_DESC_FONT_LOGICAL_PX, &mut measure)
+                    }
+                    Lang::Chinese => wrapped_description(
+                        said,
+                        column,
+                        ROW_DESC_FONT_LOGICAL_PX,
+                        &mut measure_in_a_cjk_face,
+                    ),
+                };
+                assert!(
+                    lines.len() <= SETTINGS_DESCRIPTION_MAX_LINES,
+                    "{platform:?} ({lang:?}) needs {} lines: {lines:#?}",
+                    lines.len()
+                );
+            }
+        }
+    }
+
+    /// RED (0.4.4 ticket 06) — **the `Cards` row names the chord the table it is
+    /// handed holds — the shipped one in either dialect, and the reader's own
+    /// after a rebind — and says it in two lines.**
+    ///
+    /// The row used to return `Text::DescFocusMode` as it stood, and that text
+    /// spelled `Ctrl+Shift+Z` in both languages on every machine: wrong on a
+    /// Mac, where the table holds `Shift+Cmd+E`, and wrong everywhere after a
+    /// rebind. The runtime hands the row `Shortcuts::accelerator` of its one
+    /// effective table every time it draws, which is what this does with a real
+    /// table — so a chord recorded on the Shortcuts page shows on the Cards row
+    /// the next time the dialog paints, without reopening it.
+    ///
+    /// Both dialects and both languages are held to the budget
+    /// [`no_settings_sentence_needs_a_third_line`] holds the host's English to,
+    /// in the column the Appearance page draws — the Mac chord is the longer one
+    /// and no walk of a Windows build's own dialog measures it.
+    ///
+    /// MUTATION: return `Text::DescFocusMode.text()` from the row again — the
+    /// row names no chord and the first assertion goes red.
+    #[test]
+    fn the_cards_row_names_the_chord_its_table_holds() {
+        use crate::i18n::Lang;
+        use crate::shortcuts::{Action, Shortcuts, parse_chord};
+        use bt_platform::HostPlatform;
+        fn measure_in_a_cjk_face(text: &str, font_size_px: f32) -> f32 {
+            bt_unicode::graphemes(text)
+                .map(|cluster| bt_unicode::cluster_width(cluster) as f32)
+                .sum::<f32>()
+                * font_size_px
+                * TEST_ADVANCE_PER_EM
+        }
+        let mut table = Shortcuts::defaults();
+        let shipped = table.accelerator(Action::ToggleFocusMode);
+        let drawn = |table: &Shortcuts| {
+            SettingsRow::FocusMode.description(&SettingsValues {
+                focus_mode_chord: table.accelerator(Action::ToggleFocusMode),
+                ..values()
+            })
+        };
+        let shipped = shipped.expect("focus-mode ships bound");
+        assert!(
+            drawn(&table).contains(&shipped),
+            "the row names the table's {shipped:?}: {:?}",
+            drawn(&table)
+        );
+        table.set("focus-mode", parse_chord("Ctrl+Shift+F9"));
+        let after = drawn(&table);
+        assert!(
+            after.contains("F9") && !after.contains(&shipped),
+            "a rebind shows on the next draw: {after:?}"
+        );
+
+        let metrics = StackMetrics::new(1.0);
+        let span = metrics.row_span(dialog_width());
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let editing = editing_content(&rows, &[], editor_subject(true));
+        let dialog_pages = pages(held, editing);
+        let row = SettingsRow::FocusMode;
+        let page = &dialog_pages
+            .iter()
+            .find(|(category, _)| *category == row.category())
+            .expect("the Cards row is on a page")
+            .1;
+        assert!(page.contains(&row), "the walk reached the row it measures");
+        let column = if row.stacked() {
+            span
+        } else {
+            page_description_column(page, span)
+        };
+        for platform in [HostPlatform::Windows, HostPlatform::MacOs] {
+            let chord = Shortcuts::defaults_for(platform).accelerator(Action::ToggleFocusMode);
+            for lang in Lang::ALL {
+                let said = crate::i18n::focus_mode_row_in(lang, chord.as_deref());
+                let lines = match lang {
+                    Lang::English => {
+                        wrapped_description(&said, column, ROW_DESC_FONT_LOGICAL_PX, &mut measure)
+                    }
+                    Lang::Chinese => wrapped_description(
+                        &said,
+                        column,
+                        ROW_DESC_FONT_LOGICAL_PX,
+                        &mut measure_in_a_cjk_face,
+                    ),
+                };
+                assert!(
+                    lines.len() <= SETTINGS_DESCRIPTION_MAX_LINES,
+                    "{platform:?} ({lang:?}) needs {} lines: {lines:#?}",
+                    lines.len()
+                );
+            }
+        }
+    }
+
     /// PIN (owner ruling 2026-09-13) — **the same two lines, held over the
     /// Chinese column.**
     ///
@@ -17309,9 +19251,9 @@ mod tests {
     /// entries share is skipped rather than guessed at.
     ///
     /// [`OWNER_RULED_EXCEPTIONS`] is skipped here as well as in the English
-    /// walk, and it has to be: the ruling excused the *entry* from the budget,
-    /// so a Chinese column held to two lines would be stage 2 being asked to
-    /// cut a sentence the owner had just put back.
+    /// walk, and it has to be: a ruling excuses the *entry* from the budget, so
+    /// a Chinese column held to two lines would be stage 2 being asked to cut a
+    /// sentence the owner had put back. (The list is empty since 2026-09-23.)
     ///
     /// Run it with `cargo test -p bt-app -- --ignored
     /// no_chinese_settings_sentence_needs_a_third_line_either` to see the list
@@ -18409,9 +20351,13 @@ mod tests {
                 // the dialog that overrides a colour a program named — which is
                 // the argument for it being under a disclosure rather than beside
                 // the scheme pair it repairs.
-                SettingsRow::MinimumContrast
+                SettingsRow::MinimumContrast,
+                // 0.4.4 ticket 09: directly under it — how the window's light or dark
+                // reaches a site's style, as the row above says how it reaches a program's
+                // colours.
+                SettingsRow::WebPages
             ],
-            "the group the 2026-08-18 ruling leaves standing, plus the contrast floor"
+            "the group the 2026-08-18 ruling leaves standing, plus the contrast floor and the              web pages' scheme"
         );
         // **`Sidebar` came back out** (user ruling 2026-08-18). It is an
         // everyday row again and it is back where it was born — directly under
@@ -18567,7 +20513,7 @@ mod tests {
     /// the same group in the same place with the same rows and the same verb, no
     /// band cut out of anything, and nothing to wake the window for. The
     /// animation is a layer of gain over a state that was already legible
-    /// without it — `wait_halo_opacity`'s own paradigm — and the way to prove it
+    /// without it — `wait_pulse`'s own paradigm — and the way to prove it
     /// is a layer is to take it away and find the page unchanged.
     ///
     /// Red gate: make `advanced_reveal_of` answer `Some(0.5)` where it answers
@@ -19204,15 +21150,21 @@ mod tests {
             ),
         );
         let sprites = sprites_of(&open_at_heading, None, &values());
+        // **Turned, not merely present**: since ticket 17 (`UI-SPEC.md` I1)
+        // every closed combo on the page also wears a `Chevron { turned_degrees:
+        // 0 }` — the vector mark replacing the old `▼` text glyph, always at
+        // rest, never turned. A resting combo chevron is not a second
+        // disclosure; only a *turned* one is, so the count that matters is
+        // turned chevrons, not chevrons.
         let turned: Vec<ChromeMark> = sprites
             .iter()
             .map(|sprite| sprite.mark)
-            .filter(|mark| matches!(mark, ChromeMark::Chevron { .. }))
+            .filter(|mark| matches!(mark, ChromeMark::Chevron { turned_degrees } if *turned_degrees != 0))
             .collect();
         assert_eq!(
             turned,
             vec![ChromeMark::chevron(1.0)],
-            "one chevron, fully over — and no second kind of disclosure"
+            "one chevron turned fully over — and no second kind of disclosure"
         );
         assert!(
             !sprites
@@ -19326,7 +21278,8 @@ mod tests {
     ///
     /// The height is not a guess: it is `1 + 56 + content + 1` — two hairlines,
     /// the header's `16 + 30 + 10`, and a content box of
-    /// `2 + 10 + 13 + 2 + rows * (11 + 32 + 11) + 18`, plus `16 + 13 + 2` for
+    /// `2 + 10 + 13 + 2 + rows * (11 + 32 + 11) + 16` (the 16 is the UI-SPEC bottom
+    /// padding ticket 24 restored; it was 18), plus `16 + 13 + 2` for
     /// every heading after the first. The mock-up's own renderer reported 211 for
     /// the two rows under one heading this dialog first shipped with, which is
     /// [`dialog_height`] at `(2, 1)` and the number the formula is anchored on.
@@ -19339,11 +21292,11 @@ mod tests {
     fn the_dialog_lands_where_the_mock_up_puts_it() {
         assert_eq!(
             dialog_height(2),
-            219.0,
+            217.0,
             "the mock-up's own measurement of two rows under one heading — 211 \
              when `.content` had 2px of top padding, and eight more since \
              §7.1.6c-5 gave the scrollport an inset a scrolled row can \
-             disappear under"
+             disappear under, and two fewer since ticket 24 took the bottom \n             padding back to the spec's 16"
         );
         let placed = open(1.0, false);
         assert_eq!(width(placed.frame), 720.0, "min(720px, 92%) at 1280 wide");
@@ -19446,10 +21399,10 @@ mod tests {
         assert_eq!(height(cursor.combo), height(theme.combo));
         assert_eq!(
             cursor.combo[1] - theme.combo[1],
-            5.0 * ROW_HEIGHT,
-            "Cursor is five identical rows under Theme — the two scheme rows \
-             (§7.1.6c-4a) and the two font rows sit between them, and every one \
-             of them is the same height. The window's ground used to be here \
+            6.0 * ROW_HEIGHT,
+            "Cursor is six identical rows under Theme — the two scheme rows \
+             (§7.1.6c-4a) and the three font rows (family, CJK family, size) sit \
+             between them, and every one of them is the same height. The window's ground used to be here \
              too; §7.1.6c-5's ruling moved its six rows under the disclosure"
         );
     }
@@ -19489,12 +21442,12 @@ mod tests {
             let menu = placed.menu.expect("the menu is open");
             near(118.0 * scale, width(menu), "the menu");
             near(
-                (2.0 + 8.0 + THEME_OPTIONS.len() as f32 * 27.5) * scale,
+                (2.0 + 8.0 + THEME_OPTIONS.len() as f32 * ITEM_HEIGHT_LOGICAL_PX) * scale,
                 height(menu),
                 "the menu",
             );
             for item in &placed.items {
-                near(27.5 * scale, height(*item), "a menu item");
+                near(ITEM_HEIGHT_LOGICAL_PX * scale, height(*item), "a menu item");
             }
             assert_eq!(placed.items.len(), THEME_OPTIONS.len());
         }
@@ -19950,7 +21903,7 @@ mod tests {
         // 2026-08-21: §7.1.6b′ had already pushed the vertical one 32px past 600
         // with focus mode's row, and the card-height row added that day carried
         // the horizontal one over too, so the fits example moved to a short page.
-        // Rendered blocks holds four everyday rows and sits well under the cap.
+        // Rendered blocks holds five everyday rows and sits well under the cap.
         let fits = shaped(
             SettingsCategory::RenderedBlocks,
             AdvancedOpen::default(),
@@ -19959,7 +21912,7 @@ mod tests {
         assert_eq!(
             fits.max_scroll(),
             0.0,
-            "a four-row everyday page fits a {}px dialog with room to spare",
+            "a five-row everyday page fits a {}px dialog with room to spare",
             DIALOG_MAX_HEIGHT_LOGICAL_PX
         );
         // **And the one that no longer fits says so by exactly its overflow.**
@@ -20077,7 +22030,7 @@ mod tests {
             combo[2]
                 - 1.0
                 - COMBO_PADDING_RIGHT_LOGICAL_PX
-                - COMBO_CHEVRON_FONT_LOGICAL_PX
+                - COMBO_CHEVRON_BOX_LOGICAL_PX
                 - COMBO_GAP_LOGICAL_PX,
             combo[3],
         ]
@@ -20336,6 +22289,7 @@ mod tests {
         // drawn text fits the box, and if it gave way it gave way with an `…`
         // after a prefix of the real name.
         ellipsised.retain(|row| *row != SettingsRow::TerminalFont);
+        ellipsised.retain(|row| *row != SettingsRow::TerminalCjkFont);
         ellipsised.sort_by_key(|row| format!("{row:?}"));
         assert_eq!(
             ellipsised,
@@ -20346,6 +22300,12 @@ mod tests {
                 // because what it names is a window the reader has to be able to
                 // picture. The row's own line underneath carries the rest.
                 SettingsRow::LaunchOpens,
+                // The light-scheme picker (since ticket 17, `UI-SPEC.md` I1
+                // grew the chevron column from 8.5 to 13, narrowing every
+                // button's value box by 4.5px): `Solarized Light`, the longest
+                // of the built-in light catalogue's own names, no longer fits
+                // 118px where it used to clear it by a hair.
+                SettingsRow::LightScheme,
                 // Two of the summoned terminal's own (§7.54e ⑤): its first
                 // profile item is the sentence "whatever the default profile
                 // is", and the third rung of `What comes back` names two things
@@ -20357,11 +22317,11 @@ mod tests {
                 SettingsRow::QuakeRestore,
                 SettingsRow::SplitDirection,
             ],
-            "the long profile title, the launch row's second answer, the \
-             summoned terminal's two and `Auto (longer edge)` are the \
-             values this build's own tables can produce that cannot fit the \
-             118px button, and every other row's option is one short word that \
-             must be left alone"
+            "the long profile title, the launch row's second answer, \
+             `Solarized Light`, the summoned terminal's two and \
+             `Auto (longer edge)` are the values this build's own tables can \
+             produce that cannot fit the 118px button, and every other row's \
+             option is one short word that must be left alone"
         );
     }
 
@@ -22092,15 +24052,32 @@ mod tests {
     /// [`MENU_MAX_VISIBLE_ITEMS`] scrolls and the items past the body's edge
     /// draw nothing at all — a claim stated as "these marks, in this order"
     /// would be a claim about how many profiles this build happens to ship.
+    ///
+    /// **The topmost sprite at that box, not the first one found** — `build`
+    /// returns `[scrim, content, popup]`, in painter's order, so `content`'s
+    /// sprites (since ticket 17, `UI-SPEC.md` I1: every closed combo's own
+    /// `⌄`) can share screen space with an open popup sitting over them. A
+    /// forward search would report whichever of the two happened to be pushed
+    /// first, which is not what a reader sees; searching from the end reports
+    /// the sprite actually drawn last, which is the one on top.
     fn item_marks(placed: &SettingsLayout, values: &SettingsValues) -> Vec<(usize, ChromeMark)> {
         let sprites = sprites_of(placed, None, values);
         placed
             .items
             .iter()
             .enumerate()
+            // **Shown, not merely past the enumeration** — an item beyond
+            // `MENU_MAX_VISIBLE_ITEMS`' scroll cap is never drawn by this
+            // popup at all, so its rect is not a claim about what this list
+            // put there; without this guard it is only a claim about
+            // whatever the *page underneath* happens to have at that point
+            // (since ticket 17, `UI-SPEC.md` I1, that is a closed combo's own
+            // `⌄` often enough to be found).
+            .filter(|(_, item)| placed.shows_item(**item))
             .filter_map(|(index, item)| {
                 sprites
                     .iter()
+                    .rev()
                     .find(|sprite| within(sprite.rect, *item))
                     .map(|sprite| (index, sprite.mark))
             })
@@ -22120,6 +24097,12 @@ mod tests {
     }
 
     /// Every mark drawn inside one row's closed button.
+    ///
+    /// Since ticket 17 (`UI-SPEC.md` I1) this is at least two: the leading
+    /// `.ticon`-column mark a marked row's chosen option wears, struck first,
+    /// and the combo's own trailing `⌄` (`ChromeMark::Chevron { turned_degrees:
+    /// 0 }`), struck last — every combo wears the second whether or not the row
+    /// is marked. Callers that mean "the option's own mark" want `drawn[0]`.
     fn button_marks(
         placed: &SettingsLayout,
         row: SettingsRow,
@@ -22207,10 +24190,15 @@ mod tests {
             };
             let drawn = button_marks(&general_page, SettingsRow::DefaultProfile, &general);
             assert_eq!(
-                drawn.iter().map(|sprite| sprite.mark).collect::<Vec<_>>(),
-                vec![profiles::mark(chosen)],
+                drawn[0].mark,
+                profiles::mark(chosen),
                 "the Default profile button wears the mark of the profile it \
-                 says it will start"
+                 says it will start, first in its own box"
+            );
+            assert_eq!(
+                drawn[1].mark,
+                ChromeMark::Chevron { turned_degrees: 0 },
+                "and every combo's own ⌄ stands after it (UI-SPEC.md I1)"
             );
             // The `˅` menu's own box for this mark, struck in the `.ticon`
             // column — the same two numbers the open item is given.
@@ -22223,11 +24211,8 @@ mod tests {
                 ..values()
             };
             assert_eq!(
-                button_marks(&quake_page, SettingsRow::QuakeProfile, &summoned)
-                    .iter()
-                    .map(|sprite| sprite.mark)
-                    .collect::<Vec<_>>(),
-                vec![profiles::mark(chosen)],
+                button_marks(&quake_page, SettingsRow::QuakeProfile, &summoned)[0].mark,
+                profiles::mark(chosen),
                 "and so does the summoned terminal's"
             );
         }
@@ -22239,7 +24224,7 @@ mod tests {
         for mark in (0..profiles::count()).map(profiles::mark) {
             let [_, box_height] = option_mark_box_logical_px(mark);
             assert!(
-                box_height <= ITEM_HEIGHT_LOGICAL_PX && box_height <= COMBO_HEIGHT_LOGICAL_PX,
+                box_height <= ITEM_HEIGHT_LOGICAL_PX.min(COMBO_HEIGHT_LOGICAL_PX),
                 "{mark:?} at {box_height} does not fit the row it stands in"
             );
         }
@@ -22309,9 +24294,14 @@ mod tests {
             None,
             "the closed control borrows nothing either"
         );
-        assert!(
-            button_marks(&placed, SettingsRow::QuakeProfile, &deferring).is_empty(),
-            "and draws nothing in the column"
+        assert_eq!(
+            button_marks(&placed, SettingsRow::QuakeProfile, &deferring)
+                .iter()
+                .map(|sprite| sprite.mark)
+                .collect::<Vec<_>>(),
+            vec![ChromeMark::Chevron { turned_degrees: 0 }],
+            "and draws no profile mark in the column — only every combo's own \
+             ⌄ (UI-SPEC.md I1), which stands regardless of the row's value"
         );
         let box_of = combo_value_box(
             SettingsRow::QuakeProfile,
@@ -22531,30 +24521,29 @@ mod tests {
     /// measured.** A popup is `max(its button, its own chrome + the widest
     /// label)`, and the button is [`page_combo_width`]: the widest answer on the
     /// *page*, shared so a column of controls keeps one left edge. Those two
-    /// chromes are 9.5 logical px apart and the gap does not move with the words:
+    /// chromes are 5 logical px apart and the gap does not move with the words:
     ///
     /// ```text
-    ///   button   2·border + 12 + 10 + 10 + 8.5            = 42.5   + label
-    ///   popup    2·border + 2·4 + 2·10 + 14 (tick) + 8     = 52.0   + label
+    ///   button   2·border + 12 + 10 + 10 + COMBO_CHEVRON_BOX_LOGICAL_PX (13) = 47.0   + label
+    ///   popup    2·border + 2·4 + 2·10 + 14 (tick) + 8                       = 52.0   + label
     /// ```
     ///
-    /// So a popup clears its own button by 9.5 px — *unless some row on its page
+    /// So a popup clears its own button by 5 px — *unless some row on its page
     /// is marked*, which puts `OPTION_ICON_COLUMN + ITEM_GAP` (22) into the
-    /// button and leaves the popup 12.5 px under the floor for every label width
-    /// there is. `Theme` stood here and is exactly that case: `Split direction`
-    /// is on Appearance and is marked, so at 1× Theme's popup sat on its 185px
-    /// button while `Default profile`'s was text-sized at 194 — a difference of
-    /// 9, which is the 9.5 px chrome gap and nothing to do with the mark column.
-    /// No value of `widest` could have fixed it, because both sides of that
-    /// comparison grow with the label at the same rate.
+    /// button and puts the popup under the floor for every label width there is
+    /// (`Theme` stood here: `Split direction` is on Appearance and is marked, so
+    /// at 1× Theme's popup sat on its button while `Default profile`'s, unmarked,
+    /// was text-sized and wider by roughly the 5px chrome gap). No value of
+    /// `widest` could have fixed it, because both sides of that comparison grow
+    /// with the label at the same rate.
     ///
     /// `Scrollback` is on **Terminal**, none of whose rows is marked
     /// ([`SettingsRow::options_are_marked`] is false for every one of them, on
-    /// either platform's reading of the page), so at 1× its button is 163 and
-    /// its popup 172 — over the floor by the structural 9.5, at every scale,
-    /// whatever `widest` is. The two `popup_width > combo` assertions below hold
-    /// that: the day a marked row lands on the Terminal page, this pin says so
-    /// instead of quietly measuring two floors against each other.
+    /// either platform's reading of the page), so its popup clears its button by
+    /// the same structural 5, at every scale, whatever `widest` is. The two
+    /// `popup_width > combo` assertions below hold that: the day a marked row
+    /// lands on the Terminal page, this pin says so instead of quietly measuring
+    /// two floors against each other.
     #[test]
     fn the_marked_picker_reserves_its_icon_column_on_top_of_the_widest_label() {
         for scale in [1.0_f32, 1.5, 2.0] {
@@ -22819,7 +24808,7 @@ mod tests {
         assert_eq!(
             SettingsRow::Tables.category(),
             SettingsCategory::RenderedBlocks,
-            "it stands with the two formula switches, which is where the reader looks for it"
+            "it stands with the formula switches, which is where the reader looks for it"
         );
         assert!(
             !SettingsRow::Tables.advanced(),
@@ -22833,11 +24822,64 @@ mod tests {
             vec![
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::RepairRowBreaks,
                 SettingsRow::Tables,
                 SettingsRow::BlockMaxHeight
             ],
-            "and it stands last of the three switches, under the two it is a \
-             variant of — with the page's one measurement below all three"
+            "and it stands last of the switches, under the two it is a \
+             variant of and under the repair those two depend on — with the \
+             page's one measurement below all of them"
+        );
+    }
+
+    /// PIN: the row-break repair's own items ask for that setting and nothing else asks for it.
+    ///
+    /// The neighbours matter more here than on most rows: this switch and the two above it are
+    /// three `On`/`Off` pickers in a column, and a picker wired to the row above it would read
+    /// correctly and do the wrong thing.
+    #[test]
+    fn only_the_repair_rows_items_ask_for_the_repair_setting() {
+        assert_eq!(
+            repair_row_breaks_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 0)),
+            Some(true)
+        );
+        assert_eq!(
+            repair_row_breaks_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 1)),
+            Some(false)
+        );
+        assert_eq!(
+            repair_row_breaks_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 2)),
+            None,
+            "there is no third option to ask for"
+        );
+        for target in [
+            SettingsTarget::Choice(SettingsRow::Formulas, 0),
+            SettingsTarget::Choice(SettingsRow::InlineFormulas, 0),
+            SettingsTarget::Choice(SettingsRow::Tables, 0),
+            SettingsTarget::Combo(SettingsRow::RepairRowBreaks),
+            SettingsTarget::Scrim,
+        ] {
+            assert_eq!(repair_row_breaks_requested(target), None, "{target:?}");
+        }
+        for asked in [
+            display_formulas_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 0)),
+            inline_formulas_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 0)),
+            tables_requested(SettingsTarget::Choice(SettingsRow::RepairRowBreaks, 0)),
+        ] {
+            assert_eq!(asked, None, "no neighbour is moved by this row");
+        }
+        assert_eq!(
+            SettingsRow::RepairRowBreaks.category(),
+            SettingsCategory::RenderedBlocks
+        );
+        assert!(!SettingsRow::RepairRowBreaks.advanced());
+        assert_eq!(
+            SettingsRow::RepairRowBreaks.selected_index(&SettingsValues {
+                repair_row_breaks: false,
+                ..SettingsValues::sample()
+            }),
+            Some(1),
+            "Off is the second item, as it is for every switch on this page"
         );
     }
 
@@ -22948,7 +24990,7 @@ mod tests {
                 .into_iter()
                 .rfind(|row| row.category() == SettingsCategory::RenderedBlocks),
             Some(SettingsRow::BlockMaxHeight),
-            "and it stands under the three switches: they say whether a block \
+            "and it stands under the four switches: they say whether a block \
              is drawn at all, and this says how much room one may take"
         );
     }
@@ -23081,6 +25123,7 @@ mod tests {
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
+                SettingsRow::MultilinePaste,
                 SettingsRow::Notifications
             ],
             "the mock-up's order for this page, with the two PowerShell rows \n             together at the top: the row that reports a fact about the machine, \n             the row that offers what this one is missing, then the pane's two \n             axes — what it keeps of what has gone past, and what it does with a \n             line wider than itself — and last the only row on this page whose \n             answer shows up outside this window"
@@ -23174,6 +25217,7 @@ mod tests {
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
+                SettingsRow::MultilinePaste,
                 SettingsRow::Notifications
             ],
             "the mock-up's order for this page"
@@ -23320,6 +25364,62 @@ mod tests {
     ///
     /// MUTATION: return the plain sentence for `TooOld` and the switch invites an
     /// install that puts a standing wait on a pane nobody is waiting at.
+    /// **A row whose file this build will not edit says which, instead of reading `Off`** (closure
+    /// review R1).
+    ///
+    /// A `~/.claude` a dotfile manager has linked out of the agent's own folder is not a machine
+    /// whose hooks are off: they may be firing this minute, and the switch has no honest position
+    /// for that. So the sentence under it carries the filesystem's own answer, for all three
+    /// families, and the ordinary machine is untouched.
+    ///
+    /// MUTATION: drop the refusal from any of the three arms and that row goes back to describing
+    /// a press that cannot happen.
+    #[test]
+    fn attention_rows_say_why_a_configuration_will_not_be_edited() {
+        let refused = crate::i18n::Text::AgentConfigLink.text();
+        for (index, row, plain) in [
+            (0, SettingsRow::ClaudeHooks, Text::DescClaudeHooks.text()),
+            (1, SettingsRow::CodexNotify, Text::DescCodexNotify.text()),
+            (
+                2,
+                SettingsRow::CopilotHooks,
+                crate::attention_copilot::row_description(
+                    crate::attention_copilot::Readiness::Unknown,
+                ),
+            ),
+        ] {
+            assert_eq!(row.description(&values()), plain);
+            let mut refusals = [None; 3];
+            refusals[index] = Some(refused);
+            assert_eq!(
+                row.description(&SettingsValues {
+                    agent_config_refusals: refusals,
+                    ..values()
+                }),
+                refused
+            );
+            // And it is that row's own answer, not a sentence the three share.
+            assert_eq!(
+                row.description(&SettingsValues {
+                    agent_config_refusals: [None, None, None],
+                    ..values()
+                }),
+                plain
+            );
+            // **And the switch beside it takes no press in either direction** (re-review f).
+            // A row that says "Folio will not write to this file" and still offered `On` would be
+            // offering an action it has just said it will not perform.
+            let refused = SettingsValues {
+                agent_config_refusals: refusals,
+                ..values()
+            };
+            for option in 0..row.option_count() {
+                assert!(row.option_enabled(option, &values()), "{row:?} {option}");
+                assert!(!row.option_enabled(option, &refused), "{row:?} {option}");
+            }
+        }
+    }
+
     #[test]
     fn only_the_copilot_rows_items_ask_for_it_and_its_sentence_reads_the_machine() {
         use crate::attention_copilot::Readiness;
@@ -24890,8 +26990,8 @@ mod tests {
                 );
                 // Counted rather than read off the `…`, for the reason
                 // `no_settings_sentence_needs_a_fourth_line` gives at length:
-                // since 2026-09-14 the layout tolerates a line more than this
-                // row's copy is allowed, so an ellipsis is no longer what a
+                // the layout tolerates a line more than this row's copy is
+                // allowed, so an ellipsis is no longer what a
                 // fourth line looks like.
                 assert!(
                     lines.len() <= SETTINGS_DESCRIPTION_FLOOR_MAX_LINES,
@@ -25023,6 +27123,7 @@ mod tests {
                 SettingsRow::LightScheme,
                 SettingsRow::DarkScheme,
                 SettingsRow::TerminalFont,
+                SettingsRow::TerminalCjkFont,
                 SettingsRow::FontSize,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
@@ -25041,8 +27142,10 @@ mod tests {
                 SettingsRow::AlwaysOnTop,
                 SettingsRow::SplitDirection,
                 SettingsRow::MinimumContrast,
+                SettingsRow::WebPages,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::RepairRowBreaks,
                 SettingsRow::Tables,
                 SettingsRow::BlockMaxHeight,
                 SettingsRow::Language,
@@ -25075,6 +27178,7 @@ mod tests {
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
+                SettingsRow::MultilinePaste,
                 SettingsRow::Notifications,
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,
@@ -25089,7 +27193,10 @@ mod tests {
                 SettingsRow::AboutPlatform,
                 SettingsRow::AboutReleaseNotes,
                 SettingsRow::AboutIssues,
-                SettingsRow::AboutLicences
+                SettingsRow::AboutLicences,
+                SettingsRow::ExportSettings,
+                SettingsRow::ImportSettings,
+                SettingsRow::SettingsFolder
             ]
         );
         assert_eq!(
@@ -25099,6 +27206,7 @@ mod tests {
                 SettingsRow::LightScheme,
                 SettingsRow::DarkScheme,
                 SettingsRow::TerminalFont,
+                SettingsRow::TerminalCjkFont,
                 SettingsRow::FontSize,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
@@ -25113,8 +27221,10 @@ mod tests {
                 SettingsRow::AlwaysOnTop,
                 SettingsRow::SplitDirection,
                 SettingsRow::MinimumContrast,
+                SettingsRow::WebPages,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::RepairRowBreaks,
                 SettingsRow::Tables,
                 SettingsRow::BlockMaxHeight,
                 SettingsRow::Language,
@@ -25144,6 +27254,7 @@ mod tests {
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
+                SettingsRow::MultilinePaste,
                 SettingsRow::Notifications,
                 SettingsRow::ClaudeHooks,
                 SettingsRow::CodexNotify,
@@ -25153,7 +27264,10 @@ mod tests {
                 SettingsRow::AboutPlatform,
                 SettingsRow::AboutReleaseNotes,
                 SettingsRow::AboutIssues,
-                SettingsRow::AboutLicences
+                SettingsRow::AboutLicences,
+                SettingsRow::ExportSettings,
+                SettingsRow::ImportSettings,
+                SettingsRow::SettingsFolder
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
              next to each other because they are one decision in two halves, the \
@@ -29329,8 +31443,9 @@ mod tests {
     ///
     /// **Three is now [`SETTINGS_DESCRIPTION_FLOOR_MAX_LINES`] and no longer
     /// [`ROW_DESC_MAX_LINES`]** (owner ruling 2026-09-14): the layout's
-    /// tolerance moved to four for one ruled settings sentence, and reading the
-    /// note's cap off it would have let this note grow a line nobody ruled on.
+    /// tolerance moved for one ruled settings sentence, and is one line past the
+    /// floor pins' since 2026-09-23; reading the note's cap off it would let this
+    /// note grow a line nobody ruled on.
     #[test]
     fn the_agent_note_fits_the_column_it_stands_in() {
         use crate::i18n::{Lang, Text};

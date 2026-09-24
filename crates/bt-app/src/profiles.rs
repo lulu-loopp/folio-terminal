@@ -30,6 +30,7 @@
 //!   came from — and the answer it gets wrong is silent.
 
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf, Prefix},
     sync::{
@@ -44,6 +45,7 @@ use bt_persist::{
     CandidateV1, MarkV1, NamedStartAtV1, NamedStartingDirV1, PROFILES_SCHEMA_VERSION,
     ProfileEntryV1, ProfilesV1, ProgramV1, ResolutionV1, StartAtV1, StartingDirV1,
 };
+use bt_platform::HostPlatform;
 use bt_pty::{ShellEnvironment, resolve_powershell_seven};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, FLOAT_WINDOW_BORDER_LOGICAL_PX,
@@ -79,8 +81,8 @@ const MENU_EDGE_MARGIN_LOGICAL_PX: f32 = 8.0;
 const ITEM_HEIGHT_LOGICAL_PX: f32 = 29.5;
 const ITEM_RADIUS_LOGICAL_PX: f32 = 5.0;
 const ITEM_PADDING_X_LOGICAL_PX: f32 = 10.0;
-/// `.profile-item { gap: 10px }`.
-const ITEM_GAP_LOGICAL_PX: f32 = 10.0;
+/// UI-SPEC.md G2: the icon-to-label gap is 8 everywhere.
+const ITEM_GAP_LOGICAL_PX: f32 = 8.0;
 const ITEM_FONT_LOGICAL_PX: f32 = 13.0;
 /// `.profile-item .ticon { width: 14px }` — the column. The mark inside it is
 /// the strip's own 15px `.pmark`, centred, exactly as the flex box centres it.
@@ -203,11 +205,12 @@ const SEPARATOR_ALPHA_ON_DARK: f32 = 0.06;
 const SEPARATOR_ALPHA_ON_LIGHT: f32 = 0.055;
 
 // ── `.menu-label` (mock-up lines 1026-1029) ─────────────────────────────────
-const SECTION_LABEL_FONT_LOGICAL_PX: f32 = 10.5;
-/// The 10.5px line box, measured in the mock-up's own renderer (Inter at
-/// `line-height: normal`) — 12.5px, the same ladder its 11px group label climbs
-/// at 13px and its 13px row at 15.5px.
-const SECTION_LABEL_LINE_LOGICAL_PX: f32 = 12.5;
+/// The section-label scale (`UI-SPEC.md` T7; `settings.rs::GROUP_LABEL_FONT_LOGICAL_PX`,
+/// `theme.rs::RAIL_LABEL_FONT_LOGICAL_PX`), not the mock-up's own 10.5px.
+const SECTION_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
+/// The section-label scale's line box (`UI-SPEC.md` T7;
+/// `settings.rs::GROUP_LABEL_LINE_LOGICAL_PX`), not the mock-up's own 12.5px.
+const SECTION_LABEL_LINE_LOGICAL_PX: f32 = 13.0;
 /// `letter-spacing: .05em` at `font-weight: 600` — the settings dialog's
 /// `.group-label` craft, which is the same heading in a different surface.
 const SECTION_LABEL_TRACKING_EM: f32 = 0.05;
@@ -2002,7 +2005,7 @@ impl ProfileTable {
             .into_iter()
             .filter(|index| {
                 self.profiles.get(*index).is_none_or(|profile| {
-                    profile.origin != Origin::Builtin || programs.is_available(*index)
+                    profile.origin != Origin::Builtin || programs.is_available(&profile.id)
                 })
             })
             .collect()
@@ -3444,15 +3447,31 @@ fn named_distribution(arguments: &[String]) -> Option<String> {
     None
 }
 
-/// One whole row, cloned — **what the spawn path is handed** (§7.1.6c-6c).
+/// One whole row, cloned, **asked for by the stable id its holder keeps** —
+/// what the spawn path is handed (§7.1.6c-6c, T-PROFILE-TABLE-MOVE).
 ///
 /// `shell_command` used to take an index and ask this module four separate
 /// questions about it; it takes the row itself now, which makes it a pure
 /// function of its arguments and therefore a thing a test can put any profile in
 /// front of. The clone is five short strings and a vector, once per tab.
+///
+/// **By id and not by position**, which is why the spawn no longer has an
+/// out-of-bounds case to assert about. A position stops naming a profile the
+/// moment Settings ▸ Profiles moves the table, and every window in this process
+/// shares that table, so a window holding a position was holding an answer
+/// another window could change — the twin of `row(index)` this replaces was read
+/// under a guard that had only consulted the window's own snapshot, and a
+/// shortened table met that read as a panic on the window thread. An id names
+/// the same row wherever it sits and `None` only when the row is genuinely gone,
+/// which is a fact the caller can degrade on rather than a disagreement between
+/// two authorities.
 #[must_use]
-pub fn row(index: usize) -> Option<Profile> {
-    with_table(|table| table.get(index).cloned())
+pub fn row_of(id: &str) -> Option<Profile> {
+    with_table(|table| {
+        table
+            .position_of_id(id)
+            .and_then(|index| table.get(index).cloned())
+    })
 }
 
 /// The same question as the editor's picker holds it: the rule, or the answer.
@@ -3596,14 +3615,14 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
             .iter()
             .enumerate()
             .map(|(index, profile)| {
-                let available = programs.is_available(index);
+                let available = programs.is_available(&profile.id);
                 let is_agent = agent_command(profile).is_some();
                 ProfileLine {
                     index,
                     mark: profile.mark,
                     title: title(index),
                     command: match (available, is_agent) {
-                        (true, _) => command_line(profile, programs.program(index)),
+                        (true, _) => command_line(profile, programs.program(&profile.id)),
                         // An agent this window did not find says **where it
                         // looked**, because the answer to "but I use it every
                         // day" is very often "inside WSL" and a row that only
@@ -4062,7 +4081,13 @@ fn shipped_order_for(platform: SeedPlatform) -> &'static [&'static str] {
 /// PowerShell 7 opens with it the next morning, and one that loses it stops.
 #[must_use]
 pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
-    with_table(|table| default_profile_in(table, stored, |index| programs.is_available(index)))
+    with_table(|table| {
+        default_profile_in(table, stored, |index| {
+            table
+                .get(index)
+                .is_some_and(|row| programs.is_available(&row.id))
+        })
+    })
 }
 
 /// Whether the answer above came from the machine rather than from the reader —
@@ -4076,7 +4101,12 @@ pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
 #[must_use]
 pub fn default_profile_is_automatic(stored: &str, programs: &ProfilePrograms) -> bool {
     with_table(|table| {
-        chosen_profile_in(table, stored, |index| programs.is_available(index)).is_none()
+        chosen_profile_in(table, stored, |index| {
+            table
+                .get(index)
+                .is_some_and(|row| programs.is_available(&row.id))
+        })
+        .is_none()
     })
 }
 
@@ -4693,7 +4723,7 @@ fn git_fallbacks() -> [ProgramCandidate; 3] {
     ]
 }
 
-/// Where `git.exe` is on this machine, or `None` when it is nowhere.
+/// Where git is on this machine, or `None` when it is nowhere.
 ///
 /// **`PATH` first, and it is more than a shortcut.** The Git block asks `git`
 /// questions whose answers sit three inches from a pane where the user types
@@ -4710,14 +4740,136 @@ fn git_fallbacks() -> [ProgramCandidate; 3] {
 ///
 /// `None` is an answer and not a failure (W5): a machine with no Git gets a Git
 /// page that says so once, and every other part of the product is untouched.
+///
+/// **This machine's answer** — [`find_git_on`] asked about the platform this
+/// process is running on. The two callers (the Git worker and the tests that
+/// need a real git) want the host; the platform is a parameter one level down so
+/// that a test on one machine can ask what the other one answers.
 #[must_use]
 pub fn find_git(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
-    search_path(environment, "git.exe").or_else(|| {
-        git_fallbacks().iter().find_map(|candidate| {
-            ProfilePrograms::candidate_path(candidate, environment)
-                .filter(|path| environment.is_file(path))
-        })
-    })
+    find_git_on(bt_platform::host_platform(), environment)
+}
+
+/// The file git is started from on `platform`: `git.exe` on Windows and `git`
+/// everywhere else.
+///
+/// `std::env::consts::EXE_SUFFIX` spelled as a function of the platform rather
+/// than of the build, so the Mac answer can be asked on a Windows test host.
+/// For the platform this process runs on the two agree, and
+/// `the_git_file_name_is_this_builds_executable_suffix` holds them together.
+#[must_use]
+pub(crate) const fn git_file_name_on(platform: HostPlatform) -> &'static str {
+    match platform {
+        HostPlatform::Windows => "git.exe",
+        HostPlatform::MacOs | HostPlatform::OtherUnix => "git",
+    }
+}
+
+/// [`find_git`] on a named platform (0.4.4 ticket 07).
+///
+/// **Windows** is what it always was, byte for byte: `git.exe` on `PATH`, then
+/// the three installers' default roots of [`git_fallbacks`].
+///
+/// **macOS and other Unix** look for `git`. Until 0.4.4 every Mac looked for
+/// `git.exe` under three Windows variables, found nothing, and the whole Git page
+/// said git was missing on a machine that had it. `PATH` first for the reason
+/// above, then [`unix_git_fallbacks`]: the places a Mac's git is installed to
+/// that the `PATH` of an application started from Finder does not name.
+///
+/// **On macOS `/usr/bin/git` is not proof of a git** ([`is_a_git_on`]): it is
+/// Apple's stub, present on every Mac, which hands the call on to the selected
+/// developer directory — or, on a Mac with neither Xcode nor the command line
+/// tools, raises the dialog that offers to install them. Asking whether the file
+/// exists would answer yes on every Mac; running it to find out would put that
+/// dialog in front of a reader who only opened a window. The honest question is
+/// whether the developer directory behind it holds a git, and it is asked of the
+/// filesystem, never of the stub.
+#[must_use]
+pub(crate) fn find_git_on(
+    platform: HostPlatform,
+    environment: &dyn ShellEnvironment,
+) -> Option<PathBuf> {
+    match platform {
+        HostPlatform::Windows => {
+            search_path(environment, git_file_name_on(platform)).or_else(|| {
+                git_fallbacks().iter().find_map(|candidate| {
+                    ProfilePrograms::candidate_path(candidate, environment)
+                        .filter(|path| environment.is_file(path))
+                })
+            })
+        }
+        HostPlatform::MacOs | HostPlatform::OtherUnix => {
+            let is_a_git = |path: &Path| is_a_git_on(platform, path, environment);
+            let on_path = environment.var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    // `search_path`'s rule — an empty or relative entry is the
+                    // working directory, and that is not where a program is
+                    // installed — asked as "starts at the root", which is what
+                    // absolute means on Unix and which a Windows test host can
+                    // also answer about a Unix path.
+                    .filter(|directory| directory.has_root())
+                    .map(|directory| directory.join(git_file_name_on(platform)))
+                    .find(|candidate| is_a_git(candidate))
+            });
+            on_path.or_else(|| {
+                unix_git_fallbacks(platform)
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|candidate| is_a_git(candidate))
+            })
+        }
+    }
+}
+
+/// Where git is looked for on `platform` when `PATH` does not name it, in order.
+///
+/// **macOS**: Homebrew on Apple silicon, Homebrew on Intel, then the system's
+/// `/usr/bin/git`. An application opened from Finder is started by `launchd`
+/// with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, not with the login shell's, so a
+/// Homebrew git the reader types every day is invisible to the `PATH` walk; the
+/// two prefixes are Homebrew's own defaults. The system's is last because it is
+/// the one that is only a stub unless a developer directory stands behind it.
+///
+/// **Other Unix**: `/usr/bin/git`, where every distribution's package puts it.
+/// Windows never reads this list; [`git_fallbacks`] is its.
+const fn unix_git_fallbacks(platform: HostPlatform) -> &'static [&'static str] {
+    match platform {
+        HostPlatform::MacOs => &["/opt/homebrew/bin/git", "/usr/local/bin/git", MAC_GIT_STUB],
+        HostPlatform::Windows | HostPlatform::OtherUnix => &["/usr/bin/git"],
+    }
+}
+
+/// Apple's `/usr/bin/git`, which runs the selected developer directory's git
+/// (see [`find_git_on`]).
+const MAC_GIT_STUB: &str = "/usr/bin/git";
+
+/// The developer directories the stub can hand a call to, as `xcrun` finds
+/// them — after the one `DEVELOPER_DIR` names, which is read separately: the
+/// one `xcode-select -s` recorded, Xcode's own and the command line tools'.
+const MAC_DEVELOPER_DIRS: [&str; 3] = [
+    "/var/db/xcode_select_link",
+    "/Applications/Xcode.app/Contents/Developer",
+    "/Library/Developer/CommandLineTools",
+];
+
+/// Whether `path` is a git this machine can run, on `platform`.
+///
+/// A startable file — and on macOS, when that file is [`MAC_GIT_STUB`], a
+/// developer directory that holds the git the stub would run.
+fn is_a_git_on(platform: HostPlatform, path: &Path, environment: &dyn ShellEnvironment) -> bool {
+    if !environment.is_file(path) {
+        return false;
+    }
+    if platform != HostPlatform::MacOs || path != Path::new(MAC_GIT_STUB) {
+        return true;
+    }
+    let git_under = |directory: &Path| environment.is_file(&directory.join("usr/bin/git"));
+    environment
+        .var_os("DEVELOPER_DIR")
+        .is_some_and(|directory| git_under(Path::new(&directory)))
+        || MAC_DEVELOPER_DIRS
+            .iter()
+            .any(|directory| git_under(Path::new(directory)))
 }
 
 // `vscode_fallbacks` and `find_vscode` are **retired** (user ruling 2026-08-25:
@@ -4747,9 +4899,20 @@ pub fn find_git(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
 /// otherwise every test of this module would be a test of what happens to be
 /// installed on the machine running it, and "Git Bash is greyed" would pass on
 /// the build server and fail on the developer's laptop for the same code.
+///
+/// **Keyed by [`Profile::id`] and never by row position** (T-PROFILE-TABLE-MOVE).
+/// A snapshot is a value that outlives the frame it was taken on, and the table
+/// under it has a settings page with `Move up` and `Move down` on every row: a
+/// vector indexed by position answers "is row 3 startable" with whatever row was
+/// third when the probe ran, so a window holding one of these read a reorder as
+/// every pane changing shell. An id is the one thing about a row that a move
+/// does not touch, so a snapshot keyed on it cannot observe a move at all — a
+/// row that was startable stays startable wherever it now sits, and a row that
+/// is not in the snapshot is a row this window has not probed yet, which is the
+/// same answer as "not on this machine" and degrades the same way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfilePrograms {
-    resolved: Vec<Option<OsString>>,
+    resolved: BTreeMap<String, Option<OsString>>,
 }
 
 impl ProfilePrograms {
@@ -4768,35 +4931,68 @@ impl ProfilePrograms {
     #[must_use]
     pub fn probe_rows(rows: &[Profile], environment: &dyn ShellEnvironment) -> Self {
         Self {
-            resolved: {
-                rows.iter()
-                    .map(|profile| match &profile.program {
-                        // A real `None` on a machine with no PowerShell 7, which
-                        // is what greys the row rather than starting 5.1 under
-                        // 7's name.
-                        ProgramSource::PowerShellSeven => resolve_powershell_seven(environment),
-                        ProgramSource::FirstOf(candidates) => candidates
-                            .iter()
-                            .filter_map(|candidate| Self::candidate_path(candidate, environment))
-                            .find(|candidate| environment.is_file(candidate))
-                            .map(PathBuf::into_os_string),
-                        // A path the user named is a path or it is not: there is
-                        // no list to walk, and a program that is not there greys
-                        // the row exactly as a missing built-in does.
-                        ProgramSource::Path(path) => environment
-                            .is_file(path)
-                            .then(|| path.clone().into_os_string()),
-                    })
-                    .collect()
-            },
+            resolved: rows
+                .iter()
+                .map(|profile| (profile.id.clone(), Self::resolve_row(profile, environment)))
+                .collect(),
         }
     }
 
-    /// The program this profile would start, or `None` when this machine has
-    /// nowhere to start it from.
+    /// Where one row's program is on this machine, or `None` when it is nowhere.
+    ///
+    /// Lifted out of [`Self::probe_rows`] when the probe became a map keyed by id:
+    /// the pair being built is the interesting line of that function now, and a
+    /// three-armed match nested inside the closure that builds it buried it.
+    fn resolve_row(profile: &Profile, environment: &dyn ShellEnvironment) -> Option<OsString> {
+        match &profile.program {
+            // A real `None` on a machine with no PowerShell 7, which is what
+            // greys the row rather than starting 5.1 under 7's name.
+            ProgramSource::PowerShellSeven => resolve_powershell_seven(environment),
+            ProgramSource::FirstOf(candidates) => candidates
+                .iter()
+                .filter_map(|candidate| Self::candidate_path(candidate, environment))
+                .find(|candidate| environment.is_file(candidate))
+                .map(PathBuf::into_os_string),
+            // A path the user named is a path or it is not: there is no list to
+            // walk, and a program that is not there greys the row exactly as a
+            // missing built-in does.
+            ProgramSource::Path(path) => environment
+                .is_file(path)
+                .then(|| path.clone().into_os_string()),
+        }
+    }
+
+    /// The program the profile with this **id** would start, or `None` when this
+    /// machine has nowhere to start it from — and equally when this snapshot was
+    /// taken before the row existed.
+    ///
+    /// The two are one answer on purpose: a caller that cannot start a program
+    /// and a caller that has never looked for one both owe the reader the same
+    /// degradation, and a third state here would be a third arm at every call
+    /// site for a difference nobody can act on.
     #[must_use]
-    pub fn program(&self, profile: usize) -> Option<&OsStr> {
-        self.resolved.get(profile)?.as_deref()
+    pub fn program(&self, id: &str) -> Option<&OsStr> {
+        self.resolved.get(id)?.as_deref()
+    }
+
+    /// The same answer about **the row standing at one position of the live
+    /// table** — the form the pickers and the Profiles page ask in.
+    ///
+    /// Those callers are drawing the table as it is right now, so a position is
+    /// what they hold and the id is one lookup away; taking the lookup here is
+    /// what keeps the position from being carried any further than the frame it
+    /// was read on. A position the table does not hold resolves to no id and so
+    /// to no program, which is the same degradation as every other miss.
+    #[must_use]
+    pub fn row_program(&self, index: usize) -> Option<&OsStr> {
+        self.program(&id(index))
+    }
+
+    /// [`Self::is_available`] asked about a live-table position — see
+    /// [`Self::row_program`].
+    #[must_use]
+    pub fn row_is_available(&self, index: usize) -> bool {
+        self.row_program(index).is_some()
     }
 
     /// **A machine on which exactly these profiles resolve**, for tests about
@@ -4813,11 +5009,17 @@ impl ProfilePrograms {
     pub(crate) fn with_only(available: &[usize]) -> Self {
         Self {
             resolved: with_table(|table| {
-                (0..table.profiles.len())
-                    .map(|index| {
-                        available
-                            .contains(&index)
-                            .then(|| OsString::from(format!("C:\\fake\\{index}.exe")))
+                table
+                    .profiles
+                    .iter()
+                    .enumerate()
+                    .map(|(index, profile)| {
+                        (
+                            profile.id.clone(),
+                            available
+                                .contains(&index)
+                                .then(|| OsString::from(format!("C:\\fake\\{index}.exe"))),
+                        )
                     })
                     .collect()
             }),
@@ -4876,8 +5078,8 @@ impl ProfilePrograms {
     /// and note that this answer is still what those menus grey a row of the
     /// reader's *own* with — the rule drops built-in rows only.
     #[must_use]
-    pub fn is_available(&self, profile: usize) -> bool {
-        self.program(profile).is_some()
+    pub fn is_available(&self, id: &str) -> bool {
+        self.program(id).is_some()
     }
 }
 
@@ -5078,7 +5280,7 @@ impl ProfileMenuLayout {
             .profiles
             .iter()
             .zip(&self.items)
-            .filter(|(index, _)| !programs.is_available(**index))
+            .filter(|(index, _)| !programs.row_is_available(**index))
             .map(|(index, rect)| (MenuRow::Profile(*index), *rect, unavailable_tip(*index)));
         let recents = self
             .recent
@@ -5419,7 +5621,7 @@ pub fn hit(
             let index = layout.profiles[row];
             return Some(
                 programs
-                    .is_available(index)
+                    .row_is_available(index)
                     .then_some(MenuRow::Profile(index)),
             );
         }
@@ -5465,7 +5667,11 @@ pub fn hit(
 /// has a file (§7.1.6h).
 fn recent_is_available(seed: &Seed, programs: &ProfilePrograms) -> bool {
     match seed {
-        Seed::Term { profile_id, .. } => programs.is_available(index_of_id(profile_id)),
+        // `index_of_id` and then the row it lands on: a Recent row naming an
+        // id this table no longer holds revives as the fallback profile, so
+        // what the grey has to answer for is the profile that would really
+        // start.
+        Seed::Term { profile_id, .. } => programs.row_is_available(index_of_id(profile_id)),
         Seed::Files { .. } | Seed::Preview { .. } => true,
         // **A window is offered while any one of its tabs can still be opened**
         // (multiwindow slice D). Greying it because one shell of six has gone
@@ -5546,7 +5752,7 @@ pub fn build(
 
     for (row, item) in layout.items.iter().enumerate() {
         let index = layout.profiles[row];
-        let available = programs.is_available(index);
+        let available = programs.row_is_available(index);
         push_row(
             &Row {
                 rect: *item,
@@ -5934,7 +6140,7 @@ fn push_row(
     // other trailing thing measures from where the pin stops.
     let pin_claim = row.pin.map_or(0.0, |_| row_pin_claim(scale));
     // What the hint has already claimed, out of the row's trailing padding: its
-    // own measured width, and the `gap: 10px` between two flex items. A row with
+    // own measured width, and the UI-SPEC.md G2 gap between items. A row with
     // nothing to add gives the name the whole span, which is what every row did
     // before any of them had a hint long enough to collide.
     // The accelerator sits outside the hint, which is the order Windows draws
@@ -9858,6 +10064,15 @@ pub fn term_menu_build(
 // comes; take the pointer off both the button and the menu and it goes after a
 // short grace.**
 //
+// The owner's ruling of 2026-09-23 splits that last clause by the gesture that
+// is in charge. A rest opens a **peek**, and a peek is what the grace takes
+// away: hover is looking, and looking is free. A click on the button **pins**
+// the menu — the peek if one is up, or straight from closed — and a pinned
+// menu goes only on Esc, a click elsewhere or a second click on its button:
+// clicking is doing, and a hand that asked for a menu and then moved toward
+// the terminal has not taken the request back. "再点即收" holds for a pinned
+// menu only; a click on a peek pins it instead of closing it.
+//
 // The ruling's own argument for the hover half is discoverability: "用户此前从
 // 没发现 pane 头右键有菜单". A verb reachable only by right click is a verb most
 // people never learn exists, and the answer is not a fifth button — it is that
@@ -9886,8 +10101,12 @@ pub fn term_menu_build(
 /// here", which is a different and worse instruction.
 pub const CHEVRON_HOVER_OPEN_DELAY: Duration = Duration::from_millis(250);
 
-/// How long a menu a `⌄` opened stays up once the pointer has left **both** it
-/// and the button.
+/// How long a **peek** a `⌄` opened stays up once the pointer has left **both**
+/// it and the button.
+///
+/// A pinned menu has no grace at all (owner ruling 2026-09-23): a click put it
+/// there, and only Esc, a click elsewhere or a second click on the button takes
+/// it away. See [`ChevronGate::pin`].
 ///
 /// The grace exists because the button and its menu are two rectangles with a
 /// four-pixel gap between them ([`MENU_OFFSET_LOGICAL_PX`]), and a hand
@@ -9926,7 +10145,21 @@ pub enum ChevronAction {
 }
 
 /// One `⌄`'s two clocks: how long the pointer has rested on it, and how long it
-/// has been gone from both surfaces.
+/// has been gone from both surfaces — and one bit, whether the menu it governs
+/// is **pinned** (owner ruling 2026-09-23).
+///
+/// **The bit** is the fact "a click has pinned the menu that is up", and nothing
+/// about how that menu opened. Its one writer is [`Self::pin`], called by a
+/// press on the gate's own button — on a peek (which it keeps open) or on a
+/// closed button (after the press has opened it). Its reader is
+/// [`Self::observe`]: the `(Away, true)` arm starts the leave clock only for an
+/// unpinned menu, so a pinned menu has no deadline and costs no wake-ups; and
+/// the `(Button, false)` arm — a rest on another of this gate's buttons, a
+/// second pane head or a second pill — starts no rest while the menu that is
+/// up is pinned, since a rest there would raise a menu in its place. Its one clearer is [`Self::menu_gone`], which every path that
+/// takes the menu away or replaces it goes through. [`Self::clear`] stops the
+/// clocks and leaves the bit alone, because `observe` calls it on every move
+/// over the menu.
 ///
 /// Two `Option<Instant>` rather than one enum, because the two are genuinely
 /// exclusive by construction — [`Self::observe`] never leaves both set — and
@@ -9940,6 +10173,7 @@ pub enum ChevronAction {
 pub struct ChevronGate {
     resting_since: Option<Instant>,
     leaving_since: Option<Instant>,
+    pinned: bool,
 }
 
 impl ChevronGate {
@@ -9951,19 +10185,33 @@ impl ChevronGate {
     /// why each clock is started with `get_or_insert` rather than assigned.
     pub fn observe(&mut self, pointer: ChevronPointer, open: bool, now: Instant) {
         match (pointer, open) {
-            // Resting on a shut chevron is the one state that earns an open.
+            // Resting on a shut chevron is the one state that earns an open —
+            // unless a click has pinned this gate's menu on *another* of its
+            // buttons (a second pane head, a second pill). A pinned menu goes
+            // only on Esc, a click elsewhere or a second click on its button,
+            // so a rest here must not raise a menu in its place; a click here
+            // still does, as a click elsewhere.
             (ChevronPointer::Button, false) => {
                 self.leaving_since = None;
-                self.resting_since.get_or_insert(now);
+                if self.pinned {
+                    self.resting_since = None;
+                } else {
+                    self.resting_since.get_or_insert(now);
+                }
             }
             // On the button of a menu that is already up, or anywhere on the
             // menu itself: nothing is owed in either direction, and both clocks
             // are cleared so that leaving again starts a fresh grace.
             (ChevronPointer::Button, true) | (ChevronPointer::Surface, _) => self.clear(),
-            // Gone, with a menu up: the grace runs.
+            // Gone, with a peek up: the grace runs. Gone, with a pinned menu
+            // up: nothing is owed — only a press or Esc takes it away.
             (ChevronPointer::Away, true) => {
                 self.resting_since = None;
-                self.leaving_since.get_or_insert(now);
+                if self.pinned {
+                    self.leaving_since = None;
+                } else {
+                    self.leaving_since.get_or_insert(now);
+                }
             }
             // Gone, with nothing up: there is no clock to run.
             (ChevronPointer::Away, false) => self.clear(),
@@ -10008,9 +10256,39 @@ impl ChevronGate {
     /// Stop both clocks — what a caller does once it has acted on [`Self::due`],
     /// and what every other door onto these menus (a click, Esc, another popup
     /// opening) does on its way through.
+    ///
+    /// **The pin is not a clock and stays.** `observe` calls this on every move
+    /// over the menu; a pinned menu the hand merely crossed must still be pinned
+    /// when the hand leaves it.
     pub fn clear(&mut self) {
         self.resting_since = None;
         self.leaving_since = None;
+    }
+
+    /// **A click pinned the menu that is up** (owner ruling 2026-09-23): from
+    /// now on leaving does not close it, and the next press on its button does.
+    ///
+    /// Stops the clocks too: a grace that was running against the peek this
+    /// press has just pinned is a close nobody is owed any more.
+    pub fn pin(&mut self) {
+        self.clear();
+        self.pinned = true;
+    }
+
+    /// Whether a click has pinned the menu that is up.
+    #[must_use]
+    pub fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    /// **The menu this gate governs went away**, by whatever path — Esc, a
+    /// click elsewhere, a second click on its button, a row run, another popup
+    /// opening, the grace's own close, or a new menu raised in its place. Both
+    /// clocks stop and the pin goes with the menu, so the next menu starts as
+    /// what its own opening makes it.
+    pub fn menu_gone(&mut self) {
+        self.clear();
+        self.pinned = false;
     }
 }
 
@@ -11769,7 +12047,7 @@ fn push_submenu(
                         // whose program this machine does not have cannot start
                         // a shell, and a row that lights under the pointer and
                         // then does nothing is worse than one that says so.
-                        available: programs.is_available(of),
+                        available: programs.row_is_available(of),
                         pin: None,
                     },
                     scale,
@@ -13376,6 +13654,72 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
+
+    /// RED (ticket 22) — **the section labels inside every menu `profiles.rs`
+    /// builds are on the section-label scale, not their own smaller, more
+    /// widely spaced one.**
+    ///
+    /// `UI-SPEC.md` T7: these used to sit at 10.5 on a 12.5 line, off the
+    /// scale Settings and the rail use (11 on 13).
+    ///
+    /// MUTATION: revert `SECTION_LABEL_FONT_LOGICAL_PX` or
+    /// `SECTION_LABEL_LINE_LOGICAL_PX` to a literal, or
+    /// `SECTION_LABEL_TRACKING_EM` off 0.05, and this goes red.
+    #[test]
+    fn ui_spec_menus_class_a_values_follow_the_rule() {
+        assert_eq!(SECTION_LABEL_FONT_LOGICAL_PX, 11.0, "UI-SPEC.md T7");
+        assert_eq!(SECTION_LABEL_LINE_LOGICAL_PX, 13.0, "UI-SPEC.md T7");
+        assert_eq!(SECTION_LABEL_TRACKING_EM, 0.05, "UI-SPEC.md T7");
+    }
+
+    /// RED (29) — **Every menu uses the ruled icon-to-label gap.**
+    ///
+    /// G2 sets the gap to 8, matching the private settings::ITEM_GAP_LOGICAL_PX.
+    /// Build the profile menu at all four scales to pin the label geometry
+    /// produced by the shared row painter as well as its owning constant.
+    ///
+    /// MUTATION: restore ITEM_GAP_LOGICAL_PX to 10.0.
+    #[test]
+    fn ui_spec_menus_rest_values_follow_the_rule() {
+        assert_eq!(
+            ITEM_GAP_LOGICAL_PX, 8.0,
+            "UI-SPEC.md G2: settings::ITEM_GAP_LOGICAL_PX is 8"
+        );
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let layout = layout(
+                anchor(scale),
+                MenuSide::Below,
+                &equipped(),
+                (960.0 * scale, 600.0 * scale),
+                scale,
+                NO_RECENT,
+                &chord_table(),
+                &mut fake_measure,
+            );
+            let layers = build(
+                &layout,
+                &equipped(),
+                fallback_profile(),
+                None,
+                NO_RECENT,
+                now(),
+                &crate::favicon::Favicons::default(),
+                &mut fake_measure,
+            );
+            let title = layers
+                .iter()
+                .flat_map(|layer| &layer.labels)
+                .find(|label| label.text == powershell_seven())
+                .expect("the profile row is named");
+            let column_right = layout.items[0][0]
+                + (ITEM_PADDING_X_LOGICAL_PX + ITEM_ICON_COLUMN_LOGICAL_PX) * scale;
+            assert_eq!(
+                title.rect[0] - column_right,
+                8.0 * scale,
+                "UI-SPEC.md G2: the label clears the icon column at scale {scale}"
+            );
+        }
+    }
 
     /// The one layer a popup with nothing inside it draws.
     fn one_layer(layers: Vec<OverlayLayer>) -> OverlayLayer {
@@ -15058,7 +15402,7 @@ mod tests {
             "the list the greyed-row sentence reads is the list of agents"
         );
         for id in AGENT_IDS {
-            let row = row(index_of_id(id)).expect("the agent is a row");
+            let row = row_of(id).expect("the agent is a row");
             assert_eq!(row.origin, Origin::Builtin, "{id}");
             assert!(
                 !row.hidden,
@@ -15271,7 +15615,7 @@ mod tests {
         const SIDE: f32 = 64.0;
         let mut rasters = crate::marks::ChromeMarkRasters::default();
         for id in AGENT_IDS {
-            let mark = row(index_of_id(id)).expect("the agent is a row").mark;
+            let mark = row_of(id).expect("the agent is a row").mark;
             let mut sprite =
                 crate::marks::ChromeSprite::new(mark, [0.0, 0.0, SIDE, SIDE], [0x7a, 0x99, 0xff]);
             sprite.opacity = UNAVAILABLE_MARK_OPACITY;
@@ -15359,7 +15703,11 @@ mod tests {
         assert!(faults.is_empty(), "{faults:?}");
         let table = ProfileTable { profiles: built };
         let nothing_at_all = ProfilePrograms {
-            resolved: table.profiles().iter().map(|_| None).collect(),
+            resolved: table
+                .profiles()
+                .iter()
+                .map(|profile| (profile.id.clone(), None))
+                .collect(),
         };
         assert_eq!(
             table
@@ -15496,20 +15844,27 @@ mod tests {
         // whole of what splitting them buys.
         let both = ProfilePrograms::probe(&FakeMachine::fully_equipped());
         assert_eq!(
-            both.program(seven)
+            both.row_program(seven)
                 .map(|p| p.to_string_lossy().into_owned()),
             Some(r"C:\Program Files\PowerShell\7\pwsh.exe".to_owned())
         );
         assert_eq!(
-            both.program(five).map(|p| p.to_string_lossy().into_owned()),
+            both.row_program(five)
+                .map(|p| p.to_string_lossy().into_owned()),
             Some(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned())
         );
 
         // On a machine with only what Windows ships, the 7 row says so rather
         // than starting 5.1 under 7's name, and the 5.1 row is still there.
         let plain = bare();
-        assert!(!plain.is_available(seven), "no install, no row that works");
-        assert!(plain.is_available(five), "and this one is part of the OS");
+        assert!(
+            !plain.row_is_available(seven),
+            "no install, no row that works"
+        );
+        assert!(
+            plain.row_is_available(five),
+            "and this one is part of the OS"
+        );
         assert_eq!(five, fallback_profile());
 
         // `BT_SHELL` still belongs to the 7 row (Q4) and still bypasses the
@@ -15520,13 +15875,13 @@ mod tests {
         );
         assert_eq!(
             overridden
-                .program(seven)
+                .row_program(seven)
                 .map(|p| p.to_string_lossy().into_owned()),
             Some(r"C:\Tools\pwsh.exe".to_owned())
         );
         assert_eq!(
             overridden
-                .program(five)
+                .row_program(five)
                 .map(|p| p.to_string_lossy().into_owned()),
             Some(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned()),
             "and it does not reach across into the row it is not for"
@@ -15604,8 +15959,8 @@ mod tests {
             "and never the row that is allowed to answer `no` — a fallback chain              whose bottom can be greyed has a hole in it"
         );
         // Even on a machine with nothing else on it.
-        assert!(bare().is_available(fallback_profile()));
-        assert!(equipped().is_available(fallback_profile()));
+        assert!(bare().row_is_available(fallback_profile()));
+        assert!(equipped().row_is_available(fallback_profile()));
     }
 
     /// PIN — `default` is a caption on the *chosen* row, not on the first one.
@@ -15789,7 +16144,7 @@ mod tests {
             layout
                 .profiles
                 .iter()
-                .all(|index| bare().is_available(*index)),
+                .all(|index| bare().row_is_available(*index)),
             "which is the same sentence read off the list rather than the tips"
         );
 
@@ -15914,7 +16269,7 @@ mod tests {
         for stored in ["cmd", "gitbash", "wsl", "pwsh", "", "nonsense"] {
             for machine in [&all, &bare()] {
                 assert!(
-                    machine.is_available(default_profile(stored, machine)),
+                    machine.row_is_available(default_profile(stored, machine)),
                     "the default resolved for {stored:?} must be startable"
                 );
             }
@@ -15951,7 +16306,12 @@ mod tests {
         };
         let programs = ProfilePrograms::probe_rows(&table.profiles, machine);
         let index = automatic_profile_in(&table, shipped_order_for(platform), |index| {
-            programs.is_available(index)
+            // By the row's own id and not by `row_is_available`: this table is a
+            // macOS seed being asked about on a Windows runner, so a position
+            // in it names nothing in this process's live table.
+            table
+                .get(index)
+                .is_some_and(|row| programs.is_available(&row.id))
         });
         table
             .get(index)
@@ -16825,12 +17185,88 @@ mod tests {
     /// (`%LocalAppData%\Programs\Git`) is the default for anybody without
     /// administrator rights, so "Git Bash is greyed on a machine that has Git
     /// Bash" is not a corner case, it is a whole class of user.
+    /// PIN (T-PROFILE-TABLE-MOVE) — **a probe answers about a row and not about
+    /// a position**, so the table moving under a window that is holding one
+    /// cannot change what any of its panes is allowed to start.
+    ///
+    /// A `ProfilePrograms` is deliberately a value and not a function: it is
+    /// probed once, when a window opens, and every picker frame and every spawn
+    /// for the life of that window reads it. The table under it is not still —
+    /// Settings ▸ Profiles moves, duplicates and deletes rows, and every window
+    /// in this process shares the result — so a snapshot indexed by position
+    /// answered "is row 3 startable" with whatever row happened to be third when
+    /// the probe ran. That is the disagreement the spawn used to panic on.
+    ///
+    /// Red gate: key the probe by position again and the loop below fails on the
+    /// first row whose neighbour answers differently, which on a bare Windows box
+    /// is every row but one.
+    #[test]
+    fn a_probe_answers_about_a_row_and_not_about_a_position() {
+        let machine = FakeMachine::bare_windows();
+        let mut rows = table().profiles().to_vec();
+        assert!(rows.len() > 2, "the fixture needs a table worth moving");
+
+        let before = ProfilePrograms::probe_rows(&rows, &machine);
+        assert!(
+            rows.iter().any(|row| before.is_available(&row.id))
+                && rows.iter().any(|row| !before.is_available(&row.id)),
+            "a move is only visible while the rows disagree about this machine"
+        );
+
+        // The reorder, as the page's arrows make it: every row is somewhere else
+        // and no row is anything else.
+        rows.rotate_right(1);
+        let after = ProfilePrograms::probe_rows(&rows, &machine);
+        for row in &rows {
+            assert_eq!(
+                before.is_available(&row.id),
+                after.is_available(&row.id),
+                "{} answers the same before and after the table moved",
+                row.id
+            );
+            assert_eq!(before.program(&row.id), after.program(&row.id));
+        }
+
+        // And an id no probe ever saw is "not on this machine" — an answer, not
+        // a read off the end of something.
+        assert!(!before.is_available("a-row-nobody-has"));
+        assert!(before.program("a-row-nobody-has").is_none());
+    }
+
+    /// PIN (T-PROFILE-TABLE-MOVE) — **the row a seat holds is found by its id, and
+    /// an id the table has not got is `None` rather than a panic.**
+    ///
+    /// [`row_of`]'s whole reason: the spawn used to take the seat's position,
+    /// read `row(index)` off the live table and assert the result, which is an
+    /// assertion about a table another window is free to shorten. This is the
+    /// same question asked in a spelling that has an honest answer for the case
+    /// that used to be a crash.
+    #[test]
+    fn a_row_asked_for_by_id_answers_or_says_there_is_none() {
+        assert_eq!(
+            row_of(fallback_profile_id()).map(|row| row.id),
+            Some(fallback_profile_id().to_owned()),
+            "the one row every machine has"
+        );
+        for index in 0..count() {
+            assert_eq!(
+                row_of(&id(index)).map(|row| row.id),
+                Some(id(index)),
+                "every row of the table is findable by the id it carries"
+            );
+        }
+        assert!(
+            row_of("a-row-nobody-has").is_none(),
+            "and a row that is gone is gone, which is a thing a caller can act on"
+        );
+    }
+
     #[test]
     fn a_profile_is_offered_when_this_machine_has_its_program_and_greyed_when_it_does_not() {
         let none = bare();
         assert_eq!(
             (0..count())
-                .filter(|index| none.is_available(*index))
+                .filter(|index| none.row_is_available(*index))
                 .collect::<Vec<_>>(),
             vec![fallback_profile()],
             "a bare Windows box offers PowerShell and says the truth about the rest"
@@ -16839,13 +17275,13 @@ mod tests {
         let all = equipped();
         for (index, profile) in shipped_rows().iter().enumerate() {
             assert!(
-                all.is_available(index),
+                all.row_is_available(index),
                 "{} is installed here and must be offered",
                 profile.id
             );
         }
         assert_eq!(
-            all.program(index_of_id("cmd")),
+            all.program("cmd"),
             Some(OsStr::new(r"C:\WINDOWS\System32\cmd.exe")),
             "the resolved program is the probed path, not the profile's id"
         );
@@ -16857,12 +17293,12 @@ mod tests {
                 .with_file(r"C:\Users\dev\AppData\Local\Programs\Git\bin\bash.exe"),
         );
         assert_eq!(
-            per_user.program(index_of_id("gitbash")),
+            per_user.program("gitbash"),
             Some(OsStr::new(
                 r"C:\Users\dev\AppData\Local\Programs\Git\bin\bash.exe"
             ))
         );
-        assert!(!per_user.is_available(index_of_id("wsl")));
+        assert!(!per_user.is_available("wsl"));
 
         // The candidate list is an *order*: the first well-known path that
         // exists wins, so a machine carrying both installs starts the
@@ -16875,7 +17311,7 @@ mod tests {
                 .with_file(r"C:\Users\dev\AppData\Local\Programs\Git\bin\bash.exe"),
         );
         assert_eq!(
-            both.program(index_of_id("gitbash")),
+            both.program("gitbash"),
             Some(OsStr::new(r"C:\Program Files\Git\bin\bash.exe"))
         );
     }
@@ -16910,7 +17346,7 @@ mod tests {
                 .with_file(r"D:\App\Tool\Git\bin\bash.exe"),
         );
         assert_eq!(
-            custom.program(index_of_id("gitbash")),
+            custom.program("gitbash"),
             Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe")),
             "a Git that is on the path is a Git we can find, wherever it was put"
         );
@@ -16929,7 +17365,7 @@ mod tests {
                 )
                 .with_file(r"D:\App\Tool\Git\cmd\git.exe"),
         );
-        assert!(!tool_only.is_available(index_of_id("gitbash")));
+        assert!(!tool_only.is_available("gitbash"));
 
         // And the anchor is tried first, so the install the user actually works
         // with wins over a stale copy in `%ProgramFiles%`.
@@ -16948,8 +17384,269 @@ mod tests {
                 .with_file(r"C:\Program Files\Git\bin\bash.exe"),
         );
         assert_eq!(
-            both.program(index_of_id("gitbash")),
+            both.program("gitbash"),
             Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe"))
+        );
+    }
+
+    /// A test `PATH` of these directories, joined the way this host joins one.
+    fn path_of(directories: &[&str]) -> String {
+        std::env::join_paths(directories)
+            .expect("test PATH joins cleanly")
+            .into_string()
+            .expect("ASCII test paths")
+    }
+
+    /// RED (0.4.4 ticket 07) — **on macOS git is found as `git`, and a
+    /// `git.exe` is never what is found.**
+    ///
+    /// Until 0.4.4 `find_git` asked for `git.exe` on every platform and then
+    /// under three Windows variables, so on every Mac it answered `None` and the
+    /// whole Git page said git was missing — with `/usr/bin` on the `PATH` and a
+    /// git in it. Asked through [`find_git_on`] with the platform named, so this
+    /// runs on the Windows build server as well as it would on a Mac.
+    ///
+    /// `/opt/tools/bin` stands for "a `PATH` entry that is none of the places
+    /// asked after it", so that a found git can only have come from the `PATH`
+    /// walk; the fallbacks and the stub rule are
+    /// `the_mac_fallbacks_are_asked_in_order_when_path_has_no_git`'s.
+    ///
+    /// MUTATION: answer `"git.exe"` for macOS in `git_file_name_on` (or send
+    /// macOS down the Windows arm) and the first assertion finds nothing.
+    #[test]
+    fn find_git_on_macos_finds_git_and_never_git_exe() {
+        let mac = HostPlatform::MacOs;
+        let with_git = FakeMachine::default()
+            .with_var("PATH", &path_of(&["/opt/tools/bin"]))
+            .with_file("/opt/tools/bin/git");
+        assert_eq!(
+            find_git_on(mac, &with_git),
+            Some(PathBuf::from("/opt/tools/bin/git")),
+            "a Mac with git on its PATH has a git"
+        );
+
+        // The system's own folder, as a Finder launch's PATH names it, with the
+        // command line tools behind its stub.
+        let system = FakeMachine::default()
+            .with_var("PATH", &path_of(&["/usr/bin"]))
+            .with_file("/usr/bin/git")
+            .with_file("/Library/Developer/CommandLineTools/usr/bin/git");
+        assert_eq!(
+            find_git_on(mac, &system),
+            Some(PathBuf::from("/usr/bin/git"))
+        );
+
+        let only_exe = FakeMachine::default()
+            .with_var("PATH", &path_of(&["/opt/tools/bin"]))
+            .with_file("/opt/tools/bin/git.exe");
+        assert_eq!(
+            find_git_on(mac, &only_exe),
+            None,
+            "a Mac does not start a git.exe"
+        );
+
+        // And the Windows variables mean nothing there: a Mac that happened to
+        // carry them is not a Mac with Git for Windows installed.
+        let windows_roots = FakeMachine::default()
+            .with_var("ProgramFiles", "/Program Files")
+            .with_file("/Program Files/Git/cmd/git.exe")
+            .with_file("/Program Files/Git/cmd/git");
+        assert_eq!(find_git_on(mac, &windows_roots), None);
+    }
+
+    /// PIN (0.4.4 ticket 07) — **Windows finds git exactly as it did before
+    /// the platform became a parameter.**
+    ///
+    /// `git.exe` on `PATH` first, the three installers' roots after it in their
+    /// order, a relative `PATH` entry ignored (R1-17), and a `git` with no
+    /// `.exe` not a Windows git. These are the answers the old one-arm
+    /// `find_git` gave, written down so that the Mac arm cannot move them.
+    ///
+    /// MUTATION: send Windows down the Unix arm and `git.exe` is never asked
+    /// for; swap two of [`git_fallbacks`]' roots and the order assertion names
+    /// the wrong install.
+    #[test]
+    fn find_git_on_windows_is_unchanged() {
+        let windows = HostPlatform::Windows;
+        let roots = || {
+            FakeMachine::default()
+                .with_var("ProgramFiles", r"C:\Program Files")
+                .with_var("ProgramFiles(x86)", r"C:\Program Files (x86)")
+                .with_var("LocalAppData", r"C:\Users\dev\AppData\Local")
+        };
+
+        // PATH first, over every root.
+        let on_path = roots()
+            .with_var("PATH", &path_of(&[r"C:\Other", r"D:\Tools\Git\cmd"]))
+            .with_file(r"D:\Tools\Git\cmd\git.exe")
+            .with_file(r"C:\Program Files\Git\cmd\git.exe");
+        assert_eq!(
+            find_git_on(windows, &on_path),
+            Some(PathBuf::from(r"D:\Tools\Git\cmd\git.exe"))
+        );
+
+        // The three roots, each found on its own, in this order.
+        let cases: [(&[&str], &str); 3] = [
+            (
+                &[
+                    r"C:\Program Files\Git\cmd\git.exe",
+                    r"C:\Program Files (x86)\Git\cmd\git.exe",
+                    r"C:\Users\dev\AppData\Local\Programs\Git\cmd\git.exe",
+                ],
+                r"C:\Program Files\Git\cmd\git.exe",
+            ),
+            (
+                &[
+                    r"C:\Program Files (x86)\Git\cmd\git.exe",
+                    r"C:\Users\dev\AppData\Local\Programs\Git\cmd\git.exe",
+                ],
+                r"C:\Program Files (x86)\Git\cmd\git.exe",
+            ),
+            (
+                &[r"C:\Users\dev\AppData\Local\Programs\Git\cmd\git.exe"],
+                r"C:\Users\dev\AppData\Local\Programs\Git\cmd\git.exe",
+            ),
+        ];
+        for (installed, expected) in cases {
+            let machine = installed
+                .iter()
+                .fold(roots(), |machine, file| machine.with_file(file));
+            assert_eq!(
+                find_git_on(windows, &machine),
+                Some(PathBuf::from(expected))
+            );
+        }
+
+        // A relative PATH entry is the working directory, and is never asked.
+        let relative = roots()
+            .with_var("PATH", &path_of(&["repo"]))
+            .with_file(r"repo\git.exe");
+        assert_eq!(find_git_on(windows, &relative), None);
+
+        // `git` without the suffix is not what Windows starts.
+        let bare = roots()
+            .with_var("PATH", &path_of(&[r"D:\Tools\bin"]))
+            .with_file(r"D:\Tools\bin\git");
+        assert_eq!(find_git_on(windows, &bare), None);
+    }
+
+    /// RED (0.4.4 ticket 07) — **with no git on `PATH`, a Mac asks Homebrew on
+    /// Apple silicon, Homebrew on Intel, then the system's `/usr/bin/git` — and
+    /// that last one only counts when a developer directory stands behind it.**
+    ///
+    /// An application opened from Finder gets `launchd`'s
+    /// `/usr/bin:/bin:/usr/sbin:/sbin`, not the login shell's `PATH`, so a
+    /// Homebrew git is invisible to the `PATH` walk and has to be asked for by
+    /// place. `/usr/bin/git` is Apple's stub on every Mac (the Mac mini's is
+    /// one of 78 hard links to the same 118 KB file as `/usr/bin/make`); with
+    /// neither Xcode nor the command line tools, running it raises the install
+    /// dialog. So the stub is a git only when the directory it would hand the
+    /// call to holds one — asked of the filesystem, never by running it.
+    ///
+    /// MUTATION: drop the developer-directory condition from `is_a_git_on`
+    /// and the stub-alone Mac has a git; reorder `unix_git_fallbacks` and the
+    /// order assertions name the wrong install.
+    #[test]
+    fn the_mac_fallbacks_are_asked_in_order_when_path_has_no_git() {
+        let mac = HostPlatform::MacOs;
+        let finder_path =
+            || FakeMachine::default().with_var("PATH", &path_of(&["/bin", "/usr/sbin", "/sbin"]));
+
+        let both_brews = finder_path()
+            .with_file("/opt/homebrew/bin/git")
+            .with_file("/usr/local/bin/git")
+            .with_file("/usr/bin/git")
+            .with_file("/Library/Developer/CommandLineTools/usr/bin/git");
+        assert_eq!(
+            find_git_on(mac, &both_brews),
+            Some(PathBuf::from("/opt/homebrew/bin/git"))
+        );
+        let intel_brew = finder_path()
+            .with_file("/usr/local/bin/git")
+            .with_file("/usr/bin/git")
+            .with_file("/Library/Developer/CommandLineTools/usr/bin/git");
+        assert_eq!(
+            find_git_on(mac, &intel_brew),
+            Some(PathBuf::from("/usr/local/bin/git"))
+        );
+
+        // The stub alone is not a git.
+        let stub_only = finder_path().with_file("/usr/bin/git");
+        assert_eq!(find_git_on(mac, &stub_only), None);
+
+        // The stub with each developer directory behind it is one.
+        for developer in [
+            "/var/db/xcode_select_link",
+            "/Applications/Xcode.app/Contents/Developer",
+            "/Library/Developer/CommandLineTools",
+        ] {
+            let backed = finder_path()
+                .with_file("/usr/bin/git")
+                .with_file(&format!("{developer}/usr/bin/git"));
+            assert_eq!(
+                find_git_on(mac, &backed),
+                Some(PathBuf::from("/usr/bin/git")),
+                "the stub with {developer} behind it"
+            );
+        }
+        let chosen = finder_path()
+            .with_var(
+                "DEVELOPER_DIR",
+                "/Volumes/Tools/Xcode-beta.app/Contents/Developer",
+            )
+            .with_file("/usr/bin/git")
+            .with_file("/Volumes/Tools/Xcode-beta.app/Contents/Developer/usr/bin/git");
+        assert_eq!(
+            find_git_on(mac, &chosen),
+            Some(PathBuf::from("/usr/bin/git"))
+        );
+
+        // And the same rule on the PATH walk: `/usr/bin` on the PATH (which a
+        // Finder launch has) does not stop a Homebrew git being found when the
+        // stub in it has nothing behind it.
+        let stub_on_path = FakeMachine::default()
+            .with_var("PATH", &path_of(&["/usr/bin", "/bin"]))
+            .with_file("/usr/bin/git")
+            .with_file("/opt/homebrew/bin/git");
+        assert_eq!(
+            find_git_on(mac, &stub_on_path),
+            Some(PathBuf::from("/opt/homebrew/bin/git"))
+        );
+        let backed_on_path = FakeMachine::default()
+            .with_var("PATH", &path_of(&["/usr/bin", "/bin"]))
+            .with_file("/usr/bin/git")
+            .with_file("/Library/Developer/CommandLineTools/usr/bin/git")
+            .with_file("/opt/homebrew/bin/git");
+        assert_eq!(
+            find_git_on(mac, &backed_on_path),
+            Some(PathBuf::from("/usr/bin/git")),
+            "PATH first, as on Windows, once the stub has a git behind it"
+        );
+
+        // Another Unix has no stub: its `/usr/bin/git` is the package's.
+        let linux = FakeMachine::default().with_file("/usr/bin/git");
+        assert_eq!(
+            find_git_on(HostPlatform::OtherUnix, &linux),
+            Some(PathBuf::from("/usr/bin/git"))
+        );
+    }
+
+    /// PIN (0.4.4 ticket 07) — **the name git is looked for by is this
+    /// build's own executable suffix on the platform this process runs on.**
+    ///
+    /// [`git_file_name_on`] is `EXE_SUFFIX` spelled as a function of the
+    /// platform so that the other machine's answer can be asked; this is what
+    /// keeps the host's answer from drifting away from the constant.
+    ///
+    /// MUTATION: answer `git` for Windows in `git_file_name_on` and this goes
+    /// red on Windows; answer `git.exe` for every platform and it goes red on
+    /// any Mac or Linux host that runs it (no CI job runs `bt-app`'s tests off
+    /// Windows today — `core-macos` compiles them).
+    #[test]
+    fn the_git_file_name_is_this_builds_executable_suffix() {
+        assert_eq!(
+            git_file_name_on(bt_platform::host_platform()),
+            format!("git{}", std::env::consts::EXE_SUFFIX)
         );
     }
 
@@ -17358,7 +18055,7 @@ mod tests {
     ///
     /// The surface, its rows and its ink are checked elsewhere in this module;
     /// what this pins is the ruler — the numbers a redesign would have to change
-    /// deliberately rather than drift past.
+    /// deliberately rather than drift past. The gap follows UI-SPEC.md G2.
     #[test]
     fn the_menu_measures_what_the_stylesheet_says_it_measures() {
         assert_eq!(MENU_MIN_WIDTH_LOGICAL_PX, 180.0, "min-width: 180px");
@@ -17368,7 +18065,7 @@ mod tests {
         assert_eq!(MENU_EDGE_MARGIN_LOGICAL_PX, 8.0, "win.width - mw - 8");
         assert_eq!(ITEM_RADIUS_LOGICAL_PX, 5.0, ".profile-item radius 5px");
         assert_eq!(ITEM_PADDING_X_LOGICAL_PX, 10.0, "padding: 7px 10px");
-        assert_eq!(ITEM_GAP_LOGICAL_PX, 10.0, "gap: 10px");
+        assert_eq!(ITEM_GAP_LOGICAL_PX, 8.0, "UI-SPEC.md G2: icon-to-label gap");
         assert_eq!(ITEM_FONT_LOGICAL_PX, 13.0, "font-size: 13px");
         assert_eq!(
             ITEM_ICON_COLUMN_LOGICAL_PX, 14.0,
@@ -17391,19 +18088,21 @@ mod tests {
             "--border-soft rgba(0,0,0,.055)"
         );
         assert_eq!(
-            SECTION_LABEL_FONT_LOGICAL_PX, 10.5,
-            ".menu-label font-size 10.5px"
+            SECTION_LABEL_FONT_LOGICAL_PX, 11.0,
+            "UI-SPEC.md T7, not the mock-up's own .menu-label font-size 10.5px"
         );
         assert_eq!(
             SECTION_LABEL_TRACKING_EM, 0.05,
             ".menu-label letter-spacing .05em"
         );
-        // 3 + 12.5 + 5: the 10.5px line box the mock-up's own renderer produces,
-        // inside `padding: 3px 10px 5px`.
+        // `padding: 3px 10px 5px`, unchanged by the rule.
         assert_eq!(SECTION_LABEL_PADDING_TOP_LOGICAL_PX, 3.0);
         assert_eq!(SECTION_LABEL_PADDING_X_LOGICAL_PX, 10.0);
         assert_eq!(SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX, 5.0);
-        assert_eq!(SECTION_LABEL_LINE_LOGICAL_PX, 12.5);
+        assert_eq!(
+            SECTION_LABEL_LINE_LOGICAL_PX, 13.0,
+            "UI-SPEC.md T7, not the mock-up's own 12.5"
+        );
         assert_eq!(
             RECENT_ITEM_MAX_WIDTH_LOGICAL_PX, 260.0,
             ".recent-item max-width 260px"
@@ -17507,7 +18206,7 @@ mod tests {
             ((mark.rect[0] + mark.rect[2]) / 2.0 - column_mid).abs() <= 0.5,
             "the mark is centred on its column, not aligned to it"
         );
-        // And the row's own label clears the column plus the row's 10px gap.
+        // And the label clears the column plus the UI-SPEC.md G2 gap of 8px.
         let title = labels
             .iter()
             .find(|label| label.text == powershell_seven())
@@ -19295,6 +19994,246 @@ mod tests {
         );
     }
 
+    // ── peek and pin (owner ruling, 2026-09-23) ─────────────────────────────
+
+    /// A gate whose menu a rest has just opened: the hand rested on the button
+    /// for the ruled quarter second, the clock owed an `Open`, and the caller
+    /// acted on it and cleared the clocks — exactly what `advance_chevrons` does.
+    fn peeking(start: Instant) -> ChevronGate {
+        let mut gate = ChevronGate::default();
+        gate.observe(ChevronPointer::Button, false, start);
+        assert_eq!(
+            gate.due(start + CHEVRON_HOVER_OPEN_DELAY),
+            Some(ChevronAction::Open)
+        );
+        gate.clear();
+        assert!(
+            !gate.is_pinned(),
+            "a rest opens a peek, never a pinned menu"
+        );
+        gate
+    }
+
+    /// PIN (35) — **a hover peek closes after the leave grace.**
+    ///
+    /// Ruling 1 of 2026-09-23 keeps the 2026-08-16 half unchanged: a menu a rest
+    /// raised is looking, and looking stops when the hand goes. Kept green here
+    /// so that the pin below cannot be bought by making every menu sticky.
+    ///
+    /// MUTATION: make `observe`'s `(Away, true)` arm skip the leave clock
+    /// unconditionally and the `Close` is never owed.
+    #[test]
+    fn a_hover_peek_closes_after_the_leave_grace() {
+        let start = Instant::now();
+        let mut gate = peeking(start);
+        let away = start + CHEVRON_HOVER_OPEN_DELAY + Duration::from_millis(40);
+        gate.observe(ChevronPointer::Away, true, away);
+        assert_eq!(gate.deadline(), Some(away + CHEVRON_LEAVE_GRACE));
+        assert_eq!(
+            gate.due(away + CHEVRON_LEAVE_GRACE),
+            Some(ChevronAction::Close)
+        );
+    }
+
+    /// RED (35) — **a click on a peek pins it, and a pinned menu survives the
+    /// hand leaving.**
+    ///
+    /// Ruling 2 of 2026-09-23: 「窥视中点按钮=钉住」. Until today every `⌄` menu
+    /// closed 150ms after the pointer left the button and the menu, however it
+    /// had been opened, so a reader who clicked the chevron and then moved
+    /// toward the terminal lost the menu they had asked for. The pin is one bit
+    /// on the gate, read where the leave clock would start; a pinned menu owes
+    /// nothing and registers no wake-up however long the hand stays away.
+    ///
+    /// MUTATION: make `observe`'s `(Away, true)` arm ignore `pinned` (always
+    /// start `leaving_since`) and this goes red.
+    #[test]
+    fn a_click_on_a_peek_pins_it_and_it_survives_leaving() {
+        let start = Instant::now();
+        let mut gate = peeking(start);
+        let press = start + CHEVRON_HOVER_OPEN_DELAY + Duration::from_millis(80);
+        // The press lands on the button, where a hand on an open menu's button
+        // owes nothing in either direction — and pins it.
+        gate.observe(ChevronPointer::Button, true, press);
+        gate.pin();
+        assert!(gate.is_pinned());
+        for step in 1..=10u32 {
+            let now = press + CHEVRON_LEAVE_GRACE * step;
+            gate.observe(ChevronPointer::Away, true, now);
+            assert_eq!(gate.deadline(), None, "a pinned menu owes no wake-up");
+            assert_eq!(gate.due(now), None, "and nothing is due {step} graces on");
+        }
+    }
+
+    /// RED (35) — **a click on a closed `⌄` pins the menu it opens, and it
+    /// survives the hand leaving.**
+    ///
+    /// Ruling 3 of 2026-09-23: 「直接点按钮=钉住」. The press opens the menu
+    /// through the button's own door and pins it on its way out; no rest ever
+    /// ran, and none is needed for the pin to hold.
+    ///
+    /// MUTATION: make `observe`'s `(Away, true)` arm ignore `pinned` and this
+    /// goes red.
+    #[test]
+    fn a_direct_click_pins_and_survives_leaving() {
+        let start = Instant::now();
+        let mut gate = ChevronGate::default();
+        gate.observe(ChevronPointer::Button, false, start);
+        // The press, a few milliseconds into the rest: the menu comes up at
+        // once, and the rest that was running is answered.
+        gate.pin();
+        assert_eq!(gate.deadline(), None, "the press has answered the rest");
+        for step in 1..=10u32 {
+            let now = start + CHEVRON_LEAVE_GRACE * step;
+            gate.observe(ChevronPointer::Away, true, now);
+            assert_eq!(gate.due(now), None, "still up {step} graces on");
+        }
+        assert_eq!(gate.deadline(), None);
+    }
+
+    /// RED (35) — **moving over the menu stops the clocks and keeps the pin;
+    /// only the menu going away takes the pin with it.**
+    ///
+    /// `observe` calls `clear` on every move over the menu and over its own
+    /// button, so a `clear` that dropped the pin would unpin a menu the hand had
+    /// merely crossed, and the next step off it would start the grace a click
+    /// had switched off. `menu_gone` is the one clearer, and after it the next
+    /// menu a rest raises is a peek again, whose grace runs.
+    ///
+    /// MUTATION: set `pinned = false` in `clear` and the second block goes red;
+    /// leave it out of `menu_gone` and the last block does.
+    #[test]
+    fn crossing_a_pinned_menu_keeps_the_pin_and_only_its_going_drops_it() {
+        let start = Instant::now();
+        let mut gate = peeking(start);
+        gate.pin();
+        let later = start + Duration::from_secs(1);
+        gate.observe(ChevronPointer::Surface, true, later);
+        gate.observe(ChevronPointer::Button, true, later);
+        assert!(
+            gate.is_pinned(),
+            "the hand crossing the menu is not a close"
+        );
+        gate.observe(ChevronPointer::Away, true, later);
+        assert_eq!(gate.deadline(), None);
+
+        gate.menu_gone();
+        assert!(!gate.is_pinned(), "the pin goes with the menu");
+        let mut next = gate;
+        let again = later + Duration::from_secs(1);
+        next.observe(ChevronPointer::Button, false, again);
+        let opened = again + CHEVRON_HOVER_OPEN_DELAY;
+        assert_eq!(next.due(opened), Some(ChevronAction::Open));
+        next.clear();
+        next.observe(ChevronPointer::Away, true, opened);
+        assert_eq!(
+            next.due(opened + CHEVRON_LEAVE_GRACE),
+            Some(ChevronAction::Close),
+            "the next rest-open is a peek again, and its grace runs"
+        );
+    }
+
+    /// RED (35) — **a rest on another of the gate's buttons does not raise a
+    /// menu in place of a pinned one.**
+    ///
+    /// The pane gate serves every pane head and the rail gate every pill, so a
+    /// hand resting on head B's `⌄` while head A's menu is up is told `Button`
+    /// with `open` false. For a peek that is still how a hand walks a menu
+    /// across a split without clicking. For a pinned menu it would be a fourth
+    /// way to close it, and the ruling names three: Esc, a click elsewhere, a
+    /// second click on its button. A *click* on head B is a click elsewhere,
+    /// and still moves the menu.
+    ///
+    /// MUTATION: make `observe`'s `(Button, false)` arm start `resting_since`
+    /// regardless of `pinned` and this goes red.
+    #[test]
+    fn a_rest_on_another_button_does_not_replace_a_pinned_menu() {
+        let start = Instant::now();
+        let mut pinned = peeking(start);
+        pinned.pin();
+        pinned.observe(ChevronPointer::Button, false, start);
+        assert_eq!(pinned.deadline(), None);
+        assert_eq!(pinned.due(start + CHEVRON_HOVER_OPEN_DELAY * 4), None);
+
+        // The walk across a split is unchanged for a peek.
+        let mut peek = peeking(start);
+        peek.observe(ChevronPointer::Button, false, start);
+        assert_eq!(
+            peek.due(start + CHEVRON_HOVER_OPEN_DELAY),
+            Some(ChevronAction::Open)
+        );
+    }
+
+    /// RED (35) — **`Split with` opens and closes its submenu the same way
+    /// peeked and pinned; the pin decides only whether the whole menu goes when
+    /// the hand leaves.**
+    ///
+    /// The submenu's own rows count as the menu for the leave grace — that is
+    /// [`PaneMenuLayout::holds`], the safety triangle — in both states. Leaving
+    /// both surfaces closes a peek after the grace and leaves a pinned menu up.
+    /// The submenu's opening and closing is `drive_pane_menu_hover`'s, which
+    /// reads no pin (`tests.rs` holds that by name).
+    ///
+    /// MUTATION: make `observe`'s `(Away, true)` arm ignore `pinned` and the
+    /// pinned half goes red.
+    #[test]
+    fn the_split_with_submenu_works_peeked_and_pinned() {
+        let layout = pane_menu_layout(
+            [300.0, 120.0],
+            (1600.0, 900.0),
+            1.0,
+            Some(PaneMenuRow::SplitWith),
+            false,
+            &[],
+            &chord_table(),
+            &equipped(),
+            &mut fake_measure,
+        );
+        let child = layout.submenu_frame().expect("an open submenu has a frame");
+        let heading = layout.item(PaneMenuRow::SplitWith);
+        let on_heading = [heading[0] + 4.0, (heading[1] + heading[3]) / 2.0];
+        let on_child = [child[0] + 4.0, child[1] + 4.0];
+        let gone = [child[2] + 200.0, child[3] + 200.0];
+        let place = |from: [f32; 2], at: [f32; 2]| {
+            if layout.holds(Some(from), at) {
+                ChevronPointer::Surface
+            } else {
+                ChevronPointer::Away
+            }
+        };
+        let start = Instant::now();
+        for pin in [false, true] {
+            let mut gate = peeking(start);
+            if pin {
+                gate.pin();
+            }
+            // Heading, then the child, then back to the parent: the whole trip
+            // is the menu's, and nothing is owed in either state.
+            let mut now = start + Duration::from_secs(1);
+            for (from, at) in [
+                (on_heading, on_heading),
+                (on_heading, on_child),
+                (on_child, on_heading),
+            ] {
+                gate.observe(place(from, at), true, now);
+                assert_eq!(gate.deadline(), None, "pinned={pin}: {at:?} is the menu's");
+                now += Duration::from_millis(50);
+            }
+            // Off both surfaces.
+            gate.observe(place(on_heading, gone), true, now);
+            let owed = gate.due(now + CHEVRON_LEAVE_GRACE);
+            if pin {
+                assert_eq!(owed, None, "a pinned menu stays when the hand leaves");
+            } else {
+                assert_eq!(
+                    owed,
+                    Some(ChevronAction::Close),
+                    "a peek goes after the grace"
+                );
+            }
+        }
+    }
+
     // ── the pane head's own menu ────────────────────────────────────────────
 
     /// The other windows a pin that is not about them stands in front of.
@@ -20843,7 +21782,9 @@ mod tests {
             "a bare Windows box cannot start every row this build ships"
         );
         assert!(
-            child_rows.iter().all(|index| machine.is_available(*index)),
+            child_rows
+                .iter()
+                .all(|index| machine.row_is_available(*index)),
             "and every row it does draw is one a press can spend"
         );
 

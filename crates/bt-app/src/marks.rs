@@ -1550,6 +1550,25 @@ impl ChromeMark {
     /// [`chevron_raster`] for the arithmetic and
     /// `the_turning_box_leaves_the_resting_arrow_exactly_where_it_was` for the
     /// proof.
+    /// **Whether this mark is a surface rather than a glyph** — a flat shape laid under whatever
+    /// is drawn inside it (0.4.4 ticket 09).
+    ///
+    /// The active tab's silhouette, a hovered tab's body, a pill, a card's foot and a filled
+    /// rectangle: each is one colour over its whole inside, which is what makes it the *ground*
+    /// of a mark drawn on it later in the same frame. Everything else is ink on a ground, and a
+    /// site icon that sits on a glyph's box has not been put on that glyph. Asked by the
+    /// rasterizer when it decides whether a site icon needs a plate.
+    pub(crate) fn lays_a_ground(self) -> bool {
+        matches!(
+            self,
+            Self::ActiveTab { .. }
+                | Self::TabBody { .. }
+                | Self::ControlPill { .. }
+                | Self::ControlPillFoot { .. }
+                | Self::Fill
+        )
+    }
+
     fn raster_bleed(self, width_px: u32, height_px: u32) -> (u32, u32) {
         match self {
             Self::Chevron { .. } => {
@@ -1699,8 +1718,27 @@ impl ChromeSprite {
 /// matters at the bottom of the scale range and nowhere else: a two-pixel stroke on a
 /// three-pixel-radius dot leaves a hole, and a three-pixel one would quietly draw a filled disc —
 /// the exact pixels this distinction exists to avoid, arrived at by rounding.
+///
+/// **And the breath lands here too, for the same reason the shape does.** A
+/// waiting claim's dot pulses (`docs/DESIGN.md` §7.1.5b, 2026-07-18; the clock
+/// ruled 2026-09-20) and four surfaces draw that dot — the strip, the rail's
+/// rows, the card's head and the peek's schematic. A phase applied at four call
+/// sites is four chances to disagree about how loud a breath is, so the sample
+/// is handed in and spent once, here. `None` is every claim that does not pulse
+/// — [`crate::StatusClaim::pulses`] is the one place that decides which — and it
+/// draws the dot at full strength, which is what every dot did before this
+/// parameter existed.
+///
+/// On [`ChromeSprite::opacity`] and never mixed into the ink: the mark cache is
+/// keyed by mark and colour, so a breath written into the colour would mint a
+/// texture per frame. The halo obeys the same discipline one file over.
 #[must_use]
-pub fn status_dot_sprite(dot: crate::StatusDot, rect: [f32; 4], scale: f32) -> ChromeSprite {
+pub fn status_dot_sprite(
+    dot: crate::StatusDot,
+    rect: [f32; 4],
+    scale: f32,
+    pulse: Option<crate::seats::WaitPulse>,
+) -> ChromeSprite {
     let side = (rect[2] - rect[0]).min(rect[3] - rect[1]);
     let radius_px = (side / 2.0).round().max(1.0) as u32;
     let mark = if dot.hollow {
@@ -1714,7 +1752,9 @@ pub fn status_dot_sprite(dot: crate::StatusDot, rect: [f32; 4], scale: f32) -> C
     } else {
         ChromeMark::ControlPill { radius_px }
     };
-    ChromeSprite::new(mark, rect, dot.ink)
+    let mut sprite = ChromeSprite::new(mark, rect, dot.ink);
+    sprite.opacity = pulse.map_or(1.0, |pulse| pulse.dot);
+    sprite
 }
 
 /// **How wide the unsaved-edits dot is drawn** — [`bt_render::WINDOW_TAB_STATUS_DOT_LOGICAL_PX`]
@@ -1779,9 +1819,11 @@ pub struct OverlayLayer {
     pub quads: Vec<OverlayQuad>,
     pub labels: Vec<ChromeLabel>,
     pub sprites: Vec<ChromeSprite>,
-    /// The layer's own `opacity` — see [`bt_render::OverlayLayer::opacity`]. It
-    /// rides through the rasterizer untouched: how faded a layer is has nothing
-    /// to do with which marks it names.
+    /// A multiplier folded into every primitive of this layer — see
+    /// [`bt_render::OverlayLayer::opacity`], and why a surface that fades does
+    /// not use it: it fades as a [`Band`]'s group. It rides through the
+    /// rasterizer untouched: how faded a layer is has nothing to do with which
+    /// marks it names.
     pub opacity: f32,
     /// A scrolled document inside this layer — see
     /// [`bt_render::OverlayLayer::body`]. The preview float is the one tenant
@@ -1835,6 +1877,90 @@ impl OverlayLayer {
     }
 }
 
+/// **A run of the overlay, and the surfaces in it that fade or travel as one
+/// piece** — [`OverlayLayer`]s with the [`bt_render::OverlayGroup`] spans over
+/// them (ticket 46; the fade audit of 2026-09-23).
+///
+/// A surface's fade used to be written into its layers — every layer's own
+/// opacity multiplied, every rectangle moved — and the renderer then faded each
+/// fill, mark and letter separately, in linear light: the plate overshot and the
+/// letters arrived before it. A band says instead *which layers are one
+/// surface* and at what opacity and offset that surface stands, and leaves the
+/// layers exactly as their builder drew them. The renderer draws such a surface
+/// whole and composites it once, as CSS `opacity` does.
+///
+/// The spans are indices into `layers`; an enclosing span is listed before the
+/// spans it encloses, and [`Band::append`] keeps them pointing at the same
+/// layers when bands are stacked.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Band {
+    pub layers: Vec<OverlayLayer>,
+    pub groups: Vec<bt_render::OverlayGroup>,
+}
+
+impl From<Vec<OverlayLayer>> for Band {
+    /// Layers standing where they were drawn, with nothing fading.
+    fn from(layers: Vec<OverlayLayer>) -> Self {
+        Self {
+            layers,
+            groups: Vec::new(),
+        }
+    }
+}
+
+impl Band {
+    /// `layers` as one surface, at `opacity` and displaced by `offset`
+    /// physical pixels.
+    #[must_use]
+    pub fn surface(layers: Vec<OverlayLayer>, opacity: f32, offset: [f32; 2]) -> Self {
+        Self::from(layers).faded(opacity, offset)
+    }
+
+    /// **This whole band as one surface**, faded and moved round whatever
+    /// surfaces it already holds — which then fade inside it, and multiply.
+    /// An empty band stays empty: there is no surface to fade.
+    #[must_use]
+    pub fn faded(mut self, opacity: f32, offset: [f32; 2]) -> Self {
+        if !self.layers.is_empty() {
+            self.groups.insert(
+                0,
+                bt_render::OverlayGroup {
+                    layers: 0..self.layers.len(),
+                    opacity,
+                    offset,
+                },
+            );
+        }
+        self
+    }
+
+    /// Stack `other` on top of this band, its spans moved to name the same
+    /// layers in the longer list.
+    pub fn append(&mut self, other: Band) {
+        let base = self.layers.len();
+        self.layers.extend(other.layers);
+        self.groups.extend(
+            other
+                .groups
+                .into_iter()
+                .map(|group| bt_render::OverlayGroup {
+                    layers: group.layers.start + base..group.layers.end + base,
+                    ..group
+                }),
+        );
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.layers.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+}
+
 /// Rasterized marks, keyed by mark + physical size + colour.
 ///
 /// The map is rebuilt from the sprites of each frame, so it holds exactly what
@@ -1885,9 +2011,44 @@ impl ChromeMarkRasters {
 
     /// Rasterize whatever is not already in hand and return the draw list, in
     /// the order the sprites were requested — which is the order they paint.
+    ///
+    /// **No ground is known here**, so a site icon is drawn as it is and never on a plate: the
+    /// callers of this door draw controls and pictures, not pages. The surfaces that draw a
+    /// site's icon come through [`Self::resolve_on`] and [`Self::resolve_overlay`], which know
+    /// what is under it.
     pub fn resolve(&mut self, sprites: &[ChromeSprite]) -> Vec<ChromeIcon> {
         let mut kept: HashMap<String, Raster> = HashMap::with_capacity(sprites.len());
-        let icons = self.icons_for(sprites, &mut kept);
+        let icons = self.icons_for(sprites, &mut kept, None);
+        self.rasters = kept;
+        icons
+    }
+
+    /// [`Self::resolve`] for the window's own chrome, **with the flat colours painted under the
+    /// marks** — the pane heads, the strip, the collapse bars (0.4.4 ticket 09).
+    ///
+    /// The quads are what the renderer draws before every mark ([`ChromeMark::Fill`]'s own
+    /// note), so together with the filled marks among the sprites before it they are exactly the
+    /// ground a site icon lands on, and a plate is decided against *that* ground rather than a
+    /// global one.
+    pub fn resolve_on(
+        &mut self,
+        sprites: &[ChromeSprite],
+        quads: &[bt_render::ChromeQuad],
+        palette: &bt_render::ChromePalette,
+    ) -> Vec<ChromeIcon> {
+        let backdrop = Backdrop {
+            floors: quads
+                .iter()
+                .map(|quad| Floor {
+                    rect: quad.rect,
+                    colour: quad.color,
+                    alpha: 1.0,
+                })
+                .collect(),
+            palette,
+        };
+        let mut kept: HashMap<String, Raster> = HashMap::with_capacity(sprites.len());
+        let icons = self.icons_for(sprites, &mut kept, Some(&backdrop));
         self.rasters = kept;
         icons
     }
@@ -1898,24 +2059,48 @@ impl ChromeMarkRasters {
     /// trimmed to what the *frame* asked for: resolving layer by layer would let
     /// the popup's marks retire the dialog's on the way past, and every frame
     /// would rasterize both again.
-    pub fn resolve_overlay(&mut self, layers: Vec<OverlayLayer>) -> Vec<bt_render::OverlayLayer> {
+    ///
+    /// **Each layer's grounds and fills are the ground its marks stand on** (0.4.4 ticket 09),
+    /// for [`Self::resolve_on`]'s reason: a row's site icon is asked about the row it is drawn on.
+    pub fn resolve_overlay(
+        &mut self,
+        layers: Vec<OverlayLayer>,
+        palette: &bt_render::ChromePalette,
+    ) -> Vec<bt_render::OverlayLayer> {
         let mut kept: HashMap<String, Raster> = HashMap::new();
         let resolved = layers
             .into_iter()
-            .map(|layer| bt_render::OverlayLayer {
-                grounds: layer.grounds,
-                quads: layer.quads,
-                labels: layer.labels,
-                icons: {
-                    // The layer's own marks first, then whatever pixels it
-                    // brought with it: the icon channel paints in order, and a
-                    // picture belongs over the ground its card drew for it.
-                    let mut icons = self.icons_for(&layer.sprites, &mut kept);
-                    icons.extend(layer.images);
-                    icons
-                },
-                opacity: layer.opacity,
-                body: layer.body,
+            .map(|layer| {
+                let backdrop = Backdrop {
+                    floors: layer
+                        .grounds
+                        .iter()
+                        .map(|ground| Floor {
+                            rect: ground.rect,
+                            colour: ground.color,
+                            alpha: 1.0,
+                        })
+                        .chain(layer.quads.iter().map(|quad| Floor {
+                            rect: quad.rect,
+                            colour: quad.color,
+                            alpha: quad.alpha,
+                        }))
+                        .collect(),
+                    palette,
+                };
+                // The layer's own marks first, then whatever pixels it
+                // brought with it: the icon channel paints in order, and a
+                // picture belongs over the ground its card drew for it.
+                let mut icons = self.icons_for(&layer.sprites, &mut kept, Some(&backdrop));
+                icons.extend(layer.images);
+                bt_render::OverlayLayer {
+                    grounds: layer.grounds,
+                    quads: layer.quads,
+                    labels: layer.labels,
+                    icons,
+                    opacity: layer.opacity,
+                    body: layer.body,
+                }
             })
             .collect();
         self.rasters = kept;
@@ -1927,9 +2112,10 @@ impl ChromeMarkRasters {
         &self,
         sprites: &[ChromeSprite],
         kept: &mut HashMap<String, Raster>,
+        backdrop: Option<&Backdrop<'_>>,
     ) -> Vec<ChromeIcon> {
         let mut icons = Vec::with_capacity(sprites.len());
-        for sprite in sprites {
+        for (at, sprite) in sprites.iter().enumerate() {
             let width_px = (sprite.rect[2] - sprite.rect[0]).round();
             let height_px = (sprite.rect[3] - sprite.rect[1]).round();
             if !(width_px >= 1.0 && height_px >= 1.0) {
@@ -1956,57 +2142,177 @@ impl ChromeMarkRasters {
             if let ChromeMark::Globe {
                 favicon: Some(favicon),
             } = sprite.mark
-                && let Some(raster) = self
-                    .favicons
-                    .borrow_mut()
-                    .raster(favicon, width_px, height_px)
             {
-                icons.push(ChromeIcon {
-                    key: favicon.texture_key(width_px, height_px),
-                    rect: sprite.rect,
-                    rgba: raster.rgba,
-                    width_px: raster.width_px,
-                    height_px: raster.height_px,
-                    opacity: sprite.opacity,
-                    clip: None,
-                    above_text: sprite.above_text,
-                });
-                continue;
-            }
-            let key = mark_key(sprite, width_px, height_px);
-            let raster = match kept.get(&key).or_else(|| self.rasters.get(&key)) {
-                Some(raster) => raster.clone(),
-                None => {
-                    let Some(raster) = rasterize(sprite, width_px, height_px) else {
-                        continue;
-                    };
-                    raster
+                let (raster, luminance) = {
+                    let mut store = self.favicons.borrow_mut();
+                    (
+                        store.raster(favicon, width_px, height_px),
+                        store.luminance(favicon),
+                    )
+                };
+                if let Some(raster) = raster {
+                    // **And, where the icon would vanish into what it is drawn on, a plate under
+                    // it** (0.4.4 ticket 09). One comparison per icon: the icon's luminance was
+                    // measured when it was learned, and the ground's is the colours already laid
+                    // under this box.
+                    if let (Some(backdrop), Some(luminance)) = (backdrop, luminance)
+                        && site_icon_wants_plate(luminance, backdrop.luminance_under(sprites, at))
+                    {
+                        let mut plate = site_icon_plate(sprite.rect, width_px, height_px);
+                        plate.opacity = sprite.opacity;
+                        plate.above_text = sprite.above_text;
+                        self.push_mark(&plate, width_px, height_px, kept, &mut icons);
+                    }
+                    icons.push(ChromeIcon {
+                        key: favicon.texture_key(width_px, height_px),
+                        rect: sprite.rect,
+                        rgba: raster.rgba,
+                        width_px: raster.width_px,
+                        height_px: raster.height_px,
+                        opacity: sprite.opacity,
+                        clip: None,
+                        above_text: sprite.above_text,
+                    });
+                    continue;
                 }
-            };
-            // A mark that needs room outside its own box is *drawn* over the
-            // grown box, or the extra pixels would be squeezed back into the
-            // layout's rectangle and the mark would come out scaled down. The
-            // bleed is whole pixels on each side, so this moves nothing: it
-            // states the same glyph over a wider window onto the same surface.
-            let (pad_x, pad_y) = sprite.mark.raster_bleed(width_px, height_px);
-            let [left, top, right, bottom] = sprite.rect;
-            let (pad_x, pad_y) = (pad_x as f32, pad_y as f32);
-            icons.push(ChromeIcon {
-                key: key.clone(),
-                rect: [left - pad_x, top - pad_y, right + pad_x, bottom + pad_y],
-                rgba: Arc::clone(&raster.rgba),
-                width_px: raster.width_px,
-                height_px: raster.height_px,
-                opacity: sprite.opacity,
-                // A mark is laid out to fit the control it belongs to, so there
-                // is nothing for it to be cropped by — see
-                // [`bt_render::ChromeIcon::clip`], whose one caller is a picture.
-                clip: None,
-                above_text: sprite.above_text,
-            });
-            kept.insert(key, raster);
+            }
+            self.push_mark(sprite, width_px, height_px, kept, &mut icons);
         }
         icons
+    }
+
+    /// One mark, rasterized unless `kept` or the last frame already holds it.
+    fn push_mark(
+        &self,
+        sprite: &ChromeSprite,
+        width_px: u32,
+        height_px: u32,
+        kept: &mut HashMap<String, Raster>,
+        icons: &mut Vec<ChromeIcon>,
+    ) {
+        let key = mark_key(sprite, width_px, height_px);
+        let raster = match kept.get(&key).or_else(|| self.rasters.get(&key)) {
+            Some(raster) => raster.clone(),
+            None => {
+                let Some(raster) = rasterize(sprite, width_px, height_px) else {
+                    return;
+                };
+                raster
+            }
+        };
+        // A mark that needs room outside its own box is *drawn* over the
+        // grown box, or the extra pixels would be squeezed back into the
+        // layout's rectangle and the mark would come out scaled down. The
+        // bleed is whole pixels on each side, so this moves nothing: it
+        // states the same glyph over a wider window onto the same surface.
+        let (pad_x, pad_y) = sprite.mark.raster_bleed(width_px, height_px);
+        let [left, top, right, bottom] = sprite.rect;
+        let (pad_x, pad_y) = (pad_x as f32, pad_y as f32);
+        icons.push(ChromeIcon {
+            key: key.clone(),
+            rect: [left - pad_x, top - pad_y, right + pad_x, bottom + pad_y],
+            rgba: Arc::clone(&raster.rgba),
+            width_px: raster.width_px,
+            height_px: raster.height_px,
+            opacity: sprite.opacity,
+            // A mark is laid out to fit the control it belongs to, so there
+            // is nothing for it to be cropped by — see
+            // [`bt_render::ChromeIcon::clip`], whose one caller is a picture.
+            clip: None,
+            above_text: sprite.above_text,
+        });
+        kept.insert(key, raster);
+    }
+}
+
+/// **WCAG 2.1 success criterion 1.4.11 (Non-text Contrast): 3:1** — the least a site's icon may
+/// stand off the ground it is drawn on before it is given a plate (0.4.4 ticket 09).
+///
+/// The criterion is written for exactly this — "graphical objects required to understand the
+/// content" against "adjacent colors" — and a site's icon in a pane head is the thing that tells
+/// one page from another.
+pub const SITE_ICON_CONTRAST_MINIMUM: f64 = 3.0;
+
+/// **Whether an icon of this luminance needs a plate on a ground of that one** — WCAG 2's
+/// contrast ratio between the two (lighter over darker, each offset by `0.05`), against
+/// [`SITE_ICON_CONTRAST_MINIMUM`].
+#[must_use]
+pub fn site_icon_wants_plate(icon_luminance: f64, ground_luminance: f64) -> bool {
+    let (light, dark) = if icon_luminance >= ground_luminance {
+        (icon_luminance, ground_luminance)
+    } else {
+        (ground_luminance, icon_luminance)
+    };
+    (light + 0.05) / (dark + 0.05) < SITE_ICON_CONTRAST_MINIMUM
+}
+
+/// **The plate's colour: the light theme's `--panel`, `#F7F7F5`, in both themes** (owner's ruling
+/// 2026-09-23, after comparing the two readings side by side).
+///
+/// One colour and not the theme's own `--panel`, because the theme's own does nothing on the
+/// case the plate exists for: GitHub's dark mark (`#22272C`) on the dark theme's `--panel`
+/// (`#252525`) is 1.02:1, worse than on the bare head; on `#F7F7F5` it is 14:1. It is the stock
+/// light canvas's `--panel` ([`bt_render::LIGHT_CHROME`]'s `title_bar`), never `#FFFFFF`. A pale
+/// icon on the light theme's white head gains little from it (1.07:1) — accepted as is by the
+/// same ruling.
+pub const SITE_ICON_PLATE: [u8; 3] = bt_render::LIGHT_CHROME.title_bar;
+
+/// **The plate a site icon is drawn on when it needs one**: a circle the size of the icon's own
+/// box, no border and no shadow, in [`SITE_ICON_PLATE`].
+#[must_use]
+pub fn site_icon_plate(rect: [f32; 4], width_px: u32, height_px: u32) -> ChromeSprite {
+    ChromeSprite::new(
+        ChromeMark::ControlPill {
+            radius_px: (width_px.min(height_px) / 2).max(1),
+        },
+        rect,
+        SITE_ICON_PLATE,
+    )
+}
+
+/// **One flat colour laid under the marks**, in the order it was painted — a chrome quad, an
+/// overlay ground or an overlay fill (0.4.4 ticket 09).
+#[derive(Clone, Copy, Debug)]
+struct Floor {
+    rect: [f32; 4],
+    colour: [u8; 3],
+    alpha: f32,
+}
+
+/// **What is under a mark**: the flat colours painted before every mark, and the palette the
+/// window's own ground comes from (0.4.4 ticket 09).
+struct Backdrop<'a> {
+    floors: Vec<Floor>,
+    palette: &'a bt_render::ChromePalette,
+}
+
+impl Backdrop<'_> {
+    /// **The luminance of the ground under `sprites[at]`**, at its centre, before it is drawn.
+    ///
+    /// Composited the way the renderer composites — in linear light, where a luminance is a
+    /// weighted sum and blends as one — starting from the window's own ground (`--termbg`, what
+    /// shows where nothing was laid), then every floor that covers the point in paint order, then
+    /// every *filled* mark drawn before this one that covers it (a tab's body, a row's pill: the
+    /// marks that are a surface rather than a glyph, [`ChromeMark::lays_a_ground`]).
+    fn luminance_under(&self, sprites: &[ChromeSprite], at: usize) -> f64 {
+        let rect = sprites[at].rect;
+        let (x, y) = ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+        let covers = |rect: [f32; 4]| x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3];
+        let over = |under: f64, colour: [u8; 3], alpha: f32| {
+            let alpha = f64::from(alpha.clamp(0.0, 1.0));
+            alpha * bt_render::relative_luminance(colour) + (1.0 - alpha) * under
+        };
+        let mut luminance = bt_render::relative_luminance(self.palette.seat_body);
+        for floor in self.floors.iter().filter(|floor| covers(floor.rect)) {
+            luminance = over(luminance, floor.colour, floor.alpha);
+        }
+        for below in sprites[..at]
+            .iter()
+            .filter(|below| below.mark.lays_a_ground() && covers(below.rect))
+        {
+            luminance = over(luminance, below.color, below.opacity);
+        }
+        luminance
     }
 }
 
@@ -4273,6 +4579,7 @@ mod tests {
                 },
                 rect,
                 scale,
+                None,
             );
             assert!(
                 matches!(filled.mark, ChromeMark::ControlPill { .. }),
@@ -4285,6 +4592,7 @@ mod tests {
                 },
                 rect,
                 scale,
+                None,
             );
             let ChromeMark::ControlPillRing {
                 radius_px,
@@ -6380,6 +6688,230 @@ mod tests {
         assert!(
             rasters.rasters.is_empty(),
             "the pixels are the store's — the frame's map holds no copy"
+        );
+    }
+
+    /// A real PNG of a site's mark: one ink on a transparent square, the mark filling the middle
+    /// half — the shape GitHub's own icon has, which is where 0.4.4 ticket 09 started.
+    fn a_mark_on_nothing(ink: [u8; 3]) -> Vec<u8> {
+        let mut buffer = image::RgbaImage::new(32, 32);
+        for (x, y, pixel) in buffer.enumerate_pixels_mut() {
+            let inside = (8..24).contains(&x) && (8..24).contains(&y);
+            *pixel = if inside {
+                image::Rgba([ink[0], ink[1], ink[2], 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            };
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(buffer)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("an in-memory PNG encodes");
+        png.into_inner()
+    }
+
+    /// A pane head in `palette`, with a site's icon in its mark box — the frame's own two
+    /// channels, as `seats` hands them over.
+    fn a_head_wearing(
+        store: &Rc<RefCell<crate::favicon::Favicons>>,
+        site: &str,
+        palette: &bt_render::ChromePalette,
+    ) -> Vec<ChromeIcon> {
+        let favicon = store.borrow().of_url(site).expect("the store holds it");
+        let head = bt_render::ChromeQuad::ground([0.0, 0.0, 400.0, 30.0], palette.pane_head);
+        let mark = ChromeSprite::new(
+            ChromeMark::Globe {
+                favicon: Some(favicon),
+            },
+            [12.0, 8.0, 26.0, 22.0],
+            palette.pane_title,
+        );
+        ChromeMarkRasters::sharing(Rc::clone(store)).resolve_on(&[mark], &[head], palette)
+    }
+
+    /// A store that learned one site's icon from a real PNG, through the real decoder.
+    fn a_store_learning(site: &str, png: &[u8]) -> Rc<RefCell<crate::favicon::Favicons>> {
+        let mut store = crate::favicon::Favicons::default();
+        assert!(store.learn(site, png), "the PNG decodes");
+        Rc::new(RefCell::new(store))
+    }
+
+    /// RED (0.4.4 ticket 09) — **a site's icon that would vanish into the head it is drawn on
+    /// wears a plate, in the light theme's `--panel` on both themes, and the plate is never white.**
+    ///
+    /// The case the ticket was opened for: GitHub serves a black mark to a page told "light", and
+    /// on the dark head that mark is black on `#1B1B1B` — 1.1:1, a hole where an icon should be.
+    /// The decision is made against the ground the icon is actually drawn on (the head's quad,
+    /// handed in with the sprites), with the luminance the store measured when it learned the
+    /// icon, at WCAG 2.1 SC 1.4.11's 3:1.
+    ///
+    /// Both halves of the owner's ruling of 2026-09-23 are read off the pixels: the plate is the
+    /// light theme's `--panel`, `#F7F7F5`, on the dark head as on the light one, and it is not
+    /// `#FFFFFF`. The pale icon on the light head is the second case, with the same colour.
+    ///
+    /// MUTATION: draw the plate in the palette in force (`palette.title_bar`) and the dark case
+    /// reads `#252525` here.
+    ///
+    /// MUTATION: drop the plate push in `icons_for`, or compare against a fixed ground instead of
+    /// `luminance_under`, and the first assertion goes red.
+    #[test]
+    fn an_icon_without_contrast_on_its_ground_wears_the_plate() {
+        for (palette, ink) in [
+            (bt_render::DARK_CHROME, [0x18, 0x17, 0x17]),
+            (bt_render::LIGHT_CHROME, [0xf2, 0xf2, 0xf2]),
+        ] {
+            let store = a_store_learning("https://github.test", &a_mark_on_nothing(ink));
+            let icons = a_head_wearing(&store, "https://github.test/", &palette);
+            let [plate, icon] = icons.as_slice() else {
+                panic!(
+                    "an icon without contrast is drawn over a plate: {} icons",
+                    icons.len()
+                );
+            };
+            assert!(plate.key.starts_with("chrome-mark:"), "{}", plate.key);
+            assert!(icon.key.starts_with("favicon:"), "{}", icon.key);
+            assert_eq!(plate.rect, icon.rect, "the plate is the icon's own box");
+            let middle = plate.width_px / 2;
+            assert_eq!(
+                rgb_at(plate, middle, middle),
+                [0xf7, 0xf7, 0xf5],
+                "the plate is the light theme's `--panel` on {:?}",
+                palette.pane_head
+            );
+            assert_eq!(SITE_ICON_PLATE, bt_render::LIGHT_CHROME.title_bar);
+            assert_ne!(
+                rgb_at(plate, middle, middle),
+                [0xff, 0xff, 0xff],
+                "never pure white"
+            );
+            assert_eq!(
+                plate.rgba[((middle * plate.width_px + middle) * 4 + 3) as usize],
+                255,
+                "and solid where the icon sits"
+            );
+            assert_eq!(plate.rgba[3], 0, "a circle: the box's corner is outside it");
+        }
+    }
+
+    /// RED (0.4.4 ticket 09) — **the same icon on a ground it stands off wears no plate.**
+    ///
+    /// The black mark on the light head is 17:1 — nothing to repair, and a plate there would be a
+    /// chip nobody asked for on every page whose icon is fine. So is the pale mark on the dark
+    /// head. The rule is a comparison, not a decoration.
+    ///
+    /// MUTATION: plate every site icon (drop the `site_icon_wants_plate` condition) and both
+    /// cases draw two icons.
+    #[test]
+    fn an_icon_with_contrast_wears_none() {
+        for (palette, ink) in [
+            (bt_render::LIGHT_CHROME, [0x18, 0x17, 0x17]),
+            (bt_render::DARK_CHROME, [0xf2, 0xf2, 0xf2]),
+        ] {
+            let store = a_store_learning("https://github.test", &a_mark_on_nothing(ink));
+            let icons = a_head_wearing(&store, "https://github.test/", &palette);
+            let [icon] = icons.as_slice() else {
+                panic!(
+                    "an icon with contrast is drawn alone: {} icons",
+                    icons.len()
+                );
+            };
+            assert!(icon.key.starts_with("favicon:"), "{}", icon.key);
+        }
+    }
+
+    /// RED (0.4.4 ticket 09) — **the ground is what is under the icon: a filled mark drawn before
+    /// it counts, a glyph does not.**
+    ///
+    /// The active tab's silhouette is a mark, not a quad, and a tab's site icon is drawn on it —
+    /// so a strip whose quads are dark and whose active tab is light answers "light" under that
+    /// tab's icon. A glyph whose box happens to cover the icon's centre is ink, not a surface.
+    ///
+    /// MUTATION: make `lays_a_ground` answer `false` for `ActiveTab`, and the black icon on the
+    /// light tab body wears a plate it does not need.
+    #[test]
+    fn the_ground_under_a_site_icon_is_the_last_surface_laid_there() {
+        let palette = bt_render::DARK_CHROME;
+        let store = a_store_learning(
+            "https://github.test",
+            &a_mark_on_nothing([0x18, 0x17, 0x17]),
+        );
+        let favicon = store.borrow().of_url("https://github.test/").expect("held");
+        let strip = bt_render::ChromeQuad::ground([0.0, 0.0, 400.0, 40.0], palette.title_bar);
+        let icon = ChromeSprite::new(
+            ChromeMark::Globe {
+                favicon: Some(favicon),
+            },
+            [20.0, 13.0, 34.0, 27.0],
+            palette.pane_title,
+        );
+        let light_tab = ChromeSprite::new(
+            ChromeMark::ActiveTab { radius_px: 8 },
+            [8.0, 4.0, 200.0, 40.0],
+            [0xf5, 0xf5, 0xf5],
+        );
+        let a_glyph = ChromeSprite::new(
+            ChromeMark::Folder,
+            [8.0, 4.0, 200.0, 40.0],
+            [0xf5, 0xf5, 0xf5],
+        );
+        let mut rasters = ChromeMarkRasters::sharing(Rc::clone(&store));
+        let on_the_tab = rasters.resolve_on(&[light_tab, icon], &[strip], &palette);
+        assert_eq!(
+            on_the_tab
+                .iter()
+                .filter(|icon| icon.key.starts_with("chrome-mark:"))
+                .count(),
+            1,
+            "the tab's body and the icon, and no plate between them"
+        );
+        let on_the_strip = rasters.resolve_on(&[a_glyph, icon], &[strip], &palette);
+        assert_eq!(
+            on_the_strip
+                .iter()
+                .filter(|icon| icon.key.starts_with("chrome-mark:"))
+                .count(),
+            2,
+            "the glyph and a plate: the icon's ground is still the dark strip"
+        );
+    }
+
+    /// RED (0.4.4 ticket 09) — **an icon's luminance is measured once, when it is learned, and
+    /// never by a frame.**
+    ///
+    /// The ticket's B2: a contrast decision made per frame from pixels would be a walk over every
+    /// site icon's RGBA on every rebuild of the chrome. The count is the measuring function's own
+    /// (a per-thread counter), not a timing, so it holds on a loaded machine.
+    ///
+    /// MUTATION: measure in `Favicons::luminance` instead of in `learn` and the count is one plus
+    /// one per frame.
+    #[test]
+    fn the_icon_luminance_is_computed_once_per_raster() {
+        crate::favicon::MEASURED.with(|count| count.set(0));
+        let store = a_store_learning(
+            "https://github.test",
+            &a_mark_on_nothing([0x18, 0x17, 0x17]),
+        );
+        for _ in 0..30 {
+            let icons = a_head_wearing(&store, "https://github.test/", &bt_render::DARK_CHROME);
+            assert_eq!(icons.len(), 2);
+        }
+        assert_eq!(crate::favicon::MEASURED.with(std::cell::Cell::get), 1);
+    }
+
+    /// **The threshold is WCAG's own number, and the rule is symmetric.**
+    ///
+    /// 3:1 exactly passes; a hair under does not; and a light icon on a dark ground is asked the
+    /// same question as a dark icon on a light one.
+    #[test]
+    fn the_plate_rule_is_wcag_non_text_contrast_both_ways() {
+        assert_eq!(SITE_ICON_CONTRAST_MINIMUM, 3.0);
+        // (0.1 + 0.05) * 3 - 0.05 = 0.4 is exactly 3:1 against a ground of 0.1; a hair either
+        // side of it, because 0.45 / 0.15 is not exactly 3.0 in binary.
+        assert!(!site_icon_wants_plate(0.401, 0.1));
+        assert!(site_icon_wants_plate(0.399, 0.1));
+        assert_eq!(
+            site_icon_wants_plate(0.1, 0.399),
+            site_icon_wants_plate(0.399, 0.1)
         );
     }
 

@@ -2,6 +2,26 @@
 
 use std::num::NonZeroIsize;
 
+pub mod file_reads;
+pub mod ime_trace;
+
+/// Fresh native facts for a diagnostic line only. Unreadable is not false.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativePresentFacts {
+    pub iconic: Option<bool>,
+    pub cloaked: Option<bool>,
+    pub client: Option<(u32, u32)>,
+    pub style_visible: Option<bool>,
+}
+
+#[cfg(not(windows))]
+pub fn native_present_facts(_window: NativeWindow) -> NativePresentFacts {
+    NativePresentFacts::default()
+}
+
+#[cfg(windows)]
+pub use windows_impl::native_present_facts;
+
 /// **The window this process's platform knows, named without naming a
 /// platform** (M1-1).
 ///
@@ -1005,6 +1025,69 @@ mod web_security_tests {
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect()
+    }
+
+    /// The whitespace-free text of `source` from `open` up to the first `close` after it.
+    fn between<'a>(source: &'a str, open: &str, close: &str) -> &'a str {
+        let at = source
+            .find(open)
+            .unwrap_or_else(|| panic!("`{open}` is in webview.rs"));
+        let body = &source[at + open.len()..];
+        &body[..body
+            .find(close)
+            .unwrap_or_else(|| panic!("`{close}` follows `{open}`"))]
+    }
+
+    /// RED (0.4.4 ticket 09) — **the colour scheme a page prefers is said in the same step as the
+    /// engine's other settings, before anything navigates, and a failure to say it is that step's
+    /// failure.**
+    ///
+    /// `SECURITY.md` ("The web preview") promises that every engine setting is applied in the one
+    /// step that runs before the first navigation, and that every call in it propagates its
+    /// failure. The preferred colour scheme joins that step rather than arriving after the first
+    /// page is up, which would be a flash of the operating system's scheme on every seat that
+    /// opens; and its three calls — the cast to the interface that carries the profile, the
+    /// profile itself, the setter — each name themselves in the error rather than being dropped.
+    /// The order of `Configure` before any navigation is `INSTALL_SEQUENCE`'s and `bt_app`'s
+    /// `nothing_navigates_before_every_handler_is_on`; this pins that the scheme is in it.
+    ///
+    /// MUTATION: move the `apply_color_scheme` call out of `configure`, or write `let _ =` in
+    /// front of any of its three calls, and this fails.
+    #[test]
+    fn the_preferred_colour_scheme_is_said_before_the_first_navigation_and_its_failure_is_the_steps()
+     {
+        let source = source();
+        let configure = between(
+            &source,
+            "fnconfigure(&self)->Result<Vec<WebSetting>,String>{",
+            "fnattach_events(",
+        );
+        assert!(
+            configure.contains(
+                "ifletSome(scheme)=self.color_scheme.get(){apply_color_scheme(webview,scheme)?;}"
+            ),
+            "the scheme is applied inside the configure step and its failure fails it"
+        );
+        let apply = between(
+            &source,
+            "fnapply_color_scheme(webview:&ICoreWebView2,scheme:WebColorScheme)->Result<(),String>{",
+            "fnpreferred_color_scheme(",
+        );
+        for call in [
+            "failure(\"ICoreWebView2_13\",&error))?",
+            "failure(\"ICoreWebView2_13::Profile\",&error))?",
+            "failure(\"SetPreferredColorScheme\",&error))",
+        ] {
+            assert!(apply.contains(call), "`{call}` propagates: {apply}");
+        }
+        assert!(
+            !apply.contains("let_="),
+            "nothing in the step is dropped: {apply}"
+        );
+        assert!(
+            super::INSTALL_SEQUENCE.contains(&super::InstallStep::Configure),
+            "and the step is one install walks"
+        );
     }
 
     /// The bridge is shut in both directions, and permission requests are
@@ -2506,6 +2589,10 @@ pub struct MonospaceFamily {
     pub files: Vec<std::path::PathBuf>,
 }
 
+pub mod cjk;
+pub mod ime_observation;
+pub use cjk::{CjkCoverage, CjkFamily};
+
 /// **The page Windows installs fonts on**, and the door
 /// `open_system_fonts_page` knocks on first (user ruling 2026-08-19).
 ///
@@ -3057,6 +3144,12 @@ pub fn order_monospace_families(mut families: Vec<MonospaceFamily>) -> Vec<Monos
     families
 }
 
+/// Sort and de-duplicate installed CJK-capable families for the picker.
+#[must_use]
+pub fn order_cjk_families(families: Vec<CjkFamily>) -> Vec<CjkFamily> {
+    cjk::order_for_language(families, "en-US")
+}
+
 /// Sampling this process's own window thread while it is not answering.
 ///
 /// A file of its own for the reason [`webview`] is one — a distinct unsafe
@@ -3079,6 +3172,13 @@ pub mod hang;
 /// [`instance`]'s reason: the two platforms count faults differently, and that
 /// difference should be readable on one screen.
 pub mod mem;
+
+/// **The system's pan gesture, as travel the wheel road can spend** (0.4.4
+/// ticket 11). Platform-free arithmetic over the positions Windows reports;
+/// the Windows touch door ([`let_the_system_translate_touch`]) is its only
+/// feeder, and a trackpad elsewhere already speaks the wheel.
+pub mod touch_pan;
+pub use touch_pan::{PanStep, PanTrack};
 
 /// **Everything this product gives to the machine** — the shell, the browser,
 /// Explorer, and the helper programs it starts to ask a question.
@@ -3262,13 +3362,14 @@ pub mod explorer_command;
 /// `flock` on a descriptor held for the life of the process off it. The part
 /// worth testing on either platform — which directories claim the same name —
 /// is a function of a path.
+pub mod cleanup;
 pub mod instance;
 
 mod webview;
 
 pub use webview::{
     INSTALL_SEQUENCE, InstallRollback, InstallStep, REHOST_SEQUENCE, RehostCompensation,
-    RehostOutcome, RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord,
+    RehostOutcome, RehostSide, RehostStep, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord, WebColorScheme,
     WebDpiOwnership, WebEvent, WebGuards, WebHost, WebInstallReport, WebKey, WebMouseEvent,
     WebNavigationVerdict, WebRequestVerdict, WebSetting, WebSettingRule, forget_web_environment,
     install_rollback, rehost_compensation, web_mouse_buttons, webview2_runtime_version,
@@ -3319,8 +3420,8 @@ mod windows_impl {
         },
         Graphics::DirectWrite::{
             DWRITE_FACTORY_TYPE_SHARED, DWriteCreateFactory, IDWriteFactory, IDWriteFont1,
-            IDWriteFontCollection, IDWriteFontFace, IDWriteFontFile, IDWriteLocalFontFileLoader,
-            IDWriteLocalizedStrings,
+            IDWriteFontCollection, IDWriteFontFace, IDWriteFontFamily, IDWriteFontFile,
+            IDWriteLocalFontFileLoader, IDWriteLocalizedStrings,
         },
         Graphics::Dwm::{
             DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_AUTO, DWMSBT_NONE,
@@ -3382,43 +3483,52 @@ mod windows_impl {
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
                 KeyboardAndMouse::{GetCapture, GetKeyboardLayout, SetFocus, VkKeyScanW},
+                // One call that undoes one winit makes, and the four that answer
+                // the system's pan gesture — see
+                // [`let_the_system_translate_touch`].
+                Touch::{
+                    CloseGestureInfoHandle, GESTURECONFIG, GESTUREINFO, GID_PAN, GetGestureInfo,
+                    HGESTUREINFO, SetGestureConfig, UnregisterTouchWindow,
+                },
             },
             Shell::{
                 ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA, Common::COMDLG_FILTERSPEC, DefSubclassProc,
                 FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
                 FOF_WANTNUKEWARNING, FOLDERID_Documents, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
-                FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem,
-                ITaskbarList3, KF_FLAG_DONT_VERIFY, RemoveWindowSubclass, SHAppBarMessage,
-                SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify, SHCreateItemFromParsingName,
-                SHFILEOPSTRUCTW, SHFileOperationW, SHGetKnownFolderPath, SIGDN_FILESYSPATH,
-                SetWindowSubclass, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL,
-                TBPF_PAUSED, TaskbarList,
+                FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
+                IFileOpenDialog, IFileSaveDialog, IShellItem, ITaskbarList3, KF_FLAG_DONT_VERIFY,
+                RemoveWindowSubclass, SHAppBarMessage, SHCNE_ASSOCCHANGED, SHCNF_IDLIST,
+                SHChangeNotify, SHCreateItemFromParsingName, SHFILEOPSTRUCTW, SHFileOperationW,
+                SHGetKnownFolderPath, SIGDN_FILESYSPATH, SetWindowSubclass, TBPF_ERROR,
+                TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED, TaskbarList,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
-                FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GA_ROOT,
-                GCLP_HBRBACKGROUND, GetAncestor, GetClientRect, GetCursorPos, GetSystemMetrics,
-                GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
-                HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic,
-                IsZoomed, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO,
-                MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, RegisterWindowMessageW, SM_CXFRAME,
-                SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
-                SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-                SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
+                AppendMenuW, CreateCaret, CreatePopupMenu, DefWindowProcW, DestroyCaret,
+                DestroyMenu, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GA_ROOT,
+                GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GetAncestor, GetClientRect, GetCursorPos,
+                GetSystemMetrics, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
+                HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST,
+                HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND,
+                MF_STRING, MINMAXINFO, MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW,
+                RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN,
+                SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos,
+                SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
                 TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DPICHANGED,
-                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_NCHITTEST,
-                WM_SETTINGCHANGE, WM_THEMECHANGED, WM_WINDOWPOSCHANGING, WindowFromPoint,
+                WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE, WM_GETMINMAXINFO, WM_NCCALCSIZE,
+                WM_NCDESTROY, WM_NCHITTEST, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
+                WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH, WM_WINDOWPOSCHANGING, WindowFromPoint,
             },
         },
     };
 
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
-        INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PendingWindowPos, PlatformChrome,
-        TaskbarProgress, TaskbarProgressState, ThreadPriority, VisualLayer, WheelScrollAmount,
-        WindowRect, composition_visual_offset, custom_frame_hit_test, hold_pending_pos_to,
-        logical_px_for_dpi, window_skirt,
+        INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PanStep, PanTrack, PendingWindowPos,
+        PlatformChrome, TaskbarProgress, TaskbarProgressState, ThreadPriority, VisualLayer,
+        WheelScrollAmount, WindowRect, composition_visual_offset, custom_frame_hit_test,
+        hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -3463,10 +3573,13 @@ mod windows_impl {
     const DEFERRED_MATH_MENU_MESSAGE: u32 = WM_APP + 0x4b7;
     const DEFERRED_FOLDER_PICKER_MESSAGE: u32 = WM_APP + 0x4b8;
     const DEFERRED_IMAGE_PICKER_MESSAGE: u32 = WM_APP + 0x4b9;
+    const DEFERRED_SAVE_FILE_PICKER_MESSAGE: u32 = WM_APP + 0x4ba;
     const MATH_MENU_SUBCLASS_ID: usize = 0x4254_4d4d;
     const FOLDER_PICKER_SUBCLASS_ID: usize = 0x4254_4650;
     const IMAGE_PICKER_SUBCLASS_ID: usize = 0x4254_4950;
+    const SAVE_FILE_PICKER_SUBCLASS_ID: usize = 0x4254_5350;
     const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
+    const TOUCH_SUBCLASS_ID: usize = 0x4254_5443;
     const TASKBAR_SUBCLASS_ID: usize = 0x4254_5442;
     const SYSTEM_SETTINGS_SUBCLASS_ID: usize = 0x4254_5343;
 
@@ -5147,6 +5260,411 @@ mod windows_impl {
         }
     }
 
+    /// **The messages a touch makes that Windows' own translation has to see**,
+    /// handed to `DefWindowProc` ahead of winit's window procedure (owner
+    /// ruling 2026-09-21).
+    ///
+    /// These four and no others, because these four are exactly the ones winit
+    /// 0.30.13 takes for itself: `WM_TOUCH` and `WM_POINTERDOWN` /
+    /// `WM_POINTERUPDATE` / `WM_POINTERUP` are turned into
+    /// `WindowEvent::Touch` and answered with `ProcResult::Value(0)`, so the
+    /// default handling that would have made a mouse out of them never runs
+    /// (`winit::platform_impl::windows::event_loop::public_window_callback`).
+    /// Every other message a touch raises — `WM_GESTURENOTIFY`,
+    /// `WM_POINTERENTER`, `WM_POINTERLEAVE`,
+    /// `WM_TABLET_QUERYSYSTEMGESTURESTATUS`, and `WM_GESTURE` for every gesture
+    /// but a pan — falls through winit's own default arm to `DefWindowProc`
+    /// already, and a window that answers nothing to the
+    /// `WM_TABLET_QUERYSYSTEMGESTURESTATUS` *receives every system gesture*,
+    /// press-and-hold included, which is the documented default
+    /// (<https://learn.microsoft.com/en-us/windows/win32/tablet/wm-tablet-querysystemgesturestatus-message>).
+    /// Naming one of them here would be a second statement of a route that is
+    /// already right. **The one exception is a `WM_GESTURE` whose gesture is
+    /// `GID_PAN`** (0.4.4 ticket 11): it is answered, not handed over — see
+    /// [`the_system_s_gesture_is_answered_here`] — and it is a different
+    /// question from this list's, because the system has already recognised
+    /// it; this list is the raw input the system has still to recognise.
+    ///
+    /// **All of the pointer input or none of it.** `WM_POINTERDOWN`'s own
+    /// remarks are explicit that *"if an application selectively consumes some
+    /// pointer input and passes the rest to DefWindowProc, the resulting
+    /// behavior is undefined"*
+    /// (<https://learn.microsoft.com/en-us/windows/win32/inputmsg/wm-pointerdown>),
+    /// so this list is the whole of what winit would have consumed rather than
+    /// the part of it somebody wanted back.
+    const TOUCH_GOES_TO_THE_SYSTEM: [u32; 4] =
+        [WM_TOUCH, WM_POINTERUPDATE, WM_POINTERDOWN, WM_POINTERUP];
+
+    /// Whether this message is one of [`TOUCH_GOES_TO_THE_SYSTEM`].
+    ///
+    /// The subclass's whole routing decision, as a function, so that what is
+    /// forwarded is a thing a test can ask rather than a thing a test has to
+    /// deliver a finger to.
+    fn touch_goes_to_the_system(message: u32) -> bool {
+        TOUCH_GOES_TO_THE_SYSTEM.contains(&message)
+    }
+
+    /// **The pan configuration this window asks the system for** (0.4.4
+    /// ticket 11), as the `GESTURECONFIG` `SetGestureConfig` takes.
+    ///
+    /// The `GC_PAN*` numbers are the ones `SetGestureConfig`'s own table gives
+    /// (<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setgestureconfig>)
+    /// — spelled here rather than imported because the `windows` crate files
+    /// them under `Win32_System_SystemServices`, a whole namespace compiled
+    /// for five integers.
+    ///
+    /// **What each bit is for.** `GC_PAN` is *"all pan gestures"* and must be
+    /// wanted before either single-finger bit can be (*"You must set the want
+    /// bits for GC_PAN before you can set them for
+    /// GC_PAN_WITH_SINGLE_FINGER_HORIZONTALLY or
+    /// GC_PAN_WITH_SINGLE_FINGER_VERTICALLY"*,
+    /// <https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-gestureconfig>).
+    /// The two single-finger bits are the point of the ticket: without them a
+    /// one-finger slide over a window with no scroll bar is not a pan to the
+    /// system, and its fallback is the mouse drag the owner saw select text on
+    /// next86. The gutter keeps a vertical slide vertical until the finger
+    /// clearly leaves it, and inertia is the system's own flick — both are the
+    /// system's feel, asked for by name because *"You should explicitly set all
+    /// the flags that you want enabled or disabled when controlling
+    /// single-finger panning"* (the `SetGestureConfig` page again). Nothing is
+    /// blocked, and no other gesture is configured: zoom, rotate, two-finger
+    /// tap and press-and-tap keep the system's defaults and its answers.
+    fn pan_gesture_configuration() -> GESTURECONFIG {
+        const GC_PAN: u32 = 0x01;
+        const GC_PAN_WITH_SINGLE_FINGER_VERTICALLY: u32 = 0x02;
+        const GC_PAN_WITH_SINGLE_FINGER_HORIZONTALLY: u32 = 0x04;
+        const GC_PAN_WITH_GUTTER: u32 = 0x08;
+        const GC_PAN_WITH_INERTIA: u32 = 0x10;
+        GESTURECONFIG {
+            dwID: GID_PAN,
+            dwWant: GC_PAN
+                | GC_PAN_WITH_SINGLE_FINGER_VERTICALLY
+                | GC_PAN_WITH_SINGLE_FINGER_HORIZONTALLY
+                | GC_PAN_WITH_GUTTER
+                | GC_PAN_WITH_INERTIA,
+            dwBlock: 0,
+        }
+    }
+
+    /// **Whether this recognised gesture is answered here rather than handed
+    /// to `DefWindowProc`** — `GID_PAN`, and nothing else.
+    ///
+    /// A pan is the one gesture whose default answer is wrong for this window:
+    /// the default handler turns it into `WM_VSCROLL` / `WM_HSCROLL`
+    /// (*"The pan gesture maps to using the scroll wheel"* — legacy support,
+    /// <https://learn.microsoft.com/en-us/windows/win32/wintouch/windows-touch-gestures-overview>),
+    /// which is a scroll-bar message, and this window has no scroll bar and
+    /// winit reads neither. Every other id keeps its default: `GID_BEGIN` and
+    /// `GID_END` above all, because *"Application behavior is undefined when
+    /// the GID_BEGIN and GID_END messages are consumed by a third-party
+    /// application"* (same page); zoom's default is `Ctrl`+wheel, which this
+    /// window already answers; and the rest are the system's to keep.
+    fn the_system_s_gesture_is_answered_here(id: u32) -> bool {
+        id == GID_PAN.0
+    }
+
+    /// Everything the touch subclass reads, in one stable allocation the
+    /// subclass owns and frees — see [`let_the_system_translate_touch`].
+    struct TouchToTheSystem {
+        /// **The self-report** (`docs/CONVENTIONS.md` §十 rule 2): a touch that
+        /// reached this window at all, said once, so that the road can be shown
+        /// to have been walked before anything about the far end of it is
+        /// claimed.
+        report: Box<dyn Fn()>,
+        /// Whether [`Self::report`] has been spent. A `Cell` and not an atomic
+        /// for `TaskbarState`'s reason: both sides are the window's own thread,
+        /// and an atomic here would be a claim about sharing that is not true.
+        reported: Cell<bool>,
+        /// **Where an answered pan goes** (0.4.4 ticket 11): one call per
+        /// `WM_GESTURE` that moved or opened a pan. It runs inside the
+        /// window's message dispatch, so it may park the step and wake the
+        /// loop and nothing else (`docs/ARCHITECTURE.md` §5.1, way (2)).
+        panned: Box<dyn Fn(PanStep)>,
+        /// The pan this window is in the middle of — the system's last
+        /// position and nothing more. See [`PanTrack`].
+        pan: Cell<PanTrack>,
+    }
+
+    impl TouchToTheSystem {
+        /// A `GID_PAN` message, read. The step it makes, if it makes one, goes
+        /// to [`Self::panned`]; a message that neither opens nor moves a pan
+        /// says nothing.
+        fn pan_moved(&self, begins: bool, ends: bool, screen: (i32, i32), client: (i32, i32)) {
+            let mut pan = self.pan.get();
+            let step = pan.step(begins, ends, screen, client);
+            self.pan.set(pan);
+            if let Some(step) = step {
+                (self.panned)(step);
+            }
+        }
+
+        /// A touch message arrived on this window. The first one says so and
+        /// every one after it says nothing — a finger that is drawing a line
+        /// raises these by the hundred.
+        fn arrived(&self) {
+            if self.reported.replace(true) {
+                return;
+            }
+            (self.report)();
+        }
+    }
+
+    /// **Touch is the system's to translate, and this is the window saying so**
+    /// (owner ruling 2026-09-21).
+    ///
+    /// # What was wrong
+    ///
+    /// Folio answered nothing to a finger: no tap, no drag, no scroll, on a
+    /// touch screen or through a remote-desktop tool that sends touch. Two
+    /// facts, and the second is a consequence of the first. winit registers
+    /// every window on a machine with a digitizer for touch input —
+    /// `RegisterTouchWindow(window, TWF_WANTPALM)` in its own window
+    /// constructor — and *"by default, you receive `WM_GESTURE` messages
+    /// instead of `WM_TOUCH` messages. If you call `RegisterTouchWindow`, you
+    /// will stop receiving `WM_GESTURE` messages"*
+    /// (<https://learn.microsoft.com/en-us/windows/win32/wintouch/getting-started-with-multi-touch-messages>;
+    /// the two are *"mutually exclusive"* per
+    /// <https://learn.microsoft.com/en-us/windows/win32/wintouch/troubleshooting-applications>).
+    /// So the system's gesture engine — the thing that makes a tap a click, a
+    /// drag a scroll with its own inertia, and a press-and-hold a right click —
+    /// was switched off for this window. And winit then consumed the raw
+    /// messages that were left ([`TOUCH_GOES_TO_THE_SYSTEM`]) to deliver
+    /// `WindowEvent::Touch`, which this program does not read, so nothing was
+    /// promoted to mouse input either.
+    ///
+    /// # What this does, and why it is not a gesture engine of our own
+    ///
+    /// The owner's ruling is that Folio writes no translation from touch to
+    /// anything: *the system* turns touch into the mouse, as it does for every
+    /// ordinary Windows program, with the system's own feel. One engine that
+    /// nobody here maintains beats one that somebody here does.
+    ///
+    /// Two halves, and each is one sentence:
+    ///
+    /// 1. **The window is unregistered for touch**, which hands the gesture
+    ///    engine back (`UnregisterTouchWindow`). Best-effort and not propagated:
+    ///    on a machine with no digitizer winit never registered the window, so
+    ///    this refuses, and a refusal there means the thing it asks for is
+    ///    already true.
+    /// 2. **A subclass gives the four messages winit would consume to
+    ///    `DefWindowProc` instead**, before winit's window procedure can see
+    ///    them — a subclass procedure runs ahead of the original window
+    ///    procedure, which is the class procedure winit registered, and
+    ///    `DefSubclassProc` is what would carry a message on to it. *"If the
+    ///    application does not process this message, it should call
+    ///    `DefWindowProc` … `DefWindowProc` may generate one or more
+    ///    `WM_GESTURE` messages if the sequence of input from this and,
+    ///    possibly, other pointers is recognized as a gesture. If a gesture is
+    ///    not recognized, `DefWindowProc` may generate mouse input"*
+    ///    (<https://learn.microsoft.com/en-us/windows/win32/inputmsg/wm-pointerdown>).
+    ///    `WM_TOUCH` is in the list for the same reason and for one of its own:
+    ///    *"If the application does not process the message, it must call
+    ///    `DefWindowProc`. Not doing so causes the application to leak memory
+    ///    because the touch input handle is not closed"*
+    ///    (<https://learn.microsoft.com/en-us/windows/win32/wintouch/wm-touchdown>)
+    ///    — and after step 1 a `WM_TOUCH` should not arrive at all, so the entry
+    ///    is what holds the window between this call and a registration that
+    ///    could not be given back.
+    ///
+    /// What arrives afterwards is `WM_LBUTTONDOWN`, `WM_MOUSEMOVE`,
+    /// `WM_MOUSEWHEEL` and the rest, which winit reads and this program has
+    /// answered since its first window.
+    ///
+    /// # The one gesture it answers (0.4.4 ticket 11)
+    ///
+    /// A pan's default answer is a scroll-bar message, and this window has no
+    /// scroll bar — so on next86 a two-finger slide did nothing, and a
+    /// one-finger slide, which the system did not treat as a pan here, fell
+    /// back to a mouse drag and selected text. Two more statements, and
+    /// neither recognises anything:
+    ///
+    /// 3. **The window asks for single-finger pan with the system's gutter and
+    ///    inertia** ([`pan_gesture_configuration`]), once, here — *"If you
+    ///    don't expect to change the gesture configuration, call
+    ///    `SetGestureConfig` at window creation time"*
+    ///    (<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setgestureconfig>),
+    ///    and the setting holds *"for the lifetime of the Window"*. So
+    ///    `WM_GESTURENOTIFY`, the dynamic alternative, still goes to
+    ///    `DefWindowProc` untouched.
+    /// 4. **The subclass answers `WM_GESTURE` when its gesture is `GID_PAN`**
+    ///    by handing the pan's travel to `panned` ([`PanTrack`]: this position
+    ///    minus the last one) and closing the gesture handle, as a handled
+    ///    `WM_GESTURE` must. Every other gesture id — `GID_BEGIN` and `GID_END`
+    ///    included — goes on to winit's procedure and from its default arm to
+    ///    `DefWindowProc`, which closes the handle itself.
+    ///
+    /// `panned` is called inside message dispatch on the window's thread, so it
+    /// parks the step and wakes the loop and does nothing else.
+    ///
+    /// # What could be verified by reading, and what could not
+    ///
+    /// Read and held by tests: the four ids, that nothing else is taken away
+    /// from winit, that a window that is not ours is refused, and that the
+    /// self-report is said once per window. Read and *not* testable here: that
+    /// winit registers for touch and consumes exactly those four (its own
+    /// source, version 0.30.13), and the documented promotion quoted above.
+    /// **Only a real touch source on the owner's machine can show that a tap
+    /// reaches the terminal** — which is what `report` is for.
+    ///
+    /// # Called once per window
+    ///
+    /// Beside the rest of a window's native setup. A second call on the same
+    /// window would replace the first's reference data rather than add a
+    /// second subclass, and the first allocation would never be reclaimed;
+    /// nothing calls it twice.
+    pub fn let_the_system_translate_touch(
+        window: NativeWindow,
+        report: Box<dyn Fn()>,
+        panned: Box<dyn Fn(PanStep)>,
+    ) -> Result<(), String> {
+        let hwnd = window.as_hwnd();
+        let state = Box::into_raw(Box::new(TouchToTheSystem {
+            report,
+            reported: Cell::new(false),
+            panned,
+            pan: Cell::new(PanTrack::default()),
+        }));
+        // SAFETY: `state` is a live allocation handed to the subclass as its
+        // reference data, and the subclass reclaims it at `WM_NCDESTROY` —
+        // after which no further message can reach that procedure. The window
+        // is this thread's; `SetWindowSubclass` refuses any other.
+        let installed = unsafe {
+            SetWindowSubclass(
+                hwnd,
+                Some(touch_to_the_system_subclass),
+                TOUCH_SUBCLASS_ID,
+                state as usize,
+            )
+        };
+        if !installed.as_bool() {
+            // SAFETY: nothing took the pointer, so this is its only reclaim.
+            drop(unsafe { Box::from_raw(state) });
+            return Err(format!(
+                "SetWindowSubclass(touch to the system) failed: {}",
+                unsafe { GetLastError().0 }
+            ));
+        }
+        // SAFETY: as above. A window that was never registered for touch
+        // refuses, which is the answer this call wanted anyway.
+        let _ = unsafe { UnregisterTouchWindow(hwnd) };
+        // SAFETY: one configuration for this thread's own window, read by the
+        // call and not kept. A refusal leaves the subclass installed — taps and
+        // presses still reach the system — and is said, because a window whose
+        // one-finger slide still selects is a report somebody will make.
+        unsafe {
+            SetGestureConfig(
+                hwnd,
+                0,
+                &[pan_gesture_configuration()],
+                std::mem::size_of::<GESTURECONFIG>() as u32,
+            )
+        }
+        .map_err(|error| format!("SetGestureConfig(single-finger pan) failed: {error}"))
+    }
+
+    /// [`let_the_system_translate_touch`]'s half that runs on the messages.
+    unsafe extern "system" fn touch_to_the_system_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        reference_data: usize,
+    ) -> LRESULT {
+        // **The window is going**, and this is where a subclass with an
+        // allocation behind it lets go of both — the shape the documented
+        // `SetWindowSubclass` sample has: remove the subclass, then carry the
+        // message on. `CustomWindowFrame` removes its own in `Drop` instead
+        // because a value in the application holds it; this one is held by
+        // nothing above, so the last message is its owner.
+        if message == WM_NCDESTROY {
+            let _ = unsafe {
+                RemoveWindowSubclass(hwnd, Some(touch_to_the_system_subclass), TOUCH_SUBCLASS_ID)
+            };
+            // SAFETY: the allocation `let_the_system_translate_touch` handed to
+            // this subclass, reclaimed here and only here. `WM_NCDESTROY`
+            // arrives once per window and nothing reaches this procedure after
+            // it, so no later message can read the freed state.
+            drop(unsafe { Box::from_raw(reference_data as *mut TouchToTheSystem) });
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        if message == WM_GESTURE {
+            // SAFETY: as below — live until `WM_NCDESTROY`, this thread's.
+            let state = unsafe { &*(reference_data as *const TouchToTheSystem) };
+            // SAFETY: `lParam` of a `WM_GESTURE` is the gesture handle, valid
+            // until it is closed — here, or by `DefWindowProc` down the chain.
+            if unsafe { answer_the_pan(hwnd, state, HGESTUREINFO(lparam.0 as *mut c_void)) } {
+                // *"If an application processes this message, it should
+                // return 0."*
+                return LRESULT(0);
+            }
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        if !touch_goes_to_the_system(message) {
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        // SAFETY: the allocation above is live until the `WM_NCDESTROY` handled
+        // above, and this procedure runs on the thread that owns the window.
+        let state = unsafe { &*(reference_data as *const TouchToTheSystem) };
+        state.arrived();
+        // **`DefWindowProcW` and not `DefSubclassProc`, and that is the whole
+        // ticket**: the default handling runs now and winit's window procedure
+        // never sees the message, so the system translates it instead of
+        // delivering it to a program that reads nothing.
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+
+    /// **A recognised gesture, answered if it is a pan** — `true` when it was,
+    /// and the handle is then closed; `false` when it is the system's, and the
+    /// handle is left for `DefWindowProc` to close.
+    ///
+    /// The protocol is the one `WM_GESTURE`'s page states
+    /// (<https://learn.microsoft.com/en-us/windows/win32/wintouch/wm-gesture>):
+    /// `GetGestureInfo` reads the handle, a handled message closes it with
+    /// `CloseGestureInfoHandle` (*"should close the gesture input handle for
+    /// messages that you do handle"*), and an unhandled one *"must call
+    /// DefWindowProc. Not doing so will cause the application to leak memory"*
+    /// — so the handle is closed on exactly one of the two paths. A handle
+    /// `GetGestureInfo` cannot read is not answered: the system gets it back.
+    ///
+    /// `ptsLocation` is *"the current position of the pan"* in *"physical
+    /// screen coordinates"*; the client point is the same position through
+    /// `ScreenToClient`, which is the currency of `WM_MOUSEMOVE`.
+    ///
+    /// # Safety
+    ///
+    /// `handle` is the `lParam` of a `WM_GESTURE` delivered to `hwnd` on this
+    /// thread and not yet closed.
+    unsafe fn answer_the_pan(hwnd: HWND, state: &TouchToTheSystem, handle: HGESTUREINFO) -> bool {
+        let mut info = GESTUREINFO {
+            cbSize: std::mem::size_of::<GESTUREINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: the caller's handle, and a structure sized as the call asks.
+        if unsafe { GetGestureInfo(handle, &mut info) }.is_err()
+            || !the_system_s_gesture_is_answered_here(info.dwID)
+        {
+            return false;
+        }
+        let screen = (i32::from(info.ptsLocation.x), i32::from(info.ptsLocation.y));
+        let mut client = POINT {
+            x: screen.0,
+            y: screen.1,
+        };
+        // SAFETY: this thread's own window and a point on the stack. A refusal
+        // leaves the screen point, which moves by the same travel.
+        let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client) };
+        state.pan_moved(
+            info.dwFlags & GF_BEGIN != 0,
+            info.dwFlags & GF_END != 0,
+            screen,
+            (client.x, client.y),
+        );
+        // SAFETY: handled, so closed here and nowhere else.
+        let _ = unsafe { CloseGestureInfoHandle(handle) };
+        true
+    }
+
     /// Everything the taskbar subclass reads, kept in one stable allocation the
     /// owning [`Taskbar`] holds for as long as the subclass is installed.
     ///
@@ -6477,6 +6995,223 @@ mod windows_impl {
         LRESULT(0)
     }
 
+    type SaveFilePickerState = DeferredState<(Vec<u16>, Vec<u16>), Result<Option<PathBuf>, String>>;
+
+    /// **The system's own save dialog** — `IFileSaveDialog`, on
+    /// [`FolderPicker`]'s deferred footing and for its reason word for word
+    /// (0.4.4 ticket 05: `Settings ▸ Export…`).
+    ///
+    /// `IFileDialog::Show` is modal and runs a nested message loop, so a press
+    /// only *posts*: the dialog opens from the subclass after the winit callback
+    /// has returned, and the chosen path waits here for the next turn of the loop
+    /// to collect it. Its own bridge rather than a mode of [`ImagePicker`],
+    /// because the deferral's contract is one gesture in flight per bridge, and
+    /// an open dialog and a save dialog are two gestures one page can make one
+    /// after the other.
+    pub struct SaveFilePicker {
+        hwnd: HWND,
+        state: Arc<SaveFilePickerState>,
+    }
+
+    impl SaveFilePicker {
+        pub fn new(window: NativeWindow) -> Result<Self, String> {
+            let hwnd = window.as_hwnd();
+            let state = Arc::new(SaveFilePickerState::new());
+            // SAFETY: installation and removal occur on the HWND's event-loop thread. The Arc
+            // keeps dwRefData live for the full installed interval; the callback takes its own
+            // temporary strong reference before entering the nested dialog loop.
+            let installed = unsafe {
+                SetWindowSubclass(
+                    hwnd,
+                    Some(save_file_picker_subclass),
+                    SAVE_FILE_PICKER_SUBCLASS_ID,
+                    Arc::as_ptr(&state) as usize,
+                )
+            };
+            if !installed.as_bool() {
+                return Err(format!(
+                    "SetWindowSubclass(save dialog) failed: {}",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            Ok(Self { hwnd, state })
+        }
+
+        /// Queue the dialog once, opening in `start` if that names a folder and
+        /// offering `name` — whose extension is also the one type the dialog
+        /// filters on and appends.
+        ///
+        /// A second request while one is posted, showing or waiting to be
+        /// collected returns `Ok(false)`, as every deferred door here does.
+        pub fn request(&self, start: Option<&Path>, name: &str) -> Result<bool, String> {
+            let start = start
+                .map(|start| {
+                    let mut units = start.as_os_str().encode_wide().collect::<Vec<_>>();
+                    units.push(0);
+                    units
+                })
+                .unwrap_or_default();
+            if !self.state.begin_request((start, wide_null(name))) {
+                return Ok(false);
+            }
+            // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
+            // and never dispatches the subclass synchronously on this callback stack.
+            if let Err(error) = unsafe {
+                PostMessageW(
+                    Some(self.hwnd),
+                    DEFERRED_SAVE_FILE_PICKER_MESSAGE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            } {
+                self.state.cancel_request();
+                return Err(format!("PostMessageW(save dialog) failed: {error}"));
+            }
+            Ok(true)
+        }
+
+        /// The chosen path, `None` for a cancelled dialog, or the reason the
+        /// dialog could not be shown — once, and only once the dialog is shut.
+        pub fn take_result(&self) -> Option<Result<Option<PathBuf>, String>> {
+            self.state.take_result()
+        }
+    }
+
+    impl Drop for SaveFilePicker {
+        fn drop(&mut self) {
+            // SAFETY: this object is dropped on the same event-loop thread that installed the
+            // subclass. A callback already inside the dialog owns a temporary Arc, so nested
+            // CloseRequested teardown cannot invalidate its state.
+            let _ = unsafe {
+                RemoveWindowSubclass(
+                    self.hwnd,
+                    Some(save_file_picker_subclass),
+                    SAVE_FILE_PICKER_SUBCLASS_ID,
+                )
+            };
+        }
+    }
+
+    unsafe extern "system" fn save_file_picker_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        reference_data: usize,
+    ) -> LRESULT {
+        if message != DEFERRED_SAVE_FILE_PICKER_MESSAGE {
+            // SAFETY: forwarding untouched messages is the required subclass contract.
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        let state_pointer = reference_data as *const SaveFilePickerState;
+        if state_pointer.is_null() {
+            return LRESULT(0);
+        }
+        // SAFETY: the installed SaveFilePicker owns one Arc at callback entry. Incrementing
+        // before constructing the temporary Arc keeps state alive even if a nested
+        // CloseRequested drops the Runtime while the dialog is open.
+        unsafe { Arc::increment_strong_count(state_pointer) };
+        // SAFETY: the increment immediately above created the strong reference consumed here.
+        let state = unsafe { Arc::from_raw(state_pointer) };
+        if let Some((start, name)) = state.begin_showing() {
+            state.complete(show_save_picker(hwnd, &start, &name));
+        }
+        LRESULT(0)
+    }
+
+    /// The extension a suggested file name ends in, without its dot — the one
+    /// type [`show_save_picker`] filters on and appends.
+    fn save_extension(name: &[u16]) -> Option<String> {
+        let name = String::from_utf16_lossy(name.strip_suffix(&[0]).unwrap_or(name));
+        let (_, extension) = name.rsplit_once('.')?;
+        (!extension.is_empty()).then(|| extension.to_owned())
+    }
+
+    /// Show `IFileSaveDialog` and report what came back — [`show_shell_picker`]'s
+    /// twin for the one dialog that names a file which is not there yet.
+    ///
+    /// The dialog's own defaults are kept, including its question before
+    /// replacing a file that exists: that is the system's sentence in the
+    /// system's dialog, not a check this product adds.
+    fn show_save_picker(
+        hwnd: HWND,
+        start: &[u16],
+        name: &[u16],
+    ) -> Result<Option<PathBuf>, String> {
+        // SAFETY: as `show_shell_picker` — the window's own GUI thread, reached only from the
+        // posted-message subclass after winit's initiating callback has returned; the apartment
+        // is balanced here and every COM object is released at the end of its scope.
+        unsafe {
+            let apartment = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            if apartment == RPC_E_CHANGED_MODE {
+                return Err("the event-loop thread is not a single-threaded apartment".to_owned());
+            }
+            let balance = apartment.is_ok();
+            let result = (|| {
+                let dialog: IFileSaveDialog =
+                    CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|error| format!("CoCreateInstance(FileSaveDialog): {error}"))?;
+                let options = dialog
+                    .GetOptions()
+                    .map_err(|error| format!("IFileDialog::GetOptions: {error}"))?;
+                dialog
+                    .SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
+                    .map_err(|error| format!("IFileDialog::SetOptions: {error}"))?;
+                // The type the name already carries, so the file written is the
+                // file offered. A failure here leaves an unfiltered dialog, which
+                // still saves a file.
+                let filter_name: Vec<u16>;
+                let filter_spec: Vec<u16>;
+                let extension: Vec<u16>;
+                if let Some(ext) = save_extension(name) {
+                    filter_name = wide_null(&ext.to_ascii_uppercase());
+                    filter_spec = wide_null(&format!("*.{ext}"));
+                    extension = wide_null(&ext);
+                    let filters = [COMDLG_FILTERSPEC {
+                        pszName: PCWSTR(filter_name.as_ptr()),
+                        pszSpec: PCWSTR(filter_spec.as_ptr()),
+                    }];
+                    let _ = dialog.SetFileTypes(&filters);
+                    let _ = dialog.SetDefaultExtension(PCWSTR(extension.as_ptr()));
+                }
+                if name.len() > 1 {
+                    let _ = dialog.SetFileName(PCWSTR(name.as_ptr()));
+                }
+                if start.len() > 1
+                    && let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(
+                        PCWSTR(start.as_ptr()),
+                        None,
+                    )
+                {
+                    let _ = dialog.SetFolder(&folder);
+                }
+                if let Err(error) = dialog.Show(Some(hwnd)) {
+                    return if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
+                        Ok(None)
+                    } else {
+                        Err(format!("IFileDialog::Show: {error}"))
+                    };
+                }
+                let item = dialog
+                    .GetResult()
+                    .map_err(|error| format!("IFileSaveDialog::GetResult: {error}"))?;
+                let chosen = item
+                    .GetDisplayName(SIGDN_FILESYSPATH)
+                    .map_err(|error| format!("IShellItem::GetDisplayName: {error}"))?;
+                let path = chosen.to_string();
+                // The shell allocated it; the shell's allocator frees it.
+                CoTaskMemFree(Some(chosen.0.cast()));
+                path.map(|path| Some(PathBuf::from(path)))
+                    .map_err(|error| format!("the chosen file's name is not UTF-16: {error}"))
+            })();
+            if balance {
+                CoUninitialize();
+            }
+            result
+        }
+    }
+
     /// Put this window above (or back among) the others — `HWND_TOPMOST` /
     /// `HWND_NOTOPMOST`.
     ///
@@ -6662,6 +7397,9 @@ mod windows_impl {
         /// every launcher shipped as one, and what may be started is the
         /// operating system's answer rather than this dialog's.
         Program,
+        /// An exported settings file (0.4.4 ticket 05: `Settings ▸ Import…`),
+        /// filtered to `*.json` — the one type an export is written as.
+        SettingsFile,
     }
 
     /// Show `IFileOpenDialog` and report what came back.
@@ -6722,7 +7460,7 @@ mod windows_impl {
                     // profile's shell and would grey the row the next time the
                     // dialog was opened, with nothing on screen to connect the
                     // two.
-                    ShellPickKind::Image | ShellPickKind::Program => {
+                    ShellPickKind::Image | ShellPickKind::Program | ShellPickKind::SettingsFile => {
                         options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST
                     }
                 };
@@ -6739,6 +7477,14 @@ mod windows_impl {
                 if kind == ShellPickKind::Image {
                     filter_name = wide_null("Images");
                     filter_spec = wide_null(&crate::image_file_filter_spec());
+                    let filters = [COMDLG_FILTERSPEC {
+                        pszName: PCWSTR(filter_name.as_ptr()),
+                        pszSpec: PCWSTR(filter_spec.as_ptr()),
+                    }];
+                    let _ = dialog.SetFileTypes(&filters);
+                } else if kind == ShellPickKind::SettingsFile {
+                    filter_name = wide_null("JSON");
+                    filter_spec = wide_null("*.json");
                     let filters = [COMDLG_FILTERSPEC {
                         pszName: PCWSTR(filter_name.as_ptr()),
                         pszSpec: PCWSTR(filter_spec.as_ptr()),
@@ -6779,6 +7525,7 @@ mod windows_impl {
                     ShellPickKind::Folder => "folder",
                     ShellPickKind::Image => "picture",
                     ShellPickKind::Program => "program",
+                    ShellPickKind::SettingsFile => "settings file",
                 };
                 path.map(|path| Some(PathBuf::from(path)))
                     .map_err(|error| format!("the chosen {noun}'s name is not UTF-16: {error}"))
@@ -6809,7 +7556,13 @@ mod windows_impl {
         }
 
         pub fn update(&mut self, x: i32, y: i32) -> Result<(), String> {
+            crate::ime_trace::line(|| {
+                crate::ime_trace::caret_line("update", x, y, self.active, "call")
+            });
             if !active_layout_is_chinese() {
+                crate::ime_trace::line(|| {
+                    crate::ime_trace::caret_line("update", x, y, self.active, "layout_not_chinese")
+                });
                 self.destroy();
                 return Ok(());
             }
@@ -6819,23 +7572,60 @@ mod windows_impl {
             // the non-painted compatibility caret used only as an IME positioning signal.
             unsafe {
                 if !self.active {
-                    CreateCaret(self.hwnd, None, 1, 1)
-                        .map_err(|error| format!("CreateCaret(1x1) failed: {error}"))?;
+                    let created = CreateCaret(self.hwnd, None, 1, 1);
+                    crate::ime_trace::line(|| {
+                        crate::ime_trace::caret_line(
+                            "create",
+                            x,
+                            y,
+                            self.active,
+                            if created.is_ok() { "ok" } else { "error" },
+                        )
+                    });
+                    created.map_err(|error| format!("CreateCaret(1x1) failed: {error}"))?;
                     self.active = true;
                 }
-                SetCaretPos(x, y).map_err(|error| format!("SetCaretPos failed: {error}"))?;
+                let positioned = SetCaretPos(x, y);
+                crate::ime_trace::line(|| {
+                    crate::ime_trace::caret_line(
+                        "position",
+                        x,
+                        y,
+                        self.active,
+                        if positioned.is_ok() { "ok" } else { "error" },
+                    )
+                });
+                positioned.map_err(|error| format!("SetCaretPos failed: {error}"))?;
             }
             Ok(())
         }
 
         pub fn destroy(&mut self) {
+            crate::ime_trace::line(|| {
+                crate::ime_trace::caret_line(
+                    "destroy",
+                    0,
+                    0,
+                    self.active,
+                    if self.active { "call" } else { "inactive" },
+                )
+            });
             if !self.active {
                 return;
             }
             // SAFETY: this object is dropped/disabled on the same event-loop thread that created
             // the thread-affine caret. There is no borrowed memory and failure needs no recovery.
             unsafe {
-                let _ = DestroyCaret();
+                let destroyed = DestroyCaret();
+                crate::ime_trace::line(|| {
+                    crate::ime_trace::caret_line(
+                        "destroy",
+                        0,
+                        0,
+                        self.active,
+                        if destroyed.is_ok() { "ok" } else { "error" },
+                    )
+                });
             }
             self.active = false;
         }
@@ -6873,7 +7663,7 @@ mod windows_impl {
     /// no composition string to cancel and IMM32 says so; the caller's own state
     /// is cleared either way, because the app's picture of what is being
     /// composed is the app's.
-    pub fn cancel_composition() -> bool {
+    pub fn cancel_composition(reason: &'static str) -> bool {
         let Ok(hwnd) = owner_window() else {
             return false;
         };
@@ -6888,7 +7678,9 @@ mod windows_impl {
             if context.0.is_null() {
                 return false;
             }
+            crate::ime_trace::line(|| crate::ime_trace::notify_line(reason, "call", None));
             let told = ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0).as_bool();
+            crate::ime_trace::line(|| crate::ime_trace::notify_line(reason, "return", Some(told)));
             let _ = ImmReleaseContext(hwnd, context);
             told
         }
@@ -6956,6 +7748,37 @@ mod windows_impl {
     /// **A read that fails answers `false`** — see [`cloaked_from_attribute`]
     /// for why that direction and not the other.
     pub fn is_window_cloaked(window: NativeWindow) -> bool {
+        read_window_cloaked(window).unwrap_or(false)
+    }
+
+    /// Called only while writing diagnostics, never for presentation admission.
+    pub fn native_present_facts(window: NativeWindow) -> super::NativePresentFacts {
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, IsWindowVisible};
+        // SAFETY: the handle is borrowed from a live winit window; all calls read
+        // state only. IsWindow distinguishes unreadable state from false.
+        if !unsafe { IsWindow(Some(window.as_hwnd())) }.as_bool() {
+            return super::NativePresentFacts::default();
+        }
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        // SAFETY: rect is a valid out parameter for this live window.
+        let client = unsafe { GetClientRect(window.as_hwnd(), &mut rect) }
+            .ok()
+            .map(|()| {
+                (
+                    (rect.right - rect.left).max(0) as u32,
+                    (rect.bottom - rect.top).max(0) as u32,
+                )
+            });
+        super::NativePresentFacts {
+            iconic: Some(is_window_minimized(window)),
+            cloaked: read_window_cloaked(window),
+            client,
+            // SAFETY: a read of WS_VISIBLE on the same live window.
+            style_visible: Some(unsafe { IsWindowVisible(window.as_hwnd()) }.as_bool()),
+        }
+    }
+
+    fn read_window_cloaked(window: NativeWindow) -> Option<bool> {
         let mut cloaked: u32 = 0;
         // SAFETY: `window` originates from winit's live Win32WindowHandle, and the
         // out-parameter is a `u32` matching the documented size of
@@ -6968,7 +7791,7 @@ mod windows_impl {
                 u32::try_from(size_of::<u32>()).unwrap_or(4),
             )
         };
-        cloaked_from_attribute(read.ok().map(|()| cloaked))
+        read.ok().map(|()| cloaked_from_attribute(Some(cloaked)))
     }
 
     /// What one `DWMWA_CLOAKED` reading means, with the failure policy written
@@ -7292,6 +8115,37 @@ mod windows_impl {
         // read-only query, which writes two integers and nothing else.
         unsafe { GetCursorPos(&mut point) }.ok()?;
         Some((point.x, point.y))
+    }
+
+    /// **Where the pointer is inside one window's client area**, in physical
+    /// pixels measured from its top-left corner (GitHub issue #1 ②).
+    ///
+    /// [`pointer_position`] with one call added, and the call is the whole of
+    /// it: `ScreenToClient` is the transform that turns the desktop's point into
+    /// the one every pointer event this window receives is already stated in —
+    /// `WM_MOUSEMOVE` carries client coordinates in `lParam`, which is exactly
+    /// what winit hands up as `CursorMoved`'s `PhysicalPosition`. So the answer
+    /// here and the position a hand that moved would have left behind are the
+    /// same number in the same units, and a caller may use one where it has no
+    /// other.
+    ///
+    /// **Its one caller is a file drop.** `IDropTarget::Drop` is handed the
+    /// point the hand let go at and winit discards it, and no pointer event is
+    /// delivered while another application's drag is over this window — so a
+    /// drop is the one gesture whose position this process must go and ask for.
+    ///
+    /// `None` when Win32 will not say, which is what it answers on a session
+    /// with no desktop to read.
+    #[must_use]
+    pub fn pointer_position_in_window(window: NativeWindow) -> Option<(i32, i32)> {
+        let mut point = POINT::default();
+        // SAFETY: `point` stays valid and exclusively borrowed across both
+        // read-only calls, each of which writes two integers and nothing else.
+        // The handle came from a live winit window.
+        unsafe { GetCursorPos(&mut point) }.ok()?;
+        let mapped =
+            unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(window.as_hwnd(), &mut point) };
+        mapped.as_bool().then_some((point.x, point.y))
     }
 
     /// The work area of the monitor **this screen point** is on, in physical
@@ -7938,6 +8792,161 @@ mod windows_impl {
         super::order_monospace_families(collect_monospace_families().unwrap_or_default())
     }
 
+    /// **One family, looked up by its name** — where its outlines live, and
+    /// nothing else (ticket 50).
+    ///
+    /// The renderer's question at launch: `settings.json` names a face, and the
+    /// first grid cannot be measured until that face is loaded. Before this door
+    /// the only way to answer it was [`monospace_font_families`], which opens a
+    /// font per face of every family on the machine; this asks the same system
+    /// collection for one family by name (`FindFamilyName`, which matches any of
+    /// the family's localized names) and reads that family's files through
+    /// [`monospace_family_entry`] — the same derivation the walk makes for every
+    /// row it keeps, so the files handed over are the files the picker's row for
+    /// this family would carry (`CONVENTIONS` §十 rule 9).
+    ///
+    /// It does not decide which families belong in the picker; the walk does.
+    /// A family with no monospaced face has no files by that derivation, and
+    /// answers `None` here exactly as it is absent from the walk's list.
+    #[must_use]
+    pub fn monospace_family_named(name: &str) -> Option<super::MonospaceFamily> {
+        let factory: IDWriteFactory =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.ok()?;
+        let mut collection: Option<IDWriteFontCollection> = None;
+        // `false`, for the walk's reason: no re-scan of the font directory.
+        unsafe { factory.GetSystemFontCollection(&mut collection, false) }.ok()?;
+        let collection = collection?;
+        let mut index = 0u32;
+        let mut exists = windows::core::BOOL(0);
+        unsafe { collection.FindFamilyName(&HSTRING::from(name), &mut index, &mut exists) }.ok()?;
+        if !exists.as_bool() {
+            return None;
+        }
+        let family = unsafe { collection.GetFontFamily(index) }.ok()?;
+        monospace_family_entry(&family, &super::os_ui_language())
+    }
+
+    /// Installed families with font-declared CJK coverage (or whole-block cmap
+    /// evidence), localized names and loadable files. Enumerated once per process.
+    #[must_use]
+    pub fn cjk_font_families() -> Vec<super::CjkFamily> {
+        static FAMILIES: std::sync::OnceLock<Vec<super::CjkFamily>> = std::sync::OnceLock::new();
+        FAMILIES
+            .get_or_init(|| super::order_cjk_families(collect_cjk_families().unwrap_or_default()))
+            .clone()
+    }
+
+    /// Copy a DirectWrite-owned table before releasing its table context.
+    fn cjk_font_table(face: &IDWriteFontFace, tag: &[u8; 4]) -> Option<Vec<u8>> {
+        let mut data = std::ptr::null_mut();
+        let mut size = 0;
+        let mut context = std::ptr::null_mut();
+        let mut exists = windows::core::BOOL(0);
+        unsafe {
+            face.TryGetFontTable(
+                u32::from_le_bytes(*tag),
+                &mut data,
+                &mut size,
+                &mut context,
+                &mut exists,
+            )
+        }
+        .ok()?;
+        if !exists.as_bool() {
+            return None;
+        }
+        if data.is_null() || size == 0 {
+            unsafe { face.ReleaseFontTable(context) };
+            return None;
+        }
+        // SAFETY: DirectWrite holds this nonempty table until ReleaseFontTable below.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size as usize) }.to_vec();
+        unsafe { face.ReleaseFontTable(context) };
+        Some(bytes)
+    }
+
+    fn collect_cjk_families() -> windows::core::Result<Vec<super::CjkFamily>> {
+        let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
+        let mut collection: Option<IDWriteFontCollection> = None;
+        unsafe { factory.GetSystemFontCollection(&mut collection, false) }?;
+        let Some(collection) = collection else {
+            return Ok(Vec::new());
+        };
+        use windows::Win32::Graphics::DirectWrite::{
+            DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+        };
+        let locale = super::os_ui_language();
+        let mut families = Vec::new();
+        for index in 0..unsafe { collection.GetFontFamilyCount() } {
+            let Ok(family) = (unsafe { collection.GetFontFamily(index) }) else {
+                continue;
+            };
+            let Ok(font) = (unsafe {
+                family.GetFirstMatchingFont(
+                    DWRITE_FONT_WEIGHT_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    DWRITE_FONT_STYLE_NORMAL,
+                )
+            }) else {
+                continue;
+            };
+            let Ok(face) = (unsafe { font.CreateFontFace() }) else {
+                continue;
+            };
+            let os2 = cjk_font_table(&face, b"OS/2");
+            let cmap = cjk_font_table(&face, b"cmap");
+            let coverage = super::CjkCoverage::from_tables(os2.as_deref(), cmap.as_deref());
+            if !coverage.any() {
+                continue;
+            }
+            let mut files = Vec::new();
+            for face_index in 0..unsafe { family.GetFontCount() } {
+                if let Ok(face) = unsafe { family.GetFont(face_index) }
+                    .and_then(|font| unsafe { font.CreateFontFace() })
+                {
+                    for path in font_face_files(&face) {
+                        if !files.contains(&path) {
+                            files.push(path);
+                        }
+                    }
+                }
+            }
+            if files.is_empty() {
+                continue;
+            }
+            let Ok(names) = (unsafe { family.GetFamilyNames() }) else {
+                continue;
+            };
+            // Keep the pre-ticket stored identifier. Display is independently
+            // selected from the font's name records in the application's language.
+            let Some(name) = localized_string(&names, &locale) else {
+                continue;
+            };
+            let mut localized_names = Vec::new();
+            for i in 0..unsafe { names.GetCount() } {
+                let Ok(length) = (unsafe { names.GetLocaleNameLength(i) }) else {
+                    continue;
+                };
+                let mut locale = vec![0u16; length as usize + 1];
+                if unsafe { names.GetLocaleName(i, &mut locale) }.is_err() {
+                    continue;
+                }
+                let locale = String::from_utf16_lossy(&locale[..length as usize]);
+                if let Some(text) = localized_string(&names, &locale) {
+                    localized_names.push((locale, text));
+                }
+            }
+            families.push(super::CjkFamily {
+                name,
+                files,
+                localized_names,
+                coverage,
+            });
+        }
+        Ok(families)
+    }
+
     fn collect_monospace_families() -> windows::core::Result<Vec<super::MonospaceFamily>> {
         let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
         let mut collection: Option<IDWriteFontCollection> = None;
@@ -7955,42 +8964,54 @@ mod windows_impl {
             let Ok(family) = (unsafe { collection.GetFontFamily(index) }) else {
                 continue;
             };
-            let mut files: Vec<std::path::PathBuf> = Vec::new();
-            let mut monospaced = false;
-            for face_index in 0..unsafe { family.GetFontCount() } {
-                let Ok(font) = (unsafe { family.GetFont(face_index) }) else {
-                    continue;
-                };
-                // `IDWriteFont1` is the Windows 8 interface. A machine that
-                // cannot produce it cannot answer the question, and guessing
-                // would put proportional faces in a monospace list.
-                let Ok(font1) = font.cast::<IDWriteFont1>() else {
-                    continue;
-                };
-                if !unsafe { font1.IsMonospacedFont() }.as_bool() {
-                    continue;
-                }
-                monospaced = true;
-                let Ok(face) = (unsafe { font.CreateFontFace() }) else {
-                    continue;
-                };
-                for path in font_face_files(&face) {
-                    if !files.contains(&path) {
-                        files.push(path);
-                    }
-                }
-            }
-            if !monospaced || files.is_empty() {
-                continue;
-            }
-            let Ok(names) = (unsafe { family.GetFamilyNames() }) else {
-                continue;
-            };
-            if let Some(name) = localized_string(&names, &locale) {
-                families.push(super::MonospaceFamily { name, files });
-            }
+            families.extend(monospace_family_entry(&family, &locale));
         }
         Ok(families)
+    }
+
+    /// **One family as a picker row: its name in `locale` and the files its
+    /// monospaced faces live in** — or `None` when it has no such face with a
+    /// file a loader can name.
+    ///
+    /// The one derivation of "a family's files", shared by the walk
+    /// ([`collect_monospace_families`]) and the lookup by name
+    /// ([`monospace_family_named`]) so the two can never disagree about what a
+    /// family is made of (`CONVENTIONS` §十 rule 9).
+    fn monospace_family_entry(
+        family: &IDWriteFontFamily,
+        locale: &str,
+    ) -> Option<super::MonospaceFamily> {
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        let mut monospaced = false;
+        for face_index in 0..unsafe { family.GetFontCount() } {
+            let Ok(font) = (unsafe { family.GetFont(face_index) }) else {
+                continue;
+            };
+            // `IDWriteFont1` is the Windows 8 interface. A machine that
+            // cannot produce it cannot answer the question, and guessing
+            // would put proportional faces in a monospace list.
+            let Ok(font1) = font.cast::<IDWriteFont1>() else {
+                continue;
+            };
+            if !unsafe { font1.IsMonospacedFont() }.as_bool() {
+                continue;
+            }
+            monospaced = true;
+            let Ok(face) = (unsafe { font.CreateFontFace() }) else {
+                continue;
+            };
+            for path in font_face_files(&face) {
+                if !files.contains(&path) {
+                    files.push(path);
+                }
+            }
+        }
+        if !monospaced || files.is_empty() {
+            return None;
+        }
+        let names = unsafe { family.GetFamilyNames() }.ok()?;
+        let name = localized_string(&names, locale)?;
+        Some(super::MonospaceFamily { name, files })
     }
 
     /// The files one face's outlines live in, skipping any the local loader
@@ -8576,12 +9597,260 @@ mod windows_impl {
     mod tests {
         use super::{
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
-            ShellPickKind, compositor_failure, newest_live_owner, primary_language_id,
-            retry_open_clipboard, wide_null,
+            SaveFilePickerState, ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM, TouchToTheSystem,
+            compositor_failure, let_the_system_translate_touch, newest_live_owner,
+            pan_gesture_configuration, primary_language_id, retry_open_clipboard,
+            the_system_s_gesture_is_answered_here, touch_goes_to_the_system, wide_null,
         };
-        use crate::NativeWindow;
         use crate::handoff::{validate_local_image_path, validate_openable_path};
+        use crate::{NativeWindow, PanStep, PanTrack};
+        use std::cell::Cell;
+        use std::cell::RefCell;
         use std::path::{Path, PathBuf};
+        use std::rc::Rc;
+
+        /// **The four messages taken away from winit, and no fifth** (the touch
+        /// ruling of 2026-09-21).
+        ///
+        /// The table is the claim, written as the numbers Windows' own headers
+        /// give rather than as the constants, so that a rename upstream cannot
+        /// make this test agree with itself about a different set of messages.
+        /// The four are exactly what winit 0.30.13 answers `Value(0)` to; every
+        /// id in the second list reaches `DefWindowProc` through winit's own
+        /// default arm already, and taking one of them would be this program
+        /// standing in a road that is not blocked.
+        ///
+        /// MUTATION: add any id to `TOUCH_GOES_TO_THE_SYSTEM` and the second
+        /// half goes red naming it; drop one and the first half does.
+        #[test]
+        fn the_messages_handed_to_the_system_are_the_four_winit_would_consume() {
+            assert_eq!(
+                TOUCH_GOES_TO_THE_SYSTEM,
+                [0x0240, 0x0245, 0x0246, 0x0247],
+                "WM_TOUCH, WM_POINTERUPDATE, WM_POINTERDOWN and WM_POINTERUP are the messages \
+                 winit turns into WindowEvent::Touch and answers itself; those are the ones the \
+                 system has to see instead"
+            );
+            for (message, name) in [
+                (0x0240_u32, "WM_TOUCH"),
+                (0x0245, "WM_POINTERUPDATE"),
+                (0x0246, "WM_POINTERDOWN"),
+                (0x0247, "WM_POINTERUP"),
+            ] {
+                assert!(
+                    touch_goes_to_the_system(message),
+                    "{name} is winit's to consume and therefore ours to hand over"
+                );
+            }
+            for (message, name) in [
+                (0x0119_u32, "WM_GESTURE"),
+                (0x011A, "WM_GESTURENOTIFY"),
+                (0x0084, "WM_NCHITTEST"),
+                (0x0200, "WM_MOUSEMOVE"),
+                (0x0201, "WM_LBUTTONDOWN"),
+                (0x0202, "WM_LBUTTONUP"),
+                (0x0204, "WM_RBUTTONDOWN"),
+                (0x020A, "WM_MOUSEWHEEL"),
+                (0x0249, "WM_POINTERENTER"),
+                (0x024A, "WM_POINTERLEAVE"),
+                (0x02CC, "WM_TABLET_QUERYSYSTEMGESTURESTATUS"),
+                (0x0082, "WM_NCDESTROY"),
+            ] {
+                assert!(
+                    !touch_goes_to_the_system(message),
+                    "{name} is not taken away from winit: the mouse messages are what this \
+                     ticket exists to deliver, and the rest already reach DefWindowProc through \
+                     winit's own default arm"
+                );
+            }
+        }
+
+        /// RED — **a window that is not ours is refused, and nothing is left
+        /// behind.**
+        ///
+        /// The door's only refusal, and the one a test can reach without a
+        /// digitizer: `SetWindowSubclass` will not subclass a handle that names
+        /// no window of this thread, so the call answers with Windows' own
+        /// error and reclaims the state it had built for it.
+        ///
+        /// MUTATION: install the subclass without reading its answer and this
+        /// goes red; leak the allocation on the failing path and Miri does.
+        #[test]
+        fn touch_is_not_handed_over_by_a_window_that_is_not_ours() {
+            let said = Rc::new(Cell::new(0_u32));
+            let error = {
+                let said = Rc::clone(&said);
+                let_the_system_translate_touch(
+                    NativeWindow::stand_in(11),
+                    Box::new(move || said.set(said.get() + 1)),
+                    Box::new(|_| {}),
+                )
+            }
+            .expect_err(
+                "a token that names no window has no window procedure to stand in front of",
+            );
+            assert!(
+                error.starts_with("SetWindowSubclass(touch to the system) failed: "),
+                "the refusal names the call that refused, as every other bridge here does: {error}"
+            );
+            assert_eq!(
+                said.get(),
+                0,
+                "a door that refused reports no touch: the self-report is a fact about a message \
+                 that arrived, not about a call that was made"
+            );
+        }
+
+        /// RED — **the self-report is said once per window.**
+        ///
+        /// A finger drawing one line raises these by the hundred, and the line
+        /// the owner reads is evidence that the road was walked at all
+        /// (`docs/CONVENTIONS.md` §十 rule 2) — one per window, not one per
+        /// contact. Two states here are two windows: each says its own line.
+        ///
+        /// MUTATION: report on every message and the first count is 4; share
+        /// one flag between windows and the second is 0.
+        #[test]
+        fn the_first_touch_on_a_window_says_so_and_every_one_after_it_says_nothing() {
+            let said = Rc::new(Cell::new(0_u32));
+            let window = |said: &Rc<Cell<u32>>| {
+                let said = Rc::clone(said);
+                TouchToTheSystem {
+                    report: Box::new(move || said.set(said.get() + 1)),
+                    reported: Cell::new(false),
+                    panned: Box::new(|_| {}),
+                    pan: Cell::new(PanTrack::default()),
+                }
+            };
+            let first = window(&said);
+            for _ in 0..4 {
+                first.arrived();
+            }
+            assert_eq!(said.get(), 1, "one window, one line, however many contacts");
+            let second = window(&said);
+            second.arrived();
+            second.arrived();
+            assert_eq!(
+                said.get(),
+                2,
+                "a second window is a second road and says its own line"
+            );
+        }
+
+        /// RED (0.4.4 ticket 11) — **a pan gesture is answered, and every other
+        /// gesture goes to the system.**
+        ///
+        /// The ids are written as the numbers `WM_GESTURE`'s own table gives
+        /// (<https://learn.microsoft.com/en-us/windows/win32/wintouch/wm-gesture>),
+        /// not as the constants, so a rename upstream cannot make this agree
+        /// with itself. A pan's default answer is a scroll-bar message this
+        /// window cannot read, so it is the one answered; `GID_BEGIN` and
+        /// `GID_END` must reach `DefWindowProc` (*"Application behavior is
+        /// undefined when the GID_BEGIN and GID_END messages are consumed"*);
+        /// zoom, rotate, two-finger tap and press-and-tap keep the system's
+        /// answers because nothing here has a better one.
+        ///
+        /// MUTATION: answer every id (`true`) and the second half goes red at
+        /// `GID_BEGIN`; answer none and the first half does.
+        #[test]
+        fn a_pan_gesture_is_answered_and_every_other_gesture_goes_to_the_system() {
+            assert!(
+                the_system_s_gesture_is_answered_here(4),
+                "GID_PAN (4) is answered here: its default answer is WM_VSCROLL, which a window \
+                 with no scroll bar cannot read"
+            );
+            for (id, name) in [
+                (1_u32, "GID_BEGIN"),
+                (2, "GID_END"),
+                (3, "GID_ZOOM"),
+                (5, "GID_ROTATE"),
+                (6, "GID_TWOFINGERTAP"),
+                (7, "GID_PRESSANDTAP"),
+            ] {
+                assert!(
+                    !the_system_s_gesture_is_answered_here(id),
+                    "{name} ({id}) goes to DefWindowProc, which also closes its handle"
+                );
+            }
+        }
+
+        /// RED (0.4.4 ticket 11) — **the gesture configuration enables
+        /// single-finger pan, with the system's gutter and inertia, and blocks
+        /// nothing.**
+        ///
+        /// As data, with the numbers `SetGestureConfig`'s table gives. On
+        /// next86 a one-finger slide selected text because the system did not
+        /// treat it as a pan on this window; the two single-finger bits are
+        /// what changes that, `GC_PAN` has to be wanted before they can be,
+        /// and gutter and inertia are the system's own feel, named because the
+        /// documentation asks for every single-finger flag to be set
+        /// explicitly. A block bit would be this program refusing a gesture
+        /// the system offered, which nothing here asks for.
+        ///
+        /// MUTATION: drop `GC_PAN_WITH_SINGLE_FINGER_VERTICALLY` from `dwWant`
+        /// and this reads 0x1D — and a one-finger slide selects again.
+        #[test]
+        fn the_gesture_configuration_enables_single_finger_pan() {
+            let config = pan_gesture_configuration();
+            assert_eq!(
+                config.dwID.0, 4,
+                "the configuration is GID_PAN's and no other gesture's"
+            );
+            assert_eq!(
+                config.dwWant,
+                0x01 | 0x02 | 0x04 | 0x08 | 0x10,
+                "GC_PAN | single finger vertically | single finger horizontally | gutter | inertia"
+            );
+            assert_eq!(config.dwBlock, 0, "nothing the system offers is refused");
+        }
+
+        /// RED (0.4.4 ticket 11) — **one answered pan message hands on at most
+        /// one step, and a still one hands on nothing.**
+        ///
+        /// The budget of the door (ticket 11, A3): the callback parks one value
+        /// and wakes the loop once, so a `WM_GESTURE` that is called through
+        /// twice is two wakes, and one that did not move is a wake for nothing.
+        /// Driven through the window state's own `pan_moved` — the half of the
+        /// subclass after `GetGestureInfo` — with a synthetic pan.
+        ///
+        /// MUTATION: call `panned` for every message, moved or not, and the
+        /// still message and the end each hand on a zero step: five, not three.
+        #[test]
+        fn every_answered_pan_message_hands_on_at_most_one_step() {
+            let steps = Rc::new(RefCell::new(Vec::new()));
+            let window = {
+                let steps = Rc::clone(&steps);
+                TouchToTheSystem {
+                    report: Box::new(|| {}),
+                    reported: Cell::new(false),
+                    panned: Box::new(move |step| steps.borrow_mut().push(step)),
+                    pan: Cell::new(PanTrack::default()),
+                }
+            };
+            window.pan_moved(true, false, (500, 400), (20, 30));
+            window.pan_moved(false, false, (500, 420), (20, 50));
+            window.pan_moved(false, false, (500, 420), (20, 50));
+            window.pan_moved(false, false, (500, 390), (20, 20));
+            window.pan_moved(false, true, (500, 390), (20, 20));
+            assert_eq!(
+                *steps.borrow(),
+                vec![
+                    PanStep {
+                        began_at: Some((20, 30)),
+                        travel: (0, 0)
+                    },
+                    PanStep {
+                        began_at: None,
+                        travel: (0, 20)
+                    },
+                    PanStep {
+                        began_at: None,
+                        travel: (0, -30)
+                    },
+                ],
+                "the opening point, then one step per message that moved"
+            );
+        }
 
         /// A DirectComposition refusal has to be readable by the person holding
         /// the machine it refused on, and there is no fallback path to soften it
@@ -8850,6 +10119,61 @@ mod windows_impl {
                 Some(Vec::new()),
                 "and the folder request is still sitting where it was left"
             );
+        }
+
+        /// RED (0.4.4 ticket 05) — **the save dialog is posted, shown once with the
+        /// folder and name it was asked for, and collected once; a cancel is
+        /// `Ok(None)`.**
+        ///
+        /// The folder chooser's contract on the save door: `IFileDialog::Show`
+        /// runs a nested loop, so the press only posts and the answer waits for the
+        /// next turn. A second export press while one is up is coalesced rather
+        /// than stacking a second dialog, and a cancelled dialog is not a path —
+        /// an export that wrote somewhere after a Cancel would be a file nobody
+        /// chose.
+        ///
+        /// MUTATION: let `begin_request` succeed from `Posted` and the coalescing
+        /// assertion goes red; read the name at show time and the arguments do.
+        #[test]
+        fn the_save_dialog_is_posted_then_collected_and_a_cancel_is_no_path() {
+            let state = SaveFilePickerState::new();
+            let start: Vec<u16> = "C:\\exports\0".encode_utf16().collect();
+            let name = wide_null("folio-settings.json");
+            assert!(state.begin_request((start.clone(), name.clone())));
+            assert!(
+                !state.begin_request((Vec::new(), Vec::new())),
+                "a second ask while one is queued is coalesced, not stacked"
+            );
+            assert_eq!(
+                state.take_result(),
+                None,
+                "nothing is collected before it is shown"
+            );
+            assert_eq!(state.begin_showing(), Some((start, name)));
+            assert_eq!(state.begin_showing(), None, "and it is shown exactly once");
+            state.complete(Ok(Some(PathBuf::from(r"C:\exports\folio-settings.json"))));
+            assert_eq!(
+                state.take_result(),
+                Some(Ok(Some(PathBuf::from(r"C:\exports\folio-settings.json"))))
+            );
+            assert_eq!(state.take_result(), None, "and collected exactly once");
+
+            assert!(state.begin_request((Vec::new(), wide_null("folio-settings.json"))));
+            assert!(state.begin_showing().is_some());
+            state.complete(Ok(None));
+            assert_eq!(state.take_result(), Some(Ok(None)), "a cancel is no path");
+        }
+
+        /// PIN — the type a save dialog filters on is the suggested name's own
+        /// extension, and a name with none leaves the dialog unfiltered.
+        #[test]
+        fn the_save_dialog_filters_on_the_suggested_names_extension() {
+            assert_eq!(
+                super::save_extension(&wide_null("folio-settings.json")).as_deref(),
+                Some("json")
+            );
+            assert_eq!(super::save_extension(&wide_null("notes")), None);
+            assert_eq!(super::save_extension(&wide_null("trailing.")), None);
         }
 
         /// PIN — a NUL-terminated wide copy is what the shell reads, and it is
@@ -9649,12 +10973,29 @@ mod windows_impl {
         priority: ThreadPriority,
         body: impl FnOnce() -> T + Send + 'static,
     ) -> std::io::Result<std::thread::JoinHandle<T>> {
-        std::thread::Builder::new()
-            .name(name.to_owned())
-            .spawn(move || {
-                set_current_thread_priority(priority);
-                body()
-            })
+        spawn_at_priority_with_stack(name, priority, None, body)
+    }
+
+    /// The same, for a thread that has a reason to say how much stack it needs.
+    ///
+    /// Rust's default is two mebibytes, which is nobody's measurement of any particular work. A
+    /// caller that recurses over input it did not write — the math worker descends through a LaTeX
+    /// parser and then Typst's parser and layout — states its own, because a stack overflow is not
+    /// a panic and cannot be contained by the thread that suffers it.
+    pub fn spawn_at_priority_with_stack<T: Send + 'static>(
+        name: &str,
+        priority: ThreadPriority,
+        stack_bytes: Option<usize>,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> std::io::Result<std::thread::JoinHandle<T>> {
+        let mut builder = std::thread::Builder::new().name(name.to_owned());
+        if let Some(bytes) = stack_bytes {
+            builder = builder.stack_size(bytes);
+        }
+        builder.spawn(move || {
+            set_current_thread_priority(priority);
+            body()
+        })
     }
 
     /// Put one block of text where the person who started this process will see
@@ -9823,6 +11164,60 @@ mod windows_impl {
         for slot in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
             let _ = unsafe { SetStdHandle(slot, HANDLE(std::ptr::null_mut())) };
         }
+    }
+
+    /// **Put these bytes on this process's standard error without taking
+    /// Rust's shared `Stderr` lock** (X-7).
+    ///
+    /// For the one writer that can be stuck in this call for seconds: the trace
+    /// sink's thread, writing a batch to a console whose reader has stopped
+    /// reading. `eprintln!` reaches the same destination through one process-wide
+    /// lock, so a writer parked inside `WriteFile` while holding it parks every
+    /// other thread that says anything — the window thread included, which is
+    /// the whole of the fault the sink was built to remove, moved one layer out.
+    /// Writing the slot directly leaves those threads to wait on the *device*
+    /// they chose and never on this one's turn at a mutex.
+    ///
+    /// `GetStdHandle` on every call and not once, for
+    /// [`redirect_std_streams_to_file`]'s reason: the slot moves, and Rust's own
+    /// Windows stdio re-reads it for the same reason.
+    ///
+    /// A null slot is the silenced state and answers `true` having written
+    /// nothing, which is what a null standard handle does for `eprintln!` too.
+    /// Answers whether every byte reached the handle.
+    pub fn write_std_error(bytes: &[u8]) -> bool {
+        use windows::Win32::Storage::FileSystem::WriteFile;
+        use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+
+        let Ok(handle) = (unsafe { GetStdHandle(STD_ERROR_HANDLE) }) else {
+            return false;
+        };
+        if handle.0.is_null() {
+            return true;
+        }
+        if handle.is_invalid() {
+            return false;
+        }
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let mut written = 0u32;
+            // SAFETY: the buffer outlives this synchronous call, and `written`
+            // is a local the call fills in.
+            if unsafe { WriteFile(handle, Some(rest), Some(&raw mut written), None) }.is_err() {
+                return false;
+            }
+            let Some(remaining) = rest.get(written as usize..) else {
+                return false;
+            };
+            if remaining.len() == rest.len() {
+                // Nothing moved and no error: a handle that will never take
+                // these bytes. Looping on it would be the wait this exists to
+                // refuse.
+                return false;
+            }
+            rest = remaining;
+        }
+        true
     }
 
     /// Whether `stderr` currently lands on a console screen.
@@ -10287,23 +11682,24 @@ pub fn dock_badge_label(progress: TaskbarProgress) -> Option<String> {
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
-    ImeSystemCaret, MathContextMenu, Notifier, SystemSettingsWatch, Taskbar, adopt_parent_console,
-    announce_explorer_menu_change, apartments_left, cancel_composition,
-    client_area_animation_enabled, clipboard_text, cloaked_from_attribute, current_thread_priority,
-    current_user_registry_string, current_user_registry_subkeys, detach_console,
-    directory_folds_case, documents_directory, dpi_at, exposed_from_probe, exposure_probe_points,
-    file_product_version, flash_window, get_dpi_for_window, get_window_rect, get_work_area,
-    hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
-    install_window_class_background, is_window_cloaked, is_window_minimized, leave_process,
-    message_box, monitor_id_at, monospace_font_families, os_ui_language, pointer_position,
-    read_context_menu, recycle, redirect_std_streams_to_file, register_clipboard_owner,
-    remove_context_menu, request_window_close, set_clipboard_text, set_current_thread_priority,
-    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    silence_std_streams, spawn_at_priority, stand_window_at, std_error_is_console,
-    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
-    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
-    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at, write_to_console,
+    ImeSystemCaret, MathContextMenu, Notifier, SaveFilePicker, SystemSettingsWatch, Taskbar,
+    adopt_parent_console, announce_explorer_menu_change, apartments_left, cancel_composition,
+    cjk_font_families, client_area_animation_enabled, clipboard_text, cloaked_from_attribute,
+    current_thread_priority, current_user_registry_string, current_user_registry_subkeys,
+    detach_console, directory_folds_case, documents_directory, dpi_at, exposed_from_probe,
+    exposure_probe_points, file_product_version, flash_window, get_dpi_for_window, get_window_rect,
+    get_work_area, hide_every_window_of_this_process, install_console_ctrl_handler,
+    install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
+    leave_process, let_the_system_translate_touch, message_box, monitor_id_at,
+    monospace_family_named, monospace_font_families, os_ui_language, pointer_position,
+    pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
+    register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
+    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
+    set_window_topmost, silence_std_streams, spawn_at_priority, spawn_at_priority_with_stack,
+    stand_window_at, std_error_is_console, system_backdrop_available, system_uses_light_apps,
+    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
+    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_screen_rect,
+    wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error, write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -10322,9 +11718,10 @@ pub use portable_impl::{
     CustomWindowFrame, FilePickKind, ImeSystemCaret, ShellPickKind, adopt_parent_console,
     announce_explorer_menu_change, detach_console, directory_folds_case,
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
-    is_window_cloaked, leave_process, read_context_menu, redirect_std_streams_to_file,
-    register_clipboard_owner, remove_context_menu, set_system_backdrop, silence_std_streams,
-    system_backdrop_available, thread_mouse_capture, virtual_key_for_character, write_to_console,
+    is_window_cloaked, leave_process, let_the_system_translate_touch, read_context_menu,
+    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
+    set_system_backdrop, silence_std_streams, system_backdrop_available, thread_mouse_capture,
+    virtual_key_for_character, write_std_error, write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).
@@ -10349,7 +11746,7 @@ pub use portable_impl::Compositor;
 /// product rather than about a dialog, the macOS arm reads the portable
 /// module's copy, and a second definition would be two spellings of one choice.
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub use portable_impl::{FolderPicker, ImagePicker, MathContextMenu, message_box};
+pub use portable_impl::{FolderPicker, ImagePicker, MathContextMenu, SaveFilePicker, message_box};
 
 /// **The watch doors, on a platform whose filesystem does not speak** (M2-1).
 ///
@@ -10368,7 +11765,9 @@ pub use portable_impl::{DirChange, DirWatch};
 /// `macos_fonts` now answer them for a Mac. A third platform still meets the
 /// refusal and the one-row list.
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub use portable_impl::{monospace_font_families, recycle};
+pub use portable_impl::{
+    cjk_font_families, monospace_family_named, monospace_font_families, recycle,
+};
 
 /// **The window and the screen doors, on a platform that has neither** — the
 /// twenty-two names [`macos_impl`] answers for a Mac and this module still
@@ -10383,10 +11782,10 @@ pub use portable_impl::{monospace_font_families, recycle};
 pub use portable_impl::{
     SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
     get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
-    monitor_id_at, os_ui_language, pointer_position, request_window_close, set_window_dark_mode,
-    set_window_outer_rect, set_window_topmost, stand_window_at, system_uses_light_apps,
-    take_keyboard_focus, top_level_window_at, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at,
+    monitor_id_at, os_ui_language, pointer_position, pointer_position_in_window,
+    request_window_close, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
+    stand_window_at, system_uses_light_apps, take_keyboard_focus, top_level_window_at,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
 };
 
 /// **The window and the screen, over AppKit** (M1-3).
@@ -10407,10 +11806,10 @@ mod macos_impl;
 pub use macos_impl::{
     SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
     get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
-    monitor_id_at, os_ui_language, pointer_position, request_window_close, set_window_dark_mode,
-    set_window_outer_rect, set_window_topmost, stand_window_at, system_uses_light_apps,
-    take_keyboard_focus, top_level_window_at, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at,
+    monitor_id_at, os_ui_language, pointer_position, pointer_position_in_window,
+    request_window_close, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
+    stand_window_at, system_uses_light_apps, take_keyboard_focus, top_level_window_at,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
 };
 
 /// **The two doors that own the surface's view, on macOS** (M1-4).
@@ -10864,7 +12263,7 @@ mod compositor_arms_tests {
 mod macos_dialogs;
 
 #[cfg(target_os = "macos")]
-pub use macos_dialogs::{FolderPicker, ImagePicker, MathContextMenu, message_box};
+pub use macos_dialogs::{FolderPicker, ImagePicker, MathContextMenu, SaveFilePicker, message_box};
 
 /// **The directory watch, over FSEvents** (M2-1).
 ///
@@ -10925,7 +12324,7 @@ pub use macos_files::recycle;
 mod macos_fonts;
 
 #[cfg(target_os = "macos")]
-pub use macos_fonts::monospace_font_families;
+pub use macos_fonts::{cjk_font_families, monospace_family_named, monospace_font_families};
 
 /// **The application menu bar, over `NSMenu`** (M3-2).
 ///
@@ -11151,8 +12550,9 @@ mod argument_split_tests {
 /// because that is where every caller has always found them, and moving the
 /// door is not the same as moving its handle.
 pub use handoff::{
-    PROGRAM_REFUSED, open_local_file, open_local_path, open_system_fonts_page,
-    program_in_directories, program_on_path, reveal_arguments, reveal_in_explorer, shell_execute,
+    Handoff, PROGRAM_REFUSED, ShellThread, VerifiedTarget, open_local_file, open_local_path,
+    open_local_path_verified, open_system_fonts_page, program_in_directories, program_on_path,
+    resolved_for_a_door, reveal_arguments, reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 /// The three thread-band calls, off Windows.
@@ -11209,18 +12609,36 @@ mod portable_priority {
         priority: ThreadPriority,
         body: impl FnOnce() -> T + Send + 'static,
     ) -> std::io::Result<std::thread::JoinHandle<T>> {
-        std::thread::Builder::new()
-            .name(name.to_owned())
-            .spawn(move || {
-                set_current_thread_priority(priority);
-                body()
-            })
+        spawn_at_priority_with_stack(name, priority, None, body)
+    }
+
+    /// The same, for a thread that has a reason to say how much stack it needs.
+    ///
+    /// Rust's default is two mebibytes, which is nobody's measurement of any particular work. A
+    /// caller that recurses over input it did not write — the math worker descends through a LaTeX
+    /// parser and then Typst's parser and layout — states its own, because a stack overflow is not
+    /// a panic and cannot be contained by the thread that suffers it.
+    pub fn spawn_at_priority_with_stack<T: Send + 'static>(
+        name: &str,
+        priority: ThreadPriority,
+        stack_bytes: Option<usize>,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> std::io::Result<std::thread::JoinHandle<T>> {
+        let mut builder = std::thread::Builder::new().name(name.to_owned());
+        if let Some(bytes) = stack_bytes {
+            builder = builder.stack_size(bytes);
+        }
+        builder.spawn(move || {
+            set_current_thread_priority(priority);
+            body()
+        })
     }
 }
 
 #[cfg(not(windows))]
 pub use portable_priority::{
     current_thread_priority, set_current_thread_priority, spawn_at_priority,
+    spawn_at_priority_with_stack,
 };
 
 /// **Ending a composition on macOS: the input context's, and the view's**
@@ -11280,7 +12698,7 @@ mod macos_ime {
 
     /// Whether an input method was told to throw its composition away.
     #[must_use]
-    pub fn cancel_composition() -> bool {
+    pub fn cancel_composition(_reason: &'static str) -> bool {
         let Some(main_thread) = MainThreadMarker::new() else {
             return false;
         };
@@ -11321,7 +12739,7 @@ mod portable_ime {
     /// the same time as the clipboard's, because it is the same defect and the
     /// same sentence closes both.
     #[must_use]
-    pub fn cancel_composition() -> bool {
+    pub fn cancel_composition(_reason: &'static str) -> bool {
         false
     }
 }
@@ -11580,6 +12998,7 @@ mod platform_door_tests {
 /// constructor ungated, and this goes red naming the file and the declaration.
 #[cfg(test)]
 mod native_window_door_tests {
+    use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
     /// The spellings that are a Windows handle however they are dressed.
@@ -11737,6 +13156,12 @@ mod native_window_door_tests {
     /// a line-based reading cannot answer that. The definition itself is the
     /// one occurrence outside such a module, and it is named.
     ///
+    /// **A gated module is not always text in the file that gates it**
+    /// (2026-09-18). It is `mod name { … }` or it is `mod name;` with the body
+    /// in a file beside it, and the two say exactly the same thing about what is
+    /// test-only. [`wholly_test_files`] is the half of the answer the brace
+    /// count cannot give.
+    ///
     /// MUTATION: call `stand_in` from any shipped path and this fails naming
     /// the file and the line.
     #[test]
@@ -11758,11 +13183,24 @@ mod native_window_door_tests {
             found.len()
         );
 
+        let (wholly_test, unfollowed) = wholly_test_files(&found);
+        assert!(
+            unfollowed.is_empty(),
+            "a `#[cfg(test)]` module is declared out of line and this walk cannot say which file \
+             holds it, so it cannot say what is test-only either — which is worse than saying so: \
+             {unfollowed:#?}"
+        );
+
         let mut outside = Vec::new();
         for file in found {
             let Ok(text) = std::fs::read_to_string(&file) else {
                 continue;
             };
+            // The whole file is somebody's `#[cfg(test)] mod …;`, so every line
+            // in it is inside that module.
+            if wholly_test.contains(&file) {
+                continue;
+            }
             let spans = test_module_spans(&text);
             for (at, _) in text.match_indices("stand_in(") {
                 // **On a word boundary**, for the quiet door's reason one file
@@ -11819,41 +13257,280 @@ mod native_window_door_tests {
     /// in that module to name `stand_in` was reported as a shipped path. A gate
     /// that answers about a file it cannot parse is worse than one that says it
     /// cannot, which is why this is a fix rather than an exception.
+    /// **A gate stands on exactly one item, and that item ends at the first `{`
+    /// or `;` after it** (2026-09-18). Reading further is how a gate on a
+    /// declaration came to claim the next item's braces.
     fn test_module_spans(text: &str) -> Vec<(usize, usize)> {
         let bytes = text.as_bytes();
         let mut spans = Vec::new();
-        for gate in ["#[cfg(test)]", "#[cfg(all(test"] {
-            for (at, _) in text.match_indices(gate) {
-                let Some(open) = text[at..].find('{').map(|offset| at + offset) else {
-                    continue;
-                };
-                let mut depth = 0_i32;
-                let mut index = open;
-                while index < bytes.len() {
-                    match bytes[index] {
-                        b'r' if raw_string_opens_at(bytes, index) => {
-                            index = skip_raw_string(bytes, index);
+        for at in gate_positions(text) {
+            let Some(GatedItem::Inline { open }) = gated_item(bytes, at) else {
+                continue;
+            };
+            let mut depth = 0_i32;
+            for index in code_indices(bytes, open) {
+                match bytes[index] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            spans.push((open, index));
+                            break;
                         }
-                        b'"' => index = skip_string(bytes, index),
-                        b'\'' => index = skip_char(bytes, index),
-                        b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                            index += text[index..].find('\n').unwrap_or(bytes.len() - index);
-                        }
-                        b'{' => depth += 1,
-                        b'}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                spans.push((open, index));
-                                break;
-                            }
-                        }
-                        _ => {}
                     }
-                    index += 1;
+                    _ => {}
                 }
             }
         }
         spans
+    }
+
+    /// Where each `#[cfg(test)]` or `#[cfg(all(test…` stands in `text`, in the
+    /// order they are written.
+    fn gate_positions(text: &str) -> Vec<usize> {
+        let mut gates: Vec<usize> = ["#[cfg(test)]", "#[cfg(all(test"]
+            .into_iter()
+            .flat_map(|gate| text.match_indices(gate).map(|(at, _)| at))
+            .collect();
+        gates.sort_unstable();
+        gates
+    }
+
+    /// Whether a gate's item carries its body here or names a file for it.
+    enum GatedItem {
+        /// `mod name { … }`, and `open` is that brace.
+        Inline { open: usize },
+        /// An item that ends in a semicolon — `mod name;`, and also a gated
+        /// `const` or `use`, which is not a module at all. Either way there is
+        /// no body here to take a span from; [`out_of_line_modules`] is what
+        /// reads the ones that name a file.
+        Declaration,
+    }
+
+    /// The item the gate at `at` stands on.
+    ///
+    /// **The first `{` or `;`, whichever comes first, and nothing after it.**
+    /// Until 2026-09-18 this looked only for a `{`, so a gate on `mod tests;`
+    /// — or on a gated `const`, of which `bt-app` has several — reached past its
+    /// own item and took the braces of whatever product item came next, and
+    /// every `stand_in` inside that item was exempted in silence. An
+    /// over-exemption is the failure this gate cannot see, so it is the one the
+    /// reading has to make impossible.
+    fn gated_item(bytes: &[u8], at: usize) -> Option<GatedItem> {
+        code_indices(bytes, at).find_map(|index| match bytes[index] {
+            b'{' => Some(GatedItem::Inline { open: index }),
+            b';' => Some(GatedItem::Declaration),
+            _ => None,
+        })
+    }
+
+    /// The indices of the bytes at and after `at` that are **code**: everything
+    /// inside a string, a raw string, a character literal or a line comment is
+    /// stepped over rather than yielded.
+    ///
+    /// One reader for every question this module asks of a source file — where
+    /// an item ends, how deep the braces are, what a declaration names — so that
+    /// a literal spelling `{`, `;` or `mod` cannot answer any of them. The
+    /// note on [`test_module_spans`] carries the case that made the skipping
+    /// necessary in the first place.
+    fn code_indices(bytes: &[u8], at: usize) -> impl Iterator<Item = usize> + '_ {
+        let mut index = at;
+        std::iter::from_fn(move || {
+            while index < bytes.len() {
+                let here = index;
+                match bytes[here] {
+                    b'r' if raw_string_opens_at(bytes, here) => {
+                        index = skip_raw_string(bytes, here) + 1;
+                    }
+                    b'"' => index = skip_string(bytes, here) + 1,
+                    b'\'' => {
+                        let past = skip_char(bytes, here);
+                        index = past + 1;
+                        // A quote that opens nothing is a lifetime, and a
+                        // lifetime is code.
+                        if past == here {
+                            return Some(here);
+                        }
+                    }
+                    b'/' if bytes.get(here + 1) == Some(&b'/') => {
+                        index = bytes[here..]
+                            .iter()
+                            .position(|byte| *byte == b'\n')
+                            .map_or(bytes.len(), |offset| here + offset);
+                    }
+                    _ => {
+                        index = here + 1;
+                        return Some(here);
+                    }
+                }
+            }
+            None
+        })
+    }
+
+    /// One module a file declares out of line — `mod name;`, with the body in a
+    /// file of its own.
+    struct Declaration {
+        name: String,
+        /// The file named by a `#[path = "…"]` written above it, if there is one.
+        path: Option<String>,
+        /// Whether a `#[cfg(test)]` stands on it. **This is the owner of the
+        /// fact "the file it names is test-only"** — never the file's name.
+        gated: bool,
+        /// The line it is written on, for the message when it cannot be followed.
+        line: usize,
+    }
+
+    /// Every module `text` declares out of line.
+    ///
+    /// The `mod` keyword is found in the code — a `#[path = "mod_a.rs"]` is a
+    /// string and is stepped over — and what stands above it is then read as
+    /// lines, which is sound for this one question because an attribute on a
+    /// module declaration is written above it and the read stops at the first
+    /// line that is neither an attribute, a comment, nor blank.
+    fn out_of_line_modules(text: &str) -> Vec<Declaration> {
+        let bytes = text.as_bytes();
+        let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let mut found = Vec::new();
+        for at in code_indices(bytes, 0) {
+            // The keyword, at both its edges: `submod` and `mode` are names.
+            if !bytes[at..].starts_with(b"mod")
+                || (at > 0 && is_word(bytes[at - 1]))
+                || bytes.get(at + 3).copied().is_some_and(is_word)
+            {
+                continue;
+            }
+            let mut name = String::new();
+            let mut after_name = false;
+            let mut ends_declaration = false;
+            for index in code_indices(bytes, at + 3) {
+                let byte = bytes[index];
+                if byte.is_ascii_whitespace() {
+                    after_name = !name.is_empty();
+                    continue;
+                }
+                if is_word(byte) && !after_name {
+                    name.push(char::from(byte));
+                    continue;
+                }
+                ends_declaration = byte == b';';
+                break;
+            }
+            if name.is_empty() || !ends_declaration {
+                continue;
+            }
+            let (gated, path) = attributes_above(text, at);
+            found.push(Declaration {
+                name,
+                path,
+                gated,
+                line: text[..at].lines().count(),
+            });
+        }
+        found
+    }
+
+    /// What is written above the item at `at`: whether a `cfg(test)` gate stands
+    /// on it, and the file any `#[path = "…"]` names.
+    fn attributes_above(text: &str, at: usize) -> (bool, Option<String>) {
+        let mut written: Vec<&str> = Vec::new();
+        let line_start = text[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        written.push(text[line_start..at].trim());
+        for line in text[..line_start].lines().rev() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                continue;
+            }
+            if !trimmed.starts_with("#[") {
+                break;
+            }
+            written.push(trimmed);
+        }
+        let gated = written
+            .iter()
+            .any(|line| line.starts_with("#[cfg(test)]") || line.starts_with("#[cfg(all(test"));
+        let path = written.iter().find_map(|line| {
+            let rest = line.strip_prefix("#[path")?.split_once('"')?.1;
+            rest.split_once('"').map(|(named, _)| named.to_owned())
+        });
+        (gated, path)
+    }
+
+    /// The file a module `declaring` declares out of line lives in.
+    ///
+    /// Rust's own rule, and no other: a `#[path]` on a module declared at the
+    /// top of a file is relative to the directory that file is in; otherwise a
+    /// crate root and a `mod.rs` own the directory they are in, and every other
+    /// file owns a directory named after it.
+    fn module_file(declaring: &Path, module: &Declaration) -> Option<PathBuf> {
+        let directory = declaring.parent()?;
+        if let Some(named) = &module.path {
+            let file = directory.join(named);
+            return file.is_file().then_some(file);
+        }
+        let stem = declaring.file_stem()?.to_str()?;
+        let directory = match stem {
+            "lib" | "main" | "mod" => directory.to_path_buf(),
+            owner => directory.join(owner),
+        };
+        let beside = directory.join(format!("{}.rs", module.name));
+        if beside.is_file() {
+            return Some(beside);
+        }
+        let nested = directory.join(&module.name).join("mod.rs");
+        nested.is_file().then_some(nested)
+    }
+
+    /// **Every file of `files` that exists only under `cfg(test)`**, and every
+    /// gated declaration this walk could not follow to a file.
+    ///
+    /// The fact is owned by the declaration: a file is here because a
+    /// `#[cfg(test)] mod …;` names it, never because of what it is called.
+    /// Transitively, too — a file that is only compiled under `cfg(test)`
+    /// compiles its own children under it as well, whether or not they carry a
+    /// gate of their own, because there is no build in which their parent is
+    /// there and they are not.
+    fn wholly_test_files(files: &[PathBuf]) -> (BTreeSet<PathBuf>, Vec<String>) {
+        let read = |file: &Path| std::fs::read_to_string(file).ok();
+        let mut wholly = BTreeSet::new();
+        let mut unfollowed = Vec::new();
+        let mut frontier = Vec::new();
+        for file in files {
+            let Some(text) = read(file) else { continue };
+            for module in out_of_line_modules(&text).iter().filter(|it| it.gated) {
+                match module_file(file, module) {
+                    Some(named) => {
+                        if wholly.insert(named.clone()) {
+                            frontier.push(named);
+                        }
+                    }
+                    None => unfollowed.push(format!(
+                        "{}:{}: mod {};",
+                        file.display(),
+                        module.line,
+                        module.name
+                    )),
+                }
+            }
+        }
+        while let Some(file) = frontier.pop() {
+            let Some(text) = read(&file) else { continue };
+            for module in out_of_line_modules(&text) {
+                let Some(named) = module_file(&file, &module) else {
+                    unfollowed.push(format!(
+                        "{}:{}: mod {};",
+                        file.display(),
+                        module.line,
+                        module.name
+                    ));
+                    continue;
+                };
+                if wholly.insert(named.clone()) {
+                    frontier.push(named);
+                }
+            }
+        }
+        (wholly, unfollowed)
     }
 
     /// Whether the `r` at `at` opens a raw string rather than sitting inside a
@@ -11933,6 +13610,109 @@ mod native_window_door_tests {
             (Some(_), Some(b'\'')) => at + 2,
             _ => at,
         }
+    }
+
+    /// RED — **a gate on a declaration covers the file it names, and never the
+    /// item that happens to follow it** (2026-09-18).
+    ///
+    /// The reading this gate makes is the whole of what it can say, so the
+    /// reading is tested against text rather than only against the tree — the
+    /// tree has the cases it has today, and the ones that matter are the ones
+    /// somebody writes tomorrow.
+    ///
+    /// The first assertion is the one that was red before this day's change:
+    /// the old scan took the *next* `{` after a gate, whatever item it belonged
+    /// to, so `struct Shipped` below was inside a "test module" and every
+    /// `stand_in` in it was exempted without a word.
+    #[test]
+    fn a_gate_reads_its_own_item_and_the_file_it_names() {
+        let declared = "#[cfg(test)]\nmod tests;\n\nstruct Shipped {\n    door: usize,\n}\n";
+        assert!(
+            test_module_spans(declared).is_empty(),
+            "the braces of the item after a gated declaration are not a test module's body"
+        );
+        let modules = out_of_line_modules(declared);
+        assert_eq!(modules.len(), 1, "one declaration, and `struct` is not one");
+        assert!(
+            modules[0].gated && modules[0].name == "tests" && modules[0].path.is_none(),
+            "the gate stands on `mod tests;`, which is what makes that file test-only"
+        );
+
+        // An inline gated module still gives up its own body, and only that.
+        let inline = "#[cfg(test)]\nmod tests {\n    fn one() {}\n}\nstruct Shipped;\n";
+        let spans = test_module_spans(inline);
+        assert_eq!(spans.len(), 1, "the inline module is still read");
+        assert!(
+            inline[spans[0].0..=spans[0].1].contains("fn one")
+                && !inline[spans[0].0..=spans[0].1].contains("Shipped"),
+            "the span is the module's braces and stops at them"
+        );
+
+        // A declaration with no gate says nothing about the file it names, and a
+        // gate that is spelled inside a string is not a gate.
+        let plain =
+            out_of_line_modules("mod files;\nconst NEEDLE: &str = \"#[cfg(test)]\\nmod x;\";\n");
+        assert_eq!(
+            plain.len(),
+            1,
+            "the one in the literal is text, not a module"
+        );
+        assert!(
+            !plain[0].gated,
+            "an ungated `mod files;` names a file this crate ships"
+        );
+
+        // `#[path]` is honoured, and it is read from above the declaration.
+        let pathed =
+            out_of_line_modules("#[cfg(test)]\n#[path = \"journeys_tests.rs\"]\nmod journeys;\n");
+        assert_eq!(pathed.len(), 1);
+        assert!(
+            pathed[0].gated && pathed[0].path.as_deref() == Some("journeys_tests.rs"),
+            "the file a gated module is told to read is the file that is test-only"
+        );
+    }
+
+    /// RED — **and on this tree, the declaration is followed to the file.**
+    ///
+    /// The half above is about the reading; this is about the answer. `bt-app`
+    /// declares its largest test module out of line since 2026-09-18, and two
+    /// `stand_in` calls live in the file it names — so if this classification
+    /// ever stops working, `a_stand_in_window_is_only_named_by_tests` goes red
+    /// and names a test as a shipped path.
+    #[test]
+    fn the_out_of_line_test_modules_of_this_workspace_are_followed() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .expect("the crates directory, one above this crate");
+        let mut found = Vec::new();
+        walk(&root, &mut found);
+        found.retain(|path| {
+            path.components()
+                .any(|component| component.as_os_str() == "src")
+        });
+        let (wholly, unfollowed) = wholly_test_files(&found);
+        assert!(unfollowed.is_empty(), "{unfollowed:#?}");
+        for named in [
+            // Declared `#[cfg(test)] mod tests;` in `main.rs`, beside it.
+            "bt-app/src/tests.rs",
+            // Declared with a `#[path]`, which is the other spelling.
+            "bt-app/src/journeys_tests.rs",
+            // Declared in `attention.rs`, so it lives in `attention/`.
+            "bt-app/src/attention/tests.rs",
+        ] {
+            let file = root.join(named.replace('/', std::path::MAIN_SEPARATOR_STR));
+            assert!(
+                wholly.contains(&file),
+                "{named} is a `#[cfg(test)]` module's whole body and is not classified as one"
+            );
+        }
+        assert!(
+            !wholly.contains(
+                &root.join("bt-app/src/main.rs".replace('/', std::path::MAIN_SEPARATOR_STR))
+            ),
+            "a file that declares a test module is not itself one"
+        );
     }
 
     /// RED — **the handle is spelled twice, and each spelling is gated.**
@@ -12038,6 +13818,7 @@ mod deferred_service_tests {
             ("MathContextMenu", "new", "the formula menu"),
             ("FolderPicker", "new", "the folder chooser"),
             ("ImagePicker", "new", "the picture chooser"),
+            ("SaveFilePicker", "new", "the save dialog"),
             (
                 "SystemSettingsWatch",
                 "install",
@@ -12065,6 +13846,7 @@ mod deferred_service_tests {
             ("MathContextMenu", "request"),
             ("FolderPicker", "request"),
             ("ImagePicker", "request"),
+            ("SaveFilePicker", "request"),
             ("Compositor", "attach_web_visual"),
             ("Compositor", "place_web_visual"),
         ] {
@@ -12118,7 +13900,7 @@ mod macos_window_backend_tests {
 
     /// **The window and screen group**, named once for both pins — the doors
     /// M1-3 moved, in the order the re-export lists spell them.
-    const DOORS: [&str; 22] = [
+    const DOORS: [&str; 23] = [
         "client_area_animation_enabled",
         "dpi_at",
         "get_dpi_for_window",
@@ -12129,6 +13911,7 @@ mod macos_window_backend_tests {
         "monitor_id_at",
         "os_ui_language",
         "pointer_position",
+        "pointer_position_in_window",
         "request_window_close",
         "set_window_dark_mode",
         "set_window_outer_rect",
@@ -12767,6 +14550,7 @@ mod macos_dialog_backend_tests {
             "\npub struct MathContextMenu {",
             "\npub struct FolderPicker {",
             "\npub struct ImagePicker {",
+            "\npub struct SaveFilePicker {",
             "\npub fn message_box(",
         ] {
             let attributes = attributes_above(PORTABLE, definition);
@@ -12989,8 +14773,8 @@ mod macos_dialog_backend_tests {
         let dressing = item(MACOS, "\nfn dress(");
         assert_eq!(
             dressing.matches("setAllowedContentTypes(").count(),
-            1,
-            "exactly one of the three rows is filtered, and it is the picture one"
+            2,
+            "two of the four rows are filtered — the picture one, and the settings file one              (0.4.4 ticket 05), which offers the one type an export is written as"
         );
         assert!(
             dressing.contains("setTreatsFilePackagesAsDirectories(false)"),
@@ -13797,6 +15581,8 @@ mod macos_process_door_tests {
         for (door, macos_arm, module) in [
             ("recycle", MACOS_FILES, "macos_files"),
             ("monospace_font_families", MACOS_FONTS, "macos_fonts"),
+            ("monospace_family_named", MACOS_FONTS, "macos_fonts"),
+            ("cjk_font_families", MACOS_FONTS, "macos_fonts"),
         ] {
             let attributes = attributes_above(PORTABLE, &format!("pub fn {door}("));
             assert!(
@@ -13813,7 +15599,8 @@ mod macos_process_door_tests {
         assert!(
             root.contains(
                 "#[cfg(all(not(windows), not(target_os = \"macos\")))]\n\
-                 pub use portable_impl::{monospace_font_families, recycle};"
+                 pub use portable_impl::{\n    cjk_font_families, monospace_family_named, \
+                 monospace_font_families, recycle,\n};"
             ),
             "the portable re-export is the one a third platform still meets"
         );
@@ -13823,7 +15610,9 @@ mod macos_process_door_tests {
         );
         assert!(
             root.contains(
-                "#[cfg(target_os = \"macos\")]\npub use macos_fonts::monospace_font_families;"
+                "#[cfg(target_os = \"macos\")]\n\
+                 pub use macos_fonts::{cjk_font_families, monospace_family_named, \
+                 monospace_font_families};"
             ),
             "macOS takes its font list from the CoreText arm"
         );
@@ -13878,6 +15667,16 @@ mod macos_process_door_tests {
             signature(windows_arm, "monospace_font_families"),
             signature(MACOS_FONTS, "monospace_font_families"),
             "the font list is two different doors"
+        );
+        assert_eq!(
+            signature(windows_arm, "cjk_font_families"),
+            signature(MACOS_FONTS, "cjk_font_families"),
+            "the CJK font list is two different doors"
+        );
+        assert_eq!(
+            signature(windows_arm, "monospace_family_named"),
+            signature(MACOS_FONTS, "monospace_family_named"),
+            "the lookup of one family by name is two different doors"
         );
     }
 
@@ -15352,7 +17151,9 @@ mod win32_error_tests {
 
 #[cfg(test)]
 mod monospace_family_tests {
-    use super::{DEFAULT_MONOSPACE_FAMILY, MonospaceFamily, order_monospace_families};
+    use super::{
+        DEFAULT_MONOSPACE_FAMILY, MonospaceFamily, order_cjk_families, order_monospace_families,
+    };
 
     fn named(name: &str) -> MonospaceFamily {
         MonospaceFamily {
@@ -15365,6 +17166,29 @@ mod monospace_family_tests {
 
     fn names(families: &[MonospaceFamily]) -> Vec<&str> {
         families.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    #[test]
+    fn the_cjk_family_list_is_sorted_and_deduplicated_without_a_synthetic_face() {
+        let ordered = order_cjk_families(vec![
+            super::CjkFamily {
+                name: "SimSun".into(),
+                ..Default::default()
+            },
+            super::CjkFamily {
+                name: "Microsoft YaHei UI".into(),
+                ..Default::default()
+            },
+            super::CjkFamily {
+                name: "simsun".into(),
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(
+            ordered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            vec!["Microsoft YaHei UI", "SimSun"]
+        );
+        assert!(ordered.iter().all(|family| !family.name.is_empty()));
     }
 
     /// PIN — the list is sorted case-insensitively, so the row a user is looking
@@ -15484,7 +17308,66 @@ mod monospace_family_tests {
 /// on. Windows only, because there is nothing to enumerate elsewhere.
 #[cfg(all(test, windows))]
 mod monospace_enumeration_tests {
-    use super::{DEFAULT_MONOSPACE_FAMILY, monospace_font_families};
+    use super::{
+        DEFAULT_MONOSPACE_FAMILY, cjk_font_families, monospace_family_named,
+        monospace_font_families,
+    };
+
+    /// RED (50) — **the lookup by name answers with the files the walk
+    /// answers for the same family, in a fraction of the walk's time.**
+    ///
+    /// Launch asks for one family's files before the first grid can be
+    /// measured; until ticket 50 it walked the whole collection to answer.
+    /// The lookup and the walk share `monospace_family_entry`, so what the
+    /// renderer loads at launch is what the picker's row would have handed it.
+    /// This holds the two to each other on the machine's real collection, for
+    /// the default family and for every family the walk lists, and prints both
+    /// times (`--nocapture`) — the measurement Design step 6 asks for.
+    ///
+    /// MUTATION: make the lookup read only the family's first face
+    /// (`GetFirstMatchingFont`) and the files differ for any family with a
+    /// separate bold file; make it answer `None` and the first assertion names
+    /// the default.
+    #[test]
+    fn the_lookup_by_name_answers_the_files_the_walk_does() {
+        // The lookup first, so it pays for the system collection the way a
+        // launch does; the walk after it finds the collection already open.
+        let started = std::time::Instant::now();
+        let looked_up = monospace_family_named(DEFAULT_MONOSPACE_FAMILY);
+        let lookup_us = started.elapsed().as_micros();
+        let started = std::time::Instant::now();
+        let walked = monospace_font_families();
+        let walk_us = started.elapsed().as_micros();
+        println!(
+            "BT_PERF_TRACE monospace_enumeration_us={walk_us} families={} \
+             monospace_family_named_us={lookup_us} family={DEFAULT_MONOSPACE_FAMILY}",
+            walked.len()
+        );
+        let looked_up = looked_up.expect("the default family is on every Windows");
+        let row = walked
+            .iter()
+            .find(|family| family.name.eq_ignore_ascii_case(DEFAULT_MONOSPACE_FAMILY))
+            .expect("and it is a row of the walk");
+        assert_eq!(looked_up, *row, "one family, two roads, one answer");
+        let mut slowest = 0;
+        for family in walked.iter().filter(|family| !family.files.is_empty()) {
+            let started = std::time::Instant::now();
+            let found = monospace_family_named(&family.name);
+            slowest = slowest.max(started.elapsed().as_micros());
+            assert_eq!(
+                found.as_ref(),
+                Some(family),
+                "the walk lists {} and the lookup by that name disagrees",
+                family.name
+            );
+        }
+        println!("BT_PERF_TRACE monospace_family_named_slowest_us={slowest}");
+        assert_eq!(
+            monospace_family_named("No Family Is Called This 50"),
+            None,
+            "a name the machine does not have is no family"
+        );
+    }
 
     /// PIN — a real Windows answers with families that can actually be loaded.
     ///
@@ -15522,6 +17405,30 @@ mod monospace_enumeration_tests {
                     family.name
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_machines_cjk_families_are_named_and_locatable() {
+        let started = std::time::Instant::now();
+        let families = cjk_font_families();
+        eprintln!(
+            "BT_PERF_TRACE cjk_enumeration_us={} families={}",
+            started.elapsed().as_micros(),
+            families.len()
+        );
+        assert!(
+            !families.is_empty(),
+            "Windows exposes at least one CJK family"
+        );
+        for family in families {
+            assert!(!family.name.trim().is_empty());
+            assert!(
+                !family.files.is_empty(),
+                "{} has no loadable file",
+                family.name
+            );
+            assert!(family.files.iter().all(|path| path.is_absolute()));
         }
     }
 }
@@ -17948,3 +19855,31 @@ pub use macos_clipboard_payload::clipboard_payload;
 pub fn clipboard_payload() -> Result<ClipboardPayload, String> {
     Err("terminal clipboard acquisition is unavailable on this platform".to_owned())
 }
+
+/// The system's own TIFF reader, which is a thing only one platform here has.
+#[cfg(target_os = "macos")]
+mod macos_picture;
+#[cfg(target_os = "macos")]
+pub use macos_picture::png_from_tiff;
+
+/// **The same door on a machine whose clipboard has no TIFF on it.**
+///
+/// Not a stub for a case that could happen and is unhandled: `PictureEncoding::Tiff`
+/// is produced by exactly one acquisition — the macOS pasteboard's — and every
+/// other platform's reader offers PNG and DIB. What this arm buys is a caller
+/// that decodes a clipboard picture without asking which machine it is on,
+/// which is the shape every other lane in this crate has.
+#[cfg(not(target_os = "macos"))]
+pub fn png_from_tiff(
+    _tiff: &[u8],
+    _judge: impl FnOnce(u32, u32, u64) -> Result<(), String>,
+) -> Result<Vec<u8>, String> {
+    Err("TIFF is not a clipboard picture encoding on this platform".to_owned())
+}
+mod file_replace;
+#[cfg(windows)]
+pub use file_replace::set_file_attributes;
+pub use file_replace::{
+    ReplaceRefusal, carry_metadata, extended_attribute_names, file_link_count,
+    replace_file_preserving, volume_cannot_replace,
+};

@@ -42,25 +42,9 @@
 //! anchors what it is given ("anchored as `^(?:PATTERN)$`"), so the value written is the bare
 //! subtype name and the anchoring is upstream's.
 //!
-//! **One column is written, and it is this machine's** (M4-7). Upstream's field table is `bash`
-//! "Shell command for Unix" and `powershell` "Shell command for Windows", and it runs the one that
-//! matches the machine. The first draft of this module wrote `powershell` and said why — *Folio is
-//! a Windows program, so a `bash` entry naming a Windows path would be a line that can only fail* —
-//! and that reason expired the day there was a Mac build. Writing the wrong column is not a
-//! degraded install: it is a file that parses, validates, sits in the right directory and never
-//! fires, which from the reader's chair is identical to not having installed at all. See
-//! [`column_for`]; the choice is a value out of `bt-platform` rather than a `cfg`, so that a
-//! Windows runner can read the shape a Mac installs.
-//!
-//! **`timeoutSec` is small and deliberately not the default.** The default is 30, and a
-//! `notification` hook is fire-and-forget — a timeout is "logged and skipped" — so the number is
-//! only the length of time upstream might wait on a machine where this build has wedged. Five.
-//!
-//! **No payload is passed**, [`attention_hooks::command_for_on`](crate::attention_hooks)'s rule for
-//! its reason: no row of this family declares an identifier, the two subtypes are told apart by the
-//! matcher rather than by reading the message, and a command line that interpolated a hook payload
-//! would be a command line an upstream could put a quote character into. The verbatim
-//! `notification` payload has no request identifier in it to want.
+//! Copilot CLI's `exec`/`args` form runs Folio directly, on all platforms.
+//! No payload is interpolated. `timeoutSec: 5` remains unchanged. Legacy shell
+//! entries are decoded only for ownership and migrated on an explicit install.
 //!
 //! # The version gate
 //!
@@ -75,6 +59,8 @@
 //! `copilot` on the path, a spawn that failed — is **not** gated: what is refused is a version
 //! proved too old, never the absence of proof.
 
+pub(crate) use crate::attention_ownership::Outcome;
+use crate::attention_ownership::{self as ownership, Decision};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -103,11 +89,11 @@ const SETTINGS_FILE: &str = "settings.json";
 /// The user setting that turns every hook file off at once, ours included.
 const DISABLE_ALL_HOOKS: &str = "disableAllHooks";
 
-/// The substring that marks a command as ours.
+/// What this module says about a hook file it could not read, whichever half could not read it.
 ///
-/// [`attention_hooks::MARK`](crate::attention_hooks)'s rule, for its reason — a user who moves
-/// Folio, or who runs two builds of it, still has a file this can recognise and take back out.
-const MARK: &str = "attention copilot:";
+/// One sentence for the byte that is not UTF-8 and for the document that is not JSON, because to
+/// the reader they are one fact: there is a file there, and this build is not going to guess at it.
+const UNREADABLE: &str = "the copilot hook file is not one this build can read";
 
 /// The schema version upstream's own example carries: `"version": 1`.
 const SCHEMA_VERSION: u64 = 1;
@@ -201,6 +187,10 @@ pub(crate) enum State {
     /// There is a file at our name and it could not be read as JSON. **Not** "absent": writing over
     /// a file this build cannot parse would destroy something somebody wrote by hand.
     Unreadable,
+    /// There is a readable file and **this build will not edit it**, for the reason carried: a
+    /// link out of the agent's own folder, a file shared by hard links, or a read-only one. See
+    /// `attention_hooks::Standing::Refused`.
+    Refused(&'static str),
 }
 
 /// The directory copilot keeps user configuration in, as **this environment** says it.
@@ -278,25 +268,81 @@ pub(crate) fn state() -> State {
     let Some(path) = hooks_path() else {
         return State::Absent;
     };
-    match std::fs::read_to_string(&path) {
-        Err(_) => State::Absent,
-        Ok(text) if text.trim().is_empty() => State::Absent,
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(document) if document.is_object() => {
-                // **The same predicate `apply` refuses on**, and it has to be: a state that said
-                // `Installed` about a file the press then refuses to touch would be a switch that
-                // shows On and cannot be turned Off.
-                if declares_folio(&document) && !holds_somebody_elses_entry(&document) {
-                    State::Installed
-                } else {
-                    // A file somebody else put at this name, or one they added to. `Absent` would
-                    // make the row offer to write over it; `Unreadable` is the state that means
-                    // "there is something here and it is not ours to touch".
-                    State::Unreadable
-                }
+    let state = state_at(&path);
+    if state != State::Installed {
+        return state;
+    }
+    let Some(exe) = std::env::current_exe().ok() else {
+        return State::Unreadable;
+    };
+    let Ok(text) =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, path)
+    else {
+        return State::Unreadable;
+    };
+    let Some(value) = serde_json::from_str::<Value>(&text).ok() else {
+        return State::Unreadable;
+    };
+    if (owners(&value).unwrap_or_default())
+        .iter()
+        .any(|owner| crate::explorer_menu::same_path(owner, &exe))
+    {
+        State::Installed
+    } else {
+        State::Absent
+    }
+}
+
+/// **The settings row's two facts, out of one read of the file.**
+///
+/// Whether this copy's marks are in it, and — when this build will not edit it at all — the reason
+/// the row says in place of `Off`. Two answers to "what does the row show" derived from one
+/// `State` rather than two reads, because a second read is a second answer (closure review R1).
+#[must_use]
+pub(crate) fn row_state() -> (bool, Option<&'static str>) {
+    match state() {
+        State::Installed => (true, None),
+        State::Refused(reason) => (false, Some(reason)),
+        State::Absent | State::Unreadable => (false, None),
+    }
+}
+
+/// The same question about a named file, so a test can ask it without a copilot installation on the
+/// machine it runs on.
+#[must_use]
+fn state_at(path: &Path) -> State {
+    let config = match crate::attention_hooks::Config::resolve(path) {
+        Ok(config) => config,
+        // Read, and not ours to change. The row says which file it is looking at.
+        Err(crate::attention_hooks::Unresolved::Refused(reason)) => return State::Refused(reason),
+        Err(crate::attention_hooks::Unresolved::Unreadable) => return State::Unreadable,
+    };
+    let text = match config.standing() {
+        // No file is the same answer to the only question being asked.
+        crate::attention_hooks::Standing::Nothing => return State::Absent,
+        // **Not `Absent`.** There is a file, and a row that said "not installed" about it would
+        // offer to write over one this build never read.
+        crate::attention_hooks::Standing::Unreadable => return State::Unreadable,
+        crate::attention_hooks::Standing::Text(text) => text,
+    };
+    if text.trim().is_empty() {
+        return State::Absent;
+    }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(document) if document.is_object() => {
+            // **The same predicate `apply` refuses on**, and it has to be: a state that said
+            // `Installed` about a file the press then refuses to touch would be a switch that
+            // shows On and cannot be turned Off.
+            if declares_folio(&document) && owners(&document).is_ok() {
+                State::Installed
+            } else {
+                // A file somebody else put at this name, or one they added to. `Absent` would make
+                // the row offer to write over it; `Unreadable` is the state that means "there is
+                // something here and it is not ours to touch".
+                State::Unreadable
             }
-            _ => State::Unreadable,
-        },
+        }
+        _ => State::Unreadable,
     }
 }
 
@@ -310,7 +356,9 @@ pub(crate) fn installed_rows() -> Vec<MappingRow> {
     let Some(path) = hooks_path() else {
         return Vec::new();
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, &path)
+    else {
         return Vec::new();
     };
     let Ok(document) = serde_json::from_str::<Value>(&text) else {
@@ -353,38 +401,98 @@ fn declared_events(document: &Value) -> Vec<String> {
     found
 }
 
-/// **Whether one entry is one of ours**, by the verb and the family and never by a path.
+/// Family detection delegates to the same executable-operand decoder used for edits.
 fn entry_is_ours(entry: &Value) -> bool {
-    ["bash", "powershell", "command"].iter().any(|column| {
-        entry
-            .get(*column)
-            .and_then(Value::as_str)
-            .is_some_and(|line| line.contains(MARK))
-    })
+    entry_owner(entry).is_ok_and(|owner| owner.is_some())
+}
+
+/// The only Copilot attribution site; mixed execution modes are refused.
+fn entry_owner(entry: &Value) -> Result<Option<PathBuf>, &'static str> {
+    let columns = ["exec", "bash", "powershell", "command"];
+    let present = columns
+        .iter()
+        .filter(|key| entry.get(**key).is_some())
+        .collect::<Vec<_>>();
+    if present.len() != 1 {
+        return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+    }
+    let column = *present[0];
+    let program = entry[column]
+        .as_str()
+        .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?;
+    let owner = if column == "exec" {
+        ownership::direct_path(
+            program,
+            entry.get("args").unwrap_or(&serde_json::json!([])),
+            COPILOT,
+        )?
+    } else {
+        ownership::legacy_path(program, COPILOT)?
+    };
+    if owner.is_some()
+        && (entry.as_object().is_none_or(|o| {
+            o.keys().any(|k| {
+                ![
+                    "type",
+                    "exec",
+                    "args",
+                    "bash",
+                    "powershell",
+                    "command",
+                    "matcher",
+                    "timeoutSec",
+                ]
+                .contains(&k.as_str())
+            })
+        }) || entry
+            .get("type")
+            .is_some_and(|v| v.as_str() != Some("command"))
+            || entry.get("matcher").is_some_and(|v| !v.is_string())
+            || entry.get("timeoutSec").is_some_and(|v| !v.is_number())
+            || (column != "exec" && entry.get("args").is_some()))
+    {
+        return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+    }
+    Ok(owner)
+}
+
+fn owners(document: &Value) -> Result<Vec<PathBuf>, &'static str> {
+    if document.get("version").and_then(Value::as_u64) != Some(SCHEMA_VERSION)
+        || document.as_object().is_none_or(|o| {
+            o.keys()
+                .any(|k| !["version", "hooks"].contains(&k.as_str()))
+        })
+    {
+        return Err(crate::i18n::Text::AgentHooksSchemaUnknown.text());
+    }
+    let mut paths = Vec::new();
+    for entries in document
+        .get("hooks")
+        .and_then(Value::as_object)
+        .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
+        .values()
+    {
+        for entry in entries
+            .as_array()
+            .ok_or(crate::i18n::Text::AgentHooksSchemaUnknown.text())?
+        {
+            // **Ownership is per entry** (closure review R4): an entry this build cannot decode is
+            // not Folio's, which is the same fact about this file as an entry that is plainly
+            // somebody else's — Folio's own hook file is written whole, so one entry that is not
+            // ours makes the file not ours, and it is left alone under its own sentence.
+            paths.push(
+                entry_owner(entry)
+                    .ok()
+                    .flatten()
+                    .ok_or("a hook file of your own already stands under that name")?,
+            );
+        }
+    }
+    Ok(paths)
 }
 
 fn declares_folio(document: &Value) -> bool {
     !declared_events(document).is_empty()
-}
-
-/// **Whether anything in this document belongs to somebody else.**
-///
-/// The guard that makes "this file is ours, whole" a checked claim rather than an assumption from
-/// its name. Upstream loads every `*.json` in that directory, so a user with hooks of their own has
-/// no reason to put them in a file called `folio.json` — but if one ever does, install would
-/// overwrite them and uninstall would delete them, and this module keeps no memory of what it
-/// replaced. So it refuses instead, and the row stays where the machine actually is.
-fn holds_somebody_elses_entry(document: &Value) -> bool {
-    let Some(hooks) = document.get("hooks").and_then(Value::as_object) else {
-        // A document with no `hooks` at all is not empty of meaning — somebody wrote it — and the
-        // only file that reaches here with none is one this build did not write.
-        return true;
-    };
-    hooks.values().any(|entries| {
-        entries
-            .as_array()
-            .is_none_or(|entries| entries.iter().any(|entry| !entry_is_ours(entry)))
-    })
 }
 
 /// **The rows one install writes**: every copilot row. None of them is tiered — this family
@@ -395,54 +503,6 @@ pub(crate) fn rows_to_install() -> Vec<MappingRow> {
     attention_map::installed_rows(attention_map::ROWS, COPILOT, |_| true)
 }
 
-/// **Which of upstream's two columns this machine's line goes in** (M4-7).
-///
-/// Upstream's field table is `bash` "Shell command for Unix" and `powershell` "Shell command for
-/// Windows", and it runs the one that matches the machine. Writing the wrong one is not a
-/// half-install that degrades: it is a file that parses, validates, sits in the right directory and
-/// **never fires**, which is indistinguishable from not having installed at all. The module header
-/// said "only the `powershell` column is written" and gave the reason — *Folio is a Windows
-/// program* — and the moment that stopped being true this had to stop being true with it.
-#[must_use]
-pub(crate) fn column_for(platform: HostPlatform) -> &'static str {
-    match platform {
-        HostPlatform::Windows => "powershell",
-        HostPlatform::MacOs | HostPlatform::OtherUnix => "bash",
-    }
-}
-
-/// One command line, in the flavour of the shell that will run it.
-///
-/// **PowerShell**: `&` because a path with a space in it is a string to PowerShell and not a
-/// command; single quotes because the alternative expands `$` out of somebody's folder name, and
-/// doubled inside for the one character that could close them early.
-///
-/// **`/bin/sh`**: no `&` — a quoted word at the start of a line is already the command — and the
-/// single quotes are sh's, so the escape is sh's too (close, escape, reopen), which is
-/// [`crate::attention_hooks::quoted_program`]'s and is shared with it rather than written twice.
-///
-/// **The endpoint is in neither of them.** The hook is this executable and it reads
-/// `FOLIO_ATTENTION_PIPE` out of the environment the pane's shell gave it — see
-/// `attention_hooks::command_for_on` for why a socket path travels that way exactly as a pipe name
-/// did, and why there is no `nc -U` stub on the Unix side.
-///
-/// `platform` is handed in rather than asked for, so that a Windows runner can read the line a
-/// Mac installs and the other way round — `document_for_on`'s reason, one layer down.
-#[must_use]
-pub(crate) fn command_for_on(exe: &Path, event: &str, platform: HostPlatform) -> String {
-    let verb = crate::cli::ATTENTION_VERB;
-    match platform {
-        HostPlatform::Windows => {
-            let quoted = exe.display().to_string().replace('\'', "''");
-            format!("& '{quoted}' {verb} {COPILOT}:{event}")
-        }
-        HostPlatform::MacOs | HostPlatform::OtherUnix => format!(
-            "{} {verb} {COPILOT}:{event}",
-            crate::attention_hooks::quoted_program(exe, platform)
-        ),
-    }
-}
-
 /// **The whole document one install writes**, given where this build lives.
 #[must_use]
 pub(crate) fn document_for(exe: &Path) -> Value {
@@ -451,7 +511,7 @@ pub(crate) fn document_for(exe: &Path) -> Value {
 
 /// The same document, for a named platform.
 #[must_use]
-pub(crate) fn document_for_on(exe: &Path, platform: HostPlatform) -> Value {
+pub(crate) fn document_for_on(exe: &Path, _platform: HostPlatform) -> Value {
     let mut hooks = Map::new();
     for row in rows_to_install() {
         let (event, matcher) = match row.event.split_once('.') {
@@ -462,9 +522,10 @@ pub(crate) fn document_for_on(exe: &Path, platform: HostPlatform) -> Value {
         if let Some(matcher) = matcher {
             entry.insert("matcher".to_owned(), matcher.into());
         }
+        entry.insert("exec".to_owned(), exe.to_string_lossy().as_ref().into());
         entry.insert(
-            column_for(platform).to_owned(),
-            command_for_on(exe, row.event, platform).into(),
+            "args".to_owned(),
+            serde_json::json!(["attention", format!("{COPILOT}:{}", row.event)]),
         );
         entry.insert("timeoutSec".to_owned(), TIMEOUT_SECONDS.into());
         // Upstream defaults this to `"command"` when it is omitted. Written anyway, because a
@@ -494,7 +555,9 @@ fn hooks_are_switched_off() -> bool {
     let Some(path) = settings_path() else {
         return false;
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) =
+        bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Attention, &path)
+    else {
         return false;
     };
     let Ok(settings) = serde_json::from_str::<Value>(&text) else {
@@ -546,48 +609,110 @@ pub(crate) fn row_description(readiness: Readiness) -> &'static str {
     }
 }
 
-/// What happened when the row was pressed.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Outcome {
-    /// Written. The file is now what [`State::Installed`] describes.
-    Installed,
-    /// Taken back out, and the directory is the one that was there.
-    Removed,
-    /// Nothing to do — it was already in the state that was asked for.
-    Unchanged,
-    /// Refused, with the reason in the caller's own words.
-    Refused(&'static str),
-}
-
 /// Put Folio's hook file in, or take it out, on this machine.
 ///
 /// **The version gate is here and not only on the row**, because the row is a sentence and this is
 /// the act: a machine that answers `1.0.21` gets told why, rather than a file that fires on every
 /// tool call an approval rule already waved through.
-pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
+pub(crate) fn apply(decision: Decision, exe: &Path) -> Outcome {
     let Some(path) = hooks_path() else {
         return Outcome::Refused("no copilot configuration directory to write into");
     };
-    let existing = std::fs::read_to_string(&path).ok();
-    let standing = match existing.as_deref() {
-        None => None,
-        Some(text) if text.trim().is_empty() => None,
-        Some(text) => match serde_json::from_str::<Value>(text) {
+    apply_at(&path, decision, exe, &crate::persist::storage_dir())
+}
+
+/// The same act on a named file — the seam the tests press, so that what they pin is this function
+/// and not a hook file belonging to whoever runs them.
+pub(crate) fn apply_at(path: &Path, decision: Decision, exe: &Path, data: &Path) -> Outcome {
+    match crate::attention_hooks::Config::resolve(path) {
+        Ok(config) => apply_resolved(&config, decision, exe, data),
+        Err(crate::attention_hooks::Unresolved::Refused(reason)) => Outcome::Refused(reason),
+        Err(crate::attention_hooks::Unresolved::Unreadable) => Outcome::Refused(UNREADABLE),
+    }
+}
+
+/// The same act on a configuration this operation has already resolved.
+///
+/// **Everything below the entry takes this value.** The path was resolved once, at the top; the
+/// read, the dated copy, the replace and the removal all name that one answer, and there is no
+/// second resolution on this path for a repointed link to slip through (re-review B1).
+pub(crate) fn apply_resolved(
+    config: &crate::attention_hooks::Config,
+    decision: Decision,
+    exe: &Path,
+    data: &Path,
+) -> Outcome {
+    if let Err(reason) = ownership::stable_executable(Some(exe)) {
+        return Outcome::Refused(reason);
+    }
+    if !config.named().is_absolute() {
+        return Outcome::Refused(crate::i18n::Text::AgentHooksRootUnstable.text());
+    }
+    let install = decision.installs();
+    let existing = match config.standing() {
+        crate::attention_hooks::Standing::Text(text) => text,
+        // Nothing there yet: the install creates the file, and there is nothing to keep beside it.
+        crate::attention_hooks::Standing::Nothing => String::new(),
+        // **A file that could not be read is never written over, and never removed either** — this
+        // build cannot tell whose it is. Release audit 2026-09-16 (C-3), the same conflation the
+        // other two installers held.
+        crate::attention_hooks::Standing::Unreadable => return Outcome::Refused(UNREADABLE),
+    };
+    let standing = if existing.trim().is_empty() {
+        None
+    } else {
+        match serde_json::from_str::<Value>(&existing) {
             Ok(document) if document.is_object() => Some(document),
             // Refused rather than replaced, for `attention_hooks`'s reason: a file this build
             // cannot read is a file somebody wrote.
-            _ => return Outcome::Refused("the copilot hook file is not one this build can read"),
-        },
+            _ => return Outcome::Refused(UNREADABLE),
+        }
     };
-    if let Some(standing) = &standing
-        && holds_somebody_elses_entry(standing)
-    {
-        return Outcome::Refused("a hook file of your own already stands under that name");
+    let paths = match standing.as_ref().map(owners).transpose() {
+        Ok(paths) => paths.unwrap_or_default(),
+        Err(reason) => return Outcome::Refused(reason),
+    };
+    let others = match ownership::check(&paths, exe, &decision) {
+        Ok(others) => others,
+        Err(outcome) => return outcome,
+    };
+    if !install && !others.is_empty() {
+        let mut retained = standing.clone().expect("owners imply a document");
+        let hooks = retained["hooks"].as_object_mut().expect("validated hooks");
+        for entries in hooks.values_mut() {
+            entries
+                .as_array_mut()
+                .expect("validated entries")
+                .retain(|entry| {
+                    entry_owner(entry)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|owner| others.contains(&owner))
+                });
+        }
+        if standing.as_ref() != Some(&retained) {
+            let text = serde_json::to_string_pretty(&retained).expect("JSON value");
+            if config.land(&existing, "json", format!("{text}\n").as_bytes())
+                != crate::attention_hooks::Landing::Landed
+            {
+                return Outcome::Refused("the copilot hook file could not be written");
+            }
+        }
+        return Outcome::LeftOther(others);
     }
     if install {
         if readiness() == Readiness::TooOld {
             return Outcome::Refused("copilot 1.0.26 or newer is needed for this");
         }
+        let root = config
+            .named()
+            .parent()
+            .and_then(Path::parent)
+            .expect("absolute hooks file");
+        let _record = match ownership::record(data, root, "copilot") {
+            Ok(lock) => lock,
+            Err(reason) => return Outcome::Refused(reason),
+        };
         let written = document_for(exe);
         if standing.as_ref() == Some(&written) {
             return Outcome::Unchanged;
@@ -595,7 +720,7 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
         let Ok(text) = serde_json::to_string_pretty(&written) else {
             return Outcome::Refused("the hook file could not be written back");
         };
-        // The atomic write, the backup that is a precondition and the link that is followed are all
+        // The atomic write, mandatory backup, and unsafe-path refusal are all
         // `attention_hooks::land`'s, said once for all three installers.
         //
         // **The backup's name matters more here than it does beside the other two files.** Upstream
@@ -603,18 +728,16 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
         // second copy of these hooks that upstream also runs — every event fired twice, for as long
         // as the file sat there. `folio.json.bak-<date>` is not a `*.json`, which is what the
         // `"json"` below produces.
-        match crate::attention_hooks::land(
-            &path,
-            existing.as_deref().unwrap_or_default(),
-            "json",
-            format!("{text}\n").as_bytes(),
-        ) {
+        match config.land(&existing, "json", format!("{text}\n").as_bytes()) {
             crate::attention_hooks::Landing::Landed => {}
             crate::attention_hooks::Landing::NoDirectory => {
                 return Outcome::Refused("the copilot hooks directory could not be created");
             }
             crate::attention_hooks::Landing::NoBackup => {
                 return Outcome::Refused(crate::attention_hooks::NO_BACKUP);
+            }
+            crate::attention_hooks::Landing::Changed => {
+                return Outcome::Refused(crate::i18n::Text::AgentConfigChanged.text());
             }
             crate::attention_hooks::Landing::NotWritten => {
                 return Outcome::Refused("the copilot hook file could not be written");
@@ -628,7 +751,13 @@ pub(crate) fn apply(install: bool, exe: &Path) -> Outcome {
         // **The whole file goes**, which is what "install then uninstall is the identity" means
         // when the file is one this build created: there was nothing there, and there is nothing
         // there again. The directory stays, because copilot's directory is not ours to remove.
-        if std::fs::remove_file(&path).is_err() {
+        //
+        // Under every name that delivers it, which is `land`'s resolution: where this path is a
+        // link Folio resolved, the target is the file upstream loads — leaving it would leave
+        // Folio's hooks firing, and leaving the link alone would leave upstream a name that loads
+        // nothing. The second removal is best effort because the first may already have taken the
+        // only file there was (closure review R1).
+        if config.remove_file().is_err() {
             return Outcome::Refused("the copilot hook file could not be removed");
         }
         Outcome::Removed
@@ -725,6 +854,12 @@ fn run_probe() -> Option<Version> {
         command
             .raw_arg(probe_command_tail(&copilot))
             .output()
+            .inspect(|output| {
+                bt_platform::file_reads::pipe_output(
+                    bt_platform::file_reads::Lane::Attention,
+                    output,
+                )
+            })
             .ok()?
     };
     Version::parse(&String::from_utf8_lossy(&output.stdout))
@@ -751,8 +886,58 @@ mod tests {
     use super::*;
     use crate::attention::{MappedAction, Tier};
 
+    #[test]
+    fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-tests")
+            .join(concat!("copilot-", "two-copies"));
+        std::fs::create_dir_all(&root).unwrap();
+        // **Two folders, one file name.** An operand is Folio's only if its file name is one
+        // Folio installs itself under, which is how two real copies differ: same program, two
+        // places. The odd characters this fixture exists for move to the folder.
+        let a = root.join("A space $ ` ' 中文").join("folio.exe");
+        let b = root.join("B").join("folio.exe");
+        for copy in [&a, &b] {
+            std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            std::fs::write(copy, b"a copy of Folio").unwrap();
+        }
+        let path = root.join("settings.json");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(apply_to(&path, true, &a), Outcome::Installed);
+        let before = std::fs::read(&path).unwrap();
+        let result = apply_to(&path, true, &b);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "another live executable must require explicit take-over: {result:?}"
+        );
+        assert_ne!(result, Outcome::Installed);
+        let result = apply_to(&path, false, &b);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "cleanup must leave a live other owner: {result:?}"
+        );
+    }
+
+    fn apply_to(path: &Path, install: bool, exe: &Path) -> Outcome {
+        apply_at(
+            path,
+            install.into(),
+            exe,
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-test-marks/copilot")
+                .join(path.parent().unwrap().file_name().unwrap()),
+        )
+    }
+
+    fn has_unowned_entries(document: &Value) -> bool {
+        owners(document).is_err()
+    }
+
     fn exe() -> PathBuf {
-        PathBuf::from(r"C:\Program Files\Folio\folio.exe")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tb-fixtures/Program Files/Folio/folio.exe")
     }
 
     /// PIN (R1-17) — **the probe names the program it starts, absolutely.**
@@ -931,118 +1116,33 @@ mod tests {
     /// **Every command names its family and its event, and none carries a payload.**
     #[test]
     fn every_command_says_which_upstream_it_speaks_for_and_hands_over_nothing() {
-        let document = document_for_on(&exe(), HostPlatform::Windows);
-        let mut seen = 0;
-        for entries in document["hooks"].as_object().expect("hooks").values() {
-            for entry in entries.as_array().expect("array") {
-                seen += 1;
-                assert_eq!(entry.get("type"), Some(&Value::from("command")));
-                assert_eq!(
-                    entry.get("timeoutSec"),
-                    Some(&Value::from(TIMEOUT_SECONDS)),
-                    "upstream's own default is thirty, and a fire-and-forget signal has no \
-                     business holding one of its slots that long"
-                );
-                assert_eq!(
-                    entry.get("bash"),
-                    None,
-                    "the bash column is for Unix, and a Windows path there is a line that can \
-                     only fail"
-                );
-                let line = entry["powershell"].as_str().expect("a command");
-                assert!(line.contains(MARK), "{line}");
-                assert!(
-                    !line.contains("--json"),
-                    "no row declares an identifier: {line}"
-                );
-                assert!(
-                    line.starts_with("& '"),
-                    "a path with a space is not a command: {line}"
-                );
+        let document = document_for(&exe());
+        for entries in document["hooks"].as_object().unwrap().values() {
+            for entry in entries.as_array().unwrap() {
+                assert_eq!(entry["exec"], exe().to_string_lossy().as_ref());
+                assert_eq!(entry["type"], "command");
+                assert_eq!(entry["timeoutSec"], TIMEOUT_SECONDS);
+                assert_eq!(entry["args"][0], "attention");
+                assert!(entry["args"][1].as_str().unwrap().starts_with("copilot:"));
+                assert_eq!(entry["args"].as_array().unwrap().len(), 2);
+                for shell in ["bash", "powershell", "command"] {
+                    assert!(entry.get(shell).is_none());
+                }
             }
         }
-        assert_eq!(seen, rows_to_install().len());
-        assert_eq!(document["version"], Value::from(SCHEMA_VERSION));
-        // A path with a quote in it closes the string it is in unless it is doubled.
-        assert_eq!(
-            command_for_on(
-                Path::new(r"C:\it's here\folio.exe"),
-                "agentStop",
-                HostPlatform::Windows
-            ),
-            r"& 'C:\it''s here\folio.exe' attention copilot:agentStop"
-        );
     }
 
-    /// **RED — on a Mac the line goes in the `bash` column and is quoted for `sh`** (M4-7).
-    ///
-    /// Upstream's field table is `bash` "Shell command for Unix" and `powershell` "Shell command
-    /// for Windows", and it runs the one that matches the machine. This module wrote `powershell`
-    /// because Folio was a Windows program, and the day that stopped being true the wrong column
-    /// became a file that parses, validates, lands in the right directory and **never fires** —
-    /// which from the reader's chair is exactly "the hooks are not installed".
-    ///
-    /// The rest of the document does not move: same events, same matchers, same `timeoutSec`, same
-    /// mark, and no endpoint in the line — `folio attention` reads `FOLIO_ATTENTION_PIPE` out of
-    /// the environment its pane's shell gave it, on both machines.
-    ///
-    /// MUTATION: return `"powershell"` from `column_for` for every platform and the first
-    /// assertion names it; hand the PowerShell quoting to the Mac arm and the last one does.
+    /// Every platform gets the same executable and argv, with metacharacters literal.
     #[test]
-    fn a_mac_install_writes_the_bash_column_quoted_for_sh() {
-        assert_eq!(column_for(HostPlatform::Windows), "powershell");
-        assert_eq!(column_for(HostPlatform::MacOs), "bash");
-        assert_eq!(column_for(HostPlatform::OtherUnix), "bash");
-
-        let exe = Path::new("/Applications/Folio.app/Contents/MacOS/folio");
-        let windows = document_for_on(exe, HostPlatform::Windows);
+    fn a_mac_install_writes_direct_exec_without_shell_quoting() {
+        let exe = Path::new("/Users/a $ ` ' 中文/Folio.app/Contents/MacOS/folio");
         let mac = document_for_on(exe, HostPlatform::MacOs);
-        assert_eq!(
-            windows["hooks"]
-                .as_object()
-                .expect("hooks")
-                .keys()
-                .collect::<Vec<_>>(),
-            mac["hooks"]
-                .as_object()
-                .expect("hooks")
-                .keys()
-                .collect::<Vec<_>>(),
-            "the two machines install the same events"
-        );
-        let mut seen = 0;
-        for entries in mac["hooks"].as_object().expect("hooks").values() {
-            for entry in entries.as_array().expect("array") {
-                seen += 1;
-                assert_eq!(
-                    entry.get("powershell"),
-                    None,
-                    "the powershell column is for Windows, and a Unix path there is a line that \
-                     can only fail"
-                );
-                let line = entry["bash"].as_str().expect("a command");
-                assert!(line.contains(MARK), "{line}");
-                assert!(
-                    line.starts_with("'/Applications/Folio.app/Contents/MacOS/folio' attention "),
-                    "an sh line is single-quoted and has no `&` in front of it: {line}"
-                );
-                assert_eq!(
-                    entry.get("timeoutSec"),
-                    Some(&Value::from(TIMEOUT_SECONDS)),
-                    "the timeout is policy and not platform"
-                );
+        assert_eq!(mac, document_for_on(exe, HostPlatform::Windows));
+        for entries in mac["hooks"].as_object().unwrap().values() {
+            for entry in entries.as_array().unwrap() {
+                assert_eq!(entry["exec"], exe.to_str().unwrap());
             }
         }
-        assert_eq!(seen, rows_to_install().len());
-        // The one character that ends an sh single-quoted word early, escaped the way sh spells it.
-        assert_eq!(
-            command_for_on(
-                Path::new("/Users/someone/it's here/folio"),
-                "agentStop",
-                HostPlatform::MacOs
-            ),
-            r"'/Users/someone/it'\''s here/folio' attention copilot:agentStop"
-        );
     }
 
     /// **What is written never carries two layers of one request**, and for this family that is a
@@ -1093,6 +1193,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// RED — **a hook file that could not be read is left byte for byte.**
+    ///
+    /// Release audit 2026-09-16 (C-3), the third site of the same conflation:
+    /// `read_to_string(&path).ok()` answered `None` both for a file that is not there and for one
+    /// this build could not read, so an unreadable `folio.json` was written over on install — and
+    /// on uninstall was reported as "nothing to do" about a file nobody had read.
+    ///
+    /// RED GATE: drop the `Standing::Unreadable` arm from `apply_to` and the install replaces it.
+    #[test]
+    fn a_hook_file_that_could_not_be_read_is_never_written_over() {
+        let home = scratch("unreadable");
+        let hooks = home.join(HOOKS_DIRECTORY);
+        let path = hooks.join(HOOKS_FILE);
+        std::fs::create_dir_all(&hooks).expect("a scratch directory");
+        // A Latin-1 byte inside a string: an ordinary file on an ordinary machine, and not UTF-8.
+        let theirs: &[u8] = b"{\"version\":1,\"note\":\"caf\xe9\"}\n";
+        std::fs::write(&path, theirs).expect("the user's own file");
+
+        let installing = apply_to(&path, true, &exe());
+        assert_eq!(installing, Outcome::Refused(UNREADABLE));
+        assert_eq!(std::fs::read(&path).expect("still there"), theirs);
+        assert_eq!(
+            std::fs::read_dir(&hooks).expect("the directory").count(),
+            1,
+            "nothing was written beside it either"
+        );
+        // And the row drawn from it says so, rather than offering to write over it.
+        assert_eq!(state_at(&path), State::Unreadable);
+        // Nor is it removed: uninstalling a file this build never read deletes somebody's own.
+        let taking_it_out = apply_to(&path, false, &exe());
+        assert_eq!(taking_it_out, Outcome::Refused(UNREADABLE));
+        assert!(path.is_file(), "it is still there");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// **Somebody else's `folio.json` is never written over**, and neither is one this build
     /// cannot read.
     #[test]
@@ -1113,7 +1248,10 @@ mod tests {
                 r#"{{"{column}":"folio.exe attention copilot:agentStop"}}"#
             ))
             .expect("fixture");
-            assert!(entry_is_ours(&mine), "{column}");
+            assert!(
+                entry_owner(&mine).is_err(),
+                "a bare program cannot prove ownership: {column}"
+            );
         }
         assert!(!entry_is_ours(
             &serde_json::json!({ "powershell": "say done" })
@@ -1122,8 +1260,8 @@ mod tests {
         // missed: a file that carries our block *and* one line somebody added by hand is a file
         // where install overwrites their line and uninstall deletes it, and this module keeps no
         // memory of what it replaced.
-        assert!(holds_somebody_elses_entry(&theirs));
-        assert!(!holds_somebody_elses_entry(&document_for(&exe())));
+        assert!(has_unowned_entries(&theirs));
+        assert!(!has_unowned_entries(&document_for(&exe())));
         let mut mixed = document_for(&exe());
         mixed["hooks"]["agentStop"]
             .as_array_mut()
@@ -1133,11 +1271,9 @@ mod tests {
             declares_folio(&mixed),
             "it does carry our block, which is exactly why the name is not enough"
         );
-        assert!(holds_somebody_elses_entry(&mixed));
+        assert!(has_unowned_entries(&mixed));
         // A document with no `hooks` at all is somebody's, whatever else it says.
-        assert!(holds_somebody_elses_entry(
-            &serde_json::json!({ "version": 1 })
-        ));
+        assert!(has_unowned_entries(&serde_json::json!({ "version": 1 })));
     }
 
     /// **A version proved too old is refused; an absent answer is not.**

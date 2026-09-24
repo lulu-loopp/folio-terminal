@@ -17,9 +17,12 @@ members = [
     "crates/bt-persist",
     "crates/bt-unicode",
     "crates/bt-render",
+    "crates/bt-source",
     "crates/bt-winres",
     "crates/bt-app",
     "vendor/alacritty_terminal",
+    "vendor/mitex",
+    "vendor/mitex-parser",
 ]
 
 [workspace.package]
@@ -31,12 +34,12 @@ members = [
 # that into the PE resource, and `bt_app::version` is the one module the other
 # three read. `a_release_is_one_version_in_four_places` in that module is the
 # gate; a second literal anywhere fails it.
-version = "0.4.1"
+version = "0.4.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.89"
 
-# **None of these fifteen crates is a crates.io package.** They are one product
+# **None of these sixteen crates is a crates.io package.** They are one product
 # cut into compilation units; `bt-math` and `bt-detect` would be squatting names
 # that mean nothing outside this tree, and a `cargo publish` typed in the wrong
 # directory is the only way any of them would ever get there. `vendor/` does not
@@ -104,7 +107,19 @@ glyphon = "0.12"
 #   Latin and lose its CJK glyphs. Turn it on the day such a page turns up, and
 #   accept the four packages then rather than on a guess.
 hayro = { version = "=0.7.1", default-features = false, features = ["embed-fonts"] }
-image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+# **`bmp` is here for one caller and it costs no package**: the Windows clipboard
+# hands a copied picture over as a `CF_DIB`/`CF_DIBV5`, which is a BMP with its
+# file header cut off, and `BmpDecoder::new_without_file_header` — the entry point
+# the format was given for exactly this — is gated on this feature. The codec is
+# inside `image` itself and pulls in nothing, so `Cargo.lock` and
+# `THIRD-PARTY-NOTICES.md` are untouched by it (`bt_app::clipboard_picture`).
+image = { version = "=0.25.10", default-features = false, features = [
+    "bmp",
+    "gif",
+    "jpeg",
+    "png",
+    "webp",
+] }
 # **The GIF container, named directly rather than reached through `image`.** It is
 # already in the lock file — `image`'s own `gif` feature is what put it there, at
 # this exact version — so this adds no package to the tree and nothing to
@@ -113,7 +128,13 @@ image = { version = "=0.25.10", default-features = false, features = ["gif", "jp
 # `Send`, and `crates/bt-app/src/animation.rs` needs a decoder that can be moved
 # to a worker and back to stream a long file a ring at a time.
 gif = { version = "=0.14.2", default-features = false, features = ["std", "color_quant"] }
+# Exact for the same reason as the two lines above, and vendored for a reason of
+# its own: `mitex` and `mitex-parser` are where a formula's recursion is
+# *enforced* (`vendor/mitex-parser/src/depth.rs`). A 0.2.x out-resolving the
+# local patch would take that enforcement out of the build and put a stack
+# overflow — which no `catch_unwind` contains — back behind `cat evil.md`.
 mitex = "=0.2.4"
+mitex-parser = "=0.2.4"
 mitex-spec-gen = "=0.2.4"
 pollster = "0.4"
 # Exact because a newer crates.io 0.9.x would otherwise out-resolve the local
@@ -146,6 +167,15 @@ thiserror = "2"
 # resolves: a second major would be a second copy of a font parser in the tree
 # for the sake of two bytes.
 ttf-parser = "0.25"
+# **The rasterizer glyphon already draws every glyph with**, named so that
+# `bt-render` can draw one more kind: a grid glyph whose family has no bold cut,
+# emboldened from its own outline (`Render::embolden`, ticket 38). cosmic-text
+# depends on it and re-exports its image types but not its scaler, so the scaler
+# has to be reached by name. Already in the lock file through cosmic-text, so
+# naming it here costs no new package; pinned to the locked version with the
+# features cosmic-text enables (`std` through its own `std`, `scale`, `render`),
+# so this edge compiles the copy that is already there and nothing else.
+swash = { version = "=0.2.9", default-features = false, features = ["std", "scale", "render"] }
 # The user's own `~/.codex/config.toml`, which the attention block's codex
 # installer adds one key to and must be able to hand back byte for byte
 # (`attention_codex`). A format-preserving editor and not `toml` + a serializer:
@@ -166,10 +196,20 @@ serde_json = "1"
 # not allowed to take from a library — every ink on this glass comes out of
 # `ChromePalette`, and what syntect is asked for here is the *scope* of each
 # span and nothing else.
+#
+# `yaml-load` reads a `.sublime-syntax` file, which is how `assets/syntaxes/`'s
+# vendored grammars are turned into the dumps the executable carries and how the
+# tests prove the dump beside a grammar is that grammar. It is named here rather
+# than left to feature unification: `typst-library` asks syntect for it too, so
+# today it resolves on whether Folio names it or not — and a dependency that
+# compiles because of what a *different* crate wanted is one that breaks on a day
+# nobody touched it. It adds no package to `Cargo.lock`: `yaml-rust` is already
+# there, and already in `THIRD-PARTY-NOTICES.md`, for that same reason.
 syntect = { version = "5.3", default-features = false, features = [
     "parsing",
     "default-syntaxes",
     "regex-fancy",
+    "yaml-load",
 ] }
 # The grammars Sublime's default dump does not carry — TOML, TypeScript, TSX,
 # Dockerfile and a hundred more (user ruling 2026-08-16: bundle them; a Rust
@@ -257,4 +297,6 @@ debug = "line-tables-only"
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
+mitex = { path = "vendor/mitex" }
+mitex-parser = { path = "vendor/mitex-parser" }
 portable-pty = { path = "vendor/conpty/portable-pty" }

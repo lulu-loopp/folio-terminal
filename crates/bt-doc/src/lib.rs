@@ -11,6 +11,6 @@ pub use anchor::{
 pub use document::{HistoryDocument, HistoryEntry, LiveRowRemoval};
 pub use versions::{
     BlockKind, DecorationIntent, DecorationLifecycle, DetectionRevision, GridGeneration,
-    InlineRunPlacement, InvalidSourceTransition, LayoutKey, MathMode, SUBPIXELS_PER_PX,
-    SourceLifecycle, VersionStamp, ViewGeneration,
+    InlineMathSite, InlineRunPlacement, InvalidSourceTransition, LayoutKey, MathMode,
+    SUBPIXELS_PER_PX, SourceLifecycle, VersionStamp, ViewGeneration,
 };

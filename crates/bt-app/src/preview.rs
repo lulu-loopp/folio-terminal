@@ -5732,7 +5732,16 @@ impl PreviewBuffer {
     ///   (ruling 8⑨). **Not a prompt and not a blind write** — this slice's
     ///   minimum is that the window says so and keeps the edits, because the
     ///   one unrecoverable outcome is overwriting a change nobody has seen.
-    /// * The write itself is atomic ([`bt_persist::atomic_write`]).
+    /// * The write is staged beside the file and committed in one step
+    ///   ([`bt_persist::atomic_replace_keeping_metadata`]) — **and on the
+    ///   Windows preserving arm that step is `ReplaceFileW`, which is a
+    ///   sequence and not one atomic rename**: it moves the document to a
+    ///   backup name and then moves the replacement into the name it vacated.
+    ///   A power loss between the two leaves the document under the backup name
+    ///   rather than its own, recoverable by hand and named in `docs/DESIGN.md`
+    ///   (2026-09-20, known limits). Every other arm — the hard-linked, the
+    ///   symlinked, the unopenable and Unix — commits with the single rename
+    ///   this module has always used.
     ///
     /// **In the encoding the file was read in, mark included** (T2 ①,
     /// 2026-09-10). See [`Self::encoding`] for the defect this pays: the body is
@@ -5747,11 +5756,24 @@ impl PreviewBuffer {
     /// in this window, the PowerShell profile among them. One algorithm, one
     /// place to fix.
     ///
-    /// **Two gaps stay open and are named rather than papered over**: neither
-    /// writer clears a read-only or hidden attribute on the target, and neither
-    /// asks whether the target is a symlink — a rename replaces the link, not
-    /// what it points at, which is the question the read side asks with
-    /// `may_read_unasked_through_links` and the write side still does not.
+    /// **And it replaces the content and nothing else the file carried**
+    /// (audit 3 F-1, 2026-09-20). This is the reader's own document: it can
+    /// carry alternate data streams — `Zone.Identifier`, the Mark of the Web —
+    /// an explicit DACL, hidden and system attributes, a mode, an owner and
+    /// extended attributes, and a `File::create` plus a rename kept none of it,
+    /// so saving a downloaded note quietly de-quarantined it.
+    /// [`bt_persist::atomic_replace_keeping_metadata`] carries what the file the
+    /// save replaces was carrying, and that function documents which arm a file
+    /// takes and why.
+    ///
+    /// **Three gaps stay open and are named rather than papered over**: neither
+    /// writer clears a read-only or hidden attribute on the target (a read-only
+    /// file is refused by Windows and the refusal is reported), and neither asks
+    /// whether the target is a symlink — a rename replaces the link, not what it
+    /// points at, which is the question the read side asks with
+    /// `may_read_unasked_through_links` and the write side still does not. A
+    /// hard-linked file is the third: the save lands on this name and the other
+    /// name keeps the old bytes, as it always has, and nobody has ruled it.
     ///
     /// The mtime is re-read from the file that was just written rather than
     /// remembered from the write, so the next save compares against what the
@@ -5766,7 +5788,9 @@ impl PreviewBuffer {
         if file_mtime(&path) != self.disk_mtime {
             return SaveOutcome::Conflict;
         }
-        if let Err(error) = bt_persist::atomic_write(&path, &self.encoding.encode(content)) {
+        if let Err(error) =
+            bt_persist::atomic_replace_keeping_metadata(&path, &self.encoding.encode(content))
+        {
             return SaveOutcome::Failed(error.to_string());
         }
         self.disk_mtime = file_mtime(&path);
@@ -7014,7 +7038,8 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
     ) {
         return HeadOutcome::Refused(PreviewRefusal::NetworkPath);
     }
-    let mut file = match std::fs::File::open(path) {
+    let mut file = match bt_platform::file_reads::open(bt_platform::file_reads::Lane::Preview, path)
+    {
         Ok(file) => file,
         Err(error) => {
             return HeadOutcome::Refused(PreviewRefusal::Fault(PreviewFault::from_io(&error)));
@@ -7369,9 +7394,10 @@ pub enum LinkAction {
     /// 2026-09-08) — a share, a device path, a distribution nobody here is standing in.
     ///
     /// Apart from [`Self::Nowhere`] because the two readers of this table owe a reader two
-    /// different sentences about it. A *link* wearing it is not a link: pressing it does nothing,
-    /// exactly as pressing a `mailto:` does nothing, and the row says so by wearing no finger. An
-    /// *image source* wearing it is a picture this window will not fetch, which is the "not shown"
+    /// different sentences about it. A *link* wearing it is answered by the terminal's own row for
+    /// a path this window may not read (ticket 14, owner ruling 2026-09-23): a plain press raises
+    /// the card §7.1.3 already has, which reads nothing, and `Ctrl` hands a share on another
+    /// machine to the system. An *image source* wearing it is a picture this window will not fetch, which is the "not shown"
     /// placeholder a markdown page already draws over a source it cannot read — and drawing
     /// "resolves to nothing" over a source that resolves perfectly well would be the page saying
     /// something untrue about a file that is there.
@@ -7379,6 +7405,14 @@ pub enum LinkAction {
     /// The path travels because both of those sentences are about a file somebody named, and a
     /// diagnostic that could not name it would be a diagnostic about nothing.
     Refused(PathBuf),
+    /// **A URI of any other scheme** — `mailto:`, `vscode:`, `obsidian:` (ticket 14, owner rulings
+    /// 2026-09-21 and 2026-09-23).
+    ///
+    /// Not a verb either: a plain press on one does nothing, and `Ctrl` hands it to whatever the
+    /// machine has registered for its scheme — the terminal's own row, read by
+    /// [`crate::preview_link_activation`]. It carries the target as written, trimmed, because
+    /// that is what is handed over.
+    Scheme(String),
     /// Nothing this window will act on.
     Nowhere,
 }
@@ -7399,11 +7433,11 @@ pub enum LinkAction {
 /// `http`/`https` come back as [`LinkAction::Web`] and go no further here: what
 /// a press on a web address spends is the terminal's own `http(s)` row, read
 /// once for both surfaces ([`crate::web_address_activation`]). **Every other
-/// scheme is refused** — `mailto:`, `ftp:`, `javascript:` and whatever else a
-/// document may carry — for the reason the terminal's own OSC-8 handler refuses
-/// them: a document is untrusted text, and handing an arbitrary scheme to
-/// `ShellExecute` is handing it whatever the machine has registered for that
-/// scheme.
+/// scheme** comes back as [`LinkAction::Scheme`] since ticket 14 (owner rulings
+/// 2026-09-21 and 2026-09-23): it was refused here for the reason the terminal's
+/// own OSC-8 handler refused it, and both refusals are withdrawn together — a
+/// plain press still does nothing, and `Ctrl` hands the link to whatever the
+/// machine has registered for its scheme.
 ///
 /// **「Open the containing folder」 is not here**, deliberately. That is the
 /// foot's Reveal button and it stays the foot's: a link names a *file*, and
@@ -7418,9 +7452,9 @@ pub enum LinkAction {
 ///   names `DESIGN.md`, and the anchor is simply a part of the address this
 ///   window cannot honour yet;
 /// * `file:` is unwrapped to the path it carries, percent-escapes and all;
-/// * anything else carrying a `scheme:` is refused, *except* that a bare
-///   Windows drive letter (`C:\x`) is a path and not a scheme — one letter
-///   before the colon cannot be a scheme, and RFC 3986 says so too;
+/// * anything else carrying a `scheme:` is [`LinkAction::Scheme`], *except*
+///   that a bare Windows drive letter (`C:\x`) is a path and not a scheme — one
+///   letter before the colon is a drive ([`handover_scheme`]);
 /// * an absolute path is taken as it stands; a relative one is resolved
 ///   against the **document's own directory**, which is the only frame a
 ///   relative link has ever meant.
@@ -7439,13 +7473,8 @@ pub fn link_action(target: &str, document: &Path) -> LinkAction {
             return LinkAction::Nowhere;
         };
         path
-    } else if let Some(scheme) = scheme_of(target) {
-        // A drive letter is not a scheme; every real scheme left here is one
-        // this window does not open.
-        if scheme.len() > 1 {
-            return LinkAction::Nowhere;
-        }
-        PathBuf::from(strip_fragment(target))
+    } else if handover_scheme(target).is_some() {
+        return LinkAction::Scheme(target.to_owned());
     } else {
         PathBuf::from(strip_fragment(target))
     };
@@ -7537,6 +7566,18 @@ fn normalized(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// **The scheme of a link a press may hand to the system**, or nothing when the text is not
+/// spelled as a URI (ticket 14).
+///
+/// RFC 3986's grammar ([`scheme_of`]) and at least two characters: a single letter before a colon
+/// is a Windows drive (`C:\x`), which is a *path*, and a path leaves through the path doors, where
+/// `names_a_program` is asked. [`link_action`] and the terminal's own row both read it here, so
+/// the two surfaces cannot disagree about what is a URI and what is a path.
+#[must_use]
+pub fn handover_scheme(target: &str) -> Option<&str> {
+    scheme_of(target).filter(|scheme| scheme.len() > 1)
 }
 
 /// The `scheme` of `scheme:rest`, when the text in front of the first colon
@@ -10350,20 +10391,21 @@ mod tests {
             "unwrapped, and its escapes undone"
         );
 
-        // ③ The web leaves the window, and nothing else does.
+        // ③ The web is the web row's; every other scheme is the scheme row's (ticket 14, owner
+        //    ruling 2026-09-23), which hands it to the machine only under `Ctrl`.
         assert_eq!(
             link_action("https://example.com/x", document),
             LinkAction::Web("https://example.com/x".to_owned())
         );
-        for refused in [
+        for other in [
             "mailto:someone@example.com",
             "ftp://example.com/x",
             "javascript:alert(1)",
         ] {
             assert_eq!(
-                link_action(refused, document),
-                LinkAction::Nowhere,
-                "{refused}: a document does not get to name a handler"
+                link_action(other, document),
+                LinkAction::Scheme(other.to_owned()),
+                "{other}: another scheme, for the table to answer"
             );
         }
 
@@ -12409,6 +12451,94 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(on_disk(&buffer)).unwrap(),
             "as it was read\nand as it was edited\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The save goes through the writer that keeps what the file carried**
+    /// (audit 3, F-1).
+    ///
+    /// What that writer keeps is a different thing on every platform — streams,
+    /// a DACL and an attribute word here, a mode and extended attributes on
+    /// macOS — and the assertions about them live where the writer does
+    /// (`bt-persist`'s `atomic.rs`, `bt-platform`'s `file_replace.rs`), because
+    /// this crate does not get to ask what platform it is on
+    /// (`scripts/check-portable-core.ps1`). What belongs here is the edge those
+    /// tests are about: that this `save` is the caller.
+    ///
+    /// Pinned by reading this module's own source, the way
+    /// `sniffing_happens_off_the_window_thread` pins the read side: the fact is
+    /// about the call graph, not about a value this test can compute.
+    ///
+    /// Red gate: put `bt_persist::atomic_write(&path, …)` back in
+    /// [`PreviewBuffer::save`] and the second assertion names it.
+    #[test]
+    fn a_save_is_written_by_the_writer_that_keeps_what_the_file_carried() {
+        // Spelled in halves so the assertion is not its own counter-example:
+        // the source being read is this file, and one whole spelling here would
+        // be found by the search it makes.
+        let keeping = concat!("bt_persist::", "atomic_replace_keeping_metadata(&path");
+        let plain = concat!("bt_persist::", "atomic_write(&path");
+        let source = include_str!("preview.rs");
+        let module = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file carries its tests at the end")
+            .0;
+        let body = module
+            .split_once("pub fn save(&mut self) -> SaveOutcome {")
+            .expect("the editor's save")
+            .1;
+        let end = body.find("\n    }\n").expect("its end");
+        assert!(
+            body[..end].contains(keeping),
+            "the document is replaced by the writer that carries its metadata"
+        );
+        assert!(
+            !body[..end].contains(plain),
+            "and not by the one that leaves it behind"
+        );
+    }
+
+    /// **A document with a second name still saves** (audit 3, F-1).
+    ///
+    /// The preserving replacement refuses a hard-linked target — the right
+    /// answer for `$PROFILE`, where a refusal is a message and nothing is lost.
+    /// Here it would turn a working save into a failed one, so the file keeps
+    /// the writer it has always had: the save lands under this name and the
+    /// other name goes on holding the bytes it held. **That silent break is
+    /// today's behaviour and nobody has ruled on it**; this test is what would
+    /// have to be rewritten, deliberately, by whoever does.
+    ///
+    /// Red gate: route the save at `atomic_replace_preserving` and the outcome
+    /// is `Failed` with the reader's edits stuck in the window.
+    #[test]
+    fn a_hard_linked_document_still_saves_and_the_other_name_keeps_its_bytes() {
+        let dir = scratch("linked");
+        let mut buffer = opened(&dir, "notes.md", "as it was\n");
+        let path = on_disk(&buffer).to_path_buf();
+        let linked = dir.join("dotfiles-notes.md");
+        std::fs::hard_link(&path, &linked).unwrap();
+        buffer.disk_mtime = file_mtime(&path);
+
+        buffer.edit_content(|content| {
+            content.push_str("and as it is now\n");
+            true
+        });
+        assert_eq!(buffer.save(), SaveOutcome::Saved, "the save still lands");
+        assert!(!buffer.dirty);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "as it was\nand as it is now\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&linked).unwrap(),
+            "as it was\n",
+            "the second name kept the old object, exactly as it did before"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            2,
+            "and nothing was staged into the folder and left there"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

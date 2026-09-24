@@ -96,7 +96,12 @@ pub const PEEK_PAD_LOGICAL_PX: f32 = 8.0;
 
 /// The entrance and its reverse, one span for both (§7.1.2「进出动画 120ms」) —
 /// now the archive's **base** span, because a float is a popup.
-const FLOAT_ANIMATION: Duration = Duration::from_millis(FLOAT_WINDOW_ANIMATION_MS);
+///
+/// Visible to the crate since review round 3 (2026-09-18) for
+/// [`crate::cardhint::NUDGE_END`]'s reason: the journey audit asks this host
+/// when its entrance and its exit end, and an endpoint spelled a second time
+/// somewhere else is an endpoint that can disagree with this one.
+pub(crate) const FLOAT_ANIMATION: Duration = Duration::from_millis(FLOAT_WINDOW_ANIMATION_MS);
 
 /// Which of the two promises this float is standing on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -565,12 +570,12 @@ pub fn float_geometry(
 
 /// `.float-win .fly-head .files-ico { width: 13px }`, and the foot's mark too.
 pub const FLOAT_HEAD_MARK_LOGICAL_PX: f32 = 13.0;
-/// `.float-win .fly-head { gap: 6px }`.
-pub const FLOAT_HEAD_GAP_LOGICAL_PX: f32 = 6.0;
-/// `.float-win .fly-head { padding: 0 5px 0 10px }` — the left half.
-pub const FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX: f32 = 10.0;
-/// The right half of the same declaration.
-pub const FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX: f32 = 5.0;
+/// UI-SPEC.md G1: the float head uses the shared 8-point icon-to-label gap.
+pub const FLOAT_HEAD_GAP_LOGICAL_PX: f32 = 8.0;
+/// UI-SPEC.md S5: the float head shares the pane head leading inset, 12.
+pub const FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
+/// UI-SPEC.md S5: the float head shares the pane head trailing inset, 6.
+pub const FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX: f32 = 6.0;
 /// `.float-win .fly-head { font-size: 11px }` — the file-name head's shared
 /// face (`docs/DESIGN.md` §7.37), which this header has always been the standard
 /// for and which the hover card now joins.
@@ -591,8 +596,9 @@ pub const FLOAT_DOCK_PADDING_X_LOGICAL_PX: f32 = 6.0;
 pub const FLOAT_DOCK_GLYPH_LOGICAL_PX: f32 = 13.0;
 /// `.float-win .fly-head button { gap: 4px }`.
 pub const FLOAT_DOCK_GAP_LOGICAL_PX: f32 = 4.0;
-/// The button's own box: `3px` of padding above and below its `13px` glyph.
-pub const FLOAT_DOCK_HEIGHT_LOGICAL_PX: f32 = 19.0;
+/// The tool box in a head (`UI-SPEC.md` H3; `seats::PREVIEW_TOOL_BOX_LOGICAL_PX`),
+/// not the mock-up's own `3px` of padding above and below its `13px` glyph.
+pub const FLOAT_DOCK_HEIGHT_LOGICAL_PX: f32 = crate::seats::PREVIEW_TOOL_BOX_LOGICAL_PX;
 /// `.float-win .fly-head button { font-size: 10px }`.
 pub const FLOAT_DOCK_FONT_LOGICAL_PX: f32 = 10.0;
 /// `.float-win .fly-head button { border-radius: 5px }`, shared by the `×`.
@@ -1171,10 +1177,13 @@ pub fn float_hit(
 /// still has to rise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FloatFade {
-    /// `0.0 ..= 1.0`, the layer's own opacity.
+    /// `0.0 ..= 1.0` — the opacity the whole window is drawn at, as one
+    /// surface (`Runtime::float_layer` hands it to the renderer as the window's
+    /// group; ticket 46).
     pub opacity: f32,
     /// Physical pixels the frame is still displaced *upward* by — `flyIn`'s
-    /// `translateY(-5px)` on its way to `none`.
+    /// `translateY(-5px)` on its way to `none`. Zero on the way out: nothing
+    /// travels on exit (UI-SPEC §7).
     pub rise: f32,
     /// Whether another frame is owed.
     pub moving: bool,
@@ -1197,7 +1206,17 @@ fn fade(elapsed: Duration, reverse: bool, motion: Motion, scale: f32) -> FloatFa
     let forward = if reverse { 1.0 - eased } else { eased };
     FloatFade {
         opacity: forward,
-        rise: (1.0 - forward) * FLOAT_WINDOW_RISE_LOGICAL_PX * scale,
+        // **The way out is a pure fade** (the fade audit's F3, ticket 46).
+        // `flyOut` in the mock-up is the literal reverse of `flyIn`, and this
+        // followed it — the window climbed four pixels as it went. UI-SPEC §7
+        // and `motion.rs` say otherwise for every surface in the window
+        // ("nothing travels on exit"), and the spec is the rule: a window that
+        // is leaving is not going anywhere.
+        rise: if reverse {
+            0.0
+        } else {
+            (1.0 - forward) * FLOAT_WINDOW_RISE_LOGICAL_PX * scale
+        },
         moving: progress < 1.0,
     }
 }
@@ -1486,6 +1505,33 @@ impl FloatHost {
     /// stated: the pinned list in its own order, then the peek over all of them.
     pub fn drawn(&self) -> impl Iterator<Item = &FloatWin> {
         self.pinned.iter().chain(self.peek.iter())
+    }
+
+    /// **Whether this window has any float at all** — the cheapest question
+    /// there is about this host, and the one every per-turn pass asks first
+    /// (closure review 2, 2026-09-18).
+    ///
+    /// The overwhelming majority of windows have none, and the passes that
+    /// belong to floats run on every turn of the loop: a walk that finds nothing
+    /// still costs the walk, and a `Vec` allocated to hold nothing still costs
+    /// the allocation. This is two `is_empty`s.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pinned.is_empty() && self.peek.is_none()
+    }
+
+    /// **Whether any float on screen is actually in motion right now** (review
+    /// 2026-09-18 round 2) — an entrance or an exit still moving, and never an
+    /// intent merely settling or a grace merely running down.
+    ///
+    /// [`Self::deadline`]'s `animating` arm without its two clocks, and the
+    /// distinction is the whole reason this is a second function: a float
+    /// standing open under a still hand is *waiting*, and a window that carried
+    /// it on every frame composed for anything else would rebuild its overlay
+    /// for as long as it stood there.
+    #[must_use]
+    pub fn is_animating(&self, now: Instant, motion: Motion, scale: f32) -> bool {
+        self.drawn().any(|win| win.fade(now, motion, scale).moving)
     }
 
     /// Every window that answers the pointer, **top to bottom** — the order a
@@ -2049,7 +2095,6 @@ pub fn build(
     body: FloatBody,
     scale: f32,
     palette: &ChromePalette,
-    fade: FloatFade,
 ) -> OverlayLayer {
     let FloatChrome {
         mode,
@@ -2380,11 +2425,12 @@ pub fn build(
             palette.dialog_muted_text,
         ));
     }
+    // At full strength: the window's fade is the surface's, handed to the
+    // renderer round every layer the window is made of (`Runtime::float_layer`).
     OverlayLayer {
         quads,
         labels,
         sprites,
-        opacity: fade.opacity.clamp(0.0, 1.0),
         ..OverlayLayer::default()
     }
 }
@@ -2399,6 +2445,57 @@ mod tests {
 
     fn frame(left: f32, top: f32, width: f32, height: f32) -> [f32; 4] {
         [left, top, left + width, top + height]
+    }
+
+    /// RED (26) — **Pane and files chrome follows the shared UI values.**
+    ///
+    /// The baseline uses separate gaps, heights, captions and control values.
+    /// UI-SPEC.md gives each role one rule; collect every mismatch so BASE
+    /// reports each changed value, including private cross-module numeric rules.
+    /// MUTATION: restore FLOAT_HEAD_GAP_LOGICAL_PX to 6.0.
+    /// MUTATION: restore FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX to 10.0.
+    /// MUTATION: restore FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX to 5.0.
+    #[test]
+    fn ui_spec_pane_head_rest_values_follow_the_rule() {
+        let rules = [
+            (
+                FLOAT_HEAD_GAP_LOGICAL_PX,
+                8.0,
+                "UI-SPEC.md G1: FLOAT_HEAD_GAP_LOGICAL_PX",
+            ),
+            (
+                FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX,
+                bt_render::SEAT_TITLE_PADDING_LOGICAL_PX,
+                "UI-SPEC.md S5: FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX",
+            ),
+            (
+                FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX,
+                bt_render::SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX,
+                "UI-SPEC.md S5: FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX",
+            ),
+        ];
+        let deviations: Vec<_> = rules
+            .into_iter()
+            .filter(|(actual, rule, _)| actual != rule)
+            .collect();
+        assert!(deviations.is_empty(), "{deviations:?}");
+    }
+
+    /// RED (ticket 19) — **the float's dock stands in the tool box every other
+    /// head control uses, not a 19-pt box of its own.**
+    ///
+    /// `UI-SPEC.md` H3: `seats::PREVIEW_TOOL_BOX_LOGICAL_PX` is the tool box in
+    /// a head (22).
+    ///
+    /// MUTATION: revert `FLOAT_DOCK_HEIGHT_LOGICAL_PX` to a literal and this
+    /// goes red.
+    #[test]
+    fn ui_spec_pane_head_class_a_values_follow_the_rule() {
+        assert_eq!(
+            FLOAT_DOCK_HEIGHT_LOGICAL_PX,
+            crate::seats::PREVIEW_TOOL_BOX_LOGICAL_PX,
+            "UI-SPEC.md H3"
+        );
     }
 
     /// What a foot would print, if there were one.
@@ -2934,10 +3031,15 @@ mod tests {
         let size = float_opening_size(100_000.0, viewport, HIDPI, FloatSizing::files());
         let gap = FLOAT_WINDOW_TRIGGER_GAP_LOGICAL_PX * HIDPI;
         for (which, pane) in split.iter().enumerate() {
-            let trigger =
-                crate::seats::pane_head_geometry(*pane, bt_layout::SeatKind::Terminal, HIDPI)
-                    .files
-                    .expect("a terminal head carries the folder trigger");
+            let trigger = crate::seats::pane_head_geometry(
+                *pane,
+                bt_layout::SeatKind::Terminal,
+                false,
+                false,
+                HIDPI,
+            )
+            .files
+            .expect("a terminal head carries the folder trigger");
             let placed = float_placement(trigger, size, viewport, HIDPI);
             let below = (placed[1] - (trigger[3] + gap)).abs() <= 1.0;
             let above = ((trigger[1] - gap) - placed[3]).abs() <= 1.0;
@@ -3104,11 +3206,6 @@ mod tests {
             },
             SCALE,
             &palette,
-            FloatFade {
-                opacity: 1.0,
-                rise: 0.0,
-                moving: false,
-            },
         );
         let corner = [geometry.foot[0] + 0.5, geometry.foot[3] - 0.5];
         let offending: Vec<_> = layer
@@ -4169,9 +4266,17 @@ mod tests {
         assert!(!leaving.moving);
     }
 
-    /// The entrance rises into place, and the exit falls back the way it came.
+    /// RED (46) — **the entrance rises into place, and the exit only fades.**
+    ///
+    /// The fade audit's F3: `fade(reverse)` returned `(1 − forward)·4` of rise,
+    /// so a window on its way out climbed four pixels as it faded — against
+    /// UI-SPEC §7's "nothing travels on exit" and `motion.rs`'s "Nothing
+    /// travels on the way out".
+    ///
+    /// MUTATION: give the reverse arm of `fade` its `(1 − forward)` rise back
+    /// and the half-way sample below is two pixels up.
     #[test]
-    fn the_entrance_rises_and_the_exit_reverses_it() {
+    fn the_entrance_rises_and_the_exit_only_fades() {
         let now = Instant::now();
         let mut host = FloatHost::default();
         let peek = open_peek(&mut host, TAB, now);
@@ -4202,6 +4307,16 @@ mod tests {
         assert_eq!(
             leaving.opacity, 1.0,
             "the exit starts where the entrance ended"
+        );
+        let halfway = host.drawn().next().expect("closing").fade(
+            now + FLOAT_ANIMATION + FLOAT_ANIMATION / 2,
+            Motion::Full,
+            SCALE,
+        );
+        assert!(halfway.opacity > 0.0 && halfway.opacity < 1.0);
+        assert_eq!(
+            halfway.rise, 0.0,
+            "a window that is leaving does not travel"
         );
     }
 
@@ -4540,11 +4655,6 @@ mod tests {
             FloatBody::default(),
             SCALE,
             &palette,
-            FloatFade {
-                opacity: 1.0,
-                rise: 0.0,
-                moving: false,
-            },
         );
         assert!(
             !layer
@@ -4952,9 +5062,15 @@ mod tests {
             "anchored to the whole column there is no room on either side of it, and the last resort is a strip — the bug"
         );
 
-        let button = crate::seats::pane_head_geometry(column, bt_layout::SeatKind::Files, HIDPI)
-            .float
-            .expect("a files head offers its pop-out button");
+        let button = crate::seats::pane_head_geometry(
+            column,
+            bt_layout::SeatKind::Files,
+            false,
+            false,
+            HIDPI,
+        )
+        .float
+        .expect("a files head offers its pop-out button");
         let anchored_to_button = float_placement(button, size, viewport, HIDPI);
         let frame = clamp_pinned(anchored_to_button, viewport, HIDPI);
         assert_eq!(

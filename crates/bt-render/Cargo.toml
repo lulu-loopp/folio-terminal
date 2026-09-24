@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+bt-platform = { path = "../bt-platform" }
 bt-transcript = { path = "../bt-transcript" }
 bt-unicode = { path = "../bt-unicode" }
 bt-doc = { path = "../bt-doc" }
@@ -17,6 +18,9 @@ thiserror.workspace = true
 # `head.unitsPerEm`, and nothing else — see the workspace table for why two
 # bytes are worth a named dependency and why it costs no package.
 ttf-parser.workspace = true
+# Synthetic bold for a grid glyph whose family has no bold cut — see the
+# workspace table.
+swash.workspace = true
 unicode-properties.workspace = true
 # The `Fallback` trait cosmic-text takes speaks in `unicode_script::Script`, and
 # cosmic-text does not re-export the crate. Pinned to the version cosmic-text
@@ -27,6 +31,13 @@ wgpu.workspace = true
 [dev-dependencies]
 bt-detect = { path = "../bt-detect" }
 bt-math = { path = "../bt-math" }
+# **The crate this package's guards ask about itself** — the mechanism of
+# `docs/plans/bt-app-split-prep.md`. A guard that reads `include_str!("lib.rs")`
+# is bound to a file, and a fact that moves to a file beside it stops being read
+# without a word; asking `bt-source` for an *item* is the binding that survives
+# the move. Tests only, and `bt-source`'s own manifest says that nothing in
+# `folio.exe` may ever depend on it.
+bt-source = { path = "../bt-source" }
 bt-term = { path = "../bt-term" }
 pollster.workspace = true
 

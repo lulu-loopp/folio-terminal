@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "bt-app"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "bt-detect",
@@ -270,6 +270,7 @@ dependencies = [
  "bt-platform",
  "bt-pty",
  "bt-render",
+ "bt-source",
  "bt-term",
  "bt-transcript",
  "bt-unicode",
@@ -284,6 +285,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shlex",
+ "syn 2.0.119",
  "syntect",
  "toml_edit 0.22.27",
  "two-face",
@@ -293,12 +295,13 @@ dependencies = [
 
 [[package]]
 name = "bt-corpus"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "bt-pty",
  "bt-render",
  "bt-term",
+ "bt-transcript",
  "bt-viewport",
  "pollster",
  "portable-pty",
@@ -309,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "bt-detect"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "bt-doc",
  "bt-transcript",
@@ -318,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "bt-doc"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "bt-transcript",
  "thiserror 2.0.18",
@@ -326,13 +329,17 @@ dependencies = [
 
 [[package]]
 name = "bt-layout"
-version = "0.4.1"
+version = "0.4.4"
+dependencies = [
+ "bt-source",
+]
 
 [[package]]
 name = "bt-math"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "bt-doc",
+ "bt-platform",
  "mitex",
  "mitex-lexer",
  "mitex-spec-gen",
@@ -349,8 +356,9 @@ dependencies = [
 
 [[package]]
 name = "bt-persist"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
+ "bt-platform",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -358,10 +366,11 @@ dependencies = [
 
 [[package]]
 name = "bt-platform"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "block2 0.6.2",
  "bt-transcript",
+ "bt-unicode",
  "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -376,6 +385,7 @@ dependencies = [
  "objc2-uniform-type-identifiers 0.3.2",
  "objc2-user-notifications 0.3.2",
  "objc2-web-kit",
+ "ttf-parser",
  "webview2-com",
  "windows",
  "windows-core",
@@ -384,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "bt-pty"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "bt-term",
  "bt-transcript",
@@ -395,11 +405,13 @@ dependencies = [
 
 [[package]]
 name = "bt-render"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "bt-detect",
  "bt-doc",
  "bt-math",
+ "bt-platform",
+ "bt-source",
  "bt-term",
  "bt-transcript",
  "bt-unicode",
@@ -407,6 +419,7 @@ dependencies = [
  "bytemuck",
  "glyphon",
  "pollster",
+ "swash",
  "thiserror 2.0.18",
  "ttf-parser",
  "unicode-properties",
@@ -415,8 +428,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-source"
+version = "0.4.4"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "bt-term"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -435,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "bt-transcript"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "bitflags 2.13.0",
  "bt-unicode",
@@ -445,15 +466,16 @@ dependencies = [
 
 [[package]]
 name = "bt-unicode"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
+ "ttf-parser",
  "unicode-segmentation",
  "unicode-width",
 ]
 
 [[package]]
 name = "bt-viewport"
-version = "0.4.1"
+version = "0.4.4"
 dependencies = [
  "bt-doc",
  "bt-transcript",
@@ -462,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "bt-winres"
-version = "0.4.1"
+version = "0.4.4"
 
 [[package]]
 name = "bumpalo"
@@ -735,6 +757,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "console"
+version = "0.16.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e96a4956774c13c126a8b5af4daa79384f4d826534c95a02d76afb39e2ab64e3"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -993,6 +1026,12 @@ checksum = "eabffdaee24bd1bf95c5ef7cec31260444317e72ea56c4c91750e8b7ee58d5f1"
 dependencies = [
  "log",
 ]
+
+[[package]]
+name = "encode_unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "enum-ordinalize"
@@ -1850,6 +1889,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "insta"
+version = "1.48.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
+dependencies = [
+ "console",
+ "once_cell",
+ "similar",
+ "tempfile",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2149,12 +2200,13 @@ dependencies = [
 [[package]]
 name = "mitex"
 version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81f1eb466efdd212fe624f8bf24083f21d582f2d08e3b879bc4a059b25969d6c"
 dependencies = [
+ "insta",
  "mitex-parser",
  "mitex-spec-gen",
  "rowan",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2180,12 +2232,13 @@ dependencies = [
 [[package]]
 name = "mitex-parser"
 version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a42a2f86c46d250802262387dfb1d6bb18affd2d99328bbe4dbd12ce294c3a4"
 dependencies = [
+ "insta",
  "mitex-glob",
  "mitex-lexer",
  "mitex-spec",
+ "mitex-spec-gen",
+ "once_cell",
  "rowan",
 ]
 
@@ -3879,6 +3932,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "simplecss"

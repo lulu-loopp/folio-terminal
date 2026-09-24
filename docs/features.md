@@ -4,9 +4,9 @@ The long version of the front page. [`README.md`](../README.md) is the short
 one; [`install.md`](install.md) is how to get Folio onto a machine and what the
 first run looks like.
 
-The keys named below are the Windows ones. [Shortcuts](shortcuts.md) has both
-columns: on a Mac an application verb wears **Command** where Windows wears
-**Ctrl**, which is what leaves **Control** to the terminal on both.
+This page names what Folio does and leaves the keys to one table:
+[Shortcuts](shortcuts.md) lists every key in its Windows and its macOS spelling,
+and the Shortcuts page in Settings changes any of them.
 
 ## LaTeX rendering in the terminal
 
@@ -30,6 +30,27 @@ The LaTeX a command prints is typeset where it was printed.
 - Inline `$…$` is told from a shell variable by the shell integration —
   PowerShell on Windows, zsh or bash on a Mac.
   Without it inline formulas stay as source, and `$$…$$` blocks still typeset.
+- A formula an agent prints can reach the terminal twice: once as the answer
+  streams, and once more when the tool redraws its finished answer through its
+  own markdown renderer. The streamed bytes typeset. The final redraw changes
+  them — Claude Code's and Codex's alike: `\\` becomes `\`, `\,` becomes `,`,
+  `\[` and `\]` become `[` and `]`, `\!` becomes `!`, a line holding only `=`
+  turns the line above it into a heading, and a `$$` line can come back as
+  `# $$` — so a matrix, a bracketed display or a spaced integral that was
+  typeset a moment ago falls back to whatever text survived. That is the
+  renderer's doing, not the terminal's; a formula the agent writes to a
+  markdown file arrives whole, and the preview pane typesets it.
+- Two of those the terminal puts right, because only one thing they can have
+  been is left. A `\\` that ended a row of a matrix, an `aligned` block or a
+  `cases` block is restored, so the block is set in the rows it was written in;
+  and a `# $$` line is read as the block opener it is whenever a closing `$$`
+  answers it. **Rendered blocks → Repair row breaks** turns the first of those
+  off. The rest are not repaired and will not be: `,` is as good a comma as `\,`
+  was a thin space, `[x]` is as good a bracket as `\[x\]` was a display, and a
+  deleted `=` leaves nobody able to say which side of it was which — putting any
+  of them back would be typesetting an equation nobody wrote.
+- Whatever the terminal repairs, it repairs for the typesetter only. Copying a
+  formula, or showing its source, gives back the bytes the terminal received.
 
 ## Made for agents
 
@@ -52,8 +73,8 @@ The agent that is waiting for you is marked on its tab, so there is nothing to g
   whether Folio may send notifications — answer it once, and a refusal is
   reported on the Agent page rather than swallowed.
 - One request interrupts at most once, and the dot clears when you answer in that
-  pane or the program withdraws the request. `Ctrl+Shift+A` jumps to the longest
-  wait.
+  pane or the program withdraws the request. **Jump to the longest waiting
+  pane** has a key of its own.
 - Claude Code, Codex and GitHub Copilot CLI each have a switch on the Agent page
   in Settings that writes one notification hook into that tool's own configuration
   file and takes it back out again. Nothing is installed by default.
@@ -127,7 +148,7 @@ were reading it in.
   `Backspace` do what they do anywhere else. What you select is what you copy,
   and a copy out of a document you are editing brings the marks with it, so what
   you paste back is what was there.
-- `Ctrl+S` writes the file, `Ctrl+Z` takes back the last change and `Ctrl+Y`
+- **Save** writes the file, **Undo** takes back the last change and **Redo**
   puts it again. A run of typing comes back in one press rather than a letter at
   a time, and the unsaved dot goes out when you undo back to your last save.
 - A save changes the part you edited and leaves the rest of the file identical,
@@ -150,7 +171,7 @@ were reading it in.
 - Right-clicking the empty space in a files column opens the menu of the folder
   the column is standing in, so a folder with nothing in it can still be given
   its first file.
-- `Ctrl+Shift+P` finds a file under the folder the column is standing in, and
+- The command palette finds a file under the folder the column is standing in, and
   `Enter` opens it in the preview pane, ready to be typed into.
 
 ## Panes, tabs and windows that move
@@ -178,19 +199,19 @@ be seen at once.
        Mac — and the wheel scroll the picture inside a card a row at a time.">
 </picture>
 
-- `Alt+Shift+-` splits a pane across, `Alt+Shift+=` splits it down. A tab or a
+- A pane splits across or down, each with a key. A tab or a
   single pane can be dragged out into a window of its own, and the panes it did
   not touch keep their widths.
 - A pane dropped on the join between two tabs becomes a tab *between* them: a
   gap opens where it will land. Dropped on a tab itself it joins that tab's
   layout. The horizontal strip, the vertical rail and the card column all read
   the join the same way.
-- `Ctrl+Shift+Z` turns the tab strip into a column of cards, one per tab, each
+- **Cards** turns the tab strip into a column of cards, one per tab, each
   drawing that tab's own panes in the layout they have.
-- `Ctrl+Shift+G` turns the files column into a Git panel: branch, working tree,
+- **Show Git** turns the files column into a Git panel: branch, working tree,
   staged and unstaged files, the commit graph, and a selected file's diff in the
   preview.
-- `Ctrl+Shift+↑` and `Ctrl+Shift+↓` step between commands in the scrollback, and
+- **Previous command** and **Next command** step between commands in the scrollback, and
   a command that failed is marked as having failed.
 - The folder button over the files column lists the folders your shells are
   standing in, then the last five folders you pointed a column at, each marked
@@ -249,7 +270,7 @@ One box answers five questions at once, and `Enter` goes straight there.
        is highlighted, and the letters that matched are marked in each row.">
 </picture>
 
-- `Ctrl+Shift+P` raises a box over the top of the window with five sections that
+- The command palette is a box over the top of the window with five sections that
   never mix: what Folio can do, the panes and tabs this window has open, the
   commands it has run, the files under the folder its column is standing in, and
   the settings.
@@ -341,6 +362,28 @@ Folio, so it arrives as a tab in the window you used last whatever
 On macOS that setting names an application rather than a command, so there is no
 `folio-here` for it to run. Finder's **Open in Folio** above is the way to put a
 folder in front of a shell.
+
+## Settings in one file
+
+**Settings > About** has three doors at the foot of the page.
+
+- **Export…** writes one JSON file holding the settings, the profiles, the
+  shortcuts and every colour scheme in your schemes folder. The file is
+  pretty-printed in a fixed order, so two exports diff line by line.
+- **Import…** reads such a file and puts it in force at once. Each part is read
+  the way the same file would be read if you had edited it by hand: a shortcut
+  line Folio refuses, or a scheme that does not parse, is skipped and named
+  on a card, and the rest lands. A setting this platform has no row for
+  (**Acrylic** on a Mac, **Option key sends Alt** on Windows) is kept in the file
+  and named.
+- **Settings folder** opens the folder all of this lives in — `%APPDATA%\Folio`
+  on Windows, `~/Library/Application Support/Folio` on macOS.
+
+Folio does not sync anything over the network. To keep two machines alike, let a
+folder-sync tool carry the exported file, or the folder itself.
+
+The export holds your profiles as they are, including each profile's command
+line and environment rows — read it before you share it.
 
 ## English and Chinese
 

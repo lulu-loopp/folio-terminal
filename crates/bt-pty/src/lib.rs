@@ -8,7 +8,7 @@ use std::{
     num::{NonZeroU16, NonZeroUsize},
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
@@ -90,6 +90,17 @@ pub const TERM_READ_SLICE: NonZeroUsize = NonZeroUsize::new(8 * 1024).unwrap();
 /// On PSReadLine 2.4.x the handler repairs the cached input anchor and render geometry without
 /// repainting; older/unproven versions consume the chord as a no-op.
 pub const PSREADLINE_INVOKE_PROMPT_INPUT: &[u8] = b"\x1b[24;8~";
+/// **Ctrl+V, as the one byte ConPTY turns into that key** — the multi-line paste road for a
+/// PowerShell prompt (0.4.4 ticket 03).
+///
+/// Written *instead of* the pasted text: PSReadLine's default Ctrl+V binding is `Paste`, which
+/// reads the Windows clipboard itself and inserts the block into its multi-line edit buffer
+/// without accepting it, so nothing runs until the reader presses Enter once. Measured on a
+/// clean Windows 11 (2026-09-23 spike) with PowerShell 5.1 + PSReadLine 2.0.0 and 2.4.6 and pwsh
+/// 7.6.6 + 2.4.5, on Folio's ConPTY and on the inbox one. `cmd.exe` types it as `^V`, and a
+/// PSReadLine outside ConPTY may bind it to nothing, so the caller sends it only to a PowerShell
+/// prompt the shell opened in order, on Windows.
+pub const PSREADLINE_PASTE_INPUT: &[u8] = b"\x16";
 
 /// Windows PowerShell — the shell that is part of the operating system.
 ///
@@ -114,6 +125,9 @@ pub const LAST_RESORT_SHELL: &str = WINDOWS_POWERSHELL;
 pub const LAST_RESORT_SHELL: &str = shell::BOURNE_SHELL;
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
+/// Explicit opt-in only, including release builds. This records your keystrokes, including
+/// anything typed at a password prompt; for a diagnosis you run yourself, never to be shared unread.
+const PTY_INPUT_DUMP_ENV: &str = "BT_PTY_INPUT_DUMP";
 
 /// The name this terminal announces itself under, in `TERM_PROGRAM`.
 ///
@@ -132,8 +146,9 @@ const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
 pub const TERM_PROGRAM: &str = "Folio";
 const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Diagnostic-only byte sink for **one** ConPTY reader. The main file is byte-for-byte suitable for
-/// `BT_PROBE_INPUT`; the adjacent `.chunks` file preserves reader arrival boundaries and timing.
+/// Diagnostic-only byte sink for **one** pane stream. Receive recordings are byte-for-byte
+/// suitable for `BT_PROBE_INPUT`; their `.chunks` files preserve reader boundaries and timing.
+/// Input recordings use the same files, clock and publisher, with labelled write boundaries.
 ///
 /// **One recorder per pane, and therefore one file per pane.** `BT_PTY_DUMP` names a file, and
 /// every [`PtySession::spawn`] used to open *that* file with a truncating create — so the moment a
@@ -146,7 +161,7 @@ const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// **A recording that caught nothing must not look like a recording that never ran.** The byte file
 /// is replay input and stays byte-exact, so it has nowhere to say anything and an empty one is
-/// genuinely zero bytes; the manifest is where the recording says whose it is ([`PtyDump::create`]'s
+/// genuinely zero bytes; the manifest is where the recording says whose it is ([`PtyDump::create_at`]'s
 /// `# SESSION` line: which recording of which process, and when it began) and where it says the
 /// stream ended with nothing in hand (`# END`). Both are `#` comments, which every existing
 /// manifest parser already skips.
@@ -155,6 +170,7 @@ struct PtyDump {
     bytes: File,
     chunks: File,
     started: Instant,
+    ordinal: u64,
     sequence: u64,
     total_bytes: u64,
     /// False once the stream has ended, which is how the publisher thread learns to stop.
@@ -193,15 +209,47 @@ const PTY_DUMP_PUBLISH_INTERVAL: Duration = Duration::from_millis(200);
 static PTY_DUMP_RECORDINGS: AtomicU64 = AtomicU64::new(0);
 
 impl PtyDump {
-    fn from_environment() -> Result<Option<Self>, PtyError> {
-        let Some(path) = pty_dump_path(std::env::var_os(PTY_DUMP_ENV)) else {
-            return Ok(None);
+    fn from_environment() -> Result<(Option<Self>, Option<Self>), PtyError> {
+        Self::from_paths(
+            pty_dump_path(std::env::var_os(PTY_DUMP_ENV)),
+            pty_dump_path(std::env::var_os(PTY_INPUT_DUMP_ENV)),
+            || (Instant::now(), unix_millis()),
+        )
+    }
+
+    fn from_paths(
+        output: Option<PathBuf>,
+        input: Option<PathBuf>,
+        clock: impl FnOnce() -> (Instant, u128),
+    ) -> Result<(Option<Self>, Option<Self>), PtyError> {
+        if output.is_none() && input.is_none() {
+            return Ok((None, None));
+        }
+        let ordinal = PTY_DUMP_RECORDINGS.fetch_add(1, Ordering::Relaxed);
+        let (started, started_unix_ms) = clock();
+        let open = |base: PathBuf| {
+            Self::create_at(
+                &pty_dump_session_path(&base, ordinal),
+                ordinal,
+                started,
+                started_unix_ms,
+            )
         };
-        Self::open(&path).map(Some)
+        let output = output.map(open).transpose()?;
+        // A separate suffix also prevents an input path equal to the output path from truncating it.
+        let input = input
+            .map(|base| {
+                let mut path = base.into_os_string();
+                path.push(".in");
+                open(PathBuf::from(path))
+            })
+            .transpose()?;
+        Ok((output, input))
     }
 
     /// Open this run's next recording under `base` — the named path for the first, a name beside
     /// it for every pane after that.
+    #[cfg(test)]
     fn open(base: &Path) -> Result<Self, PtyError> {
         let ordinal = PTY_DUMP_RECORDINGS.fetch_add(1, Ordering::Relaxed);
         Self::create(&pty_dump_session_path(base, ordinal), ordinal)
@@ -213,7 +261,17 @@ impl PtyDump {
         &self.path
     }
 
+    #[cfg(test)]
     fn create(path: &Path, ordinal: u64) -> Result<Self, PtyError> {
+        Self::create_at(path, ordinal, Instant::now(), unix_millis())
+    }
+
+    fn create_at(
+        path: &Path,
+        ordinal: u64,
+        started: Instant,
+        started_unix_ms: u128,
+    ) -> Result<Self, PtyError> {
         let bytes = File::create(path)?;
         let mut chunks = File::create(pty_dump_chunks_path(path))?;
         writeln!(chunks, "# BT_PTY_DUMP_CHUNKS_V1 sequence elapsed_us bytes")?;
@@ -225,14 +283,15 @@ impl PtyDump {
             chunks,
             "# SESSION ordinal={ordinal} pid={} started_unix_ms={} bytes={}",
             std::process::id(),
-            unix_millis(),
+            started_unix_ms,
             path.display()
         )?;
         let dump = Self {
             path: path.to_path_buf(),
             bytes,
             chunks,
-            started: Instant::now(),
+            started,
+            ordinal,
             sequence: 0,
             total_bytes: 0,
             live: Arc::new(AtomicBool::new(true)),
@@ -263,6 +322,32 @@ impl PtyDump {
         self.total_bytes = self
             .total_bytes
             .saturating_add(chunk.len().try_into().unwrap_or(u64::MAX));
+        Ok(())
+    }
+
+    /// One queued input write. The raw sidecar stays byte-exact; the manifest is self-contained.
+    fn write_input_at(
+        &mut self,
+        bytes: &[u8],
+        reason: &str,
+        elapsed_us: u64,
+    ) -> std::io::Result<()> {
+        self.bytes.write_all(bytes)?;
+        // Assemble a line only when tracing is enabled, avoiding a file syscall per hex digit.
+        use std::fmt::Write as _;
+        let mut hex = String::with_capacity(bytes.len().saturating_mul(2));
+        for byte in bytes {
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        writeln!(
+            self.chunks,
+            "{} {elapsed_us} {} pane={} reason={reason:?} hex={hex}",
+            self.sequence,
+            bytes.len(),
+            self.ordinal
+        )?;
+        self.sequence = self.sequence.saturating_add(1);
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len() as u64);
         Ok(())
     }
 
@@ -396,6 +481,200 @@ const CHILD_EXIT_BUDGET: Duration = Duration::from_secs(2);
 /// How often the wait above asks.
 const CHILD_EXIT_POLL: Duration = Duration::from_millis(2);
 
+/// How long a pane's shutdown waits for its reader thread (T-QUIT-HAS-A-DEADLINE).
+///
+/// The reader is blocked inside a `read` on the pseudoconsole's output pipe, and what ends that
+/// read is the host closing its end of it — which is what closing the ring and then dropping the
+/// master does, in that order, a few statements above the join. So this budget is not how long
+/// the ordinary case takes; it is what the *un*ordinary one costs, where the host has not let go
+/// and the read does not return. Two seconds, for [`CHILD_EXIT_BUDGET`]'s reasons: no healthy
+/// close comes near it, and a window closing a pane may not be made to wait on a host.
+const READER_EXIT_BUDGET: Duration = Duration::from_secs(2);
+
+/// How often the join above asks.
+const READER_EXIT_POLL: Duration = Duration::from_millis(2);
+
+/// What a bounded join found.
+#[derive(Debug, Eq, PartialEq)]
+enum ReaderExit {
+    /// It ended.
+    Ended,
+    /// It ended by panicking, which is a fact about this session the caller answers for.
+    Panicked,
+    /// It had not ended when the budget ran out, and has been let go.
+    StillReading,
+}
+
+/// **Join `reader`, and stop waiting after `budget`.**
+///
+/// The bounded shape of a join (T-QUIT-HAS-A-DEADLINE), written as a function of a handle rather
+/// than of a session so the bound itself can be tested with an ordinary thread and no PTY. The
+/// handle is consumed either way: past the budget it is dropped, which detaches the thread, and
+/// that is the only honest thing to do with one parked inside a read nothing in this process can
+/// cancel. What it is holding — a cloned pipe handle and a closed ring — is a handful of bytes
+/// that go when the pipe finally does.
+fn join_within(budget: Duration, reader: JoinHandle<()>) -> ReaderExit {
+    let deadline = Instant::now() + budget;
+    loop {
+        if reader.is_finished() {
+            return match reader.join() {
+                Ok(()) => ReaderExit::Ended,
+                Err(_) => ReaderExit::Panicked,
+            };
+        }
+        if Instant::now() >= deadline {
+            return ReaderExit::StillReading;
+        }
+        std::thread::sleep(READER_EXIT_POLL);
+    }
+}
+
+/// **What a whole pane teardown is expected to cost** (T-PANE-CLOSE-OFF-THREAD).
+///
+/// Its two bounded waits, one after the other: [`CHILD_EXIT_BUDGET`] for a child that will not
+/// answer a `TerminateProcess`, then [`READER_EXIT_BUDGET`] for a reader that will not come out
+/// of its read. Nothing here bounds the `ClosePseudoConsole` between them — that call returns
+/// when the host has let go of its clients, which is the node process the reader was talking to
+/// winding down — so this is what a teardown is *expected* to fit in rather than a promise that
+/// it does. Exceeding it is one line in the log and nothing else: the thread it is spent on is
+/// not one anybody is waiting for.
+const RETIREMENT_BUDGET: Duration = Duration::from_secs(4);
+
+/// Every pane teardown this process has started and not finished.
+///
+/// Process-wide because the question is: a quit asks "is any pane still being taken apart" about
+/// the process, not about a window — the windows are already hidden by the time it asks, and a
+/// pane closed in one of them a moment before the quit is exactly the teardown it must not walk
+/// out in front of.
+static RETIREMENTS: OnceLock<Retirements> = OnceLock::new();
+
+fn retirements() -> &'static Retirements {
+    RETIREMENTS.get_or_init(|| Retirements {
+        outstanding: Mutex::new(0),
+        finished: Condvar::new(),
+    })
+}
+
+/// The count, and the way to wait on it reaching zero.
+struct Retirements {
+    outstanding: Mutex<usize>,
+    finished: Condvar,
+}
+
+impl Retirements {
+    fn begin(&self) {
+        if let Ok(mut outstanding) = self.outstanding.lock() {
+            *outstanding += 1;
+        }
+    }
+
+    fn end(&self) {
+        if let Ok(mut outstanding) = self.outstanding.lock() {
+            *outstanding = outstanding.saturating_sub(1);
+        }
+        self.finished.notify_all();
+    }
+
+    fn outstanding(&self) -> usize {
+        self.outstanding
+            .lock()
+            .map_or(0, |outstanding| *outstanding)
+    }
+
+    fn wait_within(&self, budget: Duration) -> usize {
+        let Ok(mut outstanding) = self.outstanding.lock() else {
+            return 0;
+        };
+        let deadline = Instant::now() + budget;
+        while *outstanding > 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return *outstanding;
+            }
+            let Ok((held, _)) = self.finished.wait_timeout(outstanding, left) else {
+                return 0;
+            };
+            outstanding = held;
+        }
+        0
+    }
+}
+
+/// **Take one pane apart on a thread of its own, and come straight back**
+/// (T-PANE-CLOSE-OFF-THREAD).
+///
+/// Closing a pane or a tab is a click, and a click may not be answered with a teardown: the
+/// steps are `kill`, a bounded reap, `ClosePseudoConsole` — which does not return until the
+/// host's clients have gone, and a Claude Code pane's node process takes its time about that —
+/// the ring's close, the master's drop and the reader's join. Every one of those used to run on
+/// the window thread, between the press and the next frame. Measured on the reader's machine
+/// 2026-09-17: closing a tab holding one idle Claude Code pane held the window for **ten
+/// seconds**, of which the trace's only hold that turn was `mouse_input 2005 ms` — the reader
+/// join sitting on its whole bound. The bound was the fix for "for ever"; it was never the fix
+/// for "at all".
+///
+/// So the session is handed over whole and this returns in the time of one `spawn`. The seat is
+/// already out of its window's map by then — that is the caller's half of this, and it is what
+/// makes the hand-over safe: nothing on the window thread can reach a session that is being
+/// taken apart, because nothing on the window thread still has it.
+pub fn retire_session(session: PtySession) {
+    retire_within(RETIREMENT_BUDGET, move || {
+        let mut session = session;
+        if let Err(error) = session.shutdown() {
+            eprintln!("a closing pane's child did not go quietly: {error}");
+        }
+    });
+}
+
+/// The hand-over itself, as a function of what to run rather than of a session, so that "the
+/// window thread does not wait for this" can be tested with an ordinary closure and no PTY.
+///
+/// A thread that will not start is the one case this cannot honour, and the teardown then runs
+/// here: `spawn` drops the closure it could not take, which drops the session inside it, and
+/// [`PtySession`]'s `Drop` *is* `shutdown`. So the close costs what it used to cost rather than
+/// leaking a child nobody can see — which [`PtySession::shutdown`]'s own callers already call
+/// the one outcome worse than a slow close.
+fn retire_within(budget: Duration, teardown: impl FnOnce() + Send + 'static) {
+    let outstanding = retirements();
+    outstanding.begin();
+    let handed = std::thread::Builder::new()
+        .name("pty-retirement".to_string())
+        .spawn(move || {
+            let started = Instant::now();
+            teardown();
+            let spent = started.elapsed();
+            if spent > budget {
+                eprintln!(
+                    "a pane took {} ms to close, on a thread of its own rather than the window's",
+                    spent.as_millis()
+                );
+            }
+            retirements().end();
+        });
+    if handed.is_err() {
+        outstanding.end();
+    }
+}
+
+/// How many panes are still being taken apart.
+#[must_use]
+pub fn sessions_retiring() -> usize {
+    retirements().outstanding()
+}
+
+/// **Wait for every outstanding teardown, and stop waiting after `budget`.** Answers how many
+/// were still going.
+///
+/// The quit's half of the hand-over: the window thread never waits for a pane it closed, but the
+/// *process* may not walk out while a child it killed is still being reaped — a shell left alive
+/// behind a window that has gone is the outcome the teardown exists to prevent. Bounded for the
+/// same reason every other wait on this path is, and what is still going past the bound is left
+/// to the job objects that close with the process.
+#[must_use]
+pub fn wait_for_retirements(budget: Duration) -> usize {
+    retirements().wait_within(budget)
+}
+
 /// **Ask `reaped` until it answers, and stop asking after `budget`.**
 ///
 /// The bounded shape of a wait on a child (review row R2-6), written as a
@@ -434,12 +713,14 @@ fn read_pty_output(
 /// Keep the normal reader loop free of dump branches, clocks, allocations, and file operations.
 fn read_pty_output_without_dump(reader: &mut dyn Read, output: &OutputRing, wake: &OutputWake) {
     let mut buffer = [0_u8; READER_CHUNK_BYTES];
+    let mut capped = CappedReads::new(spawned_transport(), buffer.len());
     loop {
         let count = match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(count) => count,
         };
-        if output.push(buffer[..count].to_vec()).is_err() {
+        let capped = capped.observe(count);
+        if output.push_read(buffer[..count].to_vec(), capped).is_err() {
             drain_to_the_end(reader);
             break;
         }
@@ -473,24 +754,26 @@ fn read_pty_output_with_dump(
     dump: Arc<Mutex<PtyDump>>,
 ) {
     let mut buffer = [0_u8; READER_CHUNK_BYTES];
+    let mut capped_reads = CappedReads::new(spawned_transport(), buffer.len());
     loop {
         let count = match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(count) => count,
         };
+        let capped = capped_reads.observe(count);
         let write_result = dump
             .lock()
             .map_err(|_| std::io::Error::other("dump mutex poisoned"))
             .and_then(|mut dump| dump.write_chunk(&buffer[..count]));
         if let Err(error) = write_result {
             eprintln!("BT_PTY_DUMP disabled after write failure: {error}");
-            if output.push(buffer[..count].to_vec()).is_ok() {
+            if output.push_read(buffer[..count].to_vec(), capped).is_ok() {
                 wake();
                 read_pty_output_without_dump(reader, output, wake);
             }
             return;
         }
-        if output.push(buffer[..count].to_vec()).is_err() {
+        if output.push_read(buffer[..count].to_vec(), capped).is_err() {
             drain_to_the_end(reader);
             break;
         }
@@ -792,9 +1075,161 @@ fn program_is_the_last_resort_shell(program: &OsStr) -> bool {
     }
 }
 
+/// One `read(2)`, kept whole in the ring with the one thing only the reader knows about it.
+struct Chunk {
+    bytes: Vec<u8>,
+    /// **The transport had more than it could hand over in this call.** See [`CappedReads`].
+    capped: bool,
+}
+
+/// What one [`OutputRing::try_pop_slice`] handed out.
+///
+/// The bytes, and whether **every** `read(2)` in them was one the transport capped — the kernel's
+/// own way of saying "there was more". A window that has just fed such a slice and found the ring
+/// dry is a window one or two milliseconds ahead of the rest of a burst, and that is the only
+/// fact this type exists to carry.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OutputSlice {
+    pub bytes: Vec<u8>,
+    /// **Every whole read in this slice was capped, and the slice ends on one of them.**
+    ///
+    /// An `and` and not "the last one", and the difference was a defect: a one-byte echo
+    /// followed in the same pop by a capped read reported capped, and the keystroke waited. A
+    /// short read anywhere in a batch is the kernel saying that batch had a quiet moment in it,
+    /// and evidence of an interactive arrival is never overwritten by what came after it.
+    ///
+    /// A slice that stopped in the middle of a chunk is not capped either: the rest of that read
+    /// is still in the ring and the caller is coming straight back for it.
+    pub ends_capped: bool,
+}
+
+impl OutputSlice {
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+/// **What kind of thing this reader is reading**, which is what decides how much it may conclude
+/// from a read's length.
+///
+/// Not a platform: a platform is where a transport happens to be found, and the rule below is
+/// about the transport. This crate opens exactly one of two, and it knows at `spawn` which.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Transport {
+    /// **A Unix pty master.** A line discipline stands between the child and this reader and
+    /// hands over at most a fixed number of bytes per `read(2)` — 1024 on macOS — however large
+    /// the buffer offered to it. That fixed number is a real thing to learn, and it is the only
+    /// transport on which learning it means anything.
+    PtyMaster,
+    /// **A pipe**, which is what a Windows pseudoconsole writes its output into. A pipe has no
+    /// per-read limit of its own: a read returns what happens to be in the pipe, so two reads of
+    /// the same length say nothing whatever about a limit, and the only sound "there was more"
+    /// is a read that filled the buffer *we* supplied.
+    Pipe,
+}
+
+/// **The smallest running maximum this rule is willing to call a transfer unit.**
+///
+/// The number is taken from the terminal input queue POSIX requires — `_POSIX_MAX_INPUT` /
+/// `MAX_CANON` = 255 (IEEE Std 1003.1, `<limits.h>`) — because a line discipline that must hold
+/// that much at once has no reason to hand over less per read. That is a chosen floor, not a
+/// guarantee the standard makes about a pty master's reads, and it is stated as such: what it
+/// buys is that a running maximum under it is never taken for a cap — a keystroke's echo, a
+/// prompt, a status line that happened to repeat its length — and what it costs is that a transport
+/// with a smaller cap, should one exist, simply never coalesces.
+///
+/// The floor is named after what it is rather than set to any particular system's cap: hard-coding
+/// macOS's 1024 would be this rule guessing at a platform instead of reading a transport.
+const SMALLEST_CREDIBLE_TRANSFER_UNIT: usize = 256;
+
+/// **Which reads the transport capped, learned from the transport itself.**
+///
+/// A `read(2)` that returned as much as this transport can return in one call is the kernel
+/// saying it had more than it could give; the next bytes of that burst are already written and
+/// are a millisecond or two away. A read that returned less is the kernel saying that is all
+/// there is. Nothing here inspects a byte: this is a property of the transfer, not of the stream.
+///
+/// **A read that filled our own buffer is capped on every transport**, and needs no corroboration
+/// and no inference: the buffer is ours, and a read that filled it provably had no room for more.
+///
+/// **Everything else is an inference about a line discipline, so it is drawn only on a
+/// [`Transport::PtyMaster`]** — the one transport with a per-read limit of its own. That is where
+/// the kernel cap exists, which is why it is the only place this is sound. On a
+/// [`Transport::Pipe`] a read returns whatever was in the pipe, so repeated lengths are a
+/// coincidence and nothing is learned from them; ordinary 6-9 KiB ConPTY reads are published at
+/// once, exactly as they were before this rule existed.
+///
+/// On a pty master the unit is `min(buffer.len(), the largest count seen on this reader)`, under
+/// two conditions that keep an echo from being mistaken for a cap:
+///
+/// * it is at least [`SMALLEST_CREDIBLE_TRANSFER_UNIT`] — read lengths of `[1, 1]` are two
+///   keystrokes and not a one-byte transport; and
+/// * **a maximum seen once is indistinguishable from a coincidence**, so it has to come back:
+///   `capped` first becomes true on the *second* read that returns the largest length so far.
+///
+/// **A larger read later raises the maximum**, which retrospectively says the earlier corroborated
+/// maximum was not the transport's unit after all. That costs nothing: those chunks are long
+/// since consumed, and all their flag ever bought was a bounded wait for bytes that were not
+/// coming. The new maximum starts uncorroborated in its turn.
+///
+/// Measured against the owner's macOS recording of 2026-09-17 (350 reads, 123 of them the pty's
+/// 1024-byte cap): **123 reads flagged, 122 of them genuine** — every capped read but the first,
+/// which had nothing to corroborate it — and exactly one false positive, a 508-byte length that
+/// repeated before any 1024-byte read had raised the maximum. 508 is above the credible floor, so
+/// it is a legitimate candidate until something larger arrives; what the floor removes is the
+/// keystroke-sized repeat, which no recording of a shell is ever short of. One bounded wait, once,
+/// in seven minutes.
+pub struct CappedReads {
+    transport: Transport,
+    buffer_len: usize,
+    maximum: usize,
+    sightings: u32,
+}
+
+impl CappedReads {
+    pub fn new(transport: Transport, buffer_len: usize) -> Self {
+        Self {
+            transport,
+            buffer_len,
+            maximum: 0,
+            sightings: 0,
+        }
+    }
+
+    pub fn observe(&mut self, count: usize) -> bool {
+        if count >= self.buffer_len {
+            return true;
+        }
+        if self.transport != Transport::PtyMaster {
+            return false;
+        }
+        if count > self.maximum {
+            self.maximum = count;
+            self.sightings = 1;
+        } else if count == self.maximum {
+            self.sightings = self.sightings.saturating_add(1);
+        }
+        count == self.maximum && count >= SMALLEST_CREDIBLE_TRANSFER_UNIT && self.sightings >= 2
+    }
+}
+
+/// **The transport this process's pseudoterminals are.**
+///
+/// A Windows pseudoconsole writes its output into an anonymous pipe; every other platform this
+/// builds for hands back a pty master with a line discipline behind it. The `cfg` names which of
+/// the two the backend opened — it is not the rule, which is written against the transport in
+/// [`CappedReads`].
+const fn spawned_transport() -> Transport {
+    if cfg!(windows) {
+        Transport::Pipe
+    } else {
+        Transport::PtyMaster
+    }
+}
+
 #[derive(Default)]
 struct RingState {
-    chunks: VecDeque<Vec<u8>>,
+    chunks: VecDeque<Chunk>,
     bytes: usize,
     maximum_bytes: usize,
     blocked_pushes: u64,
@@ -832,7 +1267,15 @@ impl OutputRing {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// A push with nothing to say about the transport — the shape every test that only cares
+    /// about bytes wants. Production always comes through [`Self::push_read`], which is where
+    /// the reader's one extra fact is put on the record.
+    #[cfg(test)]
     fn push(&self, chunk: Vec<u8>) -> Result<(), PtyError> {
+        self.push_read(chunk, false)
+    }
+
+    pub fn push_read(&self, chunk: Vec<u8>, capped: bool) -> Result<(), PtyError> {
         if chunk.len() > self.capacity.get() {
             return Err(PtyError::Backend(format!(
                 "reader chunk {} exceeds ring capacity {}",
@@ -857,31 +1300,55 @@ impl OutputRing {
         }
         state.bytes += chunk.len();
         state.maximum_bytes = state.maximum_bytes.max(state.bytes);
-        state.chunks.push_back(chunk);
+        state.chunks.push_back(Chunk {
+            bytes: chunk,
+            capped,
+        });
         self.changed.notify_all();
         Ok(())
     }
 
     pub fn try_pop(&self, quantum: NonZeroUsize) -> Vec<u8> {
+        self.try_pop_slice(quantum).bytes
+    }
+
+    pub fn try_pop_slice(&self, quantum: NonZeroUsize) -> OutputSlice {
         let mut state = self.state();
         let mut output = Vec::with_capacity(quantum.get().min(state.bytes));
+        // **`and`, across every read in the slice**, and it starts true only once a read has
+        // actually been taken. A short read anywhere in the batch is a quiet moment inside it,
+        // and that evidence must not be overwritten by a capped read that follows: a one-byte
+        // echo popped together with a capped read is still an echo, and waits for nothing.
+        let mut ends_capped = false;
+        let mut took_a_whole_read = false;
         while output.len() < quantum.get() {
             let Some(mut chunk) = state.chunks.pop_front() else {
                 break;
             };
             let remaining = quantum.get() - output.len();
-            if chunk.len() <= remaining {
-                state.bytes -= chunk.len();
-                output.extend(chunk);
+            if chunk.bytes.len() <= remaining {
+                state.bytes -= chunk.bytes.len();
+                ends_capped = chunk.capped && (!took_a_whole_read || ends_capped);
+                took_a_whole_read = true;
+                output.extend(chunk.bytes);
             } else {
-                let tail = chunk.split_off(remaining);
-                state.bytes -= chunk.len();
-                output.extend(chunk);
-                state.chunks.push_front(tail);
+                let tail = chunk.bytes.split_off(remaining);
+                state.bytes -= chunk.bytes.len();
+                output.extend(chunk.bytes);
+                // The read is not over, so its flag is not spent: it travels with the tail, and
+                // this slice ends inside a read rather than on one.
+                ends_capped = false;
+                state.chunks.push_front(Chunk {
+                    bytes: tail,
+                    capped: chunk.capped,
+                });
             }
         }
         self.changed.notify_all();
-        output
+        OutputSlice {
+            bytes: output,
+            ends_capped,
+        }
     }
 
     pub fn close(&self) {
@@ -1073,6 +1540,7 @@ pub struct PtySession {
     conpty_source: ConPtySource,
     /// Shared with the reader thread so `resize` can interleave `# RESIZE` markers with chunks.
     dump: Option<Arc<Mutex<PtyDump>>>,
+    input_dump: Option<Mutex<PtyDump>>,
     /// Set once, only when a spawn had to fall back to [`LAST_RESORT_SHELL`] after the
     /// resolved shell failed to start. `Runtime` turns it into the pane's first line, then
     /// discards it.
@@ -1416,7 +1884,9 @@ impl PtySession {
     }
 
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        let dump = PtyDump::from_environment()?.map(|dump| Arc::new(Mutex::new(dump)));
+        let (dump, input_dump) = PtyDump::from_environment()?;
+        let dump = dump.map(|dump| Arc::new(Mutex::new(dump)));
+        let input_dump = input_dump.map(Mutex::new);
         let conpty_source = conpty_source();
         let strip_inherited_no_color = command.strips_inherited_no_color();
         let environment = command.resolved_environment();
@@ -1471,13 +1941,15 @@ impl PtySession {
             writer: Some(writer_thread),
             conpty_source,
             dump,
+            input_dump,
             shell_fallback: None,
         })
     }
 
     /// Hand one write to this session's child. **Returns in the time of one lock**, whatever the
     /// child is doing with its standard input — see [`InputRing`] for why that is a correctness
-    /// property of the window and not a nicety.
+    /// property of the window and not a nicety. Explicit input recording adds diagnostic file
+    /// writes; see [`Self::write_with_reason`].
     ///
     /// `&self` rather than `&mut self`, and the change is honest rather than cosmetic: there is
     /// no longer any per-session writer state a caller could race, only a queue with a lock
@@ -1488,7 +1960,24 @@ impl PtySession {
     /// already waiting. Ending the process over the second would be answering a wedged shell by
     /// taking every other pane down with it.
     pub fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
-        self.input.try_push(bytes)
+        self.write_with_reason(bytes, "unlabelled input")
+    }
+
+    /// Queue input with its caller's diagnostic reason. `BT_PTY_INPUT_DUMP` is off unless
+    /// explicitly set; it records your keystrokes, including anything typed at a password
+    /// prompt; for a diagnosis you run yourself, never to be shared unread.
+    /// A line means queued for the writer, not proof that the child read it. When unset,
+    /// instrumentation costs one Option read, with no clock, allocation, lock or file access.
+    pub fn write_with_reason(&self, bytes: &[u8], reason: &'static str) -> Result<(), PtyError> {
+        self.input.try_push(bytes)?;
+        if let Some(dump) = &self.input_dump {
+            let mut dump = dump.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let elapsed_us = u64::try_from(dump.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            if let Err(error) = dump.write_input_at(bytes, reason, elapsed_us) {
+                eprintln!("BT_PTY_INPUT_DUMP write failed: {error}");
+            }
+        }
+        Ok(())
     }
 
     /// What is queued for the child and how close it is to the ceiling.
@@ -1561,8 +2050,12 @@ impl PtySession {
     /// back on the front, so a slice boundary is a boundary in the byte stream
     /// and nowhere else — the same contract a quantum-sized pop has always had
     /// with the chunks the reader thread happened to deliver.
-    pub fn read_output_slice(&self) -> Vec<u8> {
-        self.output.try_pop(TERM_READ_SLICE)
+    ///
+    /// The slice carries [`OutputSlice::ends_capped`] because only the reader can see a read
+    /// boundary, and it is gone by the time the bytes are here: a pop concatenates whatever the
+    /// reader happened to deliver.
+    pub fn read_output_slice(&self) -> OutputSlice {
+        self.output.try_pop_slice(TERM_READ_SLICE)
     }
 
     pub fn output_is_drained(&self) -> bool {
@@ -1618,26 +2111,48 @@ impl PtySession {
         // one is already awake and leaving on the `close`.
         self.input.close();
         self.writer.take();
+        // **A reap that fails does not skip the teardown** (crash review C-11). The error is kept
+        // and answered at the end: a child that exited of its own accord between the `try_wait`
+        // and the `kill`, or any other refusal from the reap, used to return from here with the
+        // ring still open, the pseudoconsole still up and the reader thread still standing, and
+        // `Drop` calling `shutdown` again was the only thing that ever took them down.
+        let mut failure: Option<PtyError> = None;
         let status = if let Some(mut child) = self.child.take() {
-            if let Some(status) = child.try_wait()? {
-                Some(status)
-            } else {
-                child.kill()?;
-                // **Bounded** (review row R2-6). This used to be
-                // `WaitForSingleObject(…, INFINITE)` on the window's own thread,
-                // one call after a `TerminateProcess` that a child inside an
-                // uninterruptible kernel wait does not have to answer. A window
-                // closing a pane may not be made to wait for a driver, and the
-                // job object below is what makes the wait's ending safe: what
-                // has not exited by then is killed when the job handle closes.
-                reap_within(CHILD_EXIT_BUDGET, || child.try_wait().ok().flatten())
+            match child.try_wait() {
+                Ok(Some(status)) => Some(status),
+                Ok(None) => match child.kill() {
+                    Err(error) => {
+                        failure = Some(error.into());
+                        None
+                    }
+                    Ok(()) => {
+                        // **Bounded** (review row R2-6). This used to be
+                        // `WaitForSingleObject(…, INFINITE)` on the window's own
+                        // thread, one call after a `TerminateProcess` that a child
+                        // inside an uninterruptible kernel wait does not have to
+                        // answer. A window closing a pane may not be made to wait
+                        // for a driver, and the job object below is what makes the
+                        // wait's ending safe: what has not exited by then is killed
+                        // when the job handle closes.
+                        reap_within(CHILD_EXIT_BUDGET, || child.try_wait().ok().flatten())
+                    }
+                },
+                Err(error) => {
+                    failure = Some(error.into());
+                    None
+                }
             }
         } else {
             // Nothing to reap because a `try_wait` already did, and it wrote down what it found:
             // a shutdown after a reap reports how the child ended rather than reporting nothing.
             self.exited.clone()
         };
-        self.exited = status.clone();
+        // **A budget that ran out does not unlearn an exit.** How the child ended is a fact about
+        // this session ([`Self::exited`]), so a reap that was refused or that reached the end of
+        // its budget leaves whatever an earlier one wrote down exactly where it was.
+        if status.is_some() {
+            self.exited = status.clone();
+        }
         // **The ring is closed before the pseudoconsole is** (review row R2-6).
         // `ClosePseudoConsole` — which is what dropping the master ends up
         // calling — does not return until the host has flushed its output and
@@ -1651,15 +2166,44 @@ impl PtySession {
         // pipe ends, so the flush the host is waiting for can finish.
         self.output.close();
         self.master.take();
+        // **And the join that follows that order is bounded anyway** (T-QUIT-HAS-A-DEADLINE). The
+        // order above is what makes it finish promptly — the ring is closed, so the reader is
+        // draining rather than blocked on the window thread, and the master is gone, so the host
+        // closes the pipe and the drain ends. What the order cannot promise is a host that lets
+        // go: a symbolized hang report of 2026-09-16 put a window thread in this very join for
+        // five seconds while a pane was closing, and an unbounded wait here is the last one left
+        // on this path now that the writer is detached and the reap is bounded.
         if let Some(reader) = self.reader.take() {
-            reader.join().map_err(|_| PtyError::ReaderPanicked)?;
+            match join_within(READER_EXIT_BUDGET, reader) {
+                ReaderExit::Ended => {}
+                ReaderExit::Panicked => {
+                    failure.get_or_insert(PtyError::ReaderPanicked);
+                }
+                ReaderExit::StillReading => {
+                    eprintln!(
+                        "a pane closed while its reader was still inside a read on the \
+                         pseudoconsole, and it was left to end with the pipe"
+                    );
+                }
+            }
         }
-        Ok(status)
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(status),
+        }
     }
 }
 
 impl Drop for PtySession {
     fn drop(&mut self) {
+        if let Some(dump) = self.input_dump.take() {
+            let mut dump = dump
+                .into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Err(error) = dump.finish() {
+                eprintln!("BT_PTY_INPUT_DUMP finish failed: {error}");
+            }
+        }
         let _ = self.shutdown();
     }
 }
@@ -2509,6 +3053,152 @@ mod tests {
     }
 
     #[test]
+    fn input_dump_unset_does_not_open_files_or_construct_a_clock() {
+        let (output, input) = PtyDump::from_paths(None, None, || {
+            panic!("disabled dumps must not even construct their clock")
+        })
+        .unwrap();
+        assert!(output.is_none());
+        assert!(input.is_none());
+        assert!(pty_dump_path(Some(std::ffi::OsString::new())).is_none());
+    }
+
+    #[test]
+    fn input_dump_and_output_share_one_pane_and_clock() {
+        let path = std::env::temp_dir().join(format!("bt-input-clock-{}", std::process::id()));
+        let origin = Instant::now();
+        let (output, input) =
+            PtyDump::from_paths(Some(path.clone()), Some(path), || (origin, 9876)).unwrap();
+        let mut output = output.unwrap();
+        let mut input = input.unwrap();
+        assert_eq!(output.started, origin);
+        assert_eq!(input.started, origin);
+        assert_eq!(output.ordinal, input.ordinal);
+        assert_ne!(output.path, input.path);
+        for dump in [&mut output, &mut input] {
+            assert!(
+                std::fs::read_to_string(pty_dump_chunks_path(&dump.path))
+                    .unwrap()
+                    .contains("started_unix_ms=9876")
+            );
+            dump.finish().unwrap();
+            std::fs::remove_file(&dump.path).unwrap();
+            std::fs::remove_file(pty_dump_chunks_path(&dump.path)).unwrap();
+        }
+    }
+
+    #[test]
+    fn input_dump_off_write_path_has_only_the_option_gate() {
+        let source = include_str!("lib.rs");
+        let start = source.find("    pub fn write_with_reason(").unwrap();
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").unwrap()];
+        let (ordinary, enabled) = body
+            .split_once("if let Some(dump) = &self.input_dump {")
+            .unwrap();
+        assert!(ordinary.contains("self.input.try_push(bytes)?;"));
+        for work in [
+            "elapsed()",
+            "lock()",
+            "write_input_at",
+            "String::",
+            "format!",
+            "var_os",
+        ] {
+            assert!(
+                !ordinary.contains(work),
+                "disabled input dump performed {work}"
+            );
+        }
+        assert!(enabled.contains("dump.write_input_at(bytes, reason, elapsed_us)"));
+        let disabled_tail = enabled.rsplit_once("\n        }").unwrap().1.trim();
+        assert_eq!(disabled_tail, "Ok(())");
+    }
+
+    #[test]
+    fn input_dump_is_reached_by_labelled_and_plain_session_writes() {
+        let path = std::env::temp_dir().join(format!("bt-input-writes-{}", std::process::id()));
+        let dump = PtyDump::create_at(&path, 3, Instant::now(), 1234).unwrap();
+        // No process or pipe: exercise the product queue and recording door with synthetic bytes.
+        let session = PtySession {
+            master: None,
+            child: None,
+            exited: None,
+            output: Arc::new(OutputRing::new(NonZeroUsize::new(32).unwrap())),
+            input: Arc::new(InputRing::new(NonZeroUsize::new(32).unwrap())),
+            reader: None,
+            writer: None,
+            conpty_source: conpty_source(),
+            dump: None,
+            input_dump: Some(Mutex::new(dump)),
+            shell_fallback: None,
+        };
+        session.write_with_reason(b"a", "keyboard input").unwrap();
+        session.write(b"b").unwrap();
+        assert!(matches!(
+            session.write_with_reason(&[0; 33], "too large"),
+            Err(PtyError::InputRefused { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"ab");
+        let manifest = std::fs::read_to_string(pty_dump_chunks_path(&path)).unwrap();
+        let lines: Vec<_> = manifest
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        for (line, expected) in lines.iter().zip([
+            "1 pane=3 reason=\"keyboard input\" hex=61",
+            "1 pane=3 reason=\"unlabelled input\" hex=62",
+        ]) {
+            assert!(line.ends_with(expected));
+            assert!(
+                line.split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .parse::<u64>()
+                    .is_ok()
+            );
+        }
+        drop(session);
+        assert!(
+            std::fs::read_to_string(pty_dump_chunks_path(&path))
+                .unwrap()
+                .contains("# END chunks=2 bytes=2")
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(pty_dump_chunks_path(&path)).unwrap();
+    }
+
+    #[test]
+    fn input_dump_records_each_write_with_time_pane_reason_and_exact_bytes() {
+        let path = std::env::temp_dir().join(format!("bt-input-dump-{}", std::process::id()));
+        let mut dump = PtyDump::create_at(&path, 17, Instant::now(), 1234).unwrap();
+        dump.write_input_at(b"a\r\n\0\xff", "keyboard input", 42)
+            .unwrap();
+        dump.write_input_at(b"\x1b[O", "terminal protocol reply", 43)
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\n\0\xff\x1b[O");
+        let manifest = std::fs::read_to_string(pty_dump_chunks_path(&path)).unwrap();
+        let lines: Vec<_> = manifest
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "0 42 5 pane=17 reason=\"keyboard input\" hex=610d0a00ff",
+                "1 43 3 pane=17 reason=\"terminal protocol reply\" hex=1b5b4f",
+            ]
+        );
+        assert!(manifest.contains("started_unix_ms=1234"));
+        dump.finish().unwrap();
+        drop(dump);
+        // The publisher owns cloned handles briefly; files permit deletion while open.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(pty_dump_chunks_path(&path)).unwrap();
+    }
+
+    #[test]
     fn pty_dump_is_an_exact_byte_sidecar_with_replayable_chunk_metadata() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3081,7 +3771,7 @@ mod tests {
     #[test]
     fn the_only_thread_that_meets_the_pipe_is_the_writer_thread() {
         const SOURCE: &str = include_str!("lib.rs");
-        let head = "\n    pub fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {";
+        let head = "\n    pub fn write_with_reason(&self, bytes: &[u8], reason: &'static str) -> Result<(), PtyError> {";
         let start = SOURCE
             .find(head)
             .expect("`PtySession::write` takes `&self` and answers a `PtyError`")
@@ -3513,6 +4203,104 @@ mod tests {
             reaped.map(|status| status.exit_code()),
             Some(3),
             "a child that does end is reported the moment it does"
+        );
+    }
+
+    /// PIN — **a shutdown stops waiting for a reader that does not return**
+    /// (T-QUIT-HAS-A-DEADLINE).
+    ///
+    /// The reader is stood where a real one stands when the host has not closed the pipe: inside
+    /// a call that ends when somebody else decides, which here is this test. No PTY and no child
+    /// — the bound is written as a function of a handle exactly so it can be asked this.
+    ///
+    /// MUTATION: put a bare `reader.join()` back in `PtySession::shutdown` and the first half of
+    /// this does not go red, it never returns.
+    #[test]
+    fn a_shutdown_stops_waiting_for_a_reader_that_does_not_return() {
+        let (release, released) = mpsc::channel::<()>();
+        let reader = std::thread::spawn(move || {
+            let _ = released.recv();
+        });
+        let started = Instant::now();
+        let outcome = join_within(Duration::from_millis(60), reader);
+        let spent = started.elapsed();
+        assert_eq!(
+            outcome,
+            ReaderExit::StillReading,
+            "it says the reader had not come out of its read"
+        );
+        assert!(
+            spent >= Duration::from_millis(60) && spent < Duration::from_secs(5),
+            "it waited its budget and then let go, not {spent:?}"
+        );
+        // And the thread it let go of ends on its own, the moment its own wait does.
+        drop(release);
+
+        let reader = std::thread::spawn(|| {});
+        assert_eq!(
+            join_within(Duration::from_secs(30), reader),
+            ReaderExit::Ended,
+            "a reader that does end is joined the moment it does"
+        );
+    }
+
+    /// RED (T-PANE-CLOSE-OFF-THREAD) — **closing a pane does not cost the window thread the
+    /// teardown, and two closes do not queue behind each other on it.**
+    ///
+    /// The teardown is stood where a real one stands when the host will not let go: inside a
+    /// call that ends when this test says so. What is asserted is the window thread's side of
+    /// it — that `retire_within` comes back in the time of a `spawn` whatever the teardown is
+    /// doing, that a second close comes back the same way with the first still going, and that
+    /// both are counted so a quit can wait for them where nobody is watching.
+    ///
+    /// MUTATION: run the teardown on the caller's thread — which is what `pty.shutdown()` at
+    /// the close sites used to be — and the first assertion fails by two whole seconds, which
+    /// is the reader's ten-second tab close in miniature.
+    #[test]
+    fn a_pane_is_taken_apart_on_a_thread_of_its_own() {
+        let before = sessions_retiring();
+        let (release_first, first) = mpsc::channel::<()>();
+        let (release_second, second) = mpsc::channel::<()>();
+
+        let started = Instant::now();
+        retire_within(Duration::from_secs(30), move || {
+            let _ = first.recv();
+        });
+        retire_within(Duration::from_secs(30), move || {
+            let _ = second.recv();
+        });
+        let spent = started.elapsed();
+        assert!(
+            spent < Duration::from_millis(500),
+            "the window thread handed both over and came back, in {spent:?}"
+        );
+
+        // Both are standing at once, which is what "they do not queue behind each other" looks
+        // like from here, and both are on the books.
+        let waiting_since = Instant::now();
+        while sessions_retiring() < before + 2 {
+            assert!(
+                waiting_since.elapsed() < Duration::from_secs(30),
+                "two teardowns were handed over and fewer than two are outstanding"
+            );
+            std::thread::yield_now();
+        }
+
+        // A quit's wait ends on its own budget while they are still going...
+        let started = Instant::now();
+        let still = wait_for_retirements(Duration::from_millis(60));
+        assert!(
+            still >= 2 && started.elapsed() >= Duration::from_millis(60),
+            "the quit waited its budget and then said how many were still going, not {still}"
+        );
+
+        // ...and answers nothing outstanding once they finish.
+        drop(release_first);
+        drop(release_second);
+        assert_eq!(
+            wait_for_retirements(Duration::from_secs(30)),
+            0,
+            "every teardown that was handed over finished on its own thread"
         );
     }
 
@@ -4693,7 +5481,7 @@ mod tests {
             }
             self.flush_pending_resize(now);
             if self.session.finish_resize_if_quiescent(now).unwrap() && self.pending_reanchor {
-                if self.session.shell_input_region_open() {
+                if self.session.shell_prompt_opened_in_order() {
                     self.write_invoke_prompt();
                 }
                 self.pending_reanchor = false;
@@ -4737,7 +5525,7 @@ mod tests {
             self.pty.resize(size(columns, rows)).unwrap();
             self.conpty = (columns, rows);
             if self.invoke_prompt_after_resize {
-                let reanchor_owed = self.session.shell_input_region_open();
+                let reanchor_owed = self.session.shell_prompt_opened_in_order();
                 if self.reanchor_after_resize_quiescence {
                     self.pending_reanchor = reanchor_owed;
                 } else if reanchor_owed {
@@ -6272,7 +7060,7 @@ mod tests {
         eprintln!(
             "BT_CONPTY_INVOKE_SCOPE source={} shell=pwsh.exe osc133_open={} writes={} commits={:?}",
             conpty_source(),
-            oracle.session.shell_input_region_open(),
+            oracle.session.shell_prompt_opened_in_order(),
             oracle.invoke_prompt_writes,
             oracle.commits
         );
@@ -7554,5 +8342,152 @@ mod tests {
 
         session.shutdown().unwrap();
         wait_until_the_process_table_forgets(pid);
+    }
+
+    /// A maximum seen once proves nothing; a maximum that comes back is the transport's unit.
+    #[test]
+    fn a_capped_read_is_a_repeated_credible_maximum_or_a_filled_buffer() {
+        let mut capped = CappedReads::new(Transport::PtyMaster, 16 * 1024);
+        // The macOS shape: a 16 KiB buffer the kernel never fills, capping at 1024.
+        assert!(!capped.observe(118), "one sighting is a coincidence");
+        assert!(!capped.observe(27));
+        assert!(
+            !capped.observe(1024),
+            "the first 1024 has nothing to corroborate it"
+        );
+        assert!(capped.observe(1024), "the second says 1024 is the unit");
+        assert!(capped.observe(1024));
+        assert!(
+            !capped.observe(508),
+            "short of the unit is the kernel saying that is all"
+        );
+        assert!(capped.observe(1024));
+
+        // Our own buffer needs no corroboration: a read that filled it had no room for more.
+        let mut filled = CappedReads::new(Transport::PtyMaster, 64);
+        assert!(filled.observe(64));
+        let mut pipe = CappedReads::new(Transport::Pipe, 64);
+        assert!(
+            pipe.observe(64),
+            "a filled buffer is capped on every transport"
+        );
+    }
+
+    /// **A keystroke is not a transport.** Nothing below the POSIX line-discipline floor can be a
+    /// transfer unit, however often it repeats.
+    #[test]
+    fn a_repeated_length_below_the_credible_floor_is_never_a_cap() {
+        let mut capped = CappedReads::new(Transport::PtyMaster, 16 * 1024);
+        for _ in 0..8 {
+            assert!(
+                !capped.observe(1),
+                "a one-byte echo repeating is two keystrokes, not a one-byte transport"
+            );
+        }
+        assert!(!capped.observe(255), "255 is below the floor");
+        assert!(!capped.observe(255));
+        assert!(
+            !capped.observe(SMALLEST_CREDIBLE_TRANSFER_UNIT),
+            "the floor itself still needs corroborating"
+        );
+        assert!(
+            capped.observe(SMALLEST_CREDIBLE_TRANSFER_UNIT),
+            "and corroborated at the floor, it is credible"
+        );
+    }
+
+    /// **A pipe has no per-read limit, so nothing is inferred from one.** Ordinary ConPTY reads
+    /// of a repeated size are published at once, exactly as before this rule existed.
+    #[test]
+    fn a_pipe_transport_concludes_nothing_from_a_repeated_length() {
+        let mut pipe = CappedReads::new(Transport::Pipe, 16 * 1024);
+        for _ in 0..8 {
+            assert!(
+                !pipe.observe(8 * 1024),
+                "a pipe returns what was in it; twice the same is a coincidence"
+            );
+        }
+        // The same lengths on a pty master are a learned unit. The difference is the transport.
+        let mut pty = CappedReads::new(Transport::PtyMaster, 16 * 1024);
+        assert!(!pty.observe(8 * 1024));
+        assert!(pty.observe(8 * 1024));
+    }
+
+    /// A larger read later says the earlier maximum was not the unit. Nothing is owed for it.
+    #[test]
+    fn a_larger_read_raises_the_unit_and_the_new_one_starts_uncorroborated() {
+        let mut capped = CappedReads::new(Transport::PtyMaster, 16 * 1024);
+        assert!(!capped.observe(512));
+        assert!(
+            capped.observe(512),
+            "512 looked like the unit, and was flagged"
+        );
+        assert!(
+            !capped.observe(1024),
+            "a larger read raises the maximum and starts its own count"
+        );
+        assert!(
+            !capped.observe(512),
+            "the old maximum is no longer the maximum"
+        );
+        assert!(
+            capped.observe(1024),
+            "the new unit is corroborated in its turn"
+        );
+    }
+
+    /// **Evidence of a quiet moment is never overwritten.** A slice is capped only when every
+    /// whole read in it was, and a slice that stopped inside a read is not capped at all.
+    #[test]
+    fn a_slice_is_capped_only_when_every_read_in_it_was() {
+        let ring = OutputRing::new(NonZeroUsize::new(64).unwrap());
+        ring.push_read(vec![b'a'; 10], true).unwrap();
+        let whole = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(whole.bytes.len(), 10);
+        assert!(whole.ends_capped);
+
+        ring.push_read(vec![b'b'; 10], true).unwrap();
+        let head = ring.try_pop_slice(NonZeroUsize::new(4).unwrap());
+        assert_eq!(head.bytes.len(), 4);
+        assert!(
+            !head.ends_capped,
+            "the read is not over, so its flag is not spent"
+        );
+        let tail = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(tail.bytes.len(), 6);
+        assert!(
+            tail.ends_capped,
+            "the tail of a capped read is still capped"
+        );
+
+        // A capped read after an uncapped one does not erase it. This is the keystroke.
+        ring.push_read(vec![b'c'; 1], false).unwrap();
+        ring.push_read(vec![b'd'; 4], true).unwrap();
+        let echo_then_burst = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(echo_then_burst.bytes.len(), 5);
+        assert!(
+            !echo_then_burst.ends_capped,
+            "a one-byte echo popped with a capped read is still an echo"
+        );
+
+        // And the other order, which the first spelling of this got right by accident.
+        ring.push_read(vec![b'e'; 4], true).unwrap();
+        ring.push_read(vec![b'f'; 4], false).unwrap();
+        let burst_then_echo = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(burst_then_echo.bytes.len(), 8);
+        assert!(!burst_then_echo.ends_capped);
+
+        // Two capped reads together are still capped.
+        ring.push_read(vec![b'g'; 4], true).unwrap();
+        ring.push_read(vec![b'h'; 4], true).unwrap();
+        let both_capped = ring.try_pop_slice(NonZeroUsize::new(32).unwrap());
+        assert_eq!(both_capped.bytes.len(), 8);
+        assert!(both_capped.ends_capped);
+
+        // An empty ring hands out nothing and claims nothing.
+        assert_eq!(
+            ring.try_pop_slice(NonZeroUsize::new(32).unwrap()),
+            OutputSlice::default()
+        );
     }
 }

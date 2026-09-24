@@ -149,7 +149,12 @@ const NUDGE_LEAD: Duration = POPUP_ENTER;
 const NUDGE_SPAN: Duration = MOTION_SLOW;
 
 /// When the nudge is finished and the card owes no more frames.
-const NUDGE_END: Duration =
+///
+/// Visible to the crate since review round 3 (2026-09-18) because the journey
+/// audit asks every host for the instant its motion ends, and an endpoint a test
+/// spells out for itself is an endpoint that stops being this module's on the
+/// day the archive's number changes.
+pub(crate) const NUDGE_END: Duration =
     Duration::from_millis(NUDGE_LEAD.as_millis() as u64 + 3 * (NUDGE_SPAN.as_millis() as u64));
 
 // ── what a hint is ─────────────────────────────────────────────────────────

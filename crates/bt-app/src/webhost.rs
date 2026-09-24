@@ -44,10 +44,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use bt_persist::SearchEngineV1;
-use bt_platform::{WebChord, WebEvent, WebHost, WebNavigationVerdict};
+use bt_persist::{SearchEngineV1, WebColorSchemeV1};
+use bt_platform::{WebChord, WebColorScheme, WebEvent, WebHost, WebNavigationVerdict};
 use winit::keyboard::{ModifiersState, NamedKey};
 
+use crate::hang_watch;
 use crate::shortcuts::{Action, ChordKey, Focus, Shortcuts};
 
 // ── The recovery state machine (plan §4, gate 10) ──────────────────────────
@@ -472,6 +473,50 @@ pub(crate) fn development_target() -> Option<&'static str> {
                 .filter(|value| !value.is_empty())
         })
         .as_deref()
+}
+
+// ── The colour scheme a page prefers (0.4.4 ticket 09) ──────────────────────
+
+/// **Which colour scheme a page is told to prefer**, from the `Web pages` row and whether Folio's
+/// own ground is dark right now (0.4.4 ticket 09, owner's ruling 2026-09-21).
+///
+/// The whole rule, and a function of two values so it can be read without a window: the row pins
+/// one or follows the theme, and "the theme" is the ground in force — the same fact
+/// `set_window_dark_mode` tells the system about, asked by the caller at the same threshold
+/// (`bt_render::background_is_light`), so a page and the window it stands in cannot disagree.
+pub(crate) fn web_color_scheme(setting: WebColorSchemeV1, theme_is_dark: bool) -> WebColorScheme {
+    match setting {
+        WebColorSchemeV1::FollowTheme if theme_is_dark => WebColorScheme::Dark,
+        WebColorSchemeV1::FollowTheme | WebColorSchemeV1::Light => WebColorScheme::Light,
+        WebColorSchemeV1::Dark => WebColorScheme::Dark,
+    }
+}
+
+/// **Tell every live seat of one window the colour scheme its pages prefer**, and answer how many
+/// engines had to be told (0.4.4 ticket 09).
+///
+/// Every seat and not the one in front: a page on a tab nobody is looking at is still a page, and
+/// it would come back into view in the old scheme. A seat already holding the answer is not told
+/// again, so a palette change that did not move light to dark — a new dark scheme, a contrast
+/// floor — costs no engine anything; one that did costs one call per seat. The first failure is
+/// reported and the rest are still told.
+pub(crate) fn tell_every_seat_its_color_scheme<'a>(
+    seats: impl IntoIterator<Item = &'a mut WebSeat>,
+    scheme: WebColorScheme,
+) -> (usize, Option<String>) {
+    let mut told = 0;
+    let mut first_failure = None;
+    for seat in seats {
+        match seat.set_color_scheme(scheme) {
+            Ok(true) => told += 1,
+            Ok(false) => {}
+            Err(error) => {
+                told += 1;
+                first_failure.get_or_insert(error);
+            }
+        }
+    }
+    (told, first_failure)
 }
 
 // ── The user data folder ───────────────────────────────────────────────────
@@ -1871,6 +1916,7 @@ impl WebSeat {
         url: &str,
         minted: Mint,
         scale: f64,
+        scheme: WebColorScheme,
         wake: Box<dyn Fn()>,
     ) -> Result<(Self, Vec<WebOutcome>), String> {
         let folder = user_data_folder().ok_or_else(|| {
@@ -1999,6 +2045,11 @@ impl WebSeat {
         // The host decides what to do with it. On Windows the answer is
         // nothing, and the door says so in one line.
         web.host.set_request_rules(&content_rules(&web.minted))?;
+        // **And the colour scheme its pages prefer, said before the engine is asked for**
+        // (0.4.4 ticket 09). There is no page to tell yet, so this is remembered by the host and
+        // said in the install step that runs before the first navigation — the same step the
+        // engine's other settings are said in.
+        web.host.set_color_scheme(scheme)?;
         let effect = web.machine.request(url);
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
         // **A refusal here is an answer, not a reason to have no seat** (§7.36).
@@ -2099,6 +2150,26 @@ impl WebSeat {
         // report the silence that follows. A speaker left burning through a
         // ten-second teardown is a mark pointing at nothing.
         !self.is_closing() && self.playing_audio
+    }
+
+    /// **Tell this seat which colour scheme its pages prefer**, and answer whether the engine had
+    /// to be told (0.4.4 ticket 09).
+    ///
+    /// `false` when the host already holds the answer — the one comparison a palette change that
+    /// did not cross light and dark costs this seat. The host remembers it across a rebuilt
+    /// engine, so nothing here has to be said again when the browser comes back.
+    pub(crate) fn set_color_scheme(&mut self, scheme: WebColorScheme) -> Result<bool, String> {
+        if self.host.color_scheme() == Some(scheme) {
+            return Ok(false);
+        }
+        self.host.set_color_scheme(scheme)?;
+        Ok(true)
+    }
+
+    /// The scheme this seat's pages were last told to prefer.
+    #[cfg(test)]
+    pub(crate) fn color_scheme(&self) -> Option<WebColorScheme> {
+        self.host.color_scheme()
     }
 
     /// The chords the window takes back from a focused page.
@@ -2532,10 +2603,12 @@ impl WebSeat {
                 // this seat, and it draws the card rather than escaping into
                 // `apply`'s generic report — which says a fault out loud and
                 // leaves the seat with nothing on it.
-                match self
-                    .host
-                    .request_controller(self.address.window, self.machine.generation())
-                {
+                let window = self.address.window;
+                let generation = self.machine.generation();
+                let asked = hang_watch::during(hang_watch::Station::WebController, || {
+                    self.host.request_controller(window, generation)
+                });
+                match asked {
                     Ok(()) => {
                         self.engine_owes_an_answer = Some(Instant::now() + ENGINE_START_DEADLINE);
                     }
@@ -2546,15 +2619,22 @@ impl WebSeat {
             WebEffect::InstallEvents => {
                 // The visual first: the controller is told where to render
                 // before it is told to do anything at all.
-                compositor.attach_web_visual(self.address.page)?;
+                //
+                // **Each part of this burst is its own station** (ticket 43), so a
+                // hold on the turn a controller arrives says which part held it.
+                let page = self.address.page;
+                hang_watch::during(hang_watch::Station::WebVisual, || {
+                    compositor.attach_web_visual(page)
+                })?;
                 // **What this controller actually carries, recorded rather than
                 // assumed** (R2-16). A build that would not take one of the
                 // switches or one of the gates says so here, and the seat is
                 // the thing that then refuses a local file — see
                 // [`WebSeat::issue`].
-                let report =
-                    self.host
-                        .install(compositor, self.address.page, self.machine.generation())?;
+                let generation = self.machine.generation();
+                let report = hang_watch::during(hang_watch::Station::WebInstall, || {
+                    self.host.install(compositor, page, generation)
+                })?;
                 self.guards = report.guards;
                 if !report.unapplied.is_empty() {
                     let named = report
@@ -2583,8 +2663,9 @@ impl WebSeat {
                 // begins loading against the controller's default zero-by-zero
                 // bounds rasters its text for a viewport it will never be shown
                 // in. See [`WebSeat::wanted`].
-                self.stand_on_the_floor(compositor)?;
-                let generation = self.machine.generation();
+                hang_watch::during(hang_watch::Station::WebFloor, || {
+                    self.stand_on_the_floor(compositor)
+                })?;
                 Ok(Some(self.machine.on_events_installed(generation)))
             }
             WebEffect::Navigate(url) => {
@@ -2599,9 +2680,20 @@ impl WebSeat {
                 // nothing at all. The carried mint is honoured only for the URL
                 // it was made for, so a mint left over from a page that has since
                 // been navigated away from admits nothing.
+                //
+                // **"The URL it was made for" is a question about the file, not
+                // about the string** (issue #7, 2026-09-20). This asked the
+                // mint's own `admits`, spelled as a string comparison, and the
+                // two came apart in both directions: a restored page carrying
+                // its own `#fragment` — which is what `page_destination` hands
+                // over, and what a local report's table of contents is made of
+                // — did not match the mint it arrived with and was navigated
+                // with `Mint::Nothing`, which refuses every `file:` URL there
+                // is. So the mint answers for itself here as it does at every
+                // other door.
                 let minted = if url.eq_ignore_ascii_case(BLANK_PAGE) {
                     Mint::Blank
-                } else if self.minted.target() == Some(url.as_str()) {
+                } else if self.minted.admits(url).is_some() {
                     self.minted.clone()
                 } else {
                     Mint::Nothing
@@ -2627,7 +2719,13 @@ impl WebSeat {
                 // two orderly; on Windows it is one line that does nothing.
                 self.host.set_request_rules(&content_rules(&minted))?;
                 *self.mint.borrow_mut() = minted;
-                self.host.navigate(&target)?;
+                hang_watch::during(
+                    hang_watch::Station::WebNavigate,
+                    || -> Result<(), String> {
+                        self.host.navigate(&target)?;
+                        Ok(())
+                    },
+                )?;
                 Ok(None)
             }
             WebEffect::Reload => {
@@ -2780,7 +2878,13 @@ impl WebSeat {
     fn start_environment(&mut self, outcomes: &mut Vec<WebOutcome>) {
         let generation = self.machine.generation();
         let folder = self.folder.clone();
-        match self.host.request_environment(&folder, generation) {
+        // **Its own station** (ticket 43): the first page in the process
+        // spends the loader and the browser's launch request here, inside
+        // whichever gesture asked for the page.
+        let asked = hang_watch::during(hang_watch::Station::WebEnvironment, || {
+            self.host.request_environment(&folder, generation)
+        });
+        match asked {
             Ok(()) => self.engine_owes_an_answer = Some(Instant::now() + ENGINE_START_DEADLINE),
             Err(error) => self.the_engine_did_not_start(error, outcomes),
         }
@@ -3027,6 +3131,17 @@ impl WebSeat {
     /// sixty times a second while it stands still.
     pub(crate) fn wanted(&self) -> WebPresence {
         self.wanted
+    }
+
+    /// A native page's controller can arrive underneath an unchanged GPU hole.
+    /// Its lifecycle and placement still owe the shared compositor a commit.
+    pub(crate) fn present_state(&self) -> (u64, WebState, bool, WebPresence) {
+        (
+            self.machine.generation(),
+            self.machine.state(),
+            self.host.has_controller(),
+            self.wanted,
+        )
     }
 
     /// **The window this page stands in has moved** — see
@@ -3546,9 +3661,10 @@ impl WebSeat {
 
     /// One notch of `Ctrl`+wheel.
     ///
-    /// **`Ctrl`+wheel is empty everywhere else in this window** — there is no
-    /// type-size zoom in this product and a picture zooms on the bare wheel — so
-    /// nothing is being taken from anything by claiming it over a page.
+    /// **`Ctrl`+wheel scales whatever it is over** — over a page it is the
+    /// page's zoom, over a terminal it is that pane's text size (ticket 37), and a
+    /// picture zooms on the bare wheel — so claiming it over a page takes nothing
+    /// from anything.
     ///
     /// **The engine is the authority on where the page is, in both directions**
     /// (user ruling 2026-08-25). The ladder is walked from `ZoomFactor` rather
@@ -3890,11 +4006,11 @@ mod machine_tests {
             .collect();
         assert!(
             source.contains(concat!(
-                "}elseifself.minted.target()==Some(url.as",
-                "_str()){self.minted.clone()"
+                "}elseifself.minted.ad",
+                "mits(url).is_some(){self.minted.clone()"
             )),
             "the mint installed is the one the caller carried, honoured only for \
-             the URL it was made for"
+             the file it was made for"
         );
         let gate = concat!("check(url,Origin::Host", "Minted(minted))");
         assert_eq!(
@@ -4170,6 +4286,9 @@ mod keyboard_tests {
         // this list moved with it — a claim spelled for a chord the window can
         // never be reached by is a claim that takes nothing back from anybody.
         ("zoom-pane", "Ctrl+Shift+x"),
+        ("text-larger", "Ctrl+="),
+        ("text-smaller", "Ctrl+-"),
+        ("text-actual-size", "Ctrl+0"),
         ("files-pane", "Ctrl+Shift+b"),
         ("git-page", "Ctrl+Shift+g"),
         ("open-settings", "Ctrl+,"),
@@ -4294,7 +4413,11 @@ mod keyboard_tests {
     /// person has to change on purpose, which is what makes the next row
     /// scoped away from a page a decision somebody took rather than one that
     /// happened.
-    const KEPT_BY_A_PAGE: usize = 2;
+    ///
+    /// Five since ticket 37: the three text-size rows are [`Scope::Terminal`]'s, and a page
+    /// holding the keyboard is not a terminal holding it, so a page keeps `Ctrl+=`, `Ctrl+-`
+    /// and `Ctrl+0` for its own zoom.
+    const KEPT_BY_A_PAGE: usize = 5;
 
     /// RED — and every one of them reaches a virtual key, because
     /// `AcceleratorKeyPressed` speaks Win32 and nothing else.
@@ -4416,6 +4539,7 @@ mod keyboard_tests {
         let on_a_page = Focus {
             preview: true,
             terminal_primary: false,
+            terminal: false,
             search_open: false,
             web_page: true,
         };
@@ -4549,6 +4673,10 @@ mod keyboard_tests {
         Focus {
             preview: true,
             terminal_primary: true,
+            // **Not the terminal's own scope** (ticket 37): whatever else this focus stands
+            // for, the keyboard is on the page, and `Scope::Terminal` is exactly the claim
+            // a page must not take — the page keeps its own `Ctrl+=`.
+            terminal: false,
             search_open: true,
             web_page: true,
         }
@@ -5984,6 +6112,100 @@ mod search_tests {
 /// `stderr` — because `CreateCoreWebView2EnvironmentWithOptions` answered
 /// `0x80070002` where it stood, `WebSeat::open` handed that back as an `Err`,
 /// and its caller inserted no seat. A card is something a seat draws.
+#[cfg(test)]
+mod color_scheme_tests {
+    use super::rehost_address_tests::{detached, page, window};
+    use super::*;
+
+    /// RED (0.4.4 ticket 09) — **the scheme a page is told follows the `Web pages` row, and where
+    /// the row follows the theme, it follows Folio's ground.**
+    ///
+    /// The whole rule is six cells, and every one of them is written out: the two pinned rows
+    /// ignore the theme entirely, and the followed one is the theme. The owner's ruling of
+    /// 2026-09-21 is the first row; the other two are the setting it asked for.
+    ///
+    /// MUTATION: make `FollowTheme` answer `Light` whatever the theme (what the engine's own
+    /// default amounts to on a light desktop) and the dark cell of the first row goes red.
+    #[test]
+    fn the_scheme_a_page_is_told_follows_the_setting_and_the_theme() {
+        use WebColorScheme::{Dark, Light};
+        for (setting, on_light, on_dark) in [
+            (WebColorSchemeV1::FollowTheme, Light, Dark),
+            (WebColorSchemeV1::Light, Light, Light),
+            (WebColorSchemeV1::Dark, Dark, Dark),
+        ] {
+            assert_eq!(
+                web_color_scheme(setting, false),
+                on_light,
+                "{setting:?} on a light theme"
+            );
+            assert_eq!(
+                web_color_scheme(setting, true),
+                on_dark,
+                "{setting:?} on a dark theme"
+            );
+        }
+    }
+
+    /// RED (0.4.4 ticket 09) — **a theme change reaches every live web seat of the window, once
+    /// each, and a palette change that did not cross light and dark reaches none.**
+    ///
+    /// The window keeps one page per pane across every tab, and a page on a tab nobody is
+    /// looking at comes back into view in whatever scheme it was last told — so the change has to
+    /// reach all of them, not the one in front. And the budget the ticket sets (A4): one platform
+    /// call per live seat when the answer moves, none when it does not.
+    ///
+    /// The seats are real `WebSeat`s over the real host of this platform, with no engine asked
+    /// for; what is read back is what each host was told, which is the value the install step
+    /// hands the engine before its first navigation.
+    ///
+    /// MUTATION: tell only the first seat, or drop the "already holds it" comparison in
+    /// `WebSeat::set_color_scheme`, and this fails — on the second seat, or on the count.
+    #[test]
+    fn a_theme_change_reaches_every_live_web_seat() {
+        let mut seats: Vec<WebSeat> = [(1, 1), (1, 2), (2, 1)]
+            .into_iter()
+            .map(|(tab, seat)| {
+                detached(SeatAddress {
+                    page: page(tab, seat),
+                    window: window(0x51),
+                })
+            })
+            .collect();
+        assert!(seats.iter().all(|seat| seat.color_scheme().is_none()));
+
+        let dark = web_color_scheme(WebColorSchemeV1::FollowTheme, true);
+        assert_eq!(
+            tell_every_seat_its_color_scheme(seats.iter_mut(), dark),
+            (3, None),
+            "every seat is told, background tabs included"
+        );
+        assert!(
+            seats
+                .iter()
+                .all(|seat| seat.color_scheme() == Some(WebColorScheme::Dark))
+        );
+
+        // A new dark scheme, or a contrast floor: the palette moved and the answer did not.
+        assert_eq!(
+            tell_every_seat_its_color_scheme(seats.iter_mut(), dark),
+            (0, None),
+            "an answer a seat already holds costs it nothing"
+        );
+
+        let light = web_color_scheme(WebColorSchemeV1::FollowTheme, false);
+        assert_eq!(
+            tell_every_seat_its_color_scheme(seats.iter_mut(), light),
+            (3, None)
+        );
+        assert!(
+            seats
+                .iter()
+                .all(|seat| seat.color_scheme() == Some(WebColorScheme::Light))
+        );
+    }
+}
+
 #[cfg(test)]
 mod engine_absence_tests {
     use super::rehost_address_tests::{detached, page, window};

@@ -1,0 +1,134 @@
+# Folio UI: deviations from the spec
+
+Read off `main` at `b031cfd2`, 2026-09-22. Companion to `UI-SPEC.md` in this directory; the IDs match its sections. This is the work list for 0.4.4 and 0.4.5.
+
+Every row is a place where a surface does not use its rule's value. Bringing a row into line changes a constant's value to the rule's; it adds no component and changes no layout.
+
+**How to read it**
+- **Ranking:** first by **visibility**, then by how many constants share the wrong value.
+- **Visibility classes:**
+  - **A**: a user notices it in normal use.
+  - **B**: noticeable side by side, or on a rare surface.
+  - **C**: barely visible (≤ 1 pt, or seen only mid-gesture).
+  - **D**: invisible (tidying only).
+- **Files:** every constant below is under `crates/bt-app/src/`, except `theme.rs`, which is under `crates/bt-render/src/`. No line numbers are given, because the files move.
+- **Platform:** every deviation is in code shared by the Windows and macOS builds, so every row applies to **both**.
+- **Rulings of 2026-09-22 folded in:** the icon-to-label gap is 8 everywhere (G1–G3); every head title is 11 (T1). The terminal pane's resting radius (0) and the two boolean controls (combo in Settings, switch on the first-run card) are rules as they stand and produce no rows.
+
+**Totals: 14 deviations, touching 21 constants.** A 0 · B 2 · C 5 · D 7.
+
+---
+
+## Class A: visible in normal use
+
+| # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
+|---|---|---|---|---|---|---|
+
+## Class B: visible side by side, or on a rare surface
+
+| # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
+|---|---|---|---|---|---|---|
+| 20 | T9 | Search capsule field text | `search.rs::FIELD_FONT_LOGICAL_PX` | 12 | 13 | Field (`settings.rs::FIELD_FONT_LOGICAL_PX`). |
+| 21 | H6 | Video bar | `video_seat.rs::VIDEO_BAR_HEIGHT_LOGICAL_PX` | 34 | 30 | Strip (`theme.rs::SEAT_TITLE_BAR_LOGICAL_PX`, `notice.rs::BAR_HEIGHT_LOGICAL_PX`, `seats.rs::FILES_SEG_BAR_LOGICAL_PX`). |
+
+## Class C: barely visible
+
+| # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
+|---|---|---|---|---|---|---|
+| 25 | T5 | Other 11.5-pt captions: restore row path | `restore.rs::ROW_CWD_FONT_LOGICAL_PX` | 11.5 | 11 | Caption (17 constants at 11). With T1, 11.5 leaves the product. |
+| 26 | I2 | Icon sizes off the ladder | `peek_strip.rs::LIST_MARK_LOGICAL_PX`, `video_seat.rs::BAR_MARK_LOGICAL_PX`, `peek_strip.rs::LEAF_MARK_LOGICAL_PX` | 11, 16, 9 | 10, 14, 10 | Nearest `icons.rs::MarkSlot` size (14 / 13 / 10). |
+| 27 | T6 | 10.5-pt badges, pills and hashes | `peek_strip.rs::LEAF_FONT_LOGICAL_PX` | 10.5 | 10 | Badge (`theme.rs::WINDOW_TAB_BADGE_FONT_LOGICAL_PX` and 5 more). |
+| 29 | S8 | Row text inset: restore list | `restore.rs::ROW_PADDING_X_LOGICAL_PX` | 8 | 10 | `profiles.rs::ITEM_PADDING_X_LOGICAL_PX`, `settings.rs::ITEM_PADDING_X_LOGICAL_PX`, `palette.rs::ROW_PADDING_X_LOGICAL_PX`, `theme.rs::RAIL_TAB_PADDING_LEFT_LOGICAL_PX`. |
+| 37 | S7 | Video bar side padding | `video_seat.rs::BAR_PADDING_X_LOGICAL_PX` | 10 | 12 | Strip leading. |
+
+## Class D: invisible (tidying only)
+
+| # | ID | Surface | Constant(s) | Now | Rule | Why this rule |
+|---|---|---|---|---|---|---|
+| 38 | R8 | 22-pt boxes: search buttons, notice close, pane ghost | `search.rs::BUTTON_RADIUS_LOGICAL_PX`, `notice.rs::CLOSE_RADIUS_LOGICAL_PX`, `seats.rs::PANE_GHOST_RADIUS_LOGICAL_PX` | 6 | 5 | Tool box radius (`seats.rs::PREVIEW_TOOL_RADIUS_LOGICAL_PX` and 11 more). |
+| 39 | R13 | Pill constants written larger than they draw | `seats.rs::PREVIEW_COUNT_RADIUS_LOGICAL_PX` | 8 | h/2 (7) | Pill. They already draw round, so this is spelling only. |
+| 40 | S6 | Notice strip padding | `notice.rs::PADDING_LEFT_LOGICAL_PX`, `notice.rs::PADDING_RIGHT_LOGICAL_PX` | 11 · 8 | 12 · 6 | Strip. |
+| 41 | R10 | Toast close box; float head close box | `toast.rs::TOAST_CLOSE_RADIUS_LOGICAL_PX`, `float.rs::FLOAT_BUTTON_RADIUS_LOGICAL_PX` (as used for the 17-pt `float.rs::FLOAT_CLOSE_BOX_LOGICAL_PX`) | 5 | 4 | Close box in a head (`theme.rs::WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX`, `SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX`). **Ticket note:** `FLOAT_BUTTON_RADIUS_LOGICAL_PX` also rounds the float's other head buttons; split the close box off rather than change the shared constant. |
+| 42 | H7 | Close boxes 18 / 16 | `toast.rs::TOAST_CLOSE_LOGICAL_PX`, `theme.rs::FOCUS_CARD_CLOSE_BOX_LOGICAL_PX` | 18, 16 | 17 | `theme.rs::WINDOW_TAB_CLOSE_BOX_LOGICAL_PX`, `SEAT_PANE_CLOSE_BOX_LOGICAL_PX`, `float.rs::FLOAT_CLOSE_BOX_LOGICAL_PX`. |
+| 44 | R6 | Notice verb button | `notice.rs::VERB_RADIUS_LOGICAL_PX` | 5 | 6 | Button. The `websheet.rs` constant with the same name is 6. |
+| 45 | R7 | Toast action button | `toast.rs::TOAST_ACTION_RADIUS_LOGICAL_PX` | 5 | 6 | Button. |
+
+---
+
+## Ticket groups (by file, so one change touches one module)
+
+Each group is one ticket. A row whose constants live in several files is split across the groups that own them; the IDs below say which part.
+
+- **Float-tag family** (`tooltip.rs`, `file_peek.rs`, the drag ghost in `theme.rs`): E1, S1, R1 fixed in ticket 16; remaining members fixed in ticket 23 (listed below).
+- **Settings** (`settings.rs`): I1, T2, H1 and the Settings members of T3/T4 fixed in ticket 17; S10, R9 and the Settings members of T5/T6/S8 fixed in ticket 24. No Settings members remain open.
+- **First-run** (`first_run.rs`): H4 fixed in ticket 21; S3 and T8 fixed in ticket 28. No first-run members remain open.
+- **Git panel + graph** (`git_panel.rs`, `git_graph.rs`): class-A members fixed in ticket 18; remaining members fixed in ticket 25 (listed below).
+- **Web sheet** (`websheet.rs`): S2, E2, R2 and the web-sheet members of T5, R8, T10 fixed in ticket 30. No web-sheet members remain open.
+- **Pane head, files column, float window** (`seats.rs`, `theme.rs`, `float.rs`): class-A members fixed in ticket 19; H5, S5, F1, C1, R12 and the group members of G1, G3, T5 and I2 fixed in ticket 26 (listed below).
+- **Menus** (`profiles.rs`): T7 fixed in ticket 22; G2 fixed in ticket 29. No menu members remain open.
+- **Palette** (`palette.rs`): T3/T4 fixed in ticket 20; R3 and the palette members of G3 fixed in ticket 27. No palette members remain open.
+- **Everything else** (`notice.rs`, `toast.rs`, `search.rs`, `video_seat.rs`, `peek_strip.rs`, `restore.rs`, and the members of the rows above that no group names): T9, H6, S7, S6, R6, R7, R8, R10, H7; the leftover members of I2, T5, T6 and S8.
+
+## Fixed in ticket 23
+
+- Row 14 / G1: `file_peek.rs::PEEK_HEAD_GAP_LOGICAL_PX` fixed at 8; other members remain open.
+- Row 28 / G3: `theme.rs::DRAG_GHOST_GAP_LOGICAL_PX` fixed at 8; other members remain open.
+- Row 35 / S9: `theme.rs::DRAG_GHOST_PADDING_X_LOGICAL_PX` fixed at 10; row closed.
+- Row 43 / T10: `tooltip.rs::PEEK_LINE_HEIGHT` fixed at 1.4; the web-sheet member remains open.
+
+## Fixed in ticket 24
+
+- Row 25 / T5: `settings.rs::CAP_FONT_LOGICAL_PX` fixed at 11; other members remain open.
+- Row 27 / T6: `settings.rs::PROFILE_BADGE_FONT_LOGICAL_PX` fixed at 10; other members remain open.
+- Row 29 / S8: `settings.rs::NAV_ITEM_PADDING_LEFT_LOGICAL_PX` fixed at 10; other members remain open.
+- Row 36 / S10: `settings.rs::CONTENT_PADDING_BOTTOM_LOGICAL_PX` fixed at 16; row closed.
+- Row 46 / R9: `settings.rs::MENU_ACT_RADIUS_LOGICAL_PX` fixed at 5; row closed.
+
+## Fixed in ticket 25
+
+- Row 16 / S4: `git_panel.rs::GIT_LABEL_PADDING_TOP_LOGICAL_PX` fixed at 10; row closed.
+- Row 22 / R5: `git_panel.rs::GIT_SECTION_RADIUS_LOGICAL_PX` fixed at 8; row closed.
+- Row 32 / R4: `git_graph.rs::GRAPH_ROW_RADIUS_LOGICAL_PX` fixed at 6; row closed.
+- Row 47 / R11: `git_panel.rs::GIT_BADGE_RADIUS_LOGICAL_PX` fixed at 4; row closed.
+- Row 14 / G1: `git_panel.rs::FILES_BADGE_GAP_LOGICAL_PX` fixed at 8; other members remain open.
+- Row 25 / T5: `git_panel.rs::GIT_EMPTY_FONT_LOGICAL_PX` and `git_graph.rs::GRAPH_TOOL_FONT_LOGICAL_PX` fixed at 11; other members remain open.
+- Row 26 / I2: `git_panel.rs::GIT_ACT_GLYPH_LOGICAL_PX` and `git_graph.rs::GRAPH_REF_TAG_MARK_LOGICAL_PX` fixed at 10; other members remain open.
+- Row 27 / T6: `git_panel.rs::GIT_HASH_FONT_LOGICAL_PX`, `git_panel.rs::GIT_PILL_FONT_LOGICAL_PX` and `git_graph.rs::GRAPH_REF_FONT_LOGICAL_PX` fixed at 10; other members remain open.
+- Row 28 / G3: `git_graph.rs::GRAPH_ROW_GAP_LOGICAL_PX` fixed at 8; other members remain open.
+- Row 29 / S8: `git_panel.rs::GIT_ROW_PADDING_X_LOGICAL_PX` and `git_graph.rs::GRAPH_ROW_PADDING_X_LOGICAL_PX` fixed at 10; other members remain open.
+- Row 39 / R13: `git_panel.rs::GIT_PILL_RADIUS_LOGICAL_PX` and `git_graph.rs::GRAPH_REF_RADIUS_LOGICAL_PX` fixed at half their respective height constants (8); the preview-count member remains open.
+
+## Fixed in ticket 26
+
+- Row 14 / G1: `seats.rs::FILES_ROW_GAP_LOGICAL_PX`, `seats.rs::FILES_FOOT_GAP_LOGICAL_PX`, `float.rs::FLOAT_HEAD_GAP_LOGICAL_PX` and `theme.rs::FOCUS_CARD_HEAD_GAP_LOGICAL_PX` fixed at 8; row closed.
+- Row 24 / H5: `seats.rs::FILES_FOOT_BAR_LOGICAL_PX` fixed at 30; row closed.
+- Row 25 / T5: `seats.rs::FILES_SEG_FONT_LOGICAL_PX` and `seats.rs::PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX` fixed at 11; other members remain open.
+- Row 26 / I2: `seats.rs::WINDOW_TAB_SPEAKER_GLYPH_LOGICAL_PX` fixed at 13; other members remain open.
+- Row 28 / G3: `theme.rs::SEAT_TITLE_GAP_LOGICAL_PX` fixed at 8; other members remain open.
+- Row 30 / S5: `float.rs::FLOAT_HEAD_PADDING_LEFT_LOGICAL_PX` and `float.rs::FLOAT_HEAD_PADDING_RIGHT_LOGICAL_PX` fixed at 12 and 6; row closed.
+- Row 34 / F1: `seats.rs::FILES_ROW_FOCUS_RING_LOGICAL_PX` fixed at 2; row closed.
+- Row 48 / R12: `seats.rs::PREVIEW_ADDRESS_RADIUS_LOGICAL_PX` fixed at 4; row closed.
+- Row 49 / C1: `seats.rs::PANE_HEAD_TRIGGER_REVEAL` fixed at 0.6; row closed.
+
+## Fixed in ticket 27
+
+- Row 28 / G3: `palette.rs::DOT_GAP_LOGICAL_PX` and `palette.rs::ROW_GAP_LOGICAL_PX` fixed at 8; row closed (its pane-head member closed in ticket 26).
+- Row 31 / R3: `palette.rs::ROW_RADIUS_LOGICAL_PX` fixed at 6; row closed.
+
+## Fixed in ticket 28
+
+- Row 23 / S3: `first_run.rs::SURFACE_MARGIN_LOGICAL_PX` fixed at 24; row closed.
+- Row 33 / T8: `first_run.rs::TITLE_LINE_LOGICAL_PX` fixed at 18; row closed.
+
+## Fixed in ticket 29
+
+- Row 15 / G2: `profiles.rs::ITEM_GAP_LOGICAL_PX` fixed at 8; row closed.
+
+## Fixed in ticket 30
+
+- Row 17 / S2: `websheet.rs::PADDING_LOGICAL_PX` split into `PADDING_TOP_LOGICAL_PX` (20), `PADDING_X_LOGICAL_PX` (22), and `PADDING_BOTTOM_LOGICAL_PX` (16); row closed.
+- Row 18 / E2: `websheet.rs::SHADOW_SPREAD_LOGICAL_PX` fixed at 3 logical pixels; row closed.
+- Row 19 / R2: `websheet.rs::RADIUS_LOGICAL_PX` fixed at 10; row closed.
+- Row 25 / T5: `websheet.rs::DETAIL_FONT_LOGICAL_PX` fixed at 11; restore member remains open.
+- Row 38 / R8: `websheet.rs::CLOSE_RADIUS_LOGICAL_PX` fixed at 5; other members remain open.
+- Row 43 / T10: `websheet.rs::LINE_HEIGHT` fixed at 1.4; row closed.
