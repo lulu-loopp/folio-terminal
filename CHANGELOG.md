@@ -6,6 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.4-preview — 2026-09-24
+
 ### Added
 
 - Settings can be exported to one file and imported on another machine:
