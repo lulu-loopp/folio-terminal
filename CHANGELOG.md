@@ -22,10 +22,14 @@ All notable changes to Folio are recorded here. The format follows
   further back fill in over the next few frames.
 - A launch with a chosen terminal font no longer waits for Folio to list every
   font on the machine.
+- A terminal font with no bold style no longer switches to another font's bold
+  for bold text.
 
 ### Changed
 
 - Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.
+- Bold text in a terminal font that has no bold style is now drawn heavier in
+  that same font, instead of looking like the text around it.
 - Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.
 - Git panel and graph spacing, corners, captions, badges and icons now match the rest of the window.
 - Glance-card head spacing, drag-tag padding and spacing, and peek-tag line height now match the other floating tags.

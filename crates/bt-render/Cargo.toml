@@ -18,6 +18,9 @@ thiserror.workspace = true
 # `head.unitsPerEm`, and nothing else — see the workspace table for why two
 # bytes are worth a named dependency and why it costs no package.
 ttf-parser.workspace = true
+# Synthetic bold for a grid glyph whose family has no bold cut — see the
+# workspace table.
+swash.workspace = true
 unicode-properties.workspace = true
 # The `Fallback` trait cosmic-text takes speaks in `unicode_script::Script`, and
 # cosmic-text does not re-export the crate. Pinned to the version cosmic-text

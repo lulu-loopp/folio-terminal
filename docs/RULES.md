@@ -483,6 +483,23 @@ Left unfolded: the glyph atlas, the Metal-road measurement (§13.22) and the
 renderer's font database (§7.1.3l, §7.1.3m). This ticket depends on none of
 them.
 
+**Weight in the terminal grid (0.4.5 ticket 38, 2026-09-24; not a fold).**
+Entries: DESIGN 2026-09-24 *The primary family keeps its face for weight* and
+*A bold cell whose family has no bold cut is drawn heavier from that family's
+own regular glyph*, refining the 2026-09-20 ruling (`1ddd516c`).
+
+- **In the terminal grid the family that draws a cluster never depends on the
+  weight asked**, for the primary family and the Chinese families alike
+  (`cjk_fonts::match_grid_attrs`, one derivation `family_face_matches`).
+- **A bold request on a face with no bold cut is emboldened from that face's
+  own outline** (`synthetic_bold`), decided at the shaping cache's miss;
+  the ids of those rasters are retired only with the atlas that holds them.
+- **Chrome labels and previews are not emboldened** and keep
+  `match_cjk_attrs`.
+
+The row stays `not yet folded`: §13.22, §7.1.3l and §7.1.3m are outside this
+ticket.
+
 ### 26. IME — `not yet folded`
 Entries: §7.1.5a″ and §7.1.5a‴; §13.16 *one composition*; §7.34 *a closed window
 must leave the screen first, and a float holds the keyboard only when somebody

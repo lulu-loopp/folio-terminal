@@ -5,6 +5,11 @@ use std::ops::{Deref, DerefMut};
 pub struct FontSystem {
     inner: glyphon::FontSystem,
     cjk: OnceLock<Arc<CjkCatalog>>,
+    /// What the grid's primary family (`Family::Monospace`) offers for each
+    /// asked weight and style — [`family_face_matches`] of that one family.
+    /// Cleared with the catalogue by [`FontSystem::db_mut`], which is also the
+    /// only road to `set_monospace_family`.
+    primary: OnceLock<Arc<FamilyFaces>>,
 }
 impl Deref for FontSystem {
     type Target = glyphon::FontSystem;
@@ -29,6 +34,7 @@ impl FontSystem {
         Self {
             inner: glyphon::FontSystem::new(),
             cjk: OnceLock::new(),
+            primary: OnceLock::new(),
         }
     }
     pub fn new_with_locale_and_db_and_fallback(
@@ -39,6 +45,7 @@ impl FontSystem {
         let fonts = Self {
             inner: glyphon::FontSystem::new_with_locale_and_db_and_fallback(locale, db, fallback),
             cjk: OnceLock::new(),
+            primary: OnceLock::new(),
         };
         // Pay metadata resolution during font setup, before a settings frame.
         let _ = fonts.cjk_catalog();
@@ -46,6 +53,7 @@ impl FontSystem {
     }
     pub fn db_mut(&mut self) -> &mut glyphon::fontdb::Database {
         self.cjk.take();
+        self.primary.take();
         self.inner.db_mut()
     }
     pub(super) fn cjk_catalog(&self) -> Arc<CjkCatalog> {
@@ -54,6 +62,98 @@ impl FontSystem {
                 .get_or_init(|| Arc::new(CjkCatalog::read(self.inner.db()))),
         )
     }
+    pub(super) fn primary_faces(&self) -> Arc<FamilyFaces> {
+        Arc::clone(self.primary.get_or_init(|| {
+            let db = self.inner.db();
+            Arc::new(FamilyFaces {
+                matches: family_face_matches(db, db.family_name(&Family::Monospace)),
+            })
+        }))
+    }
+}
+/// One family's answer to "which face do you offer for this (weight, style)",
+/// as `(asked weight, asked style, face weight, face style)` rows.
+///
+/// **The one derivation** (CONVENTIONS §十 rule 9) behind both the CJK
+/// catalogue ([`CjkFace`]) and the grid's primary family ([`FamilyFaces`]):
+/// fontdb CSS-matches inside the named family, and a face whose `wght` axis
+/// spans the asked weight answers with the asked weight itself, because the
+/// rasterizer moves the axis there.
+fn family_face_matches(
+    db: &glyphon::fontdb::Database,
+    name: &str,
+) -> Vec<(Weight, Style, Weight, Style)> {
+    let mut matches = Vec::new();
+    for weight in [
+        Weight::NORMAL,
+        Weight::MEDIUM,
+        Weight::SEMIBOLD,
+        Weight::BOLD,
+    ] {
+        for style in [Style::Normal, Style::Italic, Style::Oblique] {
+            let found = db
+                .query(&glyphon::fontdb::Query {
+                    families: &[Family::Name(name)],
+                    weight,
+                    style,
+                    stretch: Stretch::Normal,
+                })
+                .and_then(|id| db.face(id));
+            if let Some(face) = found {
+                matches.push((
+                    weight,
+                    style,
+                    if wght_axis_reaches(db, face.id, weight) {
+                        weight
+                    } else {
+                        face.weight
+                    },
+                    face.style,
+                ));
+            }
+        }
+    }
+    matches
+}
+/// Whether a face's `wght` axis spans `weight` — the case in which the
+/// rasterizer draws that weight from the one face, by moving the axis.
+pub(super) fn wght_axis_reaches(
+    db: &glyphon::fontdb::Database,
+    id: glyphon::fontdb::ID,
+    weight: Weight,
+) -> bool {
+    db.with_face_data(id, |bytes, index| {
+        ttf_parser::Face::parse(bytes, index).ok().is_some_and(|f| {
+            f.variation_axes().into_iter().any(|axis| {
+                axis.tag == ttf_parser::Tag::from_bytes(b"wght")
+                    && f32::from(weight.0) >= axis.min_value
+                    && f32::from(weight.0) <= axis.max_value
+            })
+        })
+    })
+    .unwrap_or(false)
+}
+/// The asked attributes with the weight replaced by the face's own, when the
+/// family's table has a row for the asked (weight, style). The STYLE stays what
+/// was asked: a family with no italic cut CSS-matches its upright face, and the
+/// shaper synthesises the slant only while the request still says italic
+/// (closure review F1, 2026-09-20).
+fn offered_attrs<'a>(
+    matches: &[(Weight, Style, Weight, Style)],
+    mut attrs: Attrs<'a>,
+) -> Attrs<'a> {
+    if let Some((_, _, weight, _)) = matches
+        .iter()
+        .find(|(w, s, _, _)| *w == attrs.weight && *s == attrs.style)
+    {
+        attrs.weight = *weight;
+    }
+    attrs
+}
+/// The grid's primary family's rows of [`family_face_matches`].
+#[derive(Debug)]
+pub(super) struct FamilyFaces {
+    matches: Vec<(Weight, Style, Weight, Style)>,
 }
 #[derive(Debug)]
 pub(super) struct CjkFace {
@@ -68,19 +168,12 @@ impl CjkFace {
             .filter(|c| !matches!(*c as u32, 0xfe00..=0xfe0f | 0xe0100..=0xe01ef | 0x200d))
             .all(|c| self.points.binary_search(&(c as u32)).is_ok())
     }
-    fn attrs<'a>(&self, mut attrs: Attrs<'a>) -> Attrs<'a> {
-        if let Some((_, _, weight, _)) = self
-            .matches
-            .iter()
-            .find(|(w, s, _, _)| *w == attrs.weight && *s == attrs.style)
-        {
-            // The weight is the face's own; the STYLE stays what was asked. A family
-            // with no italic cut CSS-matches its upright face, and the shaper
-            // synthesises the slant only while the request still says italic
-            // (closure review F1, 2026-09-20).
-            attrs.weight = *weight;
-        }
-        attrs
+    /// The weight is the face's own; the style stays what was asked — see
+    /// [`offered_attrs`]. In the terminal grid a bold request on a face with no
+    /// bold cut is then emboldened downstream from that face's own outline, and
+    /// the slant by the shaper.
+    fn attrs<'a>(&self, attrs: Attrs<'a>) -> Attrs<'a> {
+        offered_attrs(&self.matches, attrs)
     }
 }
 #[derive(Debug)]
@@ -151,35 +244,7 @@ impl CjkCatalog {
             else {
                 continue;
             };
-            let mut matches = Vec::new();
-            for weight in [
-                Weight::NORMAL,
-                Weight::MEDIUM,
-                Weight::SEMIBOLD,
-                Weight::BOLD,
-            ] {
-                for style in [Style::Normal, Style::Italic, Style::Oblique] {
-                    if let Some(face) = query(weight, style).and_then(|id| db.face(id)) {
-                        let variable = db
-                            .with_face_data(face.id, |bytes, index| {
-                                ttf_parser::Face::parse(bytes, index).ok().is_some_and(|f| {
-                                    f.variation_axes().into_iter().any(|axis| {
-                                        axis.tag == ttf_parser::Tag::from_bytes(b"wght")
-                                            && f32::from(weight.0) >= axis.min_value
-                                            && f32::from(weight.0) <= axis.max_value
-                                    })
-                                })
-                            })
-                            .unwrap_or(false);
-                        matches.push((
-                            weight,
-                            style,
-                            if variable { weight } else { face.weight },
-                            face.style,
-                        ));
-                    }
-                }
-            }
+            let matches = family_face_matches(db, &name);
             faces.push(Arc::new(CjkFace {
                 name,
                 coverage,
@@ -205,8 +270,11 @@ impl CjkCatalog {
 /// Family ownership is decided before matching weight/style. fontdb applies
 /// CSS matching inside that family; cosmic-text must receive the resulting
 /// face attributes because its named-family iterator rejects weight misses.
-/// A missing bold/italic cut uses the family's available face. We do not add
-/// custom emboldening to glyphon's rasterizer or its atlas/cache contract.
+/// A missing bold/italic cut uses the family's available face. In the terminal
+/// grid a bold request on such a face is then drawn heavier from that face's own
+/// outline (`synthetic_bold`, ticket 38, 2026-09-24 — superseding the sentence
+/// of 2026-09-20 that said no emboldening would be added); chrome labels and
+/// previews draw the available face as it is.
 pub(super) fn match_cjk_attrs<'a>(fs: &FontSystem, attrs: Attrs<'a>) -> Attrs<'a> {
     let Family::Name(name) = attrs.family else {
         return attrs;
@@ -217,6 +285,32 @@ pub(super) fn match_cjk_attrs<'a>(fs: &FontSystem, attrs: Attrs<'a>) -> Attrs<'a
         .iter()
         .find(|f| f.name.eq_ignore_ascii_case(name))
         .map_or_else(|| attrs.clone(), |f| f.attrs(attrs.clone()))
+}
+/// **The terminal grid's weight match: the family that draws a cluster never
+/// depends on the weight asked** (2026-09-20 ruling, `1ddd516c`, for the
+/// resolved family — CJK and primary alike).
+///
+/// A named family goes through [`match_cjk_attrs`]. `Family::Monospace`, the
+/// primary, gets the same swap from its own rows of [`family_face_matches`]:
+/// without it cosmic-text is asked for a weight the family does not have, its
+/// default-monospace shortcut needs an exact weight, and its fallback ranking
+/// then prefers any monospace face with a nearer weight — so on Windows every
+/// regular-only primary drew bold cells in Consolas Bold (ticket 38, step 0).
+/// Grid only: chrome labels and previews keep [`match_cjk_attrs`].
+///
+/// **Only for a cluster the chosen primary family covers** (coordinator,
+/// 2026-09-24): the rule is that the *chosen* family never changes for weight.
+/// A cluster the primary cannot draw leaves it at any weight, and the family it
+/// falls back to is asked at the weight the cell asked, so one with a real bold
+/// cut draws its real bold.
+pub(super) fn match_grid_attrs<'a>(fs: &mut FontSystem, attrs: Attrs<'a>, text: &str) -> Attrs<'a> {
+    if matches!(attrs.family, Family::Monospace) {
+        if !primary_font_supports_text(fs, text) {
+            return attrs;
+        }
+        return offered_attrs(&fs.primary_faces().matches, attrs);
+    }
+    match_cjk_attrs(fs, attrs)
 }
 /// The proportional owner, shared by chrome labels and every preview run.
 /// Coordinator ruling, 2026-09-20: the proportional chain remains YaHei UI
