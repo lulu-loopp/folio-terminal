@@ -381,3 +381,239 @@ All 0.4.6. **Each ends at "committed, CI green on the branch"**: 0.4.6 code merg
 ## 8. This note's own architecture impact
 
 (a) Facts touched: none — a document. (b) Doors: none. (c) Debt: D-11 — the census is taken, its regenerating query is ticket A; D-8 — the inventory and a proposed taxonomy exist, the table awaits the owner; D-57 — its day-one contents and order are written (tickets B, C); D-32 — a third of its destinations come from the census (ticket G). No row is repaid by this commit. The dirty-gate finding (V2) is a defect, not debt, and is reported for the adversarial-review ledger rather than added here. (c′) None. (d) No ownership changes; ticket D would make one and says so.
+
+---
+
+## Revision 2026-09-25 (b), after the Codex review
+
+Review: `docs/plans/design/ownership-census-review-codex-2026-09-25.md` (Codex, static, at `6e2a9ebb`), verdict **adopt with changes**. This revision is appended; the text above stays as written, and **where the two differ, this section rules**. Each finding is taken in order and marked adopted or refuted. None is refuted. Before adopting, I checked these claims against the code at `f7826bd4`:
+- `Runtime::raise_dirty_gate` calls `self.window.dirty_gate.open(request)`, and `Runtime::advance_rename_blink_if_due` calls `self.window.rename_blink.advance(now)`. Both are writes, and both are missing from the TSV: the census rule dropped the method names `open` and `advance` because other types declare them with `&self`.
+- The TSV holds 1,321 rows, 170 facts and 1,702 sites, with no single-writer rows.
+- `attention.rs` has rustdoc links to `crate::notify::desktop_reach` and `crate::notify::WindowPlace::exposed`.
+- `attention_map.rs` imports `bt_term::{AttentionRequest, BellSource, NotificationSource, TerminalNotification}`.
+- `ToastHost` pins `a_fourth_card_on_one_anchor_sends_that_anchors_oldest_away_at_once`.
+- `Runtime::toast_with_verb` and `press_toast` exist.
+- `files::disable_files_worker_state` is the common writer that both `App.files_worker_running` rows lend to.
+- `popup_takes_the_key` sits below the shortcut rung in `keyboard_input`, so a menu leaves application shortcuts working.
+
+### (b)1 · R1 — the dirty gate: adopted; it is 0.4.5 ticket 58, and E leaves this sequence
+
+Codex traced the path to its end: `CloseRequested` → `raise_dirty_gate(Shut)` returns `Ok(false)` on the busy branch → `shutting` → `FolioApp::close`, which has no second gate → `close_window`, which vaults seeds and locations but never edited bytes → `reap_leaving_windows` drops the pools. `PreviewPoolEntryV1` holds no content, so reopening cannot recover the edits. Two OS close requests in a row reach the same loss without any other gate. This replaces §4.1 V2's "not traced to the end".
+
+The coordinator dispatched it as **0.4.5 ticket 58** (`fix/dirty-gate-busy`), which answers `Raised / NothingToAsk / Busy`, audits every caller, and adds the defect-ledger row. **Ticket E of §6 is withdrawn from this note.** No 0.4.6 ticket below depends on 58.
+
+### (b)2 · R2 — what the census is evidence for, and what it is not: adopted
+
+**Withdrawn:**
+- §0's and §1's completeness language.
+- §1 item 3's "resolved by type, not by name". It was a bounded inference from names and signatures; `syn` and `bt_source::Index` give syntax and item identity, not Rust type inference.
+- §1's "None of these changes a fact from single- to multi-writer". This is false: `dirty_gate`'s opener is missing from its row.
+- §5.5's last row ("then only the listed writers"). A row's writer list is not a stopping rule.
+- The "148 other than lending" figure. `as_mut`, `get_mut`, `iter_mut` and `values_mut` were counted as mutating calls, but they grant mutable access; they do not prove a mutation.
+- §1's "Why no script is committed" claim that ticket A discharges D-18 (see (b)5).
+
+**What the census is.** It is positive evidence: every TSV row is a located site, in a named function, where the field is assigned, receives a call shaped like a mutation, or is lent mutably. Codex's seeded sample checked 194 listed rows across 10 facts and found every listed writer present. A fact in the table therefore has **at least** those writers, or at least that mutable access, and the 170 are real candidates for the §2.1 contracts.
+
+**What it is not:**
+- **Not an exhaustive authority.** A fact absent from the TSV is not shown to be single-writer or unwritten; its 223 single-writer rows and 43 unwritten fields are not committed. A present row may miss writers: the method-name rule, about 150 unattributed sites whose real writes are not bounded (the note's "about ten" was a sample, not a bound), and inner mutability such as `Cell::set` on `diagnostic_minimized`.
+- **Not a count with a stated direction.** 170 is neither a lower bound (writers are missed) nor an upper bound (mutable access is counted as writing).
+- **Not about container membership.** The five hub rows mix changes to the container's membership with mutable access to state inside it.
+- **The class and proposed-owner columns are my manual annotations**; they cannot be regenerated from the code.
+- **Triggers and effects are approximate annotations.** Reachability and one-hop proximity prove neither causation nor absence.
+
+**Ticket A, re-specified** (now census-1 in (b)8). Its `bt-source` query is a diff gate **only over what it can prove**, and says so:
+
+1. **Universe.** `bt-app`'s product items, declared through `bt_source::Universe` and `Scope`; no file is named anywhere, and nothing reads `.rs` text outside `bt-source`. The tripwire (`crates/bt-source/tests/tripwire.rs`) and `check-migration-debt.ps1` stay green, with 0 rows added.
+   - A site's module is the declaring item's module path. `main.rs` is no longer split by manifest topic, because a physical-file identity is what the tripwire exists to refuse.
+   - The PowerShell copier (`scripts/generate-ownership-census.ps1`, on `generate-shortcuts-table.ps1`'s pattern) reads only the generated output.
+2. **The complete field inventory is committed.** Every one of the 436 fields gets a row, with status `proven-writers: 0 | 1 | n` plus the count of **unknown** sites that name it. A field with an unknown site is marked `incomplete`, never single.
+3. **Proven write** means one of:
+   - an assignment or compound assignment to a place whose receiver chain resolves by a bounded, stated rule set: `self` inside `impl X`; `Runtime.{app, window}` checked **first**, and `Deref` to `TabState` only for a field `Runtime` does not declare; typed parameters; bindings of a resolved expression; functions returning `&X` / `&mut X`;
+   - or a call whose method resolves by **(declared field type, method)** to a declaration taking `&mut self`. The field's type comes from the struct's own declaration. Workspace types are resolved by item identity; std types use a fixed list keyed by type. Method spelling alone never decides.
+4. **Recorded separately, never as writes:**
+   - mutable access and escape (`&mut` lends, `as_mut`, `get_mut`, `iter_mut`, `values_mut`);
+   - membership changes of a hub (push, insert, remove, take on `tabs` or `sessions`), as distinct from access below it;
+   - inner mutability (`Cell`, `RefCell`, atomics) as its own column.
+5. **Unknowns are output, not dropped.** Each site whose `.F` names a field of the four and does not resolve is listed with its item identity and a reason. The gate fails when the unknown set grows, compared with the committed list and shrink-only, as MIGRATION-DEBT is.
+6. **The gate** asserts that the proven rows equal the committed file, and that unknowns are a subset of it.
+7. **Annotations** (class, proposed owner) live in a separate, hand-edited, versioned file keyed by fact. The gate checks only that every proven multi-writer fact has an annotation row and that no annotation row is stale.
+8. **Triggers and effects** are not in the gate. They stay a dated snapshot column in this note.
+9. **Fixtures:**
+   - a writer moved into a newly declared module leaves the proven rows unchanged except for the module column;
+   - a new writer adds a row;
+   - a `dirty_gate.open(..)`-shaped call on a type whose method name also exists with `&self` elsewhere is proven;
+   - an access through `get_mut` alone is not a write;
+   - an explicit receiver, a local alias, an indexed element, a same-named field on another struct, and a `Deref` field are each resolved or listed as unknown, never guessed.
+
+**§0, restated.** The census found **170 fields of the four structs with write-shaped sites in two or more modules**. That is positive evidence for the contracts of §2.1 and for D-11. It is not an exhaustive ownership authority until census-1's inventory is committed with its unknowns listed.
+
+### (b)3 · R3 — roles and per-surface policy: adopted
+
+The seven names are kept as a **candidate vocabulary of semantic roles**, not a proven minimal partition. **Input policy is declared per surface, separately from role.** Role changes:
+- **Instrument is split.** A **dialog** is summoned and window-modal: Settings. A **tool** is summoned and not modal: the search capsule, floats, menus, the palette, and the rename and git-prompt fields. A dialog and a tool differ in pointer and shortcut policy.
+- **Pane state** is added: persistent status that *is* a pane's content and cannot be dismissed. These are the four web failure states of `websheet`, which have no Escape because dismissing one would expose the web hole.
+- **The web sheet row splits.** The download sheet is a tool (Escape answers it); the four failure states are pane state.
+- **A toast may carry one verb.** `toast_with_verb` / `press_toast` implement Undo for profile deletion and checkout; the verb is optional and never makes the toast a question.
+- **Notification is narrowed** to the attention ledger's episodes: a pane wants the reader. Operation results and worker deaths are *not* forced into the ledger's seen/answered rules; their role is Q4. The pane strips stay ruled-as-notification (2026-09-21) as a separate pending decision.
+- **Hint is corrected.** A key hint is dismissed by the first non-modifier key or a press, not by moving away. The card hint is admitted and ended by its own clock.
+
+**The policy record.** Every surface, or every state of a surface where the contract changes with state, declares:
+- role;
+- scope (application, window, pane);
+- text and IME (owns text, suppresses shell typing, none);
+- shortcuts (blocked, allowed);
+- Escape (answers safely, puts away the topmost, passes on, none);
+- pointer (owns every press in scope, owns its own region and passes outside presses on, owns its region and an outside press dismisses it and still counts);
+- wheel and drop;
+- priority (its rung);
+- lifetime and dismissal;
+- queue or replace.
+
+The table records today's behaviour as read from the two ladders, `keyboard_owner` and the module docs. Census-5a confirms each cell with a real-route test before anything derives from it.
+
+| surface / state | role | scope | text · shortcuts | Esc | pointer | rung (kbd · mouse) | lifetime | queue / replace |
+|---|---|---|---|---|---|---|---|---|
+| quit card | gate | application | owns · blocked | answers Cancel | owns all | 1 · 1, every window | until answered | one |
+| dirty gate | gate | window | owns · blocked | answers Cancel | owns all | 2 · 2 | until answered | one; a second request is **busy** (ticket 58) |
+| first-run card | gate (Q3) | window | owns · blocked | its keys | owns all | 3 · 3 | until answered; once per machine | one |
+| PSReadLine invitation | gate (Q3) | window | owns · blocked | its keys | owns all | 4 · 4 | until answered | one |
+| paste card | gate | window | owns · blocked | answers (drops the paste) | owns all | 5 · 5 | until answered | one per pane |
+| Settings | dialog | window | owns · blocked | closes | owns all | 6 · 7 (a toast's presses sit at 6) | until closed | one |
+| restore card | gate or keyboard-only gate (Q2); today neither | window | Enter/Esc only, below shortcuts, **not** in `keyboard_owner` | closes if `consumes_escape` | own region; outside passes on | below shortcuts · after Settings | until answered or Esc; once per launch | one |
+| rename field, git prompt | tool | window | owns text and IME · blocked | cancels | own region | 7 / inside git menu · — | until Enter, Esc or blur | one |
+| menus (git, term, file, pane, tab, preview, profile, root, graph filter) | tool | window | suppresses shell typing · **allowed** (the shortcut rung is above `popup_takes_the_key`) | puts away the topmost | own region; an outside press dismisses it and still counts; the opener's button excepted | per menu · per menu | until a row, Esc or outside press | one popup at a time |
+| palette | tool | window | owns text · blocked | closes | own region; outside dismisses and counts | above the other popups | until Esc, a row or outside | one |
+| search capsule | tool | window | its field when focused · allowed | closes, focused or not | none | below floats | until Esc | one |
+| floats | tool | window | none · allowed | top float | own region | above search | until Esc or close | stack |
+| web download sheet | tool | pane | none | dismisses | own region | above pane menu | until answered or Esc | one per seat |
+| web failure states (four) | pane state | pane | none | **none** | own region | — | while the engine is gone | one per seat |
+| pane notice strip | notification (ruled, not built) | pane | none | closes on the focused pane | its words | below search | until `×`, Esc or answer | one per pane |
+| toast, optional verb | toast | anchor | none | none | `×` and verb; wheel swallowed | mouse 6 | 4 s / 6 s nominal; **the fourth on an anchor evicts the oldest at once** | cap 3 per anchor |
+| attention mark, desktop message, flash | notification | pane / desktop | none | none | a click routes to the pane | — | episode rules (RULES row 29) | ledger |
+| update dot, text-size mark, command rail | mark | chrome | none | none | a click does one thing | — | while the state holds | one |
+| tooltip, glance, layout peek | hint | window | none; Esc hides the glance and **passes on** | see text | the glance takes its own presses and wheel | — | pointer leaves | replaced |
+| key hint | hint | window | none | — | — | above the ladder | first non-modifier key or a press | one |
+| card hint | hint | window | none | — | — | — | its own clock | one |
+| status line | unassigned (Q4) | pane | none | none | none | — | one published frame (worker death); 2.6 s (refusal) | first wins |
+| self-report, diagnostic notes | log line | outside | — | — | — | — | appended | — |
+| the system's pickers | the system's | window | the system's | — | — | — | its answer | one outstanding per kind |
+
+**How kind plus policy determines the three owner lists.** Each list asks a different question, so the lists are not required to be identical. What is required is that each is **derived from the same records**:
+- **`keyboard_input`'s modal rungs**: surfaces whose shortcut policy is `blocked` and whose text policy is `owns`, in rung order.
+- **`mouse_input`'s modal rungs**: surfaces whose pointer policy is `owns all`, in rung order. Toasts' own presses keep their place between the paste card and Settings as an explicit priority, not a list difference.
+- **`KeyboardOwner::menu_or_dialog`**: surfaces whose text policy is `owns` or `suppresses shell typing`. `is_modal` adds the text-owning tools (rename, git prompt, palette).
+
+Exceptions stay explicit rows of the same declaration:
+- Escape cancelling a drag or divider drag, and Escape hiding the glance, both **above** the quit card;
+- the terminal's copy and paste rungs answering before the shortcut table (RULES row 27);
+- the key hint being spent by the first non-modifier key above the ladder.
+
+**Ticket D's "a surface not in the table cannot be drawn" is replaced.** The registration boundary is `OverlayLayer` construction for chrome surfaces: census-5b names the one function per surface that returns its layers and requires it to carry the surface's declared id. Proof is by real routes with competing surfaces, shortcuts, composition, presses and drops, not by iterating the declaration.
+
+**V1–V5, relabelled:**
+
+| | label | status |
+|---|---|---|
+| V1 restore card | **routing defect** (paste and shortcuts reach the shell) plus a **ruling gap** (pointer policy) | ticket 57 (0.4.5) and Q2 |
+| V2 dirty gate | **defect** | ticket 58 (0.4.5) |
+| V3 status line | **unreadable delivery**; no kind was ever ruled for it, so not a kind violation | Q4, then census-6 |
+| V4 pane strips | **migration debt** of a ruling (2026-09-21) | the 0.5 notification work |
+| V5 three lists | **enforcement debt** and a demonstrated omission | census-5a/5b |
+
+### (b)4 · R4 — VIEW is a domain and lifetime label, not a sixth class: adopted
+
+VIEW labels view-owned state. Such state may *also* be an observation, lifecycle state, a projection or an async target. §2.1's VIEW invariant, "a reader may assume the state is consistent with the surface drawn last frame", is **withdrawn**. The contract is now:
+- The interaction owner holds **current logical state**, with its owning instance, commands, capture and focus rules, cancellation on hide, blur and retirement, and seat or window relocation.
+- A reader that needs pixels consults **acknowledged presentation** (`PresentGate::presented`, `last_presented_frame`). A reader that needs current interaction consults the interaction owner. The last successful frame is kept separate.
+
+Routers delegating, coordinated cancellation, and moving a whole record are **three obligations with their own tests**, not one.
+
+Coarse fields split into sub-facts in census-1's annotation file:
+- `WindowRuntime.dirty_gate`: the pending destructive request (DUR) and hover (VIEW).
+- `App.drag_broker`: a cross-window interaction owned by the application, not a surface module.
+- `image_pick_pending`: owned by the requester recorded with the pick (background image, profile program, settings import), as `FolderPick` already records its purpose. The note's single `preview` owner is withdrawn.
+
+D-52…D-55 are **not** advanced by classifying window-thread fields.
+
+### (b)5 · R5 — census-1 does not repay D-18: adopted
+
+D-18 is about `scripts/dev/bt-app-split-freshness.py::census` extracting a *reader's* subjects lexically. A field-writer query does not touch it. It gets its own ticket (census-2), with a fixture separating a migrated item query from a file needle and a real relocation witness. The ledger row D-18 now names census-2. **G (census-7) needs census-1 and census-2**, and freezes an explicit list of item identities and destinations, drawn from the 115 unassigned methods and not the 120 parsed items that include nested helpers. A unique inferred owner is navigation evidence; each placement is confirmed by reading.
+
+### (b)6 · R6 — B and C corrected; attention-first extraction kept: adopted
+
+The direction is unchanged. **B (census-3)** now carries this atomic inventory:
+- `attention.rs` moves whole, with its private helpers, state and `attention/tests.rs`.
+- Its rustdoc links to `crate::notify::*` are rewritten to the `bt-app` adapter's path until C moves the reach rule, then to `crate::reach`.
+- `NotificationSwitches`' fields, and every `pub(crate)` method `bt-app` calls on the vocabulary, become `pub`. The census-3 brief lists them by item, found with `bt_source`.
+- `WaitClock` moves with its **three pure-clock tests out of `attention_wire`**, and `attention_wire` re-imports it.
+- `attention_is_consumed` keeps its name or gets a root alias; no call site changes meaning.
+- `bt-app` keeps integration coverage of `deliver_attention` and `settle_attention` arming, forgetting and spending the clock.
+- `notify`'s tests are **not** moved in B.
+- §5.2's stays-in-`bt-app` list gains `attention_trace` and `attention_words`. `attention_map` stays because it imports `bt_term` notification types, which the guard forbids.
+- Evidence is the pure ledger and clock tests under `-p bt-workbench` **and** the app's ingress, delivery and teardown tests. "Same filter count" is not evidence.
+
+**C (census-4):**
+- `notify`'s tests split by owned behaviour: reach and interruption move; `NotificationRoute` and `toast_title` stay.
+- `Places` has a private counter starting at **0**. It issues places monotonically, surrenders on transfer (`surrender_place`), and gives fresh ordering in the target window. It is allocation history, not the live queue.
+- The proof is a **privacy compile-fail doctest** on the mutator. The earlier "no app item names it" alternative would stay green under the advertised mutation.
+- The census still shows `WindowRuntime.attention_next_place` lent by five callers. Census-1 reports the private authority and the remaining lenders separately.
+
+`Instant` stays an in-process input, never serialized. B and C are extraction; D-1 and D-54 are not advanced, because `Site` still names tab and seat and the ledger still lives in `LeafSession`.
+
+### (b)7 · R7 — toast eviction: adopted
+
+The cap-and-evict policy is unchanged unless the owner rules otherwise. Census-6 states dwell as **nominal** and eviction as the explicit exception, and adds:
+- every lane death is also written to the diagnostic record;
+- each lane death is consumed **once**, at a stated delivery point in the turn and not inside frame construction, so no redraw recursion; the window that receives it is the one whose surface asked, or the focused window for a global worker;
+- a hand-off refusal keeps its request and target association when choosing an anchor.
+
+Its tests are (i) ordinary visibility after a second, and (ii) overflow: a fourth card evicts, and the log still has the death.
+
+### (b)8 · The tickets, re-split
+
+All are 0.4.6, S or M, and each ends at "committed, CI green on the branch". Each merges on its own after the 0.4.5 tag, in any order its prerequisites allow. The old letters map to new ids as follows.
+
+| new | was | title | size | prerequisites |
+|---|---|---|---|---|
+| census-1 | A | The field inventory is a `bt-source` query: proven writers, mutable access and unknowns in separate columns, shrink-only unknowns, annotations in their own file ((b)2) | M | none |
+| census-2 | (in A) | The split-freshness census tells a migrated item query from a file needle (repays D-18) | S | none |
+| census-3 | B | `bt-workbench` is born holding the ledger, `WaitClock` and the seen rule, with (b)6's atomic inventory | S | P19 (D-27) |
+| census-4 | C | The reach rule joins the ledger; `Places` is written only by the ledger (repays D-48) | S | census-3 |
+| census-5a | D (note) | Per-surface policy declaration: a one-page design note with the (b)3 table confirmed cell by cell, reviewed by Codex (the change is (d) yes). Docs only. | S | the owner's rulings on Q1–Q3 |
+| census-5b | D (code) | `keyboard_input`'s and `mouse_input`'s modal rungs and `menu_or_dialog` derive from the declaration; each surface's layer builder carries its id; real-route tests; ticket 57's behaviour preserved | M | census-5a reviewed; ticket 57 merged |
+| census-6 | F | A lane death and a hand-off refusal are told as toasts, consumed once, logged, with overflow tested ((b)7) | S | Q4 |
+| census-7 | G | The unassigned methods on a frozen list move to their owners, each confirmed by reading | M | census-1, census-2 |
+| — | E | withdrawn: 0.4.5 ticket 58 | — | — |
+
+Each brief carries the architecture-impact fields as in §6, amended as follows:
+- census-1 repays D-11 **only to the extent its inventory is proven** (the row stays open while unknowns remain), not D-18.
+- census-2 repays D-18.
+- census-3 and census-4 advance D-57, and census-4 repays D-48; D-1 and D-54 are untouched.
+- census-5b repays D-8 only once the table is ruled **and** enforced. Its (d) is yes, hence census-5a.
+
+### (b)9 · Questions for the owner
+
+Codex settled Q5: keep the typed `bt-layout::SeatId` edge as a shrink-only exception until D-1 provides session identity. I agree, and it leaves the list. The other four are UI rulings, which are the owner's.
+
+1. **Roles.** Are the roles gate, dialog, tool, toast, notification, pane state, mark, hint and log line, each with a per-surface policy record, the rows of the table?
+   - Mine: yes.
+   - Codex: *"Keep seven names provisionally, but rule semantic role and per-surface input/lifetime policy separately; the current seven-row table is not yet complete or demonstrably minimal."*
+2. **Restore card.** A full window gate, or a keyboard-only gate?
+   - Mine: undecided, framed as a choice.
+   - Codex: *"Prefer a full window-scoped restore gate for a durable restore decision; obtain the explicit pointer-policy reversal and coordinate it with ticket 57 rather than smuggling it into D."*
+3. **First-run card and PSReadLine invitation.** Stay gates, or become notifications?
+   - Mine: framed as a choice.
+   - Codex: *"Prefer persistent actionable notifications for optional first-run/setup invitations; changing today's modal behavior requires the owner's ruling and preservation of explicit install consent."*
+4. **Worker deaths and refused hand-offs.** Told as toasts instead of on the status line?
+   - Mine: yes.
+   - Codex: *"Yes to readable toasts for hand-off refusals and worker-death announcements, with explicit eviction/logging semantics and durable status where continued action depends on it."*
+
+### (b)10 · This revision's own architecture impact
+
+(a) None. (b) None. (c) Ledger rows are corrected:
+- D-11: "positive evidence; not an exhaustive authority; census-1";
+- D-18: census-2;
+- D-8 and D-57: ticket names;
+- D-32: census-7.
+
+No row is repaid. (c′) None. (d) No.
