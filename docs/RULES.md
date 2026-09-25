@@ -479,7 +479,7 @@ Entries read: §7.1.6c-8 ruling four (2026-08-19), *the picker ends in
 2026-09-24 *The font list is walked only on its lane*.
 
 - **The machine's font collection is walked only on the font lane**
-  (`settings::scan_monospace_families`, a `BelowNormal` thread named
+  (`settings::FontLane::serve` on `FONT_LANE`, a `BelowNormal` thread named
   `font-families`, started through `spawn_at_priority`), never on the window
   thread. `bt_platform::monospace_font_families` and `cjk_font_families` have no
   other product caller.
@@ -1135,7 +1135,8 @@ for the rest of a burst the kernel said was coming*.
 **Overrides.** §1.5a explicitly supersedes §1.5's turn-counter criterion, which
 produced 200 false reports out of its first 205.
 **Open.** Which calls may be made on the window thread, the wait-budget table and
-the result-return contract are ruled in `docs/ARCHITECTURE.md` §5, not here.
+the result-return contract are ruled in `docs/ARCHITECTURE.md` §5, not here —
+the lane contract and its return rule in §5.1 (2026-09-25, 0.4.6 ticket A5).
 
 ### 54. The look of the window — `folded`
 **Rule.** **The current UI is the baseline** (2026-09-22): `docs/design/UI-SPEC.md`
