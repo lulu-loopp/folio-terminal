@@ -1406,26 +1406,52 @@ impl Runtime<'_> {
         self.window.window.id()
     }
 
-    /// Put the question, and report whether it was worth putting.
+    /// Put the question, and report what putting it came to.
     ///
-    /// Returns `true` when the gate is now up and the caller must stop — which is
-    /// the whole protocol: a gate is not a callback, it is a *pause*, and the
-    /// verb that was interrupted is re-run from the top once it is answered.
-    pub(crate) fn raise_dirty_gate(&mut self, request: restore::GateRequest) -> Result<bool> {
-        // A gate that is already up is the answer to this question: the verb
-        // below it is re-run when it is answered, and that re-run must not raise
-        // a second one.
-        if self.window.dirty_gate.is_open() {
-            return Ok(false);
-        }
-        if self.gate_dirty_names(&request).is_empty() {
-            return Ok(false);
-        }
-        self.window.dirty_gate.open(request);
-        if self.refresh_overlay() {
+    /// [`restore::GateRaise::Raised`] means the gate is now up and the caller
+    /// must stop — which is the whole protocol: a gate is not a callback, it is
+    /// a *pause*, and the verb that was interrupted is re-run from the top once
+    /// it is answered ([`Self::answer_dirty_gate`] takes the request off the gate
+    /// *before* it re-runs anything, so the re-run finds the gate free).
+    ///
+    /// **A gate that is already up answers [`restore::GateRaise::Busy`], and busy
+    /// never lets the caller go on** (ticket 58). It used to answer `false`, the
+    /// word for "nothing to ask", so an OS close requested while a tab's close
+    /// was still being asked about shut the window and dropped the buffer the
+    /// question was about. Only [`restore::GateRaise::NothingToAsk`] authorises
+    /// the verb ([`restore::GateRaise::proceeds`]).
+    pub(crate) fn raise_dirty_gate(
+        &mut self,
+        request: restore::GateRequest,
+    ) -> Result<restore::GateRaise> {
+        let window = &mut *self.window;
+        let raised = crate::raise_dirty_gate_over(
+            &mut window.dirty_gate,
+            &window.tabs,
+            window.active_tab,
+            request,
+        );
+        if raised == restore::GateRaise::Raised && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
-        Ok(true)
+        Ok(raised)
+    }
+
+    /// **Put a question whose verb only the answer performs** — the git
+    /// requests, where the gate stands in front of the write rather than behind
+    /// an interrupted verb, so the confirmed answer in [`Self::answer_dirty_gate`]
+    /// is where the repository is asked.
+    ///
+    /// Nothing is done here whatever the gate says: raised, the reader is asked;
+    /// busy, the reader is already being asked about something else and this
+    /// press is dropped (ticket 58). Every git request names what it is about
+    /// ([`crate::dirty_gate_names`]), so it is never nothing to ask.
+    pub(in crate::runtime) fn ask_before_the_verb(
+        &mut self,
+        request: restore::GateRequest,
+    ) -> Result<()> {
+        let _raised_or_busy = self.raise_dirty_gate(request)?;
+        Ok(())
     }
 
     /// Spend the answer.

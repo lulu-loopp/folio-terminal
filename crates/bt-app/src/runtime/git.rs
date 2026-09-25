@@ -937,7 +937,7 @@ impl Runtime<'_> {
                 let Some(path) = paths.into_iter().next() else {
                     return Ok(());
                 };
-                self.raise_dirty_gate(restore::GateRequest::GitDiscard {
+                self.ask_before_the_verb(restore::GateRequest::GitDiscard {
                     origin: GitOrigin::Column(seat),
                     path,
                     untracked,
@@ -2655,14 +2655,14 @@ impl Runtime<'_> {
                     current: false,
                 },
             ) => {
-                self.raise_dirty_gate(restore::GateRequest::GitDeleteBranch {
+                self.ask_before_the_verb(restore::GateRequest::GitDeleteBranch {
                     root,
                     name: name.clone(),
                 })?;
                 Ok(())
             }
             (profiles::GitMenuRow::DeleteTag, profiles::GitMenuTarget::Tag { name }) => {
-                self.raise_dirty_gate(restore::GateRequest::GitDeleteTag {
+                self.ask_before_the_verb(restore::GateRequest::GitDeleteTag {
                     root,
                     name: name.clone(),
                 })?;
@@ -2683,7 +2683,7 @@ impl Runtime<'_> {
             ) => {
                 // The same gate the row's own `×` raises, which is the point: one
                 // discard, one question, whichever gesture asked it.
-                self.raise_dirty_gate(restore::GateRequest::GitDiscard {
+                self.ask_before_the_verb(restore::GateRequest::GitDiscard {
                     origin: origin.clone(),
                     path: path.clone(),
                     untracked: *untracked,
@@ -3002,7 +3002,7 @@ impl Runtime<'_> {
         if !restore::checkout_needs_gate(kind, dirty) {
             return self.checkout_at(origin, target, kind);
         }
-        self.raise_dirty_gate(restore::GateRequest::GitCheckout {
+        self.ask_before_the_verb(restore::GateRequest::GitCheckout {
             root,
             target,
             said,
@@ -4264,7 +4264,7 @@ impl Runtime<'_> {
                 let Some(path) = paths.into_iter().next() else {
                     return Ok(());
                 };
-                self.raise_dirty_gate(restore::GateRequest::GitDiscard {
+                self.ask_before_the_verb(restore::GateRequest::GitDiscard {
                     origin: GitOrigin::Float(id),
                     path,
                     untracked,

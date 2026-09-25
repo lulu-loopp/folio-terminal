@@ -28,6 +28,8 @@ All notable changes to Folio are recorded here. The format follows
   "reopen your other tabs" card while it is up; the wheel no longer scrolls a
   pane under the other dialogs either. Esc puts the card away, and the next
   launch asks again.
+- Closing a window while it is still asking about unsaved changes no longer
+  discards them.
 
 ### Changed
 
