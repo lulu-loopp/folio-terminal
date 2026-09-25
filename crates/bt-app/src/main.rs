@@ -15576,7 +15576,9 @@ mod layer_shape_tests {
     /// apart again, which moves nothing.
     ///
     /// MUTATION: issue `CheckoutTracking` straight from the menu arm again — the
-    /// literal bug — and its count goes to two.
+    /// literal bug — and its count goes to two; call `checkout_at` directly
+    /// from anywhere but the question or the answer — a menu arm, a row press —
+    /// and the caller set gains a name.
     #[test]
     fn every_verb_that_moves_head_is_issued_from_the_one_place_that_asks_first() {
         let tracking = concat!("GitWriteVerb::", "CheckoutTracking { name: ");
@@ -15598,17 +15600,68 @@ mod layer_shape_tests {
 
         // And `checkout_at` is reached from exactly two places: the question, and
         // the gate's confirmed answer — which *is* that question, answered.
-        let asks = method_body("Runtime", "ask_to_checkout");
-        let performing = concat!("self.checkout", "_at(");
+        //
+        // **Read as calls of an item, not as a spelling** (ticket 58). This used
+        // to count the raw text `self.checkout_at(` over the crate, which also
+        // counts a test that names the call inside a string; a caller is an item
+        // that calls the method, so the question is asked of the calls
+        // themselves (`View::Identifiers`, the declaration exempted) and answered
+        // with the items they stand in.
+        let calls = source()
+            .search(
+                &Search::new(needle!(Pattern::call("checkout_at")), View::Identifiers)
+                    .exempting_declarations_of(ItemQuery::method("Runtime", "checkout_at")),
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let mut callers: Vec<String> = calls
+            .owners(source())
+            .into_keys()
+            .map(|identity| identity.name)
+            .collect();
+        callers.sort();
         assert_eq!(
-            found(needle!(performing), View::Raw).len(),
-            2,
+            (calls.len(), callers),
+            (
+                2,
+                vec!["answer_dirty_gate".to_owned(), "ask_to_checkout".to_owned()]
+            ),
             "a third caller of `checkout_at` is a third chance to skip the gate"
         );
-        assert!(asks.contains(performing), "{asks}");
+
+        // The question: it asks the rule rather than restating it, goes straight
+        // through only when the rule says no gate, and otherwise puts the
+        // question and performs nothing — the verb is left to the answer.
+        let asks = method_body("Runtime", "ask_to_checkout");
+        let straight = concat!("return self.checkout", "_at(origin, target, kind);");
+        let put = concat!(
+            "self.ask_before_the_verb(restore::GateRequest::",
+            "GitCheckout {"
+        );
         assert!(
-            asks.contains("restore::checkout_needs_gate(kind, dirty)"),
+            asks.contains("if !restore::checkout_needs_gate(kind, dirty) {"),
             "and it asks the rule rather than restating it: {asks}"
+        );
+        assert!(
+            asks.contains(straight) && asks.contains(put),
+            "past the rule, the question is put and the checkout is not performed: {asks}"
+        );
+
+        // The answer: the checkout runs in the `GitCheckout` arm, after the
+        // request has been taken off the gate — only an answered question
+        // reaches it.
+        let answer = method_body("Runtime", "answer_dirty_gate");
+        let taken = answer
+            .find("self.window.dirty_gate.take()")
+            .expect("the answer takes its request");
+        let arm = answer
+            .find("restore::GateRequest::GitCheckout {")
+            .expect("the answer's checkout arm");
+        let performed = answer
+            .find(concat!("self.checkout", "_at(&origin, target, kind)"))
+            .expect("the answer performs the checkout");
+        assert!(
+            taken < arm && arm < performed,
+            "the checkout is performed only for an answered `GitCheckout`: {answer}"
         );
     }
 
