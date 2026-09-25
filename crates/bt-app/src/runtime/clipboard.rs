@@ -237,7 +237,18 @@ impl Runtime<'_> {
     /// The seat differs from `focused_leaf` for exactly one caller — the
     /// terminal menu, which is raised by a right press, and a right press does
     /// not move the focus.
+    ///
+    /// **A paste goes where a keystroke would, or nowhere** (0.4.5 ticket 57).
+    /// The keyboard's road reaches this door only when no surface above the
+    /// clipboard rung holds the keyboard; the Edit menu's road defers to the same
+    /// list; the terminal menu's road is a press, and the restore card lets a
+    /// press past it to raise that menu. So the door asks the ladder's own
+    /// question, once, before the clipboard is read — and with the restore card
+    /// up, the menu's *Paste* writes nothing, as `Ctrl+V` writes nothing.
     pub(in crate::runtime) fn paste_from_clipboard_into(&mut self, seat: SeatId) -> Result<()> {
+        if self.a_surface_above_the_clipboard_rung_holds_the_keyboard() {
+            return Ok(());
+        }
         let active = self.window.active_tab;
         let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
             return Ok(());

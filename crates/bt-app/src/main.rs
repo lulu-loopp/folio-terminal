@@ -51431,8 +51431,10 @@ mod mouse_trace_station_tests {
     fn every_exit_of_the_wheels_road_writes_a_line() {
         // 22 → 24 on 2026-09-24 (ticket 37): the text-size rung spends a notch, and
         // spends it in two ways — a whole rung or a carried fraction — each with its
-        // own `wheel_route taken=text-size` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 24);
+        // own `wheel_route taken=text-size` line above it. 24 → 25 on 2026-09-24
+        // (ticket 57): a notch under a modal card is swallowed, with its own
+        // `wheel_route taken=overlay at=modal` line above it.
+        assert_every_exit_is_traced("mouse_wheel", 25);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
@@ -72329,6 +72331,7 @@ mod edit_menu_clipboard_tests {
             "self.window.psreadline_invite.is_open()",
             "self.paste_card_seat().is_some()",
             "self.settings_layout().is_some()",
+            "self.restore_card_is_up()",
             "self.window.rename.is_some()",
             "self.window.git_menu.is_some()",
             "self.window.term_menu.is_some()",

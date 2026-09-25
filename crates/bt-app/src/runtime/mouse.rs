@@ -14,8 +14,8 @@ use crate::{
     live_viewport_mouse_hit, marks, mouse_trace, native_window, over_home_ground, palette,
     pan_on_the_wheel_road, platform_pointer_of, pointer_cursor, press_after_blur, press_files_node,
     press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
-    profiles, protocol_mouse_button, quit, recoverable_wheel_scroll_amount, release_verdict,
-    restore, right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
+    profiles, protocol_mouse_button, recoverable_wheel_scroll_amount, release_verdict, restore,
+    right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
     route_forwarded_mouse_motion, search, seats, settings, settling, toast, tooltip, upright_wheel,
     web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
     write_pty_input,
@@ -1688,10 +1688,7 @@ impl Runtime<'_> {
         // has claimed the point, so a preview window standing over a pane no
         // longer leaves that pane's scrollbar, its link underline or its hex
         // column lit under a hand that is on the window.
-        let free = self.settings_layout().is_none()
-            && self.dirty_gate_layout().is_none()
-            && !self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
-            && self.pointer_target_at(position).is_none();
+        let free = !self.a_modal_covers_the_window() && self.pointer_target_at(position).is_none();
         self.note_preview_body_hover(free.then_some(position))?;
         // The lane the pointer is in — the fact that lights one pane's mark and
         // holds it on the glass. Answered `None` behind an overlay for the
@@ -1775,20 +1772,17 @@ impl Runtime<'_> {
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }
-        // The prompt is not modal either. Over its own box the buttons light up;
-        // everywhere else the window carries on, because the terminal behind it
-        // is still yours to use while the question stands.
+        // The restore card takes the pointer outright, beside its box as well as on it (0.4.5
+        // ticket 57, owner's ruling 2026-09-25): over its box the buttons light up, and nothing
+        // under it is hovered.
         if let Some(layout) = self.restore_layout() {
             let over = restore::hit(&layout, position.x, position.y);
-            if over.is_some() {
-                if self.window.restore_prompt.set_hover(over) && self.refresh_overlay() {
-                    self.present_chrome_change()?;
-                }
-                return Ok(());
-            }
-            if self.window.restore_prompt.set_hover(None) && self.refresh_overlay() {
+            if self.window.restore_prompt.set_hover(over) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
         }
         // **A hand on a notice holds its clock** (user ruling, 2026-08-16), and
         // lights the `×` it is reaching for. Asked unconditionally, because
@@ -4135,16 +4129,18 @@ impl Runtime<'_> {
         {
             return self.settings_mouse_input(&layout, state, button, position);
         }
-        // The prompt takes the press only where it is drawn — it is a prompt over
-        // a working app, not a gate in front of one, so a press anywhere else is
-        // still the press it always was and reaches the terminal underneath.
-        if let (Some(position), Some(layout)) =
-            (self.window.pointer_position, self.restore_layout())
-            && let Some(target) = restore::hit(&layout, position.x, position.y)
+        // **The restore card, in the order it is drawn: every press is swallowed** (owner's
+        // ruling 2026-09-25, 0.4.5 ticket 57 — the card is a full-window gate, as the paste card
+        // is). A left press on one of its two buttons answers; a press anywhere else, on the card's
+        // face or on the window beside it, reaches nothing — no pane takes the focus, no link
+        // opens, no tab is switched, no program under it hears the button.
+        if let (Some(layout), Some(position)) =
+            (self.restore_layout(), self.window.pointer_position)
         {
             if state == ElementState::Pressed
                 && button == MouseButton::Left
-                && let Some(answer) = restore::answer(target)
+                && let Some(answer) =
+                    restore::hit(&layout, position.x, position.y).and_then(restore::answer)
             {
                 self.answer_restore_prompt(answer)?;
             }
@@ -5410,6 +5406,15 @@ impl Runtime<'_> {
         if let Some(layout) = self.settings_layout() {
             self.mouse_trace(|| "wheel_route taken=overlay at=settings".to_owned());
             return self.scroll_settings(&layout, delta);
+        }
+        // **And behind every other modal card, a notch is nobody's** (0.4.5 ticket 57, owner's
+        // ruling 2026-09-25): the quit card, the gate, the invitation, the paste card and the
+        // restore card are not scrollers, and the sentence above — scrolling the terminal under a
+        // modal is the same violation as clicking it — is asked of the one reading of "a modal
+        // covers the window" rather than of each card.
+        if self.a_modal_covers_the_window() {
+            self.mouse_trace(|| "wheel_route taken=overlay at=modal".to_owned());
+            return Ok(());
         }
         // **A notch over a notice is nobody's** (user ruling, 2026-08-16). The
         // card is not a scroller and it is not transparent: a wheel that fell
