@@ -9,25 +9,18 @@
 ## Highlights
 
 - Typing stays quick: the window no longer stops to ask Windows where it is
-  or about the taskbar, to pass on a changing title or to move the input
-  method's candidate window, and the find box keeps up in a long history.
-- A launch with a chosen terminal font no longer waits for Folio to list
-  every font on the machine, and once you have used web pages in Folio, the
-  first one after launch can appear in a fraction of a second.
+  or about the taskbar, to pass on a changing title, to list every font or to
+  move the input method's candidate window, and once you have used web pages
+  in Folio, the first one after launch can appear in a fraction of a second.
 - Each terminal pane can have its own text size: Ctrl+= and Ctrl+- (⌘ on a
   Mac) or Ctrl+wheel over the pane, and Ctrl+0 to reset.
 - Bold text in a terminal font with no bold style is drawn heavier in that
   same font, and bold Chinese text no longer leaves single characters at
   regular weight.
 - Tooltips, cards, menus and other fading surfaces fade as one piece.
-- Closing a window while it is still asking about unsaved changes no longer
-  discards them.
-- The "reopen your other tabs" card keeps keys, pastes, clicks and the wheel
-  to itself while it is up, and Esc puts it away.
-- A font installed while Folio is running shows up in the font lists the next
-  time Settings opens.
-- Menus, dialogs, notices, Settings, the Git page and pane heads now share one
-  set of spacing, corners and text sizes.
+- Unsaved edits are safe: closing a window while it asks about unsaved
+  changes no longer discards them, and keys, pastes and clicks no longer
+  reach what is under the "reopen your other tabs" card.
 
 ## Changes
 
@@ -92,6 +85,15 @@
 - The wheel no longer scrolls a pane under the other dialogs.
 - Closing a window while it is still asking about unsaved changes no longer
   discards them.
+
+## Known issues
+
+- When the GPU or the display driver stalls, the picture can freeze for a
+  moment while you type; the input itself keeps up, and the frozen picture
+  catches up at once.
+- In a profile that has never opened a web page, the first web page still
+  takes a couple of seconds to appear; after that, and in profiles that have
+  used web pages, it is warm.
 
 <details>
 <summary>Install notes (SmartScreen, Gatekeeper, checksums)</summary>
