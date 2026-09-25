@@ -67197,10 +67197,51 @@ mod floated_page_tests {
             "the run ends and the hidden summoned terminal is left behind it, unclosed and \
              unwritten:\n{shut}"
         );
+        // The other road to an empty registry reads the same rule, through the one function that
+        // decides what the loop does once the registry has emptied (ticket 60): the reap asks
+        // `run_end`, and `run_end` asks the rule of the registry's own length.
         let reap = method_body("FolioApp", "reap_leaving_windows");
         assert!(
-            reap.contains("a_run_ends_with_its_last_visible_window(self.windows.len())"),
+            reap.contains("self.run_end(waking) == web_spare::RunControl::Exit"),
             "the other road to an empty registry decides residency for itself:\n{reap}"
+        );
+        let run_end = method_body("FolioApp", "run_end");
+        assert!(
+            run_end.contains("a_run_ends_with_its_last_visible_window(self.windows.len())"),
+            "the run's end decides residency for itself instead of reading the one rule:\n{run_end}"
+        );
+
+        // **And beside the summon, the spare** (ticket 60). With no spare parked the run ends on
+        // the turn its last visible window goes, exactly as above; with one parked it ends when
+        // the spare lets go — the last closed window waits for it hidden, as it waits for its own
+        // pages — and never later than the run's bound.
+        let ends = a_run_ends_with_its_last_visible_window(0);
+        let now = std::time::Instant::now();
+        let bound = now + crate::quit::PAGE_TEARDOWN_DEADLINE;
+        assert_eq!(
+            crate::web_spare::after_the_last_window(ends, true, None, None),
+            if ends {
+                crate::web_spare::RunControl::Exit
+            } else {
+                crate::web_spare::RunControl::Wait
+            },
+            "no spare holding on: the last visible window's close is the run's end"
+        );
+        let exit_wait = now + crate::webhost::BROWSER_EXIT_DEADLINE;
+        assert_eq!(
+            crate::web_spare::after_the_last_window(ends, false, Some(exit_wait), Some(bound)),
+            crate::web_spare::RunControl::WaitUntil(exit_wait),
+            "a spare still letting go holds the run until its own wait"
+        );
+        assert_eq!(
+            crate::web_spare::after_the_last_window(ends, false, None, Some(bound)),
+            crate::web_spare::RunControl::WaitUntil(bound),
+            "and never past the run's bound"
+        );
+        assert!(
+            reap.contains("if spare_holds && !done.is_empty() && done.len() == self.windows.len()"),
+            "the last closed window no longer waits for the spare, and an empty registry is not \
+             woken for its wait:\n{reap}"
         );
         // **And no door reads an icon any more**, because there is not one. A
         // source gate rather than an assertion about behaviour: what the ruling
