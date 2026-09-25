@@ -956,7 +956,7 @@ leave**); ④ retirement, with windows hidden and the loop still pumping only th
 browser-exit clock to its deadline. **The spare web controller shares the run's one
 bounded retirement** (ticket 60): `App::run_retiring_until` is set once, when the last
 window closes or ④ begins, the spare retires in that same branch, and the run ends only
-when it has let go or the bound has run out (then it is abandoned with one line). **The two failure roads skip phases ① and ③
+when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The two failure roads skip phases ① and ③
 entirely.** `FolioApp::fail` — twelve call sites — asks the device-loss latch
 first, then prints its stopped line, closes **every** window with the ending flag
 through `Runtime::close_window` so that no shell outlives its window, **abandons the
