@@ -38,7 +38,6 @@ use std::{
 mod animation;
 mod app_delegate_wire;
 mod arrival;
-mod attention;
 mod attention_codex;
 mod attention_copilot;
 mod attention_hooks;
@@ -220,6 +219,11 @@ use bt_viewport::{
     HyperlinkHit, MathBlockAnchor, ViewSelection, ViewportFrame, ViewportProjection,
     horizontal::ContentColumn,
 };
+// **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
+// is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
+// seen" rule under the name this crate has always called it by.
+use bt_workbench::attention;
+use bt_workbench::attention::is_consumed as attention_is_consumed;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
@@ -14419,7 +14423,7 @@ struct WindowRuntime {
     /// **One counter, since A2.** A3 ran a second one beside it while the ledger and the bell-fed
     /// queue were both alive, precisely so that neither could renumber the other; taking the bell
     /// out of the door left one queue and therefore one serial.
-    attention_next_place: u64,
+    attention_next_place: attention::Places,
     /// How far the rail is scrolled, in physical pixels.
     ///
     /// Its own field beside [`Self::tab_scroll`] rather than a shared one, because
@@ -27081,24 +27085,6 @@ fn tab_trailing_targets(hand: TabTriggerHand) -> (f32, f32) {
     (f32::from(u8::from(run)), lit)
 }
 
-/// Whether a tab's latched attention has already been spent by being looked at.
-///
-/// Watching is consuming (user ruling). A terminal you are sitting in front of
-/// does not need a badge telling you to look at it — it has already said
-/// everything the badge would repeat, and louder. So the bell and the failure
-/// latch retire the moment they arrive on the tab that is both on screen *and*
-/// in the focused window, exactly as [`seen_revision`] retires new output for
-/// the same tab and for the same reason.
-///
-/// Both halves of the condition carry weight, and the second is the one worth
-/// stating out loud: a window in the background is a window nobody is reading.
-/// Clearing on "active tab" alone would silently eat every bell that rang while
-/// the user was away in another application — which is the one moment a bell is
-/// actually doing its job.
-pub(crate) fn attention_is_consumed(tab_is_active: bool, window_is_focused: bool) -> bool {
-    tab_is_active && window_is_focused
-}
-
 // **`attention_is_asked` and `attention_ticket` stood here until A2, and what took them away is
 // worth stating rather than deleting in silence.**
 //
@@ -27303,7 +27289,7 @@ fn settle_attention(
     active_tab: usize,
     place: notify::WindowPlace,
     switches: attention::NotificationSwitches,
-    next_place: &mut u64,
+    next_place: &mut attention::Places,
     now: Instant,
     trace: Option<&attention_trace::Trace>,
     raised: &mut Vec<AttentionDelivery>,
@@ -27435,7 +27421,7 @@ fn answer_attention_in(
     seat: SeatId,
     by: UserInputKind,
     reach: attention::Reach,
-    next_place: &mut u64,
+    next_place: &mut attention::Places,
     now: Instant,
     trace: Option<&attention_trace::Trace>,
 ) {
@@ -27467,7 +27453,7 @@ fn expire_leaf_attention(
     at: attention::Site,
     reach: attention::Reach,
     leaf: &mut LeafSession,
-    next_place: &mut u64,
+    next_place: &mut attention::Places,
     now: Instant,
 ) {
     let lines = leaf
@@ -27569,7 +27555,7 @@ fn deliver_osc_attention(
     tab_is_active: bool,
     place: notify::WindowPlace,
     switches: attention::NotificationSwitches,
-    next_place: &mut u64,
+    next_place: &mut attention::Places,
     announcements: &[(SeatId, bt_term::TerminalNotification)],
     now: Instant,
     trace: Option<&attention_trace::Trace>,
@@ -27665,7 +27651,7 @@ fn deliver_attention(
     active_tab: usize,
     place: notify::WindowPlace,
     switches: attention::NotificationSwitches,
-    next_place: &mut u64,
+    next_place: &mut attention::Places,
     messages: &[attention_wire::Message],
     installed: &[attention::MappingRow],
     now: Instant,
@@ -40314,7 +40300,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // Resting where the bit is, and the two are set together below: a window
         // that opens *in* focus mode has not animated into it, it was born there.
         focus_reveal: RevealTween::resting(0.0, RAIL_TRANSITION),
-        attention_next_place: 0,
+        attention_next_place: attention::Places::default(),
         focus_mini_advance: 0.0,
         focus_mini_face_advance: 0.0,
         focus_thumbs: focus_thumb::FocusThumbnails::default(),

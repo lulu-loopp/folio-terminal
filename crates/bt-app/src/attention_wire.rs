@@ -41,15 +41,19 @@
 
 use std::{
     sync::{Mutex, OnceLock, PoisonError},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use bt_platform::attention_pipe::AttentionPipe;
 
-use crate::attention::{
-    ClearClass, ClearReason, ClearSelector, Event, IdSource, WaitSlot, wait_key_is_well_formed,
-};
+use crate::attention::{Event, IdSource, wait_key_is_well_formed};
 use crate::attention_map::{self, TURN_END};
+
+/// **The clock beside the ledger, and its ten minutes, are the ledger's** (`bt-workbench`, D-57).
+///
+/// Re-imported here so the pane's `attention_clock` keeps its one name: this module arms nothing
+/// and spends nothing itself — `deliver_attention` and `settle_attention` do.
+pub(crate) use crate::attention::expiry::WaitClock;
 
 /// **Diagnostic only.** `<window>.<tab>.<seat>`, so a person in a pane can see which one they are
 /// in; nothing reads it back.
@@ -66,15 +70,6 @@ pub(crate) const ENDPOINT_VARIABLE: &str = "FOLIO_ATTENTION_PIPE";
 
 /// **The capability.** One pane, 128 bits, minted at birth and dead with the leaf.
 pub(crate) const CAPABILITY_VARIABLE: &str = "FOLIO_ATTENTION";
-
-/// How long a strong credential may stand with nothing having ended it.
-///
-/// Ten minutes, which is upstream's own synchronous timeout for a permission request — the longest
-/// a well-behaved producer's wait can legitimately last. This is hygiene and not correctness: the
-/// ledger's watermark already guarantees that the next genuine request is seen whether or not this
-/// ever fires (§11.4.3). What it prevents is a badge outliving the thing it reports, which is the
-/// 2026-08-21 defect stated in general form.
-pub(crate) const WAIT_TTL: Duration = Duration::from_secs(600);
 
 /// How many lines may wait for the window thread before the oldest are dropped.
 ///
@@ -290,84 +285,6 @@ pub(crate) fn identifier(id: IdSource, payload: Option<&serde_json::Value>) -> O
     };
     let found = payload?.get(path)?.as_str()?;
     wait_key_is_well_formed(found).then(|| found.to_owned())
-}
-
-// ---------------------------------------------------------------------------
-// The clock beside the ledger
-// ---------------------------------------------------------------------------
-
-/// **When each standing credential runs out**, and nothing else.
-///
-/// Beside the ledger rather than inside it, for the ledger's own stated reason: it is a pure
-/// function of arrivals, the frame's facts are handed in, and a clock is one of those facts. This
-/// holds no credential — only a deadline per slot — so the two cannot disagree about *whether* a
-/// pane is asking; the worst a drifted entry can do is produce a clear for something that has
-/// already gone, which the ledger answers with no change and no line.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct WaitClock {
-    entries: Vec<(WaitSlot, Instant)>,
-}
-
-impl WaitClock {
-    /// Start (or restart) one slot's ten minutes.
-    pub(crate) fn arm(&mut self, slot: &WaitSlot, now: Instant) {
-        let deadline = now + WAIT_TTL;
-        match self.entries.iter_mut().find(|(held, _)| held == slot) {
-            Some(entry) => entry.1 = deadline,
-            None => self.entries.push((slot.clone(), deadline)),
-        }
-    }
-
-    /// Forget whatever a clear has just retired.
-    pub(crate) fn forget(&mut self, selector: &ClearSelector) {
-        self.entries.retain(|(slot, _)| match selector {
-            ClearSelector::All => false,
-            ClearSelector::Kind(kind) => slot.kind() != *kind,
-            ClearSelector::Key { kind, key } => {
-                slot != &WaitSlot::Keyed {
-                    kind: *kind,
-                    key: key.clone(),
-                }
-            }
-        });
-    }
-
-    /// The next instant this pane owes the loop a wake-up, or `None`.
-    ///
-    /// `None` for a pane with nothing standing, which is every pane almost always — so an idle
-    /// window asks for no wake-ups at all on this account.
-    #[must_use]
-    pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.entries.iter().map(|(_, at)| *at).min()
-    }
-
-    /// The clears that have come due, removing them as it goes.
-    ///
-    /// `Boundary`, because a timer is not a receipt: it is not evidence that anything ended, it is
-    /// this build giving up on being told. Giving up has to be unconditional or it would leave
-    /// exactly the entries it exists to sweep.
-    pub(crate) fn due(&mut self, now: Instant) -> Vec<Event> {
-        let mut expired = Vec::new();
-        self.entries.retain(|(slot, at)| {
-            if *at > now {
-                return true;
-            }
-            expired.push(Event::StrongClear {
-                selector: match slot {
-                    WaitSlot::Keyed { kind, key } => ClearSelector::Key {
-                        kind: *kind,
-                        key: key.clone(),
-                    },
-                    WaitSlot::Level(kind) => ClearSelector::Kind(*kind),
-                },
-                class: ClearClass::Boundary,
-                reason: ClearReason::Ttl,
-                begins_turn: false,
-            });
-            false
-        });
-        expired
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -672,8 +589,9 @@ fn report(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attention::{MappingRow, Via, WaitKind};
+    use crate::attention::{MappingRow, Via, WaitKind, WaitSlot};
     use crate::attention_map::{CLAUDE_CODE, CODEX, PI, installed_rows};
+    use std::time::Instant;
 
     fn installed(family: &str) -> Vec<MappingRow> {
         installed_rows(attention_map::ROWS, family, |_| true)
@@ -1007,60 +925,6 @@ mod tests {
         }
     }
 
-    /// **The clock is hygiene and it expires as a boundary.**
-    #[test]
-    fn a_standing_credential_runs_out_after_ten_minutes_and_not_before() {
-        let start = Instant::now();
-        let mut clock = WaitClock::default();
-        let slot = WaitSlot::Level(WaitKind::Permission);
-        clock.arm(&slot, start);
-        assert_eq!(clock.deadline(), Some(start + WAIT_TTL));
-        assert!(
-            clock
-                .due(start + WAIT_TTL - Duration::from_secs(1))
-                .is_empty()
-        );
-        assert_eq!(
-            clock.due(start + WAIT_TTL),
-            [Event::StrongClear {
-                selector: ClearSelector::Kind(WaitKind::Permission),
-                class: ClearClass::Boundary,
-                reason: ClearReason::Ttl,
-                begins_turn: false,
-            }],
-            "a timer is not a receipt: it is this build giving up on being told, and giving up \
-             conditionally would leave behind exactly the entry it exists to sweep"
-        );
-        assert_eq!(
-            clock.deadline(),
-            None,
-            "a fired entry is gone, not repeated"
-        );
-    }
-
-    /// Re-asserting a credential restarts its clock rather than adding a second one.
-    #[test]
-    fn a_restated_credential_keeps_one_deadline() {
-        let start = Instant::now();
-        let mut clock = WaitClock::default();
-        let slot = WaitSlot::Level(WaitKind::Permission);
-        clock.arm(&slot, start);
-        clock.arm(&slot, start + Duration::from_secs(60));
-        assert_eq!(
-            clock.deadline(),
-            Some(start + Duration::from_secs(60) + WAIT_TTL)
-        );
-        assert!(clock.due(start + WAIT_TTL).is_empty());
-        clock.forget(&ClearSelector::Kind(WaitKind::Permission));
-        assert_eq!(clock.deadline(), None);
-    }
-
-    /// An idle pane owes the loop nothing.
-    #[test]
-    fn a_pane_with_nothing_standing_asks_for_no_wake_ups() {
-        assert_eq!(WaitClock::default().deadline(), None);
-    }
-
     /// **A capability names one pane, and a pane that was never given one names nothing.**
     #[test]
     fn a_pane_with_no_capability_answers_to_nothing() {
@@ -1117,7 +981,7 @@ mod tests {
             seat: SeatId(0),
         };
         let mut ledger = AttentionLedger::default();
-        let mut place = 0;
+        let mut place = crate::attention::Places::default();
         let mut trace = Vec::new();
         // The ledger reads no clock of its own; every arrival below lands at one instant, which is
         // the truth for a sequence a test walks in a few microseconds.

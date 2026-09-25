@@ -641,6 +641,10 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **A fourteenth and a fifteenth since 2026-09-26** (0.4.6 ticket A5): `main.rs` declares `#[cfg(test)] mod lane;` and `#[cfg(test)] mod lane_contract_tests;` — the lane contract is test-side data until product code reads a declaration — which makes `lane.rs` and `lane_contract_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_fifteen`.
 
+**Twelve again since 2026-09-25** (0.4.6 census-3): `attention.rs` and `attention/tests.rs` left `bt-app` for `bt-workbench` (D-57), so the table's `attention.rs` row no longer describes `bt-app`. The test is now `the_wholly_test_files_of_bt_app_are_the_twelve`.
+
+**Fourteen at the merge of both (2026-09-26):** A5's two lane files joined and census-3's `attention/tests.rs` left, so the test is `the_wholly_test_files_of_bt_app_are_the_fourteen`.
+
 ---
 
 ## 7. The end measurement

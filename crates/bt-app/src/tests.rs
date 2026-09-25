@@ -6915,7 +6915,7 @@ fn a_waiting_tabs_pulse_is_one_reading_of_one_clock() {
     let period = Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS);
     let mut tabs = vec![ringing_tab(1, 1)];
     let seat = tabs[0].seats.terminals()[0];
-    let mut next = 0;
+    let mut next = attention::Places::default();
     let elapsed = period.mul_f32(0.25);
     let quarter = tabs[0].animation_epoch + elapsed;
 
@@ -7029,7 +7029,7 @@ fn an_idle_window_asks_for_no_frame_for_a_pulse_nobody_is_owed() {
 
     // Something rang. It is the same warn dot, and it is not a queue place.
     ring(&mut tabs[0], seat);
-    let mut next = 0;
+    let mut next = attention::Places::default();
     one_turn(&mut tabs, 1, false, &mut next);
     let state = tabs[0].mark_state(false, now, Motion::Full, &palette);
     assert!(
@@ -7130,6 +7130,215 @@ fn ticket_at(tab: &TabState, seat: SeatId) -> Option<u64> {
     tab.sessions[&seat].attention.ticket()
 }
 
+// ---------------------------------------------------------------------------
+// The wire itself: bytes a program wrote, and the lines they decided
+// ---------------------------------------------------------------------------
+//
+// **Where `bt-term` meets the ledger**, and why these three live here rather than beside the ledger
+// in `bt-workbench`: they feed a real `bt_term::DualPlaneSession`, and the ledger's crate may not
+// name `bt-term` (`docs/plans/design/ownership-census-2026-09-25.md` §5.4). This crate is where
+// the two halves are joined in the product (`deliver_osc_attention`), so this is where the join
+// is pinned.
+
+/// One pane's ledger and the window serial it draws places from, for the wire pins below — the
+/// ledger's own grid (`bt_workbench::attention`'s tests) uses the same shape.
+struct LedgerPane {
+    ledger: attention::AttentionLedger,
+    places: attention::Places,
+    now: Instant,
+}
+
+impl LedgerPane {
+    fn new() -> Self {
+        Self {
+            ledger: attention::AttentionLedger::default(),
+            places: attention::Places::default(),
+            now: Instant::now(),
+        }
+    }
+
+    /// One arrival, and the lines it decided.
+    fn at(&mut self, event: attention::Event) -> Vec<String> {
+        let site = attention::Site {
+            tab: 1,
+            seat: SeatId(2),
+        };
+        self.ledger
+            .apply(
+                site,
+                attention::Reach::Flash,
+                event,
+                &mut self.places,
+                self.now,
+            )
+            .lines
+    }
+
+    fn state(&self) -> attention::State {
+        self.ledger.state()
+    }
+
+    fn away(&mut self) -> Vec<String> {
+        self.at(attention::Event::Settle {
+            active: false,
+            focused: false,
+        })
+    }
+}
+
+fn ledger_strong_wait(kind: attention::WaitKind) -> attention::Event {
+    attention::Event::StrongWait(attention::WaitSlot::Level(kind))
+}
+
+fn ledger_clear_all(reason: attention::ClearReason) -> attention::Event {
+    attention::Event::StrongClear {
+        selector: attention::ClearSelector::All,
+        class: attention::ClearClass::Boundary,
+        reason,
+        begins_turn: false,
+    }
+}
+
+/// One session fed real bytes, the way a pane's child writes them.
+fn wired() -> bt_term::DualPlaneSession {
+    bt_term::DualPlaneSession::new(
+        std::num::NonZeroU32::new(80).expect("a width"),
+        std::num::NonZeroU32::new(8).expect("a height"),
+    )
+}
+
+/// PIN — **`OSC 1337;RequestAttention=` on the wire becomes an episode accounted to `src=osc`.**
+///
+/// The two halves of this block meet here and nowhere else: `bt-term` mints a *generation* from the
+/// bytes, and the ledger mints an *episode* from the generation. Pinning them separately leaves the
+/// join untested, and the join is where a level would be read as an edge — a program restating its
+/// request once a second would then mint an episode once a second, and the badge would re-arm
+/// forever.
+///
+/// The withdrawal is the other half of what makes this sequence the one the plan chose over four
+/// alternatives: the program can take its own sentence back, and the ledger writes that down as the
+/// program's doing rather than as anybody's answer.
+#[test]
+fn the_bytes_of_a_standing_request_become_one_episode_charged_to_the_osc_lane() {
+    fn wrote(session: &mut bt_term::DualPlaneSession, bytes: &[u8]) -> Option<u64> {
+        session.feed(bytes).expect("the session accepts bytes");
+        session.status().attention_request
+    }
+
+    let mut session = wired();
+    let mut pane = LedgerPane::new();
+    let level = wrote(&mut session, b"\x1b]1337;RequestAttention=yes\x07");
+    let rose = pane.ledger.weak_edge(level).expect("a rising edge");
+    assert_eq!(
+        pane.at(rose),
+        ["mint tab=1 seat=SeatId(2) episode=1 src=osc gen=1 grounds=requested prev=-"]
+    );
+    let level = wrote(&mut session, b"\x1b]1337;RequestAttention=yes\x07");
+    assert_eq!(
+        pane.ledger.weak_edge(level),
+        None,
+        "a restatement is one program saying one thing twice"
+    );
+    assert_eq!(
+        pane.away(),
+        ["admit tab=1 seat=SeatId(2) ticket=0 episode=1 grounds=requested active=0 focused=0"],
+        "a program that wants you is not a program that is blocked on you: no interruption"
+    );
+    let level = wrote(&mut session, b"\x1b]1337;RequestAttention=no\x07");
+    let fell = pane.ledger.weak_edge(level).expect("a falling edge");
+    assert_eq!(
+        pane.at(fell),
+        ["withdraw tab=1 seat=SeatId(2) ticket=0 episode=1 reason=program src=osc"]
+    );
+    assert_eq!(pane.state(), attention::State::Idle);
+}
+
+/// PIN — **the two lanes meet on one account: one pane, two producers, one request.**
+///
+/// The wire says "this pane wants you" and, six seconds later, a hook says "and it is blocked on
+/// your input". Those are **one** request with two pieces of evidence, not two requests: the place
+/// in the queue is not re-stamped, no second episode is minted, and the wording rises — and falls
+/// again the moment the stronger evidence is withdrawn, because a pane that says "waiting for you"
+/// on the strength of a credential that no longer exists is a pane telling you something untrue.
+///
+/// It ends on the wire because that is the half this slice added: the program takes its own
+/// sentence back, the place goes, and the line says the withdrawal came in over `src=osc`. A trace
+/// that could not tell the two producers apart would be a trace that could not answer the one
+/// question anybody asks it — *did the adapter actually install, or is this the generic path?*
+#[test]
+fn one_pane_two_producers_and_one_episode_between_them() {
+    let mut session = wired();
+    let mut pane = LedgerPane::new();
+    session
+        .feed(b"\x1b]1337;RequestAttention=yes\x07")
+        .expect("the session accepts bytes");
+    let rose = pane
+        .ledger
+        .weak_edge(session.status().attention_request)
+        .expect("a rising edge");
+    assert_eq!(
+        pane.at(rose),
+        ["mint tab=1 seat=SeatId(2) episode=1 src=osc gen=1 grounds=requested prev=-"]
+    );
+    assert_eq!(
+        pane.at(ledger_strong_wait(attention::WaitKind::Permission)),
+        ["upgrade tab=1 seat=SeatId(2) episode=1 grounds=awaiting src=pipe gen=1"],
+        "the same request, confirmed by the other producer"
+    );
+    assert_eq!(
+        pane.away(),
+        [
+            "admit tab=1 seat=SeatId(2) ticket=0 episode=1 grounds=awaiting active=0 focused=0",
+            "toast tab=1 seat=SeatId(2) why=awaiting ticket=0 episode=1 reach=flash",
+        ]
+    );
+    assert_eq!(
+        pane.at(ledger_clear_all(attention::ClearReason::Hook)),
+        [
+            "clear tab=1 seat=SeatId(2) episode=1 src=pipe gen=1 reason=hook",
+            "downgrade tab=1 seat=SeatId(2) ticket=0 episode=1 grounds=requested src=pipe \
+             reason=clear",
+        ],
+        "the strong layer withdrew; the weak one is still up, so the place stays and the wording \
+         falls back"
+    );
+    session
+        .feed(b"\x1b]1337;RequestAttention=no\x07")
+        .expect("the session accepts bytes");
+    let fell = pane
+        .ledger
+        .weak_edge(session.status().attention_request)
+        .expect("a falling edge");
+    assert_eq!(
+        pane.at(fell),
+        ["withdraw tab=1 seat=SeatId(2) ticket=0 episode=1 reason=program src=osc"]
+    );
+    assert_eq!(pane.state(), attention::State::Idle);
+}
+
+/// PIN — **`once` and `fireworks` reach the ledger as nothing at all.**
+///
+/// Both are on iTerm2's own list beside `yes` and `no`, which is what makes them worth a pin: the
+/// tempting reading is "four values of one sequence, so four values of one state". `once` is a
+/// one-shot and takes the bell's path inside the session; `fireworks` is a gesture this terminal
+/// does not have. Neither is a level, so neither can produce an edge.
+#[test]
+fn the_one_shot_and_the_unimplemented_never_reach_the_ledger() {
+    for payload in [
+        &b"\x1b]1337;RequestAttention=once\x07"[..],
+        &b"\x1b]1337;RequestAttention=fireworks\x07"[..],
+    ] {
+        let mut session = wired();
+        let ledger = attention::AttentionLedger::default();
+        session.feed(payload).expect("the session accepts bytes");
+        assert_eq!(
+            ledger.weak_edge(session.status().attention_request),
+            None,
+            "{payload:?}"
+        );
+    }
+}
+
 /// One turn of the event loop's attention pass over one window's tabs.
 ///
 /// Both notification rows on, which is what a fresh install is.
@@ -7159,7 +7368,7 @@ fn on_a_screen(focused: bool) -> notify::WindowPlace {
     }
 }
 
-fn one_turn(tabs: &mut [TabState], active: usize, focused: bool, next: &mut u64) {
+fn one_turn(tabs: &mut [TabState], active: usize, focused: bool, next: &mut attention::Places) {
     settle_attention(
         tabs,
         active,
@@ -7179,7 +7388,7 @@ fn one_turn_reaching(
     focused: bool,
     hidden: bool,
     turn_end_enabled: bool,
-    next: &mut u64,
+    next: &mut attention::Places,
 ) -> Vec<AttentionDelivery> {
     let mut raised = Vec::new();
     settle_attention(
@@ -7230,7 +7439,7 @@ fn a_turn_ending_reaches_as_far_as_the_reader_is_away_and_the_row_shuts_the_lane
         let index = usize::from(!active);
         let seat = tabs[0].seats.terminals()[0];
         ring(&mut tabs[0], seat);
-        let mut next = 0;
+        let mut next = attention::Places::default();
         let raised = one_turn_reaching(&mut tabs, index, focused, hidden, true, &mut next);
         assert_eq!(
             raised.len(),
@@ -7244,7 +7453,8 @@ fn a_turn_ending_reaches_as_far_as_the_reader_is_away_and_the_row_shuts_the_lane
             "active={active} focused={focused} hidden={hidden}"
         );
         assert_eq!(
-            next, 0,
+            next.issued(),
+            0,
             "and not one place was handed out: a turn ending is not a request (red line 14)"
         );
     }
@@ -7253,7 +7463,7 @@ fn a_turn_ending_reaches_as_far_as_the_reader_is_away_and_the_row_shuts_the_lane
     let mut tabs = vec![ringing_tab(1, 1)];
     let seat = tabs[0].seats.terminals()[0];
     ring(&mut tabs[0], seat);
-    let mut next = 0;
+    let mut next = attention::Places::default();
     assert!(
         one_turn_reaching(&mut tabs, 0, false, true, false, &mut next).is_empty(),
         "with the row off a minimised window hears nothing"
@@ -7272,6 +7482,108 @@ fn a_turn_ending_reaches_as_far_as_the_reader_is_away_and_the_row_shuts_the_lane
     );
 }
 
+/// PIN (census-3, `docs/plans/design/ownership-census-2026-09-25.md` §R6) — **the window's
+/// attention pass arms a wait's ten minutes when it arrives, forgets them when its clear arrives,
+/// and spends them when they run out.**
+///
+/// The rule and the clock left this crate for `bt-workbench` (`attention::expiry`), where their own
+/// pure tests live. What stayed here is *where the clock is driven*: `deliver_attention` arms and
+/// forgets it as a hook's line lands, `settle_attention` spends what has come due on the next
+/// pass. Neither half can be seen from the other crate, so this walks both through the product's
+/// own functions — a real message naming a real pane's capability, looked up in the shipped
+/// Claude Code rows — and reads the answer the loop reads, `attention_ledger_deadline`.
+///
+/// MUTATION: drop the `arm` arm in `deliver_attention` and the first assertion goes red; drop the
+/// `forget` arm and the second does; take the `due` loop out of `settle_attention` and the last
+/// pair does.
+#[test]
+fn a_waits_ten_minutes_are_armed_on_arrival_forgotten_on_its_clear_and_spent_when_they_run_out() {
+    use attention::expiry::WAIT_TTL;
+
+    let mut tabs = vec![ringing_tab(1, 1)];
+    let seat = tabs[0].seats.terminals()[0];
+    let capability = attention_wire::mint_capability();
+    tabs[0]
+        .sessions
+        .get_mut(&seat)
+        .expect("the fixture's seat holds a shell")
+        .attention_capability
+        .clone_from(&capability);
+    let installed =
+        attention_map::installed_rows(attention_map::ROWS, attention_map::CLAUDE_CODE, |_| true);
+    let said = |event: &str| attention_wire::Message {
+        capability: capability.clone(),
+        family: attention_map::CLAUDE_CODE.to_owned(),
+        event: event.to_owned(),
+        id: None,
+        text: None,
+    };
+    let mut places = attention::Places::default();
+    let start = Instant::now();
+    let deliver = |tabs: &mut [TabState], places: &mut attention::Places, event: &str| {
+        deliver_attention(
+            tabs,
+            1,
+            on_a_screen(false),
+            BOTH_NOTIFICATION_ROWS_ON,
+            places,
+            &[said(event)],
+            &installed,
+            start,
+            None,
+            &mut Vec::new(),
+        );
+    };
+    let settle = |tabs: &mut [TabState], places: &mut attention::Places, now: Instant| {
+        settle_attention(
+            tabs,
+            1,
+            on_a_screen(false),
+            BOTH_NOTIFICATION_ROWS_ON,
+            places,
+            now,
+            None,
+            &mut Vec::new(),
+        );
+    };
+
+    deliver(&mut tabs, &mut places, "PermissionRequest");
+    assert_eq!(
+        attention_ledger_deadline(&tabs),
+        Some(start + WAIT_TTL),
+        "a wait that arrives starts its ten minutes"
+    );
+    deliver(&mut tabs, &mut places, "Stop");
+    assert_eq!(
+        attention_ledger_deadline(&tabs),
+        None,
+        "the clear that ends it takes its clock with it"
+    );
+
+    deliver(&mut tabs, &mut places, "PermissionRequest");
+    settle(
+        &mut tabs,
+        &mut places,
+        start + WAIT_TTL - Duration::from_secs(1),
+    );
+    assert_ne!(
+        tabs[0].sessions[&seat].attention.state(),
+        attention::State::Idle,
+        "a second before the ten minutes are up, the pane is still asking"
+    );
+    settle(&mut tabs, &mut places, start + WAIT_TTL);
+    assert_eq!(
+        attention_ledger_deadline(&tabs),
+        None,
+        "a clock that ran out is spent, not repeated"
+    );
+    assert_eq!(
+        tabs[0].sessions[&seat].attention.state(),
+        attention::State::Idle,
+        "and the wait it stood for is over"
+    );
+}
+
 /// The out door, over a bare tab — **the runtime's own function**, so a fixture cannot drift
 /// away from what the window does. `Runtime::answer_attention` is this call plus the borrow
 /// split a window needs and a one-tab fixture does not.
@@ -7280,7 +7592,7 @@ fn answer(
     index: usize,
     seat: SeatId,
     by: UserInputKind,
-    next: &mut u64,
+    next: &mut attention::Places,
     trace: Option<&attention_trace::Trace>,
 ) {
     answer_attention_in(
@@ -7311,7 +7623,7 @@ fn a_bell_takes_no_place_wherever_it_rings() {
         for window_is_focused in [true, false] {
             let mut tabs = vec![ringing_tab(1, 1)];
             let seat = tabs[0].seats.terminals()[0];
-            let mut next = 0;
+            let mut next = attention::Places::default();
             ring(&mut tabs[0], seat);
             one_turn(
                 &mut tabs,
@@ -7324,7 +7636,7 @@ fn a_bell_takes_no_place_wherever_it_rings() {
                 None,
                 "a bell on active={tab_is_active} focused={window_is_focused} asked for a place"
             );
-            assert_eq!(next, 0, "and spent no serial");
+            assert_eq!(next.issued(), 0, "and spent no serial");
             let watched = tab_is_active && window_is_focused;
             assert_eq!(
                 tabs[0].sessions[&seat].session.status().bell_latched(),
@@ -7357,7 +7669,7 @@ fn a_standing_request_asks_for_a_place_only_where_nobody_was_looking() {
         for window_is_focused in [true, false] {
             let mut tabs = vec![ringing_tab(1, 1)];
             let seat = tabs[0].seats.terminals()[0];
-            let mut next = 0;
+            let mut next = attention::Places::default();
             request_attention(&mut tabs[0], seat, "yes");
             one_turn(
                 &mut tabs,
@@ -7392,7 +7704,7 @@ fn a_standing_request_asks_for_a_place_only_where_nobody_was_looking() {
             }
             assert_eq!(ticket_at(&tabs[0], seat).is_some(), !watched);
             assert_eq!(
-                next,
+                next.issued(),
                 u64::from(!watched),
                 "and one serial at most was spent"
             );
@@ -7412,7 +7724,7 @@ fn a_place_in_the_queue_is_taken_once_and_never_re_stamped() {
     let mut tabs = vec![ringing_tab(1, 2), ringing_tab(2, 1)];
     let seats = tabs[0].seats.terminals();
     let (a, b) = (seats[0], seats[1]);
-    let mut next = 0;
+    let mut next = attention::Places::default();
 
     request_attention(&mut tabs[0], a, "yes");
     request_attention(&mut tabs[0], b, "yes");
@@ -7422,7 +7734,7 @@ fn a_place_in_the_queue_is_taken_once_and_never_re_stamped() {
         (Some(0), Some(1)),
         "two panes asking on one turn still have an order"
     );
-    assert_eq!(next, 2);
+    assert_eq!(next.issued(), 2);
 
     // Restating it decides nothing — `bt-term` mints on the rise alone, so there is no edge to
     // read and no younger serial to hand out.
@@ -7435,7 +7747,7 @@ fn a_place_in_the_queue_is_taken_once_and_never_re_stamped() {
         Some(0),
         "the loudest program must not sort last"
     );
-    assert_eq!(next, 2, "and spends nothing");
+    assert_eq!(next.issued(), 2, "and spends nothing");
 }
 
 /// PIN (§7.1.5b P1-8, verbatim) — **a place taken behind a closed lid survives the look,
@@ -7449,7 +7761,7 @@ fn a_place_taken_behind_a_closed_tab_waits_for_an_action_in_its_own_seat() {
     let mut tabs = vec![ringing_tab(1, 1), ringing_tab(2, 3)];
     let seats = tabs[1].seats.terminals();
     let (a, b) = (seats[0], seats[1]);
-    let mut next = 0;
+    let mut next = attention::Places::default();
 
     // It asks while its tab is shut.
     request_attention(&mut tabs[1], b, "yes");
@@ -7485,7 +7797,7 @@ fn a_place_taken_behind_a_closed_tab_waits_for_an_action_in_its_own_seat() {
     // could not represent**, and the whole reason the ledger counts generations.
     one_turn(&mut tabs, 1, true, &mut next);
     assert_eq!(ticket_at(&tabs[1], b), None);
-    assert_eq!(next, 1, "no second serial was spent");
+    assert_eq!(next.issued(), 1, "no second serial was spent");
 }
 
 /// PIN (`attention` plan §11.1.3 rule 4) — **the program that withdraws takes the dot with it.**
@@ -7497,7 +7809,7 @@ fn a_place_taken_behind_a_closed_tab_waits_for_an_action_in_its_own_seat() {
 fn a_withdrawn_request_gives_up_its_place_without_anybody_answering() {
     let mut tabs = vec![ringing_tab(1, 1), ringing_tab(2, 1)];
     let seat = tabs[1].seats.terminals()[0];
-    let mut next = 0;
+    let mut next = attention::Places::default();
 
     request_attention(&mut tabs[1], seat, "yes");
     one_turn(&mut tabs, 0, true, &mut next);
@@ -7527,7 +7839,7 @@ fn a_withdrawn_request_gives_up_its_place_without_anybody_answering() {
 fn the_look_that_spends_a_latch_is_the_runtimes_own_call() {
     let mut tabs = vec![ringing_tab(1, 1)];
     let seat = tabs[0].seats.terminals()[0];
-    let mut next = 0;
+    let mut next = attention::Places::default();
     tabs[0]
         .sessions
         .get_mut(&seat)
@@ -7584,7 +7896,7 @@ fn the_attention_trace_writes_one_line_per_decision_and_none_otherwise() {
             })
             .collect()
     };
-    let turn = |tabs: &mut [TabState], active: usize, next: &mut u64| {
+    let turn = |tabs: &mut [TabState], active: usize, next: &mut attention::Places| {
         settle_attention(
             tabs,
             active,
@@ -7600,7 +7912,7 @@ fn the_attention_trace_writes_one_line_per_decision_and_none_otherwise() {
     let mut tabs = vec![ringing_tab(1, 1), ringing_tab(2, 2)];
     let watched = tabs[0].seats.terminals()[0];
     let background = tabs[1].seats.terminals()[1];
-    let mut next = 0;
+    let mut next = attention::Places::default();
     let mut written = 0;
     let next_lines = |written: &mut usize, expected: &[String]| {
         let lines = read(*written);

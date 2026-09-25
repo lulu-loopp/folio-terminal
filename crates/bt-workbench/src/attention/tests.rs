@@ -53,7 +53,7 @@ fn site() -> Site {
 /// rather than a ten-minute test.
 struct Pane {
     ledger: AttentionLedger,
-    next_ticket: u64,
+    places: Places,
     reach: Reach,
     now: Instant,
 }
@@ -63,7 +63,7 @@ impl Pane {
         Self {
             ledger: AttentionLedger::default(),
             // The window's counter starts where the running build's does.
-            next_ticket: 0,
+            places: Places::default(),
             reach: Reach::Flash,
             now: Instant::now(),
         }
@@ -77,14 +77,14 @@ impl Pane {
     /// One arrival, and the lines it decided.
     fn at(&mut self, event: Event) -> Vec<String> {
         self.ledger
-            .apply(site(), self.reach, event, &mut self.next_ticket, self.now)
+            .apply(site(), self.reach, event, &mut self.places, self.now)
             .lines
     }
 
     /// One arrival, and everything it decided.
     fn outcome(&mut self, event: Event) -> Outcome {
         self.ledger
-            .apply(site(), self.reach, event, &mut self.next_ticket, self.now)
+            .apply(site(), self.reach, event, &mut self.places, self.now)
     }
 
     fn state(&self) -> State {
@@ -596,7 +596,8 @@ fn a_vanished_pane_expires_its_place_and_drops_everything_else() {
         ["expire tab=1 seat=SeatId(2) ticket=0 episode=1 reason=leaf-gone"]
     );
     assert_eq!(
-        pane.next_ticket, 1,
+        pane.places.issued(),
+        1,
         "the window's serial does not come back"
     );
 
@@ -637,7 +638,8 @@ fn a_pane_carried_to_another_window_gives_up_its_place_and_keeps_its_request() {
     );
     assert_eq!(pane.state(), State::Requested(1), "and it is still asking");
     assert_eq!(
-        pane.next_ticket, 1,
+        pane.places.issued(),
+        1,
         "the serial the window issued does not come back"
     );
 
@@ -833,150 +835,6 @@ fn words_spoken_over_no_request_are_not_saved_for_the_next_one() {
         None,
         "a new request begins with nothing borrowed"
     );
-}
-
-// ---------------------------------------------------------------------------
-// The wire itself: bytes a program wrote, and the lines they decided
-// ---------------------------------------------------------------------------
-
-/// One session fed real bytes, the way a pane's child writes them.
-fn wired() -> bt_term::DualPlaneSession {
-    bt_term::DualPlaneSession::new(
-        std::num::NonZeroU32::new(80).expect("a width"),
-        std::num::NonZeroU32::new(8).expect("a height"),
-    )
-}
-
-/// PIN — **`OSC 1337;RequestAttention=` on the wire becomes an episode accounted to `src=osc`.**
-///
-/// The two halves of this block meet here and nowhere else: `bt-term` mints a *generation* from the
-/// bytes, and the ledger mints an *episode* from the generation. Pinning them separately leaves the
-/// join untested, and the join is where a level would be read as an edge — a program restating its
-/// request once a second would then mint an episode once a second, and the badge would re-arm
-/// forever.
-///
-/// The withdrawal is the other half of what makes this sequence the one the plan chose over four
-/// alternatives: the program can take its own sentence back, and the ledger writes that down as the
-/// program's doing rather than as anybody's answer.
-#[test]
-fn the_bytes_of_a_standing_request_become_one_episode_charged_to_the_osc_lane() {
-    fn wrote(session: &mut bt_term::DualPlaneSession, bytes: &[u8]) -> Option<u64> {
-        session.feed(bytes).expect("the session accepts bytes");
-        session.status().attention_request
-    }
-
-    let mut session = wired();
-    let mut pane = Pane::new();
-    let level = wrote(&mut session, b"\x1b]1337;RequestAttention=yes\x07");
-    let rose = pane.ledger.weak_edge(level).expect("a rising edge");
-    assert_eq!(
-        pane.at(rose),
-        ["mint tab=1 seat=SeatId(2) episode=1 src=osc gen=1 grounds=requested prev=-"]
-    );
-    let level = wrote(&mut session, b"\x1b]1337;RequestAttention=yes\x07");
-    assert_eq!(
-        pane.ledger.weak_edge(level),
-        None,
-        "a restatement is one program saying one thing twice"
-    );
-    assert_eq!(
-        pane.away(),
-        ["admit tab=1 seat=SeatId(2) ticket=0 episode=1 grounds=requested active=0 focused=0"],
-        "a program that wants you is not a program that is blocked on you: no interruption"
-    );
-    let level = wrote(&mut session, b"\x1b]1337;RequestAttention=no\x07");
-    let fell = pane.ledger.weak_edge(level).expect("a falling edge");
-    assert_eq!(
-        pane.at(fell),
-        ["withdraw tab=1 seat=SeatId(2) ticket=0 episode=1 reason=program src=osc"]
-    );
-    assert_eq!(pane.state(), State::Idle);
-}
-
-/// PIN — **the two lanes meet on one account: one pane, two producers, one request.**
-///
-/// The wire says "this pane wants you" and, six seconds later, a hook says "and it is blocked on
-/// your input". Those are **one** request with two pieces of evidence, not two requests: the place
-/// in the queue is not re-stamped, no second episode is minted, and the wording rises — and falls
-/// again the moment the stronger evidence is withdrawn, because a pane that says "waiting for you"
-/// on the strength of a credential that no longer exists is a pane telling you something untrue.
-///
-/// It ends on the wire because that is the half this slice added: the program takes its own
-/// sentence back, the place goes, and the line says the withdrawal came in over `src=osc`. A trace
-/// that could not tell the two producers apart would be a trace that could not answer the one
-/// question anybody asks it — *did the adapter actually install, or is this the generic path?*
-#[test]
-fn one_pane_two_producers_and_one_episode_between_them() {
-    let mut session = wired();
-    let mut pane = Pane::new();
-    session
-        .feed(b"\x1b]1337;RequestAttention=yes\x07")
-        .expect("the session accepts bytes");
-    let rose = pane
-        .ledger
-        .weak_edge(session.status().attention_request)
-        .expect("a rising edge");
-    assert_eq!(
-        pane.at(rose),
-        ["mint tab=1 seat=SeatId(2) episode=1 src=osc gen=1 grounds=requested prev=-"]
-    );
-    assert_eq!(
-        pane.at(strong_wait(WaitKind::Permission)),
-        ["upgrade tab=1 seat=SeatId(2) episode=1 grounds=awaiting src=pipe gen=1"],
-        "the same request, confirmed by the other producer"
-    );
-    assert_eq!(
-        pane.away(),
-        [
-            "admit tab=1 seat=SeatId(2) ticket=0 episode=1 grounds=awaiting active=0 focused=0",
-            "toast tab=1 seat=SeatId(2) why=awaiting ticket=0 episode=1 reach=flash",
-        ]
-    );
-    assert_eq!(
-        pane.at(clear_all(ClearReason::Hook)),
-        [
-            "clear tab=1 seat=SeatId(2) episode=1 src=pipe gen=1 reason=hook",
-            "downgrade tab=1 seat=SeatId(2) ticket=0 episode=1 grounds=requested src=pipe \
-             reason=clear",
-        ],
-        "the strong layer withdrew; the weak one is still up, so the place stays and the wording \
-         falls back"
-    );
-    session
-        .feed(b"\x1b]1337;RequestAttention=no\x07")
-        .expect("the session accepts bytes");
-    let fell = pane
-        .ledger
-        .weak_edge(session.status().attention_request)
-        .expect("a falling edge");
-    assert_eq!(
-        pane.at(fell),
-        ["withdraw tab=1 seat=SeatId(2) ticket=0 episode=1 reason=program src=osc"]
-    );
-    assert_eq!(pane.state(), State::Idle);
-}
-
-/// PIN — **`once` and `fireworks` reach the ledger as nothing at all.**
-///
-/// Both are on iTerm2's own list beside `yes` and `no`, which is what makes them worth a pin: the
-/// tempting reading is "four values of one sequence, so four values of one state". `once` is a
-/// one-shot and takes the bell's path inside the session; `fireworks` is a gesture this terminal
-/// does not have. Neither is a level, so neither can produce an edge.
-#[test]
-fn the_one_shot_and_the_unimplemented_never_reach_the_ledger() {
-    for payload in [
-        &b"\x1b]1337;RequestAttention=once\x07"[..],
-        &b"\x1b]1337;RequestAttention=fireworks\x07"[..],
-    ] {
-        let mut session = wired();
-        let ledger = AttentionLedger::default();
-        session.feed(payload).expect("the session accepts bytes");
-        assert_eq!(
-            ledger.weak_edge(session.status().attention_request),
-            None,
-            "{payload:?}"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1450,7 +1308,7 @@ fn the_event_door_never_mints_an_episode_or_takes_a_place() {
     }
     assert_eq!(pane.state(), State::Idle);
     assert_eq!(pane.ledger.ticket(), None);
-    assert_eq!(pane.next_ticket, 0, "not one place was handed out");
+    assert_eq!(pane.places.issued(), 0, "not one place was handed out");
 }
 
 // ---------------------------------------------------------------------------

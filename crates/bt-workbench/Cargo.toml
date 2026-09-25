@@ -1,0 +1,24 @@
+[package]
+name = "bt-workbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# **The attention domain, and nothing that draws it or carries it** (D-57,
+# `docs/ARCHITECTURE.md` §12.1). What this crate may name is ruled in
+# `docs/plans/design/ownership-census-2026-09-25.md` §5.4 and restated in
+# `docs/ARCHITECTURE.md` §3.1: `bt-layout` and nothing else, and only `bt-app`
+# names this crate.
+#
+# `bt-layout` is a **shrink-only exception** (owner's ruling 2026-09-25 on the
+# note's Q5): `Site` names a pane by `bt_layout::SeatId`, and the edge goes when
+# `Site` names a session instead (D-1's registry, 0.4.7). Never `bt-app`,
+# `bt-platform`, `bt-render`, `bt-term`, `bt-pty`, `winit` or any platform
+# crate — the ledger reads no window, no clock and no file.
+[dependencies]
+bt-layout = { path = "../bt-layout" }
+
+[lints]
+workspace = true

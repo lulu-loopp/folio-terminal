@@ -69,7 +69,9 @@ use std::{
 
 use bt_layout::SeatId;
 
-use crate::attention_wire::WAIT_TTL;
+pub mod expiry;
+
+use expiry::WAIT_TTL;
 
 /// How many outstanding strong credentials one pane may hold (`attention` plan §11.4.1).
 ///
@@ -88,7 +90,7 @@ const MAX_WAIT_KEY_BYTES: usize = 64;
 
 /// The pane a line is about. `claim` is the one verb that is about a tab instead.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Site {
+pub struct Site {
     pub tab: usize,
     pub seat: SeatId,
 }
@@ -104,13 +106,13 @@ impl fmt::Display for Site {
 ///
 /// Named here because it is the ledger's own vocabulary — every `toast` line carries one, and both
 /// doors evaluate the same answer. The *function* that computes it from the window's facts is
-/// [`crate::notify::desktop_reach`]; this is the answer's shape, and the shape is what the ledger
+/// `bt-app`'s `notify::desktop_reach`; this is the answer's shape, and the shape is what the ledger
 /// and its trace need to agree on first.
 ///
 /// **Written from quietest to loudest**, which is the only order the four have: each one asks more
 /// of the reader than the one above it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Reach {
+pub enum Reach {
     /// You are looking at it. Adding anything would be telling you what you can already see.
     Nothing,
     /// **This window is on a screen you can see, and the marks inside it are the whole of what is
@@ -124,7 +126,7 @@ pub(crate) enum Reach {
     ///
     /// It is separate from `Nothing` rather than folded into it because the two are different
     /// sentences about the reader — one has seen it, the other could — and the ledger's own
-    /// `attention_is_consumed` retires a latch on the first and not on the second. Folding them
+    /// [`is_consumed`] retires a latch on the first and not on the second. Folding them
     /// would make the trace unable to say which happened.
     Marks,
     /// Not in front of your eyes and not in sight either: the in-window marks, and a taskbar flash
@@ -139,7 +141,7 @@ pub(crate) enum Reach {
     /// never delivered by the Windows backend, and differencing regions over the z-order *every
     /// frame* is a heuristic on a hot path. The probe is neither: it asks the window manager itself
     /// (`WindowFromPoint`) about three points, and it asks **on the pass that decides a delivery**
-    /// rather than on the pass that draws. See [`crate::notify::WindowPlace::exposed`].
+    /// rather than on the pass that draws. See `bt-app`'s `notify::WindowPlace::exposed`.
     Toast,
 }
 
@@ -192,7 +194,7 @@ impl fmt::Display for Grounds {
 /// **Having a name in the table is not the same as having power in it.** That sentence is the whole
 /// of red line 14, and [`Self::Announced`] is the level it is about.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Credential {
+pub enum Credential {
     /// A bare bell, `RequestAttention=once`, `OSC 9`/`777`/`99`, the end of a turn.
     ///
     /// One-shot, and the consequence is not a policy: a sentence with no "off" cannot be withdrawn,
@@ -227,7 +229,7 @@ pub(crate) enum Credential {
     reason = "the derived state is what the grid's cells are spelled against"
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum State {
+pub enum State {
     /// Neither tier is asserting anything. Every leaf is born here.
     Idle,
     /// Something unanswered is asserted, and no place in the queue has been taken yet.
@@ -248,7 +250,7 @@ pub(crate) enum State {
 /// fixed by different requests upstream, and recording the first as the second makes it impossible
 /// to tell whether an adapter is installed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Transport {
+pub enum Transport {
     /// The pane-local named pipe behind `folio attention`.
     Pipe,
     /// An OSC sequence in this pane's byte stream.
@@ -272,7 +274,7 @@ impl fmt::Display for Transport {
 /// Adding a CLI adds a name here and never touches [`Transport`]. That asymmetry is the reason the
 /// two are separate fields rather than one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Via {
+pub enum Via {
     /// Claude Code's `Stop` hook: the main agent finished responding.
     Stop,
     /// Claude Code's `StopFailure` hook: the turn ended on an API error.
@@ -328,11 +330,11 @@ pub(crate) enum Via {
 /// way of hearing about a turn ending has to say which of the two rows governs
 /// it, at compile time, rather than inheriting whichever door the last one used.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct NotificationSwitches {
+pub struct NotificationSwitches {
     /// Settings ▸ Agents ▸ `Turn finished` (`turn_end_notification`).
-    pub(crate) turn_end: bool,
+    pub turn_end: bool,
     /// Settings ▸ Terminal ▸ `Notifications` (`terminal_notifications`).
-    pub(crate) desktop_messages: bool,
+    pub desktop_messages: bool,
 }
 
 impl NotificationSwitches {
@@ -379,7 +381,7 @@ impl fmt::Display for Via {
 /// A closed list, and it is closed on purpose: the mapping tables are data, and a family that
 /// wants a fifth kind is asking for a ruling, not for a row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WaitKind {
+pub enum WaitKind {
     Permission,
     Elicitation,
     Agent,
@@ -408,7 +410,7 @@ impl fmt::Display for WaitKind {
 /// endpoint is bound to one leaf when it is created, so a key cannot choose a pane, cannot cross to
 /// another, and — as the trace vocabulary below shows — never leaves this process.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum WaitSlot {
+pub enum WaitSlot {
     Keyed { kind: WaitKind, key: String },
     Level(WaitKind),
 }
@@ -426,7 +428,7 @@ impl WaitSlot {
 /// Bounded and alphabet-restricted, for one reason each: a bound because it arrives from the far
 /// end of a pipe, and an alphabet because a key that could contain a separator could be read back
 /// as two fields by anything that ever printed it.
-pub(crate) fn wait_key_is_well_formed(key: &str) -> bool {
+pub fn wait_key_is_well_formed(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= MAX_WAIT_KEY_BYTES
         && key
@@ -436,7 +438,7 @@ pub(crate) fn wait_key_is_well_formed(key: &str) -> bool {
 
 /// What one `clear` is aimed at.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ClearSelector {
+pub enum ClearSelector {
     All,
     Kind(WaitKind),
     Key { kind: WaitKind, key: String },
@@ -447,7 +449,7 @@ pub(crate) enum ClearSelector {
 /// The question this answers is not "is it a receipt" but **"how badly could it remove the wrong
 /// thing"**, and the three classes are the three answers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ClearClass {
+pub enum ClearClass {
     /// A receipt. It removes what it names, and what it may name depends on the selector:
     ///
     /// * a **key** — it cannot reach any other credential, so it removes unconditionally. A late
@@ -475,7 +477,7 @@ pub(crate) enum ClearClass {
 
 /// Why a credential left, as the word that goes in the trace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ClearReason {
+pub enum ClearReason {
     /// The program withdrew it over its own channel (`RequestAttention=no`).
     Program,
     /// An upstream hook said so.
@@ -538,7 +540,7 @@ impl ClearReason {
 /// that kind fires only on some programs and only while the mouse moves, which makes it about the
 /// hardest thing there is to catch by hand.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AnswerKind {
+pub enum AnswerKind {
     Keyboard,
     /// An IME **commit**. Composition is not an answer: it puts no byte in the pipe.
     Ime,
@@ -571,7 +573,7 @@ impl fmt::Display for AnswerKind {
 
 /// Whether a family's `kind` is running with identifiers or on a bare level (§12.1 R3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Mode {
+pub enum Mode {
     /// Every wait row and every keyed receipt for this kind declares a field path, and they name
     /// the same namespace. Sameness is then the producer's evidence, which is stronger than ours.
     Id,
@@ -581,7 +583,7 @@ pub(crate) enum Mode {
 
 /// Which layer of a family's signal is installed for one kind (§12.1 R2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Tier {
+pub enum Tier {
     /// The zero-delay event.
     Primary,
     /// The delayed notification an older upstream is limited to.
@@ -594,7 +596,7 @@ pub(crate) enum Tier {
 /// document has been quoted verbatim; guessing a field name here is how a kind ends up half in one
 /// mode and half in the other, which is precisely the mixture §12.1 forbids.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IdSource {
+pub enum IdSource {
     None,
     /// **No shipped row is one** (§12.1.6), which is the honest state of the evidence rather than a
     /// gap: a path may be written only from a verbatim quotation of an upstream payload, and none
@@ -609,7 +611,7 @@ pub(crate) enum IdSource {
 
 /// How wide a mapped `clear` aims.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ClearScope {
+pub enum ClearScope {
     /// `--all`.
     All,
     /// This row's kind — narrowed to a key when the kind is in [`Mode::Id`] and the payload
@@ -622,7 +624,7 @@ pub(crate) enum ClearScope {
 /// A sum rather than a struct of options, so that "a wait row declares a tier and a clear row
 /// declares a class" is a fact the type system holds rather than a rule a validator repeats.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MappedAction {
+pub enum MappedAction {
     Wait {
         tier: Tier,
     },
@@ -648,7 +650,7 @@ pub(crate) enum MappedAction {
 /// A family that cannot prove one writes [`IdSource::None`], and `None` has a written-down
 /// consequence rather than a shrug.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct MappingRow {
+pub struct MappingRow {
     pub family: &'static str,
     /// The upstream event's own name, spelled the way upstream spells it.
     pub event: &'static str,
@@ -658,7 +660,7 @@ pub(crate) struct MappingRow {
 }
 
 impl MappingRow {
-    pub(crate) fn is_wait(&self) -> bool {
+    pub fn is_wait(&self) -> bool {
         matches!(self.action, MappedAction::Wait { .. })
     }
 
@@ -675,7 +677,7 @@ impl MappingRow {
 
     /// The slot a `wait` from this row occupies, given its kind's mode and whatever identifier the
     /// payload carried.
-    pub(crate) fn slot(&self, mode: Mode, id: Option<&str>) -> WaitSlot {
+    pub fn slot(&self, mode: Mode, id: Option<&str>) -> WaitSlot {
         match (mode, id) {
             (Mode::Id, Some(key)) if wait_key_is_well_formed(key) => WaitSlot::Keyed {
                 kind: self.kind,
@@ -702,7 +704,7 @@ impl MappingRow {
     dead_code,
     reason = "R2's checker; its witness is the catalogue's own red form"
 )]
-pub(crate) fn duplicated_tier(rows: &[MappingRow]) -> Option<(&'static str, WaitKind)> {
+pub fn duplicated_tier(rows: &[MappingRow]) -> Option<(&'static str, WaitKind)> {
     for row in rows.iter().filter(|row| row.is_wait()) {
         let MappedAction::Wait { tier } = row.action else {
             continue;
@@ -726,7 +728,7 @@ pub(crate) fn duplicated_tier(rows: &[MappingRow]) -> Option<(&'static str, Wait
 /// puts the whole kind on the level path, because a kind that is half keyed and half not is exactly
 /// the mixture that produces both failure directions at once: a stale fixed key swallowing the next
 /// real request, and two layers of one request minting two credentials.
-pub(crate) fn kind_mode(rows: &[MappingRow], family: &str, kind: WaitKind) -> Mode {
+pub fn kind_mode(rows: &[MappingRow], family: &str, kind: WaitKind) -> Mode {
     let relevant = rows
         .iter()
         .filter(|row| row.family == family && row.kind == kind)
@@ -751,7 +753,7 @@ pub(crate) fn kind_mode(rows: &[MappingRow], family: &str, kind: WaitKind) -> Mo
 /// restatement is **decided from the ledger** by §12.1's R4, not declared by the caller. A caller
 /// that could declare it would be a caller that could get it wrong.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Event {
+pub enum Event {
     /// `bt-term` reports a weak generation this ledger has not seen. See
     /// [`AttentionLedger::weak_edge`], which is how a polled level becomes this.
     WeakYes(u64),
@@ -804,7 +806,7 @@ impl Event {
 
 /// A desktop interruption the ledger has decided to allow, exactly once.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Raised {
+pub struct Raised {
     pub why: Why,
     pub reach: Reach,
     /// The place in the queue. `None` for a turn end, which takes none.
@@ -826,7 +828,7 @@ pub(crate) struct Raised {
 
 /// Which of the two doors a desktop interruption came through.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Why {
+pub enum Why {
     /// The queue's door: a held place whose grounds are `AwaitingInput`.
     Awaiting,
     /// The event door: a turn ended. It mints nothing and queues nothing.
@@ -849,7 +851,7 @@ impl fmt::Display for Why {
 /// formatted on the frames where nothing was decided, and those are almost all of them — the
 /// vector is empty and empty vectors do not allocate.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct Outcome {
+pub struct Outcome {
     pub lines: Vec<String>,
     pub raised: Option<Raised>,
 }
@@ -858,6 +860,60 @@ pub(crate) struct Outcome {
 // The ledger
 // ---------------------------------------------------------------------------
 
+/// **A window's places in the attention queue: handed out by the ledger and by nothing else**
+/// (`attention` plan §11.1.1; census row 38).
+///
+/// One per window, because places are ordered across the whole window and a per-pane counter would
+/// order nothing. The window *owns* it and lends it to every arrival it delivers; the ledger is the
+/// one thing that may *advance* it, when an episode is admitted to the queue ([`AttentionLedger::apply`]
+/// on a [`Event::Settle`]). It is allocation history, not the live queue: a place surrendered by a
+/// pane torn out to another window is not given back, and the pane draws a fresh one there.
+///
+/// Before `bt-workbench` it was a bare `u64` that five modules lent by `&mut`, and "only the ledger
+/// increments it" was a contract nobody's type said. Now the counter is private and so is its one
+/// mutator, which the second example below proves by not compiling:
+///
+/// ```
+/// let places = bt_workbench::attention::Places::default();
+/// assert_eq!(places.issued(), 0, "a new window has handed out no place");
+/// ```
+///
+/// RED (census-3) — **nothing outside the ledger can advance a window's attention places.**
+///
+/// ```compile_fail
+/// let mut places = bt_workbench::attention::Places::default();
+/// places.issue();
+/// ```
+///
+/// MUTATION: make `Places::issue` `pub` and the block above compiles — the doctest goes red.
+///
+/// ```compile_fail
+/// let places = bt_workbench::attention::Places { next: 7 };
+/// ```
+///
+/// The third is the same fence from the other side: a caller that cannot name the field cannot
+/// wind the serial to a number of its choosing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Places {
+    /// The place the next admission is given. Starts at `0`, only ever goes up.
+    next: u64,
+}
+
+impl Places {
+    /// How many places this window has handed out, which is also the number the next one carries.
+    #[must_use]
+    pub fn issued(&self) -> u64 {
+        self.next
+    }
+
+    /// Hand out the next place. **The one mutator**, and private to this module.
+    fn issue(&mut self) -> u64 {
+        let place = self.next;
+        self.next += 1;
+        place
+    }
+}
+
 /// **One pane's attention account** (`attention` plan §11.1.1 and §12.2.1).
 ///
 /// Five cursors and they only ever go up; the live values beside them are cleared, replaced and
@@ -865,7 +921,7 @@ pub(crate) struct Outcome {
 /// what carries "a generation is never reused" through a withdrawal, and what lets a `mint` line
 /// point back at the previous episode across however many times the account fell idle in between.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AttentionLedger {
+pub struct AttentionLedger {
     /// This ledger's mirror of `bt-term`'s live weak generation; `0` is "not asserting".
     weak_gen: u64,
     /// One live generation per outstanding strong credential.
@@ -1008,7 +1064,7 @@ impl AttentionLedger {
         dead_code,
         reason = "the derived state is what the grid's cells are spelled against"
     )]
-    pub(crate) fn state(&self) -> State {
+    pub fn state(&self) -> State {
         let Some(episode) = self.episode else {
             return State::Idle;
         };
@@ -1023,7 +1079,7 @@ impl AttentionLedger {
     }
 
     /// The place this pane holds, for the caller that draws the queue.
-    pub(crate) fn ticket(&self) -> Option<u64> {
+    pub fn ticket(&self) -> Option<u64> {
         self.ticket
     }
 
@@ -1080,7 +1136,7 @@ impl AttentionLedger {
     /// `None` renders as `-`, the same way a first episode's `prev=` does. Saying `-` honestly is
     /// what lets the "every line names its request" contract have no exception, and an exception is
     /// what would make every reader of the file pause on every line to remember which one it was.
-    pub(crate) fn claim_episode(&self, was_attention: bool, now_attention: bool) -> Option<u64> {
+    pub fn claim_episode(&self, was_attention: bool, now_attention: bool) -> Option<u64> {
         if now_attention {
             self.episode
         } else if was_attention {
@@ -1095,7 +1151,7 @@ impl AttentionLedger {
     /// The weak tier is a *level* on a status snapshot and this machine takes *edges*, so the
     /// translation has to happen somewhere; here, next to the mirror it compares against, rather
     /// than at a call site that would have to keep its own copy.
-    pub(crate) fn weak_edge(&self, reported: Option<u64>) -> Option<Event> {
+    pub fn weak_edge(&self, reported: Option<u64>) -> Option<Event> {
         match reported {
             Some(generation) if generation != self.weak_gen => Some(Event::WeakYes(generation)),
             Some(_) => None,
@@ -1112,18 +1168,18 @@ impl AttentionLedger {
     /// fall out of §11.1.2's derivation, and describe the change. Nothing recomputes a state it
     /// stored, because none is stored.
     ///
-    /// `next_ticket` is the window's serial and is handed in rather than held, because places are
+    /// `places` is the window's serial and is handed in rather than held, because places are
     /// ordered across the whole window and a per-pane counter would order nothing. `now` is handed
     /// in for the same reason every other fact about the frame is (see this module's header): the
     /// ledger reads no clock of its own, and the one thing it does with the instant is stamp the
     /// arrivals a program made, so that [`Self::is_agent_seat`] can answer without a caller having
     /// to remember to tell it.
-    pub(crate) fn apply(
+    pub fn apply(
         &mut self,
         at: Site,
         reach: Reach,
         event: Event,
-        next_ticket: &mut u64,
+        places: &mut Places,
         now: Instant,
     ) -> Outcome {
         let mut out = Outcome::default();
@@ -1143,9 +1199,7 @@ impl AttentionLedger {
                 reason,
                 begins_turn,
             } => self.strong_clear(at, &selector, class, reason, begins_turn, &mut out),
-            Event::Settle { active, focused } => {
-                self.settle(at, active, focused, next_ticket, &mut out)
-            }
+            Event::Settle { active, focused } => self.settle(at, active, focused, places, &mut out),
             Event::Answer(by) => self.answer(at, by, &mut out),
             Event::LeafGone => self.leaf_gone(at, &mut out),
             // The one arrival with nothing to say. A look spends latches, and this ledger holds
@@ -1367,7 +1421,7 @@ impl AttentionLedger {
         at: Site,
         active: bool,
         focused: bool,
-        next_ticket: &mut u64,
+        places: &mut Places,
         out: &mut Outcome,
     ) {
         let Some(episode) = self.episode else {
@@ -1388,8 +1442,7 @@ impl AttentionLedger {
             }
             return;
         }
-        let ticket = *next_ticket;
-        *next_ticket += 1;
+        let ticket = places.issue();
         self.ticket = Some(ticket);
         out.lines.push(format!(
             "admit {at} ticket={ticket} episode={episode} grounds={} active={} focused={}",
@@ -1454,7 +1507,7 @@ impl AttentionLedger {
     /// **Nothing is wound back**, for [`Self::leaf_gone`]'s reason exactly, and nothing else is
     /// touched: the credentials, the episode and its spent interruption all belong to the program
     /// and the person, neither of whom did anything by dragging a tab.
-    pub(crate) fn surrender_place(&mut self, at: Site) -> Outcome {
+    pub fn surrender_place(&mut self, at: Site) -> Outcome {
         let mut out = Outcome::default();
         if let (Some(ticket), Some(episode)) = (self.ticket.take(), self.episode) {
             out.lines.push(format!(
@@ -1557,7 +1610,7 @@ impl AttentionLedger {
     /// **The answer does not depend on whether there were words.** A message with an empty body on
     /// a pane that is already asking is still that request's business; taking the branch on the
     /// text would make an empty `OSC 9` raise a second interruption that a non-empty one does not.
-    pub(crate) fn announce(&mut self, words: Option<&str>) -> bool {
+    pub fn announce(&mut self, words: Option<&str>) -> bool {
         if self.episode.is_none() || self.toasted {
             return false;
         }
@@ -1615,7 +1668,7 @@ impl AttentionLedger {
     /// still writes its own line to the trace. What is refused is a second card.
     ///
     /// `words` is the program's own sentence, or `None` for the sources that have none.
-    pub(crate) fn announce_turn_end(
+    pub fn announce_turn_end(
         &mut self,
         at: Site,
         reach: Reach,
@@ -1682,7 +1735,7 @@ impl AttentionLedger {
     ///
     /// A refusal is silent, for `MAX_FRAMES_PER_SECOND`'s reason: there is nobody on the other end
     /// to tell, and a hook that is looping is not reading errors.
-    pub(crate) fn admits_a_frame(&mut self, now: Instant) -> bool {
+    pub fn admits_a_frame(&mut self, now: Instant) -> bool {
         self.frames.admit(now)
     }
 }
@@ -1743,11 +1796,29 @@ fn held(ticket: Option<u64>) -> String {
 /// A free function because a claim is about a **tab** — the loudest of the claims its panes make —
 /// while a ledger is about one pane. The episode comes from
 /// [`AttentionLedger::claim_episode`] on whichever pane's claim won.
-pub(crate) fn claim_line(tab: usize, episode: Option<u64>, was: &str, now: &str) -> String {
+pub fn claim_line(tab: usize, episode: Option<u64>, was: &str, now: &str) -> String {
     format!(
         "claim tab={tab} episode={} was={was} now={now}",
         episode.map_or_else(|| "-".to_owned(), |episode| episode.to_string())
     )
+}
+
+/// Whether a tab's latched attention has already been spent by being looked at.
+///
+/// Watching is consuming (user ruling). A terminal you are sitting in front of
+/// does not need a badge telling you to look at it — it has already said
+/// everything the badge would repeat, and louder. So the bell and the failure
+/// latch retire the moment they arrive on the tab that is both on screen *and*
+/// in the focused window, exactly as `bt-app`'s `seen_revision` retires new output for
+/// the same tab and for the same reason.
+///
+/// Both halves of the condition carry weight, and the second is the one worth
+/// stating out loud: a window in the background is a window nobody is reading.
+/// Clearing on "active tab" alone would silently eat every bell that rang while
+/// the user was away in another application — which is the one moment a bell is
+/// actually doing its job.
+pub fn is_consumed(tab_is_active: bool, window_is_focused: bool) -> bool {
+    tab_is_active && window_is_focused
 }
 
 #[cfg(test)]

@@ -276,6 +276,7 @@ dependencies = [
  "bt-unicode",
  "bt-viewport",
  "bt-winres",
+ "bt-workbench",
  "gif",
  "hayro",
  "image",
@@ -485,6 +486,13 @@ dependencies = [
 [[package]]
 name = "bt-winres"
 version = "0.4.5"
+
+[[package]]
+name = "bt-workbench"
+version = "0.4.5"
+dependencies = [
+ "bt-layout",
+]
 
 [[package]]
 name = "bumpalo"

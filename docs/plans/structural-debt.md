@@ -167,7 +167,7 @@ ledger's.
 | D-24 | MIGRATION-DEBT class P16 — ledger keys naming a file (63 rows), and the ten text `#[cfg(test)]` splits | same | P16 | 0.4.6 | open |
 | D-25 | MIGRATION-DEBT class P17 — cross-crate and script readers (13 rows) | same | P17 | 0.4.6 | open |
 | D-26 | the ~110 `[..].concat()` needle halves written whole | split prep §6 | P18 | 0.4.6 | open |
-| D-27 | the CI dependency-direction guard, and `bt-term → bt-math` recorded | split prep §8.4–§8.5 | P19 | 0.4.6 | open |
+| D-27 | the CI dependency-direction guard, and `bt-term → bt-math` recorded | split prep §8.4–§8.5 | P19 | 0.4.6 | open — `bt-workbench`'s entry is already written for it in `docs/ARCHITECTURE.md` §3.3 (census-3, 2026-09-25) |
 | D-28 | MIGRATION-DEBT to zero and deleted; the allowlist final | split prep §7.2 | P20 | 0.4.6 | open |
 | D-29 | the unmoved topic `launch` (4 methods) | split prep Appendix C | none yet | 0.4.6 | open |
 | D-30 | the unmoved topic `settings` (31 methods) | split prep Appendix C | none yet | 0.4.6 | open |
@@ -197,7 +197,7 @@ ledger's.
 | D-54 | §4.2 class — identity, admission and lifecycle (facts 2, 3, 14, 20) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
 | D-55 | §4.2 class — projections, delivery and loss (facts 15, 16, 17, 18, 21) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
 | D-56 | §11 emergency termination — a journal and a defined recoverable revision | §11 | none yet | 0.4.7 | open |
-| D-57 | §12.1 — `bt-workbench` is born | §12.1 | census-3 and census-4 | 0.4.6 | open — day-one contents, order, public surface and guard entry in `docs/plans/design/ownership-census-2026-09-25.md` §5 (2026-09-25) |
+| D-57 | §12.1 — `bt-workbench` is born | §12.1 | census-3 and census-4 | 0.4.6 | open — day-one contents, order, public surface and guard entry in `docs/plans/design/ownership-census-2026-09-25.md` §5 (2026-09-25); **narrowed by census-3** (2026-09-25, branch `feat/bt-workbench-born`): the crate exists holding the ledger, `attention::expiry` (`WAIT_TTL`, `WaitClock`), `is_consumed` and `Places` (private counter, compile-fail doctest), `bt-app` its only dependent, `bt-layout` its only dependency; what remains is census-4 — the reach rule and its `notify` tests move, and D-48 |
 | D-58 | `profile_runtime`'s two tests failing `WouldBlock` on a slow CI disk | `docs/DESIGN.md`, 2026-09-23 | 34 | — | repaid on `fbfab1ff` |
 | D-59 | `bt-render`'s two atlas soaks, ignored under protest | `scripts/ci/ignored-tests.txt` | none yet | deferred → the version that gains a CI runner with a real graphics adapter; whether to provision one is decided in 0.4.6 | open — ticket 37 added a CI-runnable mixed-size stress (`mixed_size_seats_share_the_atlas_and_get_their_text_back`, WARP, texture ceiling 512) and no ignore; the soaks were not extended |
 | D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | 0.4.6 | open |

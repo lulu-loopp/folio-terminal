@@ -13800,8 +13800,10 @@ mod native_window_door_tests {
             "bt-app/src/tests.rs",
             // Declared with a `#[path]`, which is the other spelling.
             "bt-app/src/journeys_tests.rs",
-            // Declared in `attention.rs`, so it lives in `attention/`.
-            "bt-app/src/attention/tests.rs",
+            // Declared in `attention.rs`, so it lives in `attention/` — in
+            // `bt-workbench` since 2026-09-26 (0.4.6 census-3), where the
+            // ledger moved whole.
+            "bt-workbench/src/attention/tests.rs",
         ] {
             let file = root.join(named.replace('/', std::path::MAIN_SEPARATOR_STR));
             assert!(
