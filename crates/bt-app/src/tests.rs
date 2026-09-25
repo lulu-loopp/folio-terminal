@@ -17792,6 +17792,201 @@ fn a_new_window_carries_its_title_before_its_first_frame() {
     );
 }
 
+// ── the input method's caret area, once a turn at most (0.4.5 ticket 63) ──
+//
+// `Runtime` cannot be built without a window, so the policy is run on the real
+// `ImeCursorSlot` the window keeps — the same `want` every offer calls and the
+// same `take_due` `Runtime::flush_ime_cursor_area` spends — and the facts about
+// the runtime a slot cannot show (who calls the platform, where the turn and
+// `Ime::Enabled` flush) are read through `bt_source`.
+
+/// A caret line box on row `row` of a pane whose cells are 9x22 pixels.
+fn caret_on_row(row: i32) -> ImeCursorArea {
+    ImeCursorArea {
+        x: 976 + 71,
+        y: 40 + 22 * row,
+        width: 9,
+        height: 22,
+    }
+}
+
+/// RED (63) — **Ten caret moves in one turn tell the system the cursor area
+/// once.**
+///
+/// `Window::set_ime_cursor_area` is answered by the input method on the window
+/// thread, and the owner's stall reports caught one call holding it for 85 ms
+/// and one for 3,138 ms. Until ticket 63 every offer could call it at once — an
+/// `Enabled` and a `Preedit` in one turn paid twice. Now an offer only wants: ten
+/// moves in one turn leave the tenth area wanted, the turn's flush tells the
+/// system that one, and nothing is left held. And the platform is reached from
+/// one function only, which the turn calls once, after the last offer of the turn.
+///
+/// MUTATION: call `self.apply_ime_cursor_area(area, "sent")` in
+/// `Runtime::offer_ime_caret` at every move — red (the offer becomes a caller of
+/// the platform call).
+#[test]
+fn ten_caret_moves_in_one_turn_tell_the_system_the_cursor_area_once() {
+    let start = Instant::now();
+    let mut slot = ImeCursorSlot::default();
+    for row in 0..10 {
+        slot.want(caret_on_row(row));
+    }
+    let mut told = Vec::new();
+    told.extend(slot.take_due(start));
+    assert_eq!(told, vec![caret_on_row(9)], "one call, with the tenth area");
+    assert_eq!(slot.deadline(start), None, "and nothing is held");
+
+    let callers = calls_of("Runtime", "apply_ime_cursor_area").in_the_product(source());
+    assert_eq!(
+        reader_names(&callers),
+        vec!["flush_ime_cursor_area".to_owned()],
+        "{}",
+        callers.report(source())
+    );
+    assert_eq!(callers.len(), 1, "{}", callers.report(source()));
+    let flushes = calls_of("Runtime", "flush_ime_cursor_area").in_the_product(source());
+    assert_eq!(
+        reader_names(&flushes),
+        vec!["ime_input".to_owned(), "turn".to_owned()],
+        "{}",
+        flushes.report(source())
+    );
+    assert_eq!(flushes.len(), 2, "{}", flushes.report(source()));
+    let offer = method_body("Runtime", "offer_ime_caret");
+    assert!(
+        offer.contains("self.window.ime_cursor.want(area)"),
+        "an offer says which area it wants"
+    );
+    let turn = method_body("Runtime", "turn");
+    let flushed = turn
+        .find("self.flush_ime_cursor_area(now)")
+        .expect("the turn tells the system");
+    for before in [
+        "self.drain_pty()",
+        "self.offer_ime_caret(None)",
+        "self.flush_title(now)",
+    ] {
+        let at = turn.find(before).expect(before);
+        assert!(at < flushed, "`{before}` runs before the turn's flush");
+    }
+}
+
+/// RED (63) — **An unchanged area is not told again; a changed one is, on the
+/// next flush.**
+///
+/// The field rungs offer their caret on every turn and the grid on every frame,
+/// so a caret standing still is wanted over and over. Twenty turns a whole
+/// interval apart, each wanting the area already told: no call. Then the caret
+/// moves: the next flush tells it. A second move inside the same 60Hz slot is
+/// held, booked in the wake fold, and told when its deadline comes.
+///
+/// MUTATION: drop the equality check in `pace::LatestThrottle::offer` — the
+/// standing caret is told on every turn.
+#[test]
+fn an_unchanged_ime_cursor_area_is_not_told_again_and_a_changed_one_is_on_the_next_flush() {
+    let start = Instant::now();
+    let mut slot = ImeCursorSlot::default();
+    slot.want(caret_on_row(3));
+    assert_eq!(slot.take_due(start), Some(caret_on_row(3)));
+    let mut calls = 0;
+    for turn in 1..=20_u32 {
+        slot.want(caret_on_row(3));
+        calls += usize::from(
+            slot.take_due(start + IME_CURSOR_AREA_INTERVAL * turn)
+                .is_some(),
+        );
+    }
+    assert_eq!(calls, 0, "a caret standing still costs no call");
+
+    let moved_at = start + IME_CURSOR_AREA_INTERVAL * 21;
+    slot.want(caret_on_row(4));
+    assert_eq!(slot.take_due(moved_at), Some(caret_on_row(4)));
+    assert_eq!(slot.last_told(), Some(caret_on_row(4)));
+
+    let again = moved_at + Duration::from_millis(3);
+    slot.want(caret_on_row(5));
+    assert_eq!(slot.take_due(again), None, "held for its slot");
+    let due = slot.deadline(again).expect("the held area books a wake-up");
+    assert_eq!(due, moved_at + IME_CURSOR_AREA_INTERVAL);
+    assert_eq!(slot.take_due(due), Some(caret_on_row(5)));
+    assert_eq!(slot.deadline(due), None);
+}
+
+/// RED (63) — **Enabling the IME tells the area before the first preedit.**
+///
+/// winit sends `Ime::Enabled` from inside `WM_IME_STARTCOMPOSITION`, before the
+/// first `WM_IME_COMPOSITION`; the candidate list opens at whatever area the
+/// input method holds then. With every other offer waiting for the turn's tail,
+/// the `Enabled` arm is the one place that tells the system at once: after the
+/// slot is reset (a composition starting owes the system its area, whatever it
+/// was told before) and after both the grid's frame and a field have said which
+/// area they want. The slot half: a reset slot tells its first area at once, even
+/// a millisecond after the last call.
+///
+/// MUTATION: drop `self.flush_ime_cursor_area(..)` from the `Ime::Enabled` arm
+/// of `Runtime::ime_input` (the first area waits for the turn) — red.
+#[test]
+fn enabling_the_ime_tells_the_area_before_the_first_preedit() {
+    let input = method_body("Runtime", "ime_input");
+    let arm_at = input
+        .find("Ime::Enabled => {")
+        .expect("ime_input answers Enabled");
+    let arm_end = input[arm_at..]
+        .find("Ime::Preedit(text, cursor_range) => {")
+        .map(|end| arm_at + end)
+        .expect("the Preedit arm follows");
+    let arm = &input[arm_at..arm_end];
+    let mut previous = 0;
+    for step in [
+        "self.window.ime_cursor.reset()",
+        "self.publish_frame(",
+        "self.offer_ime_caret(None)",
+        "self.flush_ime_cursor_area(",
+    ] {
+        let at = arm
+            .find(step)
+            .unwrap_or_else(|| panic!("the Enabled arm runs `{step}`"));
+        assert!(
+            at >= previous,
+            "`{step}` is out of order in the Enabled arm"
+        );
+        previous = at;
+    }
+
+    let start = Instant::now();
+    let mut slot = ImeCursorSlot::default();
+    slot.want(caret_on_row(3));
+    assert_eq!(slot.take_due(start), Some(caret_on_row(3)));
+    slot.reset();
+    let enabled = start + Duration::from_millis(1);
+    slot.want(caret_on_row(3));
+    assert_eq!(
+        slot.take_due(enabled),
+        Some(caret_on_row(3)),
+        "a reset slot tells its first area at once, even the same area"
+    );
+}
+
+/// **A window that moved wants the area it last told again, and a newer wanted
+/// area wins** (ticket 63 keeps the 2026-09-14 re-arm on the one road).
+#[test]
+fn a_moved_window_wants_its_last_told_area_again_unless_a_newer_one_is_wanted() {
+    let start = Instant::now();
+    let mut slot = ImeCursorSlot::default();
+    assert_eq!(slot.rearm(), None, "nothing told, nothing to say again");
+    slot.want(caret_on_row(3));
+    assert_eq!(slot.take_due(start), Some(caret_on_row(3)));
+    assert_eq!(slot.rearm(), Some(caret_on_row(3)));
+    let later = start + IME_CURSOR_AREA_INTERVAL;
+    assert_eq!(slot.take_due(later), Some(caret_on_row(3)));
+    slot.want(caret_on_row(4));
+    assert_eq!(slot.rearm(), Some(caret_on_row(4)));
+    assert_eq!(
+        slot.take_due(later + IME_CURSOR_AREA_INTERVAL),
+        Some(caret_on_row(4))
+    );
+}
+
 #[test]
 fn startup_polls_pty_until_the_first_text_frame_is_presented() {
     assert_eq!(startup_poll_delay(false), Some(STARTUP_PTY_POLL_INTERVAL));
@@ -35341,10 +35536,7 @@ fn cancelling_a_composition_goes_through_one_door() {
     for (cleared, what) in [
         ("bt_platform::cancel_composition", "the method's own state"),
         ("self.window.preedit = None", "the letters"),
-        (
-            "ime_cursor_throttle.reset()",
-            "the rectangle the list hung from",
-        ),
+        ("ime_cursor.reset()", "the rectangle the list hung from"),
         (
             "destroy_ime_caret(\"cancel_composition\")",
             "the caret Pinyin follows",

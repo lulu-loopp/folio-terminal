@@ -53,12 +53,12 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 9 | 3 | 6 |
+| 0.4.5 | 10 | 3 | 7 |
 | 0.4.6 | 40 | 40 | 0 |
 | 0.4.7 | 14 | 14 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
 | already repaid | 1 | 0 | 1 |
-| **total** | **67** | **60** | **7** |
+| **total** | **68** | **60** | **8** |
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -90,6 +90,10 @@ window thread, no ownership moved) and that row's part of D-2; it added no row.
 Ticket 55 repaid D-61 and D-62 whole (the two defects the Mac build carried:
 a `webnav` test that asked a Windows question on every machine, and three
 Windows-only constants compiled where nothing read them); it added no row.
+Ticket 63 added D-69 and repaid it whole (§5.3 row 22: the input method's caret
+area is one wanted value, told to the system by one road at most once a turn
+and only when it moved, and at once on `Ime::Enabled`) and with it that row's
+part of D-2.
 
 Ticket 54 narrowed D-64 and repaid none of it: the environment is asked for once on
 an idle turn after startup, which takes the creation call (8.5–39 ms) out of the
@@ -109,7 +113,7 @@ ledger's.
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
-| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38) |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); row 22 repaid by ticket 63 (D-69) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
@@ -175,6 +179,7 @@ ledger's.
 | D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.7 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.7 before the 0.5 restyle, and the row closes with it | open |
 | D-66 | a fading surface's translucent pixels step at the landing frame: composited on encoded bytes while it fades, blended in linear light at rest — on the light theme the tip's shadow lightens at its darkest pixel from about `#DB` to `#EE` as the fade lands | ticket 46's report (Findings); the 2026-09-23 fade audit, §7 | none yet | 0.4.7 — the L variant (all overlay translucency in encoded space, with D-65), which removes the step | open |
 | D-67 | `bt-app` fails clippy on macOS: nine app-build and five test-build unused items and ignored results | ticket 55's report | none yet | 0.4.6 — beside D-63, since widening the Mac CI job hits it | open |
+| D-69 | §5.3 row 22 — `Window::set_ime_cursor_area` called at every offer of a caret: twice in one turn (15 + 85 ms) and once for 3,138 ms under load on the owner's next93 | the owner's next93 stall reports, 2026-09-25; ticket 63 | 63 | 0.4.5 — typing stability | repaid (ticket 63) |
 
 ---
 
@@ -298,7 +303,7 @@ first cut must not be advertised as eliminating every window-thread stall**.
 **Status.** open. Lanes, the exception list and the migration order are in
 `docs/ARCHITECTURE.md` §5.
 
-**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38).
+**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); row 22 repaid by ticket 63 (D-69).
 
 ---
 
