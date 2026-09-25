@@ -70038,6 +70038,19 @@ fn main() -> Result<()> {
     // asked anything of is not. See `hang_watch::TRACED_HANG_THRESHOLD`.
     let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
     hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY), trace_perf);
+    // **And every message the pump dispatches, timed** (ticket 64). A hold the
+    // self-report charged to `message pump` names the message that spent it:
+    // the posted ones are timed by the message hook below, the sent ones (the
+    // input method's, the compositor's) by two hooks of this thread's own that
+    // this installs. On this thread, before the loop, because the hooks are the
+    // calling thread's; nothing is installed where the pump offers no per-message
+    // door (see `bt_platform::pump`).
+    if let Err(error) = bt_platform::pump::time_messages(bt_platform::pump::Timing {
+        began: hang_watch::message_began,
+        ended: hang_watch::message_ended,
+    }) {
+        diagnostics::note(&format!("message timing: {error}"));
+    }
     // The one-time media-session warm-up (§7.23) is paid here, off the first
     // hover: the process-resident session costs ~210ms cold and ~10ms warm.
     bt_platform::video::prewarm();
@@ -70090,8 +70103,10 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     {
         use winit::platform::windows::EventLoopBuilderExtWindows;
-        builder.with_msg_hook(bt_platform::hotkey::summon_message_hook(
-            quake::SUMMON_HOTKEY_ID,
+        // The summon hook is asked first; every message it lets through is
+        // then dispatched between the pump timing's pair (ticket 64).
+        builder.with_msg_hook(bt_platform::pump::timed_dispatch(
+            bt_platform::hotkey::summon_message_hook(quake::SUMMON_HOTKEY_ID),
         ));
     }
     // **`Cmd+Q` is this product's `quit` row and not AppKit's menu item**

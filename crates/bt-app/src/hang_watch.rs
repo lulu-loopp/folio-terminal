@@ -211,7 +211,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -322,6 +322,22 @@ fn slow_hold_threshold_ms() -> u64 {
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
 const STATION_COUNT: usize = 208;
+
+/// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
+/// apart can nest (ticket 64).
+///
+/// A message sent while another is being dispatched begins inside it — a
+/// posted key whose translation sends the input method's `WM_IME_*`, a
+/// `SetWindowPos` that sends `WM_WINDOWPOSCHANGING` — and the pair is timed on
+/// its own. Sixteen is far past any nesting a window procedure reaches; a
+/// seventeenth level is still counted, and its time stays with the sixteenth,
+/// which is the message it was dispatched inside.
+const MESSAGE_DEPTH: usize = 16;
+
+/// A dispatched message that cost the pump more than this is counted in the
+/// line's `messages over` (ticket 64). Twenty milliseconds is more than a frame
+/// at 60 Hz: one such message on a turn is a frame missed.
+const SLOW_MESSAGE_MS: u64 = 20;
 
 #[path = "hang_watch_detail.rs"]
 mod detail;
@@ -1585,7 +1601,91 @@ pub struct SlowHold {
     /// platform counts it and both ends were sampled. See [`Paging`].
     pub paging: Option<Paging>,
     pub cpu_us: Option<u64>,
+    /// The longest message the pump dispatched in this hold, and how many ran
+    /// long. See [`PumpMessages`].
+    pub messages: PumpMessages,
     detail: detail::Tree,
+}
+
+/// **Which message the pump's milliseconds went to** (ticket 64).
+///
+/// Each dispatched message is timed on the ledger's own clock by what it cost
+/// [`Station::Pump`] — the milliseconds charged to `message pump` between its
+/// start and its end, less those of the messages dispatched inside it. So a
+/// key whose handler Folio ran for 300 ms costs the pump nothing for them (they
+/// are the handler's station's), and a message the thread spent 480 ms inside
+/// with no handler of Folio's running is 480 ms here. Plain integers, for
+/// [`SlowHold`]'s reason; the name is looked up only when the line is written.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PumpMessages {
+    /// The id of the message that cost the pump the most.
+    pub longest: u32,
+    /// What it cost, in milliseconds. Zero when no message cost a millisecond.
+    pub longest_ms: u64,
+    /// How many messages cost more than [`SLOW_MESSAGE_MS`].
+    pub over: u64,
+}
+
+impl PumpMessages {
+    /// The note printed beside `message pump`, or `None` when no message cost
+    /// the pump a millisecond.
+    #[must_use]
+    fn note(self) -> Option<String> {
+        if self.longest_ms == 0 {
+            return None;
+        }
+        let mut note = format!(
+            "[longest {} {} ms",
+            bt_platform::pump::message_label(self.longest),
+            self.longest_ms
+        );
+        match self.over {
+            0 => {}
+            1 => note.push_str(&format!(", 1 message over {SLOW_MESSAGE_MS} ms")),
+            over => note.push_str(&format!(", {over} messages over {SLOW_MESSAGE_MS} ms")),
+        }
+        note.push(']');
+        Some(note)
+    }
+}
+
+/// One message being dispatched, as [`Heartbeat::message_began_at`] left it.
+#[derive(Debug)]
+struct MessageFrame {
+    id: AtomicU32,
+    /// The hold the two figures below are counted in; see
+    /// [`Heartbeat::hold_serial`].
+    hold: AtomicU64,
+    /// The pump's account when the message began.
+    since_ms: AtomicU64,
+    /// What the messages dispatched inside it cost the pump.
+    nested_ms: AtomicU64,
+}
+
+impl MessageFrame {
+    fn new() -> Self {
+        Self {
+            id: AtomicU32::new(0),
+            hold: AtomicU64::new(0),
+            since_ms: AtomicU64::new(0),
+            nested_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// Its two figures in hold `hold`: a message that began in an earlier hold
+    /// (a modal loop inside its dispatch parks and wakes the loop) is counted
+    /// from this hold's start, because the account it began against was
+    /// written down and emptied when that hold closed.
+    fn figures(&self, hold: u64) -> (u64, u64) {
+        if self.hold.load(Ordering::Relaxed) == hold {
+            (
+                self.since_ms.load(Ordering::Relaxed),
+                self.nested_ms.load(Ordering::Relaxed),
+            )
+        } else {
+            (0, 0)
+        }
+    }
 }
 
 impl SlowHold {
@@ -1619,18 +1719,22 @@ impl SlowHold {
                 .cmp(&left.1)
                 .then(left.0.slot().cmp(&right.0.slot()))
         });
+        let pump = self.messages.note();
         let where_ = if spent.is_empty() {
             String::from("no station held it")
         } else {
             spent
                 .iter()
-                .map(|(station, spent)| format!("{station} {spent} ms"))
+                .map(|(station, spent)| match (&pump, *station) {
+                    (Some(pump), Station::Pump) => format!("{station} {spent} ms {pump}"),
+                    _ => format!("{station} {spent} ms"),
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         };
         let where_ = self
             .detail
-            .line()
+            .line(pump.as_deref())
             .filter(|line| !line.is_empty())
             .unwrap_or(where_);
         let mut line = format!(
@@ -1736,6 +1840,20 @@ pub struct Heartbeat {
     /// When the cached opening footprint was sampled, plus one; zero means no
     /// sample has yet been attempted.
     footprint_sampled_at_ms: AtomicU64,
+    /// **Which hold is open**, counted up by [`Self::open_hold`]. What a
+    /// [`MessageFrame`] is stamped with, so a message still being dispatched
+    /// when its hold closed is counted from the next one's start.
+    hold_serial: AtomicU64,
+    /// The messages being dispatched, outermost first (ticket 64). Only the
+    /// window thread writes them; see [`Self::message_began_at`].
+    message_frames: [MessageFrame; MESSAGE_DEPTH],
+    /// How many messages are being dispatched, including any past
+    /// [`MESSAGE_DEPTH`].
+    message_depth: AtomicUsize,
+    /// This hold's [`PumpMessages`], field by field.
+    longest_message: AtomicU32,
+    longest_message_ms: AtomicU64,
+    slow_messages: AtomicU64,
 }
 
 impl Default for Heartbeat {
@@ -1764,6 +1882,12 @@ impl Heartbeat {
             held_working_set: AtomicU64::new(0),
             held_footprint: AtomicBool::new(false),
             footprint_sampled_at_ms: AtomicU64::new(0),
+            hold_serial: AtomicU64::new(0),
+            message_frames: std::array::from_fn(|_| MessageFrame::new()),
+            message_depth: AtomicUsize::new(0),
+            longest_message: AtomicU32::new(0),
+            longest_message_ms: AtomicU64::new(0),
+            slow_messages: AtomicU64::new(0),
             origin: Instant::now(),
             at_ms: AtomicU64::new(0),
             turn: AtomicU64::new(0),
@@ -1848,6 +1972,10 @@ impl Heartbeat {
     /// refreshed if needed and the clock started.
     fn open_hold(&self, now_ms: u64) {
         self.detail.clear();
+        self.hold_serial.fetch_add(1, Ordering::Relaxed);
+        self.longest_message.store(0, Ordering::Relaxed);
+        self.longest_message_ms.store(0, Ordering::Relaxed);
+        self.slow_messages.store(0, Ordering::Relaxed);
         self.held_cpu.store(
             (self.cpu_time)().map_or(0, |us| us.saturating_add(1)),
             Ordering::Relaxed,
@@ -1952,6 +2080,7 @@ impl Heartbeat {
         // Below the threshold this line is never reached, which is the whole of
         // what keeps the second system call off the ordinary turn.
         let paging = self.close_footprint();
+        let messages = self.close_messages(spent_ms[Station::Pump.slot()]);
         // `try_lock` and never `lock`: see [`Self::slow`].
         if let Ok(mut queue) = self.slow.try_lock()
             && queue.len() < SLOW_HOLDS_KEPT
@@ -1971,6 +2100,7 @@ impl Heartbeat {
                 stall_count,
                 spent_ms,
                 paging,
+                messages,
             });
         } else {
             self.slow_dropped.fetch_add(1, Ordering::Relaxed);
@@ -1993,6 +2123,119 @@ impl Heartbeat {
             std::mem::take(&mut *queue),
             self.slow_dropped.swap(0, Ordering::Relaxed),
         )
+    }
+
+    /// **What the pump has been charged in this hold, as of `now_ms`**: the
+    /// closed stretches of [`Station::Pump`] plus the open one, if the thread
+    /// is in it.
+    fn pump_ms_at(&self, now_ms: u64) -> u64 {
+        let closed = self.spent_ms[Station::Pump.slot()].load(Ordering::Relaxed);
+        if Station::from_byte(self.station.load(Ordering::Relaxed)) == Station::Pump {
+            closed.saturating_add(
+                now_ms.saturating_sub(self.station_since_ms.load(Ordering::Relaxed)),
+            )
+        } else {
+            closed
+        }
+    }
+
+    /// Fold one message's cost to the pump into this hold's [`PumpMessages`].
+    fn note_message(&self, id: u32, ms: u64) {
+        if ms > self.longest_message_ms.load(Ordering::Relaxed) {
+            self.longest_message_ms.store(ms, Ordering::Relaxed);
+            self.longest_message.store(id, Ordering::Relaxed);
+        }
+        if ms > SLOW_MESSAGE_MS {
+            self.slow_messages.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// **A message with id `id` is about to reach its window procedure**
+    /// (ticket 64). Called by `bt_platform::pump` on the window thread, for a
+    /// posted message around its dispatch and for a sent one around its
+    /// procedure.
+    ///
+    /// One clock read and four relaxed stores: no allocation and no lock, for
+    /// the reason every verb of this struct keeps, and nothing at all while the
+    /// pump dispatches nothing.
+    pub fn message_began_at(&self, id: u32, now_ms: u64) {
+        let depth = self.message_depth.fetch_add(1, Ordering::Relaxed);
+        if let Some(frame) = self.message_frames.get(depth) {
+            frame.id.store(id, Ordering::Relaxed);
+            frame
+                .hold
+                .store(self.hold_serial.load(Ordering::Relaxed), Ordering::Relaxed);
+            frame
+                .since_ms
+                .store(self.pump_ms_at(now_ms), Ordering::Relaxed);
+            frame.nested_ms.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// **The most recent message that began has returned** (ticket 64).
+    ///
+    /// Its cost is what the pump was charged while it ran, less what the
+    /// messages dispatched inside it cost; that whole figure is handed to the
+    /// message it was itself dispatched inside, so each millisecond is one
+    /// message's.
+    pub fn message_ended_at(&self, now_ms: u64) {
+        let Some(depth) = self.message_depth.load(Ordering::Relaxed).checked_sub(1) else {
+            return;
+        };
+        self.message_depth.store(depth, Ordering::Relaxed);
+        let Some(frame) = self.message_frames.get(depth) else {
+            return;
+        };
+        let hold = self.hold_serial.load(Ordering::Relaxed);
+        let (since, nested) = frame.figures(hold);
+        let whole = self.pump_ms_at(now_ms).saturating_sub(since);
+        self.note_message(
+            frame.id.load(Ordering::Relaxed),
+            whole.saturating_sub(nested),
+        );
+        if let Some(parent) = depth
+            .checked_sub(1)
+            .and_then(|outer| self.message_frames.get(outer))
+        {
+            let (since, nested) = parent.figures(hold);
+            parent.hold.store(hold, Ordering::Relaxed);
+            parent.since_ms.store(since, Ordering::Relaxed);
+            parent
+                .nested_ms
+                .store(nested.saturating_add(whole), Ordering::Relaxed);
+        }
+    }
+
+    /// **This hold's [`PumpMessages`], with the messages still being
+    /// dispatched counted as far as they have got.**
+    ///
+    /// A hold normally closes with nothing dispatched — `about_to_wait` is
+    /// called between messages — but a modal loop (a window being dragged, a
+    /// menu) runs the loop from inside one message's dispatch, and a hold
+    /// that closes there would otherwise leave out the very message that held
+    /// it. `pump_ms` is the pump's whole account for the hold, taken as it
+    /// closed.
+    fn close_messages(&self, pump_ms: u64) -> PumpMessages {
+        let hold = self.hold_serial.load(Ordering::Relaxed);
+        let open = self
+            .message_depth
+            .load(Ordering::Relaxed)
+            .min(MESSAGE_DEPTH);
+        let mut inner_whole = 0;
+        for frame in self.message_frames[..open].iter().rev() {
+            let (since, nested) = frame.figures(hold);
+            let whole = pump_ms.saturating_sub(since);
+            self.note_message(
+                frame.id.load(Ordering::Relaxed),
+                whole.saturating_sub(nested).saturating_sub(inner_whole),
+            );
+            inner_whole = whole;
+        }
+        PumpMessages {
+            longest: self.longest_message.load(Ordering::Relaxed),
+            longest_ms: self.longest_message_ms.load(Ordering::Relaxed),
+            over: self.slow_messages.load(Ordering::Relaxed),
+        }
     }
 
     /// **The window thread entered a named call.** Clocked exclusive accounting.
@@ -2112,6 +2355,18 @@ pub fn heartbeat() -> &'static Heartbeat {
 /// The window thread came round. See [`Heartbeat::beat`].
 pub fn beat() {
     HEARTBEAT.beat();
+}
+
+/// A message is about to be dispatched on the window thread. See
+/// [`Heartbeat::message_began_at`]; handed to `bt_platform::pump` at startup.
+pub fn message_began(id: u32) {
+    HEARTBEAT.message_began_at(id, HEARTBEAT.now_ms());
+}
+
+/// The most recent message that began has returned. See
+/// [`Heartbeat::message_ended_at`].
+pub fn message_ended() {
+    HEARTBEAT.message_ended_at(HEARTBEAT.now_ms());
 }
 
 /// The window thread entered `station`. See [`Heartbeat::at`].
@@ -3239,10 +3494,10 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
-        Answer, Footprint, HangWatch, Heartbeat, Location, Paging, Park, Pulse, ReportFacts,
-        STATION_COUNT, SlowHold, Stall, Station, Verdict, can_come_round, prune_reports,
-        render_healed, render_report, report_filename, slow_hold_threshold_ms, utc_timestamp,
-        write_report,
+        Answer, Footprint, HangWatch, Heartbeat, Location, Paging, Park, Pulse, PumpMessages,
+        ReportFacts, STATION_COUNT, SlowHold, Stall, Station, Verdict, can_come_round,
+        prune_reports, render_healed, render_report, report_filename, slow_hold_threshold_ms,
+        utc_timestamp, write_report,
     };
 
     /// A heartbeat on a platform that counts nothing, which is what every test
@@ -4737,6 +4992,7 @@ mod tests {
         let hold = SlowHold {
             cpu_us: None,
             detail: super::detail::Tree::default(),
+            messages: PumpMessages::default(),
             turn: 7,
             held_ms: 900,
             session_age_ms: 12_345,
@@ -4768,6 +5024,7 @@ mod tests {
         let hold = SlowHold {
             cpu_us: None,
             detail: super::detail::Tree::default(),
+            messages: PumpMessages::default(),
             turn: 3_937_579,
             held_ms: 4_056,
             session_age_ms: 8_404_000,
@@ -4802,6 +5059,7 @@ mod tests {
         let hold = SlowHold {
             cpu_us: None,
             detail: super::detail::Tree::default(),
+            messages: PumpMessages::default(),
             turn: 3_937_579,
             held_ms: 4_056,
             session_age_ms: 8_404_000,
@@ -4825,6 +5083,7 @@ mod tests {
         let hold = |before: u64, after: u64| SlowHold {
             cpu_us: None,
             detail: super::detail::Tree::default(),
+            messages: PumpMessages::default(),
             turn: 0,
             held_ms: 900,
             session_age_ms: 900,
@@ -5008,6 +5267,138 @@ mod tests {
             Some(200),
             "the 400 faults taken across the first hold and the park after it \
              are not this hold's",
+        );
+    }
+
+    /// RED (64) — **a slow message is named in the self-report with its id and
+    /// duration.**
+    ///
+    /// The owner's next93 holds read `message pump 516 ms` and `205 ms` with
+    /// every named child small: the thread was inside Windows' message
+    /// dispatch, and the line could not say in which message. The synthetic
+    /// hold is that shape: the pump dispatches a key, inside whose translation
+    /// the input method's composition is sent and takes 480 ms; then a move
+    /// whose 300 ms are Folio's own handler's; then a timer. The composition is
+    /// named, the key is charged only what it cost outside the composition, and
+    /// the move's handler time stays with the handler.
+    ///
+    /// MUTATION: drop the max tracking in `Heartbeat::note_message` (never
+    /// store `longest_message_ms`) and the line says nothing beside
+    /// `message pump`.
+    #[test]
+    fn a_slow_message_is_named_in_the_self_report_with_its_id_and_duration() {
+        const WM_KEYDOWN: u32 = 0x0100;
+        const WM_IME_COMPOSITION: u32 = 0x010F;
+        const WM_MOUSEMOVE: u32 = 0x0200;
+        const WM_TIMER: u32 = 0x0113;
+        let heart = Heartbeat::sampling(no_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::Event, 1_000);
+        heart.at_station(Station::Pump, 1_010);
+        heart.message_began_at(WM_KEYDOWN, 1_020);
+        heart.message_began_at(WM_IME_COMPOSITION, 1_030);
+        heart.message_ended_at(1_510);
+        heart.message_ended_at(1_525);
+        heart.message_began_at(WM_MOUSEMOVE, 1_525);
+        heart.at_station(Station::Event, 1_530);
+        heart.at_station(Station::Pump, 1_830);
+        heart.message_ended_at(1_835);
+        heart.message_began_at(WM_TIMER, 1_835);
+        heart.message_ended_at(1_860);
+        heart.park_at(Park::Indefinite, 1_860);
+        let (holds, dropped) = heart.take_slow_holds();
+        assert_eq!(dropped, 0);
+        let [hold] = holds.as_slice() else {
+            panic!("one hold, and it ran long: {holds:?}")
+        };
+        assert_eq!(hold.spent_ms[Station::Pump.slot()], 550);
+        assert_eq!(
+            hold.messages,
+            PumpMessages {
+                longest: WM_IME_COMPOSITION,
+                longest_ms: 480,
+                over: 3,
+            },
+            "the composition 480 ms, the key 25 ms beside it, the timer 25 ms;              the move cost the pump 10 ms and its handler's 300 ms are the handler's"
+        );
+        let line = hold.line();
+        assert!(
+            line.contains(
+                "message pump 550 ms [longest WM_IME_COMPOSITION 480 ms, 3 messages over 20 ms]"
+            ),
+            "{line}"
+        );
+        assert!(line.contains("window_event 310 ms"), "{line}");
+        assert_eq!(line.matches("longest").count(), 1, "{line}");
+    }
+
+    /// **A message still being dispatched when its hold closes is counted as
+    /// far as it has got, and from the next hold's start in the next one.**
+    ///
+    /// A modal loop — a window dragged by its frame, a menu — runs the loop
+    /// from inside one message's dispatch, so the hold that closes there is
+    /// held by a message that has not returned. And the account that message
+    /// began against was emptied when that hold was written down: counting it
+    /// in the next hold against its old starting point would be a number from
+    /// two holds at once.
+    ///
+    /// MUTATION: return the recorded figures whatever the hold in
+    /// `MessageFrame::figures` and the second hold's frame is measured from the
+    /// first hold's account (`longest_ms` 500 instead of 600).
+    #[test]
+    fn a_message_that_outlives_its_hold_is_counted_in_each_hold_it_held() {
+        const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+        let heart = Heartbeat::sampling(no_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::Event, 1_000);
+        heart.at_station(Station::Pump, 1_000);
+        heart.message_began_at(WM_NCLBUTTONDOWN, 1_100);
+        heart.park_at(Park::Indefinite, 1_800);
+        heart.woke_at(2_000);
+        heart.at_station(Station::Pump, 2_000);
+        heart.message_ended_at(2_600);
+        heart.park_at(Park::Indefinite, 2_600);
+        let (holds, _) = heart.take_slow_holds();
+        let [first, second] = holds.as_slice() else {
+            panic!("two holds, both long: {holds:?}")
+        };
+        assert_eq!(
+            (first.messages.longest, first.messages.longest_ms),
+            (WM_NCLBUTTONDOWN, 700)
+        );
+        assert_eq!(
+            (second.messages.longest, second.messages.longest_ms),
+            (WM_NCLBUTTONDOWN, 600)
+        );
+        assert!(
+            second.line().contains(
+                "message pump 600 ms [longest WM_NCLBUTTONDOWN 600 ms, 1 message over 20 ms]"
+            ),
+            "{}",
+            second.line()
+        );
+    }
+
+    /// **A hold whose pump dispatched nothing that cost it a millisecond says
+    /// nothing extra**, and the line keeps the shape it had before ticket 64.
+    #[test]
+    fn a_pump_with_no_costly_message_prints_no_note() {
+        let heart = Heartbeat::sampling(no_footprint);
+        heart.woke_at(1_000);
+        heart.at_station(Station::Pump, 1_000);
+        heart.message_began_at(0x0200, 1_000);
+        heart.message_ended_at(1_000);
+        heart.park_at(Park::Indefinite, 1_700);
+        let (holds, _) = heart.take_slow_holds();
+        let [hold] = holds.as_slice() else {
+            panic!("one hold: {holds:?}")
+        };
+        assert_eq!(hold.messages, PumpMessages::default());
+        assert!(!hold.line().contains('['), "{}", hold.line());
+        assert!(
+            hold.line().contains("message pump 700 ms"),
+            "{}",
+            hold.line()
         );
     }
 }
