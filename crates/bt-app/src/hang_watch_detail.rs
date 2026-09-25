@@ -264,7 +264,18 @@ impl Tree {
                 .sum::<u64>()
     }
 
-    fn children(&self, parent: usize) -> String {
+    /// The node the pump's note is printed beside: the `message pump` node
+    /// that was charged the most, when there is one (ticket 64).
+    fn pump_node(&self) -> Option<usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.key != 0 && node.station() == Station::Pump)
+            .max_by_key(|(index, node)| (node.ms, std::cmp::Reverse(*index)))
+            .map(|(index, _)| index)
+    }
+
+    fn children(&self, parent: usize, pump: Option<(usize, &str)>) -> String {
         let mut children: Vec<_> = self
             .nodes
             .iter()
@@ -278,6 +289,12 @@ impl Tree {
             .into_iter()
             .map(|(index, node)| {
                 let mut line = format!("{} {} ms", node.station(), node.ms);
+                if let Some((pump_node, note)) = pump
+                    && pump_node == index
+                {
+                    line.push(' ');
+                    line.push_str(note);
+                }
                 if node.pane != 0 {
                     let kind = if node.station() == Station::DrainTab {
                         "tab"
@@ -301,7 +318,7 @@ impl Tree {
                         super::present_progress(node.station())
                     ));
                 }
-                let nested = self.children(index);
+                let nested = self.children(index, pump);
                 if !nested.is_empty() {
                     line.push_str(&format!(" ({nested})"));
                 }
@@ -311,11 +328,14 @@ impl Tree {
             .join(", ")
     }
 
-    pub(super) fn line(&self) -> Option<String> {
+    /// The tree as one line, with `pump` — the note of which message the
+    /// pump's time went to — beside the `message pump` node it belongs to.
+    pub(super) fn line(&self, pump: Option<&str>) -> Option<String> {
         if self.overflow || self.nodes.iter().all(|node| node.key == 0) {
             return None;
         }
-        Some(self.children(ROOT))
+        let pump = pump.and_then(|note| Some((self.pump_node()?, note)));
+        Some(self.children(ROOT, pump))
     }
 
     pub(super) fn overflowed(&self) -> bool {
@@ -410,7 +430,7 @@ mod tests {
         ledger.restore(root);
         ledger.enter(Station::Event, root, 0);
         ledger.charge(1);
-        let line = ledger.snapshot().line().unwrap();
+        let line = ledger.snapshot().line(None).unwrap();
         assert!(line.contains("[win=7 gen=3 seq=11 outcome=in_progress:present]"));
         assert!(line.contains("[win=8 gen=4 seq=1 outcome=in_progress:present]"));
         assert_eq!(line.matches("[win=").count(), 2);
@@ -439,7 +459,7 @@ mod tests {
         let tree = ledger.snapshot();
         assert_eq!(tree.inclusive(event), 1311);
         assert_eq!(tree.nodes.iter().map(|node| node.ms).sum::<u64>(), 1311);
-        let line = tree.line().unwrap();
+        let line = tree.line(None).unwrap();
         assert_eq!(
             line,
             "window_event 7 ms (IME Commit 3 ms (PtySession::write input enqueue 1300 ms [bytes=6, accepted=6, count=1], IME set_cursor_area 1 ms))"
@@ -480,13 +500,13 @@ mod tests {
         ledger.at(Station::Event);
         ledger.enter(Station::PtyInput, ledger.current(), 0);
         ledger.charge(9);
-        let line = ledger.snapshot().line().unwrap();
+        let line = ledger.snapshot().line(None).unwrap();
         assert_eq!(line.matches("input enqueue").count(), 3);
         assert!(line.contains("drain pane 2 ms [pane=0] [bytes=6, accepted=0, count=2]"));
         assert!(line.contains("drain pane 1 ms [pane=1]"));
         assert_eq!(ledger.snapshot().inclusive(drain), 9);
         ledger.clear();
-        assert_eq!(ledger.snapshot().line(), None);
+        assert_eq!(ledger.snapshot().line(None), None);
     }
 
     #[test]
@@ -497,6 +517,6 @@ mod tests {
             ledger.charge(1);
         }
         assert!(ledger.snapshot().overflowed());
-        assert_eq!(ledger.snapshot().line(), None);
+        assert_eq!(ledger.snapshot().line(None), None);
     }
 }

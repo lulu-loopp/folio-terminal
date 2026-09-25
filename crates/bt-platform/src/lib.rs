@@ -3173,6 +3173,12 @@ pub mod hang;
 /// difference should be readable on one screen.
 pub mod mem;
 
+/// **Each message the window thread's pump dispatches, timed** (ticket 64) —
+/// the posted ones through winit's message hook, the sent ones through this
+/// thread's own `WH_CALLWNDPROC` pair, and the names the self-report calls
+/// them by. Nothing is installed off Windows; see the module's own header.
+pub mod pump;
+
 /// **The system's pan gesture, as travel the wheel road can spend** (0.4.4
 /// ticket 11). Platform-free arithmetic over the positions Windows reports;
 /// the Windows touch door ([`let_the_system_translate_touch`]) is its only
