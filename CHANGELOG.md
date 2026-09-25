@@ -24,6 +24,7 @@ All notable changes to Folio are recorded here. The format follows
   font on the machine.
 - A terminal font with no bold style no longer switches to another font's bold
   for bold text.
+- Bold Chinese text no longer leaves single characters at regular weight.
 - Keys, pastes, clicks and the mouse wheel no longer reach what is under the
   "reopen your other tabs" card while it is up; the wheel no longer scrolls a
   pane under the other dialogs either. Esc puts the card away, and the next
