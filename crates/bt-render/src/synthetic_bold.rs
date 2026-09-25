@@ -7,8 +7,10 @@
 //! has a synthetic slant (`FAKE_ITALIC`) and no synthetic weight, and glyphon
 //! rasterizes every text glyph itself, so the heavier raster is drawn through
 //! glyphon's one open door: a **custom glyph**, rasterized here from the same
-//! face, glyph and subpixel position the shaper chose, with swash's
-//! `Render::embolden`. The shaper and the pen are untouched; only the ink is.
+//! face, glyph and subpixel position the shaper chose, and thickened outward
+//! by FreeType's emboldening ([`synthetic_bold_image`]; swash's own reads the
+//! outline's orientation from the wrong polygon, ticket 61). The shaper and the
+//! pen are untouched; only the ink is.
 //!
 //! # The three obligations the door brings
 //!
@@ -30,13 +32,14 @@ use super::*;
 use glyphon::cosmic_text::{CacheKey, CacheKeyFlags};
 use glyphon::{ContentType, CustomGlyph, RasterizeCustomGlyphRequest, RasterizedCustomGlyph};
 use std::ops::Range;
+use swash::scale::outline::Outline;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
-use swash::zeno::{Angle, Format, Transform, Vector};
+use swash::zeno::{Angle, Format, Mask, Origin, Point, Transform, Vector, Verb};
 
 /// **How far a synthetic bold moves an outline, as a fraction of the em.**
 ///
-/// swash's embolden is a port of FreeType's `FT_Outline_EmboldenXY` without its
-/// halving: every point moves by this distance on each axis plus its corner's
+/// The embolden ([`embolden_outline`]) is FreeType's `FT_Outline_EmboldenXY`
+/// without its halving, as swash ports it: every point moves by this distance on each axis plus its corner's
 /// bisector shift of the same size, so a stroke thickens by twice it and the
 /// ink box grows by twice it to the right and to the top and not at all to the
 /// left or the bottom — the pen and the baseline stay where the regular glyph
@@ -59,12 +62,19 @@ const SYNTHETIC_BOLD_ID_SPACE: usize = glyphon::CustomGlyphId::MAX as usize + 1;
 ///
 /// cosmic-text's `swash_image` step for step — the face's `wght` coordinate,
 /// the hint flag, the subpixel offset, the three sources in the same order, the
-/// 14° skew for `FAKE_ITALIC` — with one addition: `embolden`. swash applies it
-/// to the outline before the skew, so a bold-italic cell in a regular-only
-/// family is slanted *and* heavier, and it applies it to `Source::Outline` only,
-/// so a colour glyph comes out exactly as it would have. With `embolden` false
-/// this is the regular raster, which is how the one glyph of a mixed cluster
-/// that has a bold face of its own is drawn beside one that does not.
+/// 14° skew for `FAKE_ITALIC` — with one addition: the outline is emboldened
+/// ([`embolden_outline`]) before the skew, so a bold-italic cell in a
+/// regular-only family is slanted *and* heavier. A colour source (a colour
+/// outline, a colour bitmap) is drawn exactly as swash's `Render` draws it and
+/// never emboldened; only the monochrome outline is. With `embolden` false this
+/// is the regular raster, which is how the one glyph of a mixed cluster that has
+/// a bold face of its own is drawn beside one that does not.
+///
+/// The outline arm is swash's own (`Render::render_into`, `Source::Outline`:
+/// the scaled outline, then the transform, then a non-zero `Mask` at the
+/// subpixel offset with the origin at the bottom left) with its emboldening
+/// replaced, because swash 0.2.9 decides which side of a contour is ink from
+/// the wrong polygon (ticket 61, [`outline_orientation`]).
 pub(crate) fn synthetic_bold_image(
     context: &mut ScaleContext,
     font: &glyphon::Font,
@@ -90,24 +100,208 @@ pub(crate) fn synthetic_bold_image(
     } else {
         Vector::new(key.x_bin.as_float(), key.y_bin.as_float())
     };
-    Render::new(&[
+    let skew = key
+        .flags
+        .contains(CacheKeyFlags::FAKE_ITALIC)
+        .then(|| Transform::skew(Angle::from_degrees(14.0), Angle::from_degrees(0.0)));
+    if let Some(image) = Render::new(&[
         Source::ColorOutline(0),
         Source::ColorBitmap(StrikeWith::BestFit),
-        Source::Outline,
     ])
     .format(Format::Alpha)
     .offset(offset)
-    .embolden(if embolden {
-        SYNTHETIC_BOLD_STRENGTH_EM * size
-    } else {
-        0.0
-    })
-    .transform(
-        key.flags
-            .contains(CacheKeyFlags::FAKE_ITALIC)
-            .then(|| Transform::skew(Angle::from_degrees(14.0), Angle::from_degrees(0.0))),
-    )
+    .transform(skew)
     .render(&mut scaler, key.glyph_id)
+    {
+        return Some(image);
+    }
+    if !scaler.has_outlines() {
+        return None;
+    }
+    let mut outline = scaler.scale_outline(key.glyph_id)?;
+    if embolden {
+        embolden_outline(&mut outline, SYNTHETIC_BOLD_STRENGTH_EM * size);
+    }
+    if let Some(skew) = &skew {
+        outline.transform(skew);
+    }
+    let mut image = glyphon::SwashImage::new();
+    image.placement = Mask::new(outline.path())
+        .format(Format::Alpha)
+        .origin(Origin::BottomLeft)
+        .offset(offset)
+        .render_offset(offset)
+        .inspect(|format, width, height| {
+            image.data.resize(format.buffer_size(width, height), 0);
+        })
+        .render_into(&mut image.data[..], None);
+    image.content = glyphon::SwashContent::Mask;
+    image.source = Source::Outline;
+    Some(image)
+}
+
+/// Which way an outline's filled contours run — FreeType's
+/// `FT_Outline_Get_Orientation`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutlineOrientation {
+    /// Filled contours run clockwise with y up (TrueType's convention).
+    Clockwise,
+    /// Filled contours run counter-clockwise with y up (PostScript's).
+    CounterClockwise,
+}
+
+/// The point ranges of an outline's contours, split where swash's own
+/// emboldening splits them: at every `MoveTo` and `Close`.
+pub(crate) fn outline_contours(verbs: &[Verb]) -> Vec<Range<usize>> {
+    let mut contours = Vec::new();
+    let (mut start, mut end) = (0, 0);
+    for verb in verbs {
+        match verb {
+            Verb::MoveTo | Verb::Close => {
+                if end > start {
+                    contours.push(start..end);
+                }
+                start = end;
+                if *verb == Verb::MoveTo {
+                    end += 1;
+                }
+            }
+            Verb::LineTo => end += 1,
+            Verb::QuadTo => end += 2,
+            Verb::CurveTo => end += 3,
+        }
+    }
+    if end > start {
+        contours.push(start..end);
+    }
+    contours
+}
+
+/// **Which side of an outline is ink** — FreeType's
+/// `FT_Outline_Get_Orientation`: the signed area of every contour, each closed
+/// on itself, summed. `None` for an outline with no area.
+///
+/// swash 0.2.9 (`LayerMut::embolden` → `compute_winding`) takes the area of
+/// *all* the outline's points as one polygon instead: every contour's closing
+/// edge is missing and an edge from each contour's last point to the next
+/// contour's first is added. For a glyph of one contour the two agree; for a
+/// glyph of many — most Han characters — the stray edges can outweigh the real
+/// area and flip the sign, and emboldening with the flipped sign moves every
+/// point *into* the ink, so the glyph comes out thinner than its regular
+/// raster (ticket 61: in NSimSun, `络 志 如 谁 排 就` and not their
+/// neighbours).
+pub(crate) fn outline_orientation(
+    points: &[Point],
+    contours: &[Range<usize>],
+) -> Option<OutlineOrientation> {
+    let area: f32 = contours
+        .iter()
+        .map(|contour| {
+            let contour = &points[contour.clone()];
+            let mut previous = contour[contour.len() - 1];
+            let mut area = 0.0;
+            for &point in contour {
+                area += (point.y - previous.y) * (point.x + previous.x);
+                previous = point;
+            }
+            area
+        })
+        .sum();
+    if area > 0.0 {
+        Some(OutlineOrientation::CounterClockwise)
+    } else if area < 0.0 {
+        Some(OutlineOrientation::Clockwise)
+    } else {
+        None
+    }
+}
+
+/// **Thicken every stroke of an outline by twice `strength`**, outward from
+/// the ink on each side of it.
+///
+/// FreeType's `FT_Outline_EmboldenXY` without its halving, contour by contour
+/// — the same port swash carries, given the orientation of
+/// [`outline_orientation`] instead of swash's one-polygon area. Every point
+/// moves by `strength` on each axis plus its corner's bisector shift of the
+/// same size, so the ink box grows to the right and to the top and the pen and
+/// the baseline stay where the regular glyph has them. An outline with no area
+/// has no inside to grow away from and is left as it is, as FreeType leaves it.
+fn embolden_outline(outline: &mut Outline, strength: f32) {
+    let contours = outline_contours(outline.verbs());
+    let points = outline.points_mut();
+    let Some(orientation) = outline_orientation(points, &contours) else {
+        return;
+    };
+    for contour in contours {
+        embolden_contour(&mut points[contour], orientation, strength);
+    }
+}
+
+/// One closed contour of [`embolden_outline`]: FreeType's per-contour loop, as
+/// swash 0.2.9 ports it (`scale/outline.rs`, `embolden`), with the same
+/// strength on both axes.
+fn embolden_contour(points: &mut [Point], orientation: OutlineOrientation, strength: f32) {
+    let clockwise = orientation == OutlineOrientation::Clockwise;
+    let last = points.len() - 1;
+    let mut i = last;
+    let mut j = 0;
+    let mut k = usize::MAX;
+    let mut in_len = 0.0;
+    let mut anchor_len = 0.0;
+    let mut anchor = Point::ZERO;
+    let mut in_ = Point::ZERO;
+    while j != i && i != k {
+        let (out, out_len) = if j == k {
+            (anchor, anchor_len)
+        } else {
+            let out = points[j] - points[i];
+            let out_len = out.length();
+            if out_len == 0.0 {
+                j = if j < last { j + 1 } else { 0 };
+                continue;
+            }
+            (Point::new(out.x / out_len, out.y / out_len), out_len)
+        };
+        if in_len == 0.0 {
+            i = j;
+        } else {
+            if k == usize::MAX {
+                k = i;
+                anchor = in_;
+                anchor_len = in_len;
+            }
+            let mut d = in_.x * out.x + in_.y * out.y;
+            let shift = if d > -0.9396 {
+                d += 1.0;
+                let mut sx = in_.y + out.y;
+                let mut sy = in_.x + out.x;
+                let mut q = out.x * in_.y - out.y * in_.x;
+                if clockwise {
+                    sx = -sx;
+                    q = -q;
+                } else {
+                    sy = -sy;
+                }
+                let l = in_len.min(out_len);
+                let scale = if strength * q <= l * d {
+                    strength / d
+                } else {
+                    l / q
+                };
+                Point::new(sx * scale, sy * scale)
+            } else {
+                Point::ZERO
+            };
+            while i != j {
+                points[i].x += strength + shift.x;
+                points[i].y += strength + shift.y;
+                i = if i < last { i + 1 } else { 0 };
+            }
+        }
+        in_ = out;
+        in_len = out_len;
+        j = if j < last { j + 1 } else { 0 };
+    }
 }
 
 /// **Which glyphs of a shaped cell are drawn emboldened** — decided once, at the

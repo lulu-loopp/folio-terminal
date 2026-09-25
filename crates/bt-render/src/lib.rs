@@ -33841,6 +33841,160 @@ mod tests {
             assert_eq!(families, ["Test Other", "Test Other"]);
         }
 
+        fn test_strokes_file() -> std::path::PathBuf {
+            font_file(
+                "Test-Strokes400.ttf",
+                include_bytes!("../tests/fonts/Test-Strokes400.ttf"),
+            )
+        }
+
+        /// Test Strokes' eight Han glyphs (`tests/fonts/generate.py`): four
+        /// whose stroke contours, read as one polygon, wind the other way from
+        /// the contours themselves, and four that do not.
+        const STROKE_GLYPHS: [&str; 8] = ["一", "口", "二", "日", "三", "回", "十", "中"];
+        const FLIPPED_STROKE_GLYPHS: [&str; 4] = ["口", "日", "回", "中"];
+
+        /// The signed area (twice it, y up; positive is counter-clockwise) of
+        /// one glyph's scaled outline, taken the two ways: every contour closed
+        /// on itself and summed, and every point of the outline as one polygon.
+        fn stroke_glyph_areas(gpu: &mut GpuContext, text: &str) -> (f32, f32) {
+            let metrics = CellMetrics::measure(&mut gpu.font_system, 1.0).expect("metrics");
+            let cells = row_cells(&[(text, CellFlags::WIDE_CHAR | CellFlags::BOLD)]);
+            let gpu = &mut *gpu;
+            let shaped = shape_wide_glyphs_with_cjk(
+                &cells,
+                &mut gpu.font_system,
+                &mut gpu.swash_cache,
+                metrics,
+                &mut WideShapingCache::new(),
+                &gpu.terminal_cjk_families,
+            );
+            let glyph = shaped[0].buffer.layout_runs().next().expect("a run").glyphs[0].clone();
+            let key = glyph.physical((0.0, 0.0), 1.0).cache_key;
+            let font = gpu
+                .font_system
+                .get_font(key.font_id, key.font_weight)
+                .expect("the face");
+            let mut context = swash::scale::ScaleContext::new();
+            let mut scaler = context
+                .builder(font.as_swash())
+                .size(f32::from_bits(key.font_size_bits))
+                .build();
+            let outline = scaler.scale_outline(key.glyph_id).expect("an outline");
+            let area = |points: &[swash::zeno::Point]| {
+                let mut previous = points[points.len() - 1];
+                let mut area = 0.0;
+                for &point in points {
+                    area += (point.y - previous.y) * (point.x + previous.x);
+                    previous = point;
+                }
+                area
+            };
+            let mut per_contour = 0.0;
+            let (mut start, mut end) = (0, 0);
+            for verb in outline.verbs() {
+                match verb {
+                    swash::zeno::Verb::MoveTo | swash::zeno::Verb::LineTo => end += 1,
+                    swash::zeno::Verb::QuadTo => end += 2,
+                    swash::zeno::Verb::CurveTo => end += 3,
+                    swash::zeno::Verb::Close => {
+                        per_contour += area(&outline.points()[start..end]);
+                        start = end;
+                    }
+                }
+            }
+            (per_contour, area(outline.points()))
+        }
+
+        /// RED (61) — **Every glyph of a bold run in a regular-only family is
+        /// heavier than its regular twin, glyph by glyph.**
+        ///
+        /// Ticket 38 emboldened a synthesized glyph with swash's
+        /// `Render::embolden`, and swash 0.2.9 decides which side of the
+        /// outline is ink from the area of *all* its points read as one
+        /// polygon. For a glyph of several contours that polygon has edges the
+        /// glyph does not — none of the contours' own closing edges, and one
+        /// from each contour's last point to the next one's first — and when
+        /// those outweigh the real area the answer flips: every point is moved
+        /// into the ink, and the "bold" glyph comes out thinner than the
+        /// regular one. In NSimSun that is `络 志 如 谁 排 就` of the owner's
+        /// screenshot (ticket 61 report), between neighbours that thickened.
+        /// Test Strokes builds four such glyphs from rectangles (`口 日 回 中`)
+        /// and four that are not (`一 二 三 十`), and the family arrives the way
+        /// a picked Chinese family does. Each bold cell is read back on the
+        /// software adapter beside its regular twin.
+        ///
+        /// MUTATION: have `embolden_outline` take the orientation of all its
+        /// points as one polygon (`outline_orientation(points,
+        /// &[0..points.len()])`, swash's reading), and the four flipped cells
+        /// come out lighter than their regular twins.
+        #[test]
+        fn every_glyph_of_a_bold_run_in_a_regular_only_family_is_heavier_than_its_regular_twin() {
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            gpu.set_terminal_font(
+                "Test Sans",
+                &[test_sans_file()],
+                "Test Strokes",
+                &[test_strokes_file()],
+                16.0,
+            );
+            assert_eq!(gpu.terminal_cjk_font_family(), "Test Strokes");
+            // The fixture carries the real reason: the flipped four read the
+            // other way as one polygon, the other four do not.
+            for text in STROKE_GLYPHS {
+                let (per_contour, one_polygon) = stroke_glyph_areas(&mut gpu, text);
+                assert!(per_contour < 0.0, "{text}: its contours run clockwise");
+                assert_eq!(
+                    one_polygon > 0.0,
+                    FLIPPED_STROKE_GLYPHS.contains(&text),
+                    "{text}: one polygon {one_polygon}, per contour {per_contour}"
+                );
+            }
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 1200, 80, 1.0, FORMAT).expect("a window");
+            let metrics = window.base_metrics();
+            let mut cells: Vec<(&str, CellFlags)> = STROKE_GLYPHS
+                .iter()
+                .map(|text| (*text, CellFlags::WIDE_CHAR))
+                .collect();
+            cells.extend(
+                STROKE_GLYPHS
+                    .iter()
+                    .map(|text| (*text, CellFlags::WIDE_CHAR | CellFlags::BOLD)),
+            );
+            let frame = one_row_frame(row_cells(&cells), metrics);
+            assert!(matches!(
+                present(&mut window, &mut gpu, &frame),
+                PresentOutcome::Presented(_)
+            ));
+            let pixels = window.read_back(&gpu).expect("it reads back");
+            let width = window.config.width;
+            let mut lighter = Vec::new();
+            for (index, text) in STROKE_GLYPHS.iter().enumerate() {
+                let regular = ink_in_columns(&pixels, width, metrics, &frame, 2 * index, 2);
+                let bold = ink_in_columns(
+                    &pixels,
+                    width,
+                    metrics,
+                    &frame,
+                    2 * (STROKE_GLYPHS.len() + index),
+                    2,
+                );
+                eprintln!("BT_SYNTHETIC_BOLD {text} regular_ink={regular} bold_ink={bold}");
+                assert!(regular > 0, "{text}: the regular cell drew");
+                if bold * 100 < regular * 105 {
+                    lighter.push((*text, regular, bold));
+                }
+            }
+            assert!(
+                lighter.is_empty(),
+                "bold cells with less than 5% more ink than their regular twins \
+                 (glyph, regular, bold): {lighter:?}"
+            );
+        }
+
         /// RED (38) — **a bold cell in a primary family with no bold cut is
         /// emboldened in that family.** Step 0 keeps the cell in Test Sans; this
         /// is the ink that step leaves owed.
