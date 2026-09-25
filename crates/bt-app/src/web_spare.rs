@@ -1807,7 +1807,12 @@ mod spare_wiring_tests {
     #[test]
     fn the_runs_end_asks_the_spare() {
         assert!(method_body("FolioApp", "every_page_has_gone").contains("has_let_go()"));
-        assert!(method_body("FolioApp", "reap_leaving_windows").contains("self.run_end(spare)"));
+        let reap = method_body("FolioApp", "reap_leaving_windows");
+        assert!(reap.contains("self.run_end(waking)"));
+        assert!(
+            reap.contains("if spare_holds && !done.is_empty() && done.len() == self.windows.len()"),
+            "the last closed window waits for the spare, as it waits for its own pages"
+        );
         assert!(method_body("FolioApp", "run_end").contains("after_the_last_window("));
         assert!(method_body("FolioApp", "fail").contains("web_spare.abandon()"));
     }

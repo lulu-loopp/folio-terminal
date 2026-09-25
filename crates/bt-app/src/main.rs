@@ -59971,7 +59971,9 @@ impl FolioApp {
         now: Instant,
     ) -> Result<Option<Instant>> {
         let mut done: Vec<WindowId> = Vec::new();
-        let mut waking = None;
+        // **The spare's own clock, once the run is retiring** (ticket 60, SW-2), turned first so
+        // that a spare which lets go this turn lets its window go this turn too.
+        let mut waking = self.advance_the_spare_while_retiring(now);
         for index in 0..self.windows.len() {
             let Some(id) = self.windows.key_at(index) else {
                 continue;
@@ -59996,6 +59998,18 @@ impl FolioApp {
                 waking = earliest_deadline([waking, deadline, Some(until)]);
             }
         }
+        // **And the last closed window waits for the spare as it waits for its own pages**
+        // (ticket 60; §7.35). A run whose registry has emptied is not woken for the spare's
+        // browser-exit wait — measured on the clean VM: the thread stayed parked past its
+        // `WaitUntil` with no window left — so the window that would empty it stays, hidden and
+        // turning no clock of its own, until the spare has let go or the run's bound has passed.
+        let spare_holds = self
+            .app
+            .as_ref()
+            .is_some_and(|app| !app.web_spare.has_let_go());
+        if spare_holds && !done.is_empty() && done.len() == self.windows.len() {
+            done.pop();
+        }
         for id in done {
             self.windows.remove(id);
             // **The claim on the chord is deliberately kept** (§7.54). A reader
@@ -60013,17 +60027,13 @@ impl FolioApp {
                 app.activated.retain(|visited| *visited != id);
             }
         }
-        // **The spare's own clock, once the run is retiring** (ticket 60, SW-2): no window is
-        // left to turn it, so this door does, and its instant joins the wake.
-        let spare = self.advance_the_spare_while_retiring(now);
-        waking = earliest_deadline([waking, spare]);
         // **An empty registry is the end of the run** (§7.54e ①, user ruling
         // 2026-09-05). This is the other half of `close`'s own answer, at the door
         // every road to an empty registry passes through, and it reads the same
         // rule so that the two can never disagree. **And only once the spare has let
         // go** (ticket 60): its parent is an `HWND` the engine's child window may still
         // be under, which a thread that has stopped pumping cannot destroy (§7.35).
-        if self.run_end(spare) == web_spare::RunControl::Exit {
+        if self.run_end(waking) == web_spare::RunControl::Exit {
             // **The sentinel again, and it is idempotent** (`App::finish` →
             // `SessionStore::close`, which takes its writer and says so). The
             // ordinary shut has already spent it, at the moment the last window
