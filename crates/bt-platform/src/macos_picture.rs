@@ -274,16 +274,16 @@ mod tests {
     /// whose shape is simply larger than this paste will carry — the shape a
     /// scanner's output or a stitched screenshot has, copied out of Preview.
     /// Every byte it claims is present, so AppKit states its real dimensions,
-    /// and it is the ceiling and nothing else that stops the drawing. A third
-    /// of a megabyte on disk, because one side past [`MAX_SIDE`] is enough to
-    /// be past the ceiling — which is also why the file in this test is small
-    /// enough to build.
+    /// and it is the ceiling and nothing else that stops the drawing. About a
+    /// megabyte and a half on disk, because one side past `MAX_SIDE` (65,535
+    /// since ticket 66) is enough to be past the ceiling — which is also why
+    /// the file in this test is small enough to build.
     ///
     /// MUTATION: delete the `judge` call and this decodes instead of refusing.
     #[test]
     fn a_real_tiff_past_the_ceiling_is_refused_before_it_is_drawn() {
-        // 16,385 is one past `bt_app::clipboard_picture::MAX_SIDE`.
-        let wide = 16_385_u32;
+        // 65,536 is one past `bt_app::clipboard_picture::MAX_SIDE`.
+        let wide = 65_536_u32;
         let tiff = a_tiff_claiming(wide, 8, wide as usize * 8 * 3);
         let Judged { seen, answer } = judged(&tiff);
         assert_eq!(
