@@ -45,7 +45,7 @@ impl Runtime<'_> {
     /// warm-up that is not a stir, because it stands for as long as the reader leaves
     /// it (ticket 54). The same two facts the card's own keyboard rung and layout ask.
     pub(crate) fn web_warmup_waits_for_the_restore_card(&self) -> bool {
-        self.window.restore_prompt.is_open() && !self.app.restore_question.is_empty()
+        self.restore_card_is_up()
     }
 
     /// **The page on one seat of the tab in front, and the one door to it** —
