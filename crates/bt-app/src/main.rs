@@ -90,6 +90,13 @@ mod input;
 #[path = "journeys_tests.rs"]
 mod journeys_tests;
 mod keyhint;
+/// **The lane contract** (D-33, `docs/ARCHITECTURE.md` §5.1): each lane's declared policy, the
+/// claims every lane is held to, and the lanes' declared failures. Compiled with the tests: no
+/// product code reads a declaration yet.
+#[cfg(test)]
+mod lane;
+#[cfg(test)]
+mod lane_contract_tests;
 mod launch_wire;
 mod linebreak;
 mod marks;
@@ -2069,22 +2076,26 @@ struct MathWorker {
 }
 
 impl MathWorker {
-    fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
+    /// **Start the three threads** and return their senders and the one answer channel.
+    ///
+    /// `wake` brings the event loop round after an answer is published; the product's sends
+    /// `AppEvent::MathReady`. It is a parameter rather than the proxy so that the lane contract's
+    /// computation adapter (`lane_contract_tests`) runs these very threads, with the answer sender
+    /// shared the way the product shares it.
+    fn spawn(wake: impl Fn() + Clone + Send + 'static) -> Result<Self> {
         let (task_tx, task_rx) = mpsc::channel::<MathWorkerRequest>();
         let (scale_tx, scale_rx) = mpsc::channel::<ScaleWorkerRequest>();
         let (path_tx, path_rx) = mpsc::channel::<PathWorkerRequest>();
         let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
         let scale_result_tx = result_tx.clone();
-        let scale_proxy = proxy.clone();
+        let scale_wake = wake.clone();
         let path_result_tx = result_tx.clone();
-        let path_proxy = proxy.clone();
+        let path_wake = wake.clone();
         bt_platform::spawn_at_priority(
             "bt-path-verify-worker",
             bt_platform::ThreadPriority::BelowNormal,
             move || {
-                run_path_verify_worker(path_rx, path_result_tx, move || {
-                    let _ = path_proxy.send_event(AppEvent::MathReady);
-                });
+                run_path_verify_worker(path_rx, path_result_tx, path_wake);
             },
         )
         .context("spawn path verification worker")?;
@@ -2119,7 +2130,7 @@ impl MathWorker {
                         .send(MathWorkerResult { leaf, completion })
                         .is_ok()
                     {
-                        let _ = scale_proxy.send_event(AppEvent::MathReady);
+                        scale_wake();
                     }
                 });
             },
@@ -2136,9 +2147,7 @@ impl MathWorker {
             bt_platform::ThreadPriority::BelowNormal,
             Some(bt_math::MATH_WORKER_STACK_BYTES),
             move || {
-                run_decoration_worker(task_rx, result_tx, || {
-                    let _ = proxy.send_event(AppEvent::MathReady);
-                });
+                run_decoration_worker(task_rx, result_tx, wake);
             },
         )
         .context("spawn math rendering worker")?;
@@ -41684,7 +41693,12 @@ impl Runtime<'_> {
             trace_sink::stderr_line(format!("BT_CONPTY_SOURCE sources={conpty_sources:?}"));
         }
         let pty_time = phase_started.elapsed();
-        let math_worker = MathWorker::spawn(proxy.clone())?;
+        let math_worker = MathWorker::spawn({
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(AppEvent::MathReady);
+            }
+        })?;
         let handoff_lane = handoff_lane::HandoffLane::spawn({
             let proxy = proxy.clone();
             move || {

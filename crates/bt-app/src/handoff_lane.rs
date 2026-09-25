@@ -618,3 +618,122 @@ mod tests {
         );
     }
 }
+
+/// **The lane contract's adapter** (`crate::lane`, `lane_contract_tests`): the real lane — its
+/// queue, its thread, its drain and each window's [`Pending`] — with the suite's
+/// [`crate::lane::Gate`] standing in for the door and its [`crate::lane::WakeProbe`] for the
+/// loop's wake. Nothing of the lane is copied.
+#[cfg(test)]
+pub(crate) mod contract_adapter {
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Arc;
+
+    use bt_platform::{Handoff, NativeWindow};
+
+    use super::{Completion, HandoffId, HandoffLane, Pending};
+    use crate::lane::{
+        Admission, Contract, Delivered, Gate, HANDOFF, LaneUnderTest, Outcome, WakeProbe,
+    };
+
+    /// The address a question is handed over as, so the executor can say which one it runs.
+    const ADDRESS: &str = "https://lane-contract.invalid/";
+
+    fn question_of(handoff: &Handoff) -> Option<u64> {
+        match handoff {
+            Handoff::Address(address) => address.strip_prefix(ADDRESS)?.parse().ok(),
+            _ => None,
+        }
+    }
+
+    struct HandoffAdapter {
+        lane: HandoffLane,
+        gate: Arc<Gate>,
+        probe: Arc<WakeProbe>,
+        /// One `Pending` per open window; a closed window's is dropped, as `WindowRuntime`'s is.
+        windows: BTreeMap<u32, Pending<u64>>,
+        /// The suite's own record of which question each id carried, for its tally.
+        questions: HashMap<HandoffId, u64>,
+    }
+
+    /// A fresh lane on its own `bt-os-handoff` thread.
+    pub(crate) fn make() -> Box<dyn LaneUnderTest> {
+        let gate = Arc::new(Gate::default());
+        let probe = Arc::new(WakeProbe::default());
+        let door = Arc::clone(&gate);
+        let wake = Arc::clone(&probe);
+        let lane = HandoffLane::start(
+            move || {
+                move |_window: NativeWindow, handoff: &Handoff| {
+                    door.pass(question_of(handoff));
+                    Ok(())
+                }
+            },
+            move || wake.woke(),
+        )
+        .expect("the hand-off lane starts");
+        Box::new(HandoffAdapter {
+            lane,
+            gate,
+            probe,
+            windows: BTreeMap::new(),
+            questions: HashMap::new(),
+        })
+    }
+
+    impl LaneUnderTest for HandoffAdapter {
+        fn contract(&self) -> &'static Contract {
+            &HANDOFF
+        }
+
+        fn gate(&self) -> &Gate {
+            &self.gate
+        }
+
+        fn probe(&self) -> &WakeProbe {
+            &self.probe
+        }
+
+        fn submit(&mut self, target: u32, question: u64) -> Admission {
+            let id = self.lane.submit(
+                NativeWindow::stand_in(0),
+                Handoff::Address(format!("{ADDRESS}{question}")),
+            );
+            self.questions.insert(id, question);
+            self.windows.entry(target).or_default().owe(id, question);
+            Admission {
+                ticket: Some(id.0),
+                question,
+                refused: None,
+            }
+        }
+
+        fn close_target(&mut self, target: u32) {
+            self.windows.remove(&target);
+        }
+
+        /// `FolioApp::answer_handoffs`: every answer offered to every open window, claimed by the
+        /// one whose `Pending` holds its id.
+        fn drain(&mut self) -> Vec<Delivered> {
+            let answers = self.lane.answers();
+            answers
+                .into_iter()
+                .map(|Completion { id, outcome }| Delivered {
+                    target: self
+                        .windows
+                        .iter_mut()
+                        .find_map(|(window, pending)| pending.claim(id).map(|_| *window)),
+                    ticket: Some(id.0),
+                    question: self.questions.get(&id).copied(),
+                    outcome: match outcome {
+                        Ok(()) => Outcome::Answered,
+                        Err(reason) => Outcome::Refused(reason),
+                    },
+                })
+                .collect()
+        }
+
+        fn offer_stale(&mut self, _ticket: u64) {
+            unreachable!("the hand-off lane's target is the asking window, not the application");
+        }
+    }
+}

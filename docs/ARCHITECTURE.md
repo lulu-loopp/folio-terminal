@@ -360,7 +360,8 @@ stands in, and that call is the one `unsafe` boundary for thread priority.
 MMCSS is explicitly refused. `folio-web-thumb` breaks the rule with a bare
 `Builder` at inherited `Normal`, beside the loop, and nothing goes red.
 
-**Results come back three ways** and which is right for what is nowhere written:
+**Results come back three ways**, and the rule for which is the last paragraph
+of this section:
 (1) `AppEvent` through the event-loop proxy, drained with `try_recv` on the
 application layer — all seven `bt-app` lanes and all ten one-shot probes; (2) a
 callback run on the worker thread that may do nothing but park a value and nudge
@@ -368,6 +369,41 @@ the loop — every thread in `bt-platform`, which may not name `AppEvent`; (3) a
 static lock or latch read later, sometimes with an atomic revision beside it.
 The split between (1) and (2) is not arbitrary — it is a fact about the crate
 graph — and that fact is stated here and nowhere else.
+
+**The lane contract** (D-33; 2026-09-25, 0.4.6 ticket A5;
+`docs/plans/design/window-thread-budget-2026-09-25.md` §3 and §R-D). A lane is
+a worker the window thread gives requests to and hears answers from without
+waiting. Every lane owes eight things, and states the policy each is judged by:
+**(1)** a full lane answers the asker at once, and admits no more than its
+declared bound — a bounded queue refuses the rest with a terminal answer, a
+latest-value lane runs at most its declared rounds and answers the newest
+request; **(2)** every request carries an identity its answer carries back;
+**(3)** execution order and delivery order follow the declared policy, stated
+separately (`Fifo`, `LatestValue` where "latest" means newest requested and
+older-than-adopted is dropped, or `PerQuestion`); **(4)** an answer whose target
+incarnation has gone is raised in no other target, and an answer older than the
+one adopted is not raised; **(5)** every admitted request ends exactly once;
+**(6)** the answer is published before the wake, and an answer whose wake was
+lost is found by the next drain; **(7)** the answers held for a consumer that
+has not drained are bounded; **(8)** a worker that dies leaves every admitted
+request a terminal outcome, or the lane a fault the consumer sees. The
+declarations are `bt-app::lane`'s constants (`HANDOFF`, `FONT`, `TASKBAR`,
+`COMPUTATION`), and `lane_contract_tests` holds each lane to them through an
+adapter that drives the lane's own admission, publication and acceptance. **A
+lane that fails a claim is not declared conformant**: the failure is a row of
+`lane::EXPECTED_FAILURES` with its exact kind and the ledger row that repairs
+it, and the suite is red on an unexpected pass, a different failure, a skipped
+lane and a claim that exercised no request. The hand-off lane is the reference
+for its partial contract: it passes six claims and is declared to fail two
+(D-70, D-71); the font and taskbar lanes fail per-request outcomes and worker
+death (D-72, D-73); the computation lane fails bounds, identity and death
+(D-74…D-76). Path verification, the ten probes (D-3) and the files, preview,
+index and git workers have no adapter yet. **The return rule:** a lane whose
+answer is the latest value of one fact publishes into a slot the window reads
+(3) and wakes the loop through (1) or (2); a lane whose every request is owed
+its own answer publishes through a channel the loop drains after the wake (1)
+in `bt-app`, or through a parked value and a nudge (2) in `bt-platform`, which
+may not name `AppEvent`.
 
 ### 5.2 What must stay on the window thread
 

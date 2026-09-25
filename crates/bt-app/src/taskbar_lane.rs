@@ -312,3 +312,94 @@ pub(crate) mod tests {
         );
     }
 }
+
+/// **The lane contract's adapter** (`crate::lane`, `lane_contract_tests`): a [`TaskbarLane`] of its
+/// own — the real numbered requests, worker, slot and wake — asking a question the suite's
+/// [`crate::lane::Gate`] can hold, whose answer changes every time so that every answer is news.
+#[cfg(test)]
+pub(crate) mod contract_adapter {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    use super::TaskbarLane;
+    use crate::lane::{
+        Admission, Contract, Delivered, Gate, LaneUnderTest, Outcome, TASKBAR, WakeProbe,
+    };
+
+    struct TaskbarAdapter {
+        lane: &'static TaskbarLane,
+        gate: Arc<Gate>,
+        probe: Arc<WakeProbe>,
+        /// The generation the consumer last read — what `attention.rs` compares a reading with.
+        seen: u64,
+    }
+
+    /// A fresh lane, leaked for the `'static` its worker needs.
+    pub(crate) fn make() -> Box<dyn LaneUnderTest> {
+        let gate = Arc::new(Gate::default());
+        let probe = Arc::new(WakeProbe::default());
+        let door = Arc::clone(&gate);
+        let asked = AtomicU64::new(0);
+        let lane: &'static TaskbarLane = Box::leak(Box::new(TaskbarLane::new(move || {
+            door.pass(None);
+            asked.fetch_add(1, Ordering::Relaxed).is_multiple_of(2)
+        })));
+        let wake = Arc::clone(&probe);
+        lane.install_wake(move || wake.woke());
+        Box::new(TaskbarAdapter {
+            lane,
+            gate,
+            probe,
+            seen: 0,
+        })
+    }
+
+    impl LaneUnderTest for TaskbarAdapter {
+        fn contract(&self) -> &'static Contract {
+            &TASKBAR
+        }
+
+        fn gate(&self) -> &Gate {
+            &self.gate
+        }
+
+        fn probe(&self) -> &WakeProbe {
+            &self.probe
+        }
+
+        fn submit(&mut self, _target: u32, question: u64) -> Admission {
+            self.lane.request(Instant::now());
+            Admission {
+                ticket: Some(self.lane.lock().requested),
+                question,
+                refused: None,
+            }
+        }
+
+        fn close_target(&mut self, _target: u32) {
+            unreachable!("the taskbar lane's target is the application, which does not close");
+        }
+
+        /// The window's reading: one load of the slot. A generation other than the one last read
+        /// is an answer raised.
+        fn drain(&mut self) -> Vec<Delivered> {
+            let reading = self.lane.reading();
+            if reading.generation == self.seen {
+                return Vec::new();
+            }
+            self.seen = reading.generation;
+            vec![Delivered {
+                target: Some(0),
+                ticket: Some(reading.generation),
+                question: None,
+                outcome: Outcome::Answered,
+            }]
+        }
+
+        /// A second asker's late answer, through the slot's own `offer`.
+        fn offer_stale(&mut self, ticket: u64) {
+            let _ = self.lane.slot.offer(ticket, true);
+        }
+    }
+}

@@ -1989,43 +1989,97 @@ pub fn begin_monospace_scan(in_force: &str, cjk_in_force: &str) {
 /// Coalesced by [`MonospaceFamilySlot::claim_scan`]: one walk out at a time,
 /// and one more round for every request made while it was.
 fn request_font_walk() {
-    if !MONOSPACE_FAMILIES.claim_scan() {
-        return;
-    }
-    if bt_platform::spawn_at_priority(
-        "font-families",
-        bt_platform::ThreadPriority::BelowNormal,
-        scan_monospace_families,
-    )
-    .is_err()
-    {
-        // A machine that will not give this process a thread keeps the seed and
-        // may be asked again at the next open. Releasing the claim is the whole
-        // of the handling: nothing in this file waits for an answer.
-        let _ = MONOSPACE_FAMILIES.finish_scan();
-    }
+    FONT_LANE.request();
 }
 
-/// The worker's whole body: walk, hold the answer out, wake, and go round again
-/// if somebody asked while this one was out.
-fn scan_monospace_families() {
-    loop {
-        // The number is read before the walk, so a request made while it runs
-        // has a larger one and is served by the next round.
-        let generation = MONOSPACE_FAMILIES.serving();
-        let (monospace, cjk) = walk_the_machine(generation);
-        MONOSPACE_FAMILIES.offer(generation, monospace);
-        CJK_FAMILIES.offer(with_automatic_cjk(cjk));
-        // After the answer is in the mailbox and never before: a wake that
-        // raced the offer would send the loop to adopt nothing, and the frame
-        // the reader is waiting for would then be owed to a wake that is not
-        // coming.
-        if let Some(wake) = MONOSPACE_WAKE.get() {
-            wake();
-        }
-        if !MONOSPACE_FAMILIES.finish_scan() {
+/// **The font lane's parts**: the two slots a round fills, the round itself, and
+/// the wake.
+///
+/// The product runs one, [`FONT_LANE`], over the process's statics. The lane
+/// contract's adapter (`settings::font_lane_adapter`, `crate::lane`) runs
+/// another over slots of its own and a round it can hold, through these same
+/// three functions — which is what lets the contract's suite speak about the
+/// product's admission ([`Self::request`]), publication ([`Self::serve`]) and
+/// acceptance ([`Self::adopt`]) rather than about a copy of them.
+struct FontLane {
+    monospace: &'static MonospaceFamilySlot,
+    cjk: &'static CjkFamilySlot,
+    /// One round: both lists, asked of the machine for request `generation`.
+    /// The product's is [`walk_the_machine`].
+    walk: &'static FontRound,
+    wake: &'static std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
+}
+
+/// One round of the font lane, for the request it is handed: the monospaced
+/// families and the CJK-capable ones.
+type FontRound = dyn Fn(
+        u64,
+    ) -> (
+        Vec<bt_platform::MonospaceFamily>,
+        Vec<bt_platform::CjkFamily>,
+    ) + Sync;
+
+/// The lane the product runs.
+static FONT_LANE: FontLane = FontLane {
+    monospace: &MONOSPACE_FAMILIES,
+    cjk: &CJK_FAMILIES,
+    walk: &walk_the_machine,
+    wake: &MONOSPACE_WAKE,
+};
+
+impl FontLane {
+    /// **Number a request and see that a walk serves it** — the lane's one
+    /// admission. Coalesced by [`MonospaceFamilySlot::claim_scan`].
+    fn request(&'static self) {
+        if !self.monospace.claim_scan() {
             return;
         }
+        if bt_platform::spawn_at_priority(
+            "font-families",
+            bt_platform::ThreadPriority::BelowNormal,
+            move || self.serve(),
+        )
+        .is_err()
+        {
+            // A machine that will not give this process a thread keeps the seed and
+            // may be asked again at the next open. Releasing the claim is the whole
+            // of the handling: nothing in this file waits for an answer.
+            let _ = self.monospace.finish_scan();
+        }
+    }
+
+    /// The worker's whole body: walk, hold the answer out, wake, and go round again
+    /// if somebody asked while this one was out.
+    fn serve(&self) {
+        loop {
+            // The number is read before the walk, so a request made while it runs
+            // has a larger one and is served by the next round.
+            let generation = self.monospace.serving();
+            let (monospace, cjk) = (self.walk)(generation);
+            self.monospace.offer(generation, monospace);
+            self.cjk.offer(with_automatic_cjk(cjk));
+            // After the answer is in the mailbox and never before: a wake that
+            // raced the offer would send the loop to adopt nothing, and the frame
+            // the reader is waiting for would then be owed to a wake that is not
+            // coming.
+            if let Some(wake) = self.wake.get() {
+                wake();
+            }
+            if !self.monospace.finish_scan() {
+                return;
+            }
+        }
+    }
+
+    /// **Take the answers a finished walk left** — the window thread's half of
+    /// [`MonospaceFamilySlot`]'s rule; see [`adopt_scanned_families`].
+    fn adopt(&self) -> bool {
+        let monospace_changed = self.monospace.adopt();
+        let cjk_changed = self
+            .cjk
+            .take_offer()
+            .is_some_and(|families| self.cjk.publish(families, true));
+        monospace_changed || cjk_changed
     }
 }
 
@@ -2036,8 +2090,8 @@ fn scan_monospace_families() {
 /// never reached the Chinese-font list, however often the dialog was
 /// reopened; the platform walks now also ask the system collection for
 /// updates (`bt_platform`'s `collection_for_walk`). The round is the lane's,
-/// never the window thread's: its only product caller is
-/// [`scan_monospace_families`].
+/// never the window thread's: its only product caller is [`FontLane::serve`],
+/// on [`FONT_LANE`].
 fn walk_the_machine(
     generation: u64,
 ) -> (
@@ -2078,11 +2132,7 @@ fn walk_the_machine(
 /// the families it had last time, which is every walk but the one after
 /// somebody installs a font.
 pub fn adopt_scanned_families() -> bool {
-    let monospace_changed = MONOSPACE_FAMILIES.adopt();
-    let cjk_changed = CJK_FAMILIES
-        .take_offer()
-        .is_some_and(|families| CJK_FAMILIES.publish(families, true));
-    monospace_changed || cjk_changed
+    FONT_LANE.adopt()
 }
 
 /// **The files one family's outlines live in** — the renderer's question,
@@ -31568,5 +31618,118 @@ mod tests {
             drawable_font_size(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
             bt_persist::DEFAULT_TERMINAL_FONT_SIZE
         );
+    }
+}
+
+/// **The lane contract's adapter** (`crate::lane`, `lane_contract_tests`): a [`FontLane`] of its
+/// own — slots of its own, the real [`FontLane::request`], [`FontLane::serve`] and
+/// [`FontLane::adopt`] — whose round the suite's [`crate::lane::Gate`] can hold and whose answer
+/// names the generation it was walked for.
+#[cfg(test)]
+pub(crate) mod font_lane_adapter {
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, OnceLock};
+
+    use super::{CjkFamilySlot, FontLane, FontRound, MonospaceFamilySlot};
+    use crate::lane::{
+        Admission, Contract, Delivered, FONT, Gate, LaneUnderTest, Outcome, WakeProbe,
+    };
+
+    struct FontAdapter {
+        lane: &'static FontLane,
+        gate: Arc<Gate>,
+        probe: Arc<WakeProbe>,
+        /// The generation on screen when the consumer last looked.
+        seen: u64,
+    }
+
+    fn answer(name: String) -> Vec<bt_platform::MonospaceFamily> {
+        vec![bt_platform::MonospaceFamily {
+            name,
+            files: Vec::new(),
+        }]
+    }
+
+    /// A fresh lane over leaked slots, for the `'static` its worker needs.
+    pub(crate) fn make() -> Box<dyn LaneUnderTest> {
+        let gate = Arc::new(Gate::default());
+        let probe = Arc::new(WakeProbe::default());
+        let door = Arc::clone(&gate);
+        let walk: Box<FontRound> = Box::new(move |generation: u64| {
+            door.pass(Some(generation));
+            (
+                answer(format!("Lane Contract Mono {generation}")),
+                Vec::new(),
+            )
+        });
+        let wake: &'static OnceLock<Box<dyn Fn() + Send + Sync>> =
+            Box::leak(Box::new(OnceLock::new()));
+        let heard = Arc::clone(&probe);
+        let _ = wake.set(Box::new(move || heard.woke()));
+        let lane: &'static FontLane = Box::leak(Box::new(FontLane {
+            monospace: Box::leak(Box::new(MonospaceFamilySlot::new())),
+            cjk: Box::leak(Box::new(CjkFamilySlot::new())),
+            walk: Box::leak(walk),
+            wake,
+        }));
+        Box::new(FontAdapter {
+            lane,
+            gate,
+            probe,
+            seen: 0,
+        })
+    }
+
+    impl crate::lane::LaneUnderTest for FontAdapter {
+        fn contract(&self) -> &'static Contract {
+            &FONT
+        }
+
+        fn gate(&self) -> &Gate {
+            &self.gate
+        }
+
+        fn probe(&self) -> &WakeProbe {
+            &self.probe
+        }
+
+        fn submit(&mut self, _target: u32, question: u64) -> Admission {
+            self.lane.request();
+            Admission {
+                ticket: Some(self.lane.monospace.serving()),
+                question,
+                refused: None,
+            }
+        }
+
+        fn close_target(&mut self, _target: u32) {
+            unreachable!(
+                "the font lane's target is the application-wide slot, which does not close"
+            );
+        }
+
+        /// `adopt_scanned_families`, on this lane: an answer is raised when the adopted
+        /// generation moves.
+        fn drain(&mut self) -> Vec<Delivered> {
+            self.lane.adopt();
+            let adopted = self.lane.monospace.answered.load(Ordering::Relaxed);
+            if adopted == self.seen {
+                return Vec::new();
+            }
+            self.seen = adopted;
+            vec![Delivered {
+                target: Some(0),
+                ticket: Some(adopted),
+                question: None,
+                outcome: Outcome::Answered,
+            }]
+        }
+
+        /// A late walk's answer, through the slot's own `offer`.
+        fn offer_stale(&mut self, ticket: u64) {
+            self.lane
+                .monospace
+                .offer(ticket, answer(format!("Lane Contract Mono {ticket}, late")));
+        }
     }
 }

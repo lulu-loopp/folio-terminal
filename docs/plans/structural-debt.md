@@ -19,7 +19,8 @@ below with their IDs and text). On 2026-09-23 it gained the ledger columns and
 every debt the repository already recorded elsewhere (D-19…D-63); on
 2026-09-24, two rows found by the 0.4.5 drafts (D-64, D-65) and one artefact
 ticket 46 introduced (D-66), and one Mac defect ticket 55 found (D-67); on
-2026-09-25, one wait ticket 62 found and repaid in the same commit (D-68). It is
+2026-09-25, one wait ticket 62 found and repaid in the same commit (D-68), and
+the seven exceptions 0.4.6 ticket A5's lane contract declared (D-70…D-76). It is
 **ordered by consequence, not by severity** — nothing here is a bug; each row is
 a shape that makes the next hundred tickets more expensive, and the cost it
 charges is the one the project named: *what must be read to finish one ticket
@@ -54,12 +55,19 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 11 | 3 | 8 |
-| 0.4.6 | 40 | 40 | 0 |
+| 0.4.5 | 10 | 2 | 8 |
+| 0.4.6 | 48 | 48 | 0 |
 | 0.4.7 | 14 | 14 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
 | already repaid | 1 | 0 | 1 |
-| **total** | **68** | **60** | **8** |
+| **total** | **76** | **67** | **9** |
+
+(2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
+presentation lane, its second client, and revision (b) R8 of
+`docs/plans/design/window-thread-budget-2026-09-25.md` aligns the row — and
+D-70…D-76 were added to 0.4.6. The totals are recounted from the table below:
+the line before this read 68 rows and 8 repaid, which counted neither D-69 nor
+the already-repaid D-58.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -116,6 +124,13 @@ before the spare has landed, and every page after the spare is used still pay th
 per-page controller. It repaid a defect it found (a late controller dropped
 without `Close()`; DESIGN 2026-09-25) and added no row.
 
+0.4.6 ticket A5 repaid no row. It advanced D-33 to "contract and harness
+landed, exceptions listed": `bt-app::lane` states the lane contract once and
+`lane_contract_tests` holds the hand-off, font, taskbar and computation lanes to
+it, and every claim a lane fails is declared with the row that repairs it — the
+seven rows it added, D-70…D-76. It moved D-33 from 0.4.5 to 0.4.6 (the note's
+R8).
+
 ## The ledger
 
 "§" alone means a section of `docs/ARCHITECTURE.md`. "Split prep" is
@@ -158,7 +173,7 @@ ledger's.
 | D-30 | the unmoved topic `settings` (31 methods) | split prep Appendix C | none yet | 0.4.6 | open |
 | D-31 | the unmoved topic `focus` (51 methods) | split prep Appendix C | none yet | 0.4.6 | open |
 | D-32 | the unassigned `Runtime` methods still in `main.rs` (112 at the move, 115 today) | split prep §7.1, Appendix C | census-7 (a frozen list, after census-1 and census-2) | 0.4.6 | open |
-| D-33 | the lane contract as one shape, wrapping the existing lanes | §5.4 step 1, §5.1 | none yet | 0.4.5 — the presentation lane (D-41) is its second client | open — first instance, `handoff_lane`, on `2657e5e3`; the font lane (`settings::MonospaceFamilySlot`) numbers its requests since ticket 50, in its own slot and not yet through the shared shape |
+| D-33 | the lane contract as one shape, wrapping the existing lanes | §5.4 step 1, §5.1 | A5 (contract and harness); the exception rows D-70…D-76 | 0.4.6 — moved from 0.4.5 by the note's R8 (2026-09-25): the presentation lane (D-41), its second client, is deferred; closes when D-70…D-76 close | open — first instance, `handoff_lane`, on `2657e5e3`; the font lane (`settings::MonospaceFamilySlot`) numbers its requests since ticket 50; **contract and harness landed, exceptions listed** (A5, 2026-09-25): `bt-app::lane` declares the hand-off, font, taskbar and computation lanes' policies, `lane_contract_tests` runs eight claims on each through its real admission, publication and acceptance, and each failure is a row of `lane::EXPECTED_FAILURES` naming D-70…D-76. Not yet adapted: path verification (on `MathWorker`'s shared answer sender), the ten probes (D-3), and the files, preview, index and git workers |
 | D-34 | §5.3 row 2 — the marks lock's install half on the window thread | §5.3 | none yet | 0.4.6 | open — the wait behind our own writer repaid on `fbfab1ff`; ticket 56 put the PSReadLine upgrade on the same thread at launch (`psreadline::upgrade_recorded` from `Runtime::create`, before the first window and before the profile migration's worker): it takes the lock only on a launch that replaces Folio's own older module, and the same move to a worker repays it |
 | D-35 | §5.3 row 3 — `psreadline::apply_recorded`, nine files under the lock | §5.3 | none yet | 0.4.6 | open |
 | D-36 | §5.3 row 4 — `psreadline::installed_copy`'s recursive walk | §5.3 | none yet | 0.4.6 | open |
@@ -195,6 +210,13 @@ ledger's.
 | D-67 | `bt-app` fails clippy on macOS: nine app-build and five test-build unused items and ignored results | ticket 55's report | none yet | 0.4.6 — beside D-63, since widening the Mac CI job hits it | open |
 | D-68 | the taskbar's auto-hide state asked of Explorer on the window thread: `SHAppBarMessage(ABM_GETSTATE)` inside `sample_window_place`, at every turn's head and again for a delivery between turns | the owner's next93 stall report, 2026-09-25; ticket 62 | 62 | 0.4.5 — a wait on another process inside the typing turn | repaid (ticket 62) |
 | D-69 | §5.3 row 22 — `Window::set_ime_cursor_area` called at every offer of a caret: twice in one turn (15 + 85 ms) and once for 3,138 ms under load on the owner's next93 | the owner's next93 stall reports, 2026-09-25; ticket 63 | 63 | 0.4.5 — typing stability | repaid (ticket 63) |
+| D-70 | the hand-off lane: a worker that dies leaves the requests it had accepted with no terminal outcome — `answers()` reads a disconnected channel as empty, `LANE_GONE` answers only a later submission, and the ids stay owed in each window's `Pending` | A5 (`lane::EXPECTED_FAILURES`: Handoff × a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
+| D-71 | the hand-off lane: the answers held for an undrained consumer are unbounded — the answer channel is an unbounded `mpsc::channel` and `turned_away` a `Vec` | A5 (Handoff × answers held are bounded) | none yet | 0.4.6 — with D-33 | open |
+| D-72 | the font lane: a coalesced or superseded request gets no outcome of its own, and a walk that dies leaves `ScanState::running` set for ever — no fault, no later walk; the wake has no failure road | A5 (Font × every request ends exactly once; a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
+| D-73 | the taskbar lane: the requests between two served ones get no outcome, and a worker that dies leaves `Asks::worker` set — requests are counted and never served, and nothing says so | A5 (Taskbar × every request ends exactly once; a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
+| D-74 | the computation lane (`MathWorker`): admission and answers are unbounded `mpsc::channel`s, each way | A5 (Computation × a full lane answers without waiting; answers held are bounded) | none yet | 0.4.6 — with D-33 | open |
+| D-75 | the computation lane: no request identity — an answer carries only its question, so one question asked twice gives two answers nobody can tell apart | A5 (Computation × every request has its own identity) | none yet | 0.4.6 — with D-33 | open |
+| D-76 | the computation lane: the decoration thread's death is invisible while the scaling and path-verification threads hold clones of the one answer sender; the drain sees a disconnection only when all three have gone | A5 (Computation × a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
 
 ---
 
@@ -1212,3 +1234,69 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
   `bt_platform::TaskbarState`, a numbered slot that takes only newer answers; the
   window thread reads it with one atomic load. The station `taskbar reading`
   (`Station::PlaceTaskbar`) now measures that read.
+
+## D-70…D-76 — the rows added on 2026-09-25 by the lane contract (A5)
+
+0.4.6 ticket A5 (`docs/plans/design/window-thread-budget-2026-09-25.md` §R-D)
+put one contract over four lanes: `bt-app::lane` declares each lane's policy —
+replacement, execution order, delivery order, bounds, cancellation — and
+`lane_contract_tests` runs eight claims on the hand-off, font, taskbar and
+computation lanes through adapters that drive each lane's own admission,
+publication and acceptance, with only the executor (held, or ended on purpose)
+and the loop's wake standing in. A claim a lane fails is a row of
+`lane::EXPECTED_FAILURES`, with the exact kind of failure and one of the rows
+below; the suite is red on an unexpected pass, a different failure, a skipped
+lane or claim, and a claim that exercised no request. **No lane's behaviour
+changed**: the font lane's three functions became methods of
+`settings::FontLane` and `MathWorker::spawn` takes its wake as a closure, so the
+adapters run the product's own code.
+
+**What is mitigating today.** Every "dead worker" row (D-70, D-72, D-73, D-76)
+is reachable only by a worker's thread ending while the process lives. A panic
+on any thread runs `install_panic_log_hook`'s fatal road and ends the process,
+so today a dead worker is a dead Folio; the rows are the contract debt for the
+day a lane must survive its worker (the storage lane of B4 is the first that
+will be asked to). The unbounded rows (D-71, D-74) are bounded in practice only
+by how fast presses and decoration requests arrive and how often the loop
+drains; neither lane states a bound, and the contract asks for one.
+
+- **D-70 · hand-off, dead worker.** Sequence: a hand-off is executing, two
+  more are queued, the worker ends. `HandoffLane::answers` extends
+  `turned_away` with `answers.try_iter()`, which stops at a disconnected
+  channel as it stops at an empty one; `LANE_GONE` is answered only when a new
+  submission meets `TrySendError::Disconnected`. The three ids stay in the
+  window's `Pending` with no outcome. Owed: a terminal outcome for every
+  accepted id when the worker ends (a lane-level fault the drain reports once,
+  which each window turns into its surfaces' refusals).
+- **D-71 · hand-off, answers held.** `start` builds the answer side as an
+  unbounded `mpsc::channel`, and `turn_away` pushes to an unbounded `Vec`; a
+  consumer that does not drain holds every answer (40 of 40 in the suite).
+  Owed: a declared bound on answers held, and what a full mailbox does.
+- **D-72 · font.** `claim_scan` folds every request made during a walk into
+  one `again` round; the requests between are answered by nothing of their own.
+  A walk that ends without `finish_scan` leaves `running` set, so every later
+  request only sets `again`, and no walk ever runs again; the picker keeps its
+  last list and nothing reports it. `MONOSPACE_WAKE` is called and has no
+  failure road. Owed: a superseded outcome, a fault the slot can report, and a
+  running flag a dead walk cannot leave behind. The target stays the
+  application-wide slot.
+- **D-73 · taskbar.** `TaskbarLane::serve` answers the newest request
+  standing; the ones between are answered by nothing of their own. A worker that
+  ends leaves `Asks::worker` set, so `ask_locked` only signals a condition
+  variable nobody waits on; the reading stays at its last answer for the rest of
+  the run. Owed: as D-72.
+- **D-74 · computation, bounds.** `MathWorker::spawn` makes all four channels
+  with `mpsc::channel`. Owed: declared bounds for admission and answers, per
+  job, and what each job does when full (the per-session queue's drop-oldest is
+  the existing policy one level up).
+- **D-75 · computation, identity.** The lane mints nothing; an answer carries
+  its question (the task, a path, a key), and the same question asked twice is
+  two answers the consumer cannot tell apart. Owed: a request id and a lane
+  incarnation, or a ruling that per-question identity is this lane's contract
+  (the note's `PerQuestion` replacement) with the duplicate case stated.
+- **D-76 · computation, death.** The three threads share one answer sender
+  (`scale_result_tx` and `path_result_tx` are clones), so `drain_math_answers`
+  sees `Disconnected` — and `disable_math_worker_state` raises its notice —
+  only when all three have ended; a dead decoration thread's queued questions
+  are lost silently while the other two live. Owed: a death signal per thread,
+  or one lane per thread (D-2's "three jobs share one result type").
