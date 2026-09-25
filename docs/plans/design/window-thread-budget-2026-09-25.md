@@ -1665,3 +1665,9 @@ doors are typed.
 that Codex asked to have chosen (a sealed worker capability rather than a
 diagnostic only), because it leaves no debt and no crash path. The owner's two
 questions in §R-G stand.
+
+
+## Owner rulings 2026-09-25 (on revision (c)'s open questions)
+
+1. D-2 closes as repaid when A1, A2 and A3 have landed; the two rows the note names (aggregate scheduling; the unlisted third-party waits) are opened at the same time, dated, each with its own version.
+2. A preview save may show "saved" only when the storage lane's receipt lands, one turn later than today; quit waits for saves still in progress.
