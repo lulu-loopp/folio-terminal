@@ -639,6 +639,8 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **A thirteenth since 2026-09-24** (0.4.5 ticket 37): `main.rs` declares `#[cfg(test)] mod text_size_tests;`, which makes `text_size_tests.rs` wholly test. `bt-source`'s `the_wholly_test_files_of_bt_app_are_the_thirteen` names it.
 
+**A fourteenth and a fifteenth since 2026-09-26** (0.4.6 ticket A5): `main.rs` declares `#[cfg(test)] mod lane;` and `#[cfg(test)] mod lane_contract_tests;` — the lane contract is test-side data until product code reads a declaration — which makes `lane.rs` and `lane_contract_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_fifteen`.
+
 ---
 
 ## 7. The end measurement
