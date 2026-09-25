@@ -16,6 +16,7 @@ All notable changes to Folio are recorded here. The format follows
 
 - Typing with an input method no longer pauses while Folio repositions the
   candidate window.
+- Folio no longer pauses to ask Windows about the taskbar while you type.
 - Typing no longer pauses while Folio asks Windows several times a turn
   where its window is; it asks once.
 - A program that keeps changing its window title no longer slows typing;

@@ -2,10 +2,11 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    AttentionDelivery, NoticeHost, NoticeStrip, PreviewSurface, Runtime, UserInputKind,
-    WindowRuntime, answer_attention_in, attention, attention_codex, attention_copilot,
-    attention_hooks, attention_trace, emit_attention_lines, float, hang_watch, i18n, marks,
-    native_window, next_attention_stop, notice, notify, profiles, seats, toast,
+    AttentionDelivery, NoticeHost, NoticeStrip, PreviewSurface, Runtime, TaskbarFlash,
+    UserInputKind, WindowRuntime, answer_attention_in, attention, attention_codex,
+    attention_copilot, attention_hooks, attention_trace, emit_attention_lines, float, hang_watch,
+    i18n, marks, native_window, next_attention_stop, notice, notify, profiles, seats, taskbar_lane,
+    toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -742,17 +743,13 @@ impl Runtime<'_> {
         }
         let enabled = self.app.settings_store.loaded().terminal_notifications;
         let window = u64::from(self.window.window.id());
-        let mut flashed = false;
+        let mut flashes = Vec::new();
         let mut refusal = None;
         for delivery in raised {
             match notify::interruption(delivery.reach, enabled) {
                 notify::Interruption::Nothing => {}
-                notify::Interruption::FlashTheTaskbarButton => {
-                    if !flashed && let Ok(native) = native_window(&self.window.window) {
-                        flashed = true;
-                        bt_platform::flash_window(native);
-                    }
-                }
+                // Collected and flashed once below: the button is the window's.
+                notify::Interruption::FlashTheTaskbarButton => flashes.push(delivery),
                 notify::Interruption::PutItOnTheDesktop => {
                     let route = notify::NotificationRoute {
                         window,
@@ -777,10 +774,67 @@ impl Runtime<'_> {
                 }
             }
         }
+        if !flashes.is_empty()
+            && let Ok(native) = native_window(&self.window.window)
+        {
+            bt_platform::flash_window(native);
+            // **Kept with the number of the taskbar answer it was decided on** (ticket 62), so a
+            // newer answer that says the bar hides itself can take it back.
+            TaskbarFlash::record(
+                &mut self.window.taskbar_flash,
+                self.window.taskbar_reading.generation,
+                flashes,
+            );
+        }
         match refusal {
             Some(error) => self.raise_notification_refusal(&error),
             None => Ok(()),
         }
+    }
+
+    /// **Take back a taskbar flash the lane's newest answer contradicts** (0.4.5 ticket 62).
+    ///
+    /// Called for every window when `taskbar_lane` has news. A flash this window started on a
+    /// reading that said the bar is on screen — the default before the lane's first answer, or
+    /// an answer since overtaken — is running on a bar that hides itself, which slides the whole
+    /// bar out and keeps it out until the reader comes (user ruling 2026-08-28). So it is stopped,
+    /// and every delivery it stood for is decided again on a fresh reading of where the window is,
+    /// which now carries the answer: a covered window on such a desktop reaches the desktop, and
+    /// [`Self::raise_attention`] performs that exactly as it performs any delivery —
+    /// `terminal_notifications` still gates the message.
+    ///
+    /// Nothing happens when no flash is running (the common case), when the answer confirms the
+    /// bar is on screen, or when the answer is not newer than the flash's reading.
+    pub(crate) fn replace_contradicted_flash(&mut self) -> Result<()> {
+        let answer = taskbar_lane::reading();
+        let Some(flash) = self
+            .window
+            .taskbar_flash
+            .take_if(|flash| flash.contradicted_by(answer))
+        else {
+            return Ok(());
+        };
+        if let Ok(native) = native_window(&self.window.window) {
+            bt_platform::stop_flashing_window(native);
+        }
+        self.observe_window_place();
+        let place = self.window.observed_place;
+        let window = &*self.window;
+        let raised = flash.replaced(place, |tab, seat| {
+            let index = window.tabs.iter().position(|held| held.id == tab)?;
+            window.tabs[index]
+                .sessions
+                .contains_key(&seat)
+                .then_some(index == window.active_tab)
+        });
+        attention_trace::line(|| {
+            format!(
+                "replace flash taskbar={} deliveries={}",
+                answer.generation,
+                raised.len()
+            )
+        });
+        self.raise_attention(raised)
     }
 
     /// **Say in the window that the desktop would not take it** (user ruling 2026-08-25).

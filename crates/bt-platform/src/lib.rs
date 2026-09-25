@@ -3180,6 +3180,13 @@ pub mod mem;
 pub mod touch_pan;
 pub use touch_pan::{PanStep, PanTrack};
 
+/// **The latest answer about the taskbar, numbered** (0.4.5 ticket 62) — the
+/// slot `bt-app`'s observation lane fills and the window thread reads without
+/// waiting. Platform-free: the question it holds the answer to is
+/// [`taskbar_is_auto_hidden`], which has an arm per platform; the slot does not.
+pub mod taskbar_state;
+pub use taskbar_state::{TaskbarReading, TaskbarState};
+
 /// **Everything this product gives to the machine** — the shell, the browser,
 /// Explorer, and the helper programs it starts to ask a question.
 ///
@@ -3509,14 +3516,14 @@ mod windows_impl {
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DefWindowProcW, DestroyCaret,
-                DestroyMenu, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GA_ROOT,
-                GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GetAncestor, GetClientRect, GetCursorPos,
-                GetSystemMetrics, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
-                HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST,
-                HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND,
-                MF_STRING, MINMAXINFO, MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW,
-                RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN,
-                SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                DestroyMenu, FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx,
+                GA_ROOT, GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GetAncestor, GetClientRect,
+                GetCursorPos, GetSystemMetrics, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT,
+                HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+                HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION, MB_OK,
+                MB_SETFOREGROUND, MF_STRING, MINMAXINFO, MessageBoxW, NCCALCSIZE_PARAMS,
+                PostMessageW, RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
+                SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
                 SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
                 SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos,
                 SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
@@ -7853,6 +7860,28 @@ mod windows_impl {
         let _ = unsafe { FlashWindowEx(std::ptr::from_mut(&mut flash)) };
     }
 
+    /// **Take back a flash [`flash_window`] started** (0.4.5 ticket 62).
+    ///
+    /// `FLASHW_STOP` returns the button to its resting state. The one caller is
+    /// the re-placing of a delivery that flashed before the taskbar's state was
+    /// known and turned out to be on a desktop whose taskbar hides itself —
+    /// there the flash slides the whole bar out and keeps it out, which is the
+    /// very thing the 2026-08-28 ruling took the flash off such a desktop for.
+    /// Answers nothing, for [`flash_window`]'s reason.
+    pub fn stop_flashing_window(window: NativeWindow) {
+        let mut flash = FLASHWINFO {
+            cbSize: u32::try_from(size_of::<FLASHWINFO>()).unwrap_or(0),
+            hwnd: window.as_hwnd(),
+            dwFlags: FLASHW_STOP,
+            uCount: 0,
+            dwTimeout: 0,
+        };
+        // SAFETY: as in `flash_window` — a live HWND from winit and a structure
+        // filled in full; `FLASHW_STOP` only asks the shell to stop drawing
+        // attention to the button.
+        let _ = unsafe { FlashWindowEx(std::ptr::from_mut(&mut flash)) };
+    }
+
     /// **Whether the shell's taskbar hides itself** (user ruling 2026-08-28).
     ///
     /// The one fact that decides whether the middle tier of `attention`'s three
@@ -7871,11 +7900,13 @@ mod windows_impl {
     /// state rather than a per-monitor one, which matches the setting: Windows
     /// auto-hides every taskbar or none.
     ///
-    /// **Asked at every delivery and never cached**, because the reader can
-    /// change it in Settings between one wait and the next and nothing tells
-    /// this process when they do. It is one call into `shell32` per attention
-    /// pass, beside the two into `user32`/`dwmapi` that
-    /// `bt_app::window_is_hidden` already makes on the same turn.
+    /// **Asked on a lane of its own and never on the window thread** (0.4.5
+    /// ticket 62). The message goes to Explorer and waits for Explorer to
+    /// answer: the owner's stall report of 2026-09-25 has two of these at 99 ms
+    /// and 92 ms inside one 535 ms hold. `bt_app::taskbar_lane` asks it at
+    /// launch, every few seconds while a window is on a screen, and when
+    /// Windows says a system setting moved, and publishes the answer in a
+    /// [`crate::TaskbarState`] the window thread reads without waiting.
     ///
     /// **A shell that does not answer reports a visible taskbar** — see
     /// [`taskbar_auto_hidden_from_state`] for why that direction.
@@ -11701,10 +11732,11 @@ pub use windows_impl::{
     register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
     set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
     set_window_topmost, silence_std_streams, spawn_at_priority, spawn_at_priority_with_stack,
-    stand_window_at, std_error_is_console, system_backdrop_available, system_uses_light_apps,
-    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
-    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_screen_rect,
-    wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error, write_to_console,
+    stand_window_at, std_error_is_console, stop_flashing_window, system_backdrop_available,
+    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
+    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
+    write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -12355,12 +12387,16 @@ mod macos_menu;
 mod macos_notify;
 
 #[cfg(target_os = "macos")]
-pub use macos_notify::{Notifier, Taskbar, flash_window, taskbar_is_auto_hidden};
+pub use macos_notify::{
+    Notifier, Taskbar, flash_window, stop_flashing_window, taskbar_is_auto_hidden,
+};
 
 /// **The same four, on a platform with neither a notification centre nor a
 /// Dock** (M1-1, M4-6).
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub use portable_impl::{Notifier, Taskbar, flash_window, taskbar_is_auto_hidden};
+pub use portable_impl::{
+    Notifier, Taskbar, flash_window, stop_flashing_window, taskbar_is_auto_hidden,
+};
 
 /// **The application's own lifecycle**, on every platform (M3-1).
 ///
@@ -14813,9 +14849,13 @@ mod macos_notification_backend_tests {
     /// The gate every door in the portable arm now stands behind.
     const NEITHER: &str = "#[cfg(not(any(windows, target_os = \"macos\")))]";
 
-    /// **The two free functions M4-6 moved**, in the order the re-export lists
-    /// spell them.
-    const DOORS: [&str; 2] = ["flash_window", "taskbar_is_auto_hidden"];
+    /// **The free functions M4-6 moved**, and the flash's undo ticket 62 added
+    /// beside them, in the order the re-export lists spell them.
+    const DOORS: [&str; 3] = [
+        "flash_window",
+        "stop_flashing_window",
+        "taskbar_is_auto_hidden",
+    ];
 
     /// **The two types**, and the doors each of them is.
     ///

@@ -82,7 +82,7 @@
 //! callbacks are called *by* the platform and do not gate, for the reason the
 //! four application-delegate selectors do not.
 
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use block2::{DynBlock, RcBlock};
@@ -656,18 +656,39 @@ impl Drop for Taskbar {
 /// what `FlashWindowEx` is on the foreground window and what
 /// `bt_app::notify::desktop_reach`'s second row is written under.
 ///
-/// The request's own number is dropped: it is the handle
-/// `cancelUserAttentionRequest:` takes, and this door cancels nothing — being
-/// activated is what ends the bounce, which is exactly what `FLASHW_TIMERNOFG`
-/// says on the other platform. The Windows arm answers nothing for the same
-/// reason and this one answers nothing too.
+/// The request's own number is kept in [`ATTENTION_REQUEST`]: it is the handle
+/// `cancelUserAttentionRequest:` takes, and [`stop_flashing_window`] is the one
+/// door that uses it (ticket 62). Being activated is still what ends the bounce
+/// in the ordinary case, which is exactly what `FLASHW_TIMERNOFG` says on the
+/// other platform. The Windows arm answers nothing and this one answers nothing
+/// too.
 pub fn flash_window(window: NativeWindow) {
     let _ = window;
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    let _ = NSApplication::sharedApplication(mtm)
+    let request = NSApplication::sharedApplication(mtm)
         .requestUserAttention(NSRequestUserAttentionType::CriticalRequest);
+    ATTENTION_REQUEST.store(request, Ordering::Relaxed);
+}
+
+/// The number of the last bounce [`flash_window`] asked for; `0` when none is
+/// held. Main thread only in practice — both doors check the marker first.
+static ATTENTION_REQUEST: AtomicIsize = AtomicIsize::new(0);
+
+/// **Take back the bounce [`flash_window`] started** (ticket 62) — the Windows
+/// arm's `FLASHW_STOP`. The icon is the application's, so the window is not
+/// read, for [`flash_window`]'s reason. A request that has already ended (the
+/// application was activated) is cancelled again harmlessly.
+pub fn stop_flashing_window(window: NativeWindow) {
+    let _ = window;
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let request = ATTENTION_REQUEST.swap(0, Ordering::Relaxed);
+    if request != 0 {
+        NSApplication::sharedApplication(mtm).cancelUserAttentionRequest(request);
+    }
 }
 
 /// **Whether the Dock hides itself** — `SHAppBarMessage(ABM_GETSTATE)`'s twin,
@@ -686,9 +707,9 @@ pub fn flash_window(window: NativeWindow) {
 /// `com.apple.dock`'s `autohide`, which is where the Dock itself keeps the
 /// answer and where System Settings writes it. Read through
 /// `-[NSUserDefaults persistentDomainForName:]`, which is the supported way to
-/// read another domain of the same user, and **read on every delivery** —
-/// the reader can change it between one wait and the next and nothing tells
-/// this process when they do, which is the Windows arm's rule word for word.
+/// read another domain of the same user, and **read on `bt_app`'s taskbar
+/// lane, never on the window thread** — the Windows arm's rule word for word
+/// (ticket 62). `NSUserDefaults` is documented as safe to use from any thread.
 ///
 /// **A domain that cannot be read, or a key that is not there, answers
 /// `false`** — the direction `taskbar_auto_hidden_from_state` argues for and

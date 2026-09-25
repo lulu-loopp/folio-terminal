@@ -123,7 +123,7 @@ pub struct WindowPlace {
     /// point" answers them. Nothing on this side walks a z-order or differences a region.
     ///
     /// **Charged per delivery decision and not per frame.** It rides in `sample_window_place`
-    /// beside `IsIconic`, `DWMWA_CLOAKED` and `SHAppBarMessage`, which is the one pass that decides
+    /// beside `IsIconic` and `DWMWA_CLOAKED` (and the taskbar lane's answer), which is the one pass that decides
     /// what the reader is owed; the drawing path never asks.
     ///
     /// **A window that is [`Self::hidden`] is not exposed and is not probed.** `GetWindowRect` on a
@@ -133,7 +133,8 @@ pub struct WindowPlace {
     /// every combination of them an answer.
     pub exposed: bool,
     /// The shell's taskbar is set to hide itself
-    /// ([`bt_platform::taskbar_is_auto_hidden`]).
+    /// ([`bt_platform::taskbar_is_auto_hidden`]) — the taskbar lane's latest answer, read without
+    /// waiting; the shell is asked on that lane, never on the window thread (ticket 62).
     pub taskbar_is_auto_hidden: bool,
 }
 
@@ -222,10 +223,12 @@ pub struct WindowPlace {
 /// the same road a minimised window takes, and for the same reason — there is nowhere nearer to say
 /// it.
 ///
-/// **Asked per delivery rather than remembered**, because it is a setting the reader can change
-/// between one wait and the next and nothing tells this process when they do. It is a fact of the
-/// desktop and not of this window, which is why it rides in beside the others rather than being
-/// read here: `desktop_reach` is a function of facts and reads nothing itself.
+/// **The taskbar lane's latest answer, not a question put at each delivery** (ticket 62, which
+/// supersedes "asked per delivery rather than remembered"): the question waits on Explorer, so it
+/// is asked on a lane of its own and the window thread reads the answer. A flash decided on a
+/// reading a newer answer contradicts is taken back and decided again (`TaskbarFlash`). It is a
+/// fact of the desktop and not of this window, which is why it rides in beside the others rather
+/// than being read here: `desktop_reach` is a function of facts and reads nothing itself.
 ///
 /// **No new settings row.** A switch would ask the reader to describe their own desktop to this
 /// program, and the shell already knows the answer.

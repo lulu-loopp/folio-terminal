@@ -18,7 +18,8 @@ The file began as the 2026-09-21 structure review's debt list (D-1…D-18, kept
 below with their IDs and text). On 2026-09-23 it gained the ledger columns and
 every debt the repository already recorded elsewhere (D-19…D-63); on
 2026-09-24, two rows found by the 0.4.5 drafts (D-64, D-65) and one artefact
-ticket 46 introduced (D-66), and one Mac defect ticket 55 found (D-67). It is
+ticket 46 introduced (D-66), and one Mac defect ticket 55 found (D-67); on
+2026-09-25, one wait ticket 62 found and repaid in the same commit (D-68). It is
 **ordered by consequence, not by severity** — nothing here is a bug; each row is
 a shape that makes the next hundred tickets more expensive, and the cost it
 charges is the one the project named: *what must be read to finish one ticket
@@ -53,7 +54,7 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 10 | 3 | 7 |
+| 0.4.5 | 11 | 3 | 8 |
 | 0.4.6 | 40 | 40 | 0 |
 | 0.4.7 | 14 | 14 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
@@ -90,6 +91,10 @@ window thread, no ownership moved) and that row's part of D-2; it added no row.
 Ticket 55 repaid D-61 and D-62 whole (the two defects the Mac build carried:
 a `webnav` test that asked a Windows question on every machine, and three
 Windows-only constants compiled where nothing read them); it added no row.
+Ticket 62 added D-68 and repaid it whole in the same commit (the taskbar's
+auto-hide state is asked on `taskbar_lane`, a lane of its own, and the window
+thread reads the latest answer from a numbered slot) and with it D-2's part for
+the probe ticket 48 left inside §5.3 row 13.
 Ticket 63 added D-69 and repaid it whole (§5.3 row 22: the input method's caret
 area is one wanted value, told to the system by one road at most once a turn
 and only when it moved, and at once on `Ime::Enabled`) and with it that row's
@@ -113,7 +118,7 @@ ledger's.
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
-| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); row 22 repaid by ticket 63 (D-69) |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
@@ -179,6 +184,7 @@ ledger's.
 | D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.7 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.7 before the 0.5 restyle, and the row closes with it | open |
 | D-66 | a fading surface's translucent pixels step at the landing frame: composited on encoded bytes while it fades, blended in linear light at rest — on the light theme the tip's shadow lightens at its darkest pixel from about `#DB` to `#EE` as the fade lands | ticket 46's report (Findings); the 2026-09-23 fade audit, §7 | none yet | 0.4.7 — the L variant (all overlay translucency in encoded space, with D-65), which removes the step | open |
 | D-67 | `bt-app` fails clippy on macOS: nine app-build and five test-build unused items and ignored results | ticket 55's report | none yet | 0.4.6 — beside D-63, since widening the Mac CI job hits it | open |
+| D-68 | the taskbar's auto-hide state asked of Explorer on the window thread: `SHAppBarMessage(ABM_GETSTATE)` inside `sample_window_place`, at every turn's head and again for a delivery between turns | the owner's next93 stall report, 2026-09-25; ticket 62 | 62 | 0.4.5 — a wait on another process inside the typing turn | repaid (ticket 62) |
 | D-69 | §5.3 row 22 — `Window::set_ime_cursor_area` called at every offer of a caret: twice in one turn (15 + 85 ms) and once for 3,138 ms under load on the owner's next93 | the owner's next93 stall reports, 2026-09-25; ticket 63 | 63 | 0.4.5 — typing stability | repaid (ticket 63) |
 
 ---
@@ -303,7 +309,7 @@ first cut must not be advertised as eliminating every window-thread stall**.
 **Status.** open. Lanes, the exception list and the migration order are in
 `docs/ARCHITECTURE.md` §5.
 
-**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); row 22 repaid by ticket 63 (D-69).
+**Ledger.** source: C-2 · K-6 · ticket: through D-33…D-47 · version: 0.4.6 — closes when its rows close · status: open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69).
 
 ---
 
@@ -1180,3 +1186,20 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
   `apply` never used. The shape is D-62's: items whose only readers are
   Windows-gated, and seams whose answer only Windows reads. 0.4.6, beside D-63,
   since widening the Mac CI job hits it.
+
+## D-68 — the row added on 2026-09-25
+
+- **D-68 · the taskbar's state asked on the window thread.** The owner's stall
+  self-report on next93 (`1ce9e187`, stall #3 at session age 124 s) held the
+  window thread 535 ms, and inside it `sample_window_place` spent 99 ms and 92 ms
+  in `taskbar_is_auto_hidden` — once under the wake fold and once under the
+  application turn. The call is `SHAppBarMessage(ABM_GETSTATE)`, a message to
+  Explorer's taskbar that waits while Explorer is busy. Ticket 48 had made the
+  place one reading per turn (D-45) but left every probe in it on the window
+  thread. **Repaid by ticket 62 in the same commit**: `bt-app::taskbar_lane`
+  asks on its own `BelowNormal` thread — at launch, every
+  `taskbar_lane::REFRESH_INTERVAL` (5 s) while a window is on a screen, and on
+  `AppEvent::SystemPreferencesChanged` — and publishes into a
+  `bt_platform::TaskbarState`, a numbered slot that takes only newer answers; the
+  window thread reads it with one atomic load. The station `taskbar reading`
+  (`Station::PlaceTaskbar`) now measures that read.
