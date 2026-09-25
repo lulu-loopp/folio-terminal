@@ -617,3 +617,11 @@ Codex settled Q5: keep the typed `bt-layout::SeatId` edge as a shrink-only excep
 - D-32: census-7.
 
 No row is repaid. (c′) None. (d) No.
+
+
+## Owner rulings 2026-09-25 (on revision (b)'s open questions)
+
+1. The surface table's rows are the roles, each surface carrying its policy record (scope, text and input method, shortcuts, Escape, pointer, rung, lifetime, queue or replace); the keyboard rungs, the mouse rungs and `menu_or_dialog` are derived from those records.
+2. The restore card is a full-window gate: while it is up it owns the keyboard and the pointer (0.4.5 ticket 57 implements the keyboard and the pointer together).
+3. The first-run card stays a blocking card; the PowerShell integration invitation becomes a notification.
+4. Worker deaths and refused hand-offs are told as toasts, not only on the status line (they are also logged).
