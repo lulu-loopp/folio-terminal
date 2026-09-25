@@ -149,15 +149,17 @@ number rather than a silence.
 
 ### 3.1 The graph
 
-Sixteen first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
-Normal and target-specific edges as the manifests declare them (2026-09-23):
+Seventeen first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
+Normal and target-specific edges as the manifests declare them (2026-09-23;
+`bt-workbench` 2026-09-25):
 
 ```
 bt-unicode      ← bt-transcript, bt-platform, bt-viewport, bt-render, bt-detect
 bt-transcript   ← bt-doc, bt-detect, bt-viewport, bt-render, bt-term, bt-pty,
                   bt-platform (Windows only)
 bt-doc          ← bt-detect, bt-viewport, bt-render, bt-term, bt-math
-bt-layout       ← (nothing; pure solver, no dependencies at all)
+bt-layout       ← bt-workbench, bt-app (itself: no dependencies at all; pure solver)
+bt-workbench    ← bt-app (itself: bt-layout only — §3.3's shrink-only exception)
 bt-platform     ← bt-persist, bt-math, bt-render, bt-term, bt-app
 bt-viewport     ← bt-render, bt-term
 bt-detect       ← bt-term
@@ -229,10 +231,10 @@ those manifests actually practise, restated here from what they say:
 
 **The layering rule, restated from what enforces it:**
 
-- **`scripts/check-portable-core.ps1`** — thirteen named crates (`bt-unicode`,
-  `bt-doc`, `bt-detect`, `bt-layout`, `bt-persist`, `bt-winres`, `bt-math`,
-  `bt-transcript`, `bt-viewport`, `bt-render`, `bt-term`, `bt-pty`, `bt-corpus`)
-  name no Win32 outside a `#[cfg(windows)]` gate. Platform-specific code lives
+- **`scripts/check-portable-core.ps1`** — fifteen named crates (`bt-source`,
+  `bt-unicode`, `bt-doc`, `bt-detect`, `bt-layout`, `bt-persist`, `bt-winres`,
+  `bt-math`, `bt-transcript`, `bt-viewport`, `bt-render`, `bt-term`, `bt-pty`,
+  `bt-corpus`, `bt-workbench`) name no Win32 outside a `#[cfg(windows)]` gate. Platform-specific code lives
   behind `bt-platform`'s interface. Its second half reads
   `FILES_THAT_MAY_NAME_A_PLATFORM` out of `main.rs` — one list, two readers,
   the other being `bt_app::platform_gate_tests`.
@@ -246,6 +248,22 @@ those manifests actually practise, restated here from what they say:
   against the merge base so it can only shrink, is planned by
   `docs/plans/bt-app-split-prep.md` §8.4. Until it lands, the graph in §3.1 is
   the list.
+- **`bt-workbench`'s entry, for that guard** (D-27 lands it; census-3 wrote it
+  here because the guard does not exist yet —
+  `docs/plans/design/ownership-census-2026-09-25.md` §5.4):
+
+  ```
+  bt-workbench   normal: bt-layout (exception: `Site.seat: SeatId`; shrink-only;
+                         goes when `Site` names a session — D-1, 0.4.7)
+                 build: none      dev: none
+                 dependents: bt-app only
+                 never: bt-app, bt-platform, bt-render, bt-term, bt-pty, winit,
+                        any platform crate
+  ```
+
+  Tests that join the ledger to `bt-term`'s parser therefore live in `bt-app`
+  (`tests::the_bytes_of_a_standing_request_become_one_episode_charged_to_the_osc_lane`
+  and its two neighbours), not beside the ledger.
 
 ---
 
@@ -581,7 +599,7 @@ has the §7.1 table yet.
   snapshot during `Runtime::drain_pty`); the endpoint (`bt-platform::attention_pipe`
   on `folio-attention-endpoint` → `attention_wire::park` → `AppEvent::AttentionSpoke`
   → `attention_wire::take`); and the `folio attention` verb process, which
-  writes to that endpoint. They converge at `AttentionLedger::apply` through
+  writes to that endpoint. They converge at `bt_workbench::attention::AttentionLedger::apply` through
   `main.rs`'s `settle_attention` and `deliver_attention`, then
   `notify::desktop_reach` → `Runtime::raise_attention` → `notify::interruption`
   (a flash or a desktop toast); input answers through `answer_attention` /
@@ -654,7 +672,7 @@ Two facts the table must start from:
 
 - **There is already a notification policy and it is preserved.**
   `bt-app::notify::desktop_reach` and `notify::interruption`, backed by
-  `bt-app::attention::AttentionLedger`, decide whether a desktop interruption is
+  `bt_workbench::attention::AttentionLedger`, decide whether a desktop interruption is
   allowed. **Attention state is distinct from notification delivery, and seeing
   a request is distinct from answering it.** What is missing is the broader
   allocation rule for durable questions, operation results and persistent pane
@@ -828,6 +846,38 @@ taskbar and native notification delivery. The order of extraction is attention
 and session identity, then editable documents, then terminal lifecycle — not all
 1,424 methods (§13).
 
+**Born 2026-09-25 (0.4.6 census-3, D-57).** `crates/bt-workbench` holds
+`attention` — the ledger, moved whole with its grid of tests — and
+`attention::expiry` (`WAIT_TTL`, `WaitClock` and the clock's own three tests),
+so the dependency on `attention_wire` now points the other way:
+`attention_wire` re-imports `WaitClock`. `attention::is_consumed` is the "what
+counts as seen" rule of §12.2 decision 2 (`bt-app` keeps calling it
+`attention_is_consumed` through one root alias), and `attention::Places` is a
+window's place allocator, whose counter and only mutator are private to the
+ledger — a `compile_fail` doctest on `Places` is the proof that nothing outside
+can advance it. **Its rule:** it reads no window, no clock, no file and no
+environment; every fact arrives as an argument; it depends on `bt-layout` only
+(§3.3's entry) and only `bt-app` depends on it. **Its public surface** is what
+`bt-app` names and nothing more: `AttentionLedger` with `apply`, `weak_edge`,
+`ticket`, `state`, `claim_episode`, `surrender_place`, `announce`,
+`announce_turn_end` and `admits_a_frame`; the vocabulary `Site`, `Reach`,
+`Credential`, `State`, `Transport`, `Via`, `NotificationSwitches` (and its two
+fields), `WaitKind`, `WaitSlot`, `wait_key_is_well_formed`, `ClearSelector`,
+`ClearClass`, `ClearReason`, `AnswerKind`, `Mode`, `Tier`, `IdSource`,
+`ClearScope`, `MappedAction`, `MappingRow` (with `is_wait` and `slot`),
+`duplicated_tier`, `kind_mode`, `Event`, `Raised`, `Why`, `Outcome`,
+`claim_line`; `expiry::{WAIT_TTL, WaitClock}`, `is_consumed`, `Places`
+(`issued` only). `Grounds`, `is_agent_seat` and
+`MAX_FRAMES_PER_PANE_PER_SECOND` stay crate-private because `bt-app` names none
+of them. The crate's `lib.rs` doc is the in/out table above and the ledger's
+invariants (`docs/RULES.md` row 29). Still in `bt-app`, by
+`docs/plans/design/ownership-census-2026-09-25.md` §5.2 and §R6: the
+reach rule (`notify`, census-4), `attention_wire`, `attention_map` (it names
+`bt-term`'s notification types), the installers, `attention_trace`,
+`attention_words`, `runtime/attention.rs`, and the tab-walking routing —
+`deliver_attention`, `settle_attention`, `deliver_osc_attention`,
+`answer_attention_in`, `attention_delivery` — until D-1's session registry.
+
 ### 12.2 The three 0.6 decisions
 
 These are expressed today through a single window in `settle_attention`,
@@ -846,7 +896,7 @@ CLI and MCP are adapters to the domain API. **Do not export `AppEvent`,
 `Runtime`, window handles, rendered labels or `Instant` as the outward
 protocol, and do not forward diagnostic prose as the event protocol.** A client
 sends domain commands and consumes versioned domain observations. Today's
-`bt-app::attention_wire::Message` and `bt-app::attention::Event` are the shape
+`bt-app::attention_wire::Message` and `bt_workbench::attention::Event` are the shape
 to grow, not `Runtime`.
 
 What breaks if this is done wrong: session identity changing during detach and
@@ -867,7 +917,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23.
 
 | file | methods | owns | asks | doors and rows |
 |---|---|---|---|---|
-| `attention.rs` | 27 | toasts, pane notices, the Agents rows, terminal and turn-end notifications; raising, answering, marking seen and jumping to an attention request | ingress (the ledger the endpoint feeds, §7.2) | none; `notify::desktop_reach` and `interruption` decide what reaches the desktop |
+| `attention.rs` | 27 | toasts, pane notices, the Agents rows, terminal and turn-end notifications; raising, answering, marking seen and jumping to an attention request | ingress (the ledger the endpoint feeds, §7.2 — `bt_workbench::attention` since 2026-09-25, §12.1) | none; `notify::desktop_reach` and `interruption` decide what reaches the desktop |
 | `clipboard.rs` | 19 | copy, copy on select, the paste target and its delivery, the multi-line paste card | session (bytes into `InputRing`) | the clipboard read, on this thread (§7.2) |
 | `configuration.rs` | 10 | Settings ▸ About ▸ Export… and Import…, each imported part through its own door (§9) | — | `file_reads` (the settings lane, through `bt_persist::read_export`); store writes, row 20 |
 | `diagnostics.rs` | 5 | the OS theme change, application-change notes, the trace drain, grid-change scheduling | ingress (trace) | — |

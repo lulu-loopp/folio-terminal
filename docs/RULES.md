@@ -706,7 +706,7 @@ peek* and *A right click is a click*. The row stays `not yet folded` for the rea
 
 ### 29. Attention — `folded`
 **Rule.** An **episode** is one unanswered request from one pane.
-`bt_app::attention::AttentionLedger` keeps a per-leaf account — strictly
+`bt_workbench::attention::AttentionLedger` keeps a per-leaf account — strictly
 increasing generations per credential, a watermark per answer, one live episode —
 and **only the ledger may mint one**, so a generation above the watermark means
 unanswered and at or below means dealt with. Three ingress lanes feed it and all

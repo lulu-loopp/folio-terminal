@@ -96,7 +96,8 @@ $portable = @(
     "bt-render",
     "bt-term",
     "bt-pty",
-    "bt-corpus"
+    "bt-corpus",
+    "bt-workbench"
 )
 
 # Each is a whole-word match against the source, so `windows_sys` does not answer

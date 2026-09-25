@@ -639,6 +639,8 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **A thirteenth since 2026-09-24** (0.4.5 ticket 37): `main.rs` declares `#[cfg(test)] mod text_size_tests;`, which makes `text_size_tests.rs` wholly test. `bt-source`'s `the_wholly_test_files_of_bt_app_are_the_thirteen` names it.
 
+**Twelve again since 2026-09-25** (0.4.6 census-3): `attention.rs` and `attention/tests.rs` left `bt-app` for `bt-workbench` (D-57), so the table's `attention.rs` row no longer describes `bt-app`. The test is now `the_wholly_test_files_of_bt_app_are_the_twelve`.
+
 ---
 
 ## 7. The end measurement
