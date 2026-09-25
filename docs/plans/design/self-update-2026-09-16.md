@@ -1875,3 +1875,10 @@ F-3 and U-26–U-29). They are no longer open. What remains:
   line on the console or in a toast? Mine: accept. It only happens when a person
   starts Folio in the seconds after pressing Restart. Codex's F-6 asks that such
   a launch *"defer/refuse startup"*, not continue.
+
+
+## Owner rulings 2026-09-25 (on revision (b)'s open questions)
+
+1. A copy may update itself only when the running build is signed **and** built with the updater flag; both are required.
+2. If the macOS recovery path is not ready at the 0.4.6 cut, 0.4.6 ships the updater on Windows only; macOS stays on the releases page until its recovery contract passes its experiments.
+3. A Folio started while an update is being applied waits for the update to finish before it opens a window (up to the apply deadline); this is accepted as the behaviour right after Restart.
