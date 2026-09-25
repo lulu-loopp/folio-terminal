@@ -8,6 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A web pane survives the browser engine updating itself underneath it.
 - Pasting a picture works with every kind of bitmap the clipboard can hold,
   including browser and screenshot-tool copies and long screenshots.
 
