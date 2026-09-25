@@ -105,13 +105,15 @@ pub fn monospace_family_named(name: &str) -> Option<MonospaceFamily> {
     monospace_family_entry(&matched).filter(|family| family.name.eq_ignore_ascii_case(name))
 }
 
-/// Every visible CJK family, read once on the font worker.
+/// Every visible CJK family, read on the font worker.
+///
+/// **Asked of CoreText on every call** (ticket 65), for the Windows arm's
+/// reason: it was read once per process, so a family installed after the
+/// first open of Settings never reached the list. `from_available_fonts` is
+/// the live font database; no flag asks it to look again.
 #[must_use]
 pub fn cjk_font_families() -> Vec<crate::CjkFamily> {
-    static FAMILIES: std::sync::OnceLock<Vec<crate::CjkFamily>> = std::sync::OnceLock::new();
-    FAMILIES
-        .get_or_init(|| crate::order_cjk_families(collect_cjk_families()))
-        .clone()
+    crate::order_cjk_families(collect_cjk_families())
 }
 
 fn collect_cjk_families() -> Vec<crate::CjkFamily> {

@@ -505,6 +505,14 @@ Entries read: §7.1.6c-8 ruling four (2026-08-19), *the picker ends in
   published as the list. The primary face is not drawn in the default and
   swapped when the walk lands: that would change every pane's grid after the
   shells started.
+- **Every walk sees what was installed since the last one** (2026-09-25, ticket
+  65). Each round of the lane walks both lists, the monospace families and the
+  CJK families, and both walks ask the system collection for updates
+  (Windows: `GetSystemFontCollection(…, true)` through `collection_for_walk`;
+  macOS: CoreText's available-fonts collection, which is live). So a font
+  installed while Folio runs is in the lists the next time the dialog opens.
+  The lookup by name at launch (`collection_for_lookup`) does not ask: it runs
+  on the window thread, for a face that existed when it was chosen.
 - **The CJK face works the other way, on purpose**: `cjk_family_files` never
   looks anything up; a stored CJK family is applied again by the `FontsScanned`
   arm once the lane's list is adopted (the CJK face changes no cell metrics).

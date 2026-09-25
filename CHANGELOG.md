@@ -25,6 +25,8 @@ All notable changes to Folio are recorded here. The format follows
   further back fill in over the next few frames.
 - A launch with a chosen terminal font no longer waits for Folio to list every
   font on the machine.
+- A font installed while Folio is running shows up in the font lists the next
+  time Settings opens.
 - A terminal font with no bold style no longer switches to another font's bold
   for bold text.
 - Bold Chinese text no longer leaves single characters at regular weight.
