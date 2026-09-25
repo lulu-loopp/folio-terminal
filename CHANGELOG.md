@@ -8,6 +8,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A redraw that arrives in several pieces no longer shows a formula's source
+  for a frame.
 - Pasting a picture works with every kind of bitmap the clipboard can hold,
   including browser and screenshot-tool copies and long screenshots.
 
