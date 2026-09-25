@@ -3444,6 +3444,15 @@ impl Runtime<'_> {
                 exited.push(index);
             }
         }
+        // Only the ones whose close is nothing to ask: a tab that still holds an
+        // unsaved preview waits for the reader, and the question is never put
+        // from here (ticket 58).
+        let exited = crate::exited_tabs_the_loop_may_close(
+            &self.window.dirty_gate,
+            &self.window.tabs,
+            self.window.active_tab,
+            exited,
+        );
         for index in exited.into_iter().rev() {
             self.close_tab(index)?;
             if self.window.tabs.len() == 1 && index == 0 {

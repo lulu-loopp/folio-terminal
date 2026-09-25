@@ -23639,7 +23639,7 @@ fn window_event_squeezed() -> String {
 /// `vault_this_window` — is decided inside `FolioApp::close` (`ending`), after
 /// that line, so neither road is reachable from a busy gate.
 ///
-/// MUTATION: in `DirtyGate::raise`, answer an open gate with `NothingToAsk`
+/// MUTATION: in `DirtyGate::verdict`, answer an open gate with `NothingToAsk`
 /// (BASE's "already open → Ok(false)") — the first assertion goes red.
 #[test]
 fn a_window_close_requested_while_the_gate_is_up_neither_closes_the_window_nor_loses_the_buffer() {
@@ -23716,7 +23716,7 @@ fn a_window_close_requested_while_the_gate_is_up_neither_closes_the_window_nor_l
 /// is answered (the answer takes the request off the gate first), a close is
 /// asked again from the top.
 ///
-/// MUTATION: in `DirtyGate::raise`, answer an open gate with `NothingToAsk` —
+/// MUTATION: in `DirtyGate::verdict`, answer an open gate with `NothingToAsk` —
 /// the second assertion goes red.
 #[test]
 fn two_os_close_requests_in_a_row_ask_once_and_close_nothing_until_answered() {
@@ -23872,7 +23872,7 @@ fn cancel_keeps_the_buffer_and_save_and_discard_replay_the_accepted_request() {
 /// opened and read, not typed into — shuts on the first OS close, a clean tab
 /// closes on its first press, and the gate never opens.
 ///
-/// MUTATION: in `DirtyGate::raise`, answer an empty list with `Busy` — the
+/// MUTATION: in `DirtyGate::verdict`, answer an empty list with `Busy` — the
 /// first assertion goes red.
 #[test]
 fn nothing_to_ask_still_closes_at_once() {
@@ -23891,6 +23891,86 @@ fn nothing_to_ask_still_closes_at_once() {
         "and a clean tab closes on the first press"
     );
     assert!(!gate.is_open(), "without a question ever going up");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RED (58) — **A tab whose shell has exited beside an unsaved preview is not
+/// asked about again after Cancel, turn after turn.**
+///
+/// Coordinator ruling 2026-09-25. `Runtime::reap_exited_tabs` runs at the foot
+/// of every turn and used to hand every ended tab to `close_tab`, which puts
+/// the question: after Cancel the shell is still gone, so the next turn put it
+/// again, and Cancel could never make it stay down. Now the cleanup asks the
+/// gate's question without putting it (`exited_tabs_the_loop_may_close`) and
+/// leaves a tab whose close would ask where it is: the reader closes it, or
+/// saves, when they choose.
+///
+/// Each turn here is what the reap does: the filter, then, for each tab it
+/// lets through, `close_tab`'s first step (`raise_dirty_gate_over` over
+/// `CloseTab`). The wiring is read through `bt_source`.
+///
+/// MUTATION: let the cleanup raise the gate again — return `exited` unfiltered
+/// from `exited_tabs_the_loop_may_close` — and the second turn's assertion
+/// goes red.
+#[test]
+fn a_tab_whose_shell_has_exited_beside_an_unsaved_preview_is_not_asked_about_again_after_cancel() {
+    let (path, buffer) = a_file_being_edited("exited-shell");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let tabs = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+
+    // The reader closes the ended tab and answers Cancel.
+    assert_eq!(
+        raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::CloseTab(0)),
+        restore::GateRaise::Raised
+    );
+    assert_eq!(gate.take(), Some(restore::GateRequest::CloseTab(0)));
+
+    for turn in 1..=5 {
+        let closing = exited_tabs_the_loop_may_close(&gate, &tabs, 0, vec![0]);
+        for index in closing {
+            let _ =
+                raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::CloseTab(index));
+        }
+        assert!(
+            !gate.is_open(),
+            "turn {turn}: the loop put the question the reader just cancelled"
+        );
+        assert!(
+            still_holds_the_edit(&tabs[0], &path),
+            "turn {turn}: and the buffer stays"
+        );
+    }
+
+    // A clean ended tab is still taken away by the loop at once.
+    let dir = disk_scratch("gate58-exited-clean");
+    let clean = dir.join("notes.md");
+    std::fs::write(
+        &clean, "one
+",
+    )
+    .expect("write the file");
+    let (clean_tab, _) = tab_with_a_preview(2, vec![buffer_read_from(&clean)]);
+    let both = vec![tabs.into_iter().next().expect("the dirty tab"), clean_tab];
+    assert_eq!(
+        exited_tabs_the_loop_may_close(&gate, &both, 0, vec![0, 1]),
+        vec![1],
+        "only the tab with nothing to ask is closed by the loop"
+    );
+
+    let reap = squeezed(method_body("Runtime", "reap_exited_tabs"));
+    let filtered = reap
+        .find("letexited=crate::exited_tabs_the_loop_may_close(")
+        .expect("the cleanup filters the ended tabs");
+    let closes = reap
+        .find("self.close_tab(index)?")
+        .expect("and closes what is left");
+    assert!(
+        filtered < closes,
+        "the filter stands before the close:
+{reap}"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -18028,6 +18028,32 @@ fn raise_dirty_gate_over(
     gate.raise(request, &at_risk)
 }
 
+/// **Which of the tabs whose shells have all exited the loop may close on its
+/// own** (ticket 58, coordinator ruling 2026-09-25): those whose close is
+/// nothing to ask, in the order given.
+///
+/// The cleanup asks the gate's own question without putting it. A tab whose
+/// close would ask — an unsaved preview beside the dead shell — or that finds
+/// another question up is left standing, shell and all: whether its edits go
+/// is the reader's turn, taken through the tab's own close, not the loop's.
+/// Putting the question from here re-asked every turn after a Cancel, because
+/// the shell is still gone on the next one.
+fn exited_tabs_the_loop_may_close(
+    gate: &restore::DirtyGate,
+    tabs: &[TabState],
+    active_tab: usize,
+    exited: Vec<usize>,
+) -> Vec<usize> {
+    exited
+        .into_iter()
+        .filter(|&index| {
+            let at_risk =
+                dirty_gate_names(tabs, active_tab, &restore::GateRequest::CloseTab(index));
+            gate.verdict(&at_risk).proceeds()
+        })
+        .collect()
+}
+
 impl Deref for Runtime<'_> {
     type Target = TabState;
 

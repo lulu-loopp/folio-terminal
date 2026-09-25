@@ -1639,21 +1639,32 @@ impl DirtyGate {
         self.hover = None;
     }
 
-    /// **Put `request`, which would lose `at_risk`** (ticket 58).
+    /// **What putting a request that would lose `at_risk` would answer**,
+    /// without putting it (ticket 58) — `Raised` here means "would be asked".
     ///
     /// Busy is asked first, before what is at risk: a gate that is up is the
     /// reader's current question, and no second request — whether or not it
     /// would lose anything — may replace it or slip past it. Then an empty list
-    /// is nothing to ask. Otherwise the gate opens on this request.
-    pub fn raise(&mut self, request: GateRequest, at_risk: &[String]) -> GateRaise {
+    /// is nothing to ask.
+    pub fn verdict(&self, at_risk: &[String]) -> GateRaise {
         if self.is_open() {
-            return GateRaise::Busy;
+            GateRaise::Busy
+        } else if at_risk.is_empty() {
+            GateRaise::NothingToAsk
+        } else {
+            GateRaise::Raised
         }
-        if at_risk.is_empty() {
-            return GateRaise::NothingToAsk;
+    }
+
+    /// **Put `request`, which would lose `at_risk`** (ticket 58): the
+    /// [`Self::verdict`], and the gate opens on this request when it is
+    /// [`GateRaise::Raised`].
+    pub fn raise(&mut self, request: GateRequest, at_risk: &[String]) -> GateRaise {
+        let verdict = self.verdict(at_risk);
+        if verdict == GateRaise::Raised {
+            self.open(request);
         }
-        self.open(request);
-        GateRaise::Raised
+        verdict
     }
 
     /// Put it away and hand back what it was asking about.
