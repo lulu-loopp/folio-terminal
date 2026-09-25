@@ -43,6 +43,8 @@ All notable changes to Folio are recorded here. The format follows
   opens, the line it writes to `diagnostics.log` now names the step that took
   the time, including the time the system spent between Folio's own handlers.
 - A web pane on Windows uses the system's overlay scrollbars instead of the classic bars.
+- When Folio is upgraded, it updates the PSReadLine copy it installed earlier
+  by itself; copies you installed are left alone.
 
 ## 0.4.4-preview — 2026-09-24
 

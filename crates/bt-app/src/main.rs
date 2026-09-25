@@ -40859,6 +40859,25 @@ impl Runtime<'_> {
         // start. It is an environment read and four `is_file` calls, so moving it
         // ahead of the window costs the launch nothing measurable.
         let profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        // **Folio's own older PSReadLine is replaced here, without asking**
+        // (ruling 2026-09-21, option A; ticket 56). At the launch and before the
+        // first window, because a pane of this Folio starting a PowerShell is
+        // what would hold the old DLL open and make the write fail; and before
+        // the profile migration's worker, which takes the same marks lock. Only
+        // a build Folio recorded installing and older than the bundled one is
+        // touched (`psreadline::upgrade_decision`); a failure is one line here
+        // and the next launch tries again. On this thread, as the Settings
+        // row's own install is (RULES §38's debt).
+        let psreadline_documents = psreadline::documents_directory();
+        if let Some(documents) = psreadline_documents.as_deref()
+            && let Some(replacement) = psreadline::upgrade_recorded(
+                documents,
+                &persist::storage_dir(),
+                settings_store.loaded().psreadline_invite,
+            )
+        {
+            eprintln!("{}", replacement.log_line());
+        }
         shell_integration::begin_startup_migration();
         // Three registry reads, on this thread, finishing before the next line
         // (§7.40 ②). This used to start a worker running `wsl.exe --list` and a
@@ -41329,7 +41348,7 @@ impl Runtime<'_> {
             scheme_fault: None,
             scheme_source: [None, None],
             profile_programs,
-            psreadline_documents: psreadline::documents_directory(),
+            psreadline_documents,
             psreadline_installed: None,
             first_run_attempted: false,
             // Reads the registry once and, on a machine whose `folio.exe`

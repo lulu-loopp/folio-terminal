@@ -1015,7 +1015,26 @@ fn install_checked<G>(
         return Ok(Wrote::NotOurs);
     }
     let _held = before(&root)?;
-    for (name, bytes) in BUNDLED_FILES {
+    // **The build stamp lands last** (ticket 56). The stamp is the whole of how
+    // one Folio build is told from another, so a write that stops part-way —
+    // the usual cause is a PowerShell that has another of these DLLs loaded,
+    // which Windows will not let anybody overwrite — must leave the stamp it
+    // found. Written in array order, a stop after the assembly and before a
+    // later file left this build's stamp over a mix of two builds' bytes, which
+    // `installed_copy` reads as an edit (`None`): no longer an older build, so
+    // never replaced again, and a row reading "removed elsewhere" over a module
+    // PowerShell still loads. Last, the old stamp stands until every other file
+    // is in, so the copy still reads as the older build and the next launch
+    // tries again.
+    let stamp_last = BUNDLED_FILES
+        .iter()
+        .filter(|(name, _)| *name != BUILD_STAMP_FILE)
+        .chain(
+            BUNDLED_FILES
+                .iter()
+                .filter(|(name, _)| *name == BUILD_STAMP_FILE),
+        );
+    for (name, bytes) in stamp_last {
         let path = root.join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1392,6 +1411,244 @@ pub enum Removed {
     Nothing,
     /// A module Folio did not write. It is exactly where it was.
     NotOurs,
+}
+
+// ── Folio's own older copy, replaced at launch (ruling 2026-09-21, option A) ─
+
+/// **One Folio patch build, as the `ProductVersion` stamp in its DLL names it**
+/// (ticket 56).
+///
+/// The upgrade has to know whether a stamp on disk is *older* than
+/// [`PATCHED_BUILD`], and until this type there was no order at all: every
+/// `-bt.` stamp that was not this build's was [`InstalledCopy::OlderBuild`],
+/// whether it came before this build or after it.
+///
+/// **The order.** Two builds are ordered only when their module version is the
+/// same — the family is per [`PATCHED_VERSION`] ([`family_prefix`]), and a
+/// build of another version is not an earlier or later patch of this one. Within
+/// a version, a numbered build `-bt.N` is ordered by `N` as a number (so `bt.10`
+/// comes after `bt.9`, which a text comparison would get backwards). A named
+/// build — `-bt.anchorfix`, the one this product shipped before it began to
+/// number them (see [`PATCHED_BUILD`]) — comes before every numbered build. Two
+/// named builds are not ordered against each other: nothing says which came
+/// first, and a stamp nobody can place is kept rather than replaced.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Build {
+    version: Version,
+    patch: Patch,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Patch {
+    /// `-bt.<name>`: a build named before the numbering began.
+    Named(String),
+    /// `-bt.<N>`.
+    Numbered(u32),
+}
+
+impl Build {
+    /// Parse `<version>-bt.<patch>`; `None` for anything without Folio's `-bt.`
+    /// mark, which is the whole of what a stock or gallery module's stamp is.
+    #[must_use]
+    pub fn parse(stamp: &str) -> Option<Self> {
+        let (version, patch) = stamp.trim().split_once("-bt.")?;
+        let version = Version::parse(version)?;
+        let patch = if patch.is_empty() {
+            return None;
+        } else if patch.bytes().all(|byte| byte.is_ascii_digit()) {
+            Patch::Numbered(patch.parse().ok()?)
+        } else {
+            Patch::Named(patch.to_owned())
+        };
+        Some(Self { version, patch })
+    }
+
+    /// The build this executable carries — [`PATCHED_BUILD`], parsed.
+    #[must_use]
+    pub fn bundled() -> Self {
+        Self::parse(PATCHED_BUILD).expect("PATCHED_BUILD is a literal in this file")
+    }
+
+    /// Whether this build came before `other` — the order in the type's doc.
+    #[must_use]
+    pub fn predates(&self, other: &Self) -> bool {
+        self.version == other.version
+            && match (&self.patch, &other.patch) {
+                (Patch::Numbered(this), Patch::Numbered(that)) => this < that,
+                (Patch::Named(_), Patch::Numbered(_)) => true,
+                (Patch::Numbered(_) | Patch::Named(_), Patch::Named(_)) => false,
+            }
+    }
+
+    /// The stamp as the DLL spells it.
+    #[must_use]
+    pub fn text(&self) -> String {
+        match &self.patch {
+            Patch::Named(name) => format!("{}-bt.{name}", self.version.text()),
+            Patch::Numbered(number) => format!("{}-bt.{number}", self.version.text()),
+        }
+    }
+}
+
+/// What stands in the module directory, as far as the upgrade is concerned.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalledBuild {
+    /// The Folio build stamped in the module; `None` for a module that carries
+    /// no Folio stamp — somebody else's.
+    pub build: Option<Build>,
+    /// Whether Folio's own records say Folio put a module here.
+    pub recorded: bool,
+}
+
+impl InstalledBuild {
+    /// Read what is under `documents`, and whether Folio recorded installing it.
+    ///
+    /// `None` when [`installed_copy`] finds nothing of anybody's that the
+    /// upgrade could replace or keep — the case the invitation exists for. The
+    /// copy is classified by [`installed_copy`] and nothing else, so what the
+    /// upgrade calls "Folio's older build" is exactly what the Settings row calls
+    /// `Update`.
+    #[must_use]
+    pub fn found(
+        documents: &Path,
+        data: &Path,
+        invite: bt_persist::PsReadLineInviteV1,
+    ) -> Option<Self> {
+        let build = match installed_copy(documents) {
+            InstalledCopy::None => return None,
+            InstalledCopy::ThisBuild => Some(Build::bundled()),
+            InstalledCopy::OlderBuild => {
+                installed_build(documents).as_deref().and_then(Build::parse)
+            }
+            InstalledCopy::Foreign => None,
+        };
+        Some(Self {
+            build,
+            recorded: recorded_install(documents, data, invite),
+        })
+    }
+}
+
+/// **Whether Folio recorded installing the module under `documents`.**
+///
+/// Two records say so, and either is enough. The marks record
+/// (`psreadline_module_roots`, written by [`install_recorded`] before the first
+/// byte) names the root, and it exists only since 0.4.3. Every install pressed
+/// under 0.1.0–0.4.2 left only the other one — `settings.json` moving the
+/// invitation to `Installed`, which `Runtime::apply_psreadline` writes on the
+/// same press — and requiring the marks record alone would leave every one of
+/// those copies out of the ruling. The replacement then goes through
+/// [`install_recorded`], so such a copy leaves the upgrade carrying the marks
+/// record too, and the uninstall door can find it.
+///
+/// A record is not the only guard: [`upgrade_decision`] also asks for Folio's
+/// `-bt.` stamp, which only this project's builds put in the DLL.
+fn recorded_install(documents: &Path, data: &Path, invite: bt_persist::PsReadLineInviteV1) -> bool {
+    use crate::shell_integration::profile_marks::Marks;
+    if invite == bt_persist::PsReadLineInviteV1::Installed {
+        return true;
+    }
+    let root = module_directory(documents);
+    Marks::read(data).is_ok_and(|marks| marks.psreadline_module_roots.contains(&root))
+}
+
+/// What Folio does about the module it finds at launch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Upgrade {
+    /// Folio's own older build, which Folio recorded installing: replace it with
+    /// the bundled build without asking.
+    Replace,
+    /// Leave it: this build's own copy, a newer or unplaceable Folio build, a
+    /// Folio-stamped copy Folio has no record of installing, or a module
+    /// somebody else wrote.
+    Keep,
+    /// Nothing is there to replace: whether to offer the module is the
+    /// invitation's question ([`invite_decision`]), and it is never answered
+    /// with a silent install.
+    Invite,
+}
+
+/// **The upgrade's decision table** (ruling 2026-09-21, option A; ticket 56).
+///
+/// | on disk | Folio's record | stamp against `bundled` | answer |
+/// |---|---|---|---|
+/// | nothing Folio could replace | any | — | `Invite` |
+/// | a module with no Folio stamp | any | — | `Keep` |
+/// | a Folio build | no | any | `Keep` |
+/// | a Folio build | yes | older ([`Build::predates`]) | **`Replace`** |
+/// | a Folio build | yes | the same, newer, or unordered | `Keep` |
+#[must_use]
+pub fn upgrade_decision(installed: Option<&InstalledBuild>, bundled: &Build) -> Upgrade {
+    let Some(installed) = installed else {
+        return Upgrade::Invite;
+    };
+    match &installed.build {
+        Some(build) if installed.recorded && build.predates(bundled) => Upgrade::Replace,
+        _ => Upgrade::Keep,
+    }
+}
+
+/// What the launch's replacement did.
+#[derive(Debug)]
+pub struct Replacement {
+    /// The build that was on disk.
+    pub from: String,
+    /// What [`install_recorded`] answered.
+    pub wrote: io::Result<Wrote>,
+}
+
+impl Replacement {
+    /// The one `diagnostics.log` line the replacement owes; there is no card.
+    ///
+    /// A failure is said here and nowhere else, and changes nothing that
+    /// matters: the stamp is written last ([`install_checked`]), so the copy
+    /// still reads as the older build and the next launch tries again.
+    #[must_use]
+    pub fn log_line(&self) -> String {
+        let from = &self.from;
+        match &self.wrote {
+            Ok(Wrote::Module(root)) => format!(
+                "BT_PSREADLINE upgraded {from} to {PATCHED_BUILD} in {}",
+                root.display()
+            ),
+            Ok(Wrote::NotOurs) => {
+                format!("BT_PSREADLINE upgrade from {from} refused why=occupied")
+            }
+            Err(error) => format!(
+                "BT_PSREADLINE upgrade from {from} to {PATCHED_BUILD} failed, \
+                 kept until the next launch: {error}"
+            ),
+        }
+    }
+}
+
+/// **Replace Folio's own older copy, at launch, without asking** (ruling
+/// 2026-09-21, option A; ticket 56).
+///
+/// `None` when [`upgrade_decision`] says anything but `Replace`: nothing is
+/// written and nothing is said. Otherwise the write is the first install's own
+/// road, [`install_recorded`] — the same occupancy check, the same marks record
+/// taken before the first byte, the same files.
+///
+/// Called once per process, from the launch, before the first window exists —
+/// so before any pane of this Folio has started a PowerShell that would hold
+/// the old DLL open.
+pub fn upgrade_recorded(
+    documents: &Path,
+    data: &Path,
+    invite: bt_persist::PsReadLineInviteV1,
+) -> Option<Replacement> {
+    let installed = InstalledBuild::found(documents, data, invite);
+    if upgrade_decision(installed.as_ref(), &Build::bundled()) != Upgrade::Replace {
+        return None;
+    }
+    let from = installed
+        .and_then(|installed| installed.build)
+        .map(|build| build.text())?;
+    Some(Replacement {
+        from,
+        wrote: install_recorded(documents, data),
+    })
 }
 
 // ── one door, and it always says something (§7.47) ──────────────────────────
@@ -3254,6 +3511,249 @@ mod tests {
                 row_description(state),
                 row_description_in(state, i18n::current())
             );
+        }
+    }
+
+    // ── ticket 56: Folio's own older copy is replaced at launch ─────────────
+
+    fn on_disk(stamp: &str, recorded: bool) -> InstalledBuild {
+        InstalledBuild {
+            build: Build::parse(stamp),
+            recorded,
+        }
+    }
+
+    /// RED (56) — **Folio's own older PSReadLine build is replaced by the
+    /// bundled one without an invitation.**
+    ///
+    /// Owner's ruling 2026-09-21, option A. On BASE nothing decided this at
+    /// all: an older Folio copy silenced the invitation and waited on the
+    /// Settings row for a press of `On`. The answer here is `Replace` — not
+    /// `Invite`, because the invitation is for a machine Folio has never put
+    /// its module on, and not `Keep`, which is what BASE did.
+    ///
+    /// MUTATION: return `Upgrade::Invite` for any installed copy in
+    /// `upgrade_decision`.
+    #[test]
+    fn folios_own_older_psreadline_build_is_replaced_by_the_bundled_one_without_an_invitation() {
+        let bundled = Build::parse("2.4.6-bt.2").unwrap();
+        for older in ["2.4.6-bt.1", "2.4.6-bt.anchorfix"] {
+            assert_eq!(
+                upgrade_decision(Some(&on_disk(older, true)), &bundled),
+                Upgrade::Replace,
+                "{older} recorded by Folio, bundled 2.4.6-bt.2"
+            );
+        }
+        assert_eq!(
+            upgrade_decision(None, &bundled),
+            Upgrade::Invite,
+            "and a machine with nothing of Folio's on it is still only invited"
+        );
+    }
+
+    /// RED (56) — **A copy Folio did not install is never replaced.**
+    ///
+    /// The stamp alone says a Folio build wrote the DLL; what says *this
+    /// account's Folio put it here* is the install record. A Folio-stamped
+    /// copy with no record — carried over by hand, restored from somebody's
+    /// backup — is the reader's, and so are a stock `2.4.6` and an upstream
+    /// `2.5.0`, which carry no Folio stamp at all (`PATCHED_BUILD`'s rule about
+    /// `2.5.0` stands).
+    ///
+    /// MUTATION: drop `installed.recorded &&` from `upgrade_decision`.
+    #[test]
+    fn a_copy_folio_did_not_install_is_never_replaced() {
+        let bundled = Build::bundled();
+        assert_eq!(
+            upgrade_decision(Some(&on_disk("2.4.6-bt.1", false)), &bundled),
+            Upgrade::Keep,
+            "a Folio-stamped 2.4.6 with no record of Folio installing it"
+        );
+        for stamp in ["2.4.6", "2.5.0", "2.5.0-bt.1"] {
+            for recorded in [false, true] {
+                assert_eq!(
+                    upgrade_decision(Some(&on_disk(stamp, recorded)), &bundled),
+                    Upgrade::Keep,
+                    "{stamp}, recorded={recorded}"
+                );
+            }
+        }
+    }
+
+    /// RED (56) — **The same build is kept, and a newer own build is kept.**
+    ///
+    /// A downgrade of Folio must not downgrade the module it installed, and
+    /// the launch after an upgrade must not write the same bytes again. Also
+    /// pins the order in `Build`'s doc: numbers compare as numbers, a named
+    /// build predates every numbered one, and two named builds are unordered.
+    ///
+    /// MUTATION: `this < that` → `this <= that` in `Build::predates` (replace
+    /// on equal).
+    #[test]
+    fn the_same_build_is_kept_and_a_newer_own_build_is_kept() {
+        let bundled = Build::parse("2.4.6-bt.2").unwrap();
+        for stamp in ["2.4.6-bt.2", "2.4.6-bt.3", "2.4.6-bt.10"] {
+            assert_eq!(
+                upgrade_decision(Some(&on_disk(stamp, true)), &bundled),
+                Upgrade::Keep,
+                "{stamp} against bundled 2.4.6-bt.2"
+            );
+        }
+        let build = |stamp| Build::parse(stamp).unwrap();
+        assert!(build("2.4.6-bt.9").predates(&build("2.4.6-bt.10")));
+        assert!(!build("2.4.6-bt.10").predates(&build("2.4.6-bt.9")));
+        assert!(build("2.4.6-bt.anchorfix").predates(&build("2.4.6-bt.1")));
+        assert!(!build("2.4.6-bt.1").predates(&build("2.4.6-bt.anchorfix")));
+        assert!(!build("2.4.6-bt.anchorfix").predates(&build("2.4.6-bt.other")));
+        assert!(!build("2.4.5-bt.1").predates(&build("2.4.6-bt.2")));
+        assert_eq!(build("2.4.6-bt.anchorfix").text(), "2.4.6-bt.anchorfix");
+        assert_eq!(Build::parse("2.4.6-bt."), None);
+        // The bundled build is numbered, so every named build predates it and
+        // the launch can place every stamp this product has ever shipped.
+        assert_eq!(Build::bundled().text(), PATCHED_BUILD);
+        assert!(build("2.4.6-bt.anchorfix").predates(&Build::bundled()));
+    }
+
+    /// Stand an older Folio build in `documents`: the bundled files with the
+    /// DLL's own `ProductVersion` rewritten to `stamp`, read back by the real
+    /// version-resource reader.
+    #[cfg(windows)]
+    fn older_build_in(documents: &Path, stamp: &str) -> PathBuf {
+        let root = install_ours(documents);
+        assert!(stamp_installed_build(&root, stamp) > 0);
+        assert_eq!(installed_build(documents).as_deref(), Some(stamp));
+        assert_eq!(installed_copy(documents), InstalledCopy::OlderBuild);
+        root
+    }
+
+    #[cfg(windows)]
+    fn marks_roots(data: &Path) -> Vec<PathBuf> {
+        crate::shell_integration::profile_marks::Marks::read(data)
+            .unwrap()
+            .psreadline_module_roots
+    }
+
+    /// RED (56) — **The road performs the replacement and records the new
+    /// build (headless, the recorded file writes).**
+    ///
+    /// Real files in a temporary `Documents`, a real DLL whose version
+    /// resource says `2.4.6-bt.1`, a real marks record in a temporary data
+    /// root. Folio's record here is the one every install pressed before 0.4.3
+    /// left — `settings.json` saying `Installed`, and no marks root — so the
+    /// replacement's own record write is what puts the root in the marks, where
+    /// the uninstall door looks. Then the launch after: nothing to do. And the
+    /// two other cases on the same disk: the marks record alone is a record,
+    /// and no record at all leaves the older copy exactly as it was.
+    ///
+    /// MUTATION: in `upgrade_recorded`, write through
+    /// `install_checked(documents, |_| Ok(()))` instead of `install_recorded`
+    /// (skip the record write).
+    #[cfg(windows)]
+    #[test]
+    fn the_road_performs_the_replacement_and_records_the_new_build() {
+        let documents = temp_dir("upgrade-road");
+        let data = temp_dir("upgrade-road-data");
+        let root = older_build_in(&documents, "2.4.6-bt.1");
+        assert!(marks_roots(&data).is_empty());
+
+        let replacement = upgrade_recorded(&documents, &data, State::Installed)
+            .expect("Folio's own older build, recorded, is replaced");
+        assert!(
+            matches!(&replacement.wrote, Ok(Wrote::Module(wrote)) if *wrote == root),
+            "{replacement:?}"
+        );
+        assert_eq!(replacement.from, "2.4.6-bt.1");
+        assert!(
+            replacement
+                .log_line()
+                .contains("upgraded 2.4.6-bt.1 to 2.4.6-bt.2"),
+            "{}",
+            replacement.log_line()
+        );
+        assert!(is_folios_copy(&documents), "the bundled bytes, all nine");
+        assert_eq!(installed_build(&documents).as_deref(), Some(PATCHED_BUILD));
+        assert_eq!(installed_copy(&documents), InstalledCopy::ThisBuild);
+        assert_eq!(
+            marks_roots(&data),
+            vec![root.clone()],
+            "and the install is recorded"
+        );
+        assert!(
+            upgrade_recorded(&documents, &data, State::Installed).is_none(),
+            "the launch after has nothing to do"
+        );
+
+        // The marks record alone is Folio's record.
+        assert!(stamp_installed_build(&root, "2.4.6-bt.1") > 0);
+        let replaced = upgrade_recorded(&documents, &data, State::NotAsked).unwrap();
+        assert!(matches!(replaced.wrote, Ok(Wrote::Module(_))));
+        assert_eq!(installed_copy(&documents), InstalledCopy::ThisBuild);
+
+        // No record at all: the older copy is left exactly as it was.
+        let unrecorded = temp_dir("upgrade-road-unrecorded");
+        assert!(stamp_installed_build(&root, "2.4.6-bt.1") > 0);
+        let before = std::fs::read(root.join(BUILD_STAMP_FILE)).unwrap();
+        for invite in [State::NotAsked, State::Declined, State::Dismissed] {
+            assert!(upgrade_recorded(&documents, &unrecorded, invite).is_none());
+        }
+        assert_eq!(std::fs::read(root.join(BUILD_STAMP_FILE)).unwrap(), before);
+        assert!(marks_roots(&unrecorded).is_empty());
+
+        for dir in [documents, data, unrecorded] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    /// RED (56) — **A replacement that stops part-way keeps the older build's
+    /// stamp, so the next launch tries again.**
+    ///
+    /// The failure the ruling expects is a PowerShell somewhere holding one of
+    /// the module's DLLs, which Windows will not let anybody overwrite. Stood
+    /// in here, portably and without a PowerShell, by a directory where
+    /// `Microsoft.PowerShell.Pager.dll` goes: the write of that one file fails
+    /// as a locked one does. What must survive is the stamp — with it the copy
+    /// still reads as the older build, and the launch after replaces it once the
+    /// file is free.
+    ///
+    /// MUTATION: write the files in `BUNDLED_FILES` order in `install_checked`
+    /// (the stamp DLL third, before the Pager) — the copy then carries this
+    /// build's stamp over two builds' bytes, reads as an edit (`None`), and is
+    /// never replaced again.
+    #[cfg(windows)]
+    #[test]
+    fn a_replacement_that_stops_part_way_keeps_the_older_stamp_and_is_tried_again() {
+        let documents = temp_dir("upgrade-part-way");
+        let data = temp_dir("upgrade-part-way-data");
+        let root = older_build_in(&documents, "2.4.6-bt.1");
+        let blocked = root.join("Microsoft.PowerShell.Pager.dll");
+        std::fs::remove_file(&blocked).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+
+        let failed = upgrade_recorded(&documents, &data, State::Installed).unwrap();
+        assert!(failed.wrote.is_err(), "{failed:?}");
+        assert!(
+            failed.log_line().contains("kept until the next launch"),
+            "{}",
+            failed.log_line()
+        );
+        assert_eq!(installed_build(&documents).as_deref(), Some("2.4.6-bt.1"));
+        assert_eq!(installed_copy(&documents), InstalledCopy::OlderBuild);
+        assert_eq!(
+            upgrade_decision(
+                InstalledBuild::found(&documents, &data, State::Installed).as_ref(),
+                &Build::bundled()
+            ),
+            Upgrade::Replace,
+            "the next launch decides the same"
+        );
+
+        std::fs::remove_dir(&blocked).unwrap();
+        let retried = upgrade_recorded(&documents, &data, State::Installed).unwrap();
+        assert!(matches!(retried.wrote, Ok(Wrote::Module(_))), "{retried:?}");
+        assert_eq!(installed_copy(&documents), InstalledCopy::ThisBuild);
+
+        for dir in [documents, data] {
+            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 }

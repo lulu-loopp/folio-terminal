@@ -102,4 +102,5 @@
 1 video_seat.rs: open: Engine::open
 1 video_seat.rs: open: VideoSeat::open
 1 psreadline.rs: install_recorded: Marks::read
+1 psreadline.rs: recorded_install: Marks::read
 1 uninstall.rs: execute_with_claim: Marks::read

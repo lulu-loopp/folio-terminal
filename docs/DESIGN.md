@@ -12021,3 +12021,29 @@ Installing the whole plane's 100,000 hits took a further 8–12 ms; installing a
 **What this entry leaves behind.** A fading surface's translucent pixels step at the frame it lands on: encoded while it fades, linear at rest. On the light theme the tip's shadow at its darkest pixel lightens from about `#DB` to `#EE` as the fade lands; on dark the step is at most about 1.5 ΔL*. Recorded as D-66 in `docs/plans/structural-debt.md`, owed by the L variant (0.4.7, beside D-65). **Platforms:** the non-sRGB view of the swapchain needs the `SURFACE_VIEW_FORMATS` capability, which DX12 and Metal always have; on Linux, Vulkan needs `VK_KHR_swapchain_mutable_format` for it, and Linux is not a shipped target.
 
 **Pinned by** `bt-render` `tests::overlay_groups::*` (readbacks on the software adapter: `a_card_fading_at_one_half_reads_as_css_opacity_on_the_whole_card`, `a_surface_at_rest_draws_the_same_bytes_as_before_groups_existed`, `a_group_at_rest_never_takes_the_group_path`, `a_web_hole_inside_a_fading_surface_panics_in_a_debug_build`, `a_video_playing_on_a_fading_card_fades_with_it`, `nested_spans_multiply`, `a_ground_in_a_fading_surface_cross_fades_and_the_frame_beside_it_is_untouched`), and in `bt-app` `under_reduced_motion_no_fade_offers_the_group_path`, `the_docked_bars_clock_fades_with_its_panel`, `a_band_in_passage_is_one_surface_round_the_layers_its_builder_drew`, `a_card_slides_and_fades_as_one_surface_drawn_where_it_rests` and `the_entrance_rises_and_the_exit_only_fades`.
+
+### 2026-09-24 — Folio replaces its own older PSReadLine at launch without asking; a copy it did not install is never touched
+
+Owner's ruling of 2026-09-21 ("option A", recorded in the multi-line paste design note of 2026-09-22, rulings item 6), built by ticket 56. Until now an older Folio build of the module (`InstalledCopy::OlderBuild`) silenced the invitation and waited on the Terminal page's row for a press of `On`; nothing replaced it otherwise.
+
+**The road.** At launch, before the first window (so before any pane of this Folio starts a PowerShell that would hold the old DLL open) and before the profile migration's worker (which takes the same marks lock), `psreadline::upgrade_recorded` reads the module directory and decides; on `Replace` it writes through `install_recorded`, the first install's own road: the same occupancy check, the same marks record taken before the first byte, the same nine files. No card and no setting. One `diagnostics.log` line (`BT_PSREADLINE upgraded …` or `… failed, kept until the next launch: …`). It runs on the launch thread (the event loop's own), as the Settings row's install does, so on a launch that replaces it takes the marks lock there once; that is written beside RULES §38's debt in `docs/plans/structural-debt.md`, and is paid off by the same move to a worker.
+
+**The decision** (`psreadline::upgrade_decision`, pure):
+
+| on disk (`installed_copy`) | Folio's record | stamp against the bundled build | answer |
+|---|---|---|---|
+| nothing Folio could replace | any | — | `Invite` (the invitation's own table decides; never a silent install) |
+| a module with no Folio `-bt.` stamp (stock, gallery, upstream 2.5.0) | any | — | `Keep` |
+| a Folio build | none | any | `Keep` |
+| a Folio build | yes | older | **`Replace`** |
+| a Folio build | yes | the same, newer, or unordered | `Keep` |
+
+"Folio's record" is either of the two records Folio writes on an install: the marks record's `psreadline_module_roots` naming this root (since 0.4.3), or `settings.json`'s invitation at `Installed` (every install pressed under 0.1.0–0.4.2 left only this one). A replacement through `install_recorded` leaves the marks record behind in both cases, so the uninstall door finds the copy afterwards.
+
+**The order of builds** (`psreadline::Build`, read from the DLL's `ProductVersion`). Two builds are ordered only within one module version (the family is per `PATCHED_VERSION`). A numbered build `-bt.N` is ordered by `N` as a number (`bt.10` after `bt.9`). A named build (`-bt.anchorfix`, from before the numbering) comes before every numbered build; two named builds are unordered and kept.
+
+**A failed write keeps the older stamp.** `install_checked` now writes the stamp DLL last. A write stopped part-way (a DLL held open by a running PowerShell) leaves the older stamp, so the copy still reads as the older build and the next launch tries again. Written in array order, a stop after the stamp DLL left this build's stamp over two builds' bytes, which reads as an edit (`None`) and was never replaced again.
+
+**Today's effect.** Every published release has bundled `2.4.6-bt.2` (since 2026-08-18), so on a user's machine the road first acts at the next `PATCHED_BUILD` bump.
+
+**Pinned by** `psreadline::tests::folios_own_older_psreadline_build_is_replaced_by_the_bundled_one_without_an_invitation`, `a_copy_folio_did_not_install_is_never_replaced`, `the_same_build_is_kept_and_a_newer_own_build_is_kept`, `the_road_performs_the_replacement_and_records_the_new_build` and `a_replacement_that_stops_part_way_keeps_the_older_stamp_and_is_tried_again` (the last two Windows-only: a real DLL's version resource rewritten in place).
