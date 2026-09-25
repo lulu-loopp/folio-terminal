@@ -765,9 +765,12 @@ impl Runtime<'_> {
     ///
     /// Called from the event loop's own tail as well as from the publish, so
     /// "every frame the caret can move" needs no list of the ways it can move: a
-    /// keystroke, a scroll, a resize and a capsule relaid all wake the loop, and
-    /// [`ImeCursorThrottle`] turns a burst of identical rectangles into nothing
-    /// and a burst of moving ones into one call per 60Hz slot.
+    /// keystroke, a scroll, a resize and a capsule relaid all wake the loop.
+    ///
+    /// **It only says which area is wanted** (ticket 63). The system is told by
+    /// [`Self::flush_ime_cursor_area`], once at the turn's tail, so a burst of
+    /// moves in one turn is one call, an area equal to the one told is none, and
+    /// moves faster than 60Hz are held to one call per slot ([`ImeCursorSlot`]).
     pub(in crate::runtime) fn offer_ime_caret(&mut self, grid: Option<&ViewportFrame>) {
         if !self.window.ime_active {
             return;
@@ -795,18 +798,10 @@ impl Runtime<'_> {
         let Some(area) = area else {
             return;
         };
-        if let Some(area) = self.window.ime_cursor_throttle.offer(area, Instant::now()) {
-            self.apply_ime_cursor_area(area, "sent");
-        } else if ime_outbound::enabled() {
-            self.trace_ime_area(
-                area,
-                if self.window.ime_cursor_throttle.is_pending() {
-                    "throttled"
-                } else {
-                    "unchanged"
-                },
-            );
+        if ime_outbound::enabled() {
+            self.trace_ime_area(area, "wanted");
         }
+        self.window.ime_cursor.want(area);
     }
 
     /// One key, with the terminal menu holding the keyboard.
@@ -929,8 +924,16 @@ impl Runtime<'_> {
         }
     }
 
+    /// **The one road to [`Self::apply_ime_cursor_area`]** (ticket 63): the area
+    /// wanted, told to the system only when it differs from the one last told and
+    /// at most once per [`IME_CURSOR_AREA_INTERVAL`]; a held area is told when its
+    /// deadline comes, which the turn folds into its wake-up.
+    ///
+    /// Called once at the turn's tail, after the last clock that can move a caret,
+    /// and once from `Ime::Enabled`, so the input method has the area before the
+    /// first pre-edit of a composition rather than a turn after it.
     pub(in crate::runtime) fn flush_ime_cursor_area(&mut self, now: Instant) {
-        if let Some(area) = self.window.ime_cursor_throttle.flush_due(now) {
+        if let Some(area) = self.window.ime_cursor.take_due(now) {
             self.apply_ime_cursor_area(area, "flushed");
         }
     }
@@ -960,16 +963,14 @@ impl Runtime<'_> {
     /// times. It is telling the platform to ask again.
     ///
     /// Not `reset`: that is a composition ending. This keeps the 60Hz cadence,
-    /// so a drag across the seam costs the same as a caret moving.
+    /// so a drag across the seam costs the same as a caret moving. And, like every
+    /// other offer since ticket 63, it only wants: the call is the turn's.
     pub(in crate::runtime) fn reoffer_ime_cursor_area(&mut self) {
-        let Some(area) = self.window.ime_cursor_throttle.last_sent() else {
+        let Some(area) = self.window.ime_cursor.rearm() else {
             return;
         };
-        self.window.ime_cursor_throttle.rearm();
-        if let Some(area) = self.window.ime_cursor_throttle.offer(area, Instant::now()) {
-            self.apply_ime_cursor_area(area, "reoffered");
-        } else if ime_outbound::enabled() {
-            self.trace_ime_area(area, "reoffer_throttled");
+        if ime_outbound::enabled() {
+            self.trace_ime_area(area, "reoffer_wanted");
         }
     }
 
@@ -2199,11 +2200,19 @@ impl Runtime<'_> {
                 // `WM_IME_STARTCOMPOSITION`), then the method's own clearing
                 // pre-edit, then its commit. Clearing here would hand that
                 // commit to whichever field the keyboard had moved to.
-                self.window.ime_cursor_throttle.reset();
+                self.window.ime_cursor.reset();
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
                     source: FrameSource::Expose,
-                })
+                })?;
+                // **Told now, not at the turn's tail** (ticket 63). winit sends
+                // `Enabled` from inside `WM_IME_STARTCOMPOSITION`, before the
+                // first `WM_IME_COMPOSITION`; an area told here is the one the
+                // input method opens its candidate list at. The frame above
+                // wanted the grid's caret; a field's is asked for here.
+                self.offer_ime_caret(None);
+                self.flush_ime_cursor_area(Instant::now());
+                Ok(())
             }
             Ime::Preedit(text, cursor_range) => {
                 // A collapsed range is the caret; an open one is the IME's
@@ -2251,7 +2260,7 @@ impl Runtime<'_> {
                 // has ended a composition, which is precisely what a method that
                 // refused the cancel says before sending the commit anyway.
                 self.window.ime_active = false;
-                self.window.ime_cursor_throttle.reset();
+                self.window.ime_cursor.reset();
                 hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
                     self.destroy_ime_caret("ime_disabled")
                 });

@@ -535,6 +535,15 @@ Entries: §7.1.5a″ and §7.1.5a‴; §13.16 *one composition*; §7.34 *a close
 must leave the screen first, and a float holds the keyboard only when somebody
 presses into it*.
 
+Rule added 2026-09-25 (0.4.5 ticket 63; `DESIGN.md` entry of that date): **the
+caret area is told to the input method by one road, at most once a turn and
+only when it moved.** Every offer only wants (`WindowRuntime::ime_cursor`);
+`Runtime::flush_ime_cursor_area` is the one caller of `Window::set_ime_cursor_area`,
+at the turn's tail and once at `Ime::Enabled`, so the list opens at the caret.
+Held by `ten_caret_moves_in_one_turn_tell_the_system_the_cursor_area_once` and
+`enabling_the_ime_tells_the_area_before_the_first_preedit`. The row stays
+`not yet folded`: §7.1.5a″, §7.1.5a‴, §13.16 and §7.34 are outside this ticket.
+
 ### 27. Keyboard routing — `not yet folded`
 Entries: §7.1.5 and §7.1.5e; the `shortcuts.rs` module doc; the generated chord
 table held by `scripts/check-shortcuts-table.ps1`. **The rung order of

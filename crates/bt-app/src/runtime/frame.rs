@@ -1805,8 +1805,9 @@ impl Runtime<'_> {
         // the keyboard publishes its caret here, at the tail of every pass —
         // which is what "every frame the caret can move" means without anybody
         // having to enumerate the ways it moves: typing, scrolling, resizing and
-        // a capsule relaid all wake this loop, and the throttle below turns a
-        // rectangle that did not move into no call at all. The terminal's rung
+        // a capsule relaid all wake this loop, and the flush at the turn's tail
+        // (ticket 63) turns a rectangle that did not move into no call at all.
+        // Here it is only wanted. The terminal's rung
         // says nothing here and everything in `publish_frame_inner`, because its
         // caret is a property of a frame and there is no frame at this point.
         //
@@ -1826,9 +1827,6 @@ impl Runtime<'_> {
         })?;
         hang_watch::during(hang_watch::Station::ClockOfferImeCaret, || {
             self.offer_ime_caret(None)
-        });
-        hang_watch::during(hang_watch::Station::ClockFlushImeCursorArea, || {
-            self.flush_ime_cursor_area(now)
         });
         hang_watch::during(hang_watch::Station::ClockFinishResizeIfQuiescent, || {
             self.finish_resize_if_quiescent(now)
@@ -2022,6 +2020,14 @@ impl Runtime<'_> {
         // active or what it is called; `want_title` only said so. A title held for
         // its frame books its wake-up in the fold below.
         self.flush_title(now);
+        // **And the input method's caret area, on the same terms** (ticket 63). Every
+        // road above — the drain's frames, the IME events' frames, a preview repainted,
+        // the caret offer at the head of the clock run — only said which area it
+        // wants; this is where the system is told, once, and only if the area moved.
+        // An area held for its 60Hz slot books its wake-up in the fold below.
+        hang_watch::during(hang_watch::Station::ClockFlushImeCursorArea, || {
+            self.flush_ime_cursor_area(now)
+        });
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
@@ -2150,7 +2156,7 @@ impl Runtime<'_> {
         ];
         let deadlines = [
             startup_deadline,
-            self.window.ime_cursor_throttle.deadline(),
+            self.window.ime_cursor.deadline(now),
             // Only while a shell holds the keyboard: a frozen caret owes no
             // wake-up at all (ruling 2026-08-13).
             self.keyboard_owner_is_a_shell()

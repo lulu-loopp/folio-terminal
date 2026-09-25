@@ -437,12 +437,6 @@ impl<T: PartialEq + Clone> LatestThrottle<T> {
         self.last_sent_at.map(|last| last + self.interval)
     }
 
-    /// Whether a value is being held for its deadline.
-    #[must_use]
-    pub fn is_pending(&self) -> bool {
-        self.pending.is_some()
-    }
-
     fn mark_sent(&mut self, value: T, now: Instant) {
         self.last_sent_at = Some(now);
         self.last_sent = Some(value);

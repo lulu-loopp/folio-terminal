@@ -7780,8 +7780,8 @@ impl Runtime<'_> {
         // The caret has very likely just moved, and the candidate list has to
         // follow it. Kept here as well as in the loop's tail because this door
         // is *earlier*: the body has already been rebuilt, so the rectangle is
-        // the new one, and the candidate window moves with the same present the
-        // letters do rather than one wake-up behind them.
+        // the new one. It is only wanted here; the system is told at this
+        // turn's tail (ticket 63), at most one frame behind the letters.
         self.offer_ime_caret(None);
         self.present_chrome_change()
     }

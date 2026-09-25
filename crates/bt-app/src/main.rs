@@ -13681,7 +13681,10 @@ struct WindowRuntime {
     /// a barrier. See [`composition_ruling`] for the whole rule.
     composing_in: Composing,
     ime_active: bool,
-    ime_cursor_throttle: ImeCursorThrottle,
+    /// **The caret area the input method is wanted to follow, and the one it was
+    /// last told** (ticket 63). Written by [`Runtime::offer_ime_caret`], sent only
+    /// by [`Runtime::flush_ime_cursor_area`]; see [`ImeCursorSlot`].
+    ime_cursor: ImeCursorSlot,
     /// **The title this window wants, and the one the OS was last given**
     /// (ticket 49). Written by [`Runtime::want_title`], sent only by
     /// [`Runtime::flush_title`]; see [`TitleSlot`].
@@ -26516,6 +26519,76 @@ impl std::ops::Deref for ImeCursorThrottle {
 impl std::ops::DerefMut for ImeCursorThrottle {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+/// **The caret area this window wants the input method to hang its list from,
+/// and the one the system was last told** (ticket 63; `docs/ARCHITECTURE.md`
+/// §5.3 row 22).
+///
+/// `Window::set_ime_cursor_area` is `ImmSetCompositionWindow` and
+/// `ImmSetCandidateWindow` on Windows, answered by the input method on this
+/// thread, and the owner's stall reports caught one call holding it for 85 ms
+/// and another for 3,138 ms. Until ticket 63 every offer could make that call
+/// on the spot — each IME event's frame, each caret move, the turn's tail — so
+/// an `Enabled` and a `Preedit` in one turn paid twice. Now every road only
+/// says which area it wants ([`Self::want`], latest wins), and the turn asks,
+/// once, what is owed ([`Self::take_due`]): nothing when the area is the one
+/// already told, at most one call per [`IME_CURSOR_AREA_INTERVAL`], and a held
+/// area is told when its deadline comes. The title's shape (ticket 49,
+/// [`TitleSlot`]).
+#[derive(Debug, Default)]
+struct ImeCursorSlot {
+    /// The newest area a road asked for and the turn has not yet offered.
+    wanted: Option<ImeCursorArea>,
+    told: ImeCursorThrottle,
+}
+
+impl ImeCursorSlot {
+    /// The area the caret stands on now. Costs nothing: the system hears about
+    /// it from [`Self::take_due`].
+    fn want(&mut self, area: ImeCursorArea) {
+        self.wanted = Some(area);
+    }
+
+    /// The area to tell the system now, if any.
+    fn take_due(&mut self, now: Instant) -> Option<ImeCursorArea> {
+        match self.wanted.take() {
+            Some(area) => self.told.offer(area, now),
+            None => self.told.flush_due(now),
+        }
+    }
+
+    /// When this slot owes the system a call: at once while an area is wanted
+    /// and not yet offered, else when a held area's interval runs out. The
+    /// turn's wake fold reads it.
+    fn deadline(&self, now: Instant) -> Option<Instant> {
+        if self.wanted.is_some() {
+            return Some(now);
+        }
+        self.told.deadline()
+    }
+
+    /// **Forget what the system was told, keep when** — the window moved, and the
+    /// platform's copy of the area is a screen rectangle that is now stale (see
+    /// [`pace::LatestThrottle::rearm`]). The last area told is wanted again, unless
+    /// a newer one already is. `Some` is the area now wanted.
+    fn rearm(&mut self) -> Option<ImeCursorArea> {
+        let told = self.told.last_sent()?;
+        self.told.rearm();
+        Some(*self.wanted.get_or_insert(told))
+    }
+
+    /// Forget everything: a composition ended or the IME was switched on or off.
+    fn reset(&mut self) {
+        self.wanted = None;
+        self.told.reset();
+    }
+
+    /// The area the system is working from, if it has been told one.
+    #[cfg(test)]
+    fn last_told(&self) -> Option<ImeCursorArea> {
+        self.told.last_sent()
     }
 }
 
@@ -40203,7 +40276,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         composing: None,
         composing_in: Composing::Idle,
         ime_active: false,
-        ime_cursor_throttle: ImeCursorThrottle::default(),
+        ime_cursor: ImeCursorSlot::default(),
         title: TitleSlot::default(),
         rename_caret_line: None,
         cursor_blink: CursorBlink::new(Instant::now(), motion),
@@ -49786,7 +49859,7 @@ impl Runtime<'_> {
         self.trace_ime_cancel(started_in, reason, Some(told));
         self.window.preedit = None;
         self.window.composing = None;
-        self.window.ime_cursor_throttle.reset();
+        self.window.ime_cursor.reset();
         hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
             self.destroy_ime_caret("cancel_composition")
         });
@@ -63151,7 +63224,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
                     // Commit during this transition, and the product decision is to accept it.
                     runtime.window.ime_active = false;
-                    runtime.window.ime_cursor_throttle.reset();
+                    runtime.window.ime_cursor.reset();
                     hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
                         runtime.destroy_ime_caret("window_blur")
                     });
