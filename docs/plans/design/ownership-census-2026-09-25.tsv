@@ -1,0 +1,1322 @@
+fact	class	proposed_owner	module	function	write_kinds	sites	triggers	effects_at_the_write
+App.activated	LIFE	windows	main[impl FolioApp]	a_window_for_the_delegate	call:push,call:retain	2	gesture,turn	
+App.activated	LIFE	windows	main[impl FolioApp]	land_one_launch_request	call:push,call:retain	2	turn	
+App.activated	LIFE	windows	main[impl FolioApp]	reap_leaving_windows	call:retain	1	turn	
+App.activated	LIFE	windows	runtime/windows	note_this_window_was_visited	call:push,call:retain	2	os event	
+App.copilot_readiness	OBS	first_run	main[impl FolioApp]	user_event	assign	1	lane answer	frame,lane request
+App.copilot_readiness	OBS	first_run	runtime/first_run	apply_copilot_hooks	assign	1	gesture,turn	frame
+App.device_loss_pilot	LIFE	frame	runtime/frame	redraw	call:a_frame_reached_the_glass	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+App.device_loss_pilot	LIFE	frame	runtime/preview	present_retained_picture	call:a_frame_reached_the_glass	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+App.drag_broker	VIEW	mouse	main[impl FolioApp]	drive_drag_broker	assign,call:as_mut	5	turn	file write,frame
+App.drag_broker	VIEW	mouse	main[unassigned]	open_broker	assign	1	gesture,lane answer	
+App.drag_broker	VIEW	mouse	runtime/frame	publish_to_broker	call:as_mut	1	gesture,lane answer,turn	
+App.drag_broker	VIEW	mouse	runtime/mouse	drive_drag	assign	1	gesture,lane answer,turn	frame
+App.drag_broker	VIEW	mouse	runtime/mouse	finish_drag	assign	1	gesture,turn	frame
+App.drag_broker	VIEW	mouse	runtime/tabs	close_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+App.explorer_package_asked_by	ASYNC	first_run	main[impl FolioApp]	user_event	call:take	1	lane answer	frame,lane request
+App.explorer_package_asked_by	ASYNC	first_run	runtime/first_run	request_explorer_package	assign	1	gesture,turn	
+App.favicons_changed	PROJ	web	main[impl FolioApp]	user_event	&mut	1	lane answer	frame,lane request
+App.favicons_changed	PROJ	web	runtime/web	apply_web_outcomes	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+App.file_indexes	OBS	files	main[impl FolioApp]	retain_file_indexes	call:retain	1	lane answer	
+App.file_indexes	OBS	files	runtime/files	advance_files_watch	call:mark_dirty	1	turn	lane request
+App.files_worker_notice_pending	LIFE	files	main[impl FolioApp]	drain_files_answers	&mut	1	lane answer	
+App.files_worker_notice_pending	LIFE	files	runtime/files	disable_files_worker	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.files_worker_notice_pending	LIFE	files	runtime/frame	publish_frame_inner	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+App.files_worker_running	LIFE	files	main[impl FolioApp]	drain_files_answers	&mut	1	lane answer	
+App.files_worker_running	LIFE	files	runtime/files	disable_files_worker	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.first_run_attempted	LIFE	first_run	runtime/first_run	answer_first_run	assign	1	gesture	frame
+App.first_run_attempted	LIFE	first_run	runtime/first_run	raise_first_run_if_due	&mut	1	turn	file write,frame,process/thread
+App.first_run_attempted	LIFE	first_run	runtime/profiles	adopt_profile_table	assign	1	gesture,turn	frame
+App.git_worker_notice_pending	LIFE	git	main[impl FolioApp]	drain_git_answers	&mut	1	lane answer	
+App.git_worker_notice_pending	LIFE	git	runtime/frame	publish_frame_inner	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+App.git_worker_notice_pending	LIFE	git	runtime/git	disable_git_worker	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.git_worker_running	LIFE	git	main[impl FolioApp]	drain_git_answers	&mut	1	lane answer	
+App.git_worker_running	LIFE	git	runtime/git	disable_git_worker	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	main[focus]	card_hint_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	main[focus]	push_float_refusal_card	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	main[focus]	quit_card_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	main[impl FolioApp]	recovered_from_a_lost_device	&mut	1	lane answer,launch,turn	frame
+App.gpu	RES	—	main[impl FolioApp]	surface_selftest_if_due	&mut	1		
+App.gpu	RES	—	main[settings]	settings_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	process/thread
+App.gpu	RES	—	preview_viewport	ensure_markdown_viewport	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	preview_viewport	rebuild_markdown_geometry	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/attention	notice_layers	&mut	3	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/attention	toast_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/clipboard	paste_card_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/dpi	apply_every_leaf_metrics	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/dpi	apply_scale_factor	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/files	dress_files_feet	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/files	dress_files_tree_editor	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/files	files_float_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/files	files_views	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/files	measure_files_names	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/first_run	first_run_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/first_run	psreadline_invite_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/floats	float_hit_at	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/floats	refresh_chrome_with_overlay	&mut	7	PTY output,gesture,lane answer,launch,os event,turn	lane request
+App.gpu	RES	—	runtime/floats	term_menu_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/frame	redraw	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+App.gpu	RES	—	runtime/git	build_git_graph	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+App.gpu	RES	—	runtime/git	git_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/git	git_pages	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/git	graph_filter_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/git	push_float_git_page	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/keyboard	key_hint_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/math	refresh_overlay_with_formula	&mut	3	PTY output,gesture,lane answer,launch,os event,turn	process/thread
+App.gpu	RES	—	runtime/mouse	drag_ghost_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/panes	dirty_gate_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/panes	file_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/panes	float_dock_label_width	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/panes	palette_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/panes	pane_menu_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/panes	pane_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/panes	restore_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/panes	split_seat	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,process/thread
+App.gpu	RES	—	runtime/panes	term_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/peek	file_peek_card_layers	&mut	3	PTY output,gesture,lane answer,launch,os event,turn	lane request
+App.gpu	RES	—	runtime/peek	layout_peek_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	build_preview_body_in	&mut	3	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	build_table_block	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	dress_preview_address_editor	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	dress_preview_crumb_editor	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	dress_preview_foot	&mut	2	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	dress_preview_head	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	dress_preview_name_editor	&mut	2	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	dress_preview_rail	&mut	4	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	measure_video_meta	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	pop_out_preview	&mut	1	gesture	frame,process/thread
+App.gpu	RES	—	runtime/preview	present_retained_picture	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+App.gpu	RES	—	runtime/preview	preview_float_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	preview_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	preview_place_at	&mut	1	gesture,lane answer	
+App.gpu	RES	—	runtime/preview	preview_prose_geometry	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/preview	rebuild_preview_document	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/profiles	profile_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/profiles	root_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/search	search_capsule	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/search	search_field_look	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/tabs	commit_row_into_new_tab	&mut	1	gesture,turn	file write,frame,process/thread
+App.gpu	RES	—	runtime/tabs	measure_open_rename	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/tabs	new_tab_seeded_from	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,process/thread
+App.gpu	RES	—	runtime/tabs	tab_menu_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/tabs	tab_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/terminal	adopt_terminal_font	&mut	1	gesture,lane answer,turn	frame
+App.gpu	RES	—	runtime/terminal	restart_shell	&mut	1	gesture	process/thread
+App.gpu	RES	—	runtime/terminal	step_pane_text_scale	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+App.gpu	RES	—	runtime/tooltips	tooltip_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/web	web_sheet_layers	&mut	2	PTY output,gesture,lane answer,launch,os event,turn	
+App.gpu	RES	—	runtime/windows	answer_restore	&mut	1	turn	file write,frame,lane request,process/thread
+App.gpu	RES	—	runtime/windows	open_window	&mut	2	gesture,launch,turn	file write,process/thread
+App.gpu	RES	—	runtime/windows	reopen_recent	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request,process/thread
+App.handoff_lane	RES	handoff	main[impl FolioApp]	answer_handoffs	call:answers	1	lane answer	frame
+App.handoff_lane	RES	handoff	runtime/handoff	hand_off	call:submit	1	gesture,turn	lane request
+App.math_worker_notice_pending	LIFE	math	main[impl FolioApp]	drain_math_answers	&mut	1	lane answer	
+App.math_worker_notice_pending	LIFE	math	runtime/frame	publish_frame_inner	&mut	3	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+App.math_worker_notice_pending	LIFE	math	runtime/frame	redraw	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+App.math_worker_notice_pending	LIFE	math	runtime/math	advance_live_math_if_due	&mut	1	turn	frame,lane request
+App.math_worker_notice_pending	LIFE	math	runtime/math	apply_math_results	&mut	1	lane answer	frame,lane request
+App.math_worker_running	LIFE	math	main[impl FolioApp]	drain_math_answers	&mut	1	lane answer	
+App.math_worker_running	LIFE	math	runtime/frame	publish_frame_inner	&mut	2	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+App.math_worker_running	LIFE	math	runtime/frame	redraw	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+App.math_worker_running	LIFE	math	runtime/math	advance_live_math_if_due	&mut	1	turn	frame,lane request
+App.math_worker_running	LIFE	math	runtime/math	apply_math_results	&mut	1	lane answer	frame,lane request
+App.pending_application_change	PROJ	diagnostics	main[impl FolioApp]	settle_application_change	assign,call:take	2	turn	
+App.pending_application_change	PROJ	diagnostics	runtime/diagnostics	note_application_change	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.pending_handover	LIFE	windows	main[impl FolioApp]	settle_drag_handover	call:take	1	gesture,turn	file write
+App.pending_handover	LIFE	windows	runtime/panes	move_pane_to_window	assign	1	gesture	
+App.pending_handover	LIFE	windows	runtime/tabs	move_tab_to_window	assign	1	gesture	
+App.pending_handover	LIFE	windows	runtime/windows	hand_over_across_windows	assign	1	gesture	
+App.pending_new_windows	LIFE	windows	main[impl FolioApp]	open_a_window_for_a_launch	call:push	1	gesture,turn	file write
+App.pending_new_windows	LIFE	windows	main[impl FolioApp]	open_pending_window	&mut	1	gesture,turn	file write
+App.pending_new_windows	LIFE	windows	main[impl FolioApp]	settle_drag_handover	call:push	1	gesture,turn	file write
+App.pending_new_windows	LIFE	windows	main[impl FolioApp]	settle_quake	call:push	1	turn	file write
+App.pending_new_windows	LIFE	windows	main[impl FolioApp]	settle_restore_answer	call:push	1	turn	file write
+App.pending_new_windows	LIFE	windows	main[launch]	create	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,lane request,process/thread
+App.pending_new_windows	LIFE	windows	runtime/keyboard	run_shortcut	call:push	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request
+App.pending_new_windows	LIFE	windows	runtime/panes	move_pane_to_new_window	call:push	1	gesture	
+App.pending_new_windows	LIFE	windows	runtime/tabs	move_tab_to_new_window	call:push	1	gesture	
+App.pending_new_windows	LIFE	windows	runtime/windows	reopen_recent	call:push	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request,process/thread
+App.pending_restore_answer	ASYNC	windows	main[impl FolioApp]	settle_restore_answer	call:take	1	turn	file write
+App.pending_restore_answer	ASYNC	windows	runtime/windows	answer_restore_prompt	assign	1	gesture	frame
+App.pending_restore_windows	DUR	windows	main[impl FolioApp]	settle_restore_answer	&mut	1	turn	file write
+App.pending_restore_windows	DUR	windows	main[launch]	create	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,lane request,process/thread
+App.preview_worker_notice_pending	LIFE	preview	main[impl FolioApp]	drain_preview_answers	&mut	1	lane answer	
+App.preview_worker_notice_pending	LIFE	preview	runtime/frame	publish_frame_inner	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+App.preview_worker_notice_pending	LIFE	preview	runtime/preview	disable_preview_worker	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.preview_worker_running	LIFE	preview	main[impl FolioApp]	drain_preview_answers	&mut	1	lane answer	
+App.preview_worker_running	LIFE	preview	runtime/preview	disable_preview_worker	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.profiles_store	DUR	profiles	runtime/configuration	import_settings_from	call:store	1	turn	file write,frame
+App.profiles_store	DUR	profiles	runtime/profiles	reread_profiles	call:reread	1	turn	frame
+App.profiles_store	DUR	profiles	runtime/profiles	store_profiles	call:store	1	gesture,turn	file write,frame
+App.quake	LIFE	quake	main[impl FolioApp]	settle_quake	call:reconcile,call:take_dismiss,call:take_press	3	turn	file write
+App.quake	LIFE	quake	main[impl FolioApp]	summon_quake	call:shown_over,call:take_startup_command	2	turn	
+App.quake	LIFE	quake	main[impl FolioApp]	window_event	call:note_blur	1	gesture,os event	PTY write,file write,frame,lane request
+App.quake	LIFE	quake	main[launch]	create	call:adopt_placements	1	PTY output,gesture,lane answer,launch,os event,turn	file write,lane request,process/thread
+App.quake	LIFE	quake	runtime/quake	remember_summoned_arrangement	call:remember	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.quit	LIFE	windows	main[focus]	answer_quit_card	call:as_mut	1	gesture	frame
+App.quit	LIFE	windows	main[impl FolioApp]	begin_quit_if_asked	assign	1	turn	frame
+App.quit	LIFE	windows	main[impl FolioApp]	report_to_quit	call:as_mut	1	turn	
+App.quit	LIFE	windows	main[impl FolioApp]	settle_quit	assign	2	turn	file write,frame
+App.quit	LIFE	windows	runtime/mouse	pointer_moved	call:as_mut	1	gesture,lane answer	frame,lane request,process/thread
+App.quit_requested	LIFE	windows	main[impl App]	ask_to_quit	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.quit_requested	LIFE	windows	main[impl FolioApp]	begin_quit_if_asked	&mut	1	turn	frame
+App.recent	DUR	windows	main[impl FolioApp]	settle_restore_answer	call:record	1	turn	file write
+App.recent	DUR	windows	runtime/tabs	close_tab	call:record	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+App.recent	DUR	windows	runtime/windows	answer_restore	call:record	1	turn	file write,frame,lane request,process/thread
+App.recent	DUR	windows	runtime/windows	reopen_recent	call:take	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request,process/thread
+App.recent	DUR	windows	runtime/windows	vault_this_window	call:record	1	gesture,lane answer,launch,turn	
+App.restore_question	DUR	windows	main[impl FolioApp]	settle_restore_answer	call:clear	1	turn	file write
+App.restore_question	DUR	windows	main[launch]	create	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,lane request,process/thread
+App.restore_question	DUR	windows	runtime/windows	vault_this_window	call:retain	1	gesture,lane answer,launch,turn	
+App.scheme_watch	OBS	main[settings]	main[launch]	create	call:arm	1	PTY output,gesture,lane answer,launch,os event,turn	file write,lane request,process/thread
+App.scheme_watch	OBS	main[settings]	main[settings]	add_scheme	call:arm	1	gesture,turn	file write,frame
+App.session_store	DUR	windows	main[impl App]	record_session	call:record	1	PTY output,gesture,lane answer,launch,os event,turn	
+App.session_store	DUR	windows	main[impl FolioApp]	settle_quit	call:flush_judged	1	turn	file write,frame
+App.session_store	DUR	windows	runtime/frame	turn	call:flush_if_due	1	turn	PTY write,file write,frame,lane request,process/thread
+App.settings_store	DUR	main[settings]	main[focus]	apply_focus_card_height	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[focus]	note_card_hint	call:store	1	turn	file write,frame
+App.settings_store	DUR	main[settings]	main[focus]	set_focus_mode	call:store	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[launch]	apply_launch_opens	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	main[settings]	apply_scheme	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[unassigned]	apply_acrylic	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	main[unassigned]	apply_always_on_top	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	main[unassigned]	apply_block_max_height	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[unassigned]	apply_minimum_contrast	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[unassigned]	apply_option_sends_alt	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[unassigned]	apply_repair_row_breaks	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[unassigned]	apply_slider	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[unassigned]	apply_theme_mode	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[unassigned]	apply_update_check	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	main[unassigned]	apply_web_color_scheme	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[unassigned]	reset_advanced_group	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	main[unassigned]	toggle_advanced_group	call:store	1	gesture,turn	file write,process/thread
+App.settings_store	DUR	main[settings]	runtime/attention	apply_terminal_notifications	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/attention	apply_turn_end_notification	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/clipboard	apply_copy_on_select	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/clipboard	apply_multiline_paste_ask	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/configuration	import_settings_part	call:hold_writes,call:release_writes	2	turn	file write
+App.settings_store	DUR	main[settings]	runtime/configuration	store_imported_value	call:store	1	turn	file write
+App.settings_store	DUR	main[settings]	runtime/first_run	apply_powershell_integration_offer	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/first_run	record_first_run_card	call:store	1	turn	file write
+App.settings_store	DUR	main[settings]	runtime/first_run	record_psreadline_invite	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/git	apply_git_panel	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/i18n	apply_language	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/keyboard	apply_key_hints	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/math	apply_display_formulas	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/math	apply_inline_formulas	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/panes	apply_split_direction	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/preview	apply_background_image	call:store	1	gesture,turn	file write,process/thread
+App.settings_store	DUR	main[settings]	runtime/preview	apply_image_fit	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/preview	apply_line_wrapping	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/profiles	apply_default_profile	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/quake	apply_quake_command	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/quake	apply_quake_dismiss	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/quake	apply_quake_profile	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/quake	apply_quake_restore	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/search	apply_search_engine	call:store	1	gesture,turn	file write
+App.settings_store	DUR	main[settings]	runtime/tabs	apply_tables	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/terminal	apply_scrollback_lines	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/terminal	apply_terminal_font	call:store	1	gesture,turn	file write,frame
+App.settings_store	DUR	main[settings]	runtime/terminal	record_powershell_install_pending	call:store	1	PTY output,gesture,lane answer,launch,os event,turn	file write
+App.shortcuts	DUR	keyboard	main[settings]	record_settings_key	call:set,call:take_chord_from	2	gesture	file write,frame
+App.shortcuts	DUR	keyboard	runtime/configuration	import_settings_from	assign	1	turn	file write,frame
+App.shortcuts	DUR	keyboard	runtime/keyboard	apply_shortcut_edit	call:restore_all	1	gesture	file write
+App.tab_ids	LIFE	tabs	runtime/tabs	absorb_tab	call:mint	1	gesture	
+App.tab_ids	LIFE	tabs	runtime/tabs	commit_row_into_new_tab	call:mint	1	gesture,turn	file write,frame,process/thread
+App.tab_ids	LIFE	tabs	runtime/tabs	extract_pane_into_new_tab	call:mint	1	gesture,turn	
+App.tab_ids	LIFE	tabs	runtime/tabs	new_tab_seeded_from	call:mint	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,process/thread
+App.tab_ids	LIFE	tabs	runtime/windows	answer_restore	call:mint	1	turn	file write,frame,lane request,process/thread
+App.tab_ids	LIFE	tabs	runtime/windows	open_window	call:mint	1	gesture,launch,turn	file write,process/thread
+App.tab_ids	LIFE	tabs	runtime/windows	reopen_recent	call:mint	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request,process/thread
+WindowRuntime.active_tab	HUB	tabs	main[impl FolioApp]	transfer_tab	&mut,assign	2	gesture,turn	file write
+WindowRuntime.active_tab	HUB	tabs	main[unassigned]	retire_the_stand_in	assign	1	gesture,turn	file write,frame
+WindowRuntime.active_tab	HUB	tabs	main[unassigned]	toggle_pin	&mut	1	gesture	file write,frame
+WindowRuntime.active_tab	HUB	tabs	runtime/tabs	absorb_tab	&mut	1	gesture	
+WindowRuntime.active_tab	HUB	tabs	runtime/tabs	activate_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.active_tab	HUB	tabs	runtime/tabs	close_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.active_tab	HUB	tabs	runtime/tabs	commit_row_into_new_tab	assign	1	gesture,turn	file write,frame,process/thread
+WindowRuntime.active_tab	HUB	tabs	runtime/tabs	extract_pane_into_new_tab	assign	1	gesture,turn	
+WindowRuntime.active_tab	HUB	tabs	runtime/tabs	move_pane_across_tabs	&mut	1	gesture,turn	file write,frame
+WindowRuntime.active_tab	HUB	tabs	runtime/tabs	move_tab_with_flip	assign	1	gesture,lane answer,turn	
+WindowRuntime.active_tab	HUB	tabs	runtime/windows	abandon_a_window_nothing_arrived_in	assign	1	gesture,turn	
+WindowRuntime.advanced_reveal_sample	PROJ	main[settings]	main[unassigned]	toggle_advanced_group	assign	1	gesture,turn	file write,process/thread
+WindowRuntime.advanced_reveal_sample	PROJ	main[settings]	runtime/preview	advance_strip_animation	assign	1	turn	frame
+WindowRuntime.animations	PROJ	preview	runtime/math	apply_math_results	&mut,call:insert	2	lane answer	frame,lane request
+WindowRuntime.animations	PROJ	preview	runtime/preview	advance_animations	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.animations	PROJ	preview	runtime/preview	present_animations	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.animations	PROJ	preview	runtime/preview	request_animation_fill	call:insert,call:remove	2	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.animations	PROJ	preview	runtime/preview	request_animations	call:insert,call:remove	2	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.attention_next_place	LIFE	attention	main[impl FolioApp]	user_event	&mut	1	lane answer	frame,lane request
+WindowRuntime.attention_next_place	LIFE	attention	runtime/panes	close_pane	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.attention_next_place	LIFE	attention	runtime/preview	advance_strip_animation	&mut	1	turn	frame
+WindowRuntime.attention_next_place	LIFE	attention	runtime/tabs	close_tab	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.attention_next_place	LIFE	attention	runtime/terminal	drain_pty	&mut	1	PTY output	file write,frame
+WindowRuntime.cards	PROJ	main[focus]	main[focus]	refresh_focus_thumbnails	call:nothing_to_draw	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.cards	PROJ	main[focus]	runtime/panes	panes_spoke	call:pane_spoke	1	PTY output,turn	
+WindowRuntime.chevrons	VIEW	floats	runtime/floats	advance_chevrons	call:clear	3	turn	frame
+WindowRuntime.chevrons	VIEW	floats	runtime/floats	chevron_menu_up	call:gate	1	gesture	
+WindowRuntime.chevrons	VIEW	floats	runtime/floats	close_every_popup	call:clear	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.chevrons	VIEW	floats	runtime/floats	close_file_menu	call:menu_gone	1	gesture,turn	frame
+WindowRuntime.chevrons	VIEW	floats	runtime/floats	close_popup	call:menu_gone	3	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.chevrons	VIEW	floats	runtime/floats	close_popups_except	call:clear	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.chevrons	VIEW	floats	runtime/floats	observe_chevrons	call:clear,call:observe	3	gesture,lane answer,turn	
+WindowRuntime.chevrons	VIEW	floats	runtime/floats	open_file_menu	call:menu_gone	1	gesture,turn	frame
+WindowRuntime.chevrons	VIEW	floats	runtime/floats	place_float	call:menu_gone	1	gesture,turn	frame
+WindowRuntime.chevrons	VIEW	floats	runtime/floats	run_file_menu_row	call:menu_gone	1	gesture	PTY write,file write,frame,lane request
+WindowRuntime.chevrons	VIEW	floats	runtime/keyboard	keyboard_input	call:clear	2	gesture	PTY write,file write,frame,process/thread
+WindowRuntime.chevrons	VIEW	floats	runtime/mouse	mouse_input	call:clear	1	gesture	PTY write,file write,frame,lane request,process/thread
+WindowRuntime.chevrons	VIEW	floats	runtime/panes	close_pane_menu	call:menu_gone	1	gesture,turn	frame
+WindowRuntime.chevrons	VIEW	floats	runtime/panes	open_pane_menu	call:menu_gone	1	gesture,turn	frame
+WindowRuntime.chevrons	VIEW	floats	runtime/panes	run_pane_menu_row	call:clear,call:menu_gone	2	gesture	frame
+WindowRuntime.chevrons	VIEW	floats	runtime/panes	toggle_pane_menu	call:clear	1	gesture,turn	frame
+WindowRuntime.chevrons	VIEW	floats	runtime/profiles	close_profile_menu	call:clear	1	gesture,turn	frame
+WindowRuntime.chevrons	VIEW	floats	runtime/profiles	toggle_profile_menu	call:menu_gone	1	gesture,turn	frame
+WindowRuntime.chrome_present_pending	PROJ	frame	main[impl FolioApp]	recovered_from_a_lost_device	assign	1	lane answer,launch,turn	frame
+WindowRuntime.chrome_present_pending	PROJ	frame	main[impl FolioApp]	surface_selftest_if_due	assign	1		
+WindowRuntime.chrome_present_pending	PROJ	frame	runtime/frame	publish_chrome_frame	assign	1	turn	frame
+WindowRuntime.chrome_present_pending	PROJ	frame	runtime/frame	publish_frame_inner	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.chrome_present_pending	PROJ	frame	runtime/frame	redraw	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.chrome_present_pending	PROJ	frame	runtime/preview	present_retained_picture	assign	2	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.command_flash	VIEW	terminal	main[unassigned]	advance_command_flash	assign	1	turn	frame
+WindowRuntime.command_flash	VIEW	terminal	runtime/panes	flash_pane	assign	1	gesture	frame
+WindowRuntime.command_flash	VIEW	terminal	runtime/terminal	jump_to_command_mark	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.command_rails	PROJ	panes	runtime/palette	adopt_new_palette	call:values_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.command_rails	PROJ	panes	runtime/panes	command_rail_layers	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.command_rails	PROJ	panes	runtime/panes	drive_command_rail_hover	call:entry,call:get_mut	2	gesture,lane answer	frame
+WindowRuntime.command_rails	PROJ	panes	runtime/panes	fold_rails_on_mode_change	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.command_rails	PROJ	panes	runtime/panes	sweep_command_rails	call:retain	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.composing	VIEW	keyboard	main[unassigned]	cancel_composition	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.composing	VIEW	keyboard	main[unassigned]	settle_composition_owner	call:take	1	turn	frame
+WindowRuntime.composing	VIEW	keyboard	runtime/keyboard	ime_input	assign	2	gesture	PTY write,frame
+WindowRuntime.cursor_blink	VIEW	keyboard	main[focus]	set_cursor_focus	call:set_focused	1	os event	
+WindowRuntime.cursor_blink	VIEW	keyboard	main[impl FolioApp]	adopt_motion_preference	call:reset	1	lane answer	frame
+WindowRuntime.cursor_blink	VIEW	keyboard	runtime/keyboard	advance_cursor_blink_if_due	call:reset	1	turn	frame
+WindowRuntime.cursor_blink	VIEW	keyboard	runtime/keyboard	reset_cursor_blink	call:reset	1	PTY output,gesture,turn	
+WindowRuntime.dirty_gate	DUR	windows	runtime/mouse	pointer_moved	call:set_hover	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.dirty_gate	DUR	windows	runtime/windows	answer_dirty_gate	call:take	1	gesture	file write,frame,lane request
+WindowRuntime.divider_drag	VIEW	panes	runtime/mouse	chrome_mouse_input	assign,call:take	2	gesture	file write,frame,lane request,process/thread
+WindowRuntime.divider_drag	VIEW	panes	runtime/panes	cancel_divider_drag	call:take	1	gesture,os event,turn	file write,frame
+WindowRuntime.divider_drag	VIEW	panes	runtime/panes	drive_divider_drag	assign	1	gesture,lane answer	file write,frame
+WindowRuntime.divider_drag	VIEW	panes	runtime/panes	settle_seat_set_change	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.divider_drag	VIEW	panes	runtime/tabs	activate_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.drag	VIEW	mouse	runtime/mouse	advance_drag_spring	call:as_mut	1	turn	file write,frame
+WindowRuntime.drag	VIEW	mouse	runtime/mouse	begin_drag	assign	1	gesture,lane answer	frame
+WindowRuntime.drag	VIEW	mouse	runtime/mouse	cancel_drag	call:take	1	gesture,turn	frame
+WindowRuntime.drag	VIEW	mouse	runtime/mouse	drive_drag	assign	2	gesture,lane answer,turn	frame
+WindowRuntime.drag	VIEW	mouse	runtime/mouse	release_drag	call:take	1	gesture	file write,frame
+WindowRuntime.drag	VIEW	mouse	runtime/mouse	service_drag_autoscroll	call:as_mut	3	turn	frame
+WindowRuntime.drag	VIEW	mouse	runtime/tabs	close_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.dropped_files	VIEW	mouse	runtime/files	flush_dropped_files	call:take	1	gesture,turn	frame
+WindowRuntime.dropped_files	VIEW	mouse	runtime/mouse	collect_dropped_file	&mut	1	gesture	
+WindowRuntime.file_menu	VIEW	floats	runtime/floats	close_file_menu	call:take	1	gesture,turn	frame
+WindowRuntime.file_menu	VIEW	floats	runtime/floats	close_popup	call:take	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.file_menu	VIEW	floats	runtime/floats	open_file_menu	assign	1	gesture,turn	frame
+WindowRuntime.file_menu	VIEW	floats	runtime/floats	run_file_menu_row	call:take	1	gesture	PTY write,file write,frame,lane request
+WindowRuntime.file_menu	VIEW	floats	runtime/keyboard	keyboard_input	call:as_mut	1	gesture	PTY write,file write,frame,process/thread
+WindowRuntime.file_menu	VIEW	floats	runtime/mouse	pointer_moved	call:as_mut	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.files_notice	PROJ	files	runtime/frame	publish_frame_inner	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.files_notice	PROJ	files	runtime/handoff	answer_handoff	assign	1	lane answer	frame
+WindowRuntime.files_row_clicks	VIEW	files	runtime/files	press_files_row	call:interrupt	3	gesture	file write,frame,lane request
+WindowRuntime.files_row_clicks	VIEW	files	runtime/mouse	chrome_mouse_input	call:interrupt	16	gesture	file write,frame,lane request,process/thread
+WindowRuntime.files_row_clicks	VIEW	files	runtime/mouse	press_float	call:interrupt	6	gesture	file write,frame,lane request
+WindowRuntime.files_row_clicks	VIEW	files	runtime/mouse	press_float_row	call:interrupt	1	gesture	frame,lane request
+WindowRuntime.files_row_clicks	VIEW	files	runtime/mouse	press_on_its_own_trigger	call:interrupt	1	gesture	
+WindowRuntime.files_row_clicks	VIEW	files	runtime/preview	press_preview_rail	call:interrupt	1	gesture	frame,lane request
+WindowRuntime.first_run	VIEW	first_run	runtime/first_run	answer_first_run	call:flip	1	gesture	frame
+WindowRuntime.first_run	VIEW	first_run	runtime/first_run	follow_first_run_focus	call:scroll_to	1	gesture	
+WindowRuntime.first_run	VIEW	first_run	runtime/first_run	press_first_run_key	call:flip,call:light_the_ring,call:move_focus,call:scroll_to,call:set	7	gesture	frame
+WindowRuntime.first_run	VIEW	first_run	runtime/first_run	scroll_first_run	call:scroll_to	1	gesture,lane answer,turn	frame
+WindowRuntime.first_run	VIEW	first_run	runtime/mouse	pointer_moved	call:set_hover	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.float	VIEW	floats	main[focus]	focus_pane_at	call:blur	1	gesture	file write,frame
+WindowRuntime.float	VIEW	floats	main[focus]	focus_the_pane_a_path_landed_in	call:blur	1	gesture,turn	frame
+WindowRuntime.float	VIEW	floats	runtime/dpi	resize_floats_to_content	call:live_mut	1	turn	
+WindowRuntime.float	VIEW	floats	runtime/files	apply_files_results	call:live_mut	1	lane answer	frame
+WindowRuntime.float	VIEW	floats	runtime/files	fold_files_row	call:live_mut	1	gesture	file write,frame,lane request
+WindowRuntime.float	VIEW	floats	runtime/floats	advance_float	call:dismiss,call:grace_expired,call:sweep,call:take_due	4	turn	frame,lane request
+WindowRuntime.float	VIEW	floats	runtime/floats	ask_float_directories	call:live_windows_mut	1	turn	lane request
+WindowRuntime.float	VIEW	floats	runtime/floats	dismiss_float	call:dismiss	1	gesture,turn	frame
+WindowRuntime.float	VIEW	floats	runtime/floats	expand_float_commit	call:live_mut	1	gesture	frame,lane request
+WindowRuntime.float	VIEW	floats	runtime/floats	load_more_float_commits	call:live_mut	1	gesture	frame,lane request
+WindowRuntime.float	VIEW	floats	runtime/floats	open_minted_page_on_float	call:live_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.float	VIEW	floats	runtime/floats	reclamp_float	call:live_windows_mut,call:wipe_peek	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.float	VIEW	floats	runtime/floats	scroll_float_tree	call:live_mut	1	gesture,lane answer,turn	frame
+WindowRuntime.float	VIEW	floats	runtime/git	apply_git_panel	call:live_windows_mut	1	gesture,turn	file write,frame
+WindowRuntime.float	VIEW	floats	runtime/git	apply_git_results	call:live_mut,call:live_windows_mut	2	lane answer	frame
+WindowRuntime.float	VIEW	floats	runtime/git	ask_git_for_floats	call:live_windows_mut	1	turn	lane request
+WindowRuntime.float	VIEW	floats	runtime/git	checkout_from_float	call:live_mut	1	gesture	frame,lane request
+WindowRuntime.float	VIEW	floats	runtime/git	issue_git_write	call:live_mut	1	gesture	frame,lane request
+WindowRuntime.float	VIEW	floats	runtime/git	press_float_git_row	call:live_mut	1	gesture	frame,lane request
+WindowRuntime.float	VIEW	floats	runtime/git	push_float_git_page	call:live_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.float	VIEW	floats	runtime/git	reread_git_origin	call:live_mut	1	PTY output,gesture,os event,turn	lane request
+WindowRuntime.float	VIEW	floats	runtime/git	scroll_float_git_page	call:live_mut	1	gesture,lane answer,turn	frame
+WindowRuntime.float	VIEW	floats	runtime/git	select_float_git_row	call:live_mut	1	gesture	
+WindowRuntime.float	VIEW	floats	runtime/mouse	close_hover_floats_except	call:disarm,call:dismiss	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.float	VIEW	floats	runtime/mouse	drive_float_drag	call:live_mut	1	gesture,lane answer	frame
+WindowRuntime.float	VIEW	floats	runtime/mouse	drive_float_hover	call:hold	1	gesture,lane answer	frame
+WindowRuntime.float	VIEW	floats	runtime/mouse	pointer_moved	call:observe	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.float	VIEW	floats	runtime/mouse	press_float_row	call:live_mut	1	gesture	frame,lane request
+WindowRuntime.float	VIEW	floats	runtime/mouse	press_float_trigger	call:promote	1	gesture	frame
+WindowRuntime.float	VIEW	floats	runtime/mouse	promote_float_head_press	call:promote	1	gesture,lane answer	
+WindowRuntime.float	VIEW	floats	runtime/mouse	rearm_hover_intents	call:observe	1	turn	frame
+WindowRuntime.float	VIEW	floats	runtime/panes	dock_float	call:wipe	1	gesture	frame
+WindowRuntime.float	VIEW	floats	runtime/preview	dock_preview_float	call:wipe	1	gesture	frame
+WindowRuntime.float_drag	VIEW	floats	runtime/floats	forget_dead_float_gestures	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.float_drag	VIEW	floats	runtime/mouse	drive_float_drag	assign	1	gesture,lane answer	frame
+WindowRuntime.float_drag	VIEW	floats	runtime/mouse	mouse_input	call:take	1	gesture	PTY write,file write,frame,lane request,process/thread
+WindowRuntime.float_drag	VIEW	floats	runtime/mouse	press_float	assign	2	gesture	file write,frame,lane request
+WindowRuntime.float_drag	VIEW	floats	runtime/mouse	promote_float_head_press	assign	1	gesture,lane answer	
+WindowRuntime.float_drag	VIEW	floats	runtime/peek	promote_file_peek	assign	1	gesture,lane answer	frame
+WindowRuntime.float_git_pages_shown	PROJ	git	runtime/floats	float_layer	call:clear	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.float_git_pages_shown	PROJ	git	runtime/git	push_float_git_page	call:insert	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.float_head_press	VIEW	floats	runtime/floats	forget_dead_float_gestures	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.float_head_press	VIEW	floats	runtime/mouse	mouse_input	assign	1	gesture	PTY write,file write,frame,lane request,process/thread
+WindowRuntime.float_head_press	VIEW	floats	runtime/mouse	press_float	assign	1	gesture	file write,frame,lane request
+WindowRuntime.float_head_press	VIEW	floats	runtime/mouse	promote_float_head_press	assign,call:as_mut	2	gesture,lane answer	
+WindowRuntime.float_hover	VIEW	floats	runtime/floats	forget_dead_float_gestures	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.float_hover	VIEW	floats	runtime/floats	scroll_float_tree	assign	1	gesture,lane answer,turn	frame
+WindowRuntime.float_hover	VIEW	floats	runtime/git	scroll_float_git_page	assign	1	gesture,lane answer,turn	frame
+WindowRuntime.float_hover	VIEW	floats	runtime/mouse	drive_float_hover	assign	1	gesture,lane answer	frame
+WindowRuntime.folder_pick	ASYNC	files	main[unassigned]	browse_for_root	assign	1	gesture	
+WindowRuntime.folder_pick	ASYNC	files	runtime/files	apply_folder_pick_result	call:take	1	turn	file write,frame,process/thread
+WindowRuntime.folder_pick	ASYNC	files	runtime/files	browse_for_start_folder	assign	1	gesture,turn	
+WindowRuntime.folder_pick	ASYNC	files	runtime/panes	browse_for_split_root	assign	1	gesture	
+WindowRuntime.folder_pick	ASYNC	files	runtime/tabs	browse_for_new_tab_root	assign	1	gesture	
+WindowRuntime.formula_overlay_owed	PROJ	math	main[unassigned]	carry_live_journeys	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.formula_overlay_owed	PROJ	math	runtime/math	refresh_formula_overlay_for_present	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.frame_clock	PROJ	frame	main[unassigned]	follow_the_display	call:follow	1	os event	
+WindowRuntime.frame_clock	PROJ	frame	runtime/frame	trace_present	call:take_skipped	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.frame_clock	PROJ	frame	runtime/frame	turn	call:note_running	1	turn	PTY write,file write,frame,lane request,process/thread
+WindowRuntime.git_graphs_shown	PROJ	git	runtime/floats	float_layer	call:retain	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.git_graphs_shown	PROJ	git	runtime/floats	refresh_chrome_with_overlay	call:extend,call:retain	2	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.git_graphs_shown	PROJ	git	runtime/git	push_float_graph	call:insert	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.git_menu	VIEW	git	main[unassigned]	cancel_composition	call:as_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.git_menu	VIEW	git	runtime/floats	close_popup	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.git_menu	VIEW	git	runtime/git	close_git_menu	call:take	1	gesture	frame
+WindowRuntime.git_menu	VIEW	git	runtime/git	commit_git_prompt	call:as_mut	1	gesture	frame,lane request
+WindowRuntime.git_menu	VIEW	git	runtime/git	git_menu_key	call:as_mut	3	gesture	frame
+WindowRuntime.git_menu	VIEW	git	runtime/git	git_prompt_ime	call:as_mut	1	gesture	frame
+WindowRuntime.git_menu	VIEW	git	runtime/git	open_git_menu_at	assign	1	gesture	frame
+WindowRuntime.git_menu	VIEW	git	runtime/git	open_git_prompt	call:as_mut	1	gesture	frame
+WindowRuntime.git_menu	VIEW	git	runtime/git	run_git_menu_row	call:take	1	gesture	frame,lane request
+WindowRuntime.git_menu	VIEW	git	runtime/mouse	pointer_moved	call:as_mut	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.glyph_census_echo	PROJ	frame	runtime/frame	redraw	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.glyph_census_echo	PROJ	frame	runtime/preview	present_retained_picture	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.graph_filter_menu	VIEW	git	runtime/floats	close_popup	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.graph_filter_menu	VIEW	git	runtime/git	close_graph_filter_menu	call:take	1	gesture	frame
+WindowRuntime.graph_filter_menu	VIEW	git	runtime/git	focus_graph_search	assign	1	gesture	frame
+WindowRuntime.graph_filter_menu	VIEW	git	runtime/git	toggle_graph_filter_menu	assign	1	gesture	frame
+WindowRuntime.graph_filter_menu	VIEW	git	runtime/mouse	pointer_moved	call:as_mut	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.hover_pane	VIEW	mouse	runtime/mouse	pointer_left	assign	1	gesture,lane answer	frame
+WindowRuntime.hover_pane	VIEW	mouse	runtime/panes	observe_hovered_pane	assign	1	gesture,lane answer	frame
+WindowRuntime.hover_pane	VIEW	mouse	runtime/tabs	activate_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.hyperlink_hover	VIEW	mouse	runtime/frame	activate_hyperlink	call:show_blocked	3	gesture	frame,lane request
+WindowRuntime.hyperlink_hover	VIEW	mouse	runtime/handoff	answer_handoff	call:show_blocked	1	lane answer	frame
+WindowRuntime.hyperlink_hover	VIEW	mouse	runtime/mouse	activate_hyperlink_hover_if_due	&mut,assign	2	turn	frame
+WindowRuntime.hyperlink_hover	VIEW	mouse	runtime/mouse	pointer_left	call:clear	1	gesture,lane answer	frame
+WindowRuntime.hyperlink_hover	VIEW	mouse	runtime/mouse	pointer_moved	call:observe	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.hyperlink_hover	VIEW	mouse	runtime/tabs	activate_tab	call:clear	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.image_pick_pending	ASYNC	preview	main[unassigned]	browse_for_program	assign	1	gesture,turn	
+WindowRuntime.image_pick_pending	ASYNC	preview	runtime/configuration	open_configuration_door	assign	1	gesture,turn	lane request
+WindowRuntime.image_pick_pending	ASYNC	preview	runtime/preview	apply_image_pick_result	call:take	1	turn	file write,frame
+WindowRuntime.image_pick_pending	ASYNC	preview	runtime/preview	browse_for_background_image	assign	1	gesture,turn	
+WindowRuntime.ime_active	VIEW	keyboard	main[impl FolioApp]	window_event	assign	1	gesture,os event	PTY write,file write,frame,lane request
+WindowRuntime.ime_active	VIEW	keyboard	runtime/keyboard	ime_input	assign	2	gesture	PTY write,frame
+WindowRuntime.ime_cursor_throttle	PROJ	keyboard	main[impl FolioApp]	window_event	call:reset	1	gesture,os event	PTY write,file write,frame,lane request
+WindowRuntime.ime_cursor_throttle	PROJ	keyboard	main[unassigned]	cancel_composition	call:reset	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.ime_cursor_throttle	PROJ	keyboard	runtime/keyboard	flush_ime_cursor_area	call:flush_due	1	turn	
+WindowRuntime.ime_cursor_throttle	PROJ	keyboard	runtime/keyboard	ime_input	call:reset	2	gesture	PTY write,frame
+WindowRuntime.ime_cursor_throttle	PROJ	keyboard	runtime/keyboard	reoffer_ime_cursor_area	call:rearm	1	os event	
+WindowRuntime.ime_report	PROJ	keyboard	runtime/keyboard	ime_input	call:ime,call:pairing	2	gesture	PTY write,frame
+WindowRuntime.ime_report	PROJ	keyboard	runtime/keyboard	observe_ime_key	call:confirm,call:first_key,call:may_probe	3	gesture	
+WindowRuntime.ime_report	PROJ	keyboard	runtime/windows	put_the_window_on_the_glass	call:shown	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.ime_report_due	PROJ	keyboard	main[focus]	observe_ime_focus	assign	1	os event	
+WindowRuntime.ime_report_due	PROJ	keyboard	runtime/git	service_ime_report	assign	1	turn	
+WindowRuntime.ime_system_caret	PROJ	keyboard	ime_outbound	destroy_ime_caret	call:destroy	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.ime_system_caret	PROJ	keyboard	runtime/keyboard	apply_ime_cursor_area	call:update	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.key_hint	VIEW	keyboard	main[impl FolioApp]	window_event	call:hide	1	gesture,os event	PTY write,file write,frame,lane request
+WindowRuntime.key_hint	VIEW	keyboard	runtime/keyboard	advance_key_hint_if_due	call:activate_if_due	1	turn	frame
+WindowRuntime.key_hint	VIEW	keyboard	runtime/keyboard	hide_key_hint	call:hide	1	gesture,turn	frame
+WindowRuntime.key_hint	VIEW	keyboard	runtime/keyboard	note_key_hint	call:observe	1	gesture,turn	frame
+WindowRuntime.last_presented_frame	PROJ	frame	runtime/attention	open_from_notification	assign	1	gesture,lane answer	file write,frame
+WindowRuntime.last_presented_frame	PROJ	frame	runtime/frame	redraw	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.last_presented_frame	PROJ	frame	runtime/keyboard	take_keyboard_into	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.last_presented_frame	PROJ	frame	runtime/tabs	activate_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.last_presented_frame	PROJ	frame	runtime/terminal	restart_shell	assign	1	gesture	process/thread
+WindowRuntime.layout_peek	VIEW	peek	main[focus]	set_cursor_focus	call:hide	1	os event	
+WindowRuntime.layout_peek	VIEW	peek	runtime/mouse	close_hover_floats_except	call:hide	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.layout_peek	VIEW	peek	runtime/peek	advance_layout_peek_if_due	call:activate_if_due	1	turn	frame
+WindowRuntime.layout_peek	VIEW	peek	runtime/peek	hide_layout_peek	call:hide	1	gesture,lane answer	frame
+WindowRuntime.layout_peek	VIEW	peek	runtime/peek	note_layout_peek	call:observe	1	gesture,lane answer,turn	frame
+WindowRuntime.layout_peek	VIEW	peek	runtime/tooltips	rebuild_tooltip_anchors	call:retain	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.local_wheel_subpixel_remainder	VIEW	mouse	runtime/mouse	mouse_wheel	assign	2	gesture,lane answer,turn	frame,process/thread
+WindowRuntime.local_wheel_subpixel_remainder	VIEW	mouse	runtime/terminal	scroll_view_exact_in	&mut,assign	2	gesture,lane answer,turn	frame
+WindowRuntime.math_tool_pressed	VIEW	math	runtime/math	leave_hovered_math	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.math_tool_pressed	VIEW	math	runtime/mouse	mouse_input	assign,call:take	2	gesture	PTY write,file write,frame,lane request,process/thread
+WindowRuntime.modifiers	OBS	keyboard	main[impl FolioApp]	window_event	assign	1	gesture,os event	PTY write,file write,frame,lane request
+WindowRuntime.modifiers	OBS	keyboard	main[unassigned]	adopt_option_as_alt	assign	1	gesture,turn	
+WindowRuntime.mouse_route	VIEW	mouse	runtime/math	apply_math_context_menu_result	assign	1	turn	
+WindowRuntime.mouse_route	VIEW	mouse	runtime/mouse	mouse_input	&mut,assign	3	gesture	PTY write,file write,frame,lane request,process/thread
+WindowRuntime.mouse_route	VIEW	mouse	runtime/tabs	activate_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.mouse_route	VIEW	mouse	runtime/terminal	begin_local_selection	assign	1	gesture	frame,lane request
+WindowRuntime.mouse_route	VIEW	mouse	runtime/terminal	finish_local_selection	assign	1	gesture	frame,lane request
+WindowRuntime.palette	VIEW	palette	main[unassigned]	cancel_composition	call:as_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.palette	VIEW	palette	runtime/floats	close_popup	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.palette	VIEW	palette	runtime/mouse	mouse_input	call:as_mut	1	gesture	PTY write,file write,frame,lane request,process/thread
+WindowRuntime.palette	VIEW	palette	runtime/palette	arrange_palette	call:as_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.palette	VIEW	palette	runtime/palette	drive_palette_hover	call:as_mut	1	gesture,lane answer	frame
+WindowRuntime.palette	VIEW	palette	runtime/palette	open_command_palette	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.palette	VIEW	palette	runtime/palette	palette_ime	call:as_mut	1	gesture	
+WindowRuntime.palette	VIEW	palette	runtime/palette	palette_key	call:as_mut	2	gesture	frame
+WindowRuntime.palette	VIEW	palette	runtime/palette	scroll_palette_list	call:as_mut	2	gesture,lane answer,turn	frame
+WindowRuntime.palette	VIEW	palette	runtime/palette	settle_palette_scroll	call:as_mut	1	gesture	
+WindowRuntime.palette_layout	PROJ	palette	runtime/floats	close_popup	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.palette_layout	PROJ	palette	runtime/palette	palette_layer	assign	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.pane_menu	VIEW	panes	runtime/floats	close_popup	call:take	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.pane_menu	VIEW	panes	runtime/keyboard	keyboard_input	call:as_mut	1	gesture	PTY write,file write,frame,process/thread
+WindowRuntime.pane_menu	VIEW	panes	runtime/panes	close_pane_menu	call:take	1	gesture,turn	frame
+WindowRuntime.pane_menu	VIEW	panes	runtime/panes	drive_pane_menu_hover	call:as_mut	1	gesture,lane answer,turn	frame
+WindowRuntime.pane_menu	VIEW	panes	runtime/panes	open_pane_menu	assign	1	gesture,turn	frame
+WindowRuntime.pane_menu	VIEW	panes	runtime/panes	run_pane_menu_row	call:take	1	gesture	frame
+WindowRuntime.pane_menu	VIEW	panes	runtime/panes	set_pane_submenu	call:as_mut	1	gesture,turn	frame
+WindowRuntime.pane_motion	PROJ	tabs	runtime/preview	advance_strip_animation	call:retire,call:settle_frame_debt	2	turn	frame
+WindowRuntime.pane_motion	PROJ	tabs	runtime/tabs	activate_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.pane_motion_revision	PROJ	tabs	runtime/panes	commit_seat_geometry	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request
+WindowRuntime.pane_motion_revision	PROJ	tabs	runtime/tabs	activate_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.pane_press	VIEW	mouse	main[impl FolioApp]	window_event	assign	1	gesture,os event	PTY write,file write,frame,lane request
+WindowRuntime.pane_press	VIEW	mouse	runtime/mouse	arm_row_press	assign	1	gesture	
+WindowRuntime.pane_press	VIEW	mouse	runtime/mouse	cancel_drag	assign	1	gesture,turn	frame
+WindowRuntime.pane_press	VIEW	mouse	runtime/mouse	chrome_mouse_input	assign,call:take	4	gesture	file write,frame,lane request,process/thread
+WindowRuntime.pane_press	VIEW	mouse	runtime/mouse	pointer_moved	call:as_mut	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.pane_press	VIEW	mouse	runtime/mouse	release_drag	assign	1	gesture	file write,frame
+WindowRuntime.pane_press	VIEW	mouse	runtime/tabs	press_tab	assign	1	gesture	
+WindowRuntime.paste_card_hover	VIEW	clipboard	runtime/clipboard	answer_paste_card	assign	1	gesture	PTY write,frame
+WindowRuntime.paste_card_hover	VIEW	clipboard	runtime/clipboard	deliver_paste	assign	1	gesture,lane answer,turn	PTY write,frame
+WindowRuntime.paste_card_hover	VIEW	clipboard	runtime/mouse	pointer_moved	assign	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.peek_buffer	ASYNC	peek	runtime/git	apply_git_results	call:as_mut	1	lane answer	frame
+WindowRuntime.peek_buffer	ASYNC	peek	runtime/peek	hide_file_peek	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.peek_buffer	ASYNC	peek	runtime/peek	mature_file_peek	assign	2	turn	lane request
+WindowRuntime.peek_buffer	ASYNC	peek	runtime/preview	apply_preview_results	call:as_mut	1	lane answer	frame
+WindowRuntime.peek_cache	PROJ	peek	runtime/peek	file_peek_fitted_pixels	call:insert	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.peek_cache	PROJ	peek	runtime/peek	remember_decode_for_peek	call:insert	1	lane answer	
+WindowRuntime.peek_cache	PROJ	peek	runtime/peek	show_or_request_peek	call:insert	1	lane answer,turn	frame,lane request
+WindowRuntime.peek_cache	PROJ	peek	runtime/preview	complete_peek_image	call:insert	2	lane answer	frame,lane request
+WindowRuntime.peek_cache	PROJ	peek	runtime/preview	complete_peek_video_frame	call:insert	1	lane answer	frame
+WindowRuntime.peek_cache	PROJ	peek	runtime/preview	forget_the_picture_in	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.peek_cache	PROJ	peek	runtime/preview	refit_preview_picture	&mut,call:insert	3	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.peek_cache	PROJ	peek	runtime/preview	resolve_document_pictures	&mut,call:insert	2	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.peek_facts	ASYNC	peek	runtime/peek	file_peek_facts	assign	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.peek_facts	ASYNC	peek	runtime/peek	hide_file_peek	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.peek_facts	ASYNC	peek	runtime/preview	apply_preview_results	call:as_mut	1	lane answer	frame
+WindowRuntime.peek_hover	VIEW	peek	runtime/dpi	resize	call:clear	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.peek_hover	VIEW	peek	runtime/mouse	pointer_moved	call:observe	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.peek_hover	VIEW	peek	runtime/panes	commit_seat_geometry	call:clear	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request
+WindowRuntime.peek_hover	VIEW	peek	runtime/peek	activate_peek_if_due	call:activate_if_due	1	turn	lane request
+WindowRuntime.peek_hover	VIEW	peek	runtime/peek	dismiss_peek	call:clear	1	gesture,lane answer,turn	frame
+WindowRuntime.peek_hover	VIEW	peek	runtime/tabs	activate_tab	call:clear	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.peek_pane	VIEW	peek	runtime/peek	drag_file_peek_thumb	assign	1	gesture,lane answer	frame
+WindowRuntime.peek_pane	VIEW	peek	runtime/peek	file_peek_card_layers	assign	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.peek_pane	VIEW	peek	runtime/peek	file_peek_facts	assign	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.peek_pane	VIEW	peek	runtime/peek	hide_file_peek	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.peek_pane	VIEW	peek	runtime/peek	mature_file_peek	assign	1	turn	lane request
+WindowRuntime.peek_pane	VIEW	peek	runtime/preview	documents_held_mut	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.peek_pane	VIEW	peek	runtime/preview	preview_pane_mut	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.pending_frames	PROJ	frame	runtime/frame	redraw	call:take	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.pending_frames	PROJ	frame	runtime/tabs	activate_tab	call:take	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.pending_math_context_anchor	VIEW	math	runtime/math	apply_math_context_menu_result	call:take	1	turn	
+WindowRuntime.pending_math_context_anchor	VIEW	math	runtime/mouse	mouse_input	assign	1	gesture	PTY write,file write,frame,lane request,process/thread
+WindowRuntime.placeholder_tab	LIFE	windows	main[unassigned]	retire_the_stand_in	assign	1	gesture,turn	file write,frame
+WindowRuntime.placeholder_tab	LIFE	windows	main[unassigned]	send_user_input	assign	1	gesture	PTY write,frame
+WindowRuntime.placeholder_tab	LIFE	windows	runtime/mouse	send_mouse_input_to	assign	1	gesture,lane answer,turn	PTY write
+WindowRuntime.placeholder_tab	LIFE	windows	runtime/windows	abandon_a_window_nothing_arrived_in	assign	1	gesture,turn	
+WindowRuntime.placeholder_tab	LIFE	windows	runtime/windows	answer_restore	call:take	1	turn	file write,frame,lane request,process/thread
+WindowRuntime.preedit	VIEW	keyboard	main[unassigned]	cancel_composition	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.preedit	VIEW	keyboard	runtime/keyboard	ime_input	assign	3	gesture	PTY write,frame
+WindowRuntime.preedit	VIEW	keyboard	runtime/preview	preview_ime	assign	2	gesture	frame
+WindowRuntime.preedit	VIEW	keyboard	runtime/tabs	activate_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.present_diagnostics	PROJ	frame	runtime/frame	begin_present_attempt	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.present_diagnostics	PROJ	frame	runtime/frame	finish_present_attempt	&mut	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.present_diagnostics	PROJ	frame	runtime/preview	check_picture_freshness	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.present_gate	PROJ	frame	runtime/frame	publish_chrome_frame	&mut	1	turn	frame
+WindowRuntime.present_gate	PROJ	frame	runtime/frame	redraw	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.present_gate	PROJ	frame	runtime/preview	present_retained_picture	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.preview_name_clicks	VIEW	preview	runtime/mouse	chrome_mouse_input	call:interrupt	2	gesture	file write,frame,lane request,process/thread
+WindowRuntime.preview_name_clicks	VIEW	preview	runtime/preview	press_preview_rail	call:interrupt	1	gesture	frame,lane request
+WindowRuntime.preview_trace_echo	PROJ	frame	runtime/frame	redraw	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.preview_trace_echo	PROJ	frame	runtime/preview	present_retained_picture	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.psreadline_invite	OBS	first_run	runtime/first_run	record_psreadline_invite	assign	1	gesture,turn	file write
+WindowRuntime.psreadline_invite	OBS	first_run	runtime/mouse	pointer_moved	call:set_hover	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.psreadline_invite	OBS	first_run	settings_bundle	write_into	assign	1	turn	
+WindowRuntime.psreadline_size_changed	VIEW	first_run	main[settings]	apply_settings_choice_announcing	assign	1	gesture,turn	file write,frame,lane request,process/thread
+WindowRuntime.psreadline_size_changed	VIEW	first_run	runtime/first_run	raise_psreadline_invite_if_due	assign	1	turn	frame
+WindowRuntime.pty_coalesce	PROJ	terminal	runtime/frame	publish_frame_inner	call:settle	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.pty_coalesce	PROJ	terminal	runtime/terminal	drain_pty	assign,call:opened_at	2	PTY output	file write,frame
+WindowRuntime.pty_coalesce	PROJ	terminal	runtime/terminal	finish_pty_coalesce_if_due	assign	1	turn	frame
+WindowRuntime.rail_scroll	VIEW	panes	main[focus]	set_focus_mode	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.rail_scroll	VIEW	panes	runtime/mouse	finish_drag	assign	1	gesture,turn	frame
+WindowRuntime.rail_scroll	VIEW	panes	runtime/panes	restate_panel_scroll	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.rail_scroll	VIEW	panes	runtime/panes	scroll_rail	assign	1	gesture,lane answer,turn	file write,frame
+WindowRuntime.rail_scroll	VIEW	panes	runtime/panes	set_rail_state	assign	1	gesture,turn	file write,frame
+WindowRuntime.rail_scroll	VIEW	panes	runtime/tabs	set_tab_run_scroll	assign	1	turn	
+WindowRuntime.rename	VIEW	tabs	main[unassigned]	cancel_composition	call:as_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.rename	VIEW	tabs	runtime/files	dress_files_tree_editor	call:as_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.rename	VIEW	tabs	runtime/files	open_files_row_new	assign	1	gesture	frame
+WindowRuntime.rename	VIEW	tabs	runtime/files	open_files_row_rename	assign	1	gesture	frame,lane request
+WindowRuntime.rename	VIEW	tabs	runtime/keyboard	ime_input	assign,call:take	2	gesture	PTY write,frame
+WindowRuntime.rename	VIEW	tabs	runtime/keyboard	keyboard_input	assign,call:take	2	gesture	PTY write,file write,frame,process/thread
+WindowRuntime.rename	VIEW	tabs	runtime/preview	dress_preview_address_editor	call:as_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.rename	VIEW	tabs	runtime/preview	dress_preview_crumb_editor	call:as_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.rename	VIEW	tabs	runtime/preview	dress_preview_name_editor	call:as_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.rename	VIEW	tabs	runtime/preview	open_preview_crumb_rename	assign	1	gesture	frame
+WindowRuntime.rename	VIEW	tabs	runtime/preview	open_preview_rename	assign	1	gesture	frame
+WindowRuntime.rename	VIEW	tabs	runtime/tabs	finish_rename	assign,call:take	3	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.rename	VIEW	tabs	runtime/tabs	measure_open_rename	call:as_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.rename	VIEW	tabs	runtime/tabs	open_rename	assign	1	gesture	frame
+WindowRuntime.rename	VIEW	tabs	runtime/web	open_web_address_on	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.rename_blink	VIEW	tabs	main[impl FolioApp]	adopt_motion_preference	call:reset	1	lane answer	frame
+WindowRuntime.rename_blink	VIEW	tabs	runtime/files	open_files_row_new	call:reset	1	gesture	frame
+WindowRuntime.rename_blink	VIEW	tabs	runtime/files	open_files_row_rename	call:reset	1	gesture	frame,lane request
+WindowRuntime.rename_blink	VIEW	tabs	runtime/keyboard	ime_input	call:reset	1	gesture	PTY write,frame
+WindowRuntime.rename_blink	VIEW	tabs	runtime/keyboard	keyboard_input	call:reset	1	gesture	PTY write,file write,frame,process/thread
+WindowRuntime.rename_blink	VIEW	tabs	runtime/preview	open_preview_crumb_rename	call:reset	1	gesture	frame
+WindowRuntime.rename_blink	VIEW	tabs	runtime/preview	open_preview_rename	call:reset	1	gesture	frame
+WindowRuntime.rename_blink	VIEW	tabs	runtime/tabs	open_rename	call:reset	1	gesture	frame
+WindowRuntime.rename_blink	VIEW	tabs	runtime/web	open_web_address_on	call:reset	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.rename_caret_line	PROJ	tabs	runtime/files	dress_files_tree_editor	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.rename_caret_line	PROJ	tabs	runtime/preview	dress_preview_address_editor	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.rename_caret_line	PROJ	tabs	runtime/preview	dress_preview_crumb_editor	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.rename_caret_line	PROJ	tabs	runtime/preview	dress_preview_name_editor	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.rename_caret_line	PROJ	tabs	runtime/tabs	measure_open_rename	assign	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	main[focus]	card_hint_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	main[focus]	push_float_refusal_card	call:measure_chrome_text	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	main[focus]	quit_card_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	main[focus]	set_cursor_focus	call:set_cursor_blink_visible,call:set_window_focused	2	os event	
+WindowRuntime.renderer	RES	—	main[impl FolioApp]	adopt_motion_preference	call:set_cursor_blink_visible	1	lane answer	frame
+WindowRuntime.renderer	RES	—	main[settings]	settings_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	process/thread
+WindowRuntime.renderer	RES	—	preview_viewport	ensure_markdown_viewport	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	preview_viewport	rebuild_markdown_geometry	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/attention	notice_layers	&mut,call:measure_chrome_text	3	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/attention	toast_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/clipboard	paste_card_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/dpi	apply_scale_factor	call:update_scale_factor	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/dpi	reconcile_authoritative_dpi	call:resize	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.renderer	RES	—	runtime/dpi	resize	call:resize,call:set_peek_overlay	2	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.renderer	RES	—	runtime/files	dress_files_feet	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/files	dress_files_tree_editor	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/files	files_float_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/files	files_views	call:measure_chrome_text	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/files	measure_files_names	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/first_run	first_run_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/first_run	psreadline_invite_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/floats	float_hit_at	call:measure_chrome_text	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/floats	refresh_chrome_with_overlay	&mut,call:measure_chrome_text,call:set_chrome	8	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.renderer	RES	—	runtime/floats	term_menu_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/frame	redraw	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.renderer	RES	—	runtime/git	build_git_graph	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.renderer	RES	—	runtime/git	git_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/git	git_pages	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/git	graph_filter_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/git	push_float_git_page	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/keyboard	advance_cursor_blink_if_due	call:set_cursor_blink_visible	2	turn	frame
+WindowRuntime.renderer	RES	—	runtime/keyboard	key_hint_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/keyboard	reset_cursor_blink	call:set_cursor_blink_visible	1	PTY output,gesture,turn	
+WindowRuntime.renderer	RES	—	runtime/math	refresh_overlay_with_formula	&mut,call:set_modal_overlay	4	PTY output,gesture,lane answer,launch,os event,turn	process/thread
+WindowRuntime.renderer	RES	—	runtime/mouse	drag_ghost_layer	call:measure_chrome_text	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/panes	commit_seat_geometry	call:set_peek_overlay	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request
+WindowRuntime.renderer	RES	—	runtime/panes	dirty_gate_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/panes	file_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/panes	float_dock_label_width	call:measure_chrome_label	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/panes	palette_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/panes	pane_draws	call:place_preview_image	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/panes	pane_menu_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/panes	pane_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/panes	resolve_seat_layout	call:set_seat_viewport	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/panes	restore_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/panes	term_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/peek	file_peek_card_layers	&mut,call:measure_chrome_label,call:measure_chrome_text	3	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.renderer	RES	—	runtime/peek	layout_peek_layer	call:measure_chrome_text	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/peek	present_peek_overlay	call:set_peek_overlay	1	gesture,lane answer,turn	frame
+WindowRuntime.renderer	RES	—	runtime/preview	build_preview_body_in	&mut	3	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	build_table_block	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	dress_preview_address_editor	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	dress_preview_crumb_editor	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	dress_preview_foot	&mut	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	dress_preview_head	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	dress_preview_name_editor	&mut,call:measure_chrome_label	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	dress_preview_rail	call:measure_chrome_text	4	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	measure_video_meta	call:measure_chrome_text	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	present_retained_picture	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.renderer	RES	—	runtime/preview	preview_float_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	preview_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	preview_place_at	&mut	1	gesture,lane answer	
+WindowRuntime.renderer	RES	—	runtime/preview	preview_prose_geometry	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	rebuild_preview_document	call:preview_mono_advance	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	refresh_preview_body	call:set_preview_bodies	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/preview	refresh_preview_for_layout	call:set_preview_images	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.renderer	RES	—	runtime/preview	refresh_video_layers	call:set_video_layers	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.renderer	RES	—	runtime/profiles	profile_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/profiles	root_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/search	search_capsule	call:measure_chrome_text	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/search	search_field_look	call:measure_chrome_text	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/tabs	activate_tab	call:set_peek_overlay	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.renderer	RES	—	runtime/tabs	measure_open_rename	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/tabs	refresh_table_paints	call:set_table_blocks	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/tabs	tab_menu_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/tabs	tab_menu_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/terminal	adopt_terminal_font	&mut	1	gesture,lane answer,turn	frame
+WindowRuntime.renderer	RES	—	runtime/tooltips	tooltip_layer	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/web	apply_web_outcomes	call:set_web_holes	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.renderer	RES	—	runtime/web	sync_web_page	call:set_web_holes	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.renderer	RES	—	runtime/web	web_sheet_layers	&mut,call:measure_chrome_text	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.revealed_foot	ASYNC	handoff	main[unassigned]	advance_foot_reveal	assign	1	turn	frame
+WindowRuntime.revealed_foot	ASYNC	handoff	runtime/handoff	answer_handoff	assign	1	lane answer	frame
+WindowRuntime.revealed_foot	ASYNC	handoff	runtime/preview	reveal_preview_file	assign	1	gesture	frame,lane request
+WindowRuntime.row_press	VIEW	mouse	main[impl FolioApp]	window_event	assign	1	gesture,os event	PTY write,file write,frame,lane request
+WindowRuntime.row_press	VIEW	mouse	runtime/mouse	arm_row_press	assign	1	gesture	
+WindowRuntime.row_press	VIEW	mouse	runtime/mouse	cancel_drag	assign	1	gesture,turn	frame
+WindowRuntime.row_press	VIEW	mouse	runtime/mouse	chrome_mouse_input	assign,call:take	2	gesture	file write,frame,lane request,process/thread
+WindowRuntime.row_press	VIEW	mouse	runtime/mouse	pointer_moved	call:as_mut	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.row_press	VIEW	mouse	runtime/mouse	release_drag	assign	1	gesture	file write,frame
+WindowRuntime.row_press	VIEW	mouse	runtime/tabs	press_tab	assign	1	gesture	
+WindowRuntime.search	VIEW	search	main[focus]	focus_the_pane_a_path_landed_in	call:blur	1	gesture,turn	frame
+WindowRuntime.search	VIEW	search	main[unassigned]	cancel_composition	call:field_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.search	VIEW	search	runtime/git	web_find_reported	call:report_engine_matches	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.search	VIEW	search	runtime/mouse	mouse_input	call:blur	1	gesture	PTY write,file write,frame,lane request,process/thread
+WindowRuntime.search	VIEW	search	runtime/search	open_search	call:set_counts_its_own	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.search	VIEW	search	runtime/search	refresh_search	call:forget_engine_matches	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.search	VIEW	search	runtime/search	search_field_key	call:field_mut	10	gesture	frame
+WindowRuntime.search	VIEW	search	runtime/search	search_ime	call:field_mut	2	gesture	frame
+WindowRuntime.search	VIEW	search	runtime/search	select_search_hit	call:set_current	1	gesture	
+WindowRuntime.search	VIEW	search	runtime/search	toggle_search_flag	call:flags_mut	1	gesture	
+WindowRuntime.search_scan	PROJ	search	runtime/search	close_search	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.search_scan	PROJ	search	runtime/search	refresh_search	assign	5	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.search_scan	PROJ	search	runtime/terminal	restart_shell	assign	1	gesture	process/thread
+WindowRuntime.seat_pointer	VIEW	mouse	main[focus]	set_focus_mode	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.seat_pointer	VIEW	mouse	main[settings]	toggle_settings_panel	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/git	heal_git_hover	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/mouse	chrome_mouse_input	assign	2	gesture	file write,frame,lane request,process/thread
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/mouse	pointer_left	call:left_the_window	1	gesture,lane answer	frame
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/mouse	service_drag_autoscroll	assign	1	turn	frame
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/panes	cancel_divider_drag	assign	1	gesture,os event,turn	file write,frame
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/panes	scroll_rail	assign	1	gesture,lane answer,turn	file write,frame
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/panes	set_rail_state	assign	1	gesture,turn	file write,frame
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/panes	settle_seat_set_change	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/panes	update_chrome_hover_target_in_pane	assign	2	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/tabs	activate_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.seat_pointer	VIEW	mouse	runtime/tabs	scroll_tab_strip	assign	1	gesture,lane answer,turn	frame
+WindowRuntime.settings	VIEW	main[settings]	main[launch]	reseed_editor_env	call:editor_mut	1	gesture,turn	frame
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	apply_editor_choice	call:close_editor,call:editor_mut	3	gesture,turn	file write,frame
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	apply_settings_choice_announcing	call:keep_focus_reachable	1	gesture,turn	file write,frame,lane request,process/thread
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	drag_settings_menu_bar	call:scroll_menu	1	gesture	frame
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	open_settings_on_row	call:select_category	1	gesture	frame,lane request,process/thread
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	record_settings_key	call:keep_focus_reachable,call:record	3	gesture	file write,frame
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	scroll_settings	call:scroll_menu,call:set_hover	3	gesture,lane answer,turn	frame,process/thread
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	settings_field_key	call:text_field_mut	1	gesture	frame
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	settings_layout	call:take_agents_open_edge,call:take_psreadline_open_edge	2	PTY output,gesture,lane answer,launch,os event,turn	process/thread
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	settings_mouse_input	call:begin_recording,call:close_menu,call:close_popup,call:select_category,call:set_hover,call:toggle_menu,call:toggle_row_menu	14	gesture	file write,frame,process/thread
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	show_settings_choice_at	call:scroll_menu	1	gesture	process/thread
+WindowRuntime.settings	VIEW	main[settings]	main[settings]	toggle_settings_panel	call:seed_quake_command	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.settings	VIEW	main[settings]	main[unassigned]	apply_row_verb	call:close_row_menu	1	gesture,turn	file write,frame
+WindowRuntime.settings	VIEW	main[settings]	main[unassigned]	settings_hover	call:set_hover	1		frame
+WindowRuntime.settings	VIEW	main[settings]	main[unassigned]	write_editor_field	call:editor_mut	1	gesture	file write,frame
+WindowRuntime.settings	VIEW	main[settings]	runtime/configuration	import_settings_from	call:keep_focus_reachable	1	turn	file write,frame
+WindowRuntime.settings	VIEW	main[settings]	runtime/keyboard	apply_shortcut_edit	call:keep_focus_reachable	1	gesture	file write
+WindowRuntime.settings	VIEW	main[settings]	runtime/keyboard	keyboard_input	call:set_hover	1	gesture	PTY write,file write,frame,process/thread
+WindowRuntime.settings	VIEW	main[settings]	runtime/mouse	pointer_left	call:set_hover	1	gesture,lane answer	frame
+WindowRuntime.settings	VIEW	main[settings]	runtime/preview	apply_image_pick_result	call:editor_mut	1	turn	file write,frame
+WindowRuntime.settings	VIEW	main[settings]	runtime/profiles	delete_profile	call:close_editor	1	gesture,turn	file write,frame
+WindowRuntime.settings	VIEW	main[settings]	runtime/profiles	open_profile_editor	call:open_editor	1	gesture,turn	
+WindowRuntime.settings	VIEW	main[settings]	runtime/profiles	take_profile_table	call:close_editor,call:close_row_menu,call:editor_mut,call:keep_focus_reachable	4	turn	frame
+WindowRuntime.settings_scroll	VIEW	main[settings]	main[settings]	apply_editor_choice	assign	1	gesture,turn	file write,frame
+WindowRuntime.settings_scroll	VIEW	main[settings]	main[settings]	open_settings_on_row	assign	2	gesture	frame,lane request,process/thread
+WindowRuntime.settings_scroll	VIEW	main[settings]	main[settings]	scroll_settings	assign	1	gesture,lane answer,turn	frame,process/thread
+WindowRuntime.settings_scroll	VIEW	main[settings]	main[settings]	settings_mouse_input	assign	1	gesture	file write,frame,process/thread
+WindowRuntime.settings_scroll	VIEW	main[settings]	main[settings]	toggle_settings_panel	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.settings_scroll	VIEW	main[settings]	main[unassigned]	toggle_advanced_group	assign	1	gesture,turn	file write,process/thread
+WindowRuntime.settings_scroll	VIEW	main[settings]	runtime/keyboard	keyboard_input	assign	2	gesture	PTY write,file write,frame,process/thread
+WindowRuntime.settings_scroll	VIEW	main[settings]	runtime/profiles	open_profile_editor	assign	1	gesture,turn	
+WindowRuntime.settling	PROJ	frame	main[focus]	settled_card_ink	call:settle	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.settling	PROJ	frame	runtime/frame	settled_head_ink	call:settle	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.settling	PROJ	frame	runtime/git	settle_git_pending	call:settle	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.settling	PROJ	frame	runtime/mouse	drag_ghost_layer	call:settle	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.settling	PROJ	frame	runtime/tabs	settled_tab_ink	call:settle	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tab_clicks	VIEW	tabs	main[impl FolioApp]	window_event	call:interrupt	1	gesture,os event	PTY write,file write,frame,lane request
+WindowRuntime.tab_clicks	VIEW	tabs	runtime/mouse	cancel_drag	call:interrupt	1	gesture,turn	frame
+WindowRuntime.tab_clicks	VIEW	tabs	runtime/mouse	chrome_mouse_input	call:interrupt	31	gesture	file write,frame,lane request,process/thread
+WindowRuntime.tab_clicks	VIEW	tabs	runtime/mouse	press_float	call:interrupt	6	gesture	file write,frame,lane request
+WindowRuntime.tab_clicks	VIEW	tabs	runtime/mouse	press_on_its_own_trigger	call:interrupt	1	gesture	
+WindowRuntime.tab_clicks	VIEW	tabs	runtime/mouse	release_drag	call:interrupt	1	gesture	file write,frame
+WindowRuntime.tab_clicks	VIEW	tabs	runtime/preview	press_preview_rail	call:interrupt	1	gesture	frame,lane request
+WindowRuntime.tab_clicks	VIEW	tabs	runtime/tabs	release_tab_press	call:interrupt	1	gesture	file write,frame
+WindowRuntime.tab_menu	VIEW	tabs	runtime/floats	close_popup	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tab_menu	VIEW	tabs	runtime/tabs	close_tab_menu	call:take	1	gesture	frame
+WindowRuntime.tab_menu	VIEW	tabs	runtime/tabs	drive_tab_menu_hover	call:as_mut	1	gesture,lane answer,turn	frame
+WindowRuntime.tab_menu	VIEW	tabs	runtime/tabs	open_tab_menu_at	assign	1	gesture	frame
+WindowRuntime.tab_menu	VIEW	tabs	runtime/tabs	run_tab_menu_row	call:take	1	gesture	file write,frame
+WindowRuntime.tab_menu	VIEW	tabs	runtime/tabs	set_tab_submenu	call:as_mut	1	gesture,turn	frame
+WindowRuntime.tab_menu	VIEW	tabs	runtime/tabs	tab_menu_key	call:as_mut	1	gesture	frame
+WindowRuntime.tab_press	VIEW	mouse	main[impl FolioApp]	window_event	assign	1	gesture,os event	PTY write,file write,frame,lane request
+WindowRuntime.tab_press	VIEW	mouse	runtime/mouse	arm_row_press	assign	1	gesture	
+WindowRuntime.tab_press	VIEW	mouse	runtime/mouse	cancel_drag	assign	1	gesture,turn	frame
+WindowRuntime.tab_press	VIEW	mouse	runtime/mouse	chrome_mouse_input	assign,call:take	2	gesture	file write,frame,lane request,process/thread
+WindowRuntime.tab_press	VIEW	mouse	runtime/mouse	pointer_moved	call:as_mut	1	gesture,lane answer	frame,lane request,process/thread
+WindowRuntime.tab_press	VIEW	mouse	runtime/mouse	release_drag	assign	1	gesture	file write,frame
+WindowRuntime.tab_press	VIEW	mouse	runtime/tabs	advance_tab_press_if_due	call:as_mut	1	turn	file write,frame
+WindowRuntime.tab_press	VIEW	mouse	runtime/tabs	close_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.tab_press	VIEW	mouse	runtime/tabs	press_tab	assign	1	gesture	
+WindowRuntime.tab_scroll	VIEW	tabs	runtime/panes	restate_panel_scroll	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tab_scroll	VIEW	tabs	runtime/tabs	reveal_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tab_scroll	VIEW	tabs	runtime/tabs	scroll_tab_strip	assign	1	gesture,lane answer,turn	frame
+WindowRuntime.tab_scroll	VIEW	tabs	runtime/tabs	set_tab_run_scroll	assign	1	turn	
+WindowRuntime.tabs	HUB	tabs	main[focus]	aim_focus_card_window	call:get_mut	1	gesture,lane answer,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	main[focus]	arm_card_reads	call:get_mut	2	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.tabs	HUB	tabs	main[focus]	queue_typing_in_the_focused_pane	call:get_mut	1	turn	
+WindowRuntime.tabs	HUB	tabs	main[focus]	quit_discard	&mut	1	turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	main[focus]	refresh_focus_thumbnails	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.tabs	HUB	tabs	main[focus]	wake_terminal_thumb	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	main[impl FolioApp]	transfer_tab	&mut,call:push	2	gesture,turn	file write
+WindowRuntime.tabs	HUB	tabs	main[impl FolioApp]	user_event	&mut	1	lane answer	frame,lane request
+WindowRuntime.tabs	HUB	tabs	main[unassigned]	apply_block_max_height	&mut	1	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	main[unassigned]	apply_repair_row_breaks	&mut	1	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	main[unassigned]	cancel_composition	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.tabs	HUB	tabs	main[unassigned]	expand_commit	call:get_mut	2	gesture	frame,lane request
+WindowRuntime.tabs	HUB	tabs	main[unassigned]	finish_synchronized_update_if_due	call:iter_mut	1	turn	frame
+WindowRuntime.tabs	HUB	tabs	main[unassigned]	note_user_typing	call:get_mut	1	gesture,lane answer,turn	
+WindowRuntime.tabs	HUB	tabs	main[unassigned]	retire_the_stand_in	call:remove	1	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	main[unassigned]	settle_home	call:displace	1	gesture,turn	
+WindowRuntime.tabs	HUB	tabs	main[unassigned]	toggle_pin	&mut,assign	2	gesture	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/attention	open_from_notification	assign	1	gesture,lane answer	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/clipboard	answer_paste_card	&mut	1	gesture	PTY write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/clipboard	copy_selection	call:focused_mut	1	gesture,turn	frame
+WindowRuntime.tabs	HUB	tabs	runtime/clipboard	deliver_paste	&mut	1	gesture,lane answer,turn	PTY write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/clipboard	press_paste_card_key	call:values_mut	1	gesture	PTY write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/clipboard	send_paste	call:get_mut	1	gesture,lane answer,turn	PTY write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/diagnostics	schedule_grid_change	call:focused_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/dpi	apply_every_leaf_metrics	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/dpi	finish_resize_if_quiescent	call:iter_mut	1	turn	PTY write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/dpi	flush_pending_pty_resize	call:iter_mut	1	turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/files	apply_files_results	&mut	1	lane answer	frame
+WindowRuntime.tabs	HUB	tabs	runtime/files	delete_files_row	call:get_mut	1	gesture	file write,frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/files	files_tree_key	call:entry,call:get_mut	2	gesture	file write,frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/files	files_trees	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.tabs	HUB	tabs	runtime/files	fold_files_row	call:entry,call:get_mut	2	gesture	file write,frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/files	heal_files_scroll	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/files	heal_files_selections	&mut	1	lane answer	
+WindowRuntime.tabs	HUB	tabs	runtime/files	open_files_path_to	call:entry,call:get_mut	3	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/files	open_files_row_new	call:entry,call:get_mut	2	gesture	frame
+WindowRuntime.tabs	HUB	tabs	runtime/files	press_files_row	call:entry,call:get_mut	2	gesture	file write,frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/files	reroot_files_column	call:get_mut,call:remove	3	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/files	reveal_files_row	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/files	scroll_files_tree	call:entry	1	gesture,lane answer,turn	frame
+WindowRuntime.tabs	HUB	tabs	runtime/files	set_files_view	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/frame	publish_frame_inner	&mut,call:shell_mut	3	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/frame	redraw	&mut,call:get_mut	4	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	apply_git_panel	&mut	1	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/git	apply_git_results	&mut	3	lane answer	frame
+WindowRuntime.tabs	HUB	tabs	runtime/git	ask_git_for_column	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	ask_git_for_graphs	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	ask_graph_compare	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	ask_graph_search	call:get_mut	3	gesture	lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	build_git_graph	call:entry	3	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	checkout_from_column	call:get_mut	1	gesture	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	checkout_in_graph	call:get_mut	1	gesture	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	clear_graph_compare	call:get_mut	1	gesture	
+WindowRuntime.tabs	HUB	tabs	runtime/git	clear_graph_search	call:get_mut	2	gesture	frame
+WindowRuntime.tabs	HUB	tabs	runtime/git	compare_graph_with_working_tree	call:get_mut	1	gesture	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	expand_graph_commit	call:entry,call:get_mut	2	gesture	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	focus_graph_search	call:get_mut	1	gesture	frame
+WindowRuntime.tabs	HUB	tabs	runtime/git	git_graphs	call:iter_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/git	git_pages	call:insert	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/git	graph_search_ime	call:get_mut	1	gesture	frame
+WindowRuntime.tabs	HUB	tabs	runtime/git	graph_search_key	call:get_mut	1	gesture	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	issue_git_write	call:get_mut	2	gesture	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	open_float_git_graph	call:entry	1	gesture	
+WindowRuntime.tabs	HUB	tabs	runtime/git	open_git_graph	call:entry	1	gesture	
+WindowRuntime.tabs	HUB	tabs	runtime/git	press_git_row	call:entry	1	gesture	file write,frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	reread_git_origin	call:get_mut	2	PTY output,gesture,os event,turn	lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	reveal_git_row	call:insert	1	gesture	
+WindowRuntime.tabs	HUB	tabs	runtime/git	reveal_graph_row	call:get_mut	1	gesture,lane answer	
+WindowRuntime.tabs	HUB	tabs	runtime/git	run_graph_filter_row	call:get_mut	2	gesture	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/git	scroll_git_graph	call:get_mut	1	gesture,lane answer,turn	frame
+WindowRuntime.tabs	HUB	tabs	runtime/git	scroll_git_panel	call:insert	1	gesture,lane answer,turn	frame
+WindowRuntime.tabs	HUB	tabs	runtime/git	seek_graph_commit	call:get_mut	1	gesture	frame
+WindowRuntime.tabs	HUB	tabs	runtime/git	select_git_row	call:get_mut	1	gesture	
+WindowRuntime.tabs	HUB	tabs	runtime/git	select_graph_row	call:entry	1	gesture,lane answer	
+WindowRuntime.tabs	HUB	tabs	runtime/git	set_graph_compare	call:get_mut	1	gesture	
+WindowRuntime.tabs	HUB	tabs	runtime/git	step_graph_search	call:get_mut	1	gesture	
+WindowRuntime.tabs	HUB	tabs	runtime/git	step_graph_seeks	call:get_mut	3	gesture,lane answer	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/math	advance_live_math_if_due	&mut,call:leaves_mut	2	turn	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/math	apply_display_formulas	&mut	1	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/math	apply_inline_formulas	&mut	1	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/math	apply_math_results	&mut	6	lane answer	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/math	present_math_toggle	call:get_mut	1	gesture,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/math	press_math_toggle	call:get_mut	1	gesture	
+WindowRuntime.tabs	HUB	tabs	runtime/math	sample_math_toggle	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/math	set_hovered_math	call:leaves_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/math	settle_math_toggle	call:get_mut	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/math	switch_math_source_now	call:get_mut	1	gesture	frame
+WindowRuntime.tabs	HUB	tabs	runtime/math	sync_math_layout_key	call:iter_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/mouse	mouse_wheel	call:get_mut	1	gesture,lane answer,turn	frame,process/thread
+WindowRuntime.tabs	HUB	tabs	runtime/mouse	release_drag	call:settle_into_slot	1	gesture	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/panes	clear_pane_selection	call:clear_leaf_selection	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/panes	dock_float	call:insert	4	gesture	frame
+WindowRuntime.tabs	HUB	tabs	runtime/panes	fill_row_leaf	call:insert,call:remove	3	gesture	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/panes	rescan_pane_references	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/panes	resize_hidden_leaves_to_layout	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/panes	resize_leaves_to_layout	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/panes	scroll_seat_by_columns	call:get_mut	1	gesture,lane answer,turn	frame
+WindowRuntime.tabs	HUB	tabs	runtime/panes	scroll_seat_to_column	call:get_mut	1	gesture,lane answer	frame
+WindowRuntime.tabs	HUB	tabs	runtime/panes	scroll_seat_to_subpixels	call:get_mut	1	gesture,lane answer	frame
+WindowRuntime.tabs	HUB	tabs	runtime/panes	set_pane_view_selection	call:set_leaf_selection	1	gesture,lane answer	
+WindowRuntime.tabs	HUB	tabs	runtime/preview	advance_strip_animation	&mut,call:iter_mut	2	turn	frame
+WindowRuntime.tabs	HUB	tabs	runtime/preview	apply_line_wrapping	&mut	1	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/preview	apply_preview_results	&mut,call:get_mut	2	lane answer	frame
+WindowRuntime.tabs	HUB	tabs	runtime/preview	clear_preview_image_in	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/preview	dock_preview_float	call:entry,call:insert,call:merge_buffer,call:remove,call:take	6	gesture	frame
+WindowRuntime.tabs	HUB	tabs	runtime/preview	documents_held_mut	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/preview	follow_renamed_preview	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/preview	leave_preview_buffer_in	call:entry,call:remember	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/preview	pop_out_preview	call:insert,call:remove	2	gesture	frame,process/thread
+WindowRuntime.tabs	HUB	tabs	runtime/preview	preview_buffer_on_mut	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/preview	preview_pane_mut	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/preview	refresh_preview_file	call:iter_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/preview	request_revived_previews	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.tabs	HUB	tabs	runtime/preview	request_stale_previews	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+WindowRuntime.tabs	HUB	tabs	runtime/preview	sweep_preview_panes	call:remove	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	absorb_tab	&mut	2	gesture	
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	activate_tab	call:mark_seen	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	apply_tables	&mut	1	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	close_tab	call:remove	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	commit_row_into_new_tab	call:insert	1	gesture,turn	file write,frame,process/thread
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	extract_pane_into_new_tab	&mut,call:insert	2	gesture,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	finish_rename	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	leave_strip	call:displace	1	gesture,lane answer,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	move_pane_across_tabs	&mut	2	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	move_tab_with_flip	call:displace,call:insert,call:remove	3	gesture,lane answer,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	new_tab_seeded_from	call:push	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,process/thread
+WindowRuntime.tabs	HUB	tabs	runtime/tabs	reap_exited_tabs	call:iter_mut,call:leaves_mut	2	turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/terminal	apply_scrollback_lines	&mut	1	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/terminal	drain_pty	&mut,call:iter_mut	2	PTY output	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/terminal	insert_path_into_terminal	call:shell_mut	1	gesture	PTY write,file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/terminal	scroll_view_exact_in	call:get_mut	1	gesture,lane answer,turn	frame
+WindowRuntime.tabs	HUB	tabs	runtime/terminal	step_pane_text_scale	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.tabs	HUB	tabs	runtime/terminal	wake_terminal_column	call:get_mut	1	gesture,lane answer,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/web	commit_web_page	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/windows	abandon_a_window_nothing_arrived_in	&mut	1	gesture,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/windows	answer_dirty_gate	&mut,call:get_mut	2	gesture	file write,frame,lane request
+WindowRuntime.tabs	HUB	tabs	runtime/windows	answer_restore	call:push,call:remove	2	turn	file write,frame,lane request,process/thread
+WindowRuntime.tabs	HUB	tabs	runtime/windows	let_go_of_this_window	&mut	1	gesture,lane answer,launch,turn	
+WindowRuntime.tabs	HUB	tabs	runtime/windows	quit_save	&mut	1	gesture,turn	file write,frame
+WindowRuntime.tabs	HUB	tabs	runtime/windows	reopen_recent	call:push	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request,process/thread
+WindowRuntime.term_menu	VIEW	floats	runtime/floats	close_popup	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.term_menu	VIEW	floats	runtime/floats	close_term_menu	call:take	1	gesture	frame
+WindowRuntime.term_menu	VIEW	floats	runtime/floats	open_page_menu_at	assign	1	gesture	frame
+WindowRuntime.term_menu	VIEW	floats	runtime/floats	open_term_menu_at	assign	1	gesture	frame
+WindowRuntime.term_menu	VIEW	floats	runtime/floats	run_term_menu_row	call:take	1	gesture	frame,process/thread
+WindowRuntime.term_menu	VIEW	floats	runtime/floats	set_term_submenu	call:as_mut	1	gesture,turn	frame
+WindowRuntime.term_menu	VIEW	floats	runtime/keyboard	term_menu_key	call:as_mut	1	gesture	frame,process/thread
+WindowRuntime.term_menu	VIEW	floats	runtime/mouse	drive_term_menu_hover	call:as_mut	1	gesture,lane answer,turn	frame
+WindowRuntime.textless_frames	PROJ	frame	main[impl WindowRuntime]	may_ask_again	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.textless_frames	PROJ	frame	runtime/frame	redraw	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.textless_frames	PROJ	frame	runtime/preview	present_retained_picture	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.tooltip	VIEW	tooltips	main[focus]	set_cursor_focus	call:hide	1	os event	
+WindowRuntime.tooltip	VIEW	tooltips	runtime/peek	advance_layout_peek_if_due	call:hide	1	turn	frame
+WindowRuntime.tooltip	VIEW	tooltips	runtime/tooltips	advance_tooltip_if_due	call:activate_if_due	1	turn	frame
+WindowRuntime.tooltip	VIEW	tooltips	runtime/tooltips	hide_tooltip	call:hide	1	gesture	frame
+WindowRuntime.tooltip	VIEW	tooltips	runtime/tooltips	note_tooltip	call:observe	1	gesture,lane answer	frame
+WindowRuntime.tooltip	VIEW	tooltips	runtime/tooltips	rebuild_tooltip_anchors	call:retain	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tooltip_anchors	PROJ	tooltips	runtime/first_run	rebuild_first_run_tip_anchors	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.tooltip_anchors	PROJ	tooltips	runtime/tooltips	rebuild_tooltip_anchors	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.underlined_image_reference	PROJ	frame	runtime/preview	refresh_image_reference_underline	assign	1	gesture,lane answer	frame
+WindowRuntime.underlined_image_reference	PROJ	frame	runtime/tabs	activate_tab	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.unpainted_pane_output	PROJ	terminal	main[unassigned]	finish_synchronized_update_if_due	assign	1	turn	frame
+WindowRuntime.unpainted_pane_output	PROJ	terminal	runtime/frame	redraw	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.unpainted_pane_output	PROJ	terminal	runtime/terminal	drain_pty	assign	1	PTY output	file write,frame
+WindowRuntime.video	LIFE	preview	runtime/mouse	chrome_mouse_input	call:get_mut	1	gesture	file write,frame,lane request,process/thread
+WindowRuntime.video	LIFE	preview	runtime/panes	carry_the_recordings_of_moved_panes	call:put,call:take	2	gesture,turn	
+WindowRuntime.video	LIFE	preview	runtime/peek	promote_file_peek	call:rehome	1	gesture,lane answer	frame
+WindowRuntime.video	LIFE	preview	runtime/preview	double_click_started_a_video	call:get_mut	1	gesture	frame
+WindowRuntime.video	LIFE	preview	runtime/preview	drag_video_bar	call:get_mut	1	gesture,lane answer	frame
+WindowRuntime.video	LIFE	preview	runtime/preview	note_video_hover	call:get_mut	1	gesture,lane answer	frame,lane request
+WindowRuntime.video	LIFE	preview	runtime/preview	press_video_at	call:get_mut	1	gesture	frame
+WindowRuntime.video	LIFE	preview	runtime/preview	preview_browse_key	call:get_mut	1	gesture	frame
+WindowRuntime.video	LIFE	preview	runtime/preview	service_pictures	call:pump	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.video_bar_drag	VIEW	preview	runtime/mouse	chrome_mouse_input	call:take	1	gesture	file write,frame,lane request,process/thread
+WindowRuntime.video_bar_drag	VIEW	preview	runtime/preview	press_video_at	assign	1	gesture	frame
+WindowRuntime.web	LIFE	web	main[impl FolioApp]	transfer_tab	call:insert	1	gesture,turn	file write
+WindowRuntime.web	LIFE	web	main[unassigned]	advance_page_foot_clocks	call:get_mut	1	turn	frame
+WindowRuntime.web	LIFE	web	main[unassigned]	advance_retirement	call:iter_mut	1	turn	frame
+WindowRuntime.web	LIFE	web	runtime/dpi	apply_scale_factor	call:values_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.web	LIFE	web	runtime/git	photograph_pages	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.web	LIFE	web	runtime/panes	carry_the_pages_of_moved_panes	call:insert,call:remove	2	gesture,turn	frame
+WindowRuntime.web	LIFE	web	runtime/panes	dock_the_page_of	call:entry,call:remove	2	gesture	frame
+WindowRuntime.web	LIFE	web	runtime/preview	refresh_preview_file	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+WindowRuntime.web	LIFE	web	runtime/tabs	finish_rename	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.web	LIFE	web	runtime/tabs	withdraw_a_blank_page	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request
+WindowRuntime.web	LIFE	web	runtime/web	advance_web_page	&mut	1	turn	frame
+WindowRuntime.web	LIFE	web	runtime/web	apply_web_outcomes	call:remove	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.web	LIFE	web	runtime/web	drive_web_page	call:iter_mut	1	lane answer	frame
+WindowRuntime.web	LIFE	web	runtime/web	open_web_page_on	call:get_mut,call:insert	2	PTY output,gesture,lane answer,launch,os event,turn	frame
+WindowRuntime.web	LIFE	web	runtime/web	run_web_fault_verb	call:get_mut	1	gesture	frame,lane request
+WindowRuntime.web	LIFE	web	runtime/web	run_web_head_verb	call:get_mut	1	gesture	frame
+WindowRuntime.web	LIFE	web	runtime/web	scroll_web_page	call:get_mut	1	gesture,lane answer,turn	frame
+WindowRuntime.web	LIFE	web	runtime/web	send_to_web_page	call:get_mut	1	gesture,lane answer,turn	
+WindowRuntime.web	LIFE	web	runtime/web	sync_web_page	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.web	LIFE	web	runtime/web	tell_web_pages_their_color_scheme	call:values_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.web	LIFE	web	runtime/web	web_on_mut	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.web	LIFE	web	runtime/windows	let_go_of_this_window	call:values_mut	1	gesture,lane answer,launch,turn	
+WindowRuntime.web_cursor	PROJ	web	runtime/mouse	pointer_left	assign	1	gesture,lane answer	frame
+WindowRuntime.web_cursor	PROJ	web	runtime/web	apply_web_outcomes	assign	2	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.web_cursor	PROJ	web	runtime/web	drive_web_pointer	assign	1	gesture,lane answer	
+WindowRuntime.web_pointer_inside	VIEW	web	runtime/mouse	pointer_left	assign	1	gesture,lane answer	frame
+WindowRuntime.web_pointer_inside	VIEW	web	runtime/web	drive_web_pointer	assign	1	gesture,lane answer	
+WindowRuntime.web_thumbs	PROJ	web	main[impl FolioApp]	transfer_tab	call:put,call:take	2	gesture,turn	file write
+WindowRuntime.web_thumbs	PROJ	web	main[unassigned]	keep_what_the_modal_covers	call:drop_frames,call:frame_job	2	PTY output,gesture,lane answer,launch,os event,turn	
+WindowRuntime.web_thumbs	PROJ	web	runtime/panes	carry_the_pages_of_moved_panes	call:put,call:take	2	gesture,turn	frame
+WindowRuntime.web_thumbs	PROJ	web	runtime/preview	collect_page_pictures	call:settle	1	lane answer	
+WindowRuntime.web_thumbs	PROJ	web	runtime/web	apply_web_outcomes	call:invalidate,call:retain	2	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+WindowRuntime.window_close_requested	LIFE	windows	main[impl FolioApp]	window_event	&mut	1	gesture,os event	PTY write,file write,frame,lane request
+WindowRuntime.window_close_requested	LIFE	windows	runtime/windows	answer_dirty_gate	assign	2	gesture	file write,frame,lane request
+TabState.file_trees	OBS	files	main[focus]	arm_card_reads	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.file_trees	OBS	files	main[free fn]	forget_work_in_flight_for_seat	call:get_mut	1	gesture,turn	
+TabState.file_trees	OBS	files	main[free fn]	move_seat_content	call:insert,call:remove	2	gesture,turn	
+TabState.file_trees	OBS	files	main[free fn]	pane_into_new_tab	assign,call:remove	2	gesture,turn	
+TabState.file_trees	OBS	files	runtime/files	apply_files_results	call:entry	1	lane answer	frame
+TabState.file_trees	OBS	files	runtime/files	files_tree_key	call:entry	1	gesture	file write,frame,lane request
+TabState.file_trees	OBS	files	runtime/files	files_trees	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.file_trees	OBS	files	runtime/files	fold_files_row	call:entry	1	gesture	file write,frame,lane request
+TabState.file_trees	OBS	files	runtime/files	heal_files_scroll	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.file_trees	OBS	files	runtime/files	open_files_path_to	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.file_trees	OBS	files	runtime/files	open_files_row_new	call:entry	1	gesture	frame
+TabState.file_trees	OBS	files	runtime/files	press_files_row	call:entry	1	gesture	file write,frame,lane request
+TabState.file_trees	OBS	files	runtime/files	reroot_files_column	call:remove	1	gesture,turn	file write,frame
+TabState.file_trees	OBS	files	runtime/files	reveal_files_row	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.file_trees	OBS	files	runtime/files	scroll_files_tree	call:entry	1	gesture,lane answer,turn	frame
+TabState.file_trees	OBS	files	runtime/panes	close_pane	call:remove	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.file_trees	OBS	files	runtime/panes	dock_float	call:insert	1	gesture	frame
+TabState.file_trees	OBS	files	runtime/panes	fill_row_leaf	call:remove	1	gesture	file write,frame
+TabState.files	VIEW	files	main[free fn]	move_seat_content	call:insert,call:remove	2	gesture,turn	
+TabState.files	VIEW	files	main[free fn]	pane_into_new_tab	call:remove	1	gesture,turn	
+TabState.files	VIEW	files	main[unassigned]	expand_commit	call:get_mut	1	gesture	frame,lane request
+TabState.files	VIEW	files	runtime/files	delete_files_row	call:get_mut	1	gesture	file write,frame,lane request
+TabState.files	VIEW	files	runtime/files	files_tree_key	call:get_mut	1	gesture	file write,frame,lane request
+TabState.files	VIEW	files	runtime/files	fold_files_row	call:get_mut	1	gesture	file write,frame,lane request
+TabState.files	VIEW	files	runtime/files	heal_files_selections	call:entry	1	lane answer	
+TabState.files	VIEW	files	runtime/files	open_files_path_to	call:get_mut	2	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.files	VIEW	files	runtime/files	open_files_row_new	call:get_mut	1	gesture	frame
+TabState.files	VIEW	files	runtime/files	press_files_row	call:get_mut	1	gesture	file write,frame,lane request
+TabState.files	VIEW	files	runtime/files	reroot_files_column	call:get_mut	1	gesture,turn	file write,frame
+TabState.files	VIEW	files	runtime/files	seat_a_files_column	call:insert	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.files	VIEW	files	runtime/files	set_files_view	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.files	VIEW	files	runtime/git	press_git_row	call:entry	1	gesture	file write,frame,lane request
+TabState.files	VIEW	files	runtime/git	select_git_row	call:get_mut	1	gesture	
+TabState.files	VIEW	files	runtime/panes	close_pane	call:remove	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.files	VIEW	files	runtime/panes	dock_float	call:insert	1	gesture	frame
+TabState.files	VIEW	files	runtime/panes	fill_row_leaf	call:insert	1	gesture	file write,frame
+TabState.flip	PROJ	tabs	main[impl TabState]	settle_into_slot	call:displace	1	gesture	
+TabState.flip	PROJ	tabs	main[unassigned]	settle_home	call:displace	1	gesture,turn	
+TabState.flip	PROJ	tabs	runtime/tabs	leave_strip	call:displace	1	gesture,lane answer,turn	file write,frame
+TabState.flip	PROJ	tabs	runtime/tabs	move_tab_with_flip	call:displace	1	gesture,lane answer,turn	
+TabState.focused_leaf	VIEW	panes	main[free fn]	absorb_tab_sessions	assign	1	gesture	
+TabState.focused_leaf	VIEW	panes	main[free fn]	pane_into_tab	assign	2	gesture,turn	
+TabState.focused_leaf	VIEW	panes	main[impl TabState]	refocus_after_losing	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.focused_leaf	VIEW	panes	runtime/attention	open_from_notification	assign	1	gesture,lane answer	file write,frame
+TabState.focused_leaf	VIEW	panes	runtime/keyboard	take_keyboard_into	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+TabState.focused_leaf	VIEW	panes	runtime/panes	split_seat	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,process/thread
+TabState.focused_leaf	VIEW	panes	runtime/preview	pop_out_preview	assign	1	gesture	frame,process/thread
+TabState.git_graph_view	VIEW	git	main[free fn]	move_seat_content	call:insert,call:remove	2	gesture,turn	
+TabState.git_graph_view	VIEW	git	main[free fn]	pane_into_new_tab	call:remove	1	gesture,turn	
+TabState.git_graph_view	VIEW	git	main[unassigned]	cancel_composition	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+TabState.git_graph_view	VIEW	git	runtime/git	ask_graph_search	call:get_mut	1	gesture	lane request
+TabState.git_graph_view	VIEW	git	runtime/git	build_git_graph	call:entry	2	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.git_graph_view	VIEW	git	runtime/git	clear_graph_compare	call:get_mut	1	gesture	
+TabState.git_graph_view	VIEW	git	runtime/git	clear_graph_search	call:get_mut	1	gesture	frame
+TabState.git_graph_view	VIEW	git	runtime/git	compare_graph_with_working_tree	call:get_mut	1	gesture	frame,lane request
+TabState.git_graph_view	VIEW	git	runtime/git	expand_graph_commit	call:entry	1	gesture	frame,lane request
+TabState.git_graph_view	VIEW	git	runtime/git	focus_graph_search	call:get_mut	1	gesture	frame
+TabState.git_graph_view	VIEW	git	runtime/git	git_graphs	call:retain	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.git_graph_view	VIEW	git	runtime/git	graph_search_ime	call:get_mut	1	gesture	frame
+TabState.git_graph_view	VIEW	git	runtime/git	graph_search_key	call:get_mut	1	gesture	frame,lane request
+TabState.git_graph_view	VIEW	git	runtime/git	reveal_graph_row	call:get_mut	1	gesture,lane answer	
+TabState.git_graph_view	VIEW	git	runtime/git	run_graph_filter_row	call:get_mut	1	gesture	frame,lane request
+TabState.git_graph_view	VIEW	git	runtime/git	scroll_git_graph	call:get_mut	1	gesture,lane answer,turn	frame
+TabState.git_graph_view	VIEW	git	runtime/git	seek_graph_commit	call:get_mut	1	gesture	frame
+TabState.git_graph_view	VIEW	git	runtime/git	select_graph_row	call:entry	1	gesture,lane answer	
+TabState.git_graph_view	VIEW	git	runtime/git	set_graph_compare	call:get_mut	1	gesture	
+TabState.git_graph_view	VIEW	git	runtime/git	step_graph_search	call:get_mut	1	gesture	
+TabState.git_graph_view	VIEW	git	runtime/git	step_graph_seeks	call:get_mut	3	gesture,lane answer	frame,lane request
+TabState.git_graph_view	VIEW	git	runtime/preview	dock_preview_float	call:insert,call:remove	2	gesture	frame
+TabState.git_graph_view	VIEW	git	runtime/preview	pop_out_preview	call:insert,call:remove	2	gesture	frame,process/thread
+TabState.git_graphs	OBS	git	runtime/git	apply_git_results	call:get_mut	2	lane answer	frame
+TabState.git_graphs	OBS	git	runtime/git	ask_git_for_graphs	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.git_graphs	OBS	git	runtime/git	ask_graph_compare	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.git_graphs	OBS	git	runtime/git	ask_graph_search	call:get_mut	2	gesture	lane request
+TabState.git_graphs	OBS	git	runtime/git	build_git_graph	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.git_graphs	OBS	git	runtime/git	checkout_in_graph	call:get_mut	1	gesture	frame,lane request
+TabState.git_graphs	OBS	git	runtime/git	clear_graph_search	call:get_mut	1	gesture	frame
+TabState.git_graphs	OBS	git	runtime/git	expand_graph_commit	call:get_mut	1	gesture	frame,lane request
+TabState.git_graphs	OBS	git	runtime/git	issue_git_write	call:get_mut	1	gesture	frame,lane request
+TabState.git_graphs	OBS	git	runtime/git	open_float_git_graph	call:entry	1	gesture	
+TabState.git_graphs	OBS	git	runtime/git	open_git_graph	call:entry	1	gesture	
+TabState.git_graphs	OBS	git	runtime/git	reread_git_origin	call:get_mut	1	PTY output,gesture,os event,turn	lane request
+TabState.git_graphs	OBS	git	runtime/git	run_graph_filter_row	call:get_mut	1	gesture	frame,lane request
+TabState.git_graphs	OBS	git	runtime/preview	dock_preview_float	call:entry	1	gesture	frame
+TabState.git_scroll	VIEW	git	main[free fn]	move_seat_content	call:insert,call:remove	2	gesture,turn	
+TabState.git_scroll	VIEW	git	main[free fn]	pane_into_new_tab	assign,call:remove	2	gesture,turn	
+TabState.git_scroll	VIEW	git	runtime/git	git_pages	call:insert	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.git_scroll	VIEW	git	runtime/git	reveal_git_row	call:insert	1	gesture	
+TabState.git_scroll	VIEW	git	runtime/git	scroll_git_panel	call:insert	1	gesture,lane answer,turn	frame
+TabState.git_scroll	VIEW	git	runtime/panes	dock_float	call:insert	1	gesture	frame
+TabState.git_trees	OBS	git	main[free fn]	forget_work_in_flight_for_seat	call:get_mut	1	gesture,turn	
+TabState.git_trees	OBS	git	main[free fn]	move_seat_content	call:insert,call:remove	2	gesture,turn	
+TabState.git_trees	OBS	git	main[free fn]	pane_into_new_tab	assign,call:remove	2	gesture,turn	
+TabState.git_trees	OBS	git	main[unassigned]	expand_commit	call:get_mut	1	gesture	frame,lane request
+TabState.git_trees	OBS	git	runtime/files	reroot_files_column	call:remove	1	gesture,turn	file write,frame
+TabState.git_trees	OBS	git	runtime/git	apply_git_panel	call:clear	1	gesture,turn	file write,frame
+TabState.git_trees	OBS	git	runtime/git	apply_git_results	call:get_mut,call:values_mut	2	lane answer	frame
+TabState.git_trees	OBS	git	runtime/git	ask_git_for_column	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.git_trees	OBS	git	runtime/git	checkout_from_column	call:get_mut	1	gesture	frame,lane request
+TabState.git_trees	OBS	git	runtime/git	issue_git_write	call:get_mut	1	gesture	frame,lane request
+TabState.git_trees	OBS	git	runtime/git	reread_git_origin	call:get_mut	1	PTY output,gesture,os event,turn	lane request
+TabState.git_trees	OBS	git	runtime/panes	close_pane	call:remove	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.git_trees	OBS	git	runtime/panes	dock_float	call:insert	1	gesture	frame
+TabState.git_trees	OBS	git	runtime/panes	fill_row_leaf	call:remove	1	gesture	file write,frame
+TabState.pending_keyboard_at	PROJ	keyboard	main[unassigned]	send_user_input	assign	1	gesture	PTY write,frame
+TabState.pending_keyboard_at	PROJ	keyboard	runtime/clipboard	send_paste	assign	1	gesture,lane answer,turn	PTY write,frame
+TabState.pending_keyboard_at	PROJ	keyboard	runtime/frame	publish_pty_drain_frame	assign	1	PTY output,turn	frame,lane request
+TabState.pending_keyboard_at	PROJ	keyboard	runtime/keyboard	ime_input	assign	1	gesture	PTY write,frame
+TabState.pending_keyboard_at	PROJ	keyboard	runtime/mouse	send_mouse_input_to	assign	1	gesture,lane answer,turn	PTY write
+TabState.pending_keyboard_at	PROJ	keyboard	runtime/terminal	insert_path_into_terminal	assign	1	gesture	PTY write,file write,frame
+TabState.pinned	DUR	tabs	main[free fn]	absorb_tab_sessions	assign	1	gesture	
+TabState.pinned	DUR	tabs	main[unassigned]	toggle_pin	assign	1	gesture	file write,frame
+TabState.preview_block_drag	VIEW	preview	runtime/mouse	chrome_mouse_input	call:take	1	gesture	file write,frame,lane request,process/thread
+TabState.preview_block_drag	VIEW	preview	runtime/peek	hide_file_peek	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_block_drag	VIEW	preview	runtime/preview	leave_preview_buffer_in	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_block_drag	VIEW	preview	runtime/preview	press_preview_block_thumb	assign	1	gesture	frame
+TabState.preview_block_drag	VIEW	preview	runtime/preview	rebuild_preview_document	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_block_drag	VIEW	preview	runtime/preview	sweep_preview_panes	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_block_hover	VIEW	preview	runtime/peek	hide_file_peek	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_block_hover	VIEW	preview	runtime/preview	leave_preview_buffer_in	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_block_hover	VIEW	preview	runtime/preview	note_preview_block_hover	assign	1	gesture,lane answer	frame
+TabState.preview_block_hover	VIEW	preview	runtime/preview	press_preview_block_thumb	assign	1	gesture	frame
+TabState.preview_block_hover	VIEW	preview	runtime/preview	rebuild_preview_document	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_block_hover	VIEW	preview	runtime/preview	sweep_preview_panes	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_body_drag	VIEW	preview	runtime/mouse	chrome_mouse_input	call:take	1	gesture	file write,frame,lane request,process/thread
+TabState.preview_body_drag	VIEW	preview	runtime/preview	leave_preview_buffer_in	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_body_drag	VIEW	preview	runtime/preview	press_preview_body_thumb	assign	1	gesture	frame
+TabState.preview_body_drag	VIEW	preview	runtime/preview	sweep_preview_panes	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_edit_focus	VIEW	preview	main[settings]	open_scheme_for_editing	assign	1	gesture,turn	frame
+TabState.preview_edit_focus	VIEW	preview	runtime/preview	flip_preview_source_on	assign	1	gesture	frame,lane request
+TabState.preview_edit_focus	VIEW	preview	runtime/preview	leave_preview_buffer_in	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_edit_focus	VIEW	preview	runtime/preview	leave_preview_page	assign	1	gesture,turn	
+TabState.preview_edit_focus	VIEW	preview	runtime/preview	press_preview_body	assign	1	gesture	frame,lane request
+TabState.preview_edit_focus	VIEW	preview	runtime/preview	seat_preview_caret	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_edit_focus	VIEW	preview	runtime/preview	sweep_preview_panes	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_image_drag	VIEW	preview	runtime/mouse	chrome_mouse_input	call:take	1	gesture	file write,frame,lane request,process/thread
+TabState.preview_image_drag	VIEW	preview	runtime/preview	drag_preview_image	assign	1	gesture,lane answer	frame
+TabState.preview_image_drag	VIEW	preview	runtime/preview	press_preview_image	assign	1	gesture	frame
+TabState.preview_panes	VIEW	preview	main[free fn]	documents_held_mut_in	call:iter_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_panes	VIEW	preview	main[free fn]	move_seat_content	call:entry,call:remove	2	gesture,turn	
+TabState.preview_panes	VIEW	preview	main[free fn]	pane_into_new_tab	call:remove	1	gesture,turn	
+TabState.preview_panes	VIEW	preview	runtime/floats	open_minted_page_on_float	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_panes	VIEW	preview	runtime/preview	apply_preview_results	call:iter_mut	1	lane answer	frame
+TabState.preview_panes	VIEW	preview	runtime/preview	clear_preview_image_in	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_panes	VIEW	preview	runtime/preview	dock_preview_float	call:remove	1	gesture	frame
+TabState.preview_panes	VIEW	preview	runtime/preview	follow_renamed_preview	call:iter_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_panes	VIEW	preview	runtime/preview	leave_preview_buffer_in	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_panes	VIEW	preview	runtime/preview	pop_out_preview	call:entry,call:remove	4	gesture	frame,process/thread
+TabState.preview_panes	VIEW	preview	runtime/preview	preview_pane_mut	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_panes	VIEW	preview	runtime/preview	sweep_preview_panes	call:remove	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_panes	VIEW	preview	runtime/web	commit_web_page	call:entry	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.preview_pool	DUR	preview	main[focus]	arm_card_reads	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.preview_pool	DUR	preview	main[focus]	quit_discard	call:discard_dirty	1	turn	file write,frame
+TabState.preview_pool	DUR	preview	main[free fn]	absorb_tab_sessions	&mut,call:merge_from	2	gesture	
+TabState.preview_pool	DUR	preview	main[free fn]	forget_work_in_flight_for_seat	call:get_mut	1	gesture,turn	
+TabState.preview_pool	DUR	preview	main[free fn]	move_seat_content	call:merge_buffer,call:take	2	gesture,turn	
+TabState.preview_pool	DUR	preview	main[free fn]	pane_into_new_tab	&mut,call:take	2	gesture,turn	
+TabState.preview_pool	DUR	preview	main[free fn]	pane_into_tab	&mut,call:merge_from	4	gesture,turn	
+TabState.preview_pool	DUR	preview	main[unassigned]	land_page_refusal_on	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,lane request
+TabState.preview_pool	DUR	preview	runtime/git	apply_git_results	call:get_mut	1	lane answer	frame
+TabState.preview_pool	DUR	preview	runtime/peek	mature_file_peek	call:get_mut	1	turn	lane request
+TabState.preview_pool	DUR	preview	runtime/preview	apply_preview_results	call:get_mut	1	lane answer	frame
+TabState.preview_pool	DUR	preview	runtime/preview	dock_preview_float	call:merge_buffer,call:take	2	gesture	frame
+TabState.preview_pool	DUR	preview	runtime/preview	follow_renamed_preview	call:insert,call:take	2	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_pool	DUR	preview	runtime/preview	preview_buffer_on_mut	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_pool	DUR	preview	runtime/preview	refresh_preview_file	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+TabState.preview_pool	DUR	preview	runtime/preview	request_revived_previews	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.preview_pool	DUR	preview	runtime/preview	request_stale_previews	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.preview_pool	DUR	preview	runtime/windows	answer_dirty_gate	call:clear,call:discard_dirty	3	gesture	file write,frame,lane request
+TabState.preview_pool	DUR	preview	runtime/windows	quit_save	call:save_dirty	1	gesture,turn	file write,frame
+TabState.preview_selecting	VIEW	preview	runtime/mouse	chrome_mouse_input	call:take	1	gesture	file write,frame,lane request,process/thread
+TabState.preview_selecting	VIEW	preview	runtime/preview	leave_preview_buffer_in	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_selecting	VIEW	preview	runtime/preview	press_preview_body	assign	1	gesture	frame,lane request
+TabState.preview_selecting	VIEW	preview	runtime/preview	sweep_preview_panes	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_views	VIEW	preview	main[free fn]	absorb_tab_sessions	&mut,call:absorb	2	gesture	
+TabState.preview_views	VIEW	preview	main[free fn]	move_seat_content	call:remember	1	gesture,turn	
+TabState.preview_views	VIEW	preview	main[free fn]	pane_into_new_tab	&mut,assign	2	gesture,turn	
+TabState.preview_views	VIEW	preview	main[free fn]	pane_into_tab	&mut,call:absorb	4	gesture,turn	
+TabState.preview_views	VIEW	preview	runtime/preview	follow_renamed_preview	call:rekey	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.preview_views	VIEW	preview	runtime/preview	leave_preview_buffer_in	call:remember	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.resize_present_owed	PROJ	frame	main[impl TabState]	owe_resize_present	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.resize_present_owed	PROJ	frame	runtime/frame	redraw	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+TabState.seat_layout	VIEW	panes	main[free fn]	pane_into_tab	assign	2	gesture,turn	
+TabState.seat_layout	VIEW	panes	runtime/panes	resize_hidden_leaves_to_layout	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.seat_layout	VIEW	panes	runtime/panes	resolve_seat_layout	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.seat_overflow	PROJ	panes	main[free fn]	pane_into_tab	assign	2	gesture,turn	
+TabState.seat_overflow	PROJ	panes	runtime/panes	resize_hidden_leaves_to_layout	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.seat_overflow	PROJ	panes	runtime/panes	resolve_seat_layout	assign	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.seats	HUB	panes	main[focus]	settle_focus_on	call:set_focus	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.seats	HUB	panes	main[free fn]	absorb_tab_sessions	call:set_focus	1	gesture	
+TabState.seats	HUB	panes	main[free fn]	pane_into_tab	call:adopt_drop,call:close_seat	2	gesture,turn	
+TabState.seats	HUB	panes	main[free fn]	tear_pane_into_tab	call:close_seat	1	gesture,turn	
+TabState.seats	HUB	panes	runtime/attention	open_from_notification	call:set_focus	1	gesture,lane answer	file write,frame
+TabState.seats	HUB	panes	runtime/files	seat_a_files_column	call:add_files_pane	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.seats	HUB	panes	runtime/floats	open_minted_page_on_float	call:mint_detached_seat	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.seats	HUB	panes	runtime/mouse	chrome_mouse_input	call:set_focus	1	gesture	file write,frame,lane request,process/thread
+TabState.seats	HUB	panes	runtime/panes	cancel_divider_drag	call:drag_divider,call:drag_fixed_extent	2	gesture,os event,turn	file write,frame
+TabState.seats	HUB	panes	runtime/panes	close_pane	call:close_seat	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.seats	HUB	panes	runtime/panes	commit_layout_drop	call:adopt_drop	1	gesture	file write,frame
+TabState.seats	HUB	panes	runtime/panes	dock_float	call:add_files_pane	1	gesture	frame
+TabState.seats	HUB	panes	runtime/panes	drive_divider_drag	call:drag_divider,call:drag_fixed_extent	2	gesture,lane answer	file write,frame
+TabState.seats	HUB	panes	runtime/panes	settle_pane_notices	call:set_notices	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.seats	HUB	panes	runtime/panes	split_seat	call:close_seat,call:set_focus,call:split_terminal	3	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,process/thread
+TabState.seats	HUB	panes	runtime/panes	toggle_pane_zoom	call:toggle_zoom	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.seats	HUB	panes	runtime/preview	dock_preview_float	call:set_focus	1	gesture	frame
+TabState.seats	HUB	panes	runtime/preview	pop_out_preview	call:close_seat,call:stand_in_terminal	2	gesture	frame,process/thread
+TabState.seats	HUB	panes	runtime/preview	preview_landing_surface	call:add_preview	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.seats	HUB	panes	runtime/preview	settle_preview_rails	call:set_rails	1	turn	file write,frame
+TabState.seats	HUB	panes	runtime/preview	toggle_preview_lock	call:toggle_preview_lock	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.seats	HUB	panes	runtime/terminal	insert_path_into_terminal	call:set_focus	1	gesture	PTY write,file write,frame
+TabState.sessions	HUB	panes	main[focus]	aim_focus_card_window	call:get_mut	1	gesture,lane answer,turn	file write,frame
+TabState.sessions	HUB	panes	main[focus]	queue_typing_in_the_focused_pane	call:get_mut	1	turn	
+TabState.sessions	HUB	panes	main[focus]	refresh_focus_thumbnails	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.sessions	HUB	panes	main[focus]	wake_terminal_thumb	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	main[free fn]	answer_attention_in	call:get_mut	1	gesture,lane answer,turn	
+TabState.sessions	HUB	panes	main[free fn]	deliver_osc_attention	call:get_mut	1	PTY output	
+TabState.sessions	HUB	panes	main[free fn]	forget_work_in_flight_for_seat	call:get_mut	1	gesture,turn	
+TabState.sessions	HUB	panes	main[free fn]	leaf_session_mut	call:get_mut	1	lane answer	
+TabState.sessions	HUB	panes	main[free fn]	move_seat_content	call:insert,call:remove	2	gesture,turn	
+TabState.sessions	HUB	panes	main[free fn]	pane_into_new_tab	call:remove	1	gesture,turn	
+TabState.sessions	HUB	panes	main[free fn]	stage_paste	call:get_mut,call:values_mut	2	gesture,lane answer,turn	
+TabState.sessions	HUB	panes	main[free fn]	take_pending_paste	call:values_mut	1	gesture	
+TabState.sessions	HUB	panes	main[impl TabState]	clear_leaf_selection	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	main[impl TabState]	focused_mut	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	main[impl TabState]	leaves_mut	call:iter_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	main[impl TabState]	set_leaf_selection	call:get_mut	1	gesture,lane answer	
+TabState.sessions	HUB	panes	main[unassigned]	ask_the_worker_about_a_link_target	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+TabState.sessions	HUB	panes	main[unassigned]	note_user_typing	call:get_mut	1	gesture,lane answer,turn	
+TabState.sessions	HUB	panes	main[unassigned]	re_ask_the_worker_about_a_link_target	call:get_mut	1	gesture	lane request
+TabState.sessions	HUB	panes	runtime/clipboard	press_paste_card_key	call:values_mut	1	gesture	PTY write,frame
+TabState.sessions	HUB	panes	runtime/clipboard	send_paste	call:get_mut	1	gesture,lane answer,turn	PTY write,frame
+TabState.sessions	HUB	panes	runtime/dpi	flush_pending_pty_resize	call:iter_mut	1	turn	file write,frame
+TabState.sessions	HUB	panes	runtime/frame	redraw	call:get_mut	3	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+TabState.sessions	HUB	panes	runtime/math	present_math_toggle	call:get_mut	1	gesture,turn	
+TabState.sessions	HUB	panes	runtime/math	press_math_toggle	call:get_mut	1	gesture	
+TabState.sessions	HUB	panes	runtime/math	sample_math_toggle	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	runtime/math	settle_math_toggle	call:get_mut	2	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	runtime/math	switch_math_source_now	call:get_mut	1	gesture	frame
+TabState.sessions	HUB	panes	runtime/mouse	mouse_wheel	call:get_mut	1	gesture,lane answer,turn	frame,process/thread
+TabState.sessions	HUB	panes	runtime/panes	clear_pane_screen	call:get_mut	1	gesture	
+TabState.sessions	HUB	panes	runtime/panes	clear_pane_scrollback	call:get_mut	1	gesture	
+TabState.sessions	HUB	panes	runtime/panes	close_pane	call:remove	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.sessions	HUB	panes	runtime/panes	close_pane_notice	call:get_mut	1	gesture	frame
+TabState.sessions	HUB	panes	runtime/panes	rescan_pane_references	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	runtime/panes	resize_hidden_leaves_to_layout	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	runtime/panes	resize_leaves_to_layout	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	runtime/panes	scroll_seat_by_columns	call:get_mut	1	gesture,lane answer,turn	frame
+TabState.sessions	HUB	panes	runtime/panes	scroll_seat_to_column	call:get_mut	1	gesture,lane answer	frame
+TabState.sessions	HUB	panes	runtime/panes	scroll_seat_to_subpixels	call:get_mut	1	gesture,lane answer	frame
+TabState.sessions	HUB	panes	runtime/panes	settle_pane_notices	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+TabState.sessions	HUB	panes	runtime/panes	split_seat	call:insert	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame,process/thread
+TabState.sessions	HUB	panes	runtime/preview	pop_out_preview	call:insert	1	gesture	frame,process/thread
+TabState.sessions	HUB	panes	runtime/profiles	add_to_profile	call:get_mut	1	gesture	frame
+TabState.sessions	HUB	panes	runtime/search	clear_search_highlights	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	runtime/search	install_search_highlights	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	runtime/search	reveal_current_search_hit	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	runtime/terminal	jump_to_command_mark	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+TabState.sessions	HUB	panes	runtime/terminal	restart_shell	call:insert	1	gesture	process/thread
+TabState.sessions	HUB	panes	runtime/terminal	scroll_view_exact_in	call:get_mut	1	gesture,lane answer,turn	frame
+TabState.sessions	HUB	panes	runtime/terminal	spend_powershell_intent	call:values_mut	1	PTY output,gesture,lane answer,launch,os event,turn	file write
+TabState.sessions	HUB	panes	runtime/terminal	step_pane_text_scale	call:get_mut	1	PTY output,gesture,lane answer,launch,os event,turn	frame
+TabState.sessions	HUB	panes	runtime/terminal	wake_terminal_column	call:get_mut	1	gesture,lane answer,turn	
+TabState.terminal_column_drag	VIEW	mouse	main[focus]	press_terminal_column_thumb	assign	1	gesture	frame
+TabState.terminal_column_drag	VIEW	mouse	runtime/mouse	chrome_mouse_input	call:take	1	gesture	file write,frame,lane request,process/thread
+TabState.terminal_column_hover	VIEW	mouse	main[focus]	press_terminal_column_thumb	assign	1	gesture	frame
+TabState.terminal_column_hover	VIEW	mouse	runtime/mouse	note_terminal_column_hover	assign	1	gesture,lane answer	frame
+TabState.terminal_thumb_drag	VIEW	mouse	main[focus]	press_terminal_thumb	assign	1	gesture	frame
+TabState.terminal_thumb_drag	VIEW	mouse	runtime/mouse	chrome_mouse_input	call:take	1	gesture	file write,frame,lane request,process/thread
+LeafSession.attention	LIFE	attention (→ bt-workbench)	main[free fn]	deliver_attention	call:admits_a_frame,call:announce_turn_end	2	lane answer	
+LeafSession.attention	LIFE	attention (→ bt-workbench)	main[free fn]	deliver_osc_attention	call:announce,call:announce_turn_end	2	PTY output	
+LeafSession.attention	LIFE	attention (→ bt-workbench)	main[free fn]	settle_attention	call:announce_turn_end	1	turn	
+LeafSession.attention	LIFE	attention (→ bt-workbench)	main[impl FolioApp]	transfer_tab	call:surrender_place	1	gesture,turn	file write
+LeafSession.frame_image_references	PROJ	frame	runtime/frame	publish_frame_inner	assign	1	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+LeafSession.frame_image_references	PROJ	frame	runtime/panes	rescan_pane_references	assign	2	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.integration_offer	OBS	terminal	runtime/panes	close_pane_notice	assign	1	gesture	frame
+LeafSession.integration_offer	OBS	terminal	runtime/panes	settle_pane_notices	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+LeafSession.integration_offer	OBS	terminal	runtime/profiles	add_to_profile	assign	1	gesture	frame
+LeafSession.integration_offer	OBS	terminal	runtime/terminal	spend_powershell_intent	assign	1	PTY output,gesture,lane answer,launch,os event,turn	file write
+LeafSession.pending_paste	ASYNC	clipboard	main[free fn]	stage_paste	assign	2	gesture,lane answer,turn	
+LeafSession.pending_paste	ASYNC	clipboard	main[free fn]	take_pending_paste	call:take	1	gesture	
+LeafSession.pending_paste	ASYNC	clipboard	runtime/clipboard	press_paste_card_key	call:as_mut	1	gesture	PTY write,frame
+LeafSession.pending_psreadline_resize_reanchor	LIFE	dpi	main[free fn]	release_due_leaf_resize	&mut	1	turn	
+LeafSession.pending_psreadline_resize_reanchor	LIFE	dpi	runtime/dpi	finish_resize_if_quiescent	&mut	1	turn	PTY write,frame
+LeafSession.pending_typing	LIFE	terminal	main[focus]	queue_typing_in_the_focused_pane	assign	1	turn	
+LeafSession.pending_typing	LIFE	terminal	main[free fn]	drain_leaf_pty	call:take	1	PTY output	PTY write
+LeafSession.projection	PROJ	frame	main[free fn]	apply_leaf_metrics	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.projection	PROJ	frame	main[impl TabState]	clear_leaf_selection	call:set_selection	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.projection	PROJ	frame	main[unassigned]	return_to_live_for_input	call:scroll_to_bottom	1	gesture	
+LeafSession.projection	PROJ	frame	runtime/clipboard	copy_selection	&mut	1	gesture,turn	frame
+LeafSession.projection	PROJ	frame	runtime/frame	publish_frame_inner	&mut	3	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+LeafSession.projection	PROJ	frame	runtime/frame	redraw	&mut	3	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+LeafSession.projection	PROJ	frame	runtime/keyboard	keyboard_input	call:scroll_to_bottom,call:scroll_to_top	3	gesture	PTY write,file write,frame,process/thread
+LeafSession.projection	PROJ	frame	runtime/panes	scroll_seat_by_columns	call:scroll_horizontal_by	1	gesture,lane answer,turn	frame
+LeafSession.projection	PROJ	frame	runtime/panes	scroll_seat_to_column	call:set_horizontal_origin	1	gesture,lane answer	frame
+LeafSession.projection	PROJ	frame	runtime/panes	scroll_seat_to_subpixels	call:scroll_by_subpixels	1	gesture,lane answer	frame
+LeafSession.projection	PROJ	frame	runtime/search	clear_search_highlights	call:set_search_highlights	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.projection	PROJ	frame	runtime/search	install_search_highlights	call:set_search_highlights	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.projection	PROJ	frame	runtime/search	reveal_current_search_hit	call:set_scroll_anchor	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.projection	PROJ	frame	runtime/terminal	jump_to_command_mark	call:set_scroll_anchor	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.projection	PROJ	frame	runtime/terminal	scroll_view	call:scroll_by_subpixels	1	gesture	frame
+LeafSession.projection	PROJ	frame	runtime/terminal	scroll_view_exact_in	call:scroll_by_subpixels	1	gesture,lane answer,turn	frame
+LeafSession.pty	LIFE	panes	main[free fn]	release_due_leaf_resize	call:as_mut	1	turn	
+LeafSession.pty	LIFE	panes	main[impl TabState]	retire_all_shells	call:take	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.pty	LIFE	panes	runtime/panes	close_pane	call:take	1	PTY output,gesture,lane answer,launch,os event,turn	file write,frame
+LeafSession.pty	LIFE	panes	runtime/tabs	reap_exited_tabs	call:as_mut	2	turn	file write,frame
+LeafSession.session	HUB	terminal	main[free fn]	apply_leaf_metrics	call:set_ascii_baseline_subpixels,call:set_cell_height_subpixels,call:set_cell_width_subpixels,call:set_font_size_subpixels	4	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.session	HUB	terminal	main[free fn]	dispatch_tab_decoration_tasks	&mut	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.session	HUB	terminal	main[free fn]	drain_leaf_pty	call:feed_at,call:set_color_palette,call:set_keyboard_focus,call:take_notifications	4	PTY output	PTY write
+LeafSession.session	HUB	terminal	main[free fn]	forget_work_in_flight_for_seat	call:forget_work_in_flight	1	gesture,turn	
+LeafSession.session	HUB	terminal	main[free fn]	leaf_session_mut	&mut	1	lane answer	
+LeafSession.session	HUB	terminal	main[free fn]	mark_leaf_seen	call:clear_attention	1	gesture,turn	
+LeafSession.session	HUB	terminal	main[free fn]	release_due_leaf_resize	&mut	1	turn	
+LeafSession.session	HUB	terminal	main[free fn]	schedule_leaf_grid_change	call:resize_at	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.session	HUB	terminal	main[free fn]	settle_attention	call:clear_attention	1	turn	
+LeafSession.session	HUB	terminal	main[impl TabState]	clear_leaf_selection	call:set_view_selection	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.session	HUB	terminal	main[impl TabState]	set_leaf_selection	call:set_view_selection	1	gesture,lane answer	
+LeafSession.session	HUB	terminal	main[unassigned]	apply_block_max_height	call:set_math_layout_options	1	gesture,turn	file write,frame
+LeafSession.session	HUB	terminal	main[unassigned]	apply_repair_row_breaks	call:set_math_layout_options	1	gesture,turn	file write,frame
+LeafSession.session	HUB	terminal	main[unassigned]	ask_the_worker_about_a_link_target	call:ask_about_link_target	1	PTY output,gesture,lane answer,launch,os event,turn	lane request
+LeafSession.session	HUB	terminal	main[unassigned]	finish_synchronized_update_if_due	call:finish_synchronized_update	1	turn	frame
+LeafSession.session	HUB	terminal	main[unassigned]	note_user_typing	call:note_user_input	1	gesture,lane answer,turn	
+LeafSession.session	HUB	terminal	main[unassigned]	re_ask_the_worker_about_a_link_target	call:re_ask_about_link_target	1	gesture	lane request
+LeafSession.session	HUB	terminal	main[unassigned]	return_to_live_for_input	call:release_presentation_hold_for_user_input	1	gesture	
+LeafSession.session	HUB	terminal	runtime/clipboard	copy_selection	&mut	1	gesture,turn	frame
+LeafSession.session	HUB	terminal	runtime/dpi	finish_resize_if_quiescent	call:finish_resize_if_quiescent	1	turn	PTY write,frame
+LeafSession.session	HUB	terminal	runtime/frame	publish_frame_inner	call:absorb_printed_path_probes,call:record_published_frame,call:release_presentation_hold_for_user_input,call:schedule_visible_artifacts,call:trace_decorations	5	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+LeafSession.session	HUB	terminal	runtime/frame	redraw	call:absorb_printed_path_probes,call:schedule_visible_artifacts	2	PTY output,gesture,lane answer,launch,os event,turn	frame,lane request
+LeafSession.session	HUB	terminal	runtime/math	advance_live_math_if_due	call:advance_live_stability	1	turn	frame,lane request
+LeafSession.session	HUB	terminal	runtime/math	apply_display_formulas	call:set_display_math_bands	1	gesture,turn	file write,frame
+LeafSession.session	HUB	terminal	runtime/math	apply_inline_formulas	call:set_inline_math_bands	1	gesture,turn	file write,frame
+LeafSession.session	HUB	terminal	runtime/math	present_math_toggle	call:set_math_toggle_presentation	1	gesture,turn	
+LeafSession.session	HUB	terminal	runtime/math	press_math_toggle	call:toggle_math_source	1	gesture	
+LeafSession.session	HUB	terminal	runtime/math	sample_math_toggle	call:set_math_toggle_presentation	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.session	HUB	terminal	runtime/math	set_hovered_math	call:set_math_hover	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.session	HUB	terminal	runtime/math	settle_math_toggle	call:set_math_toggle_presentation,call:toggle_math_source	3	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.session	HUB	terminal	runtime/math	switch_math_source_now	call:toggle_math_source	1	gesture	frame
+LeafSession.session	HUB	terminal	runtime/math	sync_math_layout_key	call:set_layout_key	1	PTY output,gesture,lane answer,launch,os event,turn	
+LeafSession.session	HUB	terminal	runtime/mouse	mouse_wheel	call:scroll_math_block	1	gesture,lane answer,turn	frame,process/thread
+LeafSession.session	HUB	terminal	runtime/panes	clear_pane_screen	call:clear_screen_keeping_cursor_row	1	gesture	
+LeafSession.session	HUB	terminal	runtime/panes	clear_pane_scrollback	call:feed	1	gesture	
+LeafSession.session	HUB	terminal	runtime/preview	apply_line_wrapping	call:set_layout_key	1	gesture,turn	file write,frame
+LeafSession.session	HUB	terminal	runtime/tabs	apply_tables	call:set_table_bands	1	gesture,turn	file write,frame
+LeafSession.session	HUB	terminal	runtime/terminal	apply_scrollback_lines	call:set_frozen_quota	1	gesture,turn	file write,frame
+LeafSession.session	HUB	terminal	runtime/terminal	drain_pty	call:begin_feed_turn,call:end_feed_turn	2	PTY output	file write,frame
