@@ -145,6 +145,7 @@ mod shortcuts;
 mod source_pin;
 mod storage_watch;
 mod table_block;
+mod taskbar_lane;
 mod termscroll;
 mod text_field;
 mod text_scale;
@@ -509,6 +510,14 @@ enum AppEvent {
     /// `settings::adopt_scanned_families` for why it has to be between two
     /// frames rather than on the worker.
     FontsScanned,
+    /// **The taskbar lane has news** (0.4.5 ticket 62): its first answer about whether the
+    /// taskbar hides itself, or an answer that differs from the one held.
+    ///
+    /// Carries nothing, on `FontsScanned`'s footing: the answer is in `taskbar_lane`'s slot by the
+    /// time this is sent. Owed a wake because the one thing it can change without a turn is a
+    /// taskbar flash already running on a desktop whose bar turned out to hide itself
+    /// ([`Runtime::replace_contradicted_flash`]), and that window may be sitting idle.
+    TaskbarAnswered,
     /// **Something spoke into this process's attention endpoint** (`attention_wire`).
     ///
     /// The same family again and the same reason for a wake of its own, in its strongest form: the
@@ -714,6 +723,7 @@ impl AppEvent {
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
             | Self::FontsScanned
+            | Self::TaskbarAnswered
             | Self::SchemesChanged
             | Self::StorageChanged
             | Self::SystemPreferencesChanged
@@ -13740,14 +13750,19 @@ struct WindowRuntime {
     /// says whether the middle tier exists here at all: a taskbar button
     /// flashing is a mark you can glance at only when the bar is on the screen.
     ///
-    /// A fact of the *desktop* rather than of this window, and cached beside
-    /// the window's own for the same reason — the pass that reads it walks
-    /// every leaf of every tab, and one `SHAppBarMessage` a turn is not one per
-    /// shell. **Sampled on the same turns `window_hidden` is** and never
-    /// remembered longer than that: the reader can change it in Settings
-    /// between one wait and the next, and nothing tells this process when they
-    /// do. Born `false`, which is what Windows ships.
-    taskbar_auto_hidden: bool,
+    /// A fact of the *desktop* rather than of this window. **Read on the same
+    /// turns `window_hidden` is, from `taskbar_lane`'s slot** (ticket 62): the
+    /// shell is asked on that lane, never on this thread, and this holds the
+    /// answer the window's last reading saw together with the number of the
+    /// request it answers — the number [`TaskbarFlash`] compares a later
+    /// answer against. Born unanswered and `false`, which is what Windows
+    /// ships and the direction whose mistake a flash can take back.
+    taskbar_reading: bt_platform::TaskbarReading,
+    /// **The taskbar flash running on this window's button, and what it is
+    /// about** (ticket 62) — written by [`Runtime::raise_attention`], retired
+    /// when the window comes to the foreground (the flash ends there) or when
+    /// [`Runtime::replace_contradicted_flash`] re-places it.
+    taskbar_flash: Option<TaskbarFlash>,
     /// **The last reading of where this window is, whole** (ticket 48): the
     /// four facts [`sample_window_place`] answered, focus included, as the pass
     /// that decides a delivery takes them. Written with the four fields above in
@@ -15174,7 +15189,7 @@ impl WindowRuntime {
             focused: self.window_focused,
             hidden: self.window_hidden,
             exposed: self.window_exposed,
-            taskbar_is_auto_hidden: self.taskbar_auto_hidden,
+            taskbar_is_auto_hidden: self.taskbar_reading.auto_hidden,
         }
     }
 }
@@ -27054,18 +27069,24 @@ fn window_is_hidden(window: &Window) -> bool {
 /// The one place the four facts of [`notify::WindowPlace`] are *read* rather than remembered, and
 /// it exists so that "sampled together, on one turn" is a call and not a convention three passes
 /// each keep on their own. **Its one caller is [`Runtime::observe_window_place`]** (ticket 48):
-/// the head of every turn, a window's birth, and an attention delivery that arrives between turns.
+/// the head of every turn, a window's birth, an attention delivery that arrives between turns, and
+/// the re-placing of a flash the taskbar lane's answer contradicts (ticket 62). The taskbar bit is
+/// the one fact here that is *not* asked: it is the taskbar lane's latest answer (ticket 62).
 /// Focus is that caller's, and it asks the window itself (`Window::has_focus`) for the reason
 /// `drain_pty` gives.
 ///
-/// Between four and eight syscalls a turn — `IsIconic`, `DwmGetWindowAttribute`,
-/// `SHAppBarMessage`, and the `GetWindowRect` plus one to three `WindowFromPoint`/`GetAncestor`
-/// pairs the exposure probe costs — against a pass that walks every leaf of every tab. That is why
+/// Between three and seven syscalls a turn — `IsIconic`, `DwmGetWindowAttribute`, and the
+/// `GetWindowRect` plus one to three `WindowFromPoint`/`GetAncestor` pairs the exposure probe
+/// costs; the taskbar's `SHAppBarMessage` is asked on `taskbar_lane` and only read here
+/// (ticket 62) — against a pass that walks every leaf of every tab. That is why
 /// the answers land in `WindowRuntime`'s fields: the drain, the strip tick and the doors that fire
 /// *inside* a turn read them back from there rather than asking again about the same instant. **This is the pass
 /// that decides a delivery**, which is what the probe is priced against; nothing on the drawing path
 /// asks any of these.
-fn sample_window_place(window: &Window, focused: bool) -> notify::WindowPlace {
+fn sample_window_place(
+    window: &Window,
+    focused: bool,
+) -> (notify::WindowPlace, bt_platform::TaskbarReading) {
     // **Each probe under its own station** (ticket 48): two of them go to other processes —
     // the hit tests to whatever window is under each point, `SHAppBarMessage` to the shell's
     // taskbar — and a stall line should say which one waited.
@@ -27074,7 +27095,14 @@ fn sample_window_place(window: &Window, focused: bool) -> notify::WindowPlace {
     let leaving = hang_watch::enter(hang_watch::Station::PlaceHidden);
     let hidden = window_is_hidden(window);
     hang_watch::at(leaving);
-    notify::WindowPlace {
+    // **The taskbar is read, not asked** (ticket 62). The shell is asked on its own lane; this
+    // reads the latest answer without waiting, and — while the window is on a screen — asks the
+    // lane for a fresh one when the last request is `REFRESH_INTERVAL` old. The reading travels
+    // out beside the place, so the window can say which answer its deliveries were decided on.
+    let taskbar = hang_watch::during(hang_watch::Station::PlaceTaskbar, || {
+        taskbar_lane::observe(Instant::now(), !hidden)
+    });
+    let place = notify::WindowPlace {
         focused,
         hidden,
         // **Not asked of a window that is on no screen** (user ruling 2026-09-01). While a window
@@ -27087,13 +27115,9 @@ fn sample_window_place(window: &Window, focused: bool) -> notify::WindowPlace {
             && hang_watch::during(hang_watch::Station::PlaceExposure, || {
                 window_is_exposed(window)
             }),
-        // **Every turn, never cached across them.** The reader can turn auto-hide on in Settings
-        // between one wait and the next, and Windows tells this process nothing when they do — so
-        // the only honest reading is the one taken at the delivery it decides.
-        taskbar_is_auto_hidden: hang_watch::during(hang_watch::Station::PlaceTaskbar, || {
-            bt_platform::taskbar_is_auto_hidden()
-        }),
-    }
+        taskbar_is_auto_hidden: taskbar.auto_hidden,
+    };
+    (place, taskbar)
 }
 
 /// **Whether the window manager puts this window under any of its own sample points** (user ruling
@@ -28634,7 +28658,9 @@ struct AttentionDelivery {
     /// How far this one is allowed to go — [`notify::desktop_reach`]'s answer, sampled when the
     /// door opened and never recomputed. Recomputing it here would be a second reading of the
     /// window taken after the fact, which is how a decision about one moment becomes a decision
-    /// about a later one.
+    /// about a later one. **One exception** (ticket 62): a flash decided on a taskbar reading that
+    /// a newer answer contradicts is decided again, by [`TaskbarFlash::replaced`] — the reading it
+    /// was decided on was not an answer about that moment either.
     reach: attention::Reach,
     /// Which door — the queue's, or the event lane's. It decides the sentence when the program
     /// wrote none, and nothing else.
@@ -28644,6 +28670,71 @@ struct AttentionDelivery {
     /// `None` is the ordinary case and is answered from the i18n table by the consumer, where the
     /// language is read once.
     body: Option<String>,
+}
+
+/// **A taskbar flash this window started, and the deliveries it stands for** (0.4.5 ticket 62).
+///
+/// Whether the taskbar hides itself is now a latest value from `taskbar_lane`, not an answer taken
+/// at the delivery: before the lane's first answer it reads "not hidden", and between two answers
+/// it is up to `taskbar_lane::REFRESH_INTERVAL` old. So a covered window's delivery can flash the
+/// button of a bar that hides itself — the slide-out the 2026-08-28 ruling took the flash off such
+/// a desktop for. This is what makes that mistake one that is taken back: the flash is recorded
+/// with the number of the newest answer it was decided on, and an answer that is newer and says
+/// the bar hides re-places it ([`Runtime::replace_contradicted_flash`]): the flash stops, and each
+/// delivery is decided again on a reading that carries the answer — the desktop, where the ruling
+/// sends a covered window on such a desktop.
+///
+/// **Lifecycle.** Written by [`Runtime::raise_attention`] when it flashes; retired when the window
+/// comes to the foreground (the flash ends there, `FLASHW_TIMERNOFG`), when it is re-placed, or
+/// with the window. An answer that confirms the bar is on screen changes nothing: the flash is the
+/// right tier, and it keeps running until the reader arrives.
+struct TaskbarFlash {
+    /// The number of the newest taskbar answer any of these deliveries was decided on; `0` for
+    /// the reading held before the lane's first answer.
+    decided_on: u64,
+    deliveries: Vec<AttentionDelivery>,
+}
+
+impl TaskbarFlash {
+    /// Add `deliveries`, which flashed the button on the taskbar reading numbered `decided_on`.
+    fn record(flash: &mut Option<Self>, decided_on: u64, deliveries: Vec<AttentionDelivery>) {
+        if deliveries.is_empty() {
+            return;
+        }
+        let held = flash.get_or_insert_with(|| Self {
+            decided_on,
+            deliveries: Vec::new(),
+        });
+        held.decided_on = held.decided_on.max(decided_on);
+        held.deliveries.extend(deliveries);
+    }
+
+    /// Whether `answer` says the bar hides itself and is newer than every reading this flash was
+    /// decided on.
+    fn contradicted_by(&self, answer: bt_platform::TaskbarReading) -> bool {
+        answer.auto_hidden && answer.generation > self.decided_on
+    }
+
+    /// **The deliveries again, each decided on `place`** — [`notify::desktop_reach`] for its
+    /// tab, which `open` answers with whether the tab is the active one, or `None` when the tab
+    /// or the pane is gone (and the delivery with it: there is nothing left to call the reader
+    /// to).
+    fn replaced(
+        self,
+        place: notify::WindowPlace,
+        open: impl Fn(TabId, SeatId) -> Option<bool>,
+    ) -> Vec<AttentionDelivery> {
+        self.deliveries
+            .into_iter()
+            .filter_map(|delivery| {
+                let tab_is_active = open(delivery.tab, delivery.seat)?;
+                Some(AttentionDelivery {
+                    reach: notify::desktop_reach(tab_is_active, place),
+                    ..delivery
+                })
+            })
+            .collect()
+    }
 }
 
 /// The window's one taskbar reading, and the gate that keeps it off the wire
@@ -40221,11 +40312,12 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // this process assuming it is buried under something it has not looked
         // for yet, and the assumption would cost a toast rather than a mark.
         window_exposed: true,
-        // The shipped setting, corrected by the first pass that asks the shell.
-        // Seeding it `true` would be this process assuming a desktop it has not
-        // looked at yet, and the assumption would cost a toast rather than a
-        // flash.
-        taskbar_auto_hidden: false,
+        // The shipped setting, corrected by the first reading after the lane
+        // answers. Seeding it `true` would be this process assuming a desktop it
+        // has not looked at yet, and the assumption would cost a toast rather
+        // than a flash — and a toast cannot be taken back.
+        taskbar_reading: bt_platform::TaskbarReading::default(),
+        taskbar_flash: None,
         // The born answers of the four fields beside it, and winit's own `has_focus` start
         // (false). `dress_new_window` replaces it with a real reading before anything reads it.
         observed_place: notify::WindowPlace {
@@ -40938,6 +41030,16 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::FontsScanned);
             });
         }
+        // **And the taskbar's** (ticket 62): whether the bar hides itself is asked on its own lane
+        // and never on this thread, so the first question is put here, before any window can
+        // decide a delivery on it, and the answer wakes the loop when it is news.
+        {
+            let proxy = proxy.clone();
+            taskbar_lane::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::TaskbarAnswered);
+            });
+        }
+        taskbar_lane::request();
         explorer_menu::begin_probe();
         update::load(&persist::storage_dir());
         update::begin(persist::storage_dir(), settings_store.loaded().update_check);
@@ -62722,6 +62824,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     Ok(())
                 }
             }
+            // Every window: a flash any of them started before this answer is the one thing the
+            // answer can have made wrong (ticket 62). A window with no flash running finds nothing.
+            AppEvent::TaskbarAnswered => {
+                self.for_each_window(|runtime| runtime.replace_contradicted_flash())
+            }
             AppEvent::CopilotProbed => {
                 if let Some(app) = self.app.as_mut() {
                     app.copilot_readiness = attention_copilot::readiness();
@@ -62812,9 +62919,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // two carets, which have a live deadline that has to be dropped or
             // re-armed on the frame the answer changes rather than the next time
             // somebody types.
-            AppEvent::SystemPreferencesChanged => self
-                .adopt_motion_preference()
-                .and_then(|()| self.adopt_system_canvas()),
+            AppEvent::SystemPreferencesChanged => {
+                let adopted = self
+                    .adopt_motion_preference()
+                    .and_then(|()| self.adopt_system_canvas());
+                // And the taskbar is asked again (ticket 62): turning auto-hide on or off moves
+                // the desktop's work area, which Windows announces with this same broadcast.
+                taskbar_lane::request();
+                adopted
+            }
             AppEvent::WindowChromeChanged => self.adopt_platform_chrome(),
             // Every window, on this family's standing reason: a window whose
             // finger did nothing has nothing parked, and the walk costs a
@@ -63181,6 +63294,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 }
                 WindowEvent::Focused(true) => {
                     runtime.observe_ime_focus(true);
+                    // **A taskbar flash ends here** (`FLASHW_TIMERNOFG`: until the window comes to
+                    // the foreground; on macOS activation ends the bounce), so the record of what
+                    // it was about ends with it (ticket 62).
+                    runtime.window.taskbar_flash = None;
                     // **R31's third invalidation moment, B: the window came back.**
                     // Whatever happened while it was away happened in another process
                     // — an editor saving, a `git` run in another terminal, a

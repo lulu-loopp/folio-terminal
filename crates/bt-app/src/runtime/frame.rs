@@ -1550,7 +1550,7 @@ impl Runtime<'_> {
     /// (ticket 48; `docs/ARCHITECTURE.md` §5.3 row 13; `attention` plan §5.2).
     ///
     /// The only writer of [`WindowRuntime::observed_place`] and the four fields it is written
-    /// with (`window_hidden`, `window_exposed`, `taskbar_auto_hidden`, `attention_sampled_at`),
+    /// with (`window_hidden`, `window_exposed`, `taskbar_reading`, `attention_sampled_at`),
     /// and the only caller of [`sample_window_place`]. Called from three places, and each is
     /// the moment a delivery can be decided:
     ///
@@ -1562,17 +1562,22 @@ impl Runtime<'_> {
     /// * **an attention delivery that arrives between turns** (`AppEvent::AttentionSpoke`).
     ///   Not parked for the next turn, because on Windows there may be none for seconds: inside
     ///   the OS's modal move/size loop winit sends no `AboutToWait`, so a message held for a
-    ///   turn would wait for the hand to let go of the frame.
+    ///   turn would wait for the hand to let go of the frame;
+    /// * **the re-placing of a taskbar flash** the taskbar lane's newest answer contradicts
+    ///   (`Runtime::replace_contradicted_flash`, ticket 62), so the delivery is decided again on
+    ///   a reading that carries the answer.
     ///
-    /// "Every turn, never cached across them" (user rulings 2026-08-28 and 2026-09-01) holds:
-    /// a turn's head replaces the reading before anything in that turn reads it.
+    /// "Every turn, never cached across them" (user rulings 2026-08-28 and 2026-09-01) holds for
+    /// hidden, exposed and focus: a turn's head replaces the reading before anything in that turn
+    /// reads it. The taskbar bit is the taskbar lane's latest answer (ticket 62), read here and
+    /// asked of the shell only on that lane.
     ///
     /// Focus is the window's own answer (`Window::has_focus`), for the measured reason
     /// `drain_pty` gives; `WindowRuntime::window_focused` keeps its `WM_SETFOCUS` writer and is
     /// not written here.
     pub(crate) fn observe_window_place(&mut self) {
         let window = &self.window.window;
-        let place = hang_watch::during(hang_watch::Station::Place, || {
+        let (place, taskbar) = hang_watch::during(hang_watch::Station::Place, || {
             let focused =
                 hang_watch::during(hang_watch::Station::PlaceFocus, || window.has_focus());
             sample_window_place(window, focused)
@@ -1581,7 +1586,7 @@ impl Runtime<'_> {
         window.observed_place = place;
         window.window_hidden = place.hidden;
         window.window_exposed = place.exposed;
-        window.taskbar_auto_hidden = place.taskbar_is_auto_hidden;
+        window.taskbar_reading = taskbar;
         window.attention_sampled_at = Some(Instant::now());
     }
 

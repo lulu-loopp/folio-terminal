@@ -904,8 +904,10 @@ pub enum Station {
     /// `bt_platform::window_is_exposed` — the exposure probe's `GetWindowRect`
     /// and hit tests, which ask whatever window is under each point.
     PlaceExposure = 196,
-    /// `bt_platform::taskbar_is_auto_hidden` — `SHAppBarMessage`, a message to
-    /// the shell's taskbar.
+    /// `taskbar_lane::observe` — reading the taskbar lane's latest answer and,
+    /// every few seconds, asking the lane for a fresh one (ticket 62). Until
+    /// ticket 62 this was `SHAppBarMessage` itself, a message to the shell's
+    /// taskbar that waited for Explorer; the shell is now asked on the lane.
     PlaceTaskbar = 197,
     /// `TaskbarMirror::show`, the taskbar button's progress, from
     /// `Runtime::advance_strip_animation`.
@@ -1177,7 +1179,7 @@ impl Station {
             Self::DiagnosticWrite => "stderr diagnostic write",
             Self::PlaceHidden => "IsIconic + cloak",
             Self::PlaceExposure => "window_is_exposed",
-            Self::PlaceTaskbar => "taskbar_is_auto_hidden",
+            Self::PlaceTaskbar => "taskbar reading",
             Self::TaskbarMirror => "TaskbarMirror::show",
             Self::WebEnvironment => "request_environment",
             Self::WebController => "request_controller",

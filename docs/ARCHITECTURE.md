@@ -426,6 +426,16 @@ residual on this thread is still `request_controller` and the pump after it —
 ticket 43's 88–269 ms and 70–303 ms headless, the owner's 4,099 ms on next89 —
 above a frame, and the row is narrowed, not done.
 
+Row 13's taskbar probe, stated after its cell (ticket 62): `sample_window_place`
+still asked `bt_platform::taskbar_is_auto_hidden` — `SHAppBarMessage`, a message
+to Explorer — on the window thread, at every turn's head and again for a delivery
+between turns; the owner's next93 stall report has two of those asks at 99 ms and
+92 ms inside one 535 ms hold. **Done** — *whether the taskbar hides itself is asked
+on a lane of its own and read from a numbered slot* (`DESIGN.md`, 2026-09-25):
+`taskbar_lane` asks on its own thread (at launch, every 5 s while a window is on a
+screen, and when Windows says a system setting moved) and the window thread reads
+the latest answer with one atomic load (D-68, repaid).
+
 Row 5's road, stated more exactly than its cell (ticket 50): the walk was reached
 from `apply_stored_terminal_font` on the launch road — `FolioApp::create`, before
 the first frame, for every launch whose `settings.json` names a terminal font

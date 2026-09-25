@@ -17587,7 +17587,8 @@ fn one_turn_asks_the_desktop_where_the_window_is_exactly_once() {
 /// so a notification that arrived during a drag would wait for the hand to let
 /// go. Coordinator ruling 2026-09-24: the arm keeps a reading of its own, taken
 /// through the one writer, and decides the delivery on it. So the writer has
-/// exactly three callers — the turn's head, the window's birth and this arm —
+/// these callers — the turn's head, the window's birth and this arm, and since
+/// ticket 62 the re-placing of a taskbar flash the lane's answer contradicts —
 /// and in the arm the reading comes before the delivery that reads it.
 ///
 /// MUTATION: drop `runtime.observe_window_place()` from the `AttentionSpoke`
@@ -17599,13 +17600,16 @@ fn a_delivery_between_turns_is_decided_on_a_fresh_reading_of_its_own() {
         reader_names(&writers),
         vec![
             "dress_new_window".to_owned(),
+            "replace_contradicted_flash".to_owned(),
             "turn".to_owned(),
             "user_event".to_owned()
         ],
         "{}",
         writers.report(source())
     );
-    assert_eq!(writers.len(), 3, "{}", writers.report(source()));
+    // Four since ticket 62: re-placing a flash the taskbar lane's answer contradicts decides
+    // again on a reading of its own, through the same writer.
+    assert_eq!(writers.len(), 4, "{}", writers.report(source()));
     let arm = attention_spoke_arm();
     let observed = arm
         .find("runtime.observe_window_place();")
@@ -17646,6 +17650,209 @@ fn the_drain_never_asks_the_desktop() {
     assert!(
         drain.contains("let place = self.window.observed_place;"),
         "it reads the turn's reading"
+    );
+}
+
+// ── the taskbar's state, asked on its own lane (0.4.5 ticket 62) ──────────
+//
+// `Runtime` cannot be built without a window, so the turn's taskbar call is run
+// through the real lane (`taskbar_lane::TaskbarLane::observe`, the call
+// `sample_window_place` makes) and the call sites are held through `bt_source`.
+
+/// RED (62) — **A turn asks the shell nothing about the taskbar.**
+///
+/// The owner's stall on next93 held the window thread 535 ms with two
+/// `taskbar_is_auto_hidden` asks of 99 ms and 92 ms in it: `sample_window_place`
+/// put the question to Explorer at every turn's head and again for a delivery
+/// between turns. What a turn does about the taskbar is now
+/// `TaskbarLane::observe`; this drives it through a thousand turns, a tenth of
+/// the refresh interval apart, on this thread, while the lane asks the real
+/// shell on its own. The shell is asked — the first answer lands and wakes the
+/// loop — and never by the thread that turns. The call sites are the source
+/// half: the platform question has one caller in `bt-app`,
+/// `taskbar_lane::ask_the_shell`, which is handed only to the product's lane,
+/// and `sample_window_place` reads the lane.
+///
+/// MUTATION: restore the inline call — `bt_platform::taskbar_is_auto_hidden()`
+/// in `sample_window_place`, or `ask_the_shell()` in `TaskbarLane::observe` —
+/// red.
+#[test]
+fn a_turn_asks_the_shell_nothing_about_the_taskbar() {
+    let (lane, wakes) = taskbar_lane::tests::lane(taskbar_lane::ask_the_shell);
+    let start = Instant::now();
+    let asked_before = taskbar_lane::shell_asks();
+    for turn in 0..1000_u32 {
+        let _ = lane.observe(start + taskbar_lane::REFRESH_INTERVAL / 10 * turn, true);
+        if turn == 0 {
+            wakes
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the lane's first answer wakes the loop");
+        }
+    }
+    assert!(
+        lane.reading().answered(),
+        "the shell was asked, on the lane"
+    );
+    assert_eq!(
+        taskbar_lane::shell_asks(),
+        asked_before,
+        "a thousand turns put the question to the shell on the thread that turns them"
+    );
+
+    let asks = source()
+        .search(&Search::new(
+            needle!(Pattern::call("taskbar_is_auto_hidden")),
+            View::Identifiers,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+        .in_the_product(source());
+    assert_eq!(
+        reader_names(&asks),
+        vec!["ask_the_shell".to_owned()],
+        "{}",
+        asks.report(source())
+    );
+    let handed = source()
+        .search(
+            &Search::new(
+                needle!(Pattern::identifier("ask_the_shell")),
+                View::Identifiers,
+            )
+            .exempting_declarations_of(ItemQuery::function("ask_the_shell")),
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"))
+        .in_the_product(source());
+    assert_eq!(
+        reader_names(&handed),
+        vec!["product_lane".to_owned()],
+        "{}",
+        handed.report(source())
+    );
+    let sampled = free_fn_body("sample_window_place");
+    assert!(sampled.contains("taskbar_lane::observe("));
+}
+
+/// A covered window's delivery about one pane, as the door would have decided it
+/// on `taskbar`.
+fn delivery_on(taskbar: bt_platform::TaskbarReading) -> AttentionDelivery {
+    AttentionDelivery {
+        tab: TabId(7),
+        seat: SeatId(3),
+        reach: notify::desktop_reach(false, covered_window_on(taskbar)),
+        why: attention::Why::Awaiting,
+        title: "pwsh".to_owned(),
+        body: None,
+    }
+}
+
+/// On a screen, unfocused, with something on top of it — the window a flash is
+/// for.
+fn covered_window_on(taskbar: bt_platform::TaskbarReading) -> notify::WindowPlace {
+    notify::WindowPlace {
+        focused: false,
+        hidden: false,
+        exposed: false,
+        taskbar_is_auto_hidden: taskbar.auto_hidden,
+    }
+}
+
+/// RED (62) — **A notification placed before the first answer lands uses the
+/// default and is re-placed when the answer says auto-hidden.**
+///
+/// Until the taskbar lane's first answer the reading is "not hidden", so a
+/// covered window's request flashes the taskbar button. On a desktop whose bar
+/// hides itself that flash slides the whole bar out and keeps it out — the very
+/// thing the 2026-08-28 ruling took the flash off such a desktop for — so the
+/// flash is kept with the number of the reading it was decided on, and the
+/// lane's answer re-places it: decided again on a reading that carries the
+/// answer, the request goes to the desktop. An answer that says the bar is on
+/// screen leaves the flash running, and a pane that has gone is not called to.
+/// The answers here are real lane answers; the runtime's half — the lane's wake
+/// reaches every window, a flash is recorded where it is raised and forgotten
+/// where the window comes to the front — is held through `bt_source`.
+///
+/// MUTATION: make `TaskbarFlash::contradicted_by` answer `false` (no re-place)
+/// — red.
+#[test]
+fn a_notification_placed_before_the_first_answer_uses_the_default_and_is_re_placed_when_the_answer_says_auto_hidden()
+ {
+    let (hides, woke) = taskbar_lane::tests::lane(|| true);
+    let default = hides.reading();
+    assert!(!default.answered());
+    let placed = delivery_on(default);
+    assert_eq!(
+        placed.reach,
+        attention::Reach::Flash,
+        "the default: the bar is on screen"
+    );
+    assert_eq!(
+        notify::interruption(placed.reach, true),
+        notify::Interruption::FlashTheTaskbarButton
+    );
+    let mut flash = None;
+    TaskbarFlash::record(&mut flash, default.generation, vec![placed]);
+    let flash = flash.expect("the flash is kept with its reading");
+    assert!(!flash.contradicted_by(default));
+
+    hides.request(Instant::now());
+    woke.recv_timeout(Duration::from_secs(30))
+        .expect("the first answer wakes the loop");
+    let answer = hides.reading();
+    assert!(answer.answered() && answer.auto_hidden);
+    assert!(
+        flash.contradicted_by(answer),
+        "an answer that says the bar hides itself re-places the flash"
+    );
+    let open = |tab: TabId, seat: SeatId| (tab == TabId(7) && seat == SeatId(3)).then_some(false);
+    let replaced = flash.replaced(covered_window_on(answer), open);
+    assert_eq!(replaced.len(), 1);
+    assert_eq!(replaced[0].reach, attention::Reach::Toast);
+    assert_eq!(
+        notify::interruption(replaced[0].reach, true),
+        notify::Interruption::PutItOnTheDesktop,
+        "re-placed on the desktop"
+    );
+
+    // The answer that confirms the bar is on screen leaves the flash where it is.
+    let (shows, woke) = taskbar_lane::tests::lane(|| false);
+    let mut flash = None;
+    TaskbarFlash::record(&mut flash, 0, vec![delivery_on(shows.reading())]);
+    let flash = flash.expect("kept");
+    shows.request(Instant::now());
+    woke.recv_timeout(Duration::from_secs(30))
+        .expect("the first answer wakes the loop");
+    assert!(!flash.contradicted_by(shows.reading()));
+    // And a pane that has gone meanwhile is called to by nobody.
+    assert!(
+        flash
+            .replaced(covered_window_on(answer), |_, _| None)
+            .is_empty()
+    );
+
+    // The runtime's half.
+    let events =
+        item_body(&ItemQuery::method("FolioApp", "user_event").of_trait("ApplicationHandler"));
+    let arm = events
+        .find("AppEvent::TaskbarAnswered =>")
+        .map(|at| &events[at..])
+        .expect("the lane's wake has an arm");
+    let arm = &arm[..arm[1..].find("AppEvent::").map_or(arm.len(), |at| at + 1)];
+    assert!(arm.contains("replace_contradicted_flash()"), "{arm}");
+    let raise = method_body("Runtime", "raise_attention");
+    assert!(raise.contains("TaskbarFlash::record("));
+    assert!(raise.contains("self.window.taskbar_reading.generation"));
+    let windows =
+        item_body(&ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"));
+    let focused = windows
+        .find("WindowEvent::Focused(true) => {")
+        .map(|at| &windows[at..])
+        .expect("the window's focus has an arm");
+    let focused = &focused[..focused[1..]
+        .find("WindowEvent::")
+        .map_or(focused.len(), |at| at + 1)];
+    assert!(
+        focused.contains("taskbar_flash = None"),
+        "the record ends where the flash does"
     );
 }
 

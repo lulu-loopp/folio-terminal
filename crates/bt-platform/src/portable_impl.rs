@@ -1089,6 +1089,15 @@ pub fn flash_window(window: NativeWindow) {
     let _ = window;
 }
 
+/// Take back a flash. `NSApp.cancelUserAttentionRequest:`; ticket 62.
+///
+/// **Off on macOS**, where the arm in `macos_notify` cancels the request
+/// `flash_window` made. Here there was no flash to take back.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn stop_flashing_window(window: NativeWindow) {
+    let _ = window;
+}
+
 /// Hide every window of this process — the panic path's last act, so that a
 /// dying program does not leave a half-drawn window on the glass.
 ///

@@ -741,7 +741,12 @@ stop an announcement* (owner's ruling 2026-08-26); §7.6 *terminal notifications
 **Overrides.** The owner's 2026-08-28 ruling removed the flash tier on
 auto-hiding taskbars — a request there goes to the desktop instead. The old
 three-tier table's second row was retired in favour of the marks tier on
-2026-09-01.
+2026-09-01. Since 0.4.5 ticket 62 (`DESIGN.md`, 2026-09-25) whether the taskbar
+auto-hides is the taskbar lane's latest answer, not a question put to the shell
+at each delivery ("asked at every delivery, never cached" of 2026-08-28 and
+2026-09-01 is superseded): before the first answer it reads "on screen", and a
+flash raised on a reading a newer answer contradicts is stopped and decided
+again, so the flash tier stays absent on such a desktop once the answer is in.
 **Open.** The kind × urgency × modality → surface table is **to be ruled before
 0.5, by the project owner**. See `docs/ARCHITECTURE.md` §8.
 **Ruled and not yet built.** Owner, 2026-09-21 (recorded in the multi-line paste
