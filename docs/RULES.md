@@ -286,7 +286,9 @@ drag broker*; §7.1.1; §7.14d *a replay is neither a join nor a leave*.
 
 ### 11. Clipboard pictures — `not yet folded`
 Entries: §7.61 *`T-CLIPBOARD-IMAGE-PASTES-PATH`: a picture on the clipboard is
-not an argument, so Folio writes it one*; the `clipboard_picture` module doc.
+not an argument, so Folio writes it one*; the 2026-09-20 entry *a clipboard
+picture shows its shape before it is decoded*; the 2026-09-26 entry *a clipboard
+bitmap is read by Windows, not by Folio*; the `clipboard_picture` module doc.
 
 ### 12. The layout solver — `not yet folded`
 Entries: the standalone specification under `docs/plans/` (rules L1–L13,

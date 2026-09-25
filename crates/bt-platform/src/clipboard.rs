@@ -42,6 +42,13 @@ pub const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PictureEncoding {
     Png,
+    /// **Windows' own drawing of the picture** (ticket 66): the clipboard's
+    /// `CF_BITMAP`, handed to `GetDIBits` and asked for one layout — a
+    /// [`TopDownPixels`] buffer. Windows converts every flavour it can draw
+    /// into that one (bit fields, V4 and V5 headers, 16 bits, bottom-up and
+    /// top-down, run-length encoding), so Folio reads one layout it wrote the
+    /// request for instead of parsing the source's.
+    Bitmap,
     DibV5,
     Dib,
     /// macOS' own second shape (`public.tiff`), which is what an application
@@ -53,13 +60,22 @@ pub enum PictureEncoding {
 /// **Which shape of a clipboard picture Folio uses, on Windows** — best first,
 /// and the only place that answers the question.
 ///
-/// `PNG` before `CF_DIBV5` before `CF_DIB`: the registered `PNG` is lossless,
-/// carries alpha, is the smallest of the three by an order of magnitude, and is
-/// already the encoding this paste writes out. `CF_DIBV5` comes next because its
-/// header can carry alpha where `CF_DIB`'s cannot, and `CF_DIB` last because
-/// every source offers it and it is the one that always works.
-pub const WINDOWS_PICTURE_ORDER: [PictureEncoding; 3] = [
+/// `PNG` before `CF_BITMAP` before `CF_DIBV5` before `CF_DIB`: the registered
+/// `PNG` is lossless, carries alpha, is the smallest by an order of magnitude,
+/// and is already the encoding this paste writes out.
+///
+/// **`CF_BITMAP` is second and the two device-independent bitmaps are behind
+/// it** (ticket 66). Windows synthesises `CF_BITMAP` from either of them, so a
+/// board holding a bitmap of any flavour answers it, and what comes back is
+/// Windows' own reading of the source's header rather than Folio's — the
+/// reading every other program on the machine draws the picture with. The two
+/// raw shapes stay behind it for the bitmaps Windows cannot draw on a screen:
+/// a `CF_DIB` whose body is a whole PNG or JPEG (`BI_PNG`, `BI_JPEG`) has no
+/// `CF_BITMAP`, and `CF_DIBV5` is still tried before `CF_DIB` because its
+/// header can carry alpha where `CF_DIB`'s cannot.
+pub const WINDOWS_PICTURE_ORDER: [PictureEncoding; 4] = [
     PictureEncoding::Png,
+    PictureEncoding::Bitmap,
     PictureEncoding::DibV5,
     PictureEncoding::Dib,
 ];
@@ -201,8 +217,213 @@ pub fn first_offered_picture(
 pub fn shape_is_intact(encoding: PictureEncoding, bytes: &[u8]) -> bool {
     match encoding {
         PictureEncoding::Png => png_is_intact(bytes),
+        PictureEncoding::Bitmap => TopDownPixels::parse(bytes).is_some(),
         PictureEncoding::DibV5 | PictureEncoding::Dib => dib_is_intact(bytes),
         PictureEncoding::Tiff => tiff_is_intact(bytes),
+    }
+}
+
+/// **The one layout [`PictureEncoding::Bitmap`] carries**: a 40-byte
+/// `BITMAPINFOHEADER` saying top-down, one plane, 32 bits, `BI_RGB`, and then
+/// `width x height` pixels of four bytes each — blue, green, red, and a fourth
+/// byte `BITMAPINFOHEADER` defines as unused — row after row from the top, with
+/// no padding because a 32-bit row is always a whole number of `DWORD`s.
+///
+/// It is the layout Folio *asks* `GetDIBits` for, so it is written and read in
+/// one place: [`TopDownPixels::header`] is what the Windows arm hands
+/// `GetDIBits`, and [`TopDownPixels::parse`] is what the walk and the worker
+/// read back. Carrying the header rather than two bare numbers keeps the bytes
+/// self-describing across the thread they cross, and keeps [`PictureBytes`] one
+/// shape for every encoding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TopDownPixels<'a> {
+    pub width: u32,
+    pub height: u32,
+    /// `width x height x 4` bytes, blue-green-red-unused, top row first.
+    pub bgrx: &'a [u8],
+}
+
+/// `sizeof(BITMAPINFOHEADER)`, which is where a [`TopDownPixels`] buffer's
+/// pixels start.
+const TOP_DOWN_HEADER: usize = 40;
+
+impl TopDownPixels<'_> {
+    /// `sizeof(BITMAPINFOHEADER)`.
+    pub const HEADER: usize = TOP_DOWN_HEADER;
+
+    /// **What a picture of this shape costs in this layout**, header included —
+    /// the allocation the Windows arm is about to make, and so the number the
+    /// ceiling is checked against before it is made. `None` past `usize`.
+    #[must_use]
+    pub fn length(width: u32, height: u32) -> Option<usize> {
+        usize::try_from(u64::from(width) * u64::from(height) * 4)
+            .ok()?
+            .checked_add(Self::HEADER)
+    }
+
+    /// The header [`parse`](Self::parse) accepts, for a picture of this shape.
+    /// The height is stored negated — that is what *top-down* is in a
+    /// `BITMAPINFOHEADER` — so the sides must be inside [`MAX_PICTURE_SIDE`],
+    /// which every caller has already asked.
+    #[must_use]
+    pub fn header(width: u32, height: u32) -> [u8; TOP_DOWN_HEADER] {
+        let width = i32::try_from(width).expect("a side inside the ceiling");
+        let height = i32::try_from(height).expect("a side inside the ceiling");
+        let mut header = [0u8; TOP_DOWN_HEADER];
+        header[..4].copy_from_slice(&40u32.to_le_bytes());
+        header[4..8].copy_from_slice(&width.to_le_bytes());
+        header[8..12].copy_from_slice(&(-height).to_le_bytes());
+        header[12..14].copy_from_slice(&1u16.to_le_bytes());
+        header[14..16].copy_from_slice(&32u16.to_le_bytes());
+        // biCompression = BI_RGB and every later field zero: no palette, no
+        // masks, and a `biSizeImage` of zero is the header's own "work it out".
+        header
+    }
+
+    /// **These bytes, read as that layout** — or `None` when they are anything
+    /// else: another header, a bottom-up or compressed picture, a side outside
+    /// [`MAX_PICTURE_SIDE`], or a body that is not exactly `width x height x 4`.
+    /// Exact, and not "at least": the Windows arm sizes the buffer from the
+    /// shape it asked for, so a length that differs is a buffer this layout did
+    /// not produce.
+    #[must_use]
+    pub fn parse(bytes: &[u8]) -> Option<TopDownPixels<'_>> {
+        let header = bytes.get(..Self::HEADER)?;
+        let long = |at: usize| i32::from_le_bytes(header[at..at + 4].try_into().expect("four"));
+        let short = |at: usize| u16::from_le_bytes(header[at..at + 2].try_into().expect("two"));
+        if long(0) != 40 || short(12) != 1 || short(14) != 32 || long(16) != 0 {
+            return None;
+        }
+        let (width, height) = (long(4), long(8));
+        if width <= 0 || height >= 0 {
+            return None;
+        }
+        let (width, height) = (width.unsigned_abs(), height.unsigned_abs());
+        if !side_is_sane(width) || !side_is_sane(height) {
+            return None;
+        }
+        (Self::length(width, height)? == bytes.len()).then(|| TopDownPixels {
+            width,
+            height,
+            bgrx: &bytes[Self::HEADER..],
+        })
+    }
+}
+
+/// **A device-independent bitmap's header, as far as a diagnostic and the
+/// compressed bodies need it** (ticket 66): which header it is, how many bits a
+/// pixel, which compression, the shape, and whether it is stored top-down.
+///
+/// Read so a paste that fails can say *which* bitmap it failed on in one line.
+/// Before this, every failure in the bitmap rung was the one sentence "the
+/// clipboard bitmap could not be read", and a report of it was a guess among a
+/// dozen flavours.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DibHeader {
+    /// `biSize`: 12, 40, 52, 56, 64, 108 or 124 — the headers Windows defines.
+    pub size: u32,
+    pub width: i32,
+    /// Negative for a top-down bitmap.
+    pub height: i32,
+    pub bit_count: u16,
+    /// `biCompression`; 0 for a `BITMAPCOREHEADER`, which has none.
+    pub compression: u32,
+    /// `biSizeImage`: for `BI_PNG` and `BI_JPEG` the length of the embedded
+    /// file. 0 for a core header.
+    pub image_size: u32,
+    /// `biClrUsed`: palette entries after the header. 0 for a core header.
+    pub colours_used: u32,
+}
+
+impl DibHeader {
+    /// `BI_BITFIELDS`.
+    pub const BITFIELDS: u32 = 3;
+    /// `BI_JPEG`: the body is a whole JPEG file.
+    pub const JPEG: u32 = 4;
+    /// `BI_PNG`: the body is a whole PNG file.
+    pub const PNG: u32 = 5;
+    /// `BI_ALPHABITFIELDS`.
+    pub const ALPHABITFIELDS: u32 = 6;
+
+    /// The fields, or `None` when the bytes are shorter than the header they
+    /// name or name one Windows does not define.
+    #[must_use]
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let size = u32::from_le_bytes(bytes.get(..4)?.try_into().expect("four bytes"));
+        if !matches!(size, 12 | 40 | 52 | 56 | 64 | 108 | 124) || bytes.len() < size as usize {
+            return None;
+        }
+        let short = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().expect("two"));
+        let long = |at: usize| i32::from_le_bytes(bytes[at..at + 4].try_into().expect("four"));
+        Some(if size == 12 {
+            Self {
+                size,
+                width: i32::from(short(4)),
+                height: i32::from(short(6)),
+                bit_count: short(10),
+                compression: 0,
+                image_size: 0,
+                colours_used: 0,
+            }
+        } else {
+            Self {
+                size,
+                width: long(4),
+                height: long(8),
+                bit_count: short(14),
+                compression: long(16).cast_unsigned(),
+                image_size: long(20).cast_unsigned(),
+                colours_used: long(32).cast_unsigned(),
+            }
+        })
+    }
+
+    /// **Where the body starts**, counted from the header's first byte: the
+    /// header, then the colour masks a `BITMAPINFOHEADER` puts after itself for
+    /// `BI_BITFIELDS` (three) and `BI_ALPHABITFIELDS` (four), then the palette —
+    /// which the indexed depths always have and a compressed PNG or JPEG body
+    /// has only if `biClrUsed` says so. `None` when the palette count is past
+    /// anything a buffer holds.
+    #[must_use]
+    pub fn body_offset(&self) -> Option<usize> {
+        let masks = match (self.size, self.compression) {
+            (40, Self::BITFIELDS) => 12,
+            (40, Self::ALPHABITFIELDS) => 16,
+            _ => 0,
+        };
+        let entry = if self.size == 12 { 3 } else { 4 };
+        let used = usize::try_from(self.colours_used).ok()?;
+        let colours = match (used, self.bit_count, self.compression) {
+            (0, 1..=8, compression) if !matches!(compression, Self::JPEG | Self::PNG) => {
+                1usize << self.bit_count
+            }
+            (used, _, _) => used,
+        };
+        (self.size as usize)
+            .checked_add(masks)?
+            .checked_add(colours.checked_mul(entry)?)
+    }
+}
+
+impl std::fmt::Display for DibHeader {
+    /// `header 124, 32 bpp, compression 3, 1920x-1080 (top-down)` — the numbers
+    /// as the header carries them, so the line can be read against the
+    /// structure's documentation without a translation table.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "header {}, {} bpp, compression {}, {}x{} ({})",
+            self.size,
+            self.bit_count,
+            self.compression,
+            self.width,
+            self.height,
+            if self.height < 0 {
+                "top-down"
+            } else {
+                "bottom-up"
+            }
+        )
     }
 }
 
@@ -214,8 +435,9 @@ pub fn shape_is_intact(encoding: PictureEncoding, bytes: &[u8]) -> bool {
 /// dependency runs from `bt-app` to `bt-platform`, so the door cannot read the
 /// worker's copy. Keeping the two equal is what makes the door's fall-through
 /// agree with the worker's refusal instead of preferring a shape the worker will
-/// then turn down.
-pub const MAX_PICTURE_SIDE: u32 = 16_384;
+/// then turn down. Why it is 65,535 and no longer 16,384 is that constant's own
+/// story (ticket 66: a long screenshot is tens of thousands of rows tall).
+pub const MAX_PICTURE_SIDE: u32 = 65_535;
 
 /// **How far into a `PNG` the walk will look for the first `IDAT`.**
 ///
@@ -300,7 +522,7 @@ fn png_is_intact(bytes: &[u8]) -> bool {
 /// the end is the one review X-4 named: a header is believed before the pixels
 /// are read, so a fifty-byte global claiming a large picture is a header that is
 /// lying, and the next shape is the answer to it.
-fn dib_is_intact(bytes: &[u8]) -> bool {
+pub(crate) fn dib_is_intact(bytes: &[u8]) -> bool {
     /// Uncompressed, and the two bit-field forms: the only ones whose pixel
     /// length is arithmetic over the header.
     const BI_RGB: u32 = 0;
@@ -343,14 +565,22 @@ fn dib_is_intact(bytes: &[u8]) -> bool {
     if !side_is_sane(width) || !side_is_sane(height) || planes != 1 {
         return false;
     }
+    if matches!(compression, DibHeader::JPEG | DibHeader::PNG) {
+        // A JPEG or PNG carried inside a DIB: the body's length is not
+        // arithmetic over the header, so the header is all there is to check —
+        // and its bit count is 0, which is what `BITMAPINFOHEADER` requires of
+        // these two (the body says how deep it is). Refusing that 0 made every
+        // `BI_PNG` bitmap look broken to this walk (ticket 66).
+        return depth == 0;
+    }
     if !matches!(depth, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
         return false;
     }
     if !matches!(compression, BI_RGB | BI_BITFIELDS | BI_ALPHABITFIELDS) {
-        // RLE4, RLE8, and a JPEG or PNG carried inside a DIB: the body's length
-        // is not arithmetic over the header, so the header is all there is to
-        // check. An unknown compression is a header nobody wrote.
-        return matches!(compression, 1 | 2 | 4 | 5);
+        // RLE4 and RLE8: the body's length is not arithmetic over the header,
+        // so the header is all there is to check. An unknown compression is a
+        // header nobody wrote.
+        return matches!(compression, 1 | 2);
     }
     // A palette is present when the header says so, and always for the depths
     // that index one. `BITMAPINFOHEADER` puts the bit-field masks where the
@@ -914,6 +1144,160 @@ mod tests {
         }
     }
 
+    /// Folio's one layout for a picture Windows drew, `width x height`.
+    fn drawn(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = TopDownPixels::header(width, height).to_vec();
+        bytes.resize(
+            TopDownPixels::length(width, height).expect("a small picture"),
+            7,
+        );
+        bytes
+    }
+
+    /// RED (66) — **Windows' own drawing of the board's bitmap is taken before
+    /// either raw bitmap, and a board whose bitmap Windows will not draw falls
+    /// to them.**
+    ///
+    /// `CF_BITMAP` is what Windows synthesises out of a `CF_DIB` or
+    /// `CF_DIBV5`, and asking for it is asking Windows to read the source's
+    /// header: the flavours Folio's own reading got wrong are the ones Windows
+    /// draws on every screen. A `BI_PNG` body is the exception — no screen
+    /// draws one, the synthesis fails, the read answers nothing — and then the
+    /// raw shapes are next, in their old order.
+    ///
+    /// MUTATION: take `Bitmap` out of `WINDOWS_PICTURE_ORDER` and the first
+    /// board answers `DibV5`.
+    #[test]
+    fn windows_drawing_of_the_bitmap_comes_before_the_raw_bitmaps() {
+        let mut board = Board::with([
+            (PictureEncoding::Bitmap, Some(drawn(8, 8))),
+            (PictureEncoding::DibV5, Some(dib_v5(8, 8))),
+            (PictureEncoding::Dib, Some(dib(8, 8))),
+        ]);
+        assert_eq!(
+            first_offered_picture(&WINDOWS_PICTURE_ORDER, &mut board),
+            Candidate::Present(vec![PictureBytes {
+                encoding: PictureEncoding::Bitmap,
+                bytes: drawn(8, 8),
+            }])
+        );
+        assert_eq!(board.rendered, [PictureEncoding::Bitmap]);
+
+        // Advertised — Windows always advertises a synthesised format — and
+        // not drawn.
+        let mut board = Board::with([
+            (PictureEncoding::Bitmap, None),
+            (PictureEncoding::DibV5, Some(dib_v5(8, 8))),
+            (PictureEncoding::Dib, Some(dib(8, 8))),
+        ]);
+        assert_eq!(
+            first_offered_picture(&WINDOWS_PICTURE_ORDER, &mut board),
+            Candidate::Present(vec![PictureBytes {
+                encoding: PictureEncoding::DibV5,
+                bytes: dib_v5(8, 8),
+            }])
+        );
+        assert_eq!(
+            board.rendered,
+            [PictureEncoding::Bitmap, PictureEncoding::DibV5]
+        );
+
+        // A whole `PNG` still wins before Windows is asked to draw anything.
+        let mut board = Board::with([
+            (PictureEncoding::Png, Some(png(8, 8))),
+            (PictureEncoding::Bitmap, Some(drawn(8, 8))),
+        ]);
+        first_offered_picture(&WINDOWS_PICTURE_ORDER, &mut board);
+        assert_eq!(board.rendered, [PictureEncoding::Png]);
+    }
+
+    /// PIN (66) — **Folio's layout is read exactly as it is written**, and
+    /// anything else is not that layout.
+    #[test]
+    fn the_drawn_layout_reads_back_exactly_and_nothing_else_passes_for_it() {
+        let bytes = drawn(3, 2);
+        let pixels = TopDownPixels::parse(&bytes).expect("the layout reads back");
+        assert_eq!((pixels.width, pixels.height, pixels.bgrx.len()), (3, 2, 24));
+        assert!(shape_is_intact(PictureEncoding::Bitmap, &bytes));
+        assert_eq!(TopDownPixels::length(3, 2), Some(64));
+
+        let mut long = bytes.clone();
+        long.push(0);
+        let mut short = bytes.clone();
+        short.pop();
+        let mut bottom_up = bytes.clone();
+        bottom_up[8..12].copy_from_slice(&2_i32.to_le_bytes());
+        let mut compressed = bytes.clone();
+        compressed[16..20].copy_from_slice(&3_u32.to_le_bytes());
+        let mut sixteen = bytes.clone();
+        sixteen[14..16].copy_from_slice(&16_u16.to_le_bytes());
+        for other in [
+            long,
+            short,
+            bottom_up,
+            compressed,
+            sixteen,
+            dib(3, 2),
+            Vec::new(),
+        ] {
+            assert_eq!(TopDownPixels::parse(&other), None);
+            assert!(!shape_is_intact(PictureEncoding::Bitmap, &other));
+        }
+        // A side past the ceiling has no layout, whatever its length.
+        let mut wide = TopDownPixels::header(3, 2).to_vec();
+        wide[4..8].copy_from_slice(&i32::try_from(MAX_PICTURE_SIDE + 1).unwrap().to_le_bytes());
+        assert_eq!(TopDownPixels::parse(&wide), None);
+    }
+
+    /// PIN (66) — **A bitmap's header is named in the numbers it carries**, and
+    /// its body is found where Windows puts it.
+    #[test]
+    fn a_bitmap_header_is_read_and_named() {
+        let v5 = dib_v5(4, 4);
+        let header = DibHeader::parse(&v5).expect("a V5 header");
+        assert_eq!(
+            header.to_string(),
+            "header 124, 32 bpp, compression 0, 4x4 (bottom-up)"
+        );
+        assert_eq!(header.body_offset(), Some(124));
+
+        let mut fields = dib(4, 4);
+        fields[16..20].copy_from_slice(&DibHeader::BITFIELDS.to_le_bytes());
+        fields[8..12].copy_from_slice(&(-4_i32).to_le_bytes());
+        let header = DibHeader::parse(&fields).expect("an info header");
+        assert_eq!(
+            header.to_string(),
+            "header 40, 32 bpp, compression 3, 4x-4 (top-down)"
+        );
+        // Three masks after a `BITMAPINFOHEADER`, none after a V5.
+        assert_eq!(header.body_offset(), Some(52));
+
+        let mut indexed = dib(4, 4);
+        indexed[14..16].copy_from_slice(&8_u16.to_le_bytes());
+        assert_eq!(
+            DibHeader::parse(&indexed).and_then(|header| header.body_offset()),
+            Some(40 + 256 * 4)
+        );
+        let mut png_body = dib(4, 4);
+        png_body[14..16].copy_from_slice(&0_u16.to_le_bytes());
+        png_body[16..20].copy_from_slice(&DibHeader::PNG.to_le_bytes());
+        assert_eq!(
+            DibHeader::parse(&png_body).and_then(|header| header.body_offset()),
+            Some(40)
+        );
+        // And the walk reads it as whole: a `BI_PNG` header's bit count is 0,
+        // as `BITMAPINFOHEADER` requires. Before ticket 66 that 0 was refused,
+        // so every PNG-bodied bitmap looked broken to the walk.
+        assert!(shape_is_intact(PictureEncoding::Dib, &png_body));
+        let mut deep_png = png_body.clone();
+        deep_png[14..16].copy_from_slice(&32_u16.to_le_bytes());
+        assert!(!shape_is_intact(PictureEncoding::Dib, &deep_png));
+
+        assert_eq!(DibHeader::parse(&[40, 0, 0]), None);
+        assert_eq!(DibHeader::parse(&[41, 0, 0, 0]), None);
+        assert_eq!(DibHeader::parse(&dib(4, 4)[..39]), None);
+    }
+
     /// **Neither preference list ever asks for a shape the platform cannot
     /// carry**, and each is written best first.
     #[test]
@@ -922,6 +1306,7 @@ mod tests {
             WINDOWS_PICTURE_ORDER,
             [
                 PictureEncoding::Png,
+                PictureEncoding::Bitmap,
                 PictureEncoding::DibV5,
                 PictureEncoding::Dib
             ]

@@ -97,8 +97,10 @@ impl PictureSource for MacClipboard {
             match encoding {
                 PictureEncoding::Png => NSPasteboardTypePNG,
                 PictureEncoding::Tiff => NSPasteboardTypeTIFF,
-                // No pasteboard type carries a Windows DIB.
-                PictureEncoding::DibV5 | PictureEncoding::Dib => return None,
+                // No pasteboard type carries a Windows DIB or a GDI bitmap.
+                PictureEncoding::Bitmap | PictureEncoding::DibV5 | PictureEncoding::Dib => {
+                    return None;
+                }
             }
         };
         let data = self.pasteboard.dataForType(kind)?;

@@ -20011,7 +20011,7 @@ pub use clipboard::{ClipboardPayload, PictureBytes, PictureEncoding, Unsupported
 #[cfg(windows)]
 mod windows_clipboard;
 #[cfg(windows)]
-pub use windows_clipboard::clipboard_payload;
+pub use windows_clipboard::{clipboard_payload, pixels_through_gdi};
 #[cfg(target_os = "macos")]
 mod macos_clipboard_payload;
 #[cfg(target_os = "macos")]
@@ -20021,6 +20021,15 @@ pub use macos_clipboard_payload::clipboard_payload;
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn clipboard_payload() -> Result<ClipboardPayload, String> {
     Err("terminal clipboard acquisition is unavailable on this platform".to_owned())
+}
+
+/// **The `CF_BITMAP` seam on a machine with no GDI.** `PictureEncoding::Bitmap`
+/// is produced by exactly one acquisition — the Windows clipboard's — so there
+/// is nothing here to draw a bitmap with; the tests that go through the seam
+/// ask `host_platform()` first.
+#[cfg(not(windows))]
+pub fn pixels_through_gdi(_dib: &[u8]) -> Result<Vec<u8>, String> {
+    Err("there is no GDI on this platform".to_owned())
 }
 
 /// The system's own TIFF reader, which is a thing only one platform here has.
