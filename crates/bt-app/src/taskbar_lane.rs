@@ -90,7 +90,7 @@ impl TaskbarLane {
 
     /// The latest answer. One atomic load; never waits for the worker.
     pub fn reading(&self) -> TaskbarReading {
-        self.slot.read()
+        self.slot.latest()
     }
 
     /// **The whole of what a window's reading of where it is does about the taskbar**: ask for a
@@ -168,7 +168,7 @@ impl TaskbarLane {
                     u8::from(auto_hidden)
                 ));
             }
-            let before = self.slot.read();
+            let before = self.slot.latest();
             let taken = self.slot.offer(generation, auto_hidden);
             self.lock().served = generation;
             // After the answer is in the slot and never before: a wake that raced the offer would

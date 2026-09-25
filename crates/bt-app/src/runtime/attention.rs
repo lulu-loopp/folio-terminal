@@ -821,7 +821,7 @@ impl Runtime<'_> {
         let place = self.window.observed_place;
         let window = &*self.window;
         let raised = flash.replaced(place, |tab, seat| {
-            let index = window.tabs.iter().position(|open| open.id == tab)?;
+            let index = window.tabs.iter().position(|held| held.id == tab)?;
             window.tabs[index]
                 .sessions
                 .contains_key(&seat)

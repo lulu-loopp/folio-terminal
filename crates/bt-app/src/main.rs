@@ -28716,18 +28716,18 @@ impl TaskbarFlash {
     }
 
     /// **The deliveries again, each decided on `place`** — [`notify::desktop_reach`] for its
-    /// tab, which `open` answers with whether the tab is the active one, or `None` when the tab
+    /// tab, which `standing` answers with whether the tab is the active one, or `None` when the tab
     /// or the pane is gone (and the delivery with it: there is nothing left to call the reader
     /// to).
     fn replaced(
         self,
         place: notify::WindowPlace,
-        open: impl Fn(TabId, SeatId) -> Option<bool>,
+        standing: impl Fn(TabId, SeatId) -> Option<bool>,
     ) -> Vec<AttentionDelivery> {
         self.deliveries
             .into_iter()
             .filter_map(|delivery| {
-                let tab_is_active = open(delivery.tab, delivery.seat)?;
+                let tab_is_active = standing(delivery.tab, delivery.seat)?;
                 Some(AttentionDelivery {
                     reach: notify::desktop_reach(tab_is_active, place),
                     ..delivery

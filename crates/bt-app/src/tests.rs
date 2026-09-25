@@ -17803,8 +17803,9 @@ fn a_notification_placed_before_the_first_answer_uses_the_default_and_is_re_plac
         flash.contradicted_by(answer),
         "an answer that says the bar hides itself re-places the flash"
     );
-    let open = |tab: TabId, seat: SeatId| (tab == TabId(7) && seat == SeatId(3)).then_some(false);
-    let replaced = flash.replaced(covered_window_on(answer), open);
+    let standing =
+        |tab: TabId, seat: SeatId| (tab == TabId(7) && seat == SeatId(3)).then_some(false);
+    let replaced = flash.replaced(covered_window_on(answer), standing);
     assert_eq!(replaced.len(), 1);
     assert_eq!(replaced[0].reach, attention::Reach::Toast);
     assert_eq!(

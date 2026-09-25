@@ -71,10 +71,11 @@ impl TaskbarState {
         }
     }
 
-    /// The latest answer. One atomic load — nothing to wait on, whatever the
+    /// The latest answer — named `latest` and not `read`, because it reads no file (the
+    /// `file_reads` guard's vocabulary). One atomic load — nothing to wait on, whatever the
     /// lane is doing.
     #[must_use]
-    pub fn read(&self) -> TaskbarReading {
+    pub fn latest(&self) -> TaskbarReading {
         TaskbarReading::from_word(self.word.load(Ordering::Acquire))
     }
 
@@ -125,8 +126,8 @@ mod tests {
     #[test]
     fn an_older_answer_about_the_taskbar_never_overwrites_a_newer_one() {
         let slot = TaskbarState::new();
-        assert_eq!(slot.read(), TaskbarReading::default());
-        assert!(!slot.read().answered());
+        assert_eq!(slot.latest(), TaskbarReading::default());
+        assert!(!slot.latest().answered());
 
         assert!(slot.offer(2, true), "the first answer is taken");
         assert!(!slot.offer(1, false), "an older answer is dropped");
@@ -135,7 +136,7 @@ mod tests {
             "the same request is not answered twice"
         );
         assert_eq!(
-            slot.read(),
+            slot.latest(),
             TaskbarReading {
                 generation: 2,
                 auto_hidden: true
@@ -143,7 +144,7 @@ mod tests {
         );
         assert!(slot.offer(3, false), "a newer answer is taken");
         assert_eq!(
-            slot.read(),
+            slot.latest(),
             TaskbarReading {
                 generation: 3,
                 auto_hidden: false
