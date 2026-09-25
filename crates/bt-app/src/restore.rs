@@ -253,25 +253,23 @@ impl RestorePrompt {
         was_open
     }
 
-    /// **Esc is not an answer, so the prompt does not take it.**
+    /// **Esc puts the card away unanswered** (0.4.5 ticket 57, coordinator's
+    /// decision 2026-09-25 on the owner's full-window gate: "Enter restores, Esc
+    /// declines for now").
     ///
-    /// Always `false`, and that is the ruling rather than a stub. `docs/DESIGN.md`
-    /// §7.1.4 requires that an unanswered prompt fold back into `lastSession`
-    /// and never be lost; the settings modal's Esc route (§7.1.5, "unwind one
-    /// layer per press") exists because a modal *has* to offer a way out of the
-    /// trap it sets.
+    /// Always `true`. Since the card holds the keyboard and the pointer, a
+    /// modal has to offer a way out that a keyboard can reach (§7.1.5, "unwind
+    /// one layer per press"), and `Enter` is the other answer.
     ///
-    /// Making Esc mean "No thanks" would be worse than useless: it would spend
-    /// your other tabs on a keystroke you pressed at a shell.
-    ///
-    /// **Since 0.4.5 ticket 57 the card holds the keyboard**, so an Esc it does
-    /// not take no longer reaches the shell either: it reaches nothing, like
-    /// every key but `Enter`. Whether Esc should put the card away unanswered
-    /// (the question then folds back into `lastSession`, which this `false`
-    /// would allow by turning to `true`) is not ruled; the ticket kept today's
-    /// answer.
+    /// **It is the card's unanswered road, not "No thanks".** The key only
+    /// closes the prompt: no answer is recorded, so the tabs it asked about stay
+    /// in the question and `Runtime::window_snapshot` folds them back into
+    /// `lastSession` (§7.1.4 「未答复计划并回 lastSession，不得丢失」) — the next
+    /// launch asks again. "No thanks" is an answer: it puts them in Recent and
+    /// the question is spent. Making Esc mean "No thanks" would spend the tabs
+    /// on the reflex key of every dialog.
     pub fn consumes_escape(self) -> bool {
-        false
+        true
     }
 
     /// Returns whether the hover changed, so a caller can skip a repaint.
@@ -3503,23 +3501,21 @@ in the folders you left them, as new shells."
     }
 
     /// PIN — §7.1.4: an unanswered prompt must fold back into `lastSession` and
-    /// must not be lost, so Esc is not an answer and the prompt does not take it.
+    /// must not be lost. Esc puts the card away (0.4.5 ticket 57) without
+    /// answering it: closing the prompt records no answer, so the question's
+    /// tabs are still the question's.
     ///
-    /// Red gate: wiring Esc to "No thanks" — the reflex, and what the settings
-    /// modal's own Esc route would suggest — would spend every unpinned tab on a
-    /// keystroke that answers nothing else on the card.
+    /// Red gate: wiring Esc to "No thanks" — an *answer* — would spend every
+    /// unpinned tab on the reflex key of every dialog.
     #[test]
-    fn escape_is_not_an_answer_and_leaves_the_question_standing() {
+    fn escape_puts_the_card_away_without_answering_it() {
         let mut prompt = RestorePrompt::default();
         assert!(!prompt.is_asking(1));
         prompt.open();
         assert!(prompt.is_asking(1));
-        assert!(
-            !prompt.consumes_escape(),
-            "Esc is not an answer, and it does not put the question away"
-        );
-        assert!(prompt.is_asking(1), "and it leaves the question standing");
-        assert!(prompt.close(), "only an answer puts it away");
+        assert!(prompt.consumes_escape(), "Esc is the card's to take");
+        assert!(prompt.close(), "and it puts the card away");
+        assert!(!prompt.is_asking(1));
         assert!(!prompt.close(), "closing a shut prompt consumes nothing");
     }
 

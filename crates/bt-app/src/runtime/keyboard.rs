@@ -1609,9 +1609,10 @@ impl Runtime<'_> {
         // nothing — not the clipboard, not the shortcut table, not a composition, not the
         // encoder.
         //
-        // `Enter` answers with the button it opened focused. Esc is not an answer (§7.1.4: an
-        // unanswered question folds back into `lastSession`), so `consumes_escape` still says
-        // no, and under the card that Esc is swallowed like any other key.
+        // `Enter` answers with the button it opened focused (*Restore*). Esc puts the card away
+        // **unanswered** (`consumes_escape`, coordinator's decision 2026-09-25): no answer is
+        // recorded, so the question's tabs fold back into `lastSession` (§7.1.4) and the next
+        // launch asks again — "Enter restores, Esc declines for now".
         //
         // **Here, and not beside the paste card above the settings dialog**, in the order the
         // surfaces are drawn: the settings sheet takes the card's place in the modal chain, and the

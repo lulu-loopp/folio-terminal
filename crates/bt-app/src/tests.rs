@@ -52186,6 +52186,81 @@ fn with_the_restore_card_up_a_press_on_a_pane_beneath_changes_nothing() {
     );
 }
 
+/// RED (57) — **Esc under the restore card closes it, nothing beneath receives the key, and the
+/// session's restorable set is unchanged.**
+///
+/// Coordinator's decision 2026-09-25 on the owner's full-window gate: "Enter restores, Esc declines
+/// for now", so a keyboard-only reader has both answers. Esc takes the card's **unanswered** road,
+/// not "No thanks": the key closes the prompt and records nothing, so the question's tabs are still
+/// in the window's `pending_restore` (and the application's question), and `window_snapshot` folds
+/// them back into `lastSession` for the next launch to ask about (§7.1.4). "No thanks" is an answer
+/// (`answer_restore_prompt` → `answer_restore(false)` puts them in Recent), and the Esc arm reaches
+/// none of that.
+///
+/// MUTATION: turn `RestorePrompt::consumes_escape` back to `false` (current head) — Esc is
+/// swallowed and the card stays up, and the first assertion goes red.
+#[test]
+fn esc_under_the_restore_card_closes_it_unanswered_and_reaches_nothing_beneath() {
+    let mut prompt = restore::RestorePrompt::default();
+    prompt.open();
+    assert!(
+        prompt.consumes_escape(),
+        "Esc does not put the card away: a keyboard can only answer Restore"
+    );
+    // What the rung's Esc arm does to the prompt, on the real type.
+    assert!(prompt.close());
+    assert!(
+        !prompt.is_asking(3),
+        "the card is down and the keyboard is the shell's"
+    );
+
+    // The arm, inside the rung that returns for every key.
+    let esc = "Key::Named(NamedKey::Escape)ifself.window.restore_prompt.consumes_escape()=>{self.window.restore_prompt.close();ifself.refresh_chrome(){self.present_chrome_change()?;}}";
+    assert!(
+        RESTORE_CARD_RUNG.contains(esc),
+        "the Esc arm is not the prompt's close"
+    );
+    for answer in [
+        "answer_restore_prompt(restore::RestoreAnswer::NoThanks",
+        "pending_restore",
+        "restore_question",
+        "answer_restore(",
+    ] {
+        assert!(
+            !esc.contains(answer),
+            "the Esc arm answers the card or spends its tabs: `{answer}`"
+        );
+    }
+    let ladder = squeezed_body("Runtime", "keyboard_input");
+    let rung = ladder
+        .find(RESTORE_CARD_RUNG)
+        .unwrap_or_else(|| panic!("the restore card's rung is not whole"));
+    for beneath in [
+        "self.dismiss_web_sheet()?",
+        "self.dismiss_top_float()?",
+        "self.close_search()?",
+        "self.send_user_input(",
+    ] {
+        let at = ladder
+            .find(beneath)
+            .unwrap_or_else(|| panic!("`{beneath}` is no longer in `keyboard_input`"));
+        assert!(rung < at, "Esc reaches `{beneath}` before the card");
+    }
+
+    // The unanswered tabs go back to the file: the snapshot carries the window's pending list,
+    // and only an answer (the loop's `settle_restore_answer`) clears the application's question.
+    assert!(
+        squeezed_body("Runtime", "window_snapshot")
+            .contains(".extend(self.window.pending_restore.iter().map(|tab|TabV1{pinned:false,"),
+        "an unanswered question no longer folds back into the session"
+    );
+    assert!(
+        squeezed_body("Runtime", "answer_restore_prompt")
+            .contains("self.app.pending_restore_answer=Some("),
+        "the answer is recorded somewhere other than the button's road"
+    );
+}
+
 /// RED (0.4.4 ticket 02) — **with the setting off, a multi-line paste is sent exactly as today.**
 ///
 /// MUTATION: ignore `facts.ask` in `paste_road` — the paste is held with the row off.

@@ -314,7 +314,10 @@ pastes and pointer while it is up** — `Enter` and its two buttons answer it, a
 every other key, paste, press and wheel notch reaches nothing beneath it. §7.1.4's
 「非模态」 now holds for the picture only (no scrim, nothing dimmed). Row 27 has
 the key rung; row 28's press and wheel stations read `a_modal_covers_the_window`,
-which the card is on. Whether Esc should put it away unanswered is open.
+which the card is on. **Enter restores, Esc declines for now** (coordinator's
+decision 2026-09-25): Esc closes the card without an answer, so its tabs fold
+back into `lastSession` and the next launch asks again; *No thanks* puts them in
+Recent.
 
 ### 16. The quick terminal — `not yet folded`
 Entries: §7.54 and its lettered continuations §7.54a–§7.54e, of which §7.54e
@@ -596,8 +599,10 @@ beneath it.** In `Runtime::keyboard_input` it stands directly under the
 palette's rung — under every surface drawn over it — and above every Esc rung,
 the IME rung, the clipboard rung, the shortcut table and the encoder, and it
 returns for every key;
-`Enter` answers it with `restore::FOCUSED_ANSWER` and Esc stays unconsumed, so it
-is swallowed. It is part of `KeyboardOwner::menu_or_dialog` and of
+**Enter restores, Esc declines for now**: `Enter` answers it with
+`restore::FOCUSED_ANSWER`, and Esc (`RestorePrompt::consumes_escape`, `true` since
+the coordinator's decision of 2026-09-25) closes it unanswered — no answer is
+recorded, and the tabs it asked about fold back into `lastSession`. It is part of `KeyboardOwner::menu_or_dialog` and of
 `a_surface_above_the_clipboard_rung_holds_the_keyboard`, and the terminal's
 clipboard door (`paste_from_clipboard_into`) asks that list before it reads the
 clipboard, so the terminal menu's *Paste* writes nothing under it either. One
