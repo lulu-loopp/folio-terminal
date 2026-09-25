@@ -6,17 +6,40 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-### Changed
+Nothing yet.
 
-- The first web page you open after launch can appear in a fraction of a
-  second: once you have opened web pages in Folio, it gets one ready while it
-  is idle.
+## 0.4.5-preview — 2026-09-26
 
 ### Added
 
 - Each terminal pane can have its own text size: Ctrl+= and Ctrl+− (⌘ on a
   Mac) or Ctrl+wheel over the pane, Ctrl+0 to reset. The pane shows the size
   while it is not 100 %; it resets when Folio restarts.
+
+### Changed
+
+- The first web page you open after launch can appear in a fraction of a
+  second: once you have opened web pages in Folio, it gets one ready while it
+  is idle.
+- Search, video controls, notices, toasts, tab previews, restore lists and close buttons now use the same text sizes, spacing and corners as the rest of the window.
+- The download notice uses the same padding, shadow, corners and text sizing as other dialogs and floating notices.
+- Right-click and drop-down menus use the same icon-to-label spacing as Settings.
+- The first-run card uses the same window-edge spacing and title line height as other dialogs.
+- Command palette rows use the same corners and icon spacing as other lists.
+- Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.
+- Tooltips, cards, menus and other fading surfaces now fade as one piece, so
+  their edges and text no longer arrive before their plates.
+- Bold text in a terminal font that has no bold style is now drawn heavier in
+  that same font, instead of looking like the text around it.
+- Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.
+- Git panel and graph spacing, corners, captions, badges and icons now match the rest of the window.
+- Glance-card head spacing, drag-tag padding and spacing, and peek-tag line height now match the other floating tags.
+- When Folio stops responding for half a second or more while a web page
+  opens, the line it writes to `diagnostics.log` now names the step that took
+  the time, including the time the system spent between Folio's own handlers.
+- A web pane on Windows uses the system's overlay scrollbars instead of the classic bars.
+- When Folio is upgraded, it updates the PSReadLine copy it installed earlier
+  by itself; copies you installed are left alone.
 
 ### Fixed
 
@@ -42,28 +65,6 @@ All notable changes to Folio are recorded here. The format follows
   launch asks again.
 - Closing a window while it is still asking about unsaved changes no longer
   discards them.
-
-### Changed
-
-- Search, video controls, notices, toasts, tab previews, restore lists and close buttons now use the same text sizes, spacing and corners as the rest of the window.
-- The download notice uses the same padding, shadow, corners and text sizing as other dialogs and floating notices.
-- Right-click and drop-down menus use the same icon-to-label spacing as Settings.
-- The first-run card uses the same window-edge spacing and title line height as other dialogs.
-- Command palette rows use the same corners and icon spacing as other lists.
-- Pane heads, files bars and floating windows now share the standard spacing, captions, icons and control styling.
-- Tooltips, cards, menus and other fading surfaces now fade as one piece, so
-  their edges and text no longer arrive before their plates.
-- Bold text in a terminal font that has no bold style is now drawn heavier in
-  that same font, instead of looking like the text around it.
-- Settings key caps, profile badges, navigation spacing, bottom padding and menu-button corners now match their counterparts elsewhere.
-- Git panel and graph spacing, corners, captions, badges and icons now match the rest of the window.
-- Glance-card head spacing, drag-tag padding and spacing, and peek-tag line height now match the other floating tags.
-- When Folio stops responding for half a second or more while a web page
-  opens, the line it writes to `diagnostics.log` now names the step that took
-  the time, including the time the system spent between Folio's own handlers.
-- A web pane on Windows uses the system's overlay scrollbars instead of the classic bars.
-- When Folio is upgraded, it updates the PSReadLine copy it installed earlier
-  by itself; copies you installed are left alone.
 
 ## 0.4.4-preview — 2026-09-24
 
