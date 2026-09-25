@@ -2013,30 +2013,9 @@ fn scan_monospace_families() {
         // The number is read before the walk, so a request made while it runs
         // has a larger one and is served by the next round.
         let generation = MONOSPACE_FAMILIES.serving();
-        count_walk();
-        let start = std::time::Instant::now();
-        let families = bt_platform::monospace_font_families();
-        if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty()) {
-            crate::trace_sink::stderr_line(format!(
-                "BT_PERF_TRACE monospace_enumeration_us={} families={} generation={generation}",
-                start.elapsed().as_micros(),
-                families.len()
-            ));
-        }
-        MONOSPACE_FAMILIES.offer(generation, families);
-        if !CJK_FAMILIES.scanned() {
-            count_walk();
-            let start = std::time::Instant::now();
-            let families = bt_platform::cjk_font_families();
-            if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty()) {
-                crate::trace_sink::stderr_line(format!(
-                    "BT_PERF_TRACE cjk_enumeration_us={} families={}",
-                    start.elapsed().as_micros(),
-                    families.len()
-                ));
-            }
-            CJK_FAMILIES.offer(with_automatic_cjk(families));
-        }
+        let (monospace, cjk) = walk_the_machine(generation);
+        MONOSPACE_FAMILIES.offer(generation, monospace);
+        CJK_FAMILIES.offer(with_automatic_cjk(cjk));
         // After the answer is in the mailbox and never before: a wake that
         // raced the offer would send the loop to adopt nothing, and the frame
         // the reader is waiting for would then be owed to a wake that is not
@@ -2048,6 +2027,45 @@ fn scan_monospace_families() {
             return;
         }
     }
+}
+
+/// **One round of the lane: both lists, asked of the machine now.**
+///
+/// Both walks run every round (ticket 65). The CJK list used to be walked
+/// only until its first answer had landed, so a family installed afterwards
+/// never reached the Chinese-font list, however often the dialog was
+/// reopened; the platform walks now also ask the system collection for
+/// updates (`bt_platform`'s `collection_for_walk`). The round is the lane's,
+/// never the window thread's: its only product caller is
+/// [`scan_monospace_families`].
+fn walk_the_machine(
+    generation: u64,
+) -> (
+    Vec<bt_platform::MonospaceFamily>,
+    Vec<bt_platform::CjkFamily>,
+) {
+    let traced = std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty());
+    count_walk();
+    let start = std::time::Instant::now();
+    let monospace = bt_platform::monospace_font_families();
+    if traced {
+        crate::trace_sink::stderr_line(format!(
+            "BT_PERF_TRACE monospace_enumeration_us={} families={} generation={generation}",
+            start.elapsed().as_micros(),
+            monospace.len()
+        ));
+    }
+    count_walk();
+    let start = std::time::Instant::now();
+    let cjk = bt_platform::cjk_font_families();
+    if traced {
+        crate::trace_sink::stderr_line(format!(
+            "BT_PERF_TRACE cjk_enumeration_us={} families={}",
+            start.elapsed().as_micros(),
+            cjk.len()
+        ));
+    }
+    (monospace, cjk)
 }
 
 /// **Take the answer a finished walk left** — the window thread's half of
@@ -16704,6 +16722,37 @@ mod tests {
         assert!(
             list.iter().all(|entry| entry.files.is_empty()),
             "and every row of it is the seed's, with nothing to load: {list:?}"
+        );
+    }
+
+    /// RED (65) — **Every round of the font lane walks the CJK list too, after
+    /// one has landed.**
+    ///
+    /// The lane walked the CJK families only while no CJK list had landed, so
+    /// after the first answer every reopening of Settings refreshed the
+    /// monospace list and handed the Chinese-font list back unchanged: a
+    /// family installed while Folio ran never appeared in it (owner,
+    /// 2026-09-25). This lands a CJK list — the Automatic row alone, which is
+    /// what the dialog reads before any answer, so every other reader sees the
+    /// rows it saw — and runs the lane's real round on this thread.
+    ///
+    /// MUTATION: put `if !CJK_FAMILIES.scanned()` back around the CJK walk in
+    /// `walk_the_machine` — the round walks once.
+    #[test]
+    fn every_round_of_the_lane_walks_both_lists_after_the_cjk_list_has_landed() {
+        CJK_FAMILIES.publish(Vec::new(), true);
+        assert!(CJK_FAMILIES.scanned(), "a CJK list has landed");
+        let before = monospace_scans();
+        let (_, cjk) = walk_the_machine(0);
+        assert_eq!(
+            monospace_scans() - before,
+            2,
+            "the round walked the monospace families and the CJK families"
+        );
+        assert_eq!(
+            cjk,
+            bt_platform::cjk_font_families(),
+            "and its CJK answer is the machine's, asked now"
         );
     }
 

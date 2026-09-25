@@ -8855,10 +8855,7 @@ mod windows_impl {
     pub fn monospace_family_named(name: &str) -> Option<super::MonospaceFamily> {
         let factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.ok()?;
-        let mut collection: Option<IDWriteFontCollection> = None;
-        // `false`, for the walk's reason: no re-scan of the font directory.
-        unsafe { factory.GetSystemFontCollection(&mut collection, false) }.ok()?;
-        let collection = collection?;
+        let collection = collection_for_lookup(&factory).ok()??;
         let mut index = 0u32;
         let mut exists = windows::core::BOOL(0);
         unsafe { collection.FindFamilyName(&HSTRING::from(name), &mut index, &mut exists) }.ok()?;
@@ -8870,13 +8867,74 @@ mod windows_impl {
     }
 
     /// Installed families with font-declared CJK coverage (or whole-block cmap
-    /// evidence), localized names and loadable files. Enumerated once per process.
+    /// evidence), localized names and loadable files.
+    ///
+    /// **Asked of the machine on every call** (ticket 65). It was enumerated
+    /// once per process, so a family installed after the first walk never
+    /// reached the Chinese-font list until Folio restarted. Its one product
+    /// caller is the font lane, which runs when the dialog opens.
     #[must_use]
     pub fn cjk_font_families() -> Vec<super::CjkFamily> {
-        static FAMILIES: std::sync::OnceLock<Vec<super::CjkFamily>> = std::sync::OnceLock::new();
-        FAMILIES
-            .get_or_init(|| super::order_cjk_families(collect_cjk_families().unwrap_or_default()))
-            .clone()
+        super::order_cjk_families(collect_cjk_families().unwrap_or_default())
+    }
+
+    /// **The system collection a walk of every family reads: asked to check
+    /// for fonts installed since the process last looked** (ticket 65).
+    ///
+    /// Both walks ([`collect_monospace_families`], [`collect_cjk_families`])
+    /// run only on `bt-app`'s font lane, when the Settings dialog opens, and
+    /// the picker ends in a door onto the system's Fonts page: the reader is
+    /// expected to install a family and come back. `checkForUpdates = false`
+    /// hands back the collection the shared factory built the first time it
+    /// was asked, so that family stayed invisible until a restart. The check
+    /// is paid on the lane, never on the window thread.
+    fn collection_for_walk(
+        factory: &IDWriteFactory,
+    ) -> windows::core::Result<Option<IDWriteFontCollection>> {
+        system_font_collection(factory, true)
+    }
+
+    /// **The system collection the lookup of one family by name reads: as
+    /// already built, with no check for updates** (ticket 65).
+    ///
+    /// [`monospace_family_named`] runs on the window thread at launch, for the
+    /// face `settings.json` names — a face that was installed when it was
+    /// chosen. A check there would be a wait on the window thread for a change
+    /// that face does not need. A walk on the lane refreshes the shared
+    /// factory's collection, so a lookup after it sees what the walk saw.
+    fn collection_for_lookup(
+        factory: &IDWriteFactory,
+    ) -> windows::core::Result<Option<IDWriteFontCollection>> {
+        system_font_collection(factory, false)
+    }
+
+    /// The one `GetSystemFontCollection` call. Reached only through
+    /// [`collection_for_walk`] and [`collection_for_lookup`], which decide the
+    /// flag.
+    fn system_font_collection(
+        factory: &IDWriteFactory,
+        check_for_updates: bool,
+    ) -> windows::core::Result<Option<IDWriteFontCollection>> {
+        #[cfg(test)]
+        COLLECTION_UPDATE_CHECKS.with(|asked| asked.borrow_mut().push(check_for_updates));
+        let mut collection: Option<IDWriteFontCollection> = None;
+        unsafe { factory.GetSystemFontCollection(&mut collection, check_for_updates) }?;
+        Ok(collection)
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// **The `checkForUpdates` flag of every system collection this
+        /// thread opened, in order** — a door for the pins only (ticket 65),
+        /// per thread for `settings::MONOSPACE_SCANS`' reason (ticket 50).
+        static COLLECTION_UPDATE_CHECKS: std::cell::RefCell<Vec<bool>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Take the flags recorded on this thread since the last call.
+    #[cfg(test)]
+    pub(super) fn take_collection_update_checks() -> Vec<bool> {
+        COLLECTION_UPDATE_CHECKS.with(|asked| std::mem::take(&mut *asked.borrow_mut()))
     }
 
     /// Copy a DirectWrite-owned table before releasing its table context.
@@ -8911,9 +8969,7 @@ mod windows_impl {
 
     fn collect_cjk_families() -> windows::core::Result<Vec<super::CjkFamily>> {
         let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
-        let mut collection: Option<IDWriteFontCollection> = None;
-        unsafe { factory.GetSystemFontCollection(&mut collection, false) }?;
-        let Some(collection) = collection else {
+        let Some(collection) = collection_for_walk(&factory)? else {
             return Ok(Vec::new());
         };
         use windows::Win32::Graphics::DirectWrite::{
@@ -8992,12 +9048,10 @@ mod windows_impl {
 
     fn collect_monospace_families() -> windows::core::Result<Vec<super::MonospaceFamily>> {
         let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
-        let mut collection: Option<IDWriteFontCollection> = None;
-        // `false` — do not ask DirectWrite to re-scan the font directory. The
-        // list is being drawn for a human who is about to pick from it, not
-        // audited; a rescan is a disk walk this call has no reason to pay for.
-        unsafe { factory.GetSystemFontCollection(&mut collection, false) }?;
-        let Some(collection) = collection else {
+        // Asks for updates: this walk runs on the font lane when the dialog
+        // opens, and a family installed meanwhile belongs in the list it draws
+        // (ticket 65; see `collection_for_walk`).
+        let Some(collection) = collection_for_walk(&factory)? else {
             return Ok(Vec::new());
         };
 
@@ -17458,6 +17512,67 @@ mod monospace_enumeration_tests {
                 );
             }
         }
+    }
+
+    /// RED (65) — **The lane's walk asks the collection for updates; the
+    /// launch lookup does not.**
+    ///
+    /// A font installed while Folio runs has to reach the lists the next time
+    /// the dialog opens (owner, 2026-09-25: Source Han Serif SC installed,
+    /// Settings reopened, the Chinese-font list without it). DirectWrite hands
+    /// back the collection it built first unless it is asked to check. Both
+    /// walks run on the font lane and ask; the lookup by name runs on the
+    /// window thread at launch, for a face that existed when it was chosen,
+    /// and does not. This runs the three real roads on this thread and reads
+    /// the flag each one handed to `GetSystemFontCollection`.
+    ///
+    /// MUTATION: swap the flags in `collection_for_walk` and
+    /// `collection_for_lookup` — every assertion turns.
+    #[test]
+    fn the_lanes_walk_asks_the_collection_for_updates_and_the_launch_lookup_does_not() {
+        use super::windows_impl::take_collection_update_checks;
+        let _ = take_collection_update_checks();
+        let _ = monospace_font_families();
+        assert_eq!(
+            take_collection_update_checks(),
+            [true],
+            "the monospace walk asks for fonts installed since the last walk"
+        );
+        let _ = cjk_font_families();
+        assert_eq!(
+            take_collection_update_checks(),
+            [true],
+            "and so does the CJK walk"
+        );
+        let _ = monospace_family_named(DEFAULT_MONOSPACE_FAMILY);
+        assert_eq!(
+            take_collection_update_checks(),
+            [false],
+            "the lookup of the face settings.json names takes the collection as it is"
+        );
+    }
+
+    /// RED (65) — **Every call of the CJK walk asks the machine again.**
+    ///
+    /// The CJK list was enumerated once per process and every later call
+    /// handed back that first answer, so no check for updates could reach it:
+    /// a family installed after the first open of Settings never appeared in
+    /// the Chinese-font list until Folio restarted.
+    ///
+    /// MUTATION: put the `OnceLock` back around `cjk_font_families` — the
+    /// second call opens no collection.
+    #[test]
+    fn every_cjk_walk_asks_the_machine_again() {
+        use super::windows_impl::take_collection_update_checks;
+        let _ = take_collection_update_checks();
+        let first = cjk_font_families();
+        let second = cjk_font_families();
+        assert_eq!(
+            take_collection_update_checks(),
+            [true, true],
+            "two walks, two collections asked for updates"
+        );
+        assert_eq!(first, second, "and nothing was installed in between");
     }
 
     #[test]
