@@ -30,12 +30,14 @@
 //!
 //! # What an import leaves alone
 //!
-//! Three keys of `settings.json` are receipts about *this machine* and not
+//! Four keys of `settings.json` are receipts about *this machine* and not
 //! preferences: whether the first-run card has been put up here
 //! (`first_run_card`), whether this machine owes its `$PROFILE` a line
-//! (`powershell_install_pending`), and whether the cards' gesture hint has been
+//! (`powershell_install_pending`), whether the cards' gesture hint has been
 //! shown here (`cards_gesture_hint_offer`, which has one spender and one
-//! restorer and no third opinion — `the_cards_offer_is_spent_in_one_place_and_given_back_in_one`).
+//! restorer and no third opinion — `the_cards_offer_is_spent_in_one_place_and_given_back_in_one`),
+//! and whether a web page has ever committed here (`web_pages_used`, 0.4.5
+//! ticket 60, which decides whether this profile is given a spare controller).
 //! Another machine's answer to any of them is not a fact about this one, so they
 //! are kept as they stand. A row this platform
 //! does not have — `Acrylic` on a Mac, `Option key sends Alt` on Windows — is
@@ -310,6 +312,7 @@ pub(crate) fn plan_settings(
         // one above.
         first_run_card: _,
         powershell_install_pending: _,
+        web_pages_used: _,
         launch_opens,
         option_sends_alt,
         multiline_paste_ask,
@@ -663,6 +666,7 @@ mod tests {
             option_sends_alt: !base.option_sends_alt,
             multiline_paste_ask: !base.multiline_paste_ask,
             web_color_scheme: WebColorSchemeV1::Dark,
+            web_pages_used: bt_persist::WebPagesUsedV1::Used,
             ..base
         }
     }
@@ -699,6 +703,7 @@ mod tests {
                 first_run_card: current.first_run_card,
                 powershell_install_pending: current.powershell_install_pending,
                 cards_gesture_hint_offer: current.cards_gesture_hint_offer,
+                web_pages_used: current.web_pages_used,
                 ..imported.clone()
             };
             assert_eq!(folded, expected, "{platform:?}");
@@ -729,6 +734,42 @@ mod tests {
                 .contains(&SettingChange::Acrylic(imported.acrylic)),
             "the backdrop is named on a Mac"
         );
+    }
+
+    /// RED (60) — **the web-pages receipt is no row, and no import moves it, in either
+    /// direction.**
+    ///
+    /// Whether a page has ever committed here is a fact about this profile: another machine's
+    /// `Used` would hand this one a 91 MB spare it never asked for, and another machine's `Never`
+    /// would take away the first page's speed from a reader who opens pages every day.
+    ///
+    /// MUTATION: bind `web_pages_used` in `plan_settings` and offer it as a change, and the fold
+    /// carries the imported value.
+    #[test]
+    fn the_web_pages_receipt_is_no_row_and_no_import_moves_it() {
+        use bt_persist::WebPagesUsedV1::{Never, Used};
+        for (here, there) in [(Never, Used), (Used, Never)] {
+            let current = SettingsV1 {
+                web_pages_used: here,
+                ..SettingsV1::default()
+            };
+            let imported = SettingsV1 {
+                web_pages_used: there,
+                ..SettingsV1::default()
+            };
+            let plan = plan_settings(&current, &imported, bt_platform::HostPlatform::Windows);
+            assert!(
+                plan.apply.is_empty() && plan.elsewhere.is_empty(),
+                "nothing to put in force: {:?} {:?}",
+                plan.apply,
+                plan.elsewhere
+            );
+            let mut folded = current.clone();
+            for change in plan.apply.iter().chain(&plan.elsewhere) {
+                change.write_into(&mut folded);
+            }
+            assert_eq!(folded.web_pages_used, here, "this machine's receipt stands");
+        }
     }
 
     /// RED (0.4.4 ticket 05) — **an import of an export of this very state

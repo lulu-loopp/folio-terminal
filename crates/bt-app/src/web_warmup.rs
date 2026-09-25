@@ -31,6 +31,12 @@
 //! follows a quiet stretch, and the clock always has a future instant to wake
 //! for. The restore card is not a stir: it can stand for as long as the reader
 //! leaves it, and whatever takes it down is a gesture, which is.
+//!
+//! **A second stage, the spare** (0.4.5 ticket 60; owner's ruling 2026-09-25, option A). After
+//! the environment's turn, the same clock may make one spare web controller for the first
+//! eligible page to adopt — on its own quiet turn, counted afresh from the environment's, so the
+//! two never share one; only for a profile whose history holds a page (`web_pages_used`); and only
+//! while no window holds a page. At most one per process, attempted once, never replenished.
 
 use std::time::{Duration, Instant};
 
@@ -55,6 +61,57 @@ pub(crate) const WEB_ENGINE_WARMUP_AFTER: Duration = Duration::from_secs(5);
 /// between bursts, not a gap between keystrokes: typing keeps its inter-key
 /// gaps well under it, so the warm-up does not land inside a word.
 pub(crate) const WEB_ENGINE_WARMUP_QUIET: Duration = Duration::from_secs(1);
+
+/// **Whether a window event is the reader doing something** — a gesture (the file-read ledger's
+/// own classifier, [`crate::file_reads::is_user_input`]) or the window resized, moved or carried
+/// to another scale (ticket 60, F1).
+pub(crate) fn event_stirs(event: &winit::event::WindowEvent) -> bool {
+    use winit::event::WindowEvent;
+    crate::file_reads::is_user_input(event)
+        || matches!(
+            event,
+            WindowEvent::Resized(_)
+                | WindowEvent::Moved(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+        )
+}
+
+/// **What one window's turn says about whether anything is happening in it** (tickets 54 and
+/// 60) — the one derivation both the environment's warm-up and the spare's stage read.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TurnFacts {
+    /// Everything in motion, Folio's own periodics included — the pacer's lanes.
+    pub(crate) running: crate::pace::Lanes,
+    /// The motion a gesture set going: `running` less the periodics.
+    pub(crate) travelling: crate::pace::Lanes,
+    /// A frame owed to the glass: a refused animation frame, a shell frame not yet presented, a
+    /// chrome present pending (a caret's phase among them), a picture or a card owed one.
+    pub(crate) repaint_owed: bool,
+    /// A resize still owed to a shell, or one still settling.
+    pub(crate) resize_owed: bool,
+}
+
+impl TurnFacts {
+    /// **Nothing moving and nothing owed to the glass** — the turn's `BT_PERF_TRACE idle_wake`
+    /// test.
+    pub(crate) fn at_rest(&self) -> bool {
+        !self.running.any() && !self.repaint_owed
+    }
+
+    /// **Whether this turn stirs the warm-up** (ticket 60, F1; supersedes ticket 54's
+    /// "a window not at rest").
+    ///
+    /// A gesture and a shell's output are stirred where they arrive; what a turn adds is a window
+    /// mid-way through motion a gesture set going, or a resize still owed. **A repaint Folio
+    /// scheduled for itself is not a stir**: a blinking caret presents twice a second and carries
+    /// nothing new, and counted as one it held the warm-up's quiet stretch shut for as long as a
+    /// shell had the keyboard (measured on the clean VM: neither the environment nor the spare was
+    /// ever asked for at a prompt). Content arriving on its own — a shell frame, a picture — is
+    /// already a stir where it arrives, or nobody's doing.
+    pub(crate) fn stirs(&self) -> bool {
+        self.travelling.any() || self.resize_owed
+    }
+}
 
 /// The one line `diagnostics.log` gets when the warm-up's request fails.
 pub(crate) fn warm_up_failed_line(error: &str) -> String {
@@ -96,19 +153,39 @@ pub(crate) struct WebWarmup {
     /// The last instant something stirred: a gesture, output drained, a window
     /// not at rest.
     stirred_at: Option<Instant>,
-    /// **Once per process.** Set the turn the clock asked, or found that
-    /// somebody already had, or that there was nothing to warm. Never cleared:
-    /// a failed warm-up leaves the environment's state empty and the next page
-    /// asks again, as it did before ticket 54.
-    done: bool,
+    /// **Which of its two turns the clock is waiting for** (tickets 54 and 60). Only ever moves
+    /// forward: the environment's turn, then the spare's, then nothing. Never back: a failed
+    /// warm-up leaves the environment's state empty and the next page asks again, as it did before
+    /// ticket 54, and a spare is attempted once.
+    stage: Stage,
+    /// When the environment's turn fired: the spare's quiet stretch is counted from it too.
+    environment_turn_at: Option<Instant>,
+}
+
+/// The clock's stages, in the only order they run.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Stage {
+    /// The environment has not been asked for.
+    #[default]
+    Environment,
+    /// The environment's turn has fired; the spare's has not.
+    Spare,
+    /// Nothing more is owed.
+    Done,
+}
+
+/// **What the spare's turn decided** (ticket 60).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SpareDue {
+    /// Make the spare now, on this quiet turn.
+    Make,
+    /// Not for this process: the profile has never opened a page, or a page is already open.
+    Declined,
 }
 
 impl WebWarmup {
     /// **Something stirred at `at`**: the quiet stretch starts again from here.
     pub(crate) fn stir(&mut self, at: Instant) {
-        if self.done {
-            return;
-        }
         self.stirred_at = Some(self.stirred_at.map_or(at, |stirred| stirred.max(at)));
     }
 
@@ -137,10 +214,63 @@ impl WebWarmup {
     /// comes regardless), and while the restore card is up (whatever takes the
     /// card down is a gesture, and the gesture books the next instant).
     pub(crate) fn deadline(&self, restore_card_up: bool) -> Option<Instant> {
-        if self.done || restore_card_up {
+        if restore_card_up {
+            return None;
+        }
+        match self.stage {
+            Stage::Environment => self.ready_at(),
+            Stage::Spare => self.spare_ready_at(),
+            Stage::Done => None,
+        }
+    }
+
+    /// The earliest instant the spare's turn may fire: a quiet stretch after the environment's
+    /// turn and after the last stir, and never before the grace.
+    fn spare_ready_at(&self) -> Option<Instant> {
+        let fired = self.environment_turn_at? + WEB_ENGINE_WARMUP_QUIET;
+        Some(self.ready_at()?.max(fired))
+    }
+
+    /// **The instant from which a turn is quiet** — the end of the quiet stretch after the last
+    /// stir, and never before the grace — or `None` while the restore card stands (ticket 60,
+    /// SW-6). The spare, while it is being made, is advanced only on a turn at or after this, so
+    /// its controller call — up to 590 ms on the window thread, measured — never lands inside a
+    /// burst of typing, however late the environment's answer arrived.
+    pub(crate) fn quiet_at(&self, restore_card_up: bool) -> Option<Instant> {
+        if restore_card_up {
             return None;
         }
         self.ready_at()
+    }
+
+    /// Whether `now` is a quiet turn — see [`Self::quiet_at`].
+    pub(crate) fn is_quiet(&self, now: Instant, restore_card_up: bool) -> bool {
+        self.quiet_at(restore_card_up).is_some_and(|at| now >= at)
+    }
+
+    /// **The spare's turn** (ticket 60): `Some` on the first quiet turn after the environment's
+    /// turn — `Make` when `pages_used` (the profile's receipt) and no window holds a page,
+    /// `Declined` otherwise — and `None` on every other turn. Either answer ends the clock: at
+    /// most one spare per process, attempted once.
+    pub(crate) fn spare_turn(
+        &mut self,
+        now: Instant,
+        restore_card_up: bool,
+        pages_used: bool,
+        page_open: bool,
+    ) -> Option<SpareDue> {
+        if self.stage != Stage::Spare || restore_card_up {
+            return None;
+        }
+        if now < self.spare_ready_at()? {
+            return None;
+        }
+        self.stage = Stage::Done;
+        Some(if pages_used && !page_open {
+            SpareDue::Make
+        } else {
+            SpareDue::Declined
+        })
     }
 
     /// **One turn of the clock.** Asks the door for the environment when the
@@ -159,13 +289,12 @@ impl WebWarmup {
         door: &mut dyn EngineDoor,
         say: fn(&str),
     ) -> Option<Result<WebWarmUp, String>> {
-        if self.done || restore_card_up {
+        if self.stage != Stage::Environment || restore_card_up {
             return None;
         }
         if now < self.ready_at()? {
             return None;
         }
-        self.done = true;
         let asked = door.warm(Box::new(move |error| {
             if let Some(error) = error {
                 say(&warm_up_failed_line(&error));
@@ -174,6 +303,13 @@ impl WebWarmup {
         if let Err(error) = &asked {
             say(&warm_up_failed_line(error));
         }
+        // A platform with nothing to warm has no controller to make ahead of time either.
+        self.stage = if asked == Ok(WebWarmUp::NothingToWarm) {
+            Stage::Done
+        } else {
+            Stage::Spare
+        };
+        self.environment_turn_at = Some(now);
         Some(asked)
     }
 }
@@ -275,7 +411,7 @@ mod web_warmup_tests {
     /// after the environment has arrived and been let go of again (the rebuild
     /// road's `forget_web_environment`), when only a page may ask.
     ///
-    /// MUTATION: drop the once-per-process guard (`self.done = true` in
+    /// MUTATION: drop the once-per-process guard (the stage moving on in
     /// `turn`) and a second creation call appears after the environment is
     /// let go of. Or drop the grace from `ready_at` and the request lands on
     /// the first turn.
@@ -292,6 +428,9 @@ mod web_warmup_tests {
             if let Some(answer) = clock.turn(now, false, &mut door, say) {
                 asked_at.push((now - start, answer));
             }
+            // The spare's turn (ticket 60), for a profile that has never opened a page: declined,
+            // and the clock has nothing left to ask for.
+            let _ = clock.spare_turn(now, false, false, false);
             if step == 60 {
                 door.answer(Ok(1));
                 clock.stir(now);
@@ -346,6 +485,8 @@ mod web_warmup_tests {
                 clock.turn(due + ms(100 * step), false, &mut door, say),
                 None
             );
+            // The page is open, so the spare's turn declines (ticket 60).
+            let _ = clock.spare_turn(due + ms(100 * step), false, true, true);
         }
         assert_eq!(door.creations.len(), 1, "the page's call is the only call");
         assert_eq!(clock.deadline(false), None);
@@ -472,6 +613,89 @@ mod web_warmup_tests {
             "the page makes its own call, as it did before ticket 54"
         );
         assert_eq!(door.phase(), WebEnvironmentPhase::Requested);
+    }
+
+    /// RED (60, F1) — **a window whose shell caret blinks and nothing else stays quiet, and the
+    /// warm-up, then the spare, fires after the grace.**
+    ///
+    /// The caret's phase is a chrome present Folio schedules for itself twice a second; the turn
+    /// used to read it as "not at rest" and stir, so the quiet stretch never ran out while a shell
+    /// held the keyboard. The turn's facts here are the ones a blinking window has: nothing
+    /// running, nothing a gesture set going, no resize owed, and a repaint owed on every other
+    /// turn. A travelling tween and a resize still owed do stir.
+    ///
+    /// MUTATION: count the blink as a stir (`|| self.repaint_owed` in `TurnFacts::stirs`) and
+    /// neither the environment nor the spare is ever asked for.
+    #[test]
+    fn a_blinking_caret_is_not_a_stir_and_the_warm_up_and_the_spare_fire_after_the_grace() {
+        use super::{SpareDue, TurnFacts};
+        use crate::pace::Lanes;
+        let still = Lanes::default();
+        let start = Instant::now();
+        let mut clock = WebWarmup::default();
+        let mut door = Recorded::default();
+        clock.saw_frame(Some(start));
+        let mut asked = None;
+        let mut spare = None;
+        for step in 0..100_u32 {
+            let now = start + ms(100 * u64::from(step));
+            let facts = TurnFacts {
+                running: still,
+                travelling: still,
+                // The caret flips every 500 ms: a chrome present owed on those turns.
+                repaint_owed: step % 5 == 0,
+                resize_owed: false,
+            };
+            assert!(
+                !facts.stirs(),
+                "turn {step}: a blink is not the reader doing anything"
+            );
+            if facts.stirs() {
+                clock.stir(now);
+            }
+            if let Some(answer) = clock.turn(now, false, &mut door, say) {
+                asked.get_or_insert((now - start, answer));
+            }
+            if let Some(due) = clock.spare_turn(now, false, true, false) {
+                spare.get_or_insert((now - start, due));
+            }
+        }
+        assert_eq!(asked, Some((WEB_ENGINE_WARMUP_AFTER, Ok(WebWarmUp::Asked))));
+        assert_eq!(
+            spare,
+            Some((
+                WEB_ENGINE_WARMUP_AFTER + WEB_ENGINE_WARMUP_QUIET,
+                SpareDue::Make
+            ))
+        );
+        let travelling = TurnFacts {
+            running: Lanes {
+                chrome: true,
+                overlay: false,
+            },
+            travelling: Lanes {
+                chrome: true,
+                overlay: false,
+            },
+            repaint_owed: false,
+            resize_owed: false,
+        };
+        assert!(travelling.stirs(), "a tween a gesture set going is a stir");
+        let spinning = TurnFacts {
+            travelling: still,
+            ..travelling
+        };
+        assert!(
+            !spinning.stirs() && !spinning.at_rest(),
+            "a status spinner is motion, not a stir"
+        );
+        assert!(
+            TurnFacts {
+                resize_owed: true,
+                ..spinning
+            }
+            .stirs()
+        );
     }
 
     /// **A platform with nothing to warm is told once and never again.**

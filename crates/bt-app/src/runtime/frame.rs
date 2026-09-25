@@ -1597,13 +1597,22 @@ impl Runtime<'_> {
     /// The idle test the turn's `BT_PERF_TRACE idle_wake` line was written with, named
     /// so that the web engine's warm-up asks the same question (ticket 54) rather than
     /// a second spelling of it.
-    fn window_at_rest(&self, running: crate::pace::Lanes) -> bool {
-        !running.any()
-            && !self.window.frame_clock.owes_a_frame()
-            && self.window.pending_frames.pending_frame().is_none()
-            && !self.window.chrome_present_pending
-            && !self.window.pictures_owe_a_frame
-            && !self.window.cards.owes_frame()
+    fn turn_facts(
+        &self,
+        running: crate::pace::Lanes,
+        travelling: crate::pace::Lanes,
+        resize_owed: bool,
+    ) -> crate::web_warmup::TurnFacts {
+        crate::web_warmup::TurnFacts {
+            running,
+            travelling,
+            repaint_owed: self.window.frame_clock.owes_a_frame()
+                || self.window.pending_frames.pending_frame().is_some()
+                || self.window.chrome_present_pending
+                || self.window.pictures_owe_a_frame
+                || self.window.cards.owes_frame(),
+            resize_owed,
+        }
     }
 
     pub(crate) fn turn(
@@ -2056,6 +2065,10 @@ impl Runtime<'_> {
         let strip_animation_deadline = strip_animation.deadline;
         let terminal_thumb_deadline = terminal_thumbs.deadline;
         let running = self.running_journeys(now, strip_animation.moving, terminal_thumbs.moving);
+        // **What a gesture set going**, from the same walk (ticket 60, F1): the lanes less
+        // Folio's own periodics. See [`crate::web_warmup::TurnFacts::stirs`].
+        let travelling =
+            self.running_journeys(now, strip_animation.travelling, terminal_thumbs.travelling);
         self.window.frame_clock.note_running(running);
         let startup_deadline = startup_poll_delay(self.window.first_text_presented)
             .map(|_| self.window.startup_poll_at);
@@ -2096,16 +2109,18 @@ impl Runtime<'_> {
         // clock; the window that turns the application's clocks then asks it, and it
         // fires at most once per process. After the fold's inputs above, because they
         // are what "at rest" is read from, and before the fold, which books its wake.
-        if !self.window_at_rest(running)
-            || pty_resize_deadline.is_some()
-            || resize_finish_deadline.is_some()
-        {
+        let facts = self.turn_facts(
+            running,
+            travelling,
+            pty_resize_deadline.is_some() || resize_finish_deadline.is_some(),
+        );
+        if facts.stirs() {
             self.app.web_warmup.stir(now);
         }
         if application_clocks {
             hang_watch::during(hang_watch::Station::WebWarmup, || self.warm_web_engine(now));
         }
-        const DEADLINE_OWNERS: [&str; 52] = [
+        const DEADLINE_OWNERS: [&str; 53] = [
             "startup poll",
             "IME cursor",
             "shell caret",
@@ -2158,6 +2173,7 @@ impl Runtime<'_> {
             "window title",
             "search walk",
             "web engine warm-up",
+            "spare web controller",
         ];
         let deadlines = [
             startup_deadline,
@@ -2425,10 +2441,23 @@ impl Runtime<'_> {
                         .deadline(self.web_warmup_waits_for_the_restore_card())
                 })
                 .flatten(),
+            // **The spare web controller** (ticket 60): while it is being made and its engine has
+            // spoken, the next quiet instant (absent while the restore card stands); otherwise its
+            // own clocks — the engine's start deadline, its browser-exit wait. Absent for a
+            // profile that never gets one, which is most turns of most runs.
+            application_clocks
+                .then(|| {
+                    let quiet = self
+                        .app
+                        .web_warmup
+                        .quiet_at(self.web_warmup_waits_for_the_restore_card());
+                    self.app.web_spare.deadline(quiet.map(|at| at.max(now)))
+                })
+                .flatten(),
         ];
         let wake = earliest_named_deadline(DEADLINE_OWNERS, deadlines);
         if self.app.trace_perf
-            && self.window_at_rest(running)
+            && facts.at_rest()
             && let Some((owner, at)) = wake
             && at.saturating_duration_since(now) < Duration::from_millis(100)
         {

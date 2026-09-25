@@ -12714,12 +12714,20 @@ impl Runtime<'_> {
 
     pub(in crate::runtime) fn strip_animation_work(&self, now: Instant) -> AnimationWork {
         let motion = self.app.motion;
-        let tabs_moving = self.window.tabs.iter().any(|tab| {
-            tab.mark_is_animating(now, motion)
-                || tab.pin_is_animating(now, motion)
+        // The tab's mark is a status clock (a working agent's spinner, a waiting one's halo, a
+        // progress ring easing to what the shell printed); its pin, flip and landing are what a
+        // gesture set going (ticket 60, F1).
+        let tabs_travelling = self.window.tabs.iter().any(|tab| {
+            tab.pin_is_animating(now, motion)
                 || tab.flip.sample(now, motion).1
                 || tab.landing.sample(now, motion).1
         });
+        let tabs_moving = tabs_travelling
+            || self
+                .window
+                .tabs
+                .iter()
+                .any(|tab| tab.mark_is_animating(now, motion));
         // The `˅` belongs to the strip and not to any tab, so a window with the
         // picker mid-turn and nothing else happening still has to be woken —
         // and, once the arrow lands, must stop being woken. Under reduced
@@ -12971,6 +12979,22 @@ impl Runtime<'_> {
             // as the predicates they are made of: the panes' own tween, and the
             // bar's fade without the two waits its deadline also carries.
             moving: strip_moving || bar_moving || pane_moving,
+            // **The same fold less Folio's own periodics** (ticket 60, F1): the tab marks'
+            // status clock, a page loading, a recording playing and a card owed its picture move
+            // for as long as their condition stands, and are nobody doing anything.
+            travelling: tabs_travelling
+                || chevron_turning
+                || dock_fading
+                || cards_moving
+                || focus_arriving
+                || rail_moving
+                || files_turning
+                || passing
+                || fading
+                || saying
+                || disclosing
+                || bar_moving
+                || pane_moving,
         }
     }
 

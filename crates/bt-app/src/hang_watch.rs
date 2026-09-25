@@ -321,7 +321,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 208;
+const STATION_COUNT: usize = 210;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -991,6 +991,15 @@ pub enum Station {
     /// stall line that no longer names [`Self::WebEnvironment`] can be read
     /// beside the turn that paid for it instead.
     WebWarmup = 207,
+    /// **The spare web controller being made** (ticket 60, D-64): its parent window, its seat
+    /// and — on the quiet turns its engine answers on — its controller call and install burst
+    /// (`request_controller` and `WebHost::install` nest under it). Its own name so that the
+    /// idle-time price the first page no longer pays is booked where it is paid.
+    WebSpare = 208,
+    /// **A page adopting the spare** (ticket 60): the `WebSeat::rehost` walk that hands the
+    /// parked controller to the page's window, in place of `request_environment`,
+    /// `request_controller` and a pump dispatch on the gesture's turn.
+    WebAdopt = 209,
 }
 
 impl Station {
@@ -1206,6 +1215,8 @@ impl Station {
             Self::Pump => "message pump",
             Self::FontLookup => "font family lookup",
             Self::WebWarmup => "warm_web_engine",
+            Self::WebSpare => "make_spare_web_controller",
+            Self::WebAdopt => "adopt_spare_web_controller",
         }
     }
 
@@ -1435,6 +1446,8 @@ impl Station {
             205 => Self::Pump,
             206 => Self::FontLookup,
             207 => Self::WebWarmup,
+            208 => Self::WebSpare,
+            209 => Self::WebAdopt,
             _ => Self::Starting,
         }
     }
@@ -4776,6 +4789,8 @@ mod tests {
             "WebHost::navigate",
             "message pump",
             "warm_web_engine",
+            "make_spare_web_controller",
+            "adopt_spare_web_controller",
         ] {
             assert!(
                 vocabulary.contains(&word),

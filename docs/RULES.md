@@ -780,6 +780,10 @@ table, and a punctuation gate* (the second §7.19); 2026-09-23 *settings travel 
 one exported file* — the bundle's own shape version is `folio_export` 1
 (`bt_persist::FOLIO_EXPORT_VERSION`), separate from each part's `schema_version`,
 and a part is read by `migrate::parse_document`, the chain its own file is read by.
+Trailing entry: 2026-09-25 (ticket 60) — `settings.json` v39 carries `web_pages_used`,
+a receipt; the structural step writes `Never` and stays pure, and the window process
+completes the upgrade at startup from the session it has already loaded (a typed page
+record writes `Used` through the receipt's one writer; nothing writes `Never`).
 
 ### 32. Profiles — `not yet folded`
 Entries: §7.1.6c-6 *profiles as data*; §7.1.6c-6d *`profiles.json` is followed
@@ -827,9 +831,9 @@ each refused line named; *settings* through `parse_document` — an older part
 migrated, a future part refused whole — and then **each changed value through the
 function a press on its row calls, never by writing `settings.json` and waiting**,
 with the store's writes held so the batch lands as one write. A part the file does
-not carry is left alone. Three keys are receipts about this machine and are not
+not carry is left alone. Four keys are receipts about this machine and are not
 imported (`first_run_card`, `powershell_install_pending`,
-`cards_gesture_hint_offer`); `Focus mode` and `Offer PowerShell integration` are
+`cards_gesture_hint_offer`, `web_pages_used`); `Focus mode` and `Offer PowerShell integration` are
 imported by pressing the row's own item, their only door; a row this platform
 does not have is stored and named. No confirmation before an import — it is the
 reader's deliberate gesture — and no network: syncing the file or the folder is a
@@ -963,11 +967,15 @@ every dirty preview buffer and uncommitted editor, offering save-all, discard-al
 or cancel; ② a read-only photograph of every window; ③ the judged atomic write
 (`Runtime::quit_save` and the judged flush — **a refused disk means do not
 leave**); ④ retirement, with windows hidden and the loop still pumping only the
-browser-exit clock to its deadline. **The two failure roads skip phases ① and ③
+browser-exit clock to its deadline. **The spare web controller shares the run's one
+bounded retirement** (ticket 60): `App::run_retiring_until` is set once, when the last
+window closes or ④ begins, the spare retires in that same branch, and the run ends only
+when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The two failure roads skip phases ① and ③
 entirely.** `FolioApp::fail` — twelve call sites — asks the device-loss latch
 first, then prints its stopped line, closes **every** window with the ending flag
-through `Runtime::close_window` so that no shell outlives its window, finishes the
-application and exits the loop. `install_panic_log_hook` / `install_panic_log_hook_at`
+through `Runtime::close_window` so that no shell outlives its window, **abandons the
+spare web controller without waiting (its controller closed, its parent left to process
+exit; `exiting` does the same)**, finishes the application and exits the loop. `install_panic_log_hook` / `install_panic_log_hook_at`
 ends the announcing panic by hiding every window of this process through a system
 enumeration — not Folio's own window table — then leaves the process with a run
 footer, and only for the one thread that won the announcement.
@@ -1045,6 +1053,10 @@ the page is told `prefers-color-scheme` — WebView2's profile `PreferredColorSc
 WKWebView's own `appearance` — from Settings ▸ Appearance ▸ *Web pages* (`Theme`
 by default, or `Light` / `Dark`), in the install step before the first navigation and
 again on every theme or setting change; nothing else about a page is changed.
+2026-09-25 *the first eligible web page adopts a spare controller made on a quiet turn*
+(0.4.5 ticket 60; owner's ruling 2026-09-25, option A): only for a profile whose receipt
+says a page has committed there, one spare per process, never replenished, handed over by
+`WebSeat::rehost`; the controller stays on the window thread (§5.2, ruling 2026-09-24).
 
 ### 50. The video engine — `not yet folded`
 Entries: §7.23 *video has a face: the first frame comes from the platform decoder,

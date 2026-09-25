@@ -276,6 +276,19 @@ impl WebHost {
     /// Close a controller nobody came for. There is none.
     pub fn close_pending_controller(&mut self) {}
 
+    /// Whether a creation call nobody will adopt has still not answered. Never here: this host
+    /// makes no controller that can outlive the one who asked for it.
+    #[must_use]
+    pub fn has_orphans(&self) -> bool {
+        false
+    }
+
+    /// Whether the engine has said something nobody has read yet.
+    #[must_use]
+    pub fn has_events(&self) -> bool {
+        false
+    }
+
     /// Close the host. Nothing to close, and it must not refuse: this runs on
     /// the way out of a seat and on the way out of the process.
     pub fn close(&mut self) {}
@@ -300,6 +313,43 @@ impl WebHost {
 /// answer, and M4-2 answered it in the macOS arm — see §4.5 of the plan and
 /// `docs/DESIGN.md` §13.29.
 pub fn forget_web_environment() {}
+
+/// **Which environment the process has** (0.4.5 ticket 60). There is no process-wide environment
+/// on this platform, so there is nothing to move: always `0`.
+#[must_use]
+pub fn web_environment_epoch() -> u64 {
+    0
+}
+
+/// **The spare web controller's parent** (0.4.5 ticket 60), which this platform never makes: its
+/// engine is made on the spot, so there is nothing to warm and no parent to hold it. Uninhabited —
+/// [`spare_parent`] answers `None` — and declared so that `bt-app` names one type everywhere.
+pub struct SpareParent(std::convert::Infallible);
+
+impl SpareParent {
+    /// The window. Unreachable: there is no parent.
+    #[must_use]
+    pub fn window(&self) -> NativeWindow {
+        match self.0 {}
+    }
+
+    /// The parent's composition tree. Unreachable: there is no parent.
+    #[must_use]
+    pub fn compositor(&self) -> &Compositor {
+        match self.0 {}
+    }
+
+    /// Whether the window exists. Unreachable: there is no parent.
+    #[must_use]
+    pub fn is_window(&self) -> bool {
+        match self.0 {}
+    }
+}
+
+/// **Make the spare's parent**: nothing to make on this platform.
+pub fn spare_parent() -> Result<Option<SpareParent>, String> {
+    Ok(None)
+}
 
 /// **The warm-up's door** (ticket 54): nothing to warm on a platform with no
 /// engine. The answer is dropped unheard, and the page's own ask is still the

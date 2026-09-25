@@ -6,6 +6,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- The first web page you open after launch can appear in a fraction of a
+  second: once you have opened web pages in Folio, it gets one ready while it
+  is idle.
+
 ### Added
 
 - Each terminal pane can have its own text size: Ctrl+= and Ctrl+− (⌘ on a
