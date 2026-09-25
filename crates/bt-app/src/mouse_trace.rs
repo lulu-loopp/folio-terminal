@@ -291,7 +291,8 @@ pub const WHEEL_ROUTES: [&str; 11] = [
     // The horizontal tab strip.
     "tab-strip",
     // A surface standing over the panes: the hover card, the first-run card,
-    // the settings sheet, a notice, the palette, a files float.
+    // the settings sheet, any other modal card (ticket 57), a notice, the
+    // palette, a files float.
     "overlay",
     // A hosted web page.
     "page",

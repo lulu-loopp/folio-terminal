@@ -308,6 +308,14 @@ structural, and unknown keys are kept, not dropped.
 Entries: §2.7; §7.1.4; §7.54 *a window nobody can see is the one that needs a key
 that lives in no window* (the quick terminal's interaction with restore).
 
+Entry added 2026-09-24 (0.4.5 ticket 57; owner's ruling 2026-09-25 "the restore
+card is a full-window gate, not keyboard-only"): **the restore card holds keys,
+pastes and pointer while it is up** — `Enter` and its two buttons answer it, and
+every other key, paste, press and wheel notch reaches nothing beneath it. §7.1.4's
+「非模态」 now holds for the picture only (no scrim, nothing dimmed). Row 27 has
+the key rung; row 28's press and wheel stations read `a_modal_covers_the_window`,
+which the card is on. Whether Esc should put it away unanswered is open.
+
 ### 16. The quick terminal — `not yet folded`
 Entries: §7.54 and its lettered continuations §7.54a–§7.54e, of which §7.54e
 *behaviour model reorganised* is the latest and rules.
@@ -580,6 +588,26 @@ not step. Entry: DESIGN 2026-09-24 *Each terminal pane has its own text size*. T
 row stays `not yet folded`: the full rung order of `Runtime::keyboard_input` is
 design-note T5, and this entry adds no rung to it.
 
+Entry added 2026-09-24 (0.4.5 ticket 57; the owner's 2026-09-23 ruling that the
+multi-line paste card is modal, applied to the restore card as the same kind of
+surface, and widened by the owner's ruling of 2026-09-25 to a full-window gate):
+**the restore card is a modal rung, and keys, pastes and pointer reach nothing
+beneath it.** In `Runtime::keyboard_input` it stands directly under the
+palette's rung — under every surface drawn over it — and above every Esc rung,
+the IME rung, the clipboard rung, the shortcut table and the encoder, and it
+returns for every key;
+`Enter` answers it with `restore::FOCUSED_ANSWER` and Esc stays unconsumed, so it
+is swallowed. It is part of `KeyboardOwner::menu_or_dialog` and of
+`a_surface_above_the_clipboard_rung_holds_the_keyboard`, and the terminal's
+clipboard door (`paste_from_clipboard_into`) asks that list before it reads the
+clipboard, so the terminal menu's *Paste* writes nothing under it either. One
+reading of "up": `RestorePrompt::is_asking`. The pointer half (a press
+swallowed unless it is on one of the card's buttons, a wheel notch swallowed
+under any card `a_modal_covers_the_window` names) is `Runtime::mouse_input`'s and
+`Runtime::mouse_wheel`'s, row 28. Entry: DESIGN 2026-09-24 *The restore card owns
+the keyboard and the pointer while it is up: keys, pastes and presses reach
+nothing beneath it*. The row stays `not yet folded` (T5).
+
 ### 28. Mouse routing — `not yet folded` (the wheel half is folded, 2026-09-24)
 Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; §7.60
 *`T-WHEEL-TRACE`: the wheel has no road in a recording, so an aiming question
@@ -591,7 +619,10 @@ cannot be settled by reading*. Same finding as row 27 for the rung order of
 after `upright_wheel`; `flush_wheel` spends it), and the first station that takes
 it keeps it. The stations, in order: the hover card under the pointer scrolls its
 body (otherwise a hover card is put away); the first-run card; the Settings sheet;
-a toast (swallowed); the palette (its list, or nothing over its field); a hosted
+any other card `a_modal_covers_the_window` names — the quit card, the dirty gate,
+the PowerShell invitation, the paste card, the restore card — swallowed
+(2026-09-24, 0.4.5 ticket 57; before it, a notch under those scrolled the pane
+beneath); a toast (swallowed); the palette (its list, or nothing over its field); a hosted
 page (`scroll_web_page` — the page's own scroll and its own `Ctrl`/`⌘`+wheel
 zoom); a files float (its tree or its Git page); the card column or the vertical
 rail (`scroll_rail`, where `Alt` aims a card's window, §7.1.6b′) or the horizontal

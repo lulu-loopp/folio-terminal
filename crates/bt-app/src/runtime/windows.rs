@@ -1884,6 +1884,11 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **Whether a modal card or the settings sheet covers the whole window** — the one reading of
+    /// "the window is asking and nothing under it answers". A hosted page is hidden under it, a
+    /// wheel notch under it is nobody's once the first-run card and the settings sheet have had
+    /// the notches that scroll them, and nothing under it lights on a hover (0.4.5 ticket 57 made
+    /// the last two ask this, and put the restore card on it by its one reading).
     pub(crate) fn a_modal_covers_the_window(&self) -> bool {
         self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
@@ -1891,7 +1896,7 @@ impl Runtime<'_> {
             || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.window.settings.is_open()
-            || self.window.restore_prompt.is_open()
+            || self.restore_card_is_up()
     }
 
     /// **Close this window** (multiwindow slice C).

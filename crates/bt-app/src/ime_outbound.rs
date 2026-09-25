@@ -174,6 +174,8 @@ impl Runtime<'_> {
                 Some(Popup::TermMenu) => "terminal_popup",
                 Some(Popup::Tab) => "tab_popup",
                 Some(Popup::Palette) => "palette_popup",
+                // Under every popup, as its rung is (0.4.5 ticket 57).
+                None if self.restore_card_is_up() => "restore_card",
                 None => "modal",
             },
             ImeOwner::Rename => "rename",

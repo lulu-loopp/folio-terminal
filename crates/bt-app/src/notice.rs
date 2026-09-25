@@ -24,8 +24,11 @@
 //! made, exactly where the pane head's own is made.
 //!
 //! **It is not a dialog and it does not dim.** The pane behind it is a working
-//! shell — the shell it is about — and `crate::restore` already settled that a
-//! question over a working app is not a gate in front of one.
+//! shell — the shell it is about — and a question over a working app is not a
+//! gate in front of one. (`crate::restore` was the first precedent for that
+//! sentence; its card became a full-window gate in 0.4.5 ticket 57, because it
+//! asks about the whole window. This strip asks about one pane and stays what
+//! it was.)
 //!
 //! **Its ground is `--panel`.** It is a band in the pane's own column, not a
 //! thing floating over the text, so it takes the floor the panes sit on rather

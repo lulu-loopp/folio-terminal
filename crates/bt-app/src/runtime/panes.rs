@@ -873,13 +873,23 @@ impl Runtime<'_> {
         self.settle_pane_notices()
     }
 
+    /// **Whether the "Reopen your other tabs?" card is up**, which is also whether it holds
+    /// the keyboard (0.4.5 ticket 57): [`restore::RestorePrompt::is_asking`], read of this
+    /// window's prompt and the application's one question. [`Self::restore_layout`] draws the card
+    /// on the same reading.
+    pub(crate) fn restore_card_is_up(&self) -> bool {
+        self.window
+            .restore_prompt
+            .is_asking(self.app.restore_question.len())
+    }
+
     /// The restore prompt's placement, or `None` when it is not asking.
     ///
     /// Every string it draws has to be measured with the real font before the
     /// box that holds them can be sized, which is why the content is built here,
     /// where the renderer is, and handed to a module that knows only numbers.
     pub(in crate::runtime) fn restore_layout(&mut self) -> Option<restore::RestoreLayout> {
-        if !self.window.restore_prompt.is_open() || self.app.restore_question.is_empty() {
+        if !self.restore_card_is_up() {
             return None;
         }
         let scale = self.window.renderer.scale_factor() as f32;

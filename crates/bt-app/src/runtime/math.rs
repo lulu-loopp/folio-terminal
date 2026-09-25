@@ -393,9 +393,9 @@ impl Runtime<'_> {
                 ModalBand::Settings,
             )
         } else if let Some(layout) = self.restore_layout() {
-            // Above the strip but under no scrim: the prompt floats over a
-            // window that already works, which is the whole reason it is
-            // allowed to exist (mock-up 2219-2221).
+            // Above the strip but under no scrim: the window behind it is not
+            // dimmed (mock-up 2219-2221), though since 0.4.5 ticket 57 nothing
+            // under it answers a key or a press while it is up.
             (
                 restore::build(&layout, self.window.restore_prompt.hover()),
                 ModalBand::Fixed,

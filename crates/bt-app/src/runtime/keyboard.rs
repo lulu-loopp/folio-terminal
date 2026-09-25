@@ -669,6 +669,9 @@ impl Runtime<'_> {
                 // 2026-09-23, so a drop is refused under it and a composition goes nowhere.
                 || self.paste_card_seat().is_some()
                 || self.window.settings.is_open()
+                // The restore card (0.4.5 ticket 57): it holds the keyboard while it is up, so a
+                // drop is refused under it, a composition goes nowhere and no caret blinks.
+                || self.restore_card_is_up()
                 || popup_takes_the_key(self.popups_up()).is_some(),
             files_tree: self.files_keyboard_seat().is_some(),
             // The graph's search field, when it is the focused preview's and it
@@ -1599,6 +1602,43 @@ impl Runtime<'_> {
             self.palette_key(event)?;
             return Ok(());
         }
+        // **The restore card owns the keyboard while it is up** (0.4.5 ticket 57; seen on the
+        // clean VM on 2026-09-23, where `Ctrl+V` pasted into the shell under the card). It is a
+        // question in the middle of the window, as the multi-line paste card is, and it is
+        // answered the way that card is: its own keys answer it and every other key reaches
+        // nothing — not the clipboard, not the shortcut table, not a composition, not the
+        // encoder.
+        //
+        // `Enter` answers with the button it opened focused. Esc is not an answer (§7.1.4: an
+        // unanswered question folds back into `lastSession`), so `consumes_escape` still says
+        // no, and under the card that Esc is swallowed like any other key.
+        //
+        // **Here, and not beside the paste card above the settings dialog**, in the order the
+        // surfaces are drawn: the settings sheet takes the card's place in the modal chain, and the
+        // menus, the tab-name box and the palette are drawn over it. The card swallows every key
+        // and every press (owner's ruling 2026-09-25), so none of them is opened *through* it; one
+        // that is up anyway — opened by a door the card does not stand in, such as the macOS menu
+        // bar's Settings — is the surface on top and answers its own keys on the rungs above.
+        // Every rung below this one is the window's or the shell's.
+        if self.restore_card_is_up() {
+            if !event.repeat {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Enter) => {
+                        self.answer_restore_prompt(restore::FOCUSED_ANSWER)?;
+                    }
+                    Key::Named(NamedKey::Escape)
+                        if self.window.restore_prompt.consumes_escape() =>
+                    {
+                        self.window.restore_prompt.close();
+                        if self.refresh_chrome() {
+                            self.present_chrome_change()?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(());
+        }
         // **The download sheet's rung** (§7.7 ④, W2 slice ④). Above the pane
         // menu and below the modals, which is where the ruling puts it: 「Esc 梯
         // 子里排在 pane 菜单之上,顶层优先」. It is the one failure card with a
@@ -1761,31 +1801,6 @@ impl Runtime<'_> {
             }
             return Ok(());
         }
-        // The prompt answers Enter with the button it opened focused, and Esc
-        // with nothing at all: an unanswered question folds back into
-        // `lastSession` (§7.1.4), so Esc must dismiss the *prompt* without
-        // deciding for the user. It sits above the PTY encoder so neither key
-        // reaches the child while the question is up.
-        if self.window.restore_prompt.is_open() && !self.app.restore_question.is_empty() {
-            match &event.logical_key {
-                Key::Named(NamedKey::Enter) => {
-                    if !event.repeat {
-                        self.answer_restore_prompt(restore::FOCUSED_ANSWER)?;
-                    }
-                    return Ok(());
-                }
-                Key::Named(NamedKey::Escape) if self.window.restore_prompt.consumes_escape() => {
-                    if !event.repeat {
-                        self.window.restore_prompt.close();
-                        if self.refresh_chrome() {
-                            self.present_chrome_change()?;
-                        }
-                    }
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
         // **The transcript's own keys, and only a transcript has them**
         // (§7.1.6h). `Shift+PageUp`, `Ctrl+Home` and `Ctrl+End` all steer a
         // projection over a shell's scrollback; a folder tab has neither, so the
@@ -1941,8 +1956,11 @@ impl Runtime<'_> {
     /// **Every surface whose rung in [`Runtime::keyboard_input`] stands above
     /// the clipboard's**, asked as one question (T-MAC-EDIT-CLIPBOARD).
     ///
-    /// Four cards, the modal, the name editor and the five popups that own the
-    /// keyboard outright. None of them is an oversight to be filled in later: a
+    /// Five cards, the modal, the restore card (0.4.5 ticket 57), the name editor
+    /// and the five popups that own the keyboard outright. It is also the question
+    /// the terminal's clipboard door asks before it reads the clipboard
+    /// ([`Self::paste_from_clipboard_into`]), so a paste reached by a pointer — the
+    /// terminal menu's *Paste* — defers to the same list the keystroke does. None of them is an oversight to be filled in later: a
     /// `Cmd+V` typed in any one of these states does not reach a shell either,
     /// so a *menu* row that did would be the leak the ladder refuses arriving by
     /// a second door.
@@ -1959,6 +1977,7 @@ impl Runtime<'_> {
             || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.settings_layout().is_some()
+            || self.restore_card_is_up()
             || self.window.rename.is_some()
             || self.window.git_menu.is_some()
             || self.window.term_menu.is_some()

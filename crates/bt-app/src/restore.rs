@@ -10,21 +10,27 @@
 //! derived from *our* font would drift the moment the font did, and the design
 //! is the thing being reproduced.
 //!
-//! **It is not a modal, and that is the whole reason it is allowed to exist.**
-//! The mock-up says so above the markup, and `docs/DESIGN.md` §7.1.4 says it
-//! again with the word 非模态:
+//! **It does not dim.** The mock-up says so above the markup, and
+//! `docs/DESIGN.md` §7.1.4 says it again with the word 非模态:
 //!
 //! > Not modal and it does not dim: your terminal is already open behind it and
 //! > already usable. This is a prompt over a working app, not a gate in front of
 //! > one.
 //!
-//! So this module draws **no scrim** and claims **no input it is not standing
-//! on**: [`hit`] returns `Option`, exactly like [`crate::profiles`]'s popup
-//! contract, and a press beside the dialog belongs to whatever is there. What it
-//! borrows from [`crate::settings`] is craft and not contract — the same
+//! **Only the picture of that sentence still holds** (0.4.5 ticket 57, owner's
+//! ruling 2026-09-25; `docs/DESIGN.md` 2026-09-24 *The restore card owns the
+//! keyboard and the pointer while it is up*). A paste on the clean VM landed in
+//! the shell under the card, and the card is now a full-window gate, as the
+//! multi-line paste card is: `Enter` and its two buttons answer it, and every
+//! other key, paste, press and wheel notch reaches nothing. The window is not
+//! dimmed for it.
+//!
+//! So this module draws **no scrim**, and [`hit`] still returns `Option` — it
+//! names the card's own parts and nothing else. That a press beside the card is
+//! swallowed is the router's decision (`Runtime::mouse_input`), not this
+//! module's. What it borrows from [`crate::settings`] is craft — the same
 //! [`crate::settings::push_float_window`] lift/hairline/face, the same `--win`
-//! plane, the same 10px round every floating window shares. A prompt that
-//! trapped the pointer would be the settings modal wearing this one's words.
+//! plane, the same 10px round every floating window shares.
 //!
 //! Nothing here is layout: the prompt is not a seat, takes no space from the
 //! solver, and is never persisted — an unanswered question folds back into
@@ -221,8 +227,15 @@ pub struct RestorePrompt {
 }
 
 impl RestorePrompt {
-    pub fn is_open(self) -> bool {
-        self.open
+    /// **Whether the card is up and asking** — open, about at least one tab
+    /// (`tabs_asked_about` is the length of `App::restore_question`).
+    ///
+    /// The one reading of "the card is up": the card is drawn exactly when this
+    /// holds (`Runtime::restore_layout`), and it holds the keyboard exactly when
+    /// this holds (`Runtime::restore_card_is_up`, 0.4.5 ticket 57), so a card on
+    /// the glass and a card that takes the keys cannot disagree.
+    pub fn is_asking(self, tabs_asked_about: usize) -> bool {
+        self.open && tabs_asked_about > 0
     }
 
     /// Ask the question. Only a launch does this — the prompt has no control
@@ -246,12 +259,17 @@ impl RestorePrompt {
     /// §7.1.4 requires that an unanswered prompt fold back into `lastSession`
     /// and never be lost; the settings modal's Esc route (§7.1.5, "unwind one
     /// layer per press") exists because a modal *has* to offer a way out of the
-    /// trap it sets. This one sets no trap. The terminal behind it is already
-    /// working, so a question you are ignoring costs you nothing, and Esc
-    /// belongs to the thing you are actually typing into.
+    /// trap it sets.
     ///
     /// Making Esc mean "No thanks" would be worse than useless: it would spend
     /// your other tabs on a keystroke you pressed at a shell.
+    ///
+    /// **Since 0.4.5 ticket 57 the card holds the keyboard**, so an Esc it does
+    /// not take no longer reaches the shell either: it reaches nothing, like
+    /// every key but `Enter`. Whether Esc should put the card away unanswered
+    /// (the question then folds back into `lastSession`, which this `false`
+    /// would allow by turning to `true`) is not ruled; the ticket kept today's
+    /// answer.
     pub fn consumes_escape(self) -> bool {
         false
     }
@@ -596,9 +614,9 @@ pub struct RestoreLayout {
 /// Always an answer, unlike [`crate::settings::layout_for_menu`]: that one can
 /// report `None` because `max-height: calc(100% - 72px)` can go to nothing and a
 /// scrim over an absent dialog would be a window nobody can use. This prompt has
-/// no `max-height`, no scrim, and nothing to trap — a window too small for it
-/// shows a dialog running off its edges, which is what the mock-up does, and the
-/// terminal underneath stays usable either way.
+/// no `max-height` and no scrim — a window too small for it shows a dialog
+/// running off its edges, which is what the mock-up does, and its two buttons
+/// are still what answers it.
 #[must_use]
 pub fn layout(
     content: &RestoreContent,
@@ -835,10 +853,9 @@ fn clipped(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
 /// Every fill, label and mark the prompt draws, as one overlay layer.
 ///
 /// One layer, and **no scrim**. The absence is the design: the mock-up's own
-/// note above the markup rules that this thing does not dim, because the
-/// terminal behind it is already open and already usable. A quad over the window
-/// here would be the settings modal's contract smuggled in under this one's
-/// words, and it would take the working app away to ask about it.
+/// note above the markup rules that this thing does not dim. Since 0.4.5 ticket
+/// 57 the card holds the keyboard and the pointer while it is up, but the window
+/// behind it is still shown as it is, undimmed.
 #[must_use]
 pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -3379,21 +3396,22 @@ in the folders you left them, as new shells."
         }
     }
 
-    /// PIN — **the** red gate for this module. It draws no scrim, and a press
-    /// beside it passes straight through.
+    /// PIN — **the** red gate for this module. It draws no scrim, and its hit
+    /// test names the card's own parts and nothing beside them.
     ///
     /// `docs/DESIGN.md` §7.1.4 and the mock-up's own note above the markup:
-    /// "Not modal and it does not dim: your terminal is already open behind it
-    /// and already usable. This is a prompt over a working app, not a gate in
-    /// front of one — which is the whole reason it is allowed to exist."
+    /// "Not modal and it does not dim". Since 0.4.5 ticket 57 (owner's ruling
+    /// 2026-09-25) the router swallows a press beside the card — that is
+    /// `Runtime::mouse_input`'s decision and is pinned there — but the picture
+    /// still does not dim, and `hit` still answers `None` off the card, so a
+    /// press there is never read as a press on the card's face.
     ///
     /// Red gate: built with the settings dialog's shape — a full-window quad and
-    /// a `hit` that never says `None` — this prompt would swallow every click,
-    /// drag and hover in the window while it stood there, and would dim the
-    /// terminal it is promising is still usable. That is the one thing its own
-    /// design note forbids, and both halves of it are checked here.
+    /// a `hit` that never says `None` — this prompt would dim the window it
+    /// stands on, which its design note forbids, and both halves are checked
+    /// here.
     #[test]
-    fn it_draws_no_scrim_and_a_press_beside_it_passes_through() {
+    fn it_draws_no_scrim_and_its_hit_test_names_only_the_card() {
         let layout = placed(1.0);
         let palette = chrome_palette();
         let layer = one_layer(build(&layout, None));
@@ -3427,7 +3445,7 @@ in the folders you left them, as new shells."
             );
         }
 
-        // And the pointer: everywhere off the dialog belongs to whoever is there.
+        // And the hit test: everywhere off the dialog is not the dialog.
         for (x, y) in [
             (4.0, 4.0),
             (f64::from(SURFACE.0) - 4.0, f64::from(SURFACE.1) - 4.0),
@@ -3444,11 +3462,7 @@ in the folders you left them, as new shells."
                 f64::from(layout.frame[1]) - 2.0,
             ),
         ] {
-            assert_eq!(
-                hit(&layout, x, y),
-                None,
-                "({x}, {y}) is not the prompt's and must pass through"
-            );
+            assert_eq!(hit(&layout, x, y), None, "({x}, {y}) is not the prompt's");
         }
         assert_eq!(
             hit(
@@ -3493,19 +3507,18 @@ in the folders you left them, as new shells."
     ///
     /// Red gate: wiring Esc to "No thanks" — the reflex, and what the settings
     /// modal's own Esc route would suggest — would spend every unpinned tab on a
-    /// keystroke aimed at the shell behind the prompt, which is still focused
-    /// and still working, because this thing is not modal.
+    /// keystroke that answers nothing else on the card.
     #[test]
     fn escape_is_not_an_answer_and_leaves_the_question_standing() {
         let mut prompt = RestorePrompt::default();
-        assert!(!prompt.is_open());
+        assert!(!prompt.is_asking(1));
         prompt.open();
-        assert!(prompt.is_open());
+        assert!(prompt.is_asking(1));
         assert!(
             !prompt.consumes_escape(),
-            "Esc belongs to whatever you are typing into"
+            "Esc is not an answer, and it does not put the question away"
         );
-        assert!(prompt.is_open(), "and it leaves the question standing");
+        assert!(prompt.is_asking(1), "and it leaves the question standing");
         assert!(prompt.close(), "only an answer puts it away");
         assert!(!prompt.close(), "closing a shut prompt consumes nothing");
     }

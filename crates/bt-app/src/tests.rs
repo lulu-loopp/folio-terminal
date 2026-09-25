@@ -51922,6 +51922,270 @@ fn a_drop_while_the_card_is_up_is_refused() {
     );
 }
 
+/// The restore card's rung in [`Runtime::keyboard_input`], squeezed, as 0.4.5 ticket 57 built it:
+/// `Enter` answers with the focused button, an Esc the card does not consume falls to `_`, and the
+/// rung returns for every key.
+const RESTORE_CARD_RUNG: &str = "ifself.restore_card_is_up(){if!event.repeat{match&event.logical_key{Key::Named(NamedKey::Enter)=>{self.answer_restore_prompt(restore::FOCUSED_ANSWER)?;}Key::Named(NamedKey::Escape)ifself.window.restore_prompt.consumes_escape()=>{self.window.restore_prompt.close();ifself.refresh_chrome(){self.present_chrome_change()?;}}_=>{}}}returnOk(());}";
+
+/// RED (57) — **With the restore card up, Ctrl+V pastes nothing into the shell.**
+///
+/// Seen on the clean VM on 2026-09-23 (ticket 03's run): with "Reopen your other tabs?" up at
+/// launch, `Ctrl+V` pasted into the pane under the card, because the card's rung stood below the
+/// clipboard rung and caught only `Enter`. A paste has three roads to the terminal's clipboard
+/// door — the chord, the terminal menu's *Paste* (a right press, which the card lets past it) and
+/// the macOS Edit menu's *Paste* — and all three now defer to one list: the card has a rung above
+/// the clipboard rung that returns for every key, it is on the list of surfaces above that rung,
+/// and the door itself asks that list before the clipboard is read.
+///
+/// No `Runtime` can be built without a window and a GPU, so the claim is pinned on the bodies the
+/// bytes would have to pass through, read through `bt_source`, as ticket 02 pinned the paste
+/// card's modality.
+///
+/// MUTATION: take `|| self.restore_card_is_up()` out of
+/// `a_surface_above_the_clipboard_rung_holds_the_keyboard` — the first assertion goes red, and the
+/// terminal menu's *Paste* writes under the card again.
+#[test]
+fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
+    let defers = squeezed_body(
+        "Runtime",
+        "a_surface_above_the_clipboard_rung_holds_the_keyboard",
+    );
+    assert!(
+        defers.contains("||self.restore_card_is_up()"),
+        "the restore card is not on the list of surfaces above the clipboard rung:\n{defers}"
+    );
+    // The chord is the clipboard rung's own.
+    assert!(input::is_paste_shortcut(
+        &Key::Character("v".into()),
+        winit::keyboard::ModifiersState::CONTROL
+    ));
+    let ladder = squeezed_body("Runtime", "keyboard_input");
+    let rung = ladder
+        .find(RESTORE_CARD_RUNG)
+        .unwrap_or_else(|| panic!("the restore card's rung is not whole"));
+    let paste = ladder
+        .find("self.paste_from_clipboard()?;")
+        .expect("the clipboard rung is still a way out of `keyboard_input`");
+    assert!(
+        rung < paste,
+        "`Ctrl+V` reaches the clipboard rung before the card's"
+    );
+    // The door every clipboard road shares asks the list before it reads the clipboard.
+    let door = squeezed_body("Runtime", "paste_from_clipboard_into");
+    let asked = door
+        .find("ifself.a_surface_above_the_clipboard_rung_holds_the_keyboard(){returnOk(());}")
+        .unwrap_or_else(|| {
+            panic!("the clipboard door does not ask who holds the keyboard:\n{door}")
+        });
+    let read = door
+        .find("bt_platform::clipboard_payload()")
+        .expect("the door reads the clipboard");
+    let delivered = door
+        .find("self.deliver_paste(")
+        .expect("and delivers the paste");
+    assert!(
+        asked < read && read < delivered,
+        "the question is asked after the clipboard was read or the paste delivered"
+    );
+    // And the terminal menu's Paste goes through that door, not around it.
+    assert!(
+        squeezed_body("Runtime", "run_term_menu_row")
+            .contains("profiles::TermMenuRow::Paste=>self.paste_from_clipboard_into(seat),"),
+        "the terminal menu pastes through a door of its own"
+    );
+}
+
+/// RED (57) — **With the restore card up, a printable key reaches no shell.**
+///
+/// A letter reaches a shell two ways: as a key the encoder turns into bytes, and — for Chinese,
+/// Japanese, Korean — as a composition committed to the shell's input. The card's rung returns
+/// before the IME rung, the shortcut table and the encoder, and answers no `Key::Character`; and
+/// the card is a rung of `KeyboardOwner`, so a composition resolves to `ImeOwner::Modal` and goes
+/// nowhere, no caret blinks in the shell under it, and a drop is refused under it.
+///
+/// MUTATION: take `|| self.restore_card_is_up()` out of `keyboard_owner`'s `menu_or_dialog` — the
+/// first assertion goes red (or take the rung's `return Ok(())` out — the rung is no longer whole).
+#[test]
+fn with_the_restore_card_up_a_printable_key_reaches_no_shell() {
+    let owner = squeezed_body("Runtime", "keyboard_owner");
+    assert!(
+        owner.contains("||self.restore_card_is_up()"),
+        "the restore card is not a rung of the keyboard owner:\n{owner}"
+    );
+    let modal = KeyboardOwner {
+        menu_or_dialog: true,
+        ..KeyboardOwner::default()
+    };
+    assert!(!keyboard_owner_is_a_shell(modal), "no caret blinks");
+    assert_eq!(
+        ime_owner(modal),
+        ImeOwner::Modal,
+        "a composition goes nowhere"
+    );
+    assert!(modal.is_modal(), "a drop is refused");
+
+    let ladder = squeezed_body("Runtime", "keyboard_input");
+    let rung = ladder
+        .find(RESTORE_CARD_RUNG)
+        .unwrap_or_else(|| panic!("the restore card's rung is not whole"));
+    assert!(
+        !RESTORE_CARD_RUNG.contains("Key::Character"),
+        "the card answers a printable key"
+    );
+    for road in [
+        "input::is_ime_owned_key(",
+        "self.copy_selection()?;",
+        "self.app.shortcuts.lookup(",
+        "input::keyboard_bytes(",
+        "self.send_user_input(",
+    ] {
+        let at = ladder
+            .find(road)
+            .unwrap_or_else(|| panic!("`{road}` is no longer a way out of `keyboard_input`"));
+        assert!(rung < at, "`{road}` is reached before the card's rung");
+    }
+}
+
+/// RED (57) — **The card's own keys still work, and after it closes the shell receives keys
+/// again.**
+///
+/// `Enter` answers the card with the button it opened focused, and the answer closes the prompt
+/// before anything else; the rung and the drawing read one predicate, `RestorePrompt::is_asking`,
+/// so once the prompt is closed the rung is not taken and the next key falls to the encoder, the
+/// way it did before the card was up. The ladder asks about the card in exactly one place, so no
+/// second, older check can keep a key from the shell after the answer.
+///
+/// MUTATION: make `RestorePrompt::is_asking` ignore `open` — a prompt that was never opened, or
+/// was closed by the answer, still "asks", and the first assertion goes red (or take
+/// `self.window.restore_prompt.close();` out of `answer_restore_prompt` — the answer's assertion
+/// goes red).
+#[test]
+fn the_restore_cards_own_keys_still_work_and_after_it_closes_the_shell_has_the_keys_again() {
+    let mut prompt = restore::RestorePrompt::default();
+    assert!(!prompt.is_asking(2), "no card before a launch asks");
+    prompt.open();
+    assert!(prompt.is_asking(2), "up, about two tabs");
+    assert!(
+        !prompt.is_asking(0),
+        "a card about no tab is neither drawn nor holds the keyboard"
+    );
+    assert!(prompt.close(), "the answer puts it away");
+    assert!(
+        !prompt.is_asking(2),
+        "and the keyboard is the shell's again"
+    );
+
+    let answer = squeezed_body("Runtime", "answer_restore_prompt");
+    assert!(
+        answer.starts_with("{self.window.restore_prompt.close();"),
+        "the answer does not close the card first:\n{answer}"
+    );
+    assert_eq!(restore::FOCUSED_ANSWER, restore::RestoreAnswer::Restore);
+    assert!(
+        RESTORE_CARD_RUNG.contains(
+            "Key::Named(NamedKey::Enter)=>{self.answer_restore_prompt(restore::FOCUSED_ANSWER)?;}"
+        ),
+        "Enter no longer answers the card"
+    );
+    let up = squeezed_body("Runtime", "restore_card_is_up");
+    assert!(
+        up.contains("self.window.restore_prompt.is_asking(self.app.restore_question.len())"),
+        "{up}"
+    );
+    assert!(
+        squeezed_body("Runtime", "restore_layout")
+            .contains("if!self.restore_card_is_up(){returnNone;}"),
+        "the card is drawn on a reading of its own"
+    );
+    let ladder = squeezed_body("Runtime", "keyboard_input");
+    assert_eq!(
+        ladder.matches("restore_card_is_up").count(),
+        1,
+        "the ladder asks about the card in one place"
+    );
+    assert!(
+        !ladder.contains("restore_prompt.is_open()"),
+        "an older check on the card is still in the ladder"
+    );
+}
+
+/// RED (57) — **With the restore card up, a press on a pane beneath changes nothing: not the
+/// focus, not what the shell is sent, not the tab.**
+///
+/// Owner's ruling 2026-09-25: the card is a full-window gate, as the paste card is, and owns the
+/// pointer too. On BASE its press arm returned only for a press that landed on the card
+/// (`restore::hit` answered `Some`), and every other press went on to the chrome router — the tab
+/// strip, the pane that takes the focus, the program's mouse report. Now the arm stands in the
+/// router where the paste card's does and returns for every press, answering only on its two
+/// buttons; the wheel under it is nobody's (one reading, `a_modal_covers_the_window`, which the
+/// card is on); and nothing under it lights on a hover.
+///
+/// The pure half runs the card's own layout and hit test: a press on the window beside the card
+/// hits nothing, so it answers nothing. The routing half is pinned on `mouse_input`,
+/// `mouse_wheel` and `pointer_moved`, read through `bt_source` — no `Runtime` can be built without
+/// a window.
+///
+/// MUTATION: put back BASE's arm (`&& let Some(target) = restore::hit(..)` in the `if let`, so the
+/// arm is taken only on the card) — the arm is no longer whole and its pin goes red.
+#[test]
+fn with_the_restore_card_up_a_press_on_a_pane_beneath_changes_nothing() {
+    let content = restore::RestoreContent {
+        rows: Vec::new(),
+        sub_lines: vec!["These come back as new shells.".to_owned()],
+        decline_text_width: 62.0,
+        restore_text_width: 47.0,
+    };
+    let layout = restore::layout(&content, 1200.0, 800.0, 1.0);
+    // The top-left corner is the tab strip and the first pane, never the centred card.
+    for (x, y) in [(10.0, 10.0), (40.0, 120.0), (1190.0, 790.0)] {
+        assert_eq!(
+            restore::hit(&layout, x, y),
+            None,
+            "({x}, {y}) is beside the card"
+        );
+        assert_eq!(
+            restore::hit(&layout, x, y).and_then(restore::answer),
+            None,
+            "a press beside the card answers nothing"
+        );
+    }
+
+    let press = squeezed_body("Runtime", "mouse_input");
+    let arm = "iflet(Some(layout),Some(position))=(self.restore_layout(),self.window.pointer_position){ifstate==ElementState::Pressed&&button==MouseButton::Left&&letSome(answer)=restore::hit(&layout,position.x,position.y).and_then(restore::answer){self.answer_restore_prompt(answer)?;}returnOk(());}";
+    let at = press
+        .find(arm)
+        .unwrap_or_else(|| panic!("the restore card's press arm does not swallow every press"));
+    let chrome = press
+        .find("self.chrome_mouse_input(")
+        .expect("the chrome router is still reached from `mouse_input`");
+    assert!(
+        at < chrome,
+        "a press reaches the tab strip, the panes and the programs before the card"
+    );
+
+    let covers = squeezed_body("Runtime", "a_modal_covers_the_window");
+    assert!(
+        covers.contains("||self.restore_card_is_up()"),
+        "the card is not on the one reading of a modal:\n{covers}"
+    );
+    let wheel = squeezed_body("Runtime", "mouse_wheel");
+    let nobody = wheel
+        .find("ifself.a_modal_covers_the_window(){")
+        .unwrap_or_else(|| panic!("a notch under a modal card is not swallowed"));
+    let beneath = wheel
+        .find("self.scroll_web_page(")
+        .expect("the wheel still reaches a page");
+    assert!(
+        nobody < beneath,
+        "a notch under the card scrolls what is beneath"
+    );
+    assert!(
+        squeezed_body("Runtime", "pointer_moved")
+            .contains("letfree=!self.a_modal_covers_the_window()&&"),
+        "a hover under the card lights what is beneath"
+    );
+}
+
 /// RED (0.4.4 ticket 02) — **with the setting off, a multi-line paste is sent exactly as today.**
 ///
 /// MUTATION: ignore `facts.ask` in `paste_road` — the paste is held with the row off.
