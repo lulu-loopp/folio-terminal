@@ -1815,7 +1815,10 @@ impl Runtime<'_> {
             // clear goes straight through, which is right: there is nothing to
             // ask about when there is nothing to lose.
             profiles::TermMenuRow::ClearScrollback => {
-                if self.raise_dirty_gate(restore::GateRequest::ClearScrollback(seat))? {
+                if !self
+                    .raise_dirty_gate(restore::GateRequest::ClearScrollback(seat))?
+                    .proceeds()
+                {
                     return Ok(());
                 }
                 self.clear_pane_scrollback(seat)

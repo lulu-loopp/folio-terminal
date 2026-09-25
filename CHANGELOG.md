@@ -24,6 +24,8 @@ All notable changes to Folio are recorded here. The format follows
   font on the machine.
 - A terminal font with no bold style no longer switches to another font's bold
   for bold text.
+- Closing a window while it is still asking about unsaved changes no longer
+  discards them.
 
 ### Changed
 

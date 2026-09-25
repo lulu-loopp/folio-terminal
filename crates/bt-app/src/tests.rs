@@ -23573,6 +23573,369 @@ fn the_clear_scrollback_gate_counts_what_it_deletes_and_asks_nothing_for_none() 
     assert_eq!(session.scrollback_line_count(), 0);
 }
 
+// ── ticket 58: a busy dirty gate is never "nothing to ask" ──────────────────
+
+/// A real file under a scratch folder, read into a buffer the way the window
+/// reads one, then typed into through the keyboard's own door — a dirty
+/// buffer with the reader's words in it and the file's old words on the disk.
+fn a_file_being_edited(tag: &str) -> (PathBuf, preview::PreviewBuffer) {
+    let dir = disk_scratch(&format!("gate58-{tag}"));
+    let path = dir.join("notes.md");
+    std::fs::write(&path, "one\n").expect("write the file");
+    let mut buffer = buffer_read_from(&path);
+    let mut caret = preview_edit::EditCaret::default();
+    let body = buffer.content.clone().expect("the head landed");
+    caret.place(&body, 4, false);
+    assert!(
+        buffer.edit_by_caret(&mut caret, |content, caret| {
+            preview_edit::insert(content, caret, "typed by hand")
+        }),
+        "the keystroke landed"
+    );
+    assert!(buffer.dirty, "there is unsaved work");
+    (path, buffer)
+}
+
+/// Whether the buffer for `path` in this tab still holds what was typed.
+fn still_holds_the_edit(tab: &TabState, path: &Path) -> bool {
+    tab.preview_pool
+        .get(&preview::PreviewSource::file(path))
+        .is_some_and(|buffer| {
+            buffer.dirty
+                && buffer
+                    .content
+                    .as_deref()
+                    .is_some_and(|body| body.contains("typed by hand"))
+        })
+}
+
+/// The window's own event handler, the door every OS close (Alt+F4, the
+/// taskbar's Close window, `performClose:`) comes through, squeezed.
+fn window_event_squeezed() -> String {
+    squeezed(item_body(
+        &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
+    ))
+}
+
+/// RED (58) — **A window close requested while the unsaved-changes gate is up
+/// neither closes the window nor loses the buffer.**
+///
+/// The census's traced sequence (R1): a tab holding an edited file is asked to
+/// close, the gate goes up holding `CloseTab`, and before anybody answers the
+/// OS asks the window to close. The `CloseRequested` arm put `Shut` to the
+/// gate, the gate — already open — answered `Ok(false)`, the word for "nothing
+/// to ask", the arm set `shutting`, and `FolioApp::close` let the window go;
+/// the reaped `WindowRuntime` took the pool with it, and the session file
+/// keeps paths, not bytes. Now the gate answers `Busy`, which never proceeds,
+/// and it keeps the request it was asking about.
+///
+/// The decision runs for real here (`raise_dirty_gate_over`, the whole of
+/// `Runtime::raise_dirty_gate` but the repaint) on a real tab over a real file
+/// typed into through the keyboard's door. `FolioApp` cannot be built without
+/// an event loop, so the arm the OS event reaches is read through `bt_source`:
+/// it sets `shutting` from `proceeds()` and from nothing else, and the one
+/// `self.close(window_id)` in the handler stands behind `if shutting`. The
+/// retirement fork — the ending run's `App::finish` or the non-final window's
+/// `vault_this_window` — is decided inside `FolioApp::close` (`ending`), after
+/// that line, so neither road is reachable from a busy gate.
+///
+/// MUTATION: in `DirtyGate::raise`, answer an open gate with `NothingToAsk`
+/// (BASE's "already open → Ok(false)") — the first assertion goes red.
+#[test]
+fn a_window_close_requested_while_the_gate_is_up_neither_closes_the_window_nor_loses_the_buffer() {
+    let (path, buffer) = a_file_being_edited("close-under-gate");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let tabs = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+
+    assert_eq!(
+        raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::CloseTab(0)),
+        restore::GateRaise::Raised,
+        "closing the tab asks first"
+    );
+    let os_close = raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::Shut);
+    assert_eq!(
+        os_close,
+        restore::GateRaise::Busy,
+        "a close requested while the question is up is not nothing to ask"
+    );
+    assert!(!os_close.proceeds(), "so the window does not shut");
+    assert_eq!(
+        gate.request(),
+        Some(&restore::GateRequest::CloseTab(0)),
+        "and the question on the screen is still the one the reader was asked"
+    );
+    assert!(
+        still_holds_the_edit(&tabs[0], &path),
+        "the buffer still holds what was typed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read the file back"),
+        "one\n",
+        "and nothing was written behind the reader's back"
+    );
+
+    let event = window_event_squeezed();
+    assert!(
+        event.contains(
+            "WindowEvent::CloseRequested=>{runtime.raise_dirty_gate(restore::GateRequest::Shut).map(|raised|shutting=raised.proceeds())}"
+        ),
+        "the OS close shuts only when the gate had nothing to ask:\n{event}"
+    );
+    assert_eq!(
+        event.matches("self.close(window_id)").count(),
+        1,
+        "the handler has one road to the close"
+    );
+    assert!(
+        event.contains(
+            "letresult=ifshutting{result.and(hang_watch::during(hang_watch::Station::EventShut,||{self.close(window_id)}))"
+        ),
+        "and it stands behind `shutting`:\n{event}"
+    );
+    let close = squeezed(method_body("FolioApp", "close"));
+    assert!(
+        close.contains("letending=a_run_ends_with_its_last_visible_window(")
+            && close.contains("runtime.close_window(ending)"),
+        "the final and the non-final retirement fork inside the close, behind the gate:\n{close}"
+    );
+    let raise = squeezed(method_body("Runtime", "raise_dirty_gate"));
+    assert!(
+        raise.contains("crate::raise_dirty_gate_over("),
+        "the window's gate decides through the function this test runs:\n{raise}"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+}
+
+/// RED (58) — **Two OS close requests in a row ask once and close nothing
+/// until answered.**
+///
+/// The census's shorter reproduction: the first Alt+F4 raises `Shut`, and the
+/// second found the gate open and was read as "nothing to ask". Now the second
+/// is `Busy`: one question, the same question, and the window stands. Once it
+/// is answered (the answer takes the request off the gate first), a close is
+/// asked again from the top.
+///
+/// MUTATION: in `DirtyGate::raise`, answer an open gate with `NothingToAsk` —
+/// the second assertion goes red.
+#[test]
+fn two_os_close_requests_in_a_row_ask_once_and_close_nothing_until_answered() {
+    let (path, buffer) = a_file_being_edited("two-closes");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let tabs = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+
+    let first = raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::Shut);
+    let second = raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::Shut);
+    assert_eq!(first, restore::GateRaise::Raised, "the first close asks");
+    assert_eq!(
+        second,
+        restore::GateRaise::Busy,
+        "the second asks nothing new"
+    );
+    assert!(
+        !first.proceeds() && !second.proceeds(),
+        "and neither closes the window"
+    );
+    assert_eq!(gate.request(), Some(&restore::GateRequest::Shut));
+    assert!(still_holds_the_edit(&tabs[0], &path));
+
+    assert_eq!(
+        gate.take(),
+        Some(restore::GateRequest::Shut),
+        "Cancel: the answer takes the one question it was"
+    );
+    assert_eq!(
+        raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::Shut),
+        restore::GateRaise::Raised,
+        "and a close after Cancel is asked again, because the edit is still there"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+}
+
+/// RED (58) — **Cancel keeps the buffer; Save and Discard replay the accepted
+/// request.**
+///
+/// The answer road is unchanged by this ticket, and this is why it did not
+/// need BASE's "already open means proceed": `Runtime::answer_dirty_gate`
+/// takes the request off the gate *before* it re-runs anything, so the re-run
+/// meets a free gate and a pool the answer has already dealt with. Run here
+/// with the busy case in front of it — a `Shut` dropped on a `CloseTab`
+/// question — for each answer: Cancel leaves the edit and the tab, and the
+/// dropped close is not replayed; Discard empties the tab's pool (the
+/// `CloseTab` arm's `clear`) and the replayed close is nothing to ask; Save
+/// writes through the pool's own `save_dirty` (`quit_save`'s door, the shut's
+/// `Save`) and the replayed shut is nothing to ask, with the typed words on
+/// the disk.
+///
+/// MUTATION: treat `Busy` as proceeding (`proceeds` answering
+/// `self != Self::Raised`) — the Cancel block's first assertion goes red; move
+/// `take()` after the re-runs in `answer_dirty_gate` — the order pin goes red.
+#[test]
+fn cancel_keeps_the_buffer_and_save_and_discard_replay_the_accepted_request() {
+    // Cancel.
+    let (path, buffer) = a_file_being_edited("cancel");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let tabs = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let _ = raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::CloseTab(0));
+    let dropped = raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::Shut);
+    assert!(
+        !dropped.proceeds(),
+        "the OS close under the question is dropped"
+    );
+    assert_eq!(gate.take(), Some(restore::GateRequest::CloseTab(0)));
+    assert!(
+        still_holds_the_edit(&tabs[0], &path),
+        "Cancel: nothing happens, and nothing is lost"
+    );
+    assert!(
+        !gate.is_open(),
+        "and the dropped close was not queued behind it"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+
+    // Discard, replaying `CloseTab`.
+    let (path, buffer) = a_file_being_edited("discard");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let mut tabs = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let _ = raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::CloseTab(0));
+    let _ = raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::Shut);
+    let accepted = gate.take().expect("the answer takes its request");
+    assert_eq!(accepted, restore::GateRequest::CloseTab(0));
+    tabs[0].preview_pool.clear();
+    assert_eq!(
+        raise_dirty_gate_over(&mut gate, &tabs, 0, accepted),
+        restore::GateRaise::NothingToAsk,
+        "Discard: the replayed close meets a free gate and nothing at risk, so it closes"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+
+    // Save, replaying `Shut`.
+    let (path, buffer) = a_file_being_edited("save");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    let mut tabs = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+    let _ = raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::Shut);
+    assert!(
+        restore::GateRequest::Shut.offers_save(),
+        "the shut is the question Save answers"
+    );
+    let accepted = gate.take().expect("the answer takes its request");
+    assert_eq!(
+        tabs[0].preview_pool.save_dirty(),
+        vec![("notes.md".to_owned(), preview::SaveOutcome::Saved)],
+        "every dirty buffer written back"
+    );
+    assert_eq!(
+        raise_dirty_gate_over(&mut gate, &tabs, 0, accepted),
+        restore::GateRaise::NothingToAsk,
+        "Save: the replayed shut has nothing left to ask"
+    );
+    assert!(
+        std::fs::read_to_string(&path)
+            .expect("read the file back")
+            .contains("typed by hand"),
+        "and what was typed is on the disk"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));
+
+    // The answer takes the request before any re-run.
+    let answer = squeezed(method_body("Runtime", "answer_dirty_gate"));
+    let taken = answer
+        .find("self.window.dirty_gate.take()")
+        .expect("the answer takes its request");
+    for rerun in [
+        "self.quit_save()",
+        "self.close_pane(seat)",
+        "self.close_tab(index)",
+        "self.window.window_close_requested=true",
+        "self.issue_git_write(",
+        "self.checkout_at(",
+        "self.clear_pane_scrollback(seat)",
+    ] {
+        let at = answer
+            .find(rerun)
+            .unwrap_or_else(|| panic!("the answer still re-runs `{rerun}`"));
+        assert!(
+            taken < at,
+            "`{rerun}` runs before the gate is free:\n{answer}"
+        );
+    }
+}
+
+/// RED (58) — **Nothing to ask still closes at once.**
+///
+/// The other half of the three-way answer, so that the fix cannot be a gate
+/// that refuses everything: a window whose buffers are all clean — a file
+/// opened and read, not typed into — shuts on the first OS close, a clean tab
+/// closes on its first press, and the gate never opens.
+///
+/// MUTATION: in `DirtyGate::raise`, answer an empty list with `Busy` — the
+/// first assertion goes red.
+#[test]
+fn nothing_to_ask_still_closes_at_once() {
+    let dir = disk_scratch("gate58-clean");
+    let path = dir.join("notes.md");
+    std::fs::write(&path, "one\n").expect("write the file");
+    let (tab, _) = tab_with_a_preview(1, vec![buffer_read_from(&path)]);
+    let tabs = vec![tab];
+    let mut gate = restore::DirtyGate::default();
+
+    let shut = raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::Shut);
+    assert_eq!(shut, restore::GateRaise::NothingToAsk);
+    assert!(shut.proceeds(), "a clean window shuts on the first close");
+    assert!(
+        raise_dirty_gate_over(&mut gate, &tabs, 0, restore::GateRequest::CloseTab(0)).proceeds(),
+        "and a clean tab closes on the first press"
+    );
+    assert!(!gate.is_open(), "without a question ever going up");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// PIN (58) — **every producer of the gate reads its answer as three.**
+///
+/// The verbs that run on their own when there is nothing to ask — the tab's
+/// close, the pane's close, `Clear scrollback…` — go on only on `proceeds()`;
+/// the git requests, whose verb only the answer performs, go through the one
+/// door that does nothing either way (`ask_before_the_verb`); and the OS close
+/// is the first test's arm. A caller that went back to "stop only when this
+/// raised it" would reopen R1 for its own verb.
+///
+/// MUTATION: write `if self.raise_dirty_gate(..)? == GateRaise::Raised`
+/// in `close_tab` — the first assertion goes red.
+#[test]
+fn every_producer_of_the_dirty_gate_goes_on_only_when_there_was_nothing_to_ask() {
+    for (name, request) in [
+        ("close_tab", "restore::GateRequest::CloseTab(index)"),
+        ("close_pane", "restore::GateRequest::ClosePane(seat)"),
+        (
+            "run_term_menu_row",
+            "restore::GateRequest::ClearScrollback(seat)",
+        ),
+    ] {
+        let body = squeezed(method_body("Runtime", name));
+        assert!(
+            body.contains(&format!(
+                "if!self.raise_dirty_gate({request})?.proceeds(){{returnOk(());}}"
+            )),
+            "`Runtime::{name}` goes on for a reason other than nothing to ask:\n{body}"
+        );
+    }
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "raise_dirty_gate")),
+        [
+            "ask_before_the_verb",
+            "close_pane",
+            "close_tab",
+            "run_term_menu_row",
+            "window_event",
+        ],
+        "a new producer of the gate: pin it above once it goes on only on `proceeds()`"
+    );
+}
+
 #[test]
 fn stationary_double_click_stays_strictly_paired_across_tui_repaints() {
     let mut session =

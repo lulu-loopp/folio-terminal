@@ -369,7 +369,12 @@ release** (`preview_press::held_span`), a press or a drag may move the caret
 anywhere the held span draws as source (`preview_press::keeps_the_span`), and a
 lost focus ends the drag. **The source blocks are banded from one range of file
 bytes** (`preview_live::source_band`), stretched while a drag is in flight to the
-last byte the hand reached.
+last byte the hand reached. **Unsaved edits are asked about before anything
+takes them away**: closing the tab's last preview pane, a tab or the window puts
+the dirty gate (`restore::DirtyGate`), which answers raised, nothing to ask, or
+busy — and **a busy gate never authorises the operation that found it busy**
+(2026-09-25, ticket 58): only nothing to ask lets the verb go on; a request that
+finds another question up is dropped, and that question keeps its own request.
 **From.** §7.1.3; §7.1.3q; §7.1.3s *undo lives on the buffer, and the dirty dot is
 a position in it*; §7.1.3v *a buffer knows which disk state it is holding, and a
 read is answered against the body it was issued for* (`T-EDIT-DISK`); §7.1.3w;
@@ -379,7 +384,8 @@ where it stands, and the seat holds until the gesture ends*; the 2026-09-23 entr
 *a selection crossing the source block bands it too, a table only a selection
 sweeps stays rendered, and a caret crossing into another block is measured*; the
 2026-09-23 entry *every block a selection touches is drawn as source, a table it
-only sweeps stays rendered, and the span is held until the gesture ends*.
+only sweeps stays rendered, and the span is held until the gesture ends*; the
+2026-09-25 entry *a busy dirty gate is never read as "nothing to ask"*.
 **Overrides.** §7.1.3v overrides §7.1.3p: a read now carries the base it was
 issued for, and a late answer about a body the buffer has moved past is refused
 — it raises a disk-changed notice and keeps body, undo, caret and selection —

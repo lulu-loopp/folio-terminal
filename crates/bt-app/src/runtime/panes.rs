@@ -1259,7 +1259,10 @@ impl Runtime<'_> {
         // is also the tab's last pane would otherwise fall through to `close_tab`
         // and be asked by gate ②, which is the same question with a different
         // subject.
-        if self.raise_dirty_gate(restore::GateRequest::ClosePane(seat))? {
+        if !self
+            .raise_dirty_gate(restore::GateRequest::ClosePane(seat))?
+            .proceeds()
+        {
             return Ok(());
         }
         if closing_this_pane_closes_the_tab(self.seats.pane_count()) {

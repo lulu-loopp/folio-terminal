@@ -256,7 +256,13 @@ impl Runtime<'_> {
         // **Gate ② (P124)** — "the tab owns its buffer pool; the pool dies with
         // it", and the mock-up's note beside it records that this hole predates
         // the pool: closing a tab used to discard a dirty preview without a word.
-        if self.raise_dirty_gate(restore::GateRequest::CloseTab(index))? {
+        // Only "nothing to ask" closes: a gate raised here, or one already up
+        // about something else, leaves the tab and its pool where they are
+        // (ticket 58).
+        if !self
+            .raise_dirty_gate(restore::GateRequest::CloseTab(index))?
+            .proceeds()
+        {
             return Ok(());
         }
         // Item 6, asked on the way *in* rather than on the way out. There is no

@@ -17926,6 +17926,108 @@ impl TabState {
     }
 }
 
+/// The dirty buffers one gate is about, by name and in the pool's own order —
+/// [`Runtime::gate_dirty_names`]' list, over the window's tabs and which one is
+/// active, so that the gate's decision ([`raise_dirty_gate_over`]) can be run on
+/// real tabs without a window.
+fn dirty_gate_names(
+    tabs: &[TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+) -> Vec<String> {
+    // **Each name says which tab it is in** (B1, user ruling 2026-08-25),
+    // and it is added here because here is the only place that can see a
+    // tab: the card is handed a list of lines and has no window to ask.
+    //
+    // A shut is the one request whose list can span more than one tab, so it
+    // is the one that needs saying — but the sentence is added by every one
+    // of the three, because a reader looking at a card does not know which
+    // question raised it and a name that carries its room in one card and
+    // not in another is two cards.
+    let one_tab = |tab: &TabState| {
+        let where_ = tab.display_title();
+        tab.preview_pool
+            .dirty_names(None)
+            .map(|name| unsaved_line(name, &where_))
+            .collect::<Vec<_>>()
+    };
+    match request {
+        // **Only the tab's LAST preview pane.** "The pool outlives any ONE
+        // pane — only the LAST preview pane's close would strand it" (P123),
+        // so closing one of two asks nothing at all.
+        restore::GateRequest::ClosePane(seat) => {
+            let tab = active_item(tabs, active_tab);
+            let previews = tab
+                .seats
+                .tree()
+                .seats_in_order()
+                .into_iter()
+                .filter(|found| found.kind == bt_layout::SeatKind::Preview)
+                .count();
+            let closing_a_preview = tab
+                .seats
+                .tree()
+                .find_seat(*seat)
+                .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
+            if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
+                one_tab(tab)
+            } else {
+                Vec::new()
+            }
+        }
+        restore::GateRequest::CloseTab(index) => tabs.get(*index).map(one_tab).unwrap_or_default(),
+        restore::GateRequest::Shut => tabs.iter().flat_map(one_tab).collect(),
+        // A discard names one file, and it is never empty — which matters,
+        // because `raise_dirty_gate` treats an empty list as "there is
+        // nothing to ask about" and lets the verb through. There is always
+        // something to ask about here: that is what makes it a discard.
+        restore::GateRequest::GitDiscard { path, .. } => vec![path.clone()],
+        // A ref deletion names the ref, for the same reason and with the
+        // same consequence: the list is never empty, so `raise_dirty_gate`
+        // never lets one of these through unasked.
+        restore::GateRequest::GitDeleteBranch { name, .. }
+        | restore::GateRequest::GitDeleteTag { name, .. } => vec![name.clone()],
+        // A detaching checkout names where it is about to put you, and it is
+        // never empty either — `said` is a short hash and a subject, or a
+        // tag's name, worked out at the moment the menu row was pressed and
+        // carried rather than looked up again from a history that may have
+        // been re-read since.
+        restore::GateRequest::GitCheckout { said, .. } => vec![said.clone()],
+        // **An empty scrollback is asked nothing** (ticket #62), which is
+        // the emptiness rule this list was written for, applied to a fourth
+        // subject: `raise_dirty_gate` reads an empty list as "there is
+        // nothing to lose here" and lets the verb through, and a pane whose
+        // history and staging are both empty has nothing an ED3 could take.
+        // The clear still runs; it simply runs unasked, because a question
+        // whose only honest answer is "nothing happens either way" is not a
+        // question.
+        restore::GateRequest::ClearScrollback(seat) => active_item(tabs, active_tab)
+            .sessions
+            .get(seat)
+            .map(|leaf| leaf.session.scrollback_line_count())
+            .filter(|lines| *lines > 0)
+            .map(|lines| vec![lines_phrase(lines)])
+            .unwrap_or_default(),
+    }
+}
+
+/// **Put `request` to a window's gate over that window's tabs** (ticket 58) —
+/// the whole of [`Runtime::raise_dirty_gate`] except the repaint.
+///
+/// What the request would lose is read off the tabs, and the gate answers with
+/// it: [`restore::GateRaise::Busy`] while another question is up (its request
+/// kept), [`restore::GateRaise::NothingToAsk`] when nothing is at risk, and
+/// otherwise [`restore::GateRaise::Raised`] with the gate now holding this one.
+fn raise_dirty_gate_over(
+    gate: &mut restore::DirtyGate,
+    tabs: &[TabState],
+    active_tab: usize,
+    request: restore::GateRequest,
+) -> restore::GateRaise {
+    let at_risk = dirty_gate_names(tabs, active_tab, &request);
+    gate.raise(request, &at_risk)
+}
+
 impl Deref for Runtime<'_> {
     type Target = TabState;
 
@@ -47008,85 +47110,7 @@ impl Runtime<'_> {
     /// puts every tab's — and the mock-up's own `state.tabs.flatMap(poolDirtyNames)`
     /// says the third in as many words (P125).
     fn gate_dirty_names(&self, request: &restore::GateRequest) -> Vec<String> {
-        // **Each name says which tab it is in** (B1, user ruling 2026-08-25),
-        // and it is added here because here is the only place that can see a
-        // tab: the card is handed a list of lines and has no window to ask.
-        //
-        // A shut is the one request whose list can span more than one tab, so it
-        // is the one that needs saying — but the sentence is added by every one
-        // of the three, because a reader looking at a card does not know which
-        // question raised it and a name that carries its room in one card and
-        // not in another is two cards.
-        let one_tab = |tab: &TabState| {
-            let where_ = tab.display_title();
-            tab.preview_pool
-                .dirty_names(None)
-                .map(|name| unsaved_line(name, &where_))
-                .collect::<Vec<_>>()
-        };
-        match request {
-            // **Only the tab's LAST preview pane.** "The pool outlives any ONE
-            // pane — only the LAST preview pane's close would strand it" (P123),
-            // so closing one of two asks nothing at all.
-            restore::GateRequest::ClosePane(seat) => {
-                let tab = &self.window.tabs[self.window.active_tab];
-                let previews = tab
-                    .seats
-                    .tree()
-                    .seats_in_order()
-                    .into_iter()
-                    .filter(|found| found.kind == bt_layout::SeatKind::Preview)
-                    .count();
-                let closing_a_preview = tab
-                    .seats
-                    .tree()
-                    .find_seat(*seat)
-                    .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
-                if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
-                    one_tab(tab)
-                } else {
-                    Vec::new()
-                }
-            }
-            restore::GateRequest::CloseTab(index) => self
-                .window
-                .tabs
-                .get(*index)
-                .map(one_tab)
-                .unwrap_or_default(),
-            restore::GateRequest::Shut => self.window.tabs.iter().flat_map(one_tab).collect(),
-            // A discard names one file, and it is never empty — which matters,
-            // because `raise_dirty_gate` treats an empty list as "there is
-            // nothing to ask about" and lets the verb through. There is always
-            // something to ask about here: that is what makes it a discard.
-            restore::GateRequest::GitDiscard { path, .. } => vec![path.clone()],
-            // A ref deletion names the ref, for the same reason and with the
-            // same consequence: the list is never empty, so `raise_dirty_gate`
-            // never lets one of these through unasked.
-            restore::GateRequest::GitDeleteBranch { name, .. }
-            | restore::GateRequest::GitDeleteTag { name, .. } => vec![name.clone()],
-            // A detaching checkout names where it is about to put you, and it is
-            // never empty either — `said` is a short hash and a subject, or a
-            // tag's name, worked out at the moment the menu row was pressed and
-            // carried rather than looked up again from a history that may have
-            // been re-read since.
-            restore::GateRequest::GitCheckout { said, .. } => vec![said.clone()],
-            // **An empty scrollback is asked nothing** (ticket #62), which is
-            // the emptiness rule this list was written for, applied to a fourth
-            // subject: `raise_dirty_gate` reads an empty list as "there is
-            // nothing to lose here" and lets the verb through, and a pane whose
-            // history and staging are both empty has nothing an ED3 could take.
-            // The clear still runs; it simply runs unasked, because a question
-            // whose only honest answer is "nothing happens either way" is not a
-            // question.
-            restore::GateRequest::ClearScrollback(seat) => self
-                .sessions
-                .get(seat)
-                .map(|leaf| leaf.session.scrollback_line_count())
-                .filter(|lines| *lines > 0)
-                .map(|lines| vec![lines_phrase(lines)])
-                .unwrap_or_default(),
-        }
+        dirty_gate_names(&self.window.tabs, self.window.active_tab, request)
     }
 
     // ── quitting (multiwindow slice E2, `DESIGN.md` §2.9) ───────────────────
@@ -62869,14 +62893,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
                     // — plans carry paths, never content — so shutting asks, the same
                     // honesty as closing a tab."
-                    match runtime.raise_dirty_gate(restore::GateRequest::Shut) {
-                        Ok(true) => Ok(()),
-                        Ok(false) => {
-                            shutting = true;
-                            Ok(())
-                        }
-                        Err(error) => Err(error),
-                    }
+                    //
+                    // **Only "nothing to ask" shuts** (ticket 58). A gate raised by
+                    // this close stands; so does one that was already up — a tab's
+                    // close still being asked about, or this same shut asked a
+                    // second time — and this request is dropped: the card is the
+                    // one surface that answers, and its answer re-runs the verb.
+                    runtime
+                        .raise_dirty_gate(restore::GateRequest::Shut)
+                        .map(|raised| shutting = raised.proceeds())
                 }
                 // **`is_synthetic` is read and not discarded** (§7.54d). It is the
                 // one bit that separates a key the reader pressed at this window

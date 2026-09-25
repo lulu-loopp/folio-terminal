@@ -1299,6 +1299,40 @@ pub struct DirtyGate {
     hover: Option<GateTarget>,
 }
 
+/// **What putting a question to the gate came to** (ticket 58).
+///
+/// Three answers, because the verb that asked needs three: go on, stop because
+/// the question is now up, or stop because another question already is. Before
+/// this type the answer was a `bool`, and "a gate is already up" was spelled
+/// `false` — the same word as "there is nothing to ask" — so a window close
+/// requested while a tab's close was still being asked about went straight
+/// through the one door that could have stopped it, and the unsaved buffer went
+/// with the window.
+///
+/// **Only [`Self::NothingToAsk`] lets the caller go on** ([`Self::proceeds`]).
+/// A busy gate keeps its own request and is the only surface that answers: the
+/// verb that found it busy does not happen, and it is not queued — the reader
+/// is already being asked, and whatever they answer is re-run from the gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
+pub enum GateRaise {
+    /// The question is now up, about this request. Stop.
+    Raised,
+    /// Nothing this request would lose: go on.
+    NothingToAsk,
+    /// Another question is already up. Stop, and leave it as it is.
+    Busy,
+}
+
+impl GateRaise {
+    /// Whether the verb that asked may go on — true only when there was
+    /// nothing to ask.
+    #[must_use]
+    pub fn proceeds(self) -> bool {
+        self == Self::NothingToAsk
+    }
+}
+
 /// **How a move onto somewhere else is spelled to git** (user ruling,
 /// 2026-08-19).
 ///
@@ -1603,6 +1637,23 @@ impl DirtyGate {
     pub fn open(&mut self, request: GateRequest) {
         self.open = Some(request);
         self.hover = None;
+    }
+
+    /// **Put `request`, which would lose `at_risk`** (ticket 58).
+    ///
+    /// Busy is asked first, before what is at risk: a gate that is up is the
+    /// reader's current question, and no second request — whether or not it
+    /// would lose anything — may replace it or slip past it. Then an empty list
+    /// is nothing to ask. Otherwise the gate opens on this request.
+    pub fn raise(&mut self, request: GateRequest, at_risk: &[String]) -> GateRaise {
+        if self.is_open() {
+            return GateRaise::Busy;
+        }
+        if at_risk.is_empty() {
+            return GateRaise::NothingToAsk;
+        }
+        self.open(request);
+        GateRaise::Raised
     }
 
     /// Put it away and hand back what it was asking about.

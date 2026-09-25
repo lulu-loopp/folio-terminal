@@ -63,7 +63,7 @@
 1 Runtime::play_video_file_on: .open
 1 Runtime::pop_out_preview: .open
 1 Runtime::promote_file_peek: .open
-1 Runtime::raise_dirty_gate: .open
+1 DirtyGate::raise: .open
 1 Runtime::raise_first_run_if_due: .open
 1 Runtime::raise_psreadline_invite_if_due: .open
 1 main.rs: say_at_the_front_door: persist::SettingsStore::open
