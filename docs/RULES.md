@@ -832,13 +832,22 @@ and **no ticket id has been issued**. See `docs/ARCHITECTURE.md` §5.3 rows 2–
 Since 2026-09-23 such a press waits behind one of our own workers' I/O for as
 long as that I/O takes, instead of failing after two seconds; that wait is
 bounded by our own finite writes and is paid off by the same move.
-**Ruled and not yet built.** Owner's verbal ruling of 2026-09-21, written down on
-2026-09-22 (multi-line paste design note, "Owner rulings" 6): **option A — Folio
-replaces its own older copy of the module on upgrade.** No ticket in the 0.4.4
-set implements it (`00-INDEX.md`, open decisions); today an older copy of
-Folio's own module is shown on the Settings row as installed with a newer
-one available (`i18n::psreadline_row_update_in`), and nothing replaces it
-without the reader's press.
+**Upgrade (ruled 2026-09-21, implemented 2026-09-24 by ticket 56).** Owner's
+verbal ruling of 2026-09-21, written down on 2026-09-22 (multi-line paste design
+note, "Owner rulings" 6): **option A.** Folio's own older copy of the module is
+replaced on upgrade **without asking** — at launch, before the first window, by
+`psreadline::upgrade_recorded` on the first install's road (`install_recorded`),
+with one `diagnostics.log` line and no card; a failed write keeps the older
+stamp (the stamp DLL is written last) and the next launch tries again. "Folio's
+own" is decided by `psreadline::upgrade_decision`: the DLL carries Folio's `-bt.`
+stamp, the stamp is older than `PATCHED_BUILD` (`psreadline::Build::predates`),
+and Folio recorded the install (the marks record's root, or `settings.json`'s
+invitation at `Installed`). **A copy Folio did not install is never touched**
+(no Folio stamp, or no record), nor is a newer or equal Folio build. **A first
+install is always invited**, never performed silently. The launch's lock on the
+marks record sits beside the debt above (`docs/plans/structural-debt.md` D-34).
+The same ruling's other two parts ("strips become notifications", the
+multi-line paste question's rules) are not this row's and are not folded here.
 
 ### 39. Single instance and the launch pipe — `not yet folded`
 Entries: §7.59 *a second launch is no longer a second process: it hands its one

@@ -12035,3 +12035,29 @@ Installing the whole plane's 100,000 hits took a further 8–12 ms; installing a
 **Measured: the environment starts no runtime process** (a windowless probe that creates no window of any kind, the product's options over an empty scratch profile, development machine, runtime 153.0.4234.48, five runs). The creation call took 8.5–39.2 ms and its callback had already arrived when it returned; for eight seconds afterwards the probe had **no** descendant process, and the profile folder stayed empty. The host process grew by about 2.2 MB of working set and 0.6 MB private. So the ruling's premise — that the environment brings the runtime's processes up with it — does not hold: WebView2 launches the browser, GPU and utility processes at the first controller. What this warm-up takes out of the first page's gesture is the environment call alone (ticket 43 measured 10–38 ms of it inside the gesture); the controller's creation (88–269 ms on the first page, headless, ticket 43) and the engine's dispatch on the pump after it (70–303 ms) are still the first page's. The memory cost for a session that never opens a page is those ~2 MB in Folio's own process and no process of the runtime's. §5.3 row 21 stays open, narrowed by the environment call; moving the rest needs a new ruling (a controller made at the idle turn, or hosting WebView2 on its own thread, §5.2).
 
 **Pinned by** `web_warmup::web_warmup_tests` (`the_web_engine_is_asked_for_once_on_a_quiet_turn_after_the_startup_grace`, `a_page_asked_for_before_the_warm_up_fires_makes_the_only_request`, `a_busy_turn_is_not_a_quiet_one`, `a_failed_warm_up_leaves_the_state_empty_and_the_next_page_asks_again`, `a_platform_with_nothing_to_warm_is_asked_once`), `web_environment::environment_slot_tests` in bt-platform (the page joins the warm-up's request; the warm-up does nothing once anybody has asked; a failure empties the state; a call refused where it stands is reported once; a forgotten request hands its waiters on), and `hang_watch::tests::the_stall_report_has_a_word_for_every_phase_of_a_web_page_coming_up`, which now names `warm_web_engine`.
+
+### 2026-09-24 — Folio replaces its own older PSReadLine at launch without asking; a copy it did not install is never touched
+
+Owner's ruling of 2026-09-21 ("option A", recorded in the multi-line paste design note of 2026-09-22, rulings item 6), built by ticket 56. Until now an older Folio build of the module (`InstalledCopy::OlderBuild`) silenced the invitation and waited on the Terminal page's row for a press of `On`; nothing replaced it otherwise.
+
+**The road.** At launch, before the first window (so before any pane of this Folio starts a PowerShell that would hold the old DLL open) and before the profile migration's worker (which takes the same marks lock), `psreadline::upgrade_recorded` reads the module directory and decides; on `Replace` it writes through `install_recorded`, the first install's own road: the same occupancy check, the same marks record taken before the first byte, the same nine files. No card and no setting. One `diagnostics.log` line (`BT_PSREADLINE upgraded …` or `… failed, kept until the next launch: …`). It runs on the launch thread (the event loop's own), as the Settings row's install does, so on a launch that replaces it takes the marks lock there once; that is written beside RULES §38's debt in `docs/plans/structural-debt.md`, and is paid off by the same move to a worker.
+
+**The decision** (`psreadline::upgrade_decision`, pure):
+
+| on disk (`installed_copy`) | Folio's record | stamp against the bundled build | answer |
+|---|---|---|---|
+| nothing Folio could replace | any | — | `Invite` (the invitation's own table decides; never a silent install) |
+| a module with no Folio `-bt.` stamp (stock, gallery, upstream 2.5.0) | any | — | `Keep` |
+| a Folio build | none | any | `Keep` |
+| a Folio build | yes | older | **`Replace`** |
+| a Folio build | yes | the same, newer, or unordered | `Keep` |
+
+"Folio's record" is either of the two records Folio writes on an install: the marks record's `psreadline_module_roots` naming this root (since 0.4.3), or `settings.json`'s invitation at `Installed` (every install pressed under 0.1.0–0.4.2 left only this one). A replacement through `install_recorded` leaves the marks record behind in both cases, so the uninstall door finds the copy afterwards.
+
+**The order of builds** (`psreadline::Build`, read from the DLL's `ProductVersion`). Two builds are ordered only within one module version (the family is per `PATCHED_VERSION`). A numbered build `-bt.N` is ordered by `N` as a number (`bt.10` after `bt.9`). A named build (`-bt.anchorfix`, from before the numbering) comes before every numbered build; two named builds are unordered and kept.
+
+**A failed write keeps the older stamp.** `install_checked` now writes the stamp DLL last. A write stopped part-way (a DLL held open by a running PowerShell) leaves the older stamp, so the copy still reads as the older build and the next launch tries again. Written in array order, a stop after the stamp DLL left this build's stamp over two builds' bytes, which reads as an edit (`None`) and was never replaced again.
+
+**Today's effect.** Every published release has bundled `2.4.6-bt.2` (since 2026-08-18), so on a user's machine the road first acts at the next `PATCHED_BUILD` bump.
+
+**Pinned by** `psreadline::tests::folios_own_older_psreadline_build_is_replaced_by_the_bundled_one_without_an_invitation`, `a_copy_folio_did_not_install_is_never_replaced`, `the_same_build_is_kept_and_a_newer_own_build_is_kept`, `the_road_performs_the_replacement_and_records_the_new_build` and `a_replacement_that_stops_part_way_keeps_the_older_stamp_and_is_tried_again` (the last two Windows-only: a real DLL's version resource rewritten in place).
