@@ -136,6 +136,11 @@ pub(crate) struct WebMachine {
     recoverable_url: Option<String>,
     events_installed: bool,
     cleanup: Cleanup,
+    /// **An adopted controller's first address, held until the page has its size** (0.4.5
+    /// ticket 60). Set by [`Self::adopt`] when the seat has no bounds in its new window yet, and
+    /// spent once by [`Self::release_on_bounds`]: the rule `InstallEvents` keeps for a seat's own
+    /// controller — the engine is given its size before its URL — kept for one it was handed.
+    awaiting_bounds: bool,
 }
 
 impl Default for WebMachine {
@@ -153,6 +158,7 @@ impl WebMachine {
             recoverable_url: None,
             events_installed: false,
             cleanup: Cleanup::Idle,
+            awaiting_bounds: false,
         }
     }
 
@@ -188,6 +194,9 @@ impl WebMachine {
     pub(crate) fn request(&mut self, url: &str) -> WebEffect {
         self.desired_url = Some(url.to_owned());
         match self.state {
+            // An adopted page still waiting for its size keeps waiting: last write wins, and the
+            // one navigation comes with the bounds (ticket 60).
+            WebState::Ready if self.awaiting_bounds => WebEffect::Ignore,
             WebState::Ready if self.events_installed => WebEffect::Navigate(url.to_owned()),
             WebState::Uninitialized | WebState::Failed => {
                 self.generation += 1;
@@ -196,6 +205,38 @@ impl WebMachine {
                 WebEffect::Ignore
             }
             _ => WebEffect::Ignore,
+        }
+    }
+
+    /// **A page adopted this machine's controller and asks for `url`** (0.4.5 ticket 60).
+    ///
+    /// The controller is already made and installed — it was the spare's — so nothing is asked
+    /// for: no `CreateController`, no `InstallEvents`. What is kept is the order `InstallEvents`
+    /// keeps: **the engine is given its size before its URL**. `sized` is whether the seat has
+    /// bounds in its new window; without them the address is recorded and navigated to by
+    /// [`Self::release_on_bounds`], once, on the first bounds that arrive.
+    pub(crate) fn adopt(&mut self, url: &str, sized: bool) -> WebEffect {
+        self.desired_url = Some(url.to_owned());
+        if self.state != WebState::Ready || !self.events_installed {
+            return WebEffect::Ignore;
+        }
+        if sized {
+            self.awaiting_bounds = false;
+            return WebEffect::Navigate(url.to_owned());
+        }
+        self.awaiting_bounds = true;
+        WebEffect::Ignore
+    }
+
+    /// **The adopted page has its bounds**: the address it was waiting with is navigated to, once.
+    pub(crate) fn release_on_bounds(&mut self) -> WebEffect {
+        if !self.awaiting_bounds || self.state != WebState::Ready || !self.events_installed {
+            return WebEffect::Ignore;
+        }
+        self.awaiting_bounds = false;
+        match self.desired_url.clone() {
+            Some(url) => WebEffect::Navigate(url),
+            None => WebEffect::Ignore,
         }
     }
 
@@ -300,6 +341,7 @@ impl WebMachine {
         self.generation += 1;
         self.state = WebState::EnvironmentPending;
         self.events_installed = false;
+        self.awaiting_bounds = false;
         // Whatever was last good is what comes back up.
         self.desired_url = self
             .recoverable_url
@@ -342,6 +384,7 @@ impl WebMachine {
         self.generation += 1;
         self.state = WebState::Closing;
         self.events_installed = false;
+        self.awaiting_bounds = false;
         self.cleanup = Cleanup::Awaiting;
         WebEffect::AwaitBrowserExitBeforeCleanup
     }
@@ -432,6 +475,7 @@ impl WebMachine {
         self.generation += 1;
         self.state = WebState::EnvironmentPending;
         self.events_installed = false;
+        self.awaiting_bounds = false;
         self.desired_url = self
             .recoverable_url
             .clone()
@@ -442,6 +486,56 @@ impl WebMachine {
 
 fn is_blank(url: &str) -> bool {
     url.eq_ignore_ascii_case(BLANK_PAGE) || url.is_empty()
+}
+
+// ── Whose recovery road a seat is on (0.4.5 ticket 60, SW-1) ──────────────
+
+/// **What a seat does about its engine failing** — a page's recovery, or a parked spare's
+/// retirement.
+///
+/// Set by the door that opened the seat: [`RecoveryPolicy::Page`] for every pane,
+/// [`RecoveryPolicy::Parked`] for the spare web controller. Switched to `Page` by adoption and
+/// never back.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RecoveryPolicy {
+    /// A page: a dead browser is rebuilt, a new runtime is adopted, a dead renderer is reloaded.
+    Page,
+    /// The spare, waiting for a page: none of that. Every one of those events retires it, before
+    /// it can forget the process's environment or ask for another — a spare never rebuilds.
+    Parked,
+}
+
+/// What a seat does with the effect its machine answered, under its policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Recovered {
+    /// Carry the effect out, as every page does.
+    Apply(WebEffect),
+    /// Retire the seat instead, for this reason.
+    Retire(&'static str),
+}
+
+/// **The one filter between a seat's machine and its executor** (SW-1).
+///
+/// `digest` has already moved the machine; this decides whether what it asked for is carried
+/// out. A page's answer is the identity. A parked spare's rebuilds, reloads and a fall into
+/// `Failed` are a retirement — `WebMachine::close`'s wait for the browser, through the same
+/// executor, and never `forget_web_environment` or a second environment request, so a page and
+/// the spare hearing one browser event rebuild once, whichever hears it first.
+pub(crate) fn recovery_under(
+    policy: RecoveryPolicy,
+    effect: WebEffect,
+    fell_into_failure: bool,
+) -> Recovered {
+    if policy == RecoveryPolicy::Page {
+        return Recovered::Apply(effect);
+    }
+    match effect {
+        WebEffect::RebuildFromScratch => Recovered::Retire("its browser process went away"),
+        WebEffect::RebuildForNewVersion => Recovered::Retire("a new browser version arrived"),
+        WebEffect::Reload => Recovered::Retire("its renderer went away"),
+        _ if fell_into_failure => Recovered::Retire("its engine did not start"),
+        effect => Recovered::Apply(effect),
+    }
 }
 
 // Slice ② landed on 2026-08-22, so the placeholder it was written against is
@@ -1575,6 +1669,9 @@ pub(crate) enum WebOutcome {
         png: Option<Vec<u8>>,
         source: Option<(u32, u32)>,
     },
+    /// **A parked spare retired itself** (0.4.5 ticket 60, SW-1), and why. Only a seat under
+    /// [`RecoveryPolicy::Parked`] says it; its owner writes one diagnostics line and lets it go.
+    Retired(&'static str),
     /// **What this seat learned about a site's icon** (the favicon slice, `docs/DESIGN.md` §7.13,
     /// §7.7 ②).
     ///
@@ -1901,6 +1998,24 @@ pub(crate) struct WebSeat {
     /// hold two engines at two magnifications, and one slot on the window would
     /// have the second one's notch confirming itself on the first one's foot.
     zoom_said: Option<(f64, Instant)>,
+    /// **Whose recovery road this seat is on** (0.4.5 ticket 60) — see [`RecoveryPolicy`].
+    policy: RecoveryPolicy,
+    /// **The generation whose `about:blank` has landed**, if one has (SW-5). A spare is parked —
+    /// fit for a page to take — only once its blank page has completed on the current generation,
+    /// which is the state spike 59's 146 ms was measured from.
+    landed_blank: Option<u64>,
+    /// **The environment this seat's controller was asked for under** (SW-1, item 3) — the epoch
+    /// the process's environment had at `CreateController`. The spare compares it with the
+    /// process's own: another seat's rebuild forgets the environment, and a controller made over
+    /// the old one cannot be handed to a page.
+    made_under: Option<u64>,
+    /// **What the seat's first navigation after adoption said**, kept for the next `drive`,
+    /// because it is issued from [`Self::place`], which has no outcomes to hand back.
+    owed: Vec<WebOutcome>,
+    /// **The page this seat's two gates name in `BT_WEB_TRACE`** — a cell the gate closures read
+    /// and [`Self::take_address`] writes, so a line written after a tear-out or an adoption names
+    /// the pane the page is in, not the one it was made in (ticket 60).
+    label: Rc<std::cell::Cell<bt_platform::PageVisual>>,
 }
 
 impl WebSeat {
@@ -1927,6 +2042,8 @@ impl WebSeat {
         let request_gate = Rc::clone(&mint);
         let refusal = Rc::new(RefCell::new(None));
         let refusal_sink = Rc::clone(&refusal);
+        let label = Rc::new(std::cell::Cell::new(page));
+        let (gate_label, request_label) = (Rc::clone(&label), Rc::clone(&label));
         let host = WebHost::new(
             Box::new(move |candidate| {
                 let decision = navigation_starting(candidate, &gate.borrow());
@@ -1939,7 +2056,7 @@ impl WebSeat {
                 crate::web_trace::line(|| {
                     format!(
                         "navigation_starting {} uri={candidate} mint={} verdict={}",
-                        crate::web_trace::seat(page),
+                        crate::web_trace::seat(gate_label.get()),
                         crate::web_trace::mint(&gate.borrow()),
                         crate::web_trace::verdict(&decision),
                     )
@@ -1981,7 +2098,7 @@ impl WebSeat {
                     crate::web_trace::line(|| {
                         format!(
                             "request_refused {} uri={candidate} mint={} verdict={}",
-                            crate::web_trace::seat(page),
+                            crate::web_trace::seat(request_label.get()),
                             crate::web_trace::mint(&request_gate.borrow()),
                             crate::web_trace::verdict(&decision),
                         )
@@ -2028,6 +2145,11 @@ impl WebSeat {
             favicon_changed_again: false,
             playing_audio: false,
             zoom_said: None,
+            policy: RecoveryPolicy::Page,
+            landed_blank: None,
+            made_under: None,
+            owed: Vec::new(),
+            label,
         };
         // **The third door in its other spelling, said before the engine is
         // even asked for** (M4-2, `docs/DESIGN.md` §13.29).
@@ -2065,6 +2187,101 @@ impl WebSeat {
         let mut outcomes = Vec::new();
         web.start_environment(&mut outcomes);
         Ok((web, outcomes))
+    }
+
+    /// **Open the spare web controller's seat** (0.4.5 ticket 60): the pane's own [`Self::open`],
+    /// on the spare's never-shown parent, towards the seat's own blank page, under
+    /// [`RecoveryPolicy::Parked`]. Its gates, guards, recovery machine and install burst are the
+    /// pane's, so a page that adopts it adopts nothing a pane would not have had.
+    pub(crate) fn open_parked(
+        page: bt_platform::PageVisual,
+        window: bt_platform::NativeWindow,
+        scale: f64,
+        scheme: WebColorScheme,
+        wake: Box<dyn Fn()>,
+    ) -> Result<(Self, Vec<WebOutcome>), String> {
+        let (mut seat, outcomes) =
+            Self::open(page, window, BLANK_PAGE, Mint::Blank, scale, scheme, wake)?;
+        seat.policy = RecoveryPolicy::Parked;
+        Ok((seat, outcomes))
+    }
+
+    /// **Whether this spare is still whole enough for a page to take** (SW-1 item 5, SW-5): still
+    /// parked, its engine up with a controller, and its blank page landed on this generation.
+    pub(crate) fn fit_for_adoption(&self) -> bool {
+        self.policy == RecoveryPolicy::Parked
+            && self.machine.state() == WebState::Ready
+            && self.host.has_controller()
+            && self.landed_on_blank()
+    }
+
+    /// Whether the seat's own `about:blank` has completed on its current generation.
+    pub(crate) fn landed_on_blank(&self) -> bool {
+        self.landed_blank == Some(self.machine.generation())
+            && self.machine.state() == WebState::Ready
+    }
+
+    /// The environment epoch this seat's controller was asked for under.
+    pub(crate) fn made_under(&self) -> Option<u64> {
+        self.made_under
+    }
+
+    /// Whether this seat's engine has said anything nobody has read yet.
+    pub(crate) fn has_events(&self) -> bool {
+        self.host.has_events()
+    }
+
+    /// Whether a controller creation call nobody will adopt has still not answered.
+    pub(crate) fn has_orphans(&self) -> bool {
+        self.host.has_orphans()
+    }
+
+    /// **An orderly stop: close the controller now and wait for nothing** (SW-2). The engine's
+    /// own `Close()` on the controller and on every orphan that has answered; the browser is left
+    /// to exit behind the process.
+    pub(crate) fn close_now(&mut self) {
+        self.host.close();
+    }
+
+    /// **Stand the spare's page on its parent's glass** (SW-5): the parent's scale, then a nonzero
+    /// rectangle, then shown inside a window nobody ever sees — spike 59's harness state, through
+    /// the one placement path every page takes.
+    pub(crate) fn stand_parked(
+        &mut self,
+        compositor: &bt_platform::Compositor,
+        bounds: WebBounds,
+    ) -> Result<(), String> {
+        self.place(compositor, WebPresence::Shown(bounds), Some(bounds), &[])?;
+        compositor.commit()
+    }
+
+    /// **Before a handoff: the spare's own rectangle is not the page's** (SW-3, SW-5). Hidden,
+    /// and with no bounds wanted, so nothing but the target window's own placement can size the
+    /// page — and so release its address.
+    pub(crate) fn park_for_handoff(&mut self) {
+        self.wanted = WebPresence::Hidden;
+        self.wanted_bounds = None;
+    }
+
+    /// **A page has this seat now** (SW-1): its recovery is a page's from here on.
+    pub(crate) fn becomes_a_page(&mut self) {
+        self.policy = RecoveryPolicy::Page;
+    }
+
+    /// **The adopted page's first address** (ticket 60) — [`WebMachine::adopt`] plus the
+    /// compositor, as [`Self::go`] is `request` plus it. Navigated at once only when the seat
+    /// already has bounds in its window; otherwise on the first bounds [`Self::place`] gives it.
+    pub(crate) fn go_adopted(
+        &mut self,
+        url: &str,
+        minted: Mint,
+        compositor: &bt_platform::Compositor,
+    ) -> Vec<WebOutcome> {
+        self.minted = minted;
+        let effect = self.machine.adopt(url, self.bounded.is_some());
+        let mut outcomes = Vec::new();
+        self.apply(effect, compositor, &mut outcomes);
+        outcomes
     }
 
     /// **Go somewhere on this seat** — the one door every later navigation takes
@@ -2188,12 +2405,36 @@ impl WebSeat {
 
     /// Read everything the engine has said and act on it.
     pub(crate) fn drive(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
-        let mut outcomes = Vec::new();
+        let mut outcomes = std::mem::take(&mut self.owed);
         for event in self.host.drain() {
+            let failed_before = self.machine.state() == WebState::Failed;
             let effect = self.digest(&event, &mut outcomes);
-            self.apply(effect, compositor, &mut outcomes);
+            let fell_into_failure = !failed_before && self.machine.state() == WebState::Failed;
+            // **The policy between the machine and the executor** (ticket 60, SW-1): a page's
+            // answer is carried out as it always was; a parked spare's rebuild is a retirement,
+            // decided before anything is forgotten or asked for.
+            match recovery_under(self.policy, effect, fell_into_failure) {
+                Recovered::Apply(effect) => self.apply(effect, compositor, &mut outcomes),
+                Recovered::Retire(why) => self.retire_parked(why, compositor, &mut outcomes),
+            }
         }
         outcomes
+    }
+
+    /// **A parked spare retires itself**: the machine's own close — the wait for the browser to
+    /// let go, through the one executor — and one outcome saying why. Nothing else a page would do.
+    fn retire_parked(
+        &mut self,
+        why: &'static str,
+        compositor: &bt_platform::Compositor,
+        outcomes: &mut Vec<WebOutcome>,
+    ) {
+        if self.machine.state() == WebState::Closing {
+            return;
+        }
+        let effect = self.machine.close();
+        self.apply(effect, compositor, outcomes);
+        outcomes.push(WebOutcome::Retired(why));
     }
 
     /// One event, turned into one effect — and into whatever the window has to
@@ -2289,6 +2530,11 @@ impl WebSeat {
                 });
                 self.page.loading = false;
                 self.page.loading_since = None;
+                // **The seat's own blank page has landed** (ticket 60, SW-5): what "parked" means
+                // for a spare.
+                if *success && uri.eq_ignore_ascii_case(BLANK_PAGE) {
+                    self.landed_blank = Some(self.machine.generation());
+                }
                 if *success {
                     self.fault = None;
                 } else if let Some(fault) = load_fault(uri, *success, *status) {
@@ -2605,6 +2851,7 @@ impl WebSeat {
                 // leaves the seat with nothing on it.
                 let window = self.address.window;
                 let generation = self.machine.generation();
+                self.made_under = Some(bt_platform::web_environment_epoch());
                 let asked = hang_watch::during(hang_watch::Station::WebController, || {
                     self.host.request_controller(window, generation)
                 });
@@ -2929,8 +3176,13 @@ impl WebSeat {
         now: Instant,
         compositor: &bt_platform::Compositor,
     ) -> Vec<WebOutcome> {
-        let silent = self.engine_that_said_nothing(now);
+        let mut silent = self.engine_that_said_nothing(now);
         if !silent.is_empty() {
+            // A spare whose engine never answered is retired, not left wearing a card nobody sees
+            // (ticket 60, SW-1): the same filter `drive` applies.
+            if let Recovered::Retire(why) = recovery_under(self.policy, WebEffect::Ignore, true) {
+                self.retire_parked(why, compositor, &mut silent);
+            }
             return silent;
         }
         let Some((kind, deadline)) = self.waiting else {
@@ -3026,7 +3278,20 @@ impl WebSeat {
         if let Some(bounds) = bounds {
             self.wanted_bounds = Some(bounds);
         }
-        self.stand_on_the_floor(compositor)
+        let floored = self.stand_on_the_floor(compositor)?;
+        // **An adopted page's address goes with its first bounds, and only then** (ticket 60,
+        // SW-5). `bounded` is what the engine was told in *this* window — the spare's own
+        // rectangle was cleared with the address — so the one `Navigate` is issued against the
+        // target's size, through the common mint and guard path, and never again after it.
+        if self.bounded.is_some() {
+            let effect = self.machine.release_on_bounds();
+            if effect != WebEffect::Ignore {
+                let mut outcomes = Vec::new();
+                self.apply(effect, compositor, &mut outcomes);
+                self.owed.extend(outcomes);
+            }
+        }
+        Ok(floored)
     }
 
     /// **The floor, then the page, then the visibility — in that order, on
@@ -3381,6 +3646,7 @@ impl WebSeat {
     /// for a display it may not be on.
     fn take_address(&mut self, address: SeatAddress) {
         self.address = address;
+        self.label.set(address.page);
         self.the_controller_has_been_told_nothing();
         // And the floor, which answers for a visual rather than for a
         // controller: this seat's pair is in another window's tree now.
@@ -4820,6 +5086,11 @@ mod rehost_address_tests {
             fetching_favicon: None,
             favicon_changed_again: false,
             zoom_said: None,
+            policy: RecoveryPolicy::Page,
+            landed_blank: None,
+            made_under: None,
+            owed: Vec::new(),
+            label: Rc::new(std::cell::Cell::new(address.page)),
         }
     }
 

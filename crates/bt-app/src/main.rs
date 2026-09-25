@@ -157,6 +157,7 @@ mod update;
 mod version;
 mod video_seat;
 mod watch_clock;
+mod web_spare;
 mod web_thumb;
 mod web_trace;
 mod web_warmup;
@@ -12559,6 +12560,19 @@ struct App {
     /// any window and by any window not at rest; turned by the window that turns
     /// the application's clocks (`Runtime::warm_web_engine`).
     web_warmup: web_warmup::WebWarmup,
+    /// **The spare web controller** (0.4.5 ticket 60, D-64): made by the warm-up clock's second
+    /// stage on a quiet turn for a profile that has opened a page, parked on a never-shown window,
+    /// and adopted by the first eligible page. The application's, on the window thread, because
+    /// no window owns it until a page takes it — see [`web_spare`].
+    web_spare: web_spare::WebSpare,
+    /// **The run's retirement bound** (ticket 60, SW-2): set once, when the last window closes or
+    /// a quit retires, to that moment plus [`quit::PAGE_TEARDOWN_DEADLINE`]; never restarted by a
+    /// poll. The spare shares it with the pages.
+    run_retiring_until: Option<Instant>,
+    /// **Whether any window holds a page this turn** — every window's `web` map, leaving ones
+    /// included, read once a turn before any window takes its own (ticket 60). The spare's stage
+    /// makes nothing while a page is open: that page has already paid for the engine.
+    web_pages_open: bool,
     /// **Saved windows that have not opened, because nothing in them was pinned**
     /// (multiwindow slice D).
     ///
@@ -40855,6 +40869,11 @@ impl Runtime<'_> {
         // the user has already seen it somewhere else.
         let mut session_store = persist::SessionStore::open();
         let mut settings_store = persist::SettingsStore::open();
+        // **The v39 upgrade, completed where the evidence is** (0.4.5 ticket 60, SW-4): while the
+        // receipt says `Never`, a saved session holding a typed page record writes `Used`. Here,
+        // with both documents loaded and before a restore choice can rewrite the session; a
+        // missing, corrupt or newer session was loaded as the empty document and is no evidence.
+        web_spare::reconcile_web_pages_used(&mut settings_store, session_store.loaded());
         // **Taken here, said on the first window** (review rows R4-3, R4-5, R4-9).
         // The stores open before there is any window to put a card on, which is
         // the whole reason every other one of these is a field rather than a
@@ -41588,6 +41607,9 @@ impl Runtime<'_> {
             window_pictures: vec![(window.id(), opening.clone())],
             restore_question: Vec::new(),
             web_warmup: web_warmup::WebWarmup::default(),
+            web_spare: web_spare::WebSpare::default(),
+            run_retiring_until: None,
+            web_pages_open: false,
             pending_restore_windows: Vec::new(),
             pending_restore_answer: None,
             pending_application_change: None,
@@ -55653,10 +55675,14 @@ mod pages_are_plural_tests {
     #[test]
     fn a_pane_with_no_engine_has_one_built_for_it() {
         let door = method_body("Runtime", "open_web_page_on");
+        // The seat enters the window through the one bookkeeping tail since ticket 60, which the
+        // spare's adoption walks too.
+        let tail = method_body("Runtime", "seat_a_web_page");
         assert!(
             door.contains("self.window.web.contains_key(&leaf)")
                 && door.contains("webhost::WebSeat::open(")
-                && door.contains("self.window.web.insert(leaf, web);"),
+                && door.contains("self.seat_a_web_page(leaf, index, web, engine_said)")
+                && tail.contains("self.window.web.insert(leaf, web);"),
             "the door no longer forks on whether *this pane* has an engine:\n{door}"
         );
     }
@@ -59817,6 +59843,12 @@ impl FolioApp {
                 Ok(())
             }
         });
+        // **And the spare web controller, at the same moment as the pages** (ticket 60, SW-2),
+        // under the run's one bound — started here, once.
+        if ending && let Some(app) = self.app.as_mut() {
+            let _ = web_spare::start_retiring(&mut app.run_retiring_until, Instant::now());
+            app.web_spare.retire();
+        }
         if ending {
             // **The run's sentinel goes with the picture, not with the process**
             // (§7.35). `App::finish` flushes the document, joins the writer and
@@ -59981,11 +60013,17 @@ impl FolioApp {
                 app.activated.retain(|visited| *visited != id);
             }
         }
+        // **The spare's own clock, once the run is retiring** (ticket 60, SW-2): no window is
+        // left to turn it, so this door does, and its instant joins the wake.
+        let spare = self.advance_the_spare_while_retiring(now);
+        waking = earliest_deadline([waking, spare]);
         // **An empty registry is the end of the run** (§7.54e ①, user ruling
         // 2026-09-05). This is the other half of `close`'s own answer, at the door
         // every road to an empty registry passes through, and it reads the same
-        // rule so that the two can never disagree.
-        if a_run_ends_with_its_last_visible_window(self.windows.len()) {
+        // rule so that the two can never disagree. **And only once the spare has let
+        // go** (ticket 60): its parent is an `HWND` the engine's child window may still
+        // be under, which a thread that has stopped pumping cannot destroy (§7.35).
+        if self.run_end(spare) == web_spare::RunControl::Exit {
             // **The sentinel again, and it is idempotent** (`App::finish` →
             // `SessionStore::close`, which takes its writer and says so). The
             // ordinary shut has already spent it, at the moment the last window
@@ -59998,6 +60036,38 @@ impl FolioApp {
             return Ok(None);
         }
         Ok(waking)
+    }
+
+    /// **Turn the spare's clock, if the run is retiring** (ticket 60, SW-2) — and answer when it
+    /// next needs a turn. Nothing before retirement starts: while windows are open the window that
+    /// runs the application's clocks turns it.
+    fn advance_the_spare_while_retiring(&mut self, now: Instant) -> Option<Instant> {
+        let app = self.app.as_mut()?;
+        let bound = app.run_retiring_until?;
+        app.web_spare.advance(
+            now,
+            false,
+            bt_platform::web_environment_epoch(),
+            Some(bound),
+            &mut |line| diagnostics::note(line),
+        )
+    }
+
+    /// **What the loop does once the registry is empty**, read through
+    /// [`web_spare::after_the_last_window`] so that the rule can be driven with no window.
+    fn run_end(&self, spare_next: Option<Instant>) -> web_spare::RunControl {
+        let (let_go, bound) = self.app.as_ref().map_or((true, None), |app| {
+            (app.web_spare.has_let_go(), app.run_retiring_until)
+        });
+        if !self.windows.is_empty() {
+            return web_spare::RunControl::Wait;
+        }
+        web_spare::after_the_last_window(
+            a_run_ends_with_its_last_visible_window(self.windows.len()),
+            let_go,
+            spare_next,
+            bound,
+        )
     }
 
     /// Open a window the keyboard asked for, if one was asked for.
@@ -61684,6 +61754,11 @@ impl FolioApp {
                         );
                     }
                     let now = Instant::now();
+                    // **The spare retires with the windows, under the run's one bound** (ticket 60).
+                    if let Some(app) = self.app.as_mut() {
+                        let _ = web_spare::start_retiring(&mut app.run_retiring_until, now);
+                        app.web_spare.retire();
+                    }
                     self.report_to_quit(|quit| quit.retired(now));
                 }
                 quit::QuitStep::Exit => {
@@ -61788,15 +61863,25 @@ impl FolioApp {
             };
             deadline = earliest_deadline([deadline, runtime.advance_retirement(now)?]);
         }
-        Ok(deadline)
+        // **And the spare's, concurrently with the pages'** (ticket 60, SW-2).
+        Ok(earliest_deadline([
+            deadline,
+            self.advance_the_spare_while_retiring(now),
+        ]))
     }
 
-    /// Whether every page in every window has let go of its browser.
+    /// Whether every page in every window has let go of its browser — **and the spare web
+    /// controller has** (ticket 60).
     fn every_page_has_gone(&mut self) -> bool {
-        (0..self.windows.len()).all(|index| {
-            self.runtime_at(index)
-                .is_none_or(|runtime| runtime.pages_are_gone())
-        })
+        let spare_let_go = self
+            .app
+            .as_ref()
+            .is_none_or(|app| app.web_spare.has_let_go());
+        spare_let_go
+            && (0..self.windows.len()).all(|index| {
+                self.runtime_at(index)
+                    .is_none_or(|runtime| runtime.pages_are_gone())
+            })
     }
 
     /// **A device the driver took away is not a program that has to stop**
@@ -61926,6 +62011,11 @@ impl FolioApp {
         if let Err(shutdown_error) = self.for_each_window(|runtime| runtime.close_window(true)) {
             eprintln!("child shutdown also failed: {shutdown_error:#}");
         }
+        // **The spare is abandoned, not waited for** (ticket 60, SW-2): its controller closed now,
+        // its parent left to process exit — as this path already treats the pages.
+        if let Some(app) = self.app.as_mut() {
+            app.web_spare.abandon();
+        }
         self.windows.clear();
         if let Some(app) = self.app.as_mut() {
             app.finish();
@@ -61995,6 +62085,15 @@ impl FolioApp {
         // or close one — which the next turn's walk will say, exactly as it says
         // every other change to the run.
         self.publish_window_directory();
+        // **Whether a page is open anywhere** (ticket 60), for the spare's stage.
+        let pages_open = self
+            .windows
+            .in_order_mut()
+            .into_iter()
+            .any(|window| !window.web.is_empty());
+        if let Some(app) = self.app.as_mut() {
+            app.web_pages_open = pages_open;
+        }
         if let Err(error) = self
             .settle_window_ring()
             .and_then(|()| self.settle_application_change())
@@ -62069,8 +62168,13 @@ impl FolioApp {
             // `WaitUntil` standing would be a deadline already in the past, i.e.
             // a process at 100% CPU with nothing on any screen. There is nothing
             // left to be woken *for* except the delegate and the launch socket,
-            // and both of those wake the loop themselves.
-            event_loop.set_control_flow(ControlFlow::Wait);
+            // and both of those wake the loop themselves — **and the spare web
+            // controller, while it lets go** (ticket 60, SW-2): no window is left to
+            // wake the loop for its browser-exit wait, so its instant is the one kept.
+            event_loop.set_control_flow(match self.run_end(wake_deadline) {
+                web_spare::RunControl::WaitUntil(at) => ControlFlow::WaitUntil(at),
+                web_spare::RunControl::Exit | web_spare::RunControl::Wait => ControlFlow::Wait,
+            });
             return;
         }
         // **Every window's own turn, and the earliest wake-up any of them asked
@@ -62825,6 +62929,21 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // its own address and a window with no page finds nothing to read.
             AppEvent::WebPageSpoke => self
                 .for_every_window_engines_included(|runtime| runtime.drive_web_page())
+                // **And the spare web controller** (ticket 60): read on any spoke once it is
+                // parked or retiring, so a browser event is met before a page could take it;
+                // while it is still being made, only on a quiet turn (SW-6) — never here.
+                .map(|()| {
+                    if let Some(app) = self.app.as_mut() {
+                        let bound = app.run_retiring_until;
+                        let _ = app.web_spare.advance(
+                            Instant::now(),
+                            false,
+                            bt_platform::web_environment_epoch(),
+                            bound,
+                            &mut |line| diagnostics::note(line),
+                        );
+                    }
+                })
                 // **And the windows that heard nothing** (the favicon slice, `docs/DESIGN.md` §7.13).
                 // A site's icon is filed for the whole application, so a page
                 // learning one in this window changes what a page on the same
@@ -63346,6 +63465,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // **A spare still standing is abandoned** (ticket 60, SW-2): the loop is stopping, and a
+        // thread that has stopped pumping is not one to wait on its browser with.
+        if let Some(app) = self.app.as_mut() {
+            app.web_spare.abandon();
+        }
         // The path the ordinary shut has already taken: `FolioApp::close` shuts
         // the last window and spends `App::finish` at the moment the map became
         // empty. This is the other path — a loop stopped by something that is

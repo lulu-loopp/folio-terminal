@@ -98,6 +98,15 @@ probe: no descendant process, an empty profile folder), so §5.3 row 21's residu
 the first controller and the pump dispatch after it — stays, and so does D-2's part
 for that row. It added no row.
 
+Ticket 60 narrowed D-64 again and repaid none of it (owner's ruling 2026-09-25,
+option A): a profile that has opened a page gets one spare controller made on a
+quiet idle turn and handed to its first eligible page, which then pays the rehost
+walk and a navigate (146 ms median in spike 59, against 2318 ms cold). The row
+stays open, narrowed, for 0.4.6: a profile's first-ever page, a page that arrives
+before the spare has landed, and every page after the spare is used still pay the
+per-page controller. It repaid a defect it found (a late controller dropped
+without `Close()`; DESIGN 2026-09-25) and added no row.
+
 ## The ledger
 
 "§" alone means a section of `docs/ARCHITECTURE.md`. "Split prep" is
@@ -171,7 +180,7 @@ ledger's.
 | D-61 | a Mac-only red test in `webnav` | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | none yet | 0.4.6 | open |
-| D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43, 54 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open — narrowed by ticket 43: the phases are named in the stall self-report; the remaining cost is the engine's own thread-affine work (§5.3 row 21) ruled 2026-09-24: warm the engine at a quiet moment — follow-up warm-up, ticket 54; narrowed by ticket 54: the environment call is taken at an idle turn, but the environment starts no runtime process (measured), so the first page's `request_controller` and pump dispatch remain; ruling owed |
+| D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43, 54 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open — narrowed by ticket 43: the phases are named in the stall self-report; the remaining cost is the engine's own thread-affine work (§5.3 row 21) ruled 2026-09-24: warm the engine at a quiet moment — follow-up warm-up, ticket 54; narrowed by ticket 54: the environment call is taken at an idle turn, but the environment starts no runtime process (measured), so the first page's `request_controller` and pump dispatch remain; ruling owed; ruled 2026-09-25 (option A) and **narrowed by ticket 60**: a profile that has opened a page gets a spare controller made at idle for its first eligible page (2318 → 146 ms median, spike 59); **open for 0.4.6** — the residual is a profile's first-ever page, a page that arrives before the spare has landed, and every page after the spare is used |
 | D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.7 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.7 before the 0.5 restyle, and the row closes with it | open |
 | D-66 | a fading surface's translucent pixels step at the landing frame: composited on encoded bytes while it fades, blended in linear light at rest — on the light theme the tip's shadow lightens at its darkest pixel from about `#DB` to `#EE` as the fade lands | ticket 46's report (Findings); the 2026-09-23 fade audit, §7 | none yet | 0.4.7 — the L variant (all overlay translucency in encoded space, with D-65), which removes the step | open |
 | D-67 | `bt-app` fails clippy on macOS: nine app-build and five test-build unused items and ignored results | ticket 55's report | none yet | 0.4.6 — beside D-63, since widening the Mac CI job hits it | open |

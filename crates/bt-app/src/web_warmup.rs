@@ -31,6 +31,12 @@
 //! follows a quiet stretch, and the clock always has a future instant to wake
 //! for. The restore card is not a stir: it can stand for as long as the reader
 //! leaves it, and whatever takes it down is a gesture, which is.
+//!
+//! **A second stage, the spare** (0.4.5 ticket 60; owner's ruling 2026-09-25, option A). After
+//! the environment's turn, the same clock may make one spare web controller for the first
+//! eligible page to adopt — on its own quiet turn, counted afresh from the environment's, so the
+//! two never share one; only for a profile whose history holds a page (`web_pages_used`); and only
+//! while no window holds a page. At most one per process, attempted once, never replenished.
 
 use std::time::{Duration, Instant};
 
@@ -96,19 +102,39 @@ pub(crate) struct WebWarmup {
     /// The last instant something stirred: a gesture, output drained, a window
     /// not at rest.
     stirred_at: Option<Instant>,
-    /// **Once per process.** Set the turn the clock asked, or found that
-    /// somebody already had, or that there was nothing to warm. Never cleared:
-    /// a failed warm-up leaves the environment's state empty and the next page
-    /// asks again, as it did before ticket 54.
-    done: bool,
+    /// **Which of its two turns the clock is waiting for** (tickets 54 and 60). Only ever moves
+    /// forward: the environment's turn, then the spare's, then nothing. Never back: a failed
+    /// warm-up leaves the environment's state empty and the next page asks again, as it did before
+    /// ticket 54, and a spare is attempted once.
+    stage: Stage,
+    /// When the environment's turn fired: the spare's quiet stretch is counted from it too.
+    environment_turn_at: Option<Instant>,
+}
+
+/// The clock's stages, in the only order they run.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Stage {
+    /// The environment has not been asked for.
+    #[default]
+    Environment,
+    /// The environment's turn has fired; the spare's has not.
+    Spare,
+    /// Nothing more is owed.
+    Done,
+}
+
+/// **What the spare's turn decided** (ticket 60).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SpareDue {
+    /// Make the spare now, on this quiet turn.
+    Make,
+    /// Not for this process: the profile has never opened a page, or a page is already open.
+    Declined,
 }
 
 impl WebWarmup {
     /// **Something stirred at `at`**: the quiet stretch starts again from here.
     pub(crate) fn stir(&mut self, at: Instant) {
-        if self.done {
-            return;
-        }
         self.stirred_at = Some(self.stirred_at.map_or(at, |stirred| stirred.max(at)));
     }
 
@@ -137,10 +163,63 @@ impl WebWarmup {
     /// comes regardless), and while the restore card is up (whatever takes the
     /// card down is a gesture, and the gesture books the next instant).
     pub(crate) fn deadline(&self, restore_card_up: bool) -> Option<Instant> {
-        if self.done || restore_card_up {
+        if restore_card_up {
+            return None;
+        }
+        match self.stage {
+            Stage::Environment => self.ready_at(),
+            Stage::Spare => self.spare_ready_at(),
+            Stage::Done => None,
+        }
+    }
+
+    /// The earliest instant the spare's turn may fire: a quiet stretch after the environment's
+    /// turn and after the last stir, and never before the grace.
+    fn spare_ready_at(&self) -> Option<Instant> {
+        let fired = self.environment_turn_at? + WEB_ENGINE_WARMUP_QUIET;
+        Some(self.ready_at()?.max(fired))
+    }
+
+    /// **The instant from which a turn is quiet** — the end of the quiet stretch after the last
+    /// stir, and never before the grace — or `None` while the restore card stands (ticket 60,
+    /// SW-6). The spare, while it is being made, is advanced only on a turn at or after this, so
+    /// its controller call — up to 590 ms on the window thread, measured — never lands inside a
+    /// burst of typing, however late the environment's answer arrived.
+    pub(crate) fn quiet_at(&self, restore_card_up: bool) -> Option<Instant> {
+        if restore_card_up {
             return None;
         }
         self.ready_at()
+    }
+
+    /// Whether `now` is a quiet turn — see [`Self::quiet_at`].
+    pub(crate) fn is_quiet(&self, now: Instant, restore_card_up: bool) -> bool {
+        self.quiet_at(restore_card_up).is_some_and(|at| now >= at)
+    }
+
+    /// **The spare's turn** (ticket 60): `Some` on the first quiet turn after the environment's
+    /// turn — `Make` when `pages_used` (the profile's receipt) and no window holds a page,
+    /// `Declined` otherwise — and `None` on every other turn. Either answer ends the clock: at
+    /// most one spare per process, attempted once.
+    pub(crate) fn spare_turn(
+        &mut self,
+        now: Instant,
+        restore_card_up: bool,
+        pages_used: bool,
+        page_open: bool,
+    ) -> Option<SpareDue> {
+        if self.stage != Stage::Spare || restore_card_up {
+            return None;
+        }
+        if now < self.spare_ready_at()? {
+            return None;
+        }
+        self.stage = Stage::Done;
+        Some(if pages_used && !page_open {
+            SpareDue::Make
+        } else {
+            SpareDue::Declined
+        })
     }
 
     /// **One turn of the clock.** Asks the door for the environment when the
@@ -159,13 +238,12 @@ impl WebWarmup {
         door: &mut dyn EngineDoor,
         say: fn(&str),
     ) -> Option<Result<WebWarmUp, String>> {
-        if self.done || restore_card_up {
+        if self.stage != Stage::Environment || restore_card_up {
             return None;
         }
         if now < self.ready_at()? {
             return None;
         }
-        self.done = true;
         let asked = door.warm(Box::new(move |error| {
             if let Some(error) = error {
                 say(&warm_up_failed_line(&error));
@@ -174,6 +252,13 @@ impl WebWarmup {
         if let Err(error) = &asked {
             say(&warm_up_failed_line(error));
         }
+        // A platform with nothing to warm has no controller to make ahead of time either.
+        self.stage = if asked == Ok(WebWarmUp::NothingToWarm) {
+            Stage::Done
+        } else {
+            Stage::Spare
+        };
+        self.environment_turn_at = Some(now);
         Some(asked)
     }
 }
@@ -275,7 +360,7 @@ mod web_warmup_tests {
     /// after the environment has arrived and been let go of again (the rebuild
     /// road's `forget_web_environment`), when only a page may ask.
     ///
-    /// MUTATION: drop the once-per-process guard (`self.done = true` in
+    /// MUTATION: drop the once-per-process guard (the stage moving on in
     /// `turn`) and a second creation call appears after the environment is
     /// let go of. Or drop the grace from `ready_at` and the request lands on
     /// the first turn.
@@ -292,6 +377,9 @@ mod web_warmup_tests {
             if let Some(answer) = clock.turn(now, false, &mut door, say) {
                 asked_at.push((now - start, answer));
             }
+            // The spare's turn (ticket 60), for a profile that has never opened a page: declined,
+            // and the clock has nothing left to ask for.
+            let _ = clock.spare_turn(now, false, false, false);
             if step == 60 {
                 door.answer(Ok(1));
                 clock.stir(now);
@@ -346,6 +434,8 @@ mod web_warmup_tests {
                 clock.turn(due + ms(100 * step), false, &mut door, say),
                 None
             );
+            // The page is open, so the spare's turn declines (ticket 60).
+            let _ = clock.spare_turn(due + ms(100 * step), false, true, true);
         }
         assert_eq!(door.creations.len(), 1, "the page's call is the only call");
         assert_eq!(clock.deadline(false), None);

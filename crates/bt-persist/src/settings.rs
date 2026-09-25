@@ -323,7 +323,16 @@ use serde::{Deserialize, Serialize};
 /// every build before this one told the page nothing, so the engine answered with the operating
 /// system's own mode, and the owner ruled that a page follows Folio instead. The row is what keeps
 /// that a choice — `Light` or `Dark` pins either.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 38;
+///
+/// **v39 carries `web_pages_used`**, a receipt about this profile and not a preference: whether a
+/// web page has ever committed in it (0.4.5 ticket 60) — see [`WebPagesUsedV1`]. No row shows it
+/// and no import moves it.
+///
+/// **It lands on `Never`**, because nothing in a v38 file says whether a page was ever opened. The
+/// structural step stays pure; the upgrade is completed at startup by the window process, which
+/// reads the saved session it has already loaded for typed page records and writes `Used` through
+/// the receipt's one writer when it finds one.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 39;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -585,7 +594,8 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "quake_profile_id": "pwsh" | "wsl" | ... | "",
 ///   "quake_startup_command": "fastfetch" | "",
 ///   "quake_top_gap": 0..=64,
-///   "quake_restore": "Nothing" | "Folders" | "FoldersAndPinnedCommands"
+///   "quake_restore": "Nothing" | "Folders" | "FoldersAndPinnedCommands",
+///   "web_pages_used": "Never" | "Used"
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1243,6 +1253,14 @@ pub struct SettingsV1 {
     /// nobody who never saw the card ever recorded an intent.
     #[serde(default)]
     pub powershell_install_pending: bool,
+    /// **Whether a web page has ever committed in this profile** (v39, 0.4.5 ticket 60) — see
+    /// [`WebPagesUsedV1`]. A receipt about this machine, beside `first_run_card`: no Settings row,
+    /// and an import leaves it as it stands.
+    ///
+    /// `#[serde(default)]` because [`WebPagesUsedV1::Never`] is the honest reading of a missing key:
+    /// a file that does not say so is not evidence that a page was ever opened.
+    #[serde(default)]
+    pub web_pages_used: WebPagesUsedV1,
     /// **What a second start of Folio opens when one is already running** (v33,
     /// `docs/DESIGN.md` §7.59) — see [`LaunchOpensV1`].
     ///
@@ -1525,6 +1543,8 @@ impl Default for SettingsV1 {
             first_run_card: FirstRunCardV1::NotShown,
             // Nobody has recorded an intent about a file nobody has named.
             powershell_install_pending: false,
+            // A profile being written for the first time has opened no page.
+            web_pages_used: WebPagesUsedV1::Never,
             // Starting a program again opens that program — see `LaunchOpensV1`.
             launch_opens: LaunchOpensV1::NewWindow,
             // Option composes text, which is what the key does everywhere else
@@ -1630,6 +1650,27 @@ pub enum FirstRunCardV1 {
     NotShown,
     /// Put up once. Nothing shows it again, whatever the answer was.
     Shown,
+}
+
+/// **Whether a web page has ever committed in this profile** (0.4.5 ticket 60, D-64).
+///
+/// The one input that decides whether Folio makes a spare web controller at idle: a profile that
+/// has opened a page is given one for its first page of the run, and a profile that never has pays
+/// nothing — no controller, no browser processes (owner's ruling 2026-09-25, option A).
+///
+/// **Two values and not a `bool`, for [`FirstRunCardV1`]'s reason**: the default is the one a
+/// migrated file lands on, and it has to be the one that asks for nothing.
+///
+/// **Written by one function, never by a row.** The first successful top-level navigation to a
+/// page that is not blank writes `Used`, and so does the startup reconciliation that finds a typed
+/// page record in the saved session. Nothing writes `Never` back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum WebPagesUsedV1 {
+    /// No page has committed here, as far as this profile knows.
+    #[default]
+    Never,
+    /// A page has committed here, or the saved session holds one.
+    Used,
 }
 
 /// Which language the interface is written in — `docs/DESIGN.md` §7.1.6c-3.

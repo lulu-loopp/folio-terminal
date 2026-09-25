@@ -74,6 +74,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (35, migrate_settings_v35_to_v36),
     (36, migrate_settings_v36_to_v37),
     (37, migrate_settings_v37_to_v38),
+    (38, migrate_settings_v38_to_v39),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -862,6 +863,25 @@ fn migrate_settings_v37_to_v38(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(38));
         object.insert("web_color_scheme".to_owned(), Value::from("FollowTheme"));
+    }
+    value
+}
+
+/// v38 -> v39: the receipt that a web page has committed in this profile, written **`Never`**
+/// (0.4.5 ticket 60).
+///
+/// [`migrate_settings_v7_to_v8`]'s one-key shape, and deliberately pure: nothing in a v38 settings
+/// file says whether a page was ever opened, and this step reads no other file. The upgrade is
+/// completed where the evidence is — the window process's startup reconciliation reads the saved
+/// session it has already loaded and writes `Used` when it holds a typed page record. No sibling is
+/// read or rewritten.
+fn migrate_settings_v38_to_v39(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(39));
+        object.insert(
+            "web_pages_used".to_owned(),
+            serde_json::to_value(crate::WebPagesUsedV1::Never).expect("a unit variant serialises"),
+        );
     }
     value
 }
@@ -2930,6 +2950,59 @@ mod tests {
             absent.web_color_scheme,
             crate::WebColorSchemeV1::FollowTheme
         );
+    }
+
+    /// RED (60) — **the v38 -> v39 step adds the web-pages receipt as `Never`, and leaves every
+    /// sibling exactly as it found it.**
+    ///
+    /// Nothing in a v38 settings file says whether a page was ever opened, so the step writes the
+    /// value that asks for nothing and reads no other file; the startup reconciliation, which has
+    /// the saved session in hand, is what writes `Used` for a profile whose history holds a page.
+    /// A step that wrote `Used` would give every upgrading profile a 91 MB spare it may never use.
+    ///
+    /// MUTATION: write `"Used"` in `migrate_settings_v38_to_v39` — the first assertion goes red;
+    /// drop its `schema_version` line — the second does.
+    #[test]
+    fn migrate_settings_v38_to_v39_adds_the_receipt_as_never_and_leaves_every_sibling_alone() {
+        let before = json!({
+            "schema_version": 38,
+            "theme_mode": "Dark",
+            "first_run_card": "Shown",
+            "web_color_scheme": "Light",
+            "search_engine": "Bing"
+        });
+        let migrated = migrate_value(before.clone(), 38, 39, SETTINGS_MIGRATIONS).unwrap();
+        assert_eq!(
+            migrated["web_pages_used"],
+            json!("Never"),
+            "the settings file alone is no evidence that a page was ever opened"
+        );
+        assert_eq!(migrated["schema_version"], json!(39));
+        let (before, after) = (
+            before.as_object().expect("an object"),
+            migrated.as_object().expect("an object"),
+        );
+        assert_eq!(after.len(), before.len() + 1, "exactly one key is added");
+        for (key, value) in before {
+            if key != "schema_version" {
+                assert_eq!(&after[key], value, "`{key}` was rewritten by the step");
+            }
+        }
+        // A whole v38 document walked up the rung reads back as `Never`, and so does a v39
+        // document that omits the line.
+        let mut whole = serde_json::to_value(crate::SettingsV1::default()).expect("serialises");
+        let object = whole
+            .as_object_mut()
+            .expect("a settings document is an object");
+        object.remove("web_pages_used");
+        object.insert("schema_version".to_owned(), json!(38));
+        let walked = migrate_value(whole.clone(), 38, 39, SETTINGS_MIGRATIONS).unwrap();
+        let read: crate::SettingsV1 =
+            serde_json::from_value(walked).expect("the migrated document deserialises");
+        assert_eq!(read.web_pages_used, crate::WebPagesUsedV1::Never);
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(whole).expect("this key has a default");
+        assert_eq!(absent.web_pages_used, crate::WebPagesUsedV1::Never);
     }
 
     #[test]

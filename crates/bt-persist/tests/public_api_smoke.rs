@@ -79,6 +79,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         quake_restore: bt_persist::QuakeRestoreV1::Folders,
         first_run_card: bt_persist::FirstRunCardV1::Shown,
         powershell_install_pending: true,
+        web_pages_used: bt_persist::WebPagesUsedV1::Used,
         launch_opens: bt_persist::LaunchOpensV1::TabInLastWindow,
         option_sends_alt: true,
     };

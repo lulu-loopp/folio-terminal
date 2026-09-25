@@ -95,7 +95,7 @@ pub use settings::{
     LaunchOpensV1, MAXIMUM_QUAKE_TOP_GAP, MINIMUM_BACKGROUND_OPACITY, MINIMUM_QUAKE_HEIGHT,
     MINIMUM_QUAKE_WIDTH, MinimumContrastV1, PsReadLineInviteV1, QuakeRestoreV1,
     SETTINGS_SCHEMA_VERSION, SearchEngineV1, SettingsV1, SplitDirectionV1, ThemeModeV1,
-    WebColorSchemeV1,
+    WebColorSchemeV1, WebPagesUsedV1,
 };
 pub use update::{UPDATE_CHECK_SCHEMA_VERSION, UpdateCheckV1};
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};

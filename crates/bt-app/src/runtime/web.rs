@@ -39,6 +39,110 @@ impl Runtime<'_> {
             &mut web_warmup::ThisProcess,
             crate::diagnostics::note,
         );
+        // **The clock's second stage: the spare web controller** (0.4.5 ticket 60, D-64) — on its
+        // own quiet turn after the environment's, for a profile whose history holds a page, while
+        // no window holds one. At most once per process.
+        let pages_used =
+            self.app.settings_store.loaded().web_pages_used == bt_persist::WebPagesUsedV1::Used;
+        if let Some(due) = self.app.web_warmup.spare_turn(
+            now,
+            restore_card_up,
+            pages_used,
+            self.app.web_pages_open,
+        ) {
+            web_trace::line(|| format!("spare turn due={due:?}"));
+            if due == web_warmup::SpareDue::Make {
+                let began = Instant::now();
+                hang_watch::during(hang_watch::Station::WebSpare, || {
+                    self.make_spare_web_controller();
+                });
+                web_trace::line(|| format!("spare made held_us={}", began.elapsed().as_micros()));
+            }
+        }
+        // **And its clock** (SW-6): a spare still being made is drained only on a quiet turn, so
+        // its controller call never lands inside a burst of typing. A run that is retiring turns
+        // it from the loop's own doors instead.
+        if self.app.run_retiring_until.is_none() {
+            let quiet = self.app.web_warmup.is_quiet(now, restore_card_up);
+            let creating = self.app.web_spare.phase() == bt_platform::SparePhase::Creating;
+            let epoch = bt_platform::web_environment_epoch();
+            let spare = &mut self.app.web_spare;
+            let mut advance = || {
+                let _ = spare.advance(now, quiet, epoch, None, &mut |line| {
+                    crate::diagnostics::note(line);
+                });
+            };
+            if creating && quiet {
+                // The quiet-gated turns that carry the controller call and the install burst:
+                // their hold is written down, which is the whole of what the stage is for.
+                let began = Instant::now();
+                hang_watch::during(hang_watch::Station::WebSpare, advance);
+                let held = began.elapsed();
+                let phase = self.app.web_spare.phase();
+                if held.as_micros() >= 1_000 || phase != bt_platform::SparePhase::Creating {
+                    web_trace::line(|| {
+                        format!("spare advance held_us={} phase={phase:?}", held.as_micros())
+                    });
+                }
+            } else {
+                advance();
+            }
+        }
+    }
+
+    /// **Make the spare web controller** (ticket 60, turn B of the design note's §4): its
+    /// never-shown parent and its seat — the pane's own `WebSeat::open`, under the parked policy,
+    /// at this window's scale and scheme — stood on the parent's glass at 800 × 600 so the engine
+    /// is sized before its blank page loads (SW-5). The controller call itself comes on a later
+    /// quiet turn, when the environment's answer is read. A failure is one diagnostics line and no
+    /// spare: nothing is retried.
+    fn make_spare_web_controller(&mut self) {
+        let parent = match bt_platform::spare_parent() {
+            Ok(Some(parent)) => parent,
+            Ok(None) => return,
+            Err(error) => {
+                crate::diagnostics::note(&crate::web_spare::retired_line(&error));
+                return;
+            }
+        };
+        let proxy = self.app.event_proxy.clone();
+        let opened = webhost::WebSeat::open_parked(
+            bt_platform::PageVisual {
+                tab: crate::web_spare::SPARE_TAB,
+                seat: 1,
+            },
+            parent.window(),
+            self.window.renderer.scale_factor(),
+            self.web_color_scheme_in_force(),
+            Box::new(move || {
+                let _ = proxy.send_event(AppEvent::WebPageSpoke);
+            }),
+        );
+        let (mut seat, said) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                crate::diagnostics::note(&crate::web_spare::retired_line(&error));
+                return;
+            }
+        };
+        // An engine that refused where it stood has nothing to park: the seat and the window go
+        // now, on a thread that is pumping, with no controller under either.
+        if let Some(webhost::WebOutcome::Fault(error)) = said
+            .iter()
+            .find(|outcome| matches!(outcome, webhost::WebOutcome::Fault(_)))
+        {
+            crate::diagnostics::note(&crate::web_spare::retired_line(error));
+            return;
+        }
+        if let Err(error) = seat.stand_parked(parent.compositor(), crate::web_spare::PARKED_BOUNDS)
+        {
+            crate::diagnostics::note(&crate::web_spare::retired_line(&error));
+            return;
+        }
+        web_trace::line(|| String::from("spare made"));
+        self.app
+            .web_spare
+            .created(seat, parent, bt_platform::web_environment_epoch());
     }
 
     /// **Whether the restore card is up in this window** — the one condition of the
@@ -576,6 +680,10 @@ impl Runtime<'_> {
                     // field being open.
                     self.forget_a_blank_page(leaf);
                     self.commit_web_page(leaf)?;
+                    // **The receipt that this profile opens pages** (0.4.5 ticket 60): the one
+                    // writer, handed `Used` on every commit; the store decides whether that is a
+                    // write (the first, or a retry).
+                    crate::web_spare::note_a_web_page_committed(&mut self.app.settings_store);
                 }
                 webhost::WebOutcome::Gone => {
                     self.forget_a_blank_page(leaf);
@@ -614,6 +722,9 @@ impl Runtime<'_> {
                 // goes for its reason — a fact with nowhere to be drawn is still
                 // a fact.
                 webhost::WebOutcome::Fault(text) => eprintln!("BT_WEB {text}"),
+                // Only a parked spare says this, and a pane's seat is never parked: its owner
+                // (`web_spare`) reads it, and a window has nothing to add.
+                webhost::WebOutcome::Retired(why) => eprintln!("BT_WEB {why}"),
                 webhost::WebOutcome::FindMatches { count, active } => {
                     self.web_find_reported(count, active)?;
                 }
@@ -848,6 +959,12 @@ impl Runtime<'_> {
                 .unwrap_or_default();
             return self.apply_web_outcomes(leaf, outcomes);
         }
+        // **The spare, if one is parked** (0.4.5 ticket 60): the first eligible page takes the
+        // controller made at idle instead of asking for its own. Here, in the arm where this pane
+        // has no engine, and nowhere else.
+        if self.adopt_spare_web_page(leaf, index, url, &minted)? {
+            return Ok(());
+        }
         let native = native_window(&self.window.window)?;
         let proxy = self.app.event_proxy.clone();
         match webhost::WebSeat::open(
@@ -876,61 +993,166 @@ impl Runtime<'_> {
             // all on a machine that has one, and on a machine that has not, the
             // fault the seat is already wearing, on its way to `stderr` like
             // every other. See `webhost::WebSeat::open`.
-            Ok((web, engine_said)) => {
-                self.window.web.insert(leaf, web);
-                // The pane stops showing whatever document it was on the moment
-                // it becomes a page: one seat shows one thing, and a buffer left
-                // pointed at from underneath a browser is a switcher row claiming
-                // to be current while a page covers it.
-                //
-                // **Except the buffer that is the page itself**, which a restore
-                // has already put there and which the first commit will put there
-                // again: clearing it would blank the head and the foot for as long
-                // as the engine takes to come up, which on a cold profile is the
-                // better part of a second.
-                //
-                // **On this page's own tab, and named as one** (F1b′, found on
-                // the machine; §7.12 ⓑ made the name carry it). What that cost,
-                // measured: a window restored with a page in each of two tabs
-                // cleared the first tab's buffer twice and left the second tab's
-                // file buffer standing under its own engine, so
-                // `advance_web_page` read that buffer as "something else landed
-                // here" and closed the page it had just opened. One of the two
-                // pages was gone within a frame of arriving. It was cured here
-                // first, by reaching the tab through `leaf.tab` while
-                // `PreviewSurface::Seat` still held a bare number; the surface
-                // now carries the whole leaf, so the two lines below say it
-                // rather than work around it.
-                let surface = PreviewSurface::Seat(leaf);
-                let showing_a_page = self.window.tabs[index]
-                    .preview_panes
-                    .get(surface)
-                    .and_then(|pane| pane.buffer.as_ref())
-                    .is_some_and(|source| source.web_url().is_some());
-                if !showing_a_page {
-                    self.leave_preview_buffer_in(index, surface);
-                }
-                // **And the picture with it** — unconditionally again, since
-                // route B (2026-08-28; §7.44 ④).
-                //
-                // This carried an exception while a video was played by a page:
-                // a player shell was the one navigation whose pane had to keep
-                // its `PreviewImageState`, because that state was the pane's
-                // whole account of the recording the browser was playing. There
-                // is no such navigation any more. A recording is played by an
-                // engine this window drives and drawn on its own glass, and it
-                // never travels through this door at all — so every page that
-                // reaches here is a page, and every page replaces what the pane
-                // was showing.
-                self.clear_preview_image_in(index, surface);
-                self.apply_web_outcomes(leaf, engine_said)?;
-            }
+            Ok((web, engine_said)) => self.seat_a_web_page(leaf, index, web, engine_said)?,
             // What is left here is the one failure that is not the engine's: no
             // `%LOCALAPPDATA%`, so there is no profile for any engine to use and
             // no seat to hang a card on.
             Err(error) => eprintln!("BT_WEB {error}"),
         }
         Ok(())
+    }
+
+    /// **A page's seat enters this window** — the one bookkeeping tail, whichever road made the
+    /// seat: a controller of its own, or the spare's adopted (ticket 60, SW-3).
+    fn seat_a_web_page(
+        &mut self,
+        leaf: LeafId,
+        index: usize,
+        web: webhost::WebSeat,
+        engine_said: Vec<webhost::WebOutcome>,
+    ) -> Result<()> {
+        self.window.web.insert(leaf, web);
+        // The pane stops showing whatever document it was on the moment
+        // it becomes a page: one seat shows one thing, and a buffer left
+        // pointed at from underneath a browser is a switcher row claiming
+        // to be current while a page covers it.
+        //
+        // **Except the buffer that is the page itself**, which a restore
+        // has already put there and which the first commit will put there
+        // again: clearing it would blank the head and the foot for as long
+        // as the engine takes to come up, which on a cold profile is the
+        // better part of a second.
+        //
+        // **On this page's own tab, and named as one** (F1b′, found on
+        // the machine; §7.12 ⓑ made the name carry it). What that cost,
+        // measured: a window restored with a page in each of two tabs
+        // cleared the first tab's buffer twice and left the second tab's
+        // file buffer standing under its own engine, so
+        // `advance_web_page` read that buffer as "something else landed
+        // here" and closed the page it had just opened. One of the two
+        // pages was gone within a frame of arriving. It was cured here
+        // first, by reaching the tab through `leaf.tab` while
+        // `PreviewSurface::Seat` still held a bare number; the surface
+        // now carries the whole leaf, so the two lines below say it
+        // rather than work around it.
+        let surface = PreviewSurface::Seat(leaf);
+        let showing_a_page = self.window.tabs[index]
+            .preview_panes
+            .get(surface)
+            .and_then(|pane| pane.buffer.as_ref())
+            .is_some_and(|source| source.web_url().is_some());
+        if !showing_a_page {
+            self.leave_preview_buffer_in(index, surface);
+        }
+        // **And the picture with it** — unconditionally again, since
+        // route B (2026-08-28; §7.44 ④).
+        //
+        // This carried an exception while a video was played by a page:
+        // a player shell was the one navigation whose pane had to keep
+        // its `PreviewImageState`, because that state was the pane's
+        // whole account of the recording the browser was playing. There
+        // is no such navigation any more. A recording is played by an
+        // engine this window drives and drawn on its own glass, and it
+        // never travels through this door at all — so every page that
+        // reaches here is a page, and every page replaces what the pane
+        // was showing.
+        self.clear_preview_image_in(index, surface);
+        self.apply_web_outcomes(leaf, engine_said)?;
+        Ok(())
+    }
+
+    /// **Hand the parked spare to this pane, as one transaction** (ticket 60, SW-3), and answer
+    /// whether it did. `false` is every page's ordinary road — no spare parked, one that is no
+    /// longer fit (retired on the spot), or a handoff that refused where it stood (the spare
+    /// retires, and the pane builds its own controller, a real request recorded as such).
+    ///
+    /// `Moved`: the seat is the pane's, through [`Self::seat_a_web_page`]; then the window's scale
+    /// and scheme (a setter's error is a fault on a seat that is already the pane's); then the
+    /// address, navigated on the first bounds this window gives it (SW-5). `Lost`: the seat is the
+    /// pane's and rebuilding here; the address waits for the rebuild.
+    fn adopt_spare_web_page(
+        &mut self,
+        leaf: LeafId,
+        index: usize,
+        url: &str,
+        minted: &webnav::Mint,
+    ) -> Result<bool> {
+        if self.app.web_spare.phase() != bt_platform::SparePhase::Parked {
+            return Ok(false);
+        }
+        let leaving = hang_watch::enter(hang_watch::Station::WebAdopt);
+        let began = Instant::now();
+        let native = native_window(&self.window.window)?;
+        let page = bt_platform::PageVisual {
+            tab: leaf.tab.0,
+            seat: leaf.seat.0,
+        };
+        let mut door = WindowHandoff {
+            to: &self.window.compositor,
+            address: webhost::SeatAddress {
+                page,
+                window: native,
+            },
+            outcomes: Vec::new(),
+            answered: None,
+        };
+        let adoption = crate::web_spare::adopt(
+            &mut self.app.web_spare,
+            bt_platform::web_environment_epoch(),
+            &mut door,
+            Instant::now() + webhost::BROWSER_EXIT_DEADLINE,
+        );
+        let (said, answered) = (door.outcomes, door.answered);
+        if let Some(answered) = answered {
+            web_trace::line(|| {
+                format!(
+                    "adopt {} from=spare outcome={answered} held_us={}",
+                    web_trace::seat(page),
+                    began.elapsed().as_micros()
+                )
+            });
+        }
+        let adopted = match adoption {
+            crate::web_spare::Adoption::BuildYourOwn => false,
+            crate::web_spare::Adoption::Moved(mut web) => {
+                web.becomes_a_page();
+                self.seat_a_web_page(leaf, index, web, said)?;
+                let scale = self.window.renderer.scale_factor();
+                let scheme = self.web_color_scheme_in_force();
+                let window = &mut *self.window;
+                let mut outcomes = Vec::new();
+                if let Some(web) = window.web.get_mut(&leaf) {
+                    if let Err(error) = web.set_device_scale(scale) {
+                        outcomes.push(webhost::WebOutcome::Fault(error));
+                    }
+                    if let Err(error) = web.set_color_scheme(scheme) {
+                        outcomes.push(webhost::WebOutcome::Fault(error));
+                    }
+                    outcomes.extend(web.go_adopted(url, minted.clone(), &window.compositor));
+                }
+                self.apply_web_outcomes(leaf, outcomes)?;
+                true
+            }
+            crate::web_spare::Adoption::Lost(mut web) => {
+                web.becomes_a_page();
+                self.seat_a_web_page(leaf, index, web, said)?;
+                let window = &mut *self.window;
+                let outcomes = window
+                    .web
+                    .get_mut(&leaf)
+                    .map(|web| web.go(url, minted.clone(), &window.compositor))
+                    .unwrap_or_default();
+                self.apply_web_outcomes(leaf, outcomes)?;
+                true
+            }
+        };
+        hang_watch::at(leaving);
+        if adopted {
+            // The first placement is what sizes the page and releases its address, so a frame is
+            // owed now rather than whenever something else happens to ask for one.
+            self.present_chrome_change()?;
+        }
+        Ok(adopted)
     }
 
     /// **The colour scheme a page in this window prefers, right now** — the `Web pages` row read
@@ -1698,5 +1920,52 @@ impl Runtime<'_> {
                 position,
             );
         }
+    }
+}
+
+/// **The page's window, as the adoption transaction's handoff door** (ticket 60, SW-3): park the
+/// spare's seat, then walk `WebSeat::rehost` from the spare's parent into this window, with
+/// `take_focus = false`.
+struct WindowHandoff<'a> {
+    to: &'a bt_platform::Compositor,
+    address: webhost::SeatAddress,
+    outcomes: Vec<webhost::WebOutcome>,
+    /// The handoff's own word for the trace: `Moved`, `KeptSource` or `Lost`.
+    answered: Option<&'static str>,
+}
+
+impl crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent> for WindowHandoff<'_> {
+    fn park(&mut self, seat: &mut webhost::WebSeat) {
+        seat.park_for_handoff();
+    }
+
+    fn rehost(
+        &mut self,
+        seat: &mut webhost::WebSeat,
+        parent: &bt_platform::SpareParent,
+    ) -> crate::web_spare::HandedOff {
+        use crate::web_spare::HandedOff;
+        let report = seat.rehost(
+            parent.compositor(),
+            self.to,
+            self.address,
+            false,
+            &mut self.outcomes,
+        );
+        let (word, handed) = match report {
+            webhost::RehostReport::Moved => ("Moved", HandedOff::Moved),
+            // A fit spare has a controller, so there is always something to hand over; an answer
+            // that moved nothing is a refusal like any other.
+            webhost::RehostReport::AddressOnly => (
+                "KeptSource",
+                HandedOff::SourceKept(String::from("nothing to hand over")),
+            ),
+            webhost::RehostReport::SourceKept(error) => {
+                ("KeptSource", HandedOff::SourceKept(error))
+            }
+            webhost::RehostReport::Rebuilding(error) => ("Lost", HandedOff::Lost(error)),
+        };
+        self.answered = Some(word);
+        handed
     }
 }

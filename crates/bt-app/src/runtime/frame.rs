@@ -2094,7 +2094,7 @@ impl Runtime<'_> {
         if application_clocks {
             hang_watch::during(hang_watch::Station::WebWarmup, || self.warm_web_engine(now));
         }
-        const DEADLINE_OWNERS: [&str; 52] = [
+        const DEADLINE_OWNERS: [&str; 53] = [
             "startup poll",
             "IME cursor",
             "shell caret",
@@ -2147,6 +2147,7 @@ impl Runtime<'_> {
             "window title",
             "search walk",
             "web engine warm-up",
+            "spare web controller",
         ];
         let deadlines = [
             startup_deadline,
@@ -2412,6 +2413,19 @@ impl Runtime<'_> {
                     self.app
                         .web_warmup
                         .deadline(self.web_warmup_waits_for_the_restore_card())
+                })
+                .flatten(),
+            // **The spare web controller** (ticket 60): while it is being made and its engine has
+            // spoken, the next quiet instant (absent while the restore card stands); otherwise its
+            // own clocks — the engine's start deadline, its browser-exit wait. Absent for a
+            // profile that never gets one, which is most turns of most runs.
+            application_clocks
+                .then(|| {
+                    let quiet = self
+                        .app
+                        .web_warmup
+                        .quiet_at(self.web_warmup_waits_for_the_restore_card());
+                    self.app.web_spare.deadline(quiet.map(|at| at.max(now)))
                 })
                 .flatten(),
         ];

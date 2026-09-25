@@ -79,7 +79,7 @@ use windows::core::{BOOL, HSTRING, IUnknown, Interface as _, PCWSTR, PWSTR};
 use super::PageVisual;
 use crate::Compositor;
 #[cfg(windows)]
-use crate::{EnvironmentAnswer, EnvironmentAsk, EnvironmentSlot, WebWarmUp};
+use crate::{ControllerSlots, EnvironmentAnswer, EnvironmentAsk, EnvironmentSlot, WebWarmUp};
 
 // ── Reading out-parameters ─────────────────────────────────────────────────
 //
@@ -733,6 +733,135 @@ pub fn forget_web_environment() {
     ENVIRONMENT.with(|cell| cell.borrow_mut().forget());
 }
 
+/// **Which environment the process has** (0.4.5 ticket 60) — see
+/// [`EnvironmentSlot::epoch`]. The spare records it when it is made and compares
+/// it before a page may take it.
+#[cfg(windows)]
+#[must_use]
+pub fn web_environment_epoch() -> u64 {
+    ENVIRONMENT.with(|cell| cell.borrow().epoch())
+}
+
+/// Close a controller a creation call delivered to nobody (R2-13, ticket 60).
+#[cfg(windows)]
+fn close_orphan(orphan: ICoreWebView2CompositionController) {
+    if let Ok(controller) = orphan.cast::<ICoreWebView2Controller>() {
+        let _ = unsafe { controller.Close() };
+    }
+}
+
+/// **The spare web controller's parent: a window that exists and is never shown**
+/// (0.4.5 ticket 60; `docs/ARCHITECTURE.md` §6) — **the one `CreateWindowExW` in
+/// product code**, and the door that kind of effect goes through.
+///
+/// A composition-hosted controller needs a parent `HWND` to be made under and to
+/// hang its own popups off; the spare is made before any page asks for one, so its
+/// parent cannot be a pane's window. `WS_POPUP` with `WS_EX_NOACTIVATE |
+/// WS_EX_TOOLWINDOW`, 800 × 600, and never `ShowWindow`: it never appears, never
+/// takes the foreground and has no taskbar button — spike 59's harness window,
+/// promoted. Beside it, a [`Compositor`] of its own (a null rendering device, as
+/// every window's), whose visual the spare's page composes into until a page's
+/// window adopts the controller through `WebHost::rehost`.
+///
+/// **Dropping it destroys the window**, so the owner drops it only on a thread that
+/// is still pumping: after a handoff moved the controller away, or after the spare's
+/// browser has let go. An orderly stop leaves it to process exit instead (§7.35: an
+/// `HWND` with the engine's child window under it cannot be destroyed by a thread
+/// that has stopped pumping).
+#[cfg(windows)]
+pub struct SpareParent {
+    hwnd: HWND,
+    /// `Option` only so the compositor can be let go of before the window it is
+    /// bound to is destroyed.
+    compositor: Option<Compositor>,
+}
+
+#[cfg(windows)]
+impl SpareParent {
+    /// The window, as the rest of the program names windows.
+    #[must_use]
+    pub fn window(&self) -> NativeWindow {
+        NativeWindow::from_hwnd(self.hwnd).expect("a window this door created")
+    }
+
+    /// The parent's own composition tree.
+    #[must_use]
+    pub fn compositor(&self) -> &Compositor {
+        self.compositor
+            .as_ref()
+            .expect("the compositor lives as long as the parent")
+    }
+
+    /// Whether the window still exists — the VM smoke's `IsWindow` question.
+    #[must_use]
+    pub fn is_window(&self) -> bool {
+        unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(self.hwnd)) }.as_bool()
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SpareParent {
+    fn drop(&mut self) {
+        drop(self.compositor.take());
+        let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(self.hwnd) };
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn spare_parent_procedure(
+    hwnd: HWND,
+    message: u32,
+    w: windows::Win32::Foundation::WPARAM,
+    l: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, message, w, l) }
+}
+
+/// **Make the spare's parent** (0.4.5 ticket 60) — see [`SpareParent`]. `Ok(None)`
+/// on a platform whose engine is made on the spot; on Windows a window and a
+/// compositor, or the error that refused them.
+#[cfg(windows)]
+pub fn spare_parent() -> Result<Option<SpareParent>, String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, RegisterClassW, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    };
+    let class = HSTRING::from("FolioSpareWebParent");
+    let wnd = WNDCLASSW {
+        lpfnWndProc: Some(spare_parent_procedure),
+        lpszClassName: PCWSTR(class.as_ptr()),
+        ..Default::default()
+    };
+    // Registered once per process; the second registration answers zero and the
+    // class from the first is the one used. There is only ever one spare.
+    unsafe { RegisterClassW(&wnd) };
+    let title = HSTRING::new();
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            PCWSTR(class.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            WS_POPUP,
+            0,
+            0,
+            800,
+            600,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    .map_err(|error| failure("CreateWindowExW(spare parent)", &error))?;
+    let window = NativeWindow::from_hwnd(hwnd)
+        .ok_or_else(|| String::from("CreateWindowExW(spare parent) answered no window"))?;
+    let mut parent = SpareParent {
+        hwnd,
+        compositor: None,
+    };
+    parent.compositor = Some(Compositor::new(window)?);
+    Ok(Some(parent))
+}
+
 /// **Ask for the process's web environment before any page does** — the
 /// warm-up's door (0.4.5 ticket 54, D-64).
 ///
@@ -1368,7 +1497,11 @@ pub struct WebHost {
     /// would take the first one's controller — a live browser pointed at a
     /// window that had already let go of it. The generation is asked for by
     /// name now, and a slot that does not carry it is not adopted.
-    pending_controller: Option<(u64, Rc<RefCell<Option<ICoreWebView2CompositionController>>>)>,
+    ///
+    /// **And the calls nobody will come for, until they answer** (0.4.5 ticket 60): a slot this
+    /// host lets go of is kept as an orphan, and the controller it delivers is closed rather than
+    /// dropped — see [`ControllerSlots`].
+    controllers: ControllerSlots<ICoreWebView2CompositionController>,
     /// **The environment these handlers were put on, and their two tokens**
     /// (R2-10).
     ///
@@ -1467,7 +1600,7 @@ impl WebHost {
             composition: None,
             webview: None,
             environment: None,
-            pending_controller: None,
+            controllers: ControllerSlots::default(),
             environment_events: None,
             find_attached: std::cell::Cell::new(false),
             color_scheme: std::cell::Cell::new(None),
@@ -1574,19 +1707,28 @@ impl WebHost {
             .cast()
             .map_err(|error| failure("ICoreWebView2Environment3", &error))?;
         let shared = Rc::clone(&self.shared);
-        let holder = Rc::new(RefCell::new(None));
-        let sink = Rc::clone(&holder);
+        // **The generation the slot is opened for** (R2-13). A slot already
+        // standing here belongs to an attempt this one supersedes, and the
+        // controller it may yet receive is one nobody will come for — so it is
+        // orphaned and closed when it answers rather than dropped, which is the
+        // same rule [`Self::close_pending_controller`] states for the caller's
+        // side of it.
+        let sink = self.controllers.open(generation, close_orphan);
         let handler = CreateCoreWebView2CompositionControllerCompletedHandler::create(Box::new(
             move |result, controller| {
                 let error = match (result, controller) {
                     (Ok(()), Some(controller)) => {
-                        *sink.borrow_mut() = Some(controller);
+                        sink.deliver(Some(controller));
                         None
                     }
-                    (Ok(()), None) => Some(String::from(
-                        "the controller callback delivered no controller",
-                    )),
+                    (Ok(()), None) => {
+                        sink.deliver(None);
+                        Some(String::from(
+                            "the controller callback delivered no controller",
+                        ))
+                    }
                     (Err(error), _) => {
+                        sink.deliver(None);
                         Some(failure("CreateCoreWebView2CompositionController", &error))
                     }
                 };
@@ -1594,13 +1736,6 @@ impl WebHost {
                 Ok(())
             },
         ));
-        // **The generation the slot is opened for** (R2-13). A slot already
-        // standing here belongs to an attempt this one supersedes, and the
-        // controller it may yet receive is one nobody will come for — so it is
-        // closed rather than dropped, which is the same rule
-        // [`Self::close_pending_controller`] states for the caller's side of it.
-        self.close_pending_controller();
-        self.pending_controller = Some((generation, holder));
         let hwnd = window.as_hwnd();
         unsafe { environment3.CreateCoreWebView2CompositionController(hwnd, &handler) }
             .map_err(|error| failure("CreateCoreWebView2CompositionController", &error))
@@ -1673,25 +1808,12 @@ impl WebHost {
     /// Take the controller the callback left for `generation`, and read the two
     /// interfaces this host works through off it.
     fn take_the_controller(&mut self, generation: u64) -> Result<(), String> {
-        let (opened_for, pending) = self
-            .pending_controller
-            .take()
-            .ok_or_else(|| String::from("no controller callback has been answered"))?;
-        if opened_for != generation {
-            // The slot belongs to an attempt this seat has moved on from. It is
-            // closed rather than adopted, for the reason it would have been
-            // closed had the caller's own machine caught it: a controller
-            // nobody points at is a browser process nobody points at.
-            self.pending_controller = Some((opened_for, pending));
-            self.close_pending_controller();
-            return Err(format!(
-                "the controller that answered was asked for by generation {opened_for}, not {generation}"
-            ));
-        }
-        let composition: ICoreWebView2CompositionController = pending
-            .borrow_mut()
-            .take()
-            .ok_or_else(|| String::from("the controller callback delivered no controller"))?;
+        // A slot that belongs to an attempt this seat has moved on from is
+        // closed rather than adopted, for the reason it would have been closed
+        // had the caller's own machine caught it: a controller nobody points at
+        // is a browser process nobody points at.
+        let composition: ICoreWebView2CompositionController =
+            self.controllers.take(generation, close_orphan)?;
         let controller: ICoreWebView2Controller = composition
             .cast()
             .map_err(|error| failure("ICoreWebView2Controller", &error))?;
@@ -3106,16 +3228,29 @@ impl WebHost {
     /// letting the last reference go leaves a browser process tree with nobody
     /// pointing at it, which is the leak the generation token exists to prevent
     /// rather than to cause.
+    ///
+    /// **Kept until it answers** (0.4.5 ticket 60). The creation callback cannot
+    /// be cancelled, so a slot let go of before its answer used to take the
+    /// controller down with the callback, unclosed; it is an orphan now, and
+    /// whatever it delivers is closed here the next time anybody closes.
     pub fn close_pending_controller(&mut self) {
-        let Some((_, pending)) = self.pending_controller.take() else {
-            return;
-        };
-        let Some(orphan) = pending.borrow_mut().take() else {
-            return;
-        };
-        if let Ok(controller) = orphan.cast::<ICoreWebView2Controller>() {
-            let _ = unsafe { controller.Close() };
-        }
+        self.controllers.close_pending(close_orphan);
+    }
+
+    /// **Whether a creation call nobody will adopt has still not answered**
+    /// (0.4.5 ticket 60). A seat on its way out that is not a page's — the
+    /// spare — keeps being advanced until this is false or its wait runs out.
+    #[must_use]
+    pub fn has_orphans(&self) -> bool {
+        self.controllers.has_orphans()
+    }
+
+    /// **Whether the engine has said something nobody has read yet** (0.4.5
+    /// ticket 60). The spare is drained only on a quiet turn while it is being
+    /// made, and this is what tells the clock a turn is owed.
+    #[must_use]
+    pub fn has_events(&self) -> bool {
+        !self.shared.events.borrow().is_empty()
     }
 
     /// Close the controller. The browser process goes on living until it says
@@ -4117,11 +4252,15 @@ mod install_and_close_contract_tests {
     #[test]
     fn closing_empties_the_slot_a_controller_would_arrive_into() {
         let mut host = a_host();
-        host.pending_controller = Some((7, Rc::new(RefCell::new(None))));
+        let _sink = host.controllers.open(7, close_orphan);
         host.close();
         assert!(
-            host.pending_controller.is_none(),
+            host.controllers.pending_generation().is_none(),
             "a controller that answers now has nowhere to be adopted from"
+        );
+        assert!(
+            host.has_orphans(),
+            "and it is kept until it answers, so what it delivers is closed"
         );
     }
 
@@ -4136,19 +4275,19 @@ mod install_and_close_contract_tests {
     #[test]
     fn a_controller_asked_for_by_one_generation_is_not_adopted_by_another() {
         let mut host = a_host();
-        host.pending_controller = Some((3, Rc::new(RefCell::new(None))));
+        let _sink = host.controllers.open(3, close_orphan);
         let refused = host
             .take_the_controller(4)
             .expect_err("the slot was opened for generation 3");
         assert!(refused.contains('3') && refused.contains('4'), "{refused}");
         assert!(
-            host.pending_controller.is_none(),
+            host.controllers.pending_generation().is_none(),
             "and the slot is emptied rather than left for a third attempt"
         );
         // The generation it *was* opened for still finds it, and fails on the
         // controller having never been delivered rather than on the generation.
         let mut host = a_host();
-        host.pending_controller = Some((3, Rc::new(RefCell::new(None))));
+        let _sink = host.controllers.open(3, close_orphan);
         let refused = host
             .take_the_controller(3)
             .expect_err("the callback delivered nothing");
@@ -4371,7 +4510,10 @@ mod rehost_contract_tests {
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::{WebHost, forget_web_environment, warm_web_environment, webview2_runtime_version};
+pub use macos::{
+    SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
+    web_environment_epoch, webview2_runtime_version,
+};
 
 /// **The page host, on a platform whose engine has not been written yet.**
 ///
@@ -4388,7 +4530,8 @@ mod portable;
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable::{
-    WebHost, forget_web_environment, warm_web_environment, webview2_runtime_version,
+    SpareParent, WebHost, forget_web_environment, spare_parent, warm_web_environment,
+    web_environment_epoch, webview2_runtime_version,
 };
 
 /// **The names under the card, on both engines** (M4-3).
