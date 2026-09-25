@@ -59,6 +59,8 @@
 1 Runtime::open_rename: TabRename::open
 1 Runtime::open_search: .open
 1 Runtime::open_web_page_on: webhost::WebSeat::open
+# The spare web controller's seat (ticket 60): the pane's own WebSeat::open, a domain verb, no file read.
+1 WebSeat::open_parked: Self::open
 1 Runtime::place_float: .open
 1 Runtime::play_video_file_on: .open
 1 Runtime::pop_out_preview: .open

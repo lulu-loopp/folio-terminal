@@ -62,6 +62,57 @@ pub(crate) const WEB_ENGINE_WARMUP_AFTER: Duration = Duration::from_secs(5);
 /// gaps well under it, so the warm-up does not land inside a word.
 pub(crate) const WEB_ENGINE_WARMUP_QUIET: Duration = Duration::from_secs(1);
 
+/// **Whether a window event is the reader doing something** — a gesture (the file-read ledger's
+/// own classifier, [`crate::file_reads::is_user_input`]) or the window resized, moved or carried
+/// to another scale (ticket 60, F1).
+pub(crate) fn event_stirs(event: &winit::event::WindowEvent) -> bool {
+    use winit::event::WindowEvent;
+    crate::file_reads::is_user_input(event)
+        || matches!(
+            event,
+            WindowEvent::Resized(_)
+                | WindowEvent::Moved(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+        )
+}
+
+/// **What one window's turn says about whether anything is happening in it** (tickets 54 and
+/// 60) — the one derivation both the environment's warm-up and the spare's stage read.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TurnFacts {
+    /// Everything in motion, Folio's own periodics included — the pacer's lanes.
+    pub(crate) running: crate::pace::Lanes,
+    /// The motion a gesture set going: `running` less the periodics.
+    pub(crate) travelling: crate::pace::Lanes,
+    /// A frame owed to the glass: a refused animation frame, a shell frame not yet presented, a
+    /// chrome present pending (a caret's phase among them), a picture or a card owed one.
+    pub(crate) repaint_owed: bool,
+    /// A resize still owed to a shell, or one still settling.
+    pub(crate) resize_owed: bool,
+}
+
+impl TurnFacts {
+    /// **Nothing moving and nothing owed to the glass** — the turn's `BT_PERF_TRACE idle_wake`
+    /// test.
+    pub(crate) fn at_rest(&self) -> bool {
+        !self.running.any() && !self.repaint_owed
+    }
+
+    /// **Whether this turn stirs the warm-up** (ticket 60, F1; supersedes ticket 54's
+    /// "a window not at rest").
+    ///
+    /// A gesture and a shell's output are stirred where they arrive; what a turn adds is a window
+    /// mid-way through motion a gesture set going, or a resize still owed. **A repaint Folio
+    /// scheduled for itself is not a stir**: a blinking caret presents twice a second and carries
+    /// nothing new, and counted as one it held the warm-up's quiet stretch shut for as long as a
+    /// shell had the keyboard (measured on the clean VM: neither the environment nor the spare was
+    /// ever asked for at a prompt). Content arriving on its own — a shell frame, a picture — is
+    /// already a stir where it arrives, or nobody's doing.
+    pub(crate) fn stirs(&self) -> bool {
+        self.travelling.any() || self.resize_owed
+    }
+}
+
 /// The one line `diagnostics.log` gets when the warm-up's request fails.
 pub(crate) fn warm_up_failed_line(error: &str) -> String {
     format!("the web engine's warm-up failed: {error}; the first page will ask again")
@@ -562,6 +613,89 @@ mod web_warmup_tests {
             "the page makes its own call, as it did before ticket 54"
         );
         assert_eq!(door.phase(), WebEnvironmentPhase::Requested);
+    }
+
+    /// RED (60, F1) — **a window whose shell caret blinks and nothing else stays quiet, and the
+    /// warm-up, then the spare, fires after the grace.**
+    ///
+    /// The caret's phase is a chrome present Folio schedules for itself twice a second; the turn
+    /// used to read it as "not at rest" and stir, so the quiet stretch never ran out while a shell
+    /// held the keyboard. The turn's facts here are the ones a blinking window has: nothing
+    /// running, nothing a gesture set going, no resize owed, and a repaint owed on every other
+    /// turn. A travelling tween and a resize still owed do stir.
+    ///
+    /// MUTATION: count the blink as a stir (`|| self.repaint_owed` in `TurnFacts::stirs`) and
+    /// neither the environment nor the spare is ever asked for.
+    #[test]
+    fn a_blinking_caret_is_not_a_stir_and_the_warm_up_and_the_spare_fire_after_the_grace() {
+        use super::{SpareDue, TurnFacts};
+        use crate::pace::Lanes;
+        let still = Lanes::default();
+        let start = Instant::now();
+        let mut clock = WebWarmup::default();
+        let mut door = Recorded::default();
+        clock.saw_frame(Some(start));
+        let mut asked = None;
+        let mut spare = None;
+        for step in 0..100_u32 {
+            let now = start + ms(100 * u64::from(step));
+            let facts = TurnFacts {
+                running: still,
+                travelling: still,
+                // The caret flips every 500 ms: a chrome present owed on those turns.
+                repaint_owed: step % 5 == 0,
+                resize_owed: false,
+            };
+            assert!(
+                !facts.stirs(),
+                "turn {step}: a blink is not the reader doing anything"
+            );
+            if facts.stirs() {
+                clock.stir(now);
+            }
+            if let Some(answer) = clock.turn(now, false, &mut door, say) {
+                asked.get_or_insert((now - start, answer));
+            }
+            if let Some(due) = clock.spare_turn(now, false, true, false) {
+                spare.get_or_insert((now - start, due));
+            }
+        }
+        assert_eq!(asked, Some((WEB_ENGINE_WARMUP_AFTER, Ok(WebWarmUp::Asked))));
+        assert_eq!(
+            spare,
+            Some((
+                WEB_ENGINE_WARMUP_AFTER + WEB_ENGINE_WARMUP_QUIET,
+                SpareDue::Make
+            ))
+        );
+        let travelling = TurnFacts {
+            running: Lanes {
+                chrome: true,
+                overlay: false,
+            },
+            travelling: Lanes {
+                chrome: true,
+                overlay: false,
+            },
+            repaint_owed: false,
+            resize_owed: false,
+        };
+        assert!(travelling.stirs(), "a tween a gesture set going is a stir");
+        let spinning = TurnFacts {
+            travelling: still,
+            ..travelling
+        };
+        assert!(
+            !spinning.stirs() && !spinning.at_rest(),
+            "a status spinner is motion, not a stir"
+        );
+        assert!(
+            TurnFacts {
+                resize_owed: true,
+                ..spinning
+            }
+            .stirs()
+        );
     }
 
     /// **A platform with nothing to warm is told once and never again.**

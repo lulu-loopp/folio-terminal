@@ -318,6 +318,13 @@ struct AnimationWork {
     /// Whether anything in it is travelling at the instant of the walk — the
     /// tweens alone, never the waits.
     moving: bool,
+    /// **The part of `moving` a gesture set going** (0.4.5 ticket 60, F1): the tweens that
+    /// finish on their own after a press, a drag or a chord. Not the periodics Folio runs on its
+    /// own clock — a working tab's spinner, a waiting agent's halo, a page's loading mark, a
+    /// playing recording, a card owed its picture — which move for as long as their condition
+    /// stands and are nobody doing anything. The web engine's warm-up reads this, and not
+    /// `moving`, as a window being busy.
+    travelling: bool,
 }
 
 /// Winit 0.30 has no enter/exit-size-move event; the final ConPTY size is committed after this
@@ -46089,6 +46096,8 @@ impl Runtime<'_> {
             }
             work.moving |= termscroll::fade_is_moving(rest, now, motion);
         }
+        // A thumb fades after the scroll that woke it: a gesture's tween.
+        work.travelling = work.moving;
         work
     }
 
@@ -63008,12 +63017,16 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     ) {
         if file_reads::is_user_input(&event) {
             bt_platform::file_reads::input();
-            // **A gesture is a stir for the web engine's warm-up** (ticket 54): the
-            // same classifier the file-read ledger asks, so "the reader did
-            // something" is one judgement in this program and not two.
-            if let Some(app) = self.app.as_mut() {
-                app.web_warmup.stir(Instant::now());
-            }
+        }
+        // **A gesture is a stir for the web engine's warm-up** (ticket 54): the
+        // same classifier the file-read ledger asks, so "the reader did
+        // something" is one judgement in this program and not two — and a window
+        // resized, moved or carried to another scale (ticket 60, F1), which is the
+        // reader doing something too.
+        if web_warmup::event_stirs(&event)
+            && let Some(app) = self.app.as_mut()
+        {
+            app.web_warmup.stir(Instant::now());
         }
         present_diagnostics::event();
         hang_watch::at(hang_watch::Station::Event);
