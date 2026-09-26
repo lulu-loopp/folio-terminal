@@ -34,6 +34,11 @@ All notable changes to Folio are recorded here. The format follows
   if every file is one the new `folio.exe`'s signed list names, with the same
   bytes; odd file names, oversized or damaged files and anything unlisted are
   refused by name. Nothing uses it yet.
+- A Folio started to try out an update writes nothing to your settings, your
+  data folder, your shell profiles or the registry until the update is
+  confirmed, so undoing the update leaves everything as it was; once it has
+  drawn its first text it leaves the note that confirms it. No build starts
+  such a trial yet.
 
 ### Fixed
 

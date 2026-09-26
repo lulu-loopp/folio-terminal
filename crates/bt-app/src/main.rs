@@ -169,6 +169,7 @@ mod update_archive;
 #[cfg(test)]
 mod update_eligibility;
 mod update_startup;
+mod update_trial;
 mod update_txn;
 mod version;
 mod video_seat;
@@ -558,6 +559,16 @@ enum AppEvent {
     /// a turn for it, and a window about to put up its first modal may have
     /// nothing else coming.
     InstallChannelRead,
+    /// **An update's trial was committed, and what it held back may be
+    /// written** (`update_trial`, F-7).
+    ///
+    /// Sent once, by the trial's watch, the moment it reads `Committed` in the
+    /// journal. Carries nothing: the writers are in `update_trial`'s slot
+    /// ([`update_trial::take_released`]), and the handler runs each of them —
+    /// on this thread, because the documents they write are this thread's
+    /// (`App::release_trial_writes`). Owed a wake because nothing else may be
+    /// coming: a commit lands while the reader is doing nothing at all.
+    TrialWritesReleased,
     /// **Something spoke into this process's attention endpoint** (`attention_wire`).
     ///
     /// The same family again and the same reason for a wake of its own, in its strongest form: the
@@ -773,6 +784,10 @@ impl AppEvent {
             // The station winit's own pan event would have been charged to:
             // this is the same gesture, answered by the system instead.
             Self::TouchPanned => Station::EventPan,
+            // The writes a committed trial held back: documents, the marks
+            // migration, the PSReadLine upgrade and the registrations, each
+            // one write — charged a station of their own so a slow one is named.
+            Self::TrialWritesReleased => Station::TrialWritesReleased,
             Self::PtyOutput
             | Self::GitChanged
             | Self::PreviewFileChanged
@@ -28719,13 +28734,22 @@ impl NotificationDesk {
         }
         if self.voice.is_none() {
             let proxy = self.proxy.clone();
-            match bt_platform::Notifier::new(Box::new(move || {
+            let wake: Box<dyn Fn() + Send> = Box::new(move || {
                 // Nothing is done here beyond waking the loop, for
                 // `AppEvent::GitChanged`'s reason and one of its own: this runs on
                 // a platform thread with no access to any window, and the launch
                 // string is already in the notifier's own queue.
                 let _ = proxy.send_event(AppEvent::NotificationClicked);
-            })) {
+            });
+            // **An update's trial writes no identity** (`update_trial`, F-7):
+            // the toast goes out under the one the old build registered, and
+            // the commit writes this build's.
+            let opened = if update_trial::defer(update_trial::Writer::ToastIdentity) {
+                bt_platform::Notifier::without_registration(wake)
+            } else {
+                bt_platform::Notifier::new(wake)
+            };
+            match opened {
                 Ok(voice) => self.voice = Some(voice),
                 Err(error) => {
                     eprintln!("desktop notifications unavailable: {error}");
@@ -41160,7 +41184,23 @@ impl Runtime<'_> {
             });
         }
         taskbar_lane::request();
-        explorer_menu::begin_probe();
+        // **The probe can repair the package registration**, which is O's
+        // until an update's trial is committed (`update_trial`, F-7): a trial
+        // starts it at the commit instead, and the row reads `Unknown` until
+        // then, which it already treats as "not known yet".
+        if !update_trial::defer(update_trial::Writer::ExplorerRepair) {
+            explorer_menu::begin_probe();
+        }
+        // **And an update's trial watches its journal** (`update_trial`): a
+        // worker reads it until the transaction is decided, and a commit wakes
+        // this loop to write what the trial held back. Nothing at all in any
+        // other start.
+        {
+            let proxy = proxy.clone();
+            update_trial::begin_watch(move || {
+                let _ = proxy.send_event(AppEvent::TrialWritesReleased);
+            });
+        }
         update::load(
             &persist::storage_dir(),
             settings_store.loaded().update_check,
@@ -50374,6 +50414,56 @@ impl Runtime<'_> {
 }
 
 impl App {
+    /// **Write what an update's trial held back, now that it is committed**
+    /// (`update_trial`, F-7) — each released writer run again, in
+    /// [`update_trial::Writer`]'s order: the folder before anything written
+    /// into it, the copies of refused documents before the documents that would
+    /// replace them. What is written is what this process holds now.
+    fn release_trial_writes(&mut self, writers: Vec<update_trial::Writer>) {
+        use update_trial::Writer;
+        for writer in writers {
+            match writer {
+                // The folder is in use; its move from the old name is the next
+                // start's, which makes it as every start does.
+                Writer::DataFolderMove => {}
+                Writer::DataFolder => {
+                    let _ = std::fs::create_dir_all(persist::storage_dir());
+                }
+                Writer::RefusedCopies => update_trial::keep_owed_copies(),
+                Writer::Session => self.session_store.release_trial(),
+                Writer::Settings => self.settings_store.release_trial(),
+                Writer::Keybindings => self.keybindings_store.release_trial(),
+                Writer::Profiles => self.profiles_store.release_trial(),
+                Writer::Pins => self.pins_store.release_trial(),
+                Writer::UpdateCheck => update::release_trial(),
+                Writer::ProfileMigration => shell_integration::begin_startup_migration(),
+                Writer::BashScript => {
+                    let _ = shell_integration::script_path();
+                }
+                Writer::ZshScripts => {
+                    let _ = shell_integration::zdotdir_path();
+                }
+                Writer::PsReadLineUpgrade => {
+                    if let Some(documents) = psreadline::documents_directory()
+                        && let Some(replacement) = psreadline::upgrade_recorded(
+                            &documents,
+                            &persist::storage_dir(),
+                            self.settings_store.loaded().psreadline_invite,
+                        )
+                    {
+                        eprintln!("{}", replacement.log_line());
+                    }
+                }
+                Writer::ExplorerRepair => explorer_menu::begin_probe(),
+                Writer::ToastIdentity => {
+                    if let Err(error) = bt_platform::Notifier::register_identity() {
+                        eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
+                    }
+                }
+            }
+        }
+    }
+
     /// **Name the next playback of an animated picture** (adversarial review
     /// 2026-09-11, B3) — a number this process never gives out twice.
     ///
@@ -62924,6 +63014,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // slot, and its one reader, `raise_first_run_if_due`, is on the clock
             // run of the turn this wake brings round.
             AppEvent::InstallChannelRead => Ok(()),
+            // **What a committed trial held back, written now** (`update_trial`).
+            AppEvent::TrialWritesReleased => {
+                if let Some(app) = self.app.as_mut() {
+                    app.release_trial_writes(update_trial::take_released());
+                }
+                Ok(())
+            }
             AppEvent::MathReady => {
                 let (mut batch, gone) = self.drain_math_answers();
                 self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))
@@ -70256,6 +70353,16 @@ fn main() -> Result<()> {
     // would answer that search first — turning a pin on where the run's last
     // line is written into a pin on a branch that never writes one.
     let storage = persist::storage_dir();
+    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
+    // asks for it until the old build has let go, and adopts it into the claim
+    // table before anything below asks who writes here. One that is not handed
+    // the claim does not start and does not hand itself over — its applier
+    // sees the trial gone without a receipt and rolls back. Nothing at all in
+    // any other start.
+    if let Err(line) = update_trial::take_the_claim(&storage) {
+        bt_platform::write_std_error(format!("{line}\n").as_bytes());
+        bt_platform::leave_process(1);
+    }
     if !persist::is_writer_of(&storage)
         && let Some(handed) =
             launch_wire::hand_over(&admitted, &storage, &request, say_at_the_front_door)

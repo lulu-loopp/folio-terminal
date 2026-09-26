@@ -33,11 +33,14 @@ pub enum Lane {
     /// The downloaded release archive the updater reads, and the manifest
     /// read out of the new `folio.exe` in it (`update_archive`, ticket U-14).
     Update,
+    /// The update journal's header and phase, read again and again by a trial's
+    /// watch until its transaction is decided (`update_trial`, ticket U-13).
+    UpdateJournal,
     Other,
 }
 
 impl Lane {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::InlineImage,
         Self::Peek,
         Self::Animation,
@@ -49,6 +52,7 @@ impl Lane {
         Self::Attention,
         Self::Install,
         Self::Update,
+        Self::UpdateJournal,
         Self::Other,
     ];
 
@@ -65,6 +69,7 @@ impl Lane {
             Self::Attention => "attention",
             Self::Install => "install",
             Self::Update => "update",
+            Self::UpdateJournal => "update_journal",
             Self::Other => "other",
         }
     }

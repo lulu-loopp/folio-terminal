@@ -542,6 +542,10 @@ pub struct OfferState {
     known: Mutex<UpdateCheckV1>,
     /// The reader's switch (`SettingsV1::update_check`), as last told.
     enabled: AtomicBool,
+    /// **A change an update's trial held back from the file** (`update_trial`,
+    /// F-7): [`Self::known`] holds it, and a commit writes it
+    /// ([`Self::release_trial`]).
+    owed: AtomicBool,
     /// A test's pause between a transaction's read and its write — the one place
     /// a racing writer can land. Fires once.
     #[cfg(test)]
@@ -556,13 +560,18 @@ impl OfferState {
     #[must_use]
     pub fn load(dir: &Path, enabled: bool) -> Self {
         let path = dir.join(STATE_FILE_NAME);
-        let (state, _) = bt_persist::read_update_check(&path);
+        let (state, report) =
+            bt_persist::read_update_check_keeping(&path, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &path, |path| {
+            let _ = bt_persist::read_update_check(path);
+        });
         Self {
             claim: dir.join(CLAIM_FILE_NAME),
             path,
             file: Mutex::new(()),
             known: Mutex::new(state),
             enabled: AtomicBool::new(enabled),
+            owed: AtomicBool::new(false),
             #[cfg(test)]
             between: Mutex::new(None),
         }
@@ -618,7 +627,16 @@ impl OfferState {
             .file
             .lock()
             .expect("the update state file is not held across a panic");
-        let (mut state, _) = bt_persist::read_update_check(&self.path);
+        // **An update's trial reads and changes what it holds, and writes
+        // nothing** (`update_trial`, F-7): the file is O's until the trial is
+        // committed, and this process holds the data directory's claim, so no
+        // other process writes it meanwhile.
+        let deferred = crate::update_trial::writes_are_deferred();
+        let mut state = if deferred {
+            self.known()
+        } else {
+            bt_persist::read_update_check(&self.path).0
+        };
         let changed = change(&mut state);
         #[cfg(test)]
         {
@@ -632,12 +650,34 @@ impl OfferState {
             }
         }
         if changed {
-            bt_persist::write_update_check_atomic(&self.path, &state)?;
+            if crate::update_trial::defer(crate::update_trial::Writer::UpdateCheck) {
+                self.owed.store(true, AtomicOrdering::Release);
+            } else {
+                bt_persist::write_update_check_atomic(&self.path, &state)?;
+            }
         }
         *self
             .known
             .lock()
             .expect("the update state is not held across a panic") = state;
+        Ok(())
+    }
+
+    /// **An update's trial was committed: what it held back reaches the file**
+    /// — the state as this process holds it, once, if a change was held back
+    /// (`update_trial`, F-7).
+    ///
+    /// # Errors
+    /// The write's refusal; the change stays owed.
+    pub fn release_trial(&self) -> Result<(), bt_persist::WriteError> {
+        let _file = self
+            .file
+            .lock()
+            .expect("the update state file is not held across a panic");
+        if self.owed.load(AtomicOrdering::Acquire) {
+            bt_persist::write_update_check_atomic(&self.path, &self.known())?;
+            self.owed.store(false, AtomicOrdering::Release);
+        }
         Ok(())
     }
 
@@ -916,6 +956,18 @@ pub fn row_description_in(lang: crate::i18n::Lang) -> &'static str {
     }
 }
 
+/// **An update's trial was committed** (`update_trial`): the change it held
+/// back reaches `update-check.json`, and the check it did not start starts.
+pub fn release_trial() {
+    let Some(owner) = OWNER.get() else {
+        return;
+    };
+    if let Err(error) = owner.release_trial() {
+        eprintln!("BT_UPDATE_TRIAL update-check.json was not written: {error}");
+    }
+    begin();
+}
+
 /// Start the one check this process makes.
 ///
 /// A no-op when the switch is off, and that is the whole of the switch: no
@@ -925,6 +977,12 @@ pub fn begin() {
         return;
     };
     if !owner.enabled() {
+        return;
+    }
+    // **Not in an update's trial** (`update_trial`, F-7): the check writes its
+    // stamp and its claim file into O's folder. It is asked again when the
+    // trial is committed ([`release_trial`]).
+    if crate::update_trial::defer(crate::update_trial::Writer::UpdateCheck) {
         return;
     }
     // **In the background band.** A thread starts at normal priority whatever

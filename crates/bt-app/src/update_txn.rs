@@ -26,7 +26,7 @@
 //!
 //! # What crosses versions
 //!
-//! Only the [`Header`] (`{v, txn, rescue, class}`) and the [`Receipt`]
+//! Only the [`Header`] (`{v, txn, rescue, class, outcome}`) and the [`Receipt`]
 //! (`{v, txn, nonce, pid, version}`) are read by a build other than the one that
 //! wrote them: an ordinary start of any later version reads the header, and the
 //! rescue build (a copy of O) reads the receipt the new build wrote. They are
@@ -97,6 +97,13 @@ pub(crate) enum ParseRefusal {
     UnknownClass(String),
     /// A journal whose header class is not the class of its body's phase.
     ClassDisagreesWithPhase { class: Class, phase: PhaseKind },
+    /// A header `outcome` that is none of the three.
+    UnknownOutcome(String),
+    /// A journal whose header outcome is not the outcome of its body's phase.
+    OutcomeDisagreesWithPhase {
+        outcome: HeaderOutcome,
+        phase: PhaseKind,
+    },
     /// Anything else: not JSON, a field missing or of the wrong type.
     Malformed(String),
 }
@@ -115,6 +122,15 @@ impl fmt::Display for ParseRefusal {
             Self::UnknownClass(class) => write!(f, "`{class}` is not a transaction class"),
             Self::ClassDisagreesWithPhase { class, phase } => {
                 write!(f, "class {class:?} is not the class of phase {phase:?}")
+            }
+            Self::UnknownOutcome(outcome) => {
+                write!(f, "`{outcome}` is not a transaction outcome")
+            }
+            Self::OutcomeDisagreesWithPhase { outcome, phase } => {
+                write!(
+                    f,
+                    "outcome {outcome:?} is not the outcome of phase {phase:?}"
+                )
             }
             Self::Malformed(why) => write!(f, "malformed: {why}"),
         }
@@ -319,7 +335,47 @@ impl Class {
     }
 }
 
-/// **The journal's frozen header, v1** — `{v, txn, rescue, class}` (F-8).
+/// **What the transaction has decided, as the header says it** — frozen with
+/// the header at v1 (coordinator ruling, 2026-09-27): `none` until a decision,
+/// `committed` from `Committed` on, `rolled_back` from `RollbackIntent` on.
+///
+/// The class cannot say it: `Trial`, `Committed` and `RollbackIntent` are all
+/// `destructive`, and both retirements `terminal`. The trial N reads this, and
+/// only the header, to learn whether it may write (`update_trial`, U-13); the
+/// lock holder writes it together with the phase it records, as the class is
+/// ([`PhaseKind::outcome`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum HeaderOutcome {
+    /// Nothing decided: every phase before `Committed` or `RollbackIntent`,
+    /// and `Abandoned`, which moved nothing.
+    None,
+    /// `Committed`, and its retirement.
+    Committed,
+    /// `RollbackIntent`, `Stuck`, `RolledBack`, and their retirement.
+    RolledBack,
+}
+
+impl HeaderOutcome {
+    fn word(self) -> &'static str {
+        match self {
+            HeaderOutcome::None => "none",
+            HeaderOutcome::Committed => "committed",
+            HeaderOutcome::RolledBack => "rolled_back",
+        }
+    }
+
+    fn from_word(word: &str) -> Result<Self, ParseRefusal> {
+        match word {
+            "none" => Ok(HeaderOutcome::None),
+            "committed" => Ok(HeaderOutcome::Committed),
+            "rolled_back" => Ok(HeaderOutcome::RolledBack),
+            _ => Err(ParseRefusal::UnknownOutcome(word.to_owned())),
+        }
+    }
+}
+
+/// **The journal's frozen header, v1** — `{v, txn, rescue, class, outcome}`
+/// (F-8; `outcome` by the coordinator's ruling of 2026-09-27).
 ///
 /// `rescue` is the path of the rescue build (`H\<txn>\rescue\folio.exe`, or
 /// the rescue clone's bundle on macOS), which is what a start that finds a
@@ -329,6 +385,7 @@ pub(crate) struct Header {
     pub(crate) txn: TxnId,
     pub(crate) rescue: String,
     pub(crate) class: Class,
+    pub(crate) outcome: HeaderOutcome,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -337,11 +394,12 @@ struct HeaderWire {
     txn: TxnId,
     rescue: String,
     class: String,
+    outcome: String,
 }
 
 impl Header {
     /// Reads the header out of a journal's bytes, ignoring its body: a start
-    /// reads these four fields and nothing else, whatever version wrote the
+    /// reads these five fields and nothing else, whatever version wrote the
     /// rest.
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, ParseRefusal> {
         versioned(bytes, HEADER_VERSION)?;
@@ -350,6 +408,7 @@ impl Header {
             txn: wire.txn,
             rescue: wire.rescue,
             class: Class::from_word(&wire.class)?,
+            outcome: HeaderOutcome::from_word(&wire.outcome)?,
         })
     }
 
@@ -364,6 +423,7 @@ impl Header {
             txn: self.txn,
             rescue: self.rescue.clone(),
             class: self.class.word().to_owned(),
+            outcome: self.outcome.word().to_owned(),
         }
     }
 }
@@ -656,6 +716,25 @@ impl PhaseKind {
             PhaseKind::Abandoned | PhaseKind::Retired => Class::Terminal,
         }
     }
+
+    /// **The header outcome of each phase but `Retired`**, whose outcome is
+    /// its own ([`Phase::outcome`]).
+    fn outcome(self) -> HeaderOutcome {
+        match self {
+            PhaseKind::Committed => HeaderOutcome::Committed,
+            PhaseKind::RollbackIntent | PhaseKind::Stuck | PhaseKind::RolledBack => {
+                HeaderOutcome::RolledBack
+            }
+            PhaseKind::Allocated
+            | PhaseKind::Prepared
+            | PhaseKind::Handoff
+            | PhaseKind::Armed
+            | PhaseKind::Moving
+            | PhaseKind::Trial
+            | PhaseKind::Abandoned
+            | PhaseKind::Retired => HeaderOutcome::None,
+        }
+    }
 }
 
 impl Phase {
@@ -678,6 +757,20 @@ impl Phase {
 
     pub(crate) fn class(&self) -> Class {
         self.kind().class()
+    }
+
+    /// **The header outcome of this phase** — what the lock holder writes into
+    /// the header with it.
+    pub(crate) fn outcome(&self) -> HeaderOutcome {
+        match self {
+            Phase::Retired {
+                outcome: Outcome::Committed,
+            } => HeaderOutcome::Committed,
+            Phase::Retired {
+                outcome: Outcome::RolledBack,
+            } => HeaderOutcome::RolledBack,
+            phase => phase.kind().outcome(),
+        }
     }
 }
 
@@ -732,6 +825,7 @@ impl Journal {
             txn: self.txn,
             rescue: self.rescue.clone(),
             class: self.body.phase.class(),
+            outcome: self.body.phase.outcome(),
         }
     }
 
@@ -753,6 +847,12 @@ impl Journal {
         if phase.class() != header.class {
             return Err(ParseRefusal::ClassDisagreesWithPhase {
                 class: header.class,
+                phase,
+            });
+        }
+        if body.phase.outcome() != header.outcome {
+            return Err(ParseRefusal::OutcomeDisagreesWithPhase {
+                outcome: header.outcome,
                 phase,
             });
         }
@@ -1813,6 +1913,11 @@ impl Home {
     pub(crate) fn transaction(&self, txn: TxnId) -> PathBuf {
         self.root.join(txn.to_string())
     }
+
+    /// `H\<txn>\health-<nonce>`: the trial's receipt ((b).2's objects table).
+    pub(crate) fn receipt_path(&self, txn: TxnId, nonce: &Nonce) -> PathBuf {
+        self.transaction(txn).join(Receipt::file_name(nonce))
+    }
 }
 
 /// A macOS executable's bundle and its path inside it:
@@ -1828,6 +1933,49 @@ fn bundle_of(exe: &Path) -> Option<(&Path, &Path)> {
         return None;
     }
     Some((bundle, exe.strip_prefix(bundle).ok()?))
+}
+
+// ───────────────────────────── what the trial sees ─────────────────────────────
+
+/// **What the trial N reads of its own transaction while it waits to be
+/// committed** — F-7's "it releases them only when it reads `Committed` in the
+/// journal" (U-13, `update_trial`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrialSight {
+    /// Not decided yet (`Trial`, or a phase before it), or not readable by this
+    /// build: the trial keeps its writes pending and looks again.
+    Undecided,
+    /// `Committed` is durable (or the transaction retired after it): the trial's
+    /// writes may land.
+    Committed,
+    /// Decided otherwise — `RollbackIntent`, `Stuck`, `RolledBack`,
+    /// `Abandoned`, retired without a commit — or gone: the journal is absent,
+    /// or names another transaction. Nothing it held back will ever be written.
+    Ended,
+}
+
+/// **What the journal's header says about the trial of `txn`**; `None` is no
+/// journal at all.
+///
+/// The frozen header alone (F-8): `outcome == committed` releases the trial's
+/// writes; `outcome == rolled_back` or a `terminal` class ends them; anything
+/// else — or a header this build cannot read — is not decided yet. A journal
+/// naming another transaction, or none, means this trial's is gone.
+pub(crate) fn trial_sight(journal: Option<&[u8]>, txn: &TxnId) -> TrialSight {
+    let Some(bytes) = journal else {
+        return TrialSight::Ended;
+    };
+    let Ok(header) = Header::parse(bytes) else {
+        return TrialSight::Undecided;
+    };
+    if header.txn != *txn {
+        return TrialSight::Ended;
+    }
+    match (header.outcome, header.class) {
+        (HeaderOutcome::Committed, _) => TrialSight::Committed,
+        (HeaderOutcome::RolledBack, _) | (_, Class::Terminal) => TrialSight::Ended,
+        _ => TrialSight::Undecided,
+    }
 }
 
 // ───────────────────────────── the ordinary start ─────────────────────────────
@@ -2411,7 +2559,7 @@ mod tests {
     #[test]
     fn a_header_class_that_is_unknown_or_disagrees_with_its_phase_is_refused() {
         let unknown = format!(
-            r#"{{"v":1,"txn":"{}","rescue":"r","class":"paused"}}"#,
+            r#"{{"v":1,"txn":"{}","rescue":"r","class":"paused","outcome":"none"}}"#,
             txn()
         );
         assert_eq!(
@@ -2432,6 +2580,60 @@ mod tests {
             Err(ParseRefusal::ClassDisagreesWithPhase {
                 class: Class::Terminal,
                 phase: PhaseKind::Stuck,
+            })
+        );
+    }
+
+    /// RED (U-13) — **the header's outcome is the phase's decision**: `none`
+    /// until one, `committed` from `Committed` on (its retirement included),
+    /// `rolled_back` from `RollbackIntent` on; an unknown word, or one that is
+    /// not its phase's, is refused by name.
+    ///
+    /// The class cannot carry this, and the trial reads only the header
+    /// (coordinator ruling, 2026-09-27), so the lock holder writes it with the
+    /// phase and a start checks it against the body it can read.
+    ///
+    /// MUTATION: in `PhaseKind::outcome`, answer `None` for `RollbackIntent`.
+    #[test]
+    fn a_header_outcome_follows_its_phase_and_is_refused_by_name_otherwise() {
+        let expected = |phase: &Phase| match phase {
+            Phase::Committed
+            | Phase::Retired {
+                outcome: Outcome::Committed,
+            } => HeaderOutcome::Committed,
+            Phase::RollbackIntent { .. }
+            | Phase::Stuck { .. }
+            | Phase::RolledBack
+            | Phase::Retired {
+                outcome: Outcome::RolledBack,
+            } => HeaderOutcome::RolledBack,
+            _ => HeaderOutcome::None,
+        };
+        for journal in journals() {
+            let header = Header::parse(&journal.encode()).expect("a header");
+            assert_eq!(
+                header.outcome,
+                expected(&journal.body.phase),
+                "{:?}",
+                journal.body.phase
+            );
+        }
+        let unknown = format!(
+            r#"{{"v":1,"txn":"{}","rescue":"r","class":"destructive","outcome":"maybe"}}"#,
+            txn()
+        );
+        assert_eq!(
+            Header::parse(unknown.as_bytes()),
+            Err(ParseRefusal::UnknownOutcome("maybe".to_owned()))
+        );
+        let intent = journal(Phase::RollbackIntent { trial: None }, members_layout());
+        let mut value: serde_json::Value = serde_json::from_slice(&intent.encode()).expect("json");
+        value["outcome"] = serde_json::json!("committed");
+        assert_eq!(
+            Journal::parse(&serde_json::to_vec(&value).expect("bytes")),
+            Err(ParseRefusal::OutcomeDisagreesWithPhase {
+                outcome: HeaderOutcome::Committed,
+                phase: PhaseKind::RollbackIntent,
             })
         );
     }

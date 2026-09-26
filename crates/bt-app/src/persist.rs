@@ -17,8 +17,10 @@ use std::time::{Duration, Instant};
 use bt_persist::{
     BindingOverrideV1, Debouncer, ExitState, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1, ProfilesV1,
     ReadReport, SessionV1, SettingsV1, WriteAlertAction, WriteFailureTracker, create_sentinel,
-    probe_sentinel, read_keybindings, read_profiles, read_session, read_settings, remove_sentinel,
-    write_keybindings_atomic, write_profiles_atomic, write_settings_atomic,
+    probe_sentinel, read_keybindings, read_keybindings_keeping, read_profiles,
+    read_profiles_keeping, read_session, read_session_keeping, read_settings,
+    read_settings_keeping, remove_sentinel, write_keybindings_atomic, write_profiles_atomic,
+    write_settings_atomic,
 };
 
 /// The name the session document wears on disk, which is also what a notice
@@ -265,13 +267,6 @@ fn claim_table() -> std::sync::MutexGuard<
 /// ([`bt_platform::instance::ClaimRefusal`]): a live holder, which is worth
 /// asking again, or a question the platform did not answer, which is not
 /// evidence that anybody holds anything.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "self-update R-3's claim API lands before its caller: the health-check                   process arrives in U-17/U-18 ((b).5)"
-    )
-)]
 pub(crate) fn try_claim(
     directory: &Path,
 ) -> Result<bt_platform::instance::DataDirectoryClaim, bt_platform::instance::ClaimRefusal> {
@@ -295,13 +290,6 @@ pub(crate) fn try_claim(
 /// must not become the writer mid-run (revision (b)'s refinement of R-3) — and
 /// the adopted claim is dropped, which lets it go. Debug builds and tests stop
 /// on it; a release build keeps the earlier answer and says so in the log.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "self-update R-3's claim API lands before its caller: the health-check                   process arrives in U-17/U-18 ((b).5)"
-    )
-)]
 pub(crate) fn adopt_claim(directory: &Path, claim: bt_platform::instance::DataDirectoryClaim) {
     let name = bt_platform::instance::claim_name(directory);
     // The earlier answer, if there was one — decided under the lock, reported
@@ -426,9 +414,41 @@ struct SessionWriteReceipt {
     result: Result<(), String>,
 }
 
+/// **One job for the storage worker**: a session document, or an update
+/// trial's receipt (U-13).
+enum StorageJob {
+    Session(SessionWriteRequest),
+    /// Written create-new through the `install_txn` door, and answered on its
+    /// own channel: a receipt is not a session document and has no generation.
+    Receipt {
+        job: crate::update_trial::ReceiptJob,
+        answer: mpsc::Sender<ReceiptWritten>,
+    },
+}
+
+/// **What became of a trial's receipt**, and the thread that wrote it.
+#[derive(Debug)]
+pub(crate) struct ReceiptWritten {
+    /// The role of the thread the receipt was written on — the storage
+    /// worker's, never the window's (F-14).
+    pub(crate) by: bt_platform::admission::Role,
+    pub(crate) result: Result<(), String>,
+}
+
+/// Write a trial's receipt, on the thread that calls this — the storage
+/// worker. Create-new: an existing receipt is refused, never written over.
+fn write_receipt(job: &crate::update_trial::ReceiptJob) -> ReceiptWritten {
+    let result = bt_platform::install_txn::durable_create(&job.path, &job.bytes)
+        .map_err(|failure| failure.to_string());
+    ReceiptWritten {
+        by: bt_platform::admission::role(),
+        result,
+    }
+}
+
 /// The channel ends one writer thread works from: requests in, receipts out.
 struct SessionWriterEnds {
-    incoming: mpsc::Receiver<SessionWriteRequest>,
+    incoming: mpsc::Receiver<StorageJob>,
     outgoing: mpsc::Sender<SessionWriteReceipt>,
 }
 
@@ -458,7 +478,7 @@ type SessionWaitAnswer = (Vec<SessionWriteReceipt>, Result<(), SaveRefusal>);
 /// arriving after a newer request has already gone out can be recognised as stale and dropped
 /// rather than being allowed to mark the store clean over a document that has since changed.
 struct SessionWriter {
-    requests: mpsc::Sender<SessionWriteRequest>,
+    requests: mpsc::Sender<StorageJob>,
     receipts: mpsc::Receiver<SessionWriteReceipt>,
     /// **The two ends the writer thread needs, until one thread has them**
     /// (T-QUIT-TIMEOUT-PROCEEDS, release review X-9).
@@ -487,7 +507,7 @@ struct SessionWriter {
 
 impl SessionWriter {
     fn open() -> Self {
-        let (requests, incoming) = mpsc::channel::<SessionWriteRequest>();
+        let (requests, incoming) = mpsc::channel::<StorageJob>();
         let (outgoing, receipts) = mpsc::channel::<SessionWriteReceipt>();
         let mut writer = Self {
             requests,
@@ -528,7 +548,14 @@ impl SessionWriter {
                 let Some(ends) = ends.lock().ok().and_then(|mut held| held.take()) else {
                     return;
                 };
-                while let Ok(request) = ends.incoming.recv() {
+                while let Ok(job) = ends.incoming.recv() {
+                    let request = match job {
+                        StorageJob::Session(request) => request,
+                        StorageJob::Receipt { job, answer } => {
+                            let _ = answer.send(write_receipt(&job));
+                            continue;
+                        }
+                    };
                     let result = bt_persist::atomic_write(&request.path, &request.bytes)
                         .map_err(|error| error.to_string());
                     if ends
@@ -567,14 +594,31 @@ impl SessionWriter {
         }
         let generation = self.sent + 1;
         self.requests
-            .send(SessionWriteRequest {
+            .send(StorageJob::Session(SessionWriteRequest {
                 generation,
                 path: path.to_path_buf(),
                 bytes,
-            })
+            }))
             .ok()?;
         self.sent = generation;
         Some(generation)
+    }
+
+    /// Hand an update trial's receipt to the writer thread (F-14). `None` when
+    /// there is no writer thread: the receipt is then not written at all, and
+    /// never on the calling thread, which is the window's.
+    fn send_receipt(
+        &mut self,
+        job: crate::update_trial::ReceiptJob,
+    ) -> Option<mpsc::Receiver<ReceiptWritten>> {
+        if !self.start() {
+            return None;
+        }
+        let (answer, answered) = mpsc::channel();
+        self.requests
+            .send(StorageJob::Receipt { job, answer })
+            .ok()?;
+        Some(answered)
     }
 
     /// Every receipt that has arrived, newest-relevant last. Never waits.
@@ -705,7 +749,7 @@ impl SessionStore {
         let dir = storage_dir();
         let session_path = dir.join(SESSION_FILE_NAME);
         let sentinel_path = dir.join("session.lock");
-        let writable = std::fs::create_dir_all(&dir).is_ok();
+        let writable = make_data_folder(&dir);
         // **Asked before the sentinel and before the read** (review row R4-5),
         // because both of those are things only the writer of record may do: a
         // second process that armed a sentinel would clear the first one's crash
@@ -715,7 +759,11 @@ impl SessionStore {
         // Probe *before* creating: creating first would make every probe after
         // the first report a crash.
         let previous_exit = probe_sentinel(&sentinel_path).unwrap_or(ExitState::Normal);
-        let (session, report, degradation) = read_session(&session_path);
+        let (session, report, degradation) =
+            read_session_keeping(&session_path, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &session_path, |path| {
+            let _ = read_session(path);
+        });
         // §5.4 case 1 — no file yet — is the normal first run and must not
         // alert; every other non-`Loaded` outcome must (§5.3: "explicit alert,
         // never pretend it succeeded").
@@ -746,7 +794,12 @@ impl SessionStore {
         if previous_exit == ExitState::Crashed {
             eprintln!("BT_PERSIST previous session did not reach its clean-exit path");
         }
-        let armed = writable && writer_of_record && create_sentinel(&sentinel_path).is_ok();
+        // An update's trial arms no sentinel until it is committed
+        // (`update_trial`, F-7): `session.lock` is a file in O's folder.
+        let armed = writable
+            && writer_of_record
+            && !crate::update_trial::defer(crate::update_trial::Writer::Session)
+            && create_sentinel(&sentinel_path).is_ok();
         Self {
             session_path,
             sentinel_path,
@@ -844,8 +897,36 @@ impl SessionStore {
     /// [`is_writer_of`], asked of the directory this store's file is in. A store
     /// that is not stays exactly as useful as one that is, in memory; it simply
     /// reaches no disk.
+    ///
+    /// **And not while an update's trial holds its writes back**
+    /// (`update_trial`, F-7): the document stays live here and is handed over
+    /// when the trial is committed ([`Self::release_trial`]).
     fn writes_to_disk(&self) -> bool {
-        self.writer_of_record
+        self.writer_of_record && !crate::update_trial::defer(crate::update_trial::Writer::Session)
+    }
+
+    /// **Hand an update trial's receipt to the storage worker** (F-14): written
+    /// there, create-new, through the `install_txn` door — never on the calling
+    /// thread, which is the window's. The answer comes back on the channel this
+    /// returns; `None` when there is no worker to write it.
+    pub(crate) fn write_receipt(
+        &mut self,
+        receipt: crate::update_trial::ReceiptJob,
+    ) -> Option<mpsc::Receiver<ReceiptWritten>> {
+        self.writer.send_receipt(receipt)
+    }
+
+    /// **An update's trial was committed: arm this run's sentinel and hand the
+    /// document over** — what [`Self::open`] and the autosave held back
+    /// (`update_trial`, F-7).
+    pub fn release_trial(&mut self) {
+        if !self.writer_of_record {
+            return;
+        }
+        if !self.armed {
+            self.armed = create_sentinel(&self.sentinel_path).is_ok();
+        }
+        self.hand_over(Instant::now());
     }
 
     /// Hand the current document to the writer, without waiting for it to land.
@@ -1098,8 +1179,11 @@ impl SettingsStore {
     pub fn open() -> Self {
         let dir = storage_dir();
         let path = dir.join(SETTINGS_FILE_NAME);
-        let _ = std::fs::create_dir_all(&dir);
-        let (settings, report) = read_settings(&path);
+        make_data_folder(&dir);
+        let (settings, report) = read_settings_keeping(&path, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &path, |path| {
+            let _ = read_settings(path);
+        });
         // §5.4 case 1 — no file yet — is the normal first run and must not alert.
         let fault = read_fault(
             &report,
@@ -1196,12 +1280,23 @@ impl SettingsStore {
         }
     }
 
+    /// **An update's trial was committed: the document as it stands reaches
+    /// the disk** — every write [`Self::write_now`] held back (`update_trial`).
+    pub fn release_trial(&mut self) {
+        self.write_now();
+    }
+
     /// Put the document in force on disk, now.
     fn write_now(&mut self) {
         if !self.writer_of_record {
             // The second Folio over this directory (review row R4-5): the choice
             // is live in this window and reaches no file. Not recorded as a
             // failure, because nothing was attempted and nothing is owed.
+            return;
+        }
+        // An update's trial writes nothing durable until it is committed
+        // (`update_trial`, F-7): the choice is live here and owed to the file.
+        if crate::update_trial::defer(crate::update_trial::Writer::Settings) {
             return;
         }
         self.writes.record(
@@ -1245,8 +1340,11 @@ impl KeybindingsStore {
     pub fn open() -> Self {
         let dir = storage_dir();
         let path = dir.join(KEYBINDINGS_FILE_NAME);
-        let _ = std::fs::create_dir_all(&dir);
-        let (file, report) = read_keybindings(&path);
+        make_data_folder(&dir);
+        let (file, report) = read_keybindings_keeping(&path, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &path, |path| {
+            let _ = read_keybindings(path);
+        });
         // §5.4 case 1 — no file — is the ordinary state of nearly every machine
         // and must not alert. Everything else must, naming the file (§5.3).
         let fault = read_fault(
@@ -1289,8 +1387,24 @@ impl KeybindingsStore {
         if changed {
             self.writes.rearm();
         }
-        if !self.writer_of_record {
-            return changed;
+        self.write_now();
+        changed
+    }
+
+    /// **An update's trial was committed: the departures as they stand reach
+    /// the disk** (`update_trial`).
+    pub fn release_trial(&mut self) {
+        self.write_now();
+    }
+
+    /// Put the departures in force on disk, now — unless this process is not
+    /// the writer (review row R4-5) or an update's trial holds its writes back
+    /// (`update_trial`, F-7).
+    fn write_now(&mut self) {
+        if !self.writer_of_record
+            || crate::update_trial::defer(crate::update_trial::Writer::Keybindings)
+        {
+            return;
         }
         let file = KeybindingsV1 {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
@@ -1303,7 +1417,6 @@ impl KeybindingsStore {
             })
             .map_err(|error| error.to_string()),
         );
-        changed
     }
 }
 
@@ -1357,7 +1470,7 @@ impl ProfilesStore {
     /// Read `profiles.json`, falling back to *no departures* on every failure.
     pub fn open() -> Self {
         let dir = storage_dir();
-        let _ = std::fs::create_dir_all(&dir);
+        make_data_folder(&dir);
         Self::at(dir.join(PROFILES_FILE_NAME))
     }
 
@@ -1367,7 +1480,8 @@ impl ProfilesStore {
     ///
     /// [`open`]: Self::open
     fn at(path: PathBuf) -> Self {
-        let (file, report) = read_profiles(&path);
+        let (file, report) = read_profiles_keeping(&path, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &path, keep_profiles);
         // §5.4 case 1 — no file — is the ordinary state of nearly every machine
         // and must not alert. Everything else must, naming the file (§5.3).
         let fault = read_fault(
@@ -1421,7 +1535,8 @@ impl ProfilesStore {
     /// The line printed here is §5.3's, and the card the window raises for it is
     /// the caller's — this type has no way to say anything to anybody.
     pub fn reread(&mut self) -> ProfilesNews {
-        let (file, report) = read_profiles(&self.path);
+        let (file, report) = read_profiles_keeping(&self.path, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &self.path, keep_profiles);
         if let ReadReport::FellBackToDefaults { reason, kept } = &report {
             eprintln!("BT_PERSIST {PROFILES_FILE_NAME} would not parse: {reason:?} kept={kept:?}");
             return ProfilesNews::Unreadable;
@@ -1446,8 +1561,24 @@ impl ProfilesStore {
         if changed {
             self.writes.rearm();
         }
-        if !self.writer_of_record {
-            return changed;
+        self.write_now();
+        changed
+    }
+
+    /// **An update's trial was committed: the table as it stands reaches the
+    /// disk** (`update_trial`).
+    pub fn release_trial(&mut self) {
+        self.write_now();
+    }
+
+    /// Put the table in force on disk, now — unless this process is not the
+    /// writer (review row R4-5) or an update's trial holds its writes back
+    /// (`update_trial`, F-7).
+    fn write_now(&mut self) {
+        if !self.writer_of_record
+            || crate::update_trial::defer(crate::update_trial::Writer::Profiles)
+        {
+            return;
         }
         self.writes.record(
             PROFILES_FILE_NAME,
@@ -1456,8 +1587,24 @@ impl ProfilesStore {
             })
             .map_err(|error| error.to_string()),
         );
-        changed
     }
+}
+
+/// `profiles.json` read again with a refused file's copy kept — what an update's
+/// trial owed it (`update_trial::owe_copy`).
+fn keep_profiles(path: &Path) {
+    let _ = read_profiles(path);
+}
+
+/// **Make the data folder a store is about to open in**, and answer whether it
+/// is there — unless an update's trial holds its writes back (`update_trial`,
+/// F-7), which makes nothing and answers whether it was there already. The
+/// commit makes it then, before the first document it released is written.
+pub(crate) fn make_data_folder(dir: &Path) -> bool {
+    if crate::update_trial::defer(crate::update_trial::Writer::DataFolder) {
+        return dir.is_dir();
+    }
+    std::fs::create_dir_all(dir).is_ok()
 }
 
 /// The directory this build wrote its files under before the product was named,
@@ -1572,6 +1719,17 @@ pub fn storage_dir() -> PathBuf {
             let Some(previous) = location.previous else {
                 return current;
             };
+            // **An update's trial moves nothing** (`update_trial`, F-7): it runs
+            // in the folder the old build left, as a start whose move failed
+            // does below. The move is the next start's; this one's folder is in
+            // use by then.
+            if crate::update_trial::defer(crate::update_trial::Writer::DataFolderMove) {
+                return if previous.is_dir() && !current.exists() {
+                    previous
+                } else {
+                    current
+                };
+            }
             match relocate(&previous, &current) {
                 Relocation::Nothing | Relocation::AlreadyHere => current,
                 Relocation::Moved => {
@@ -1973,7 +2131,7 @@ mod tests {
     /// one inside an `fsync` that has not come back. It ends when the returned sender is
     /// dropped, so nothing of this test outlives the test.
     fn a_writer_that_never_answers() -> (SessionWriter, mpsc::Sender<()>) {
-        let (requests, incoming) = mpsc::channel::<SessionWriteRequest>();
+        let (requests, incoming) = mpsc::channel::<StorageJob>();
         let (outgoing, receipts) = mpsc::channel::<SessionWriteReceipt>();
         let (release, released) = mpsc::channel::<()>();
         let thread = std::thread::spawn(move || {

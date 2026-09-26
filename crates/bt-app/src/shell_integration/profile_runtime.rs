@@ -37,7 +37,14 @@ fn schedule_migration(record_exists: bool, script_exists: bool, start: impl FnOn
 
 /// Only two metadata questions on the caller. No profile read, process query or
 /// migration on the window thread; pristine installs don't even start a worker.
+///
+/// **Not in an update's trial** (`update_trial`, F-7): the migration rewrites
+/// profiles and the marks record, which are O's until the trial is committed;
+/// the commit calls this again, and it runs then.
 pub fn begin_startup_migration() {
+    if crate::update_trial::defer(crate::update_trial::Writer::ProfileMigration) {
+        return;
+    }
     if STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }

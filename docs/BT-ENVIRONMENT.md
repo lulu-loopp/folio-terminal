@@ -135,7 +135,13 @@ let go. Only that test's child half reads them; no product code does.
 `BT_STANDALONE_ENTRY_TEST_CHILD` carries the name of the one test `bt-app`'s
 `tests::alone_in_a_process` runs again in a process of its own — the three
 standalone-entry cases of `attention_wire` and `explorer_menu`, whose claim holds
-once per process — and only that test, in that child, reads it.
+once per process — and only that test, in that child, reads it. And
+`BT_UPDATE_TRIAL_TEST_CHILD` and `BT_UPDATE_TRIAL_TEST_ROOT` — the test name and
+the private folder `bt-app`'s `update_trial` tests set on the copy of their own
+test binary that runs a start's writers in a process of its own (the trial is a
+fact once per process), with `APPDATA`, `LOCALAPPDATA`, `HOME`, `XDG_DATA_HOME`
+and `BT_POWERSHELL_PROFILE` pointed inside that folder. Only the child half of
+those two tests reads them.
 
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |

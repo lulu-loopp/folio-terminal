@@ -1473,6 +1473,40 @@ pub enum ReadReport {
     },
 }
 
+/// **Whether a refused document's bytes are kept beside it as it is read**
+/// (review row R4-3), or left exactly where they are for the caller to keep
+/// later.
+///
+/// Keeping writes into the document's own folder — a `.rejected-<stamp>` copy,
+/// or the oversized file renamed away — and a caller that may write nothing
+/// durable yet (an update's trial, `bt-app`'s `update_trial`, ticket U-13)
+/// reads with [`Keeping::Owed`]: the refusal is reported the same way, with
+/// `kept: None`, and the file is untouched. The caller keeps it later by reading
+/// again with [`Keeping::Now`], which applies the whole chain to whatever is
+/// there then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keeping {
+    /// Keep the refused bytes now — every read before U-13, and every read
+    /// outside a trial.
+    Now,
+    /// Keep nothing: the caller owes the keeping.
+    Owed,
+}
+
+impl ReadReport {
+    /// **Whether a read with [`Keeping::Owed`] left a keeping owed**: the file
+    /// was refused with its bytes in reach (every reason but
+    /// [`FallbackReason::Io`], where nothing was obtained and there is nothing
+    /// to keep).
+    #[must_use]
+    pub fn owes_a_copy(&self) -> bool {
+        matches!(
+            self,
+            Self::FellBackToDefaults { reason, kept: None } if !matches!(reason, FallbackReason::Io(_))
+        )
+    }
+}
+
 #[derive(Deserialize)]
 struct VersionEnvelope {
     schema_version: u32,
@@ -1481,15 +1515,18 @@ struct VersionEnvelope {
 /// Applies `read_with_fallback`'s §5.4 chain for one file: missing → silent
 /// default; unparseable/future-version → default + explicit reason;
 /// otherwise the deserialized value (after migration, if the file was
-/// behind current). Never panics — every branch returns a value.
+/// behind current). Never panics — every branch returns a value. A refused
+/// file's bytes are kept beside it, or not, as `keeping` says ([`Keeping`]).
 pub(crate) fn read_with_fallback<T>(
     path: &Path,
     current_version: u32,
     migrations: &[(u32, MigrationStep)],
+    keeping: Keeping,
 ) -> (T, ReadReport)
 where
     T: DeserializeOwned + Default,
 {
+    let now = keeping == Keeping::Now;
     let bytes = match read_bounded(path, MAX_DOCUMENT_BYTES) {
         Ok(bytes) => bytes,
         Err(BoundedRead::NotFound) => return (T::default(), ReadReport::NotFound),
@@ -1513,7 +1550,7 @@ where
                         cap: MAX_DOCUMENT_BYTES,
                     },
                     // Moved rather than copied — see [`keep_oversized`].
-                    kept: keep_oversized(path),
+                    kept: if now { keep_oversized(path) } else { None },
                 },
             );
         }
@@ -1527,7 +1564,11 @@ where
         Err(reason) => (
             T::default(),
             ReadReport::FellBackToDefaults {
-                kept: keep_rejected(path, &bytes),
+                kept: if now {
+                    keep_rejected(path, &bytes)
+                } else {
+                    None
+                },
                 reason,
             },
         ),
@@ -3309,7 +3350,7 @@ mod tests {
     fn missing_file_is_silent_default() {
         let dir = unique_dir("missing");
         let path = dir.join("does-not-exist.json");
-        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Now);
         assert_eq!(value, Fixture::default());
         assert_eq!(report, ReadReport::NotFound);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -3319,7 +3360,7 @@ mod tests {
     fn syntax_error_falls_back_with_parse_error_reason() {
         let dir = unique_dir("syntax");
         let path = write_fixture(&dir, "broken.json", "{ not json");
-        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Now);
         assert_eq!(value, Fixture::default());
         assert!(matches!(
             report,
@@ -3341,7 +3382,7 @@ mod tests {
             "future.json",
             r#"{"schema_version": 99, "value": "from the future"}"#,
         );
-        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Now);
         assert_eq!(value, Fixture::default());
         assert!(matches!(
             report,
@@ -3364,7 +3405,7 @@ mod tests {
             "old.json",
             r#"{"schema_version": 0, "value": "prehistoric"}"#,
         );
-        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Now);
         assert_eq!(value, Fixture::default());
         assert!(matches!(
             report,
@@ -3384,7 +3425,7 @@ mod tests {
             "ok.json",
             r#"{"schema_version": 1, "value": "hello"}"#,
         );
-        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Now);
         assert_eq!(
             value,
             Fixture {
@@ -3404,7 +3445,7 @@ mod tests {
             "extra.json",
             r#"{"schema_version": 1, "value": "hello", "from_a_third_party_tool": 42}"#,
         );
-        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Now);
         assert_eq!(
             value,
             Fixture {
@@ -3435,7 +3476,7 @@ mod tests {
         let dir = unique_dir("kept");
         let path = write_fixture(&dir, "settings.json", "{ this is not json ");
 
-        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Now);
         assert_eq!(value, Fixture::default(), "defaults, as §5.4 requires");
 
         let ReadReport::FellBackToDefaults { reason, kept } = report else {
@@ -3465,6 +3506,59 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// RED (U-13) — **a read that owes its keeping leaves the folder exactly as
+    /// it was, reports the same refusal, and says a copy is owed; the read that
+    /// pays it keeps the bytes as any read does.**
+    ///
+    /// An update's trial may write nothing durable before its transaction is
+    /// committed (`docs/plans/design/self-update-2026-09-16.md` F-7), and
+    /// keeping a refused file is a write into the data folder. So the trial
+    /// reads with [`Keeping::Owed`] and keeps later, once it may.
+    ///
+    /// MUTATION: ignore `keeping` in `read_with_fallback` (keep always).
+    #[test]
+    fn a_read_that_owes_its_keeping_leaves_the_folder_as_it_was() {
+        let dir = unique_dir("owed");
+        let path = write_fixture(&dir, "settings.json", "{ this is not json ");
+
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Owed);
+        assert_eq!(value, Fixture::default());
+        assert!(
+            matches!(
+                &report,
+                ReadReport::FellBackToDefaults {
+                    reason: FallbackReason::ParseError(_),
+                    kept: None
+                }
+            ),
+            "{report:?}"
+        );
+        assert!(report.owes_a_copy());
+        let names = |dir: &Path| {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&dir), vec!["settings.json".to_string()]);
+
+        let (_, paid) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Now);
+        assert!(!paid.owes_a_copy(), "{paid:?}");
+        assert_eq!(names(&dir).len(), 2, "the copy is kept once it may be");
+        assert!(!ReadReport::NotFound.owes_a_copy());
+        assert!(
+            !ReadReport::FellBackToDefaults {
+                reason: FallbackReason::Io("denied".to_owned()),
+                kept: None
+            }
+            .owes_a_copy(),
+            "nothing was obtained, so nothing is owed"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// RED (review row R4-3) — **a document from a newer build is kept too.**
     ///
     /// The arm that costs the most, because it is the one that fires on a
@@ -3480,7 +3574,7 @@ mod tests {
             r#"{"schema_version": 99, "value": "theirs"}"#,
         );
 
-        let (_, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        let (_, report) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Now);
         let ReadReport::FellBackToDefaults { reason, kept } = report else {
             panic!("a future version falls back");
         };
@@ -3522,7 +3616,7 @@ mod tests {
         text.push_str("\"}");
         std::fs::write(&path, &text).unwrap();
 
-        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[]);
+        let (value, report) = read_with_fallback::<Fixture>(&path, 1, &[], Keeping::Now);
         assert_eq!(value, Fixture::default());
         let ReadReport::FellBackToDefaults { reason, kept } = report else {
             panic!("an oversized document falls back");

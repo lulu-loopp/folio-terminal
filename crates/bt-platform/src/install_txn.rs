@@ -15,6 +15,9 @@
 //!   `FILE_FLAG_BACKUP_SEMANTICS`; macOS: `F_FULLFSYNC` on the directory's
 //!   descriptor). It returns only after the directory flush. A reader after a
 //!   power cut finds the old file or the new one, whole, and never a torn one.
+//! * **A durable create** ([`durable_create`]): the same steps, with a rename
+//!   that never replaces — the trial's receipt (U-13), written once and never
+//!   over an existing one.
 //! * **A durable move** ([`durable_move`]): Windows `MoveFileExW(…,
 //!   MOVEFILE_WRITE_THROUGH)`, macOS `renamex_np(…, RENAME_EXCL)`; then the
 //!   same directory flush, on the destination's directory and on the source's
@@ -153,7 +156,7 @@ impl std::error::Error for Failure {
 enum Replace {
     /// A durable write: the new journal takes the old one's name.
     Existing,
-    /// A durable move: an existing destination is a refusal.
+    /// A durable move or a durable create: an existing destination is a refusal.
     Never,
 }
 
@@ -196,7 +199,24 @@ trait Surface {
 /// A [`Failure`] naming the stage that failed; on a platform with no arm, one
 /// at [`Stage::CreateTemp`] whose error is `Unsupported` and names this door.
 pub fn durable_write(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
-    durable_write_with(&mut arm::Os, target, bytes)
+    durable_write_with(&mut arm::Os, target, bytes, Replace::Existing)
+}
+
+/// **Write `bytes` to `target` durably, and only if nothing is there yet** —
+/// the trial's receipt (F-14: "create-new, flush file and directory"; U-13).
+///
+/// [`durable_write`]'s steps in its order — a temporary beside the target, the
+/// bytes, a flush of the file, a rename, a flush of the directory — with the
+/// one difference that the rename **never replaces**: a target that already
+/// exists is refused at [`Stage::Rename`] with the operating system's "already
+/// exists" error, the existing file is left byte for byte, and the temporary is
+/// removed. So a receipt, once written, is never written over.
+///
+/// # Errors
+/// A [`Failure`] naming the stage that failed; on a platform with no arm, one
+/// at [`Stage::CreateTemp`] whose error is `Unsupported` and names this door.
+pub fn durable_create(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
+    durable_write_with(&mut arm::Os, target, bytes, Replace::Never)
 }
 
 /// **Move `from` to `to`, durably, and never over an existing file.**
@@ -269,6 +289,7 @@ fn durable_write_with<S: Surface>(
     surface: &mut S,
     target: &Path,
     bytes: &[u8],
+    replace: Replace,
 ) -> Result<(), Failure> {
     let temporary =
         temporary_beside(target).map_err(|error| Failure::at(Stage::CreateTemp, target, error))?;
@@ -286,7 +307,7 @@ fn durable_write_with<S: Surface>(
         surface.remove(&temporary);
         return Err(failure);
     }
-    if let Err(error) = surface.rename(&temporary, target, Replace::Existing) {
+    if let Err(error) = surface.rename(&temporary, target, replace) {
         surface.remove(&temporary);
         return Err(Failure::at(Stage::Rename, target, error));
     }
@@ -933,7 +954,7 @@ mod tests {
     /// Journal-shaped bytes: a header v1 as `bt-app`'s `update_txn` encodes it.
     /// Spelled out rather than encoded, because `bt-platform` sits below
     /// `bt-app` and cannot name its types; the door never reads what it writes.
-    const JOURNAL: &[u8] = br#"{"v":1,"txn":"00112233445566778899aabbccddeeff","rescue":"rescue\\folio.exe","class":"deferred","body":{"phase":"Prepared"}}"#;
+    const JOURNAL: &[u8] = br#"{"v":1,"txn":"00112233445566778899aabbccddeeff","rescue":"rescue\\folio.exe","class":"deferred","outcome":"none","body":{"phase":"Prepared"}}"#;
 
     fn home() -> PathBuf {
         PathBuf::from("home").join(".folio-update")
@@ -963,7 +984,7 @@ mod tests {
     fn a_journal_write_is_renamed_only_after_its_flush() {
         let target = home().join("journal.json");
         let mut fake = Recorder::default();
-        durable_write_with(&mut fake, &target, JOURNAL).unwrap();
+        durable_write_with(&mut fake, &target, JOURNAL, Replace::Existing).unwrap();
         let temporary = temporary_of(&fake.calls);
         assert_eq!(temporary.parent(), Some(home().as_path()), "same directory");
         assert_eq!(
@@ -1002,7 +1023,7 @@ mod tests {
     fn the_directory_flush_opens_the_directory_and_flushes_that_handle() {
         let target = home().join("journal.json");
         let mut fake = Recorder::default();
-        durable_write_with(&mut fake, &target, b"x").unwrap();
+        durable_write_with(&mut fake, &target, b"x", Replace::Existing).unwrap();
         let rename = fake
             .calls
             .iter()
@@ -1077,7 +1098,8 @@ mod tests {
             (Fail::FlushDirectory, Stage::FlushDirectory, false),
         ] {
             let mut fake = Recorder::failing(fail);
-            let failure = durable_write_with(&mut fake, &target, JOURNAL).unwrap_err();
+            let failure =
+                durable_write_with(&mut fake, &target, JOURNAL, Replace::Existing).unwrap_err();
             assert_eq!(failure.stage, stage, "{fail:?}");
             assert!(
                 failure
@@ -1198,6 +1220,35 @@ mod tests {
         durable_write(&journal, JOURNAL).unwrap();
         assert_eq!(std::fs::read(&journal).unwrap(), JOURNAL);
         assert_eq!(names_in(&home), vec!["journal.json".to_string()]);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED (U-13) — **a durable create writes a new file whole, and refuses an
+    /// existing one at the rename, leaving it byte for byte and no temporary
+    /// beside it.**
+    ///
+    /// The trial's receipt is written create-new (F-14): once `health-<nonce>`
+    /// exists, nothing replaces it, so the lock holder that reads it reads the
+    /// first receipt the trial wrote and never a second one that raced it.
+    ///
+    /// MUTATION: pass `Replace::Existing` from `durable_create` (the receipt is
+    /// written over).
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_durable_create_writes_a_new_file_and_never_an_existing_one() {
+        let home = scratch("create");
+        let receipt = home.join("health-00");
+        durable_create(&receipt, b"first").unwrap();
+        assert_eq!(std::fs::read(&receipt).unwrap(), b"first");
+        let refused = durable_create(&receipt, b"second").unwrap_err();
+        assert_eq!(refused.stage, Stage::Rename, "{refused}");
+        assert_eq!(
+            refused.error.kind(),
+            io::ErrorKind::AlreadyExists,
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(&receipt).unwrap(), b"first");
+        assert_eq!(names_in(&home), vec!["health-00".to_string()]);
         let _ = std::fs::remove_dir_all(&home);
     }
 

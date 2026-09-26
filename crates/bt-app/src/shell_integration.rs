@@ -320,8 +320,23 @@ fn asks_for_login(arguments: &[String]) -> bool {
 /// rather than an error to report: a shell with no init file is a shell on the
 /// documented fallback path, which is where every bash pane was before this
 /// existed.
+///
+/// **An update's trial writes nothing** (`update_trial`, F-7): it names the
+/// script the old build left, if there is one, and the commit writes this
+/// build's.
 pub fn script_path() -> Option<&'static Path> {
     static INSTALLED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static STANDING: OnceLock<Option<PathBuf>> = OnceLock::new();
+    if crate::update_trial::defer(crate::update_trial::Writer::BashScript) {
+        return STANDING
+            .get_or_init(|| {
+                let path = persist::storage_dir()
+                    .join(SCRIPT_DIRECTORY)
+                    .join(SCRIPT_FILE);
+                path.is_file().then_some(path)
+            })
+            .as_deref();
+    }
     INSTALLED.get_or_init(install).as_deref()
 }
 
@@ -366,8 +381,26 @@ fn install_script_at(directory: &Path, name: &str, text: &str) -> Option<PathBuf
 /// a write that fails leaves this `None`, and the pane takes the documented
 /// fallback — the shell the distribution logs into, with no integration — rather
 /// than a half-built directory.
+///
+/// **An update's trial writes nothing** (`update_trial`, F-7): it names the
+/// directory the old build left, if it is whole, and the commit writes this
+/// build's.
 pub fn zdotdir_path() -> Option<&'static Path> {
     static INSTALLED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static STANDING: OnceLock<Option<PathBuf>> = OnceLock::new();
+    if crate::update_trial::defer(crate::update_trial::Writer::ZshScripts) {
+        return STANDING
+            .get_or_init(|| {
+                let directory = persist::storage_dir()
+                    .join(SCRIPT_DIRECTORY)
+                    .join(ZDOTDIR_DIRECTORY);
+                ZDOTDIR_FILES
+                    .iter()
+                    .all(|name| directory.join(name).is_file())
+                    .then_some(directory)
+            })
+            .as_deref();
+    }
     INSTALLED.get_or_init(install_zdotdir).as_deref()
 }
 

@@ -67,8 +67,8 @@ pub use layout::{
     RATIO_PPM_MAX, SplitDirV1, SplitNodeV1, TermLeafV1,
 };
 pub use migrate::{
-    FallbackReason, KEYBINDINGS_MIGRATIONS, MAX_DOCUMENT_BYTES, MigrationStep, PINS_MIGRATIONS,
-    PROFILES_MIGRATIONS, ReadReport, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,
+    FallbackReason, KEYBINDINGS_MIGRATIONS, Keeping, MAX_DOCUMENT_BYTES, MigrationStep,
+    PINS_MIGRATIONS, PROFILES_MIGRATIONS, ReadReport, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,
     UPDATE_CHECK_MIGRATIONS,
 };
 pub use pins::{PINS_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1};
@@ -107,7 +107,13 @@ use std::path::Path;
 /// represented entirely by the returned [`ReadReport`], with `SettingsV1`
 /// always a usable value (defaults on any failure).
 pub fn read_settings(path: &Path) -> (SettingsV1, ReadReport) {
-    migrate::read_with_fallback(path, SETTINGS_SCHEMA_VERSION, SETTINGS_MIGRATIONS)
+    read_settings_keeping(path, Keeping::Now)
+}
+
+/// [`read_settings`], with the keeping of a refused file the caller's to
+/// choose ([`Keeping`]).
+pub fn read_settings_keeping(path: &Path, keeping: Keeping) -> (SettingsV1, ReadReport) {
+    migrate::read_with_fallback(path, SETTINGS_SCHEMA_VERSION, SETTINGS_MIGRATIONS, keeping)
 }
 
 /// Reads `session.json` from `path`, applying the §5.4 fallback chain and
@@ -118,8 +124,21 @@ pub fn read_settings(path: &Path) -> (SettingsV1, ReadReport) {
 /// and otherwise records what had to be fixed, for the caller to decide
 /// whether to surface a banner.
 pub fn read_session(path: &Path) -> (SessionV1, ReadReport, DegradationReport) {
-    let (mut session, report) =
-        migrate::read_with_fallback::<SessionV1>(path, SESSION_SCHEMA_VERSION, SESSION_MIGRATIONS);
+    read_session_keeping(path, Keeping::Now)
+}
+
+/// [`read_session`], with the keeping of a refused file the caller's to choose
+/// ([`Keeping`]).
+pub fn read_session_keeping(
+    path: &Path,
+    keeping: Keeping,
+) -> (SessionV1, ReadReport, DegradationReport) {
+    let (mut session, report) = migrate::read_with_fallback::<SessionV1>(
+        path,
+        SESSION_SCHEMA_VERSION,
+        SESSION_MIGRATIONS,
+        keeping,
+    );
     let degradation = session.degrade_in_place();
     (session, report, degradation)
 }
@@ -142,7 +161,18 @@ pub fn write_settings_atomic(path: &Path, settings: &SettingsV1) -> Result<(), W
 /// this build's defaults. Never returns an `Err`: a shortcut file that cannot be
 /// read must not be a terminal that will not start.
 pub fn read_keybindings(path: &Path) -> (KeybindingsV1, ReadReport) {
-    migrate::read_with_fallback(path, KEYBINDINGS_SCHEMA_VERSION, KEYBINDINGS_MIGRATIONS)
+    read_keybindings_keeping(path, Keeping::Now)
+}
+
+/// [`read_keybindings`], with the keeping of a refused file the caller's to
+/// choose ([`Keeping`]).
+pub fn read_keybindings_keeping(path: &Path, keeping: Keeping) -> (KeybindingsV1, ReadReport) {
+    migrate::read_with_fallback(
+        path,
+        KEYBINDINGS_SCHEMA_VERSION,
+        KEYBINDINGS_MIGRATIONS,
+        keeping,
+    )
 }
 
 /// Serializes `keybindings` and writes it to `path` via [`atomic_write`].
@@ -166,7 +196,13 @@ pub fn write_keybindings_atomic(
 /// build's shipped five. Never returns an `Err`: a profile file that cannot be
 /// read must not be a terminal that will not start.
 pub fn read_profiles(path: &Path) -> (ProfilesV1, ReadReport) {
-    migrate::read_with_fallback(path, PROFILES_SCHEMA_VERSION, PROFILES_MIGRATIONS)
+    read_profiles_keeping(path, Keeping::Now)
+}
+
+/// [`read_profiles`], with the keeping of a refused file the caller's to
+/// choose ([`Keeping`]).
+pub fn read_profiles_keeping(path: &Path, keeping: Keeping) -> (ProfilesV1, ReadReport) {
+    migrate::read_with_fallback(path, PROFILES_SCHEMA_VERSION, PROFILES_MIGRATIONS, keeping)
 }
 
 /// Serializes `profiles` and writes it to `path` via [`atomic_write`].
@@ -188,7 +224,13 @@ pub fn write_profiles_atomic(path: &Path, profiles: &ProfilesV1) -> Result<(), W
 /// section rather than a window that will not start. The caller is expected to
 /// say so out loud and to leave the damaged file alone until the user acts.
 pub fn read_pins(path: &Path) -> (PinsV1, ReadReport) {
-    migrate::read_with_fallback(path, PINS_SCHEMA_VERSION, PINS_MIGRATIONS)
+    read_pins_keeping(path, Keeping::Now)
+}
+
+/// [`read_pins`], with the keeping of a refused file the caller's to choose
+/// ([`Keeping`]).
+pub fn read_pins_keeping(path: &Path, keeping: Keeping) -> (PinsV1, ReadReport) {
+    migrate::read_with_fallback(path, PINS_SCHEMA_VERSION, PINS_MIGRATIONS, keeping)
 }
 
 /// Serializes `pins` and writes it to `path` via [`atomic_write`].
@@ -209,7 +251,18 @@ pub fn write_pins_atomic(path: &Path, pins: &PinsV1) -> Result<(), WriteError> {
 /// question to the releases page — which is why neither is worth telling anybody
 /// about.
 pub fn read_update_check(path: &Path) -> (UpdateCheckV1, ReadReport) {
-    migrate::read_with_fallback(path, UPDATE_CHECK_SCHEMA_VERSION, UPDATE_CHECK_MIGRATIONS)
+    read_update_check_keeping(path, Keeping::Now)
+}
+
+/// [`read_update_check`], with the keeping of a refused file the caller's to
+/// choose ([`Keeping`]).
+pub fn read_update_check_keeping(path: &Path, keeping: Keeping) -> (UpdateCheckV1, ReadReport) {
+    migrate::read_with_fallback(
+        path,
+        UPDATE_CHECK_SCHEMA_VERSION,
+        UPDATE_CHECK_MIGRATIONS,
+        keeping,
+    )
 }
 
 /// Serializes `state` and writes it to `path` via [`atomic_write`].
