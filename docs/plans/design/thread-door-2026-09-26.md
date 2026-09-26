@@ -2044,3 +2044,344 @@ scope:
 - `CompositorCommit`'s four web-seat callers.
 
 (c) None repaid or added in this commit. (c′) None. (d) No.
+
+---
+
+## Revision 2026-09-26 (e), after the Codex confirmation round
+
+Review: `docs/plans/design/thread-door-review-codex-2026-09-26-c.md` (Codex,
+static, at `d85ed3fc`). It found:
+- **P1 met**;
+- **P2 met, with one wording correction**;
+- **P3 and P4 not met**, with one change each.
+
+This revision is appended, and it rules over everything before it where they
+differ. It is the last revision before A1a is dispatched, so its tables are
+built to be complete **by construction**: every inventory below comes from a
+full-workspace search at `78a3699a`, and the note gives the patterns so A1a's
+implementer can re-run them. Nothing in (e) says "by grep", "as today",
+"per door type" or "existing call sites".
+
+**How the inventories were taken.**
+- **The universe:** every `.rs` file under `crates/`, `vendor/` excluded.
+- **Reading:** each file is read as bytes with NUL removed. This matters:
+  `crates/bt-platform/src/lib.rs` contains a NUL byte, so ripgrep skips it as
+  binary. Use `grep -a`, or a reader that strips NUL.
+- **Test code:** a line is test code when it is:
+  - in `tests/`, `examples/`, `benches/` or `src/bin/`, or in a file named
+    `*tests.rs`; or
+  - inside an item marked `#[cfg(test)]` or `#[cfg(all(test, …))]`, from the
+    attribute to the item's closing brace at the item's own indentation.
+- **Enclosing function:** the nearest preceding `fn <name>`.
+- **The patterns**, one per door, are listed in (e)2's first table.
+
+### (e)1 · P2 — the checked decoder: adopted
+
+**Checked.** `Station::from_byte` returns a `Station`, not an `Option`. An
+unknown byte falls back to `Station::Starting`. (d)2's "`Station::from_byte` is
+`None`" is withdrawn.
+
+**The decoder** is new, owned by `hang_watch`, and used only by the meter's
+`leave`:
+
+```rust
+fn decode(cookie: Cookie) -> Option<Location> {
+    let raw = cookie.raw();
+    let station = (raw & 0xFF) as u8;
+    let node = ((raw >> 8) & 0xFFFF) as usize;
+    let scope = ((raw >> 24) & 0xFFFF) as usize;
+    let rest = raw >> 40;
+    (usize::from(station) < STATION_COUNT
+        && node <= hang_watch_detail::ROOT
+        && scope <= hang_watch_detail::ROOT
+        && rest == 0)
+        .then(|| Location::Resume { station: Station::from_byte(station), node, scope })
+}
+```
+
+- `leave` calls `resume_at` only on `Some`. On `None` it restores nothing and
+  adds one to the invalid-cookie counter.
+- `Station::from_byte`'s fallback is never reached through `decode`, because
+  the range check comes first.
+- One more A1a test covers the decoder: `decode` of every value `enter` can
+  produce is `Some` and round-trips. `decode` is `None` for `station =
+  STATION_COUNT`, for `node = ROOT + 1`, for `scope = ROOT + 1`, and for any
+  set bit at 40 or above. Each rejection is counted exactly once.
+
+**Adopted.**
+
+### (e)2 · P3 — every `Compositor::commit` caller, and no placeholder left: adopted
+
+**Checked.**
+- Besides the five `bt-app` statements (d)3 listed, Windows product code
+  calls `Compositor::commit` six more times:
+  - `Compositor::new` (`bt-platform/src/lib.rs`), after the tree is built;
+  - `Compositor::set_window_size` (the same file), after `place_skirt`;
+  - `WebHost::rehost` (`webview.rs`), in its `RehostStep::CommitSource` and
+    `CommitTarget` arms;
+  - `WebHost::compensate`, twice, `restore.target.commit()?` and
+    `restore.source.commit()?`. `compensate` has one caller: `rehost`'s
+    failure branch.
+- There are three direct test and example callers:
+  - `webview.rs`'s `open_the_page` test helper;
+  - `portable_impl.rs`'s
+    `a_deferred_service_that_is_not_on_this_platform_refuses_when_invoked_not_at_startup`;
+  - `crates/bt-app/examples/video-probe.rs`'s `Probe::draw`. The example
+    compiles under `clippy --all-targets`, so it must adapt.
+- The macOS and portable `Compositor::commit` definitions
+  (`macos_compose.rs`, `portable_impl.rs`) have no in-crate product callers.
+  No macOS or portable `WebHost` calls `commit`.
+
+**While completing the inventory, an unlisted window-thread wait was found.**
+`Runtime::create` (`main.rs`) opens the first window's GPU with
+`pollster::block_on(GpuContext::open(…))`. `pollster::block_on` is in B§R-A's
+vocabulary, and the call is not a §5.3 row. That is a finding, reported here,
+not decided: under A§5.3 "a call not on this list that blocks on something
+outside the process is a defect". A1a registers it as **row 23 · `GpuOpen`**
+with status `pending`. It is never shown as `bound`, and its ruling cell cites
+the DESIGN entry A1a adds to record the finding. A1d wraps it (row below).
+Moving it is not decided here.
+
+**How `Compositor`'s commits are admitted.** `Compositor::commit` becomes the
+token-taking door. The six internal commits call a new **private**
+`Compositor::commit_now(&self) -> Result<(), String>`, the body today's
+`commit` has. Each internal statement is covered by the admission of the
+public door that encloses it, as in the table below. The macOS and portable
+`Compositor` and `WebHost` take the same token parameters, so the platforms
+keep one signature, which the signature-parity test in `bt-platform/src/lib.rs`
+already compares.
+
+**Test protocol for every row.** A test that reaches a minting statement runs
+on a thread that has called `admission::enter_window_thread()` and then
+`admission::loop_running()`. Rows admitted only in `Exiting` also call
+`admission::exiting()`. `bt-app` gets one test helper, `tests::on_the_window_thread()`,
+that makes those calls. Test code is outside A1e's pinned-call-site universe
+by declaration, so this adds no product writer. The direct test callers each
+row must adapt are listed in its row. The indirect ones are listed after the
+table.
+
+#### The patterns (the inventory's search)
+
+| row | pattern(s), run over the universe above |
+|---|---|
+| `PtyBirth` | `spawn_shell_in\(` · `create_leaf_session\(` |
+| `PtyResize` | `pty\.resize\(` · `commit_leaf_resize\(` · `release_due_leaf_resize\(` · `flush_pending_pty_resize\(` |
+| `PaneRetirementWait` | `wait_for_retirements\(` |
+| `SessionWriteWait` | `writer\.wait_for\(` · `flush_judged\(` |
+| `SessionWriterRetire` | `writer\.close\(` · `SessionStore::close` via `session_store\.close\(`/`\.finish\(\)` on `App` |
+| `TraceFlush` | `trace_sink::flush\(` · `\bflush\(\)` in `trace_sink.rs` |
+| `LaunchHandOver` | `launch_wire::hand_over\(` |
+| `GpuOpen` | `GpuContext::open\(` |
+| `PresentFrame` | `present_frame_with_phases\(` · `\.present_frame\(` · `\.present\(` on `WindowRenderer` · `present_seats_and_commit\(` |
+| `CompositorCommit` | `\.commit\(\)` |
+| `CompositorBirth` | `Compositor::new\(` · `spare_parent\(` |
+| `CompositorWindowSize` | `\.set_window_size\(` |
+| `WebRehost` | `\.rehost\(` · `compensate\(` |
+| `SurfaceBirth` | `WindowRenderer::new\(` |
+| `TitleFlush` | `\.set_title\(` · `flush_title\(` |
+| `ImeCaretArea` | `\.set_ime_cursor_area\(` · `apply_ime_cursor_area\(` · `flush_ime_cursor_area\(` |
+| `FocusWindow` | `\.focus_window\(` · `open_from_notification\(` |
+| `SetVisible` | `window\.set_visible\(` · `put_the_window_on_the_glass\(` · `hide_quake_window\(` · `let_go_of_this_window\(` |
+| `SetCursor` | `window\.set_cursor\(` · `apply_pointer_cursor\(` |
+| `WebController` | `request_controller\(` · `self\.apply\(` in `webhost.rs` |
+| `WebEnvironment` | `request_environment\(` · `start_environment\(` |
+| `FontFamilyLookup` | `monospace_family_named\(` · `monospace_family_files\(` · `apply_stored_terminal_font\(` |
+| `PlaceHidden`, `PlaceExposure` | `window_is_hidden\(` · `window_is_exposed\(` · `sample_window_place\(` · `observe_window_place\(` |
+
+#### The door table (replaces (d)3's; every cell is an inventory)
+
+The notation is `file` · `Type::function`, or `file` · `function` for a free
+function. "Minted at" is the statement inside the minting function where
+`admitted::<doors::X, _>(|t| …)` wraps the door call. The token is consumed by
+value there. All signatures take `token: WaitToken<'_, doors::X>` first (after
+`self`).
+
+| door · row | door function | minted at | product callers of the minting function (complete) | phases | metric | on `Refused` | witness | direct test callers to adapt |
+|---|---|---|---|---|---|---|---|---|
+| `PtyBirth` · 11 | `bt-app` `pty_door::spawn_shell(token, program: OsString, args: &[OsString], environment: &[(OsString, OsString)], size: PtySize, wake: OutputWake, working_directory: Option<PathBuf>) -> Result<PtySession, PtyError>`; its body is the one `PtySession::spawn_shell_in` call | `main.rs` · `create_leaf_session`, at `PtySession::spawn_shell_in(` | `runtime/panes.rs` · `Runtime::split_seat`; `runtime/preview.rs` · `Runtime::pop_out_preview`; `runtime/terminal.rs` · `Runtime::restart_shell`; `main.rs` · `create_tab_state` (← `main.rs` · `Runtime::create`; `runtime/tabs.rs` · `Runtime::new_tab_seeded_from`, `Runtime::commit_row_into_new_tab`; `runtime/windows.rs` · `Runtime::open_window`, `Runtime::reopen_recent`, `Runtime::answer_restore`) | Running, Exiting | single call | `Err` into `create_leaf_session`'s existing spawn-failure branch | a headless `split_seat` records one admission and a live session | none (the `bt-pty` tests call `spawn_shell_in` directly and are unaffected) |
+| `PtyResize` · 12 | `pty_door::resize(token, pty: &mut PtySession, size: PtySize) -> Result<(), PtyError>` | `main.rs` · `commit_leaf_resize`, at `pty.resize(pty_size(next_grid, physical))`: after the reflow, before the reconcile, keeping the `?` | `commit_leaf_resize` ← `main.rs` · `release_due_leaf_resize` ← `runtime/dpi.rs` · `Runtime::flush_pending_pty_resize` ← `runtime/frame.rs` · `Runtime::turn` | Running, Exiting | single call per leaf | the same `Err` the `?` propagates | two leaves in one flush record two admissions | none directly. Indirectly: `tests.rs` calls `commit_leaf_resize` six times and `release_due_leaf_resize` eleven times, and `text_size_tests.rs` calls `release_due_leaf_resize` once. Each enters the window thread (`on_the_window_thread`); where it passes no `PtySession`, no admission is reached |
+| `PaneRetirementWait` · 15 | `pty_door::wait_for_retirements(token, budget: Duration) -> usize` | `main.rs` · `FolioApp::settle_quit`, `QuitStep::Retire` arm | `settle_quit` ← `FolioApp::about_to_wait_inner` (two statements), `FolioApp::window_event` | Exiting | single call | logs the count as unknown; quit proceeds as on a timeout | the `Retire` step through the real `settle_quit` | none (the `bt-pty` tests are unaffected) |
+| `SessionWriteWait` · 16 | `persist.rs` · `SessionWriter::wait_for(&mut self, token, generation: u64) -> SessionWaitAnswer` | `persist.rs` · `SessionStore::wait_for_landing`, at `self.writer.wait_for(generation)` | `wait_for_landing` ← `SessionStore::flush_judged` ← `main.rs` · `FolioApp::settle_quit` (`QuitStep::Write`) and `persist.rs` · `SessionStore::flush` ← `SessionStore::close` ← `main.rs` · `App::finish` | Exiting | single call | the existing stalled answer; quit proceeds | `flush_judged` through `QuitStep::Write` records one admission | `persist.rs` · `only_one_thread_ever_takes_the_session_writers_channel` (a direct `wait_for`). Indirectly through `flush_judged`: `a_session_write_that_could_not_happen_is_reported_as_one`, `a_quit_leaves_a_writer_that_never_answers_behind`, `a_store_with_no_writer_thread_reports_rather_than_writing`, `a_document_that_will_not_write_stops_retrying_and_says_so`. Each enters the window thread and `exiting()` |
+| `SessionWriterRetire` · 16b | `persist.rs` · `SessionWriter::close(&mut self, token)` | `persist.rs` · `SessionStore::close`, at `self.writer.close()` | `SessionStore::close` ← `main.rs` · `App::finish` ← `FolioApp::close`, `FolioApp::reap_leaving_windows`, `FolioApp::settle_quit`, `FolioApp::fail`, `FolioApp::exiting` | Exiting | single call | the writer is left to process exit | `App::finish` through `FolioApp::close` | `persist.rs`: `a_quit_leaves_a_writer_that_never_answers_behind`, `only_one_thread_ever_takes_the_session_writers_channel`, `a_store_with_no_writer_thread_reports_rather_than_writing`, `a_document_that_will_not_write_stops_retrying_and_says_so` (direct `writer.close()`) |
+| `TraceFlush` · 17 | `trace_sink.rs` · `flush(token)` | `main.rs` · `main` after `run_app`, and in `main`'s event-loop build error arm ((c)5); `trace_sink.rs` · `Shutdown::drop` (conditional, (e)3) | `main`; `Shutdown::drop` | Exiting | single call | queued lines are lost, as on its timeout | a window-entered test runs `exiting()` and then the admitted flush | none (`shutdown_does_not_wait_forever_for_a_stalled_writer` calls the private `flush_sink`, not the door) |
+| `LaunchHandOver` · 18 | `launch_wire.rs` · `hand_over(token, directory: &Path, argv: &cli::CliRequest, say: impl Fn(&str)) -> Option<i32>` | `main.rs` · `main`, at `launch_wire::hand_over(` | `main` | Starting | single call | `None`: open a window | the hand-over road's existing tests, window-entered | none. Three source needles keep matching: the literal `launch_wire::hand_over(` stays inside the closure |
+| **`GpuOpen` · 23 (new, pending)** | `bt-app` `gpu_door::open(token, target: WindowTarget, width: u32, height: u32, scale: f64) -> Result<(GpuContext, WindowRenderer), RenderError>`; its body is `pollster::block_on(GpuContext::open(…))` | `main.rs` · `Runtime::create`, at `pollster::block_on(GpuContext::open(` | `Runtime::create` ← `main.rs` · `FolioApp::resumed` | Running | single call | the existing "initialize wgpu renderer" error | a headless `Runtime::create` records one admission | none (`examples/video-probe.rs` and `tests/macos_glyph_surface.rs` call `GpuContext::open` directly, not the `bt-app` door) |
+| `PresentFrame` · 9 | `bt-render` · `WindowRenderer::present_frame_with_phases(&mut self, token, gpu, seats, trigger, phase) -> Result<PresentOutcome, RenderError>`. `present_frame` and `present` take the same token and forward it | `runtime/panes.rs` · `Runtime::present_seats_and_commit`, at `renderer.present_frame_with_phases(`; it replaces the `enter(RenderCompose)`/`at(present_parent)` pair | `present_seats_and_commit` ← `runtime/frame.rs` · `Runtime::redraw`, `runtime/preview.rs` · `Runtime::present_retained_picture` | Running, Exiting | declared batch: one per window per present (compose, configure, acquire, submit, present; the inner phases stay stations) | an `anyhow` error through the existing `?` | one admission per window per present, containing every inner phase station | the twenty `present_frame` statements in `bt-render/src/lib.rs`'s test module, named here by their nearest enclosing `fn` (`HeadlessDevice::ideograph` ×2, `a_4k_chinese_frame_fits_the_glyph_atlas`, `one_ideograph_at_one_size_is_one_bitmap_in_every_lane`, `a_label_behind_a_closed_clip_casts_nothing`, `a_pane_flying_off_the_edge_never_scissors_outside_the_render_target`, `a_long_chinese_session_never_runs_the_atlas_out_of_room`, `a_session_long_enough_to_wear_the_packer_out_gets_its_text_back`, `mixed_size_seats_share_the_atlas_and_get_their_text_back`, `a_cards_text_reaches_the_glass_on_the_frame_its_layout_lands`, `every_picture_handed_over_is_drawn_in_its_own_pane`, `HanStream::present` ×2, `a_chrome_label_lands_in_its_box_on_the_device_a_driverless_machine_gets`, `a_video_layer_fills_its_box_letterboxes_in_its_ground_and_rounds_its_corners`, `a_video_that_stopped_releases_its_texture`, `a_layer_without_a_frame_draws_nothing`, `a_second_playback_is_a_second_texture_however_its_frames_are_numbered`, `one_windows_textures_are_not_another_windows`, `HanStream::one_frame`); `bt-render/src/glyph_probe.rs` · `GlyphFixture::present` (product module, used only by `bt-render/tests/glyph_output.rs` and `bt-app/tests/macos_glyph_surface.rs`); `bt-app/examples/video-probe.rs` · `Probe::draw` ×2 |
+| `CompositorCommit` · 9 | `bt-platform` · `Compositor::commit(&self, token) -> Result<(), String>` (Windows, macOS, portable) | five `bt-app` statements: `runtime/panes.rs` · `Runtime::present_seats_and_commit` (`committed` closure); `webhost.rs` · `WebSeat::stand_parked`; `webhost.rs` · `WebSeat::adopt`; `web_spare.rs` · `SpareSeat::advance` for `WebSeat`; `web_spare.rs` · `SpareSeat::retire` for `WebSeat` | `present_seats_and_commit` as above; `stand_parked` ← `runtime/web.rs` · `Runtime::make_spare_web_controller`; `WebSeat::adopt` ← `webhost.rs` · `WebSeat::rehost` (three statements); `advance` ← `web_spare.rs` · `WebSpare::advance` ← `runtime/web.rs` · `Runtime::warm_web_engine`, `main.rs` · `FolioApp::advance_the_spare_while_retiring`, `FolioApp::user_event`; `retire` ← `WebSpare::advance`, `WebSpare::retire` (← `FolioApp::close`, `FolioApp::settle_quit`), `WebSpare::adopt` | Running, Exiting | single call | present: the `FailedCommit` road; `stand_parked`/`advance`: their existing `Err` branches; `adopt`/`retire`: ignored as today (`let _`) | present with a commit gives two sibling admissions; each web road records one | `webview.rs` · `open_the_page` (test helper); `portable_impl.rs` · `a_deferred_service_that_is_not_on_this_platform_refuses_when_invoked_not_at_startup`; `examples/video-probe.rs` · `Probe::draw` |
+| ↳ internal: `Compositor::new`'s commit, `set_window_size`'s commit | private `Compositor::commit_now(&self)` | covered by `CompositorBirth` and `CompositorWindowSize` (below) | — | — | part of the enclosing batch | — | — | — |
+| ↳ internal: `WebHost::rehost`'s `CommitSource`/`CommitTarget`; `WebHost::compensate`'s two | private `Compositor::commit_now` through `RehostSide.compositor` | covered by `WebRehost` (below) | — | — | part of the enclosing batch | — | — | — |
+| **`CompositorBirth` · 9** (new) | `bt-platform` · `Compositor::new(token, window: NativeWindow) -> Result<Compositor, String>` (all three arms), and `spare_parent(token) -> Result<Option<SpareParent>, String>`, which forwards the token to its one `Compositor::new` | `main.rs` · `Runtime::create`, at `bt_platform::Compositor::new(native)`; `runtime/windows.rs` · `Runtime::open_window`, at the same; `runtime/web.rs` · `Runtime::make_spare_web_controller`, at `bt_platform::spare_parent()` | `Runtime::create` ← `FolioApp::resumed`; `Runtime::open_window` ← `main.rs` · `FolioApp::open_pending_window`; `make_spare_web_controller` ← `runtime/web.rs` · `Runtime::warm_web_engine` ← `runtime/frame.rs` · `Runtime::turn` (its `WebWarmup` station) | Running | declared batch: building the DirectComposition device, the visuals and one `commit_now` (and, for `spare_parent`, the never-shown window) | window roads: the existing "open the window's DirectComposition visual tree" error; the spare: the existing `Err` branch (`retired_line`, no spare) | opening a second window and making a spare each record one admission | `portable_impl.rs`: `every_startup_constructor_builds_rather_than_refusing`, `a_deferred_service_that_is_not_on_this_platform_refuses_when_invoked_not_at_startup`; `webview.rs` · `open_the_page`; `tests/macos_compose.rs`: `the_page_slot_shows_through_folios_frame_and_only_where_it_stands`, `the_unflipped_branch_of_the_placement_is_a_flip`; `tests/macos_webview.rs` · `Origin::run`; `examples/video-probe.rs` · `Probe::resumed` |
+| **`CompositorWindowSize` · 9** (new) | `bt-platform` · `Compositor::set_window_size(&self, token, width: u32, height: u32) -> Result<(), String>` (all three arms) | `runtime/dpi.rs` · `Runtime::resize`, at `.set_window_size(physical.width, physical.height)` | `Runtime::resize` ← `runtime/dpi.rs` · `Runtime::scale_factor_changed`, `Runtime::resized` | Running, Exiting | declared batch: `place_skirt` (property sets) and one `commit_now`; a size that did not change commits nothing and still records its admission | the existing `?` with "put the window's own ground under the strip a resize opens" | a size change records one admission | `portable_impl.rs` · `a_deferred_service_that_is_not_on_this_platform_refuses_when_invoked_not_at_startup` |
+| **`WebRehost` · 21** (new) | `bt-platform` · `WebHost::rehost(&mut self, token, from: &RehostSide<'_>, to: &RehostSide<'_>, rect: (i32, i32, u32, u32), visible: bool) -> RehostOutcome` (all three arms); `compensate` stays private and is reached only inside it | `webhost.rs` · `WebSeat::rehost`, at `self.host.rehost(` | `WebSeat::rehost` ← `runtime/panes.rs` · `Runtime::dock_the_page_of`, `Runtime::carry_the_pages_of_moved_panes`; `runtime/web.rs` · `WindowHandoff::rehost` (← `web_spare.rs` · `WebSpare::adopt`); `main.rs` · `FolioApp::transfer_tab` (two statements) | Running | declared batch: the rehost steps with their two forward commits and, on failure, `compensate`'s two restoring commits | `RehostOutcome::KeptSource` with `failed_at: RehostStep::Hide` and no compensation owed. This is the shape `rehost` already returns before its first step, so `WebSeat::rehost`'s existing kept-source branch keeps the page where it was | docking a page records one admission | none direct. Source needle `main.rs` · `the_transfer_is_a_transaction_and_its_commit_pays_every_debt` (`".rehost("`) keeps matching |
+| `SurfaceBirth` · 9 | `bt-render` · `WindowRenderer::new(token, gpu: &mut GpuContext, target: WindowTarget, width: u32, height: u32, scale_factor: f64) -> Result<WindowRenderer, RenderError>` | `runtime/windows.rs` · `Runtime::open_window`, at `WindowRenderer::new(` | `Runtime::open_window` ← `FolioApp::open_pending_window` | Running | declared batch: surface creation and `configure_window_surface` | the existing "open the new window's surface on this application's device" error | a second window records one admission | none |
+| `TitleFlush` · 14 residue | `bt-app` `owner_door::set_title(token, window: &Window, title: &str)` | `runtime/windows.rs` · `Runtime::flush_title`, at `window.set_title(&title)` | `flush_title` ← `runtime/frame.rs` · `Runtime::turn`, `runtime/windows.rs` · `Runtime::dress_new_window` | Running, Exiting | single call | the wanted title stays wanted | a changed title is written once, with one admission | none |
+| `ImeCaretArea` · 22 residue | `owner_door::set_ime_cursor_area(token, window: &Window, position: Position, size: Size)` | `runtime/keyboard.rs` · `Runtime::apply_ime_cursor_area`, at `self.window.window.set_ime_cursor_area(` | `apply_ime_cursor_area` ← `Runtime::flush_ime_cursor_area` ← `runtime/frame.rs` · `Runtime::turn`, `runtime/keyboard.rs` · `Runtime::ime_input` | Running, Exiting | single call | the wanted area stays wanted | a moved caret is told once | none direct; source needle `ime_outbound.rs` (`".set_ime_cursor_area("`) is updated to `owner_door::set_ime_cursor_area(` in A1d's commit |
+| `FocusWindow` · §5.2 | `owner_door::focus_window(token, window: &Window)` | `runtime/attention.rs` · `Runtime::open_from_notification`, at `self.window.window.focus_window()` | `open_from_notification` ← `main.rs` · `FolioApp::route_clicked_notifications` ← `FolioApp::user_event` | Running | single call | the route opens without taking focus | a clicked notification records one admission | none |
+| `SetVisible` · §5.2 | `owner_door::set_visible(token, window: &Window, visible: bool)` | `runtime/windows.rs` · `Runtime::put_the_window_on_the_glass` (`true`); `runtime/quake.rs` · `Runtime::hide_quake_window` (`false`); `runtime/windows.rs` · `Runtime::let_go_of_this_window` (`false`) | `put_the_window_on_the_glass` ← `runtime/windows.rs` · `Runtime::show_new_window` (← `Runtime::open_window`, `main.rs` · `Runtime::create`, `FolioApp::settle_tear_out`), `runtime/quake.rs` · `Runtime::show_quake_window` (← `FolioApp::summon_quake`); `hide_quake_window` ← `FolioApp::dismiss_quake` (← `FolioApp::settle_quake` ×2); `let_go_of_this_window` ← `Runtime::retire_window` (← `FolioApp::settle_quit`), `Runtime::close_window` (← `FolioApp::transfer_tab`, `FolioApp::close`, `FolioApp::retire_the_summon_with_the_run`, `FolioApp::settle_tear_out`, `FolioApp::fail`, `FolioApp::exiting`) | `true`: Running. `false`: Running, Exiting | single call | `true`: stays hidden, and the show road's existing failure branch runs. `false`: the retire or close continues | each of the three statements records one admission | none direct; source needles `main.rs` (`"self.window.window.set_visible(false)"`, `"set_visible(false)"`) are updated to the door's spelling in A1d's commit |
+| `SetCursor` · §5.2 | `owner_door::set_cursor(token, window: &Window, cursor: Cursor)` | `runtime/mouse.rs` · `Runtime::apply_pointer_cursor`, both `set_cursor` statements | `apply_pointer_cursor` ← `runtime/floats.rs`: `place_float`, `dismiss_float`; `runtime/mouse.rs`: `drive_float_hover`, `press_float`, `promote_float_head_press`, `pointer_moved`, `drive_drag`, `finish_drag`, `chrome_mouse_input` ×3, `mouse_input`; `runtime/panes.rs`: `drive_command_rail_hover`, `dock_float`, `cancel_divider_drag`, `update_chrome_hover_target_in_pane`; `runtime/peek.rs`: `press_file_peek_foot`, `promote_file_peek`; `runtime/preview.rs`: `note_preview_link_hover`, `press_preview_image`, `set_preview_image_zoom`, `pop_out_preview`, `dock_preview_float`; `runtime/web.rs`: `apply_web_outcomes`, `drive_web_pointer`; `main.rs`: `Runtime::toggle_settings_panel`, `FolioApp::window_event` | Running | single call | the cursor keeps its shape | each branch records one admission | none |
+| `WebController` · 21 | `bt-platform` · `WebHost::request_controller(&mut self, token, window: NativeWindow, generation: u64) -> Result<(), String>` (all three arms) | `webhost.rs` · `WebSeat::step`, at `self.host.request_controller(window, generation)` | `step` ← `WebSeat::apply` ← `webhost.rs`: `go_adopted`, `go`, `restart_engine`, `reload`, `drive`, `retire_parked`, `tick`, `place`, `rehost`, `go_to` | Running | single call | the step's existing `Err` road | a page coming up records one admission | `webview.rs` · `open_the_page`; `tests/macos_webview.rs` · `Origin::run` ×2; source needle `main.rs` (`"self.host.request_controller("`) keeps matching |
+| `WebEnvironment` · 21 | `bt-platform` · `WebHost::request_environment(&mut self, token, folder: &Path, generation: u64) -> Result<(), String>` (all three arms) | `webhost.rs` · `WebSeat::start_environment`, at `self.host.request_environment(&folder, generation)` | `start_environment` ← `webhost.rs` · `WebSeat::open`, `WebSeat::step` ×2 | Running | single call | the existing `Err` road | `warm_web_engine` records one admission | `webview.rs` · `open_the_page`; `tests/macos_webview.rs` · `Origin::run` ×2; source needle `main.rs` (`"self.host.request_environment("`) keeps matching |
+| `FontFamilyLookup` · 5 residue | `bt-platform` · `monospace_family_named(token, name: &str) -> Option<MonospaceFamily>` (all three arms) | `settings.rs` · `monospace_family_files`, at its call | `monospace_family_files` ← `main.rs` · `apply_stored_terminal_font` ← `main.rs` · `Runtime::create`, `runtime/terminal.rs` · `Runtime::adopt_terminal_font` | Running | single call | `None`: not found | a stored family at launch records one admission | `settings.rs`: `launching_with_a_stored_font_family_walks_no_font_collection_on_the_window_thread`, `the_launch_face_is_looked_up_by_name_and_the_picker_list_comes_from_the_lane`; `bt-platform/src/lib.rs`: `the_lookup_by_name_answers_the_files_the_walk_does` ×3, `the_lanes_walk_asks_the_collection_for_updates_and_the_launch_lookup_does_not` |
+| `PlaceHidden` · 13 residue | `main.rs` · `window_is_hidden(token, window: &Window) -> bool` | `main.rs` · `sample_window_place`, at `window_is_hidden(window)` (replacing its `enter`/`at` pair) | `sample_window_place` ← `runtime/frame.rs` · `Runtime::observe_window_place` ← `Runtime::turn`, `runtime/windows.rs` · `Runtime::dress_new_window`, `runtime/attention.rs` · `Runtime::replace_contradicted_flash`, `main.rs` · `FolioApp::user_event` | Running, Exiting | single call | the previous place is kept | a turn's head records one admission | source needles `present_diagnostics_tests.rs` (`"fn window_is_hidden(window: &Window) -> bool {"`, `"let hidden = window_is_hidden(window);"`) are updated to the new spelling in A1d's commit |
+| `PlaceExposure` · 13 residue | `main.rs` · `window_is_exposed(token, window: &Window) -> bool` | `main.rs` · `sample_window_place`, at `window_is_exposed(window)` (inside its `during(PlaceExposure)`, which the admission replaces) | as `PlaceHidden` | Running, Exiting | single call | the previous place is kept | as `PlaceHidden` | none |
+| — `set_covered_size` | not a door: a property set on the uncommitted tree, which does not wait; it stays under `during(CompositorSize)` | — | — | — | — | — | — | — |
+
+**Source-reading tests whose needles change, updated in A1d's commit.** These
+are all found by searching test code for string literals naming a door call
+(pattern: a `"…"` literal containing any of the door names above):
+- `main.rs`:
+  - `".set_window_size(physical.width,physical.height)"` (the resize-order red
+    gate) and `".commit()"` (the present-funnel gate) gain the token argument;
+  - `"self.window.window.set_visible(false)"` and `"set_visible(false)"`;
+- `tests.rs` · the present funnel's `".commit()"`;
+- `ime_outbound.rs` · `".set_ime_cursor_area("`;
+- `present_diagnostics_tests.rs`' two `window_is_hidden` needles;
+- `bt-platform/src/lib.rs` · `"self.place_skirt()?;self.commit()"`, which
+  becomes `commit_now`;
+- `bt-render/src/lib.rs`' `present_frame` signature needle
+  (`"pubfnpresent_frame(&mutself,gpu:&mutGpuContext,"`), which gains the
+  token.
+
+These needles keep matching and need no change: `".rehost("`,
+`"self.host.request_controller("`, `"self.host.request_environment("`,
+`"app.session_store.flush_judged()"`, `"launch_wire::hand_over("` (three
+tests), `"Compositor::new"` (the startup-order list), and `hang_watch`'s
+station names.
+
+**§8 and §11, reconciled.** A1d converts exactly the rows above. Its scope now
+includes the rows (d)5 named plus `CompositorBirth`, `CompositorWindowSize`,
+`WebRehost` and the new row 23 `GpuOpen`. The deferred rows are unchanged:
+2, 3, 4, 7, 8, 10, 19, 20.
+
+**Adopted.**
+
+### (e)3 · P4 — complete per-body edge lists: adopted
+
+**Checked.** Every body was walked at `78a3699a`, and each first-party helper
+it calls was walked recursively, until only vocabulary items and non-blocking
+std or foreign leaves remained. The (d)4 table had four gaps, now closed:
+- `flush_sink` calls `Queue::close`;
+- `InputRing::close` and `OutputRing::close` each call their own `state`
+  helper;
+- Windows `DirWatch::drop` calls its `close` helper three times, and that
+  helper holds the `CloseHandle`;
+- `PtySession::shutdown` has **two** `try_wait` call sites, one of them inside
+  the closure passed to `reap_within`.
+
+Walking the bodies again also found `PtySession::shutdown`'s two
+`error.into()` conversions to `PtyError`, a first-party `From` impl generated
+by `thiserror`'s `#[from]`.
+
+**The rule, unchanged in kind and restated.** Every body the guard reads is a
+**pinned body**, identified by name, owner and count.
+- Starting from each `Drop` in the table, the guard reads the pinned body and
+  resolves each call to a first-party item by `bt_source` item identity.
+- It compares, per body:
+  - (i) the ordered list of first-party call sites against the row's edge
+    list;
+  - (ii) the count of each vocabulary effect, per call site, against the
+    row's.
+- It recurses into every first-party callee. Every callee must itself be a
+  pinned body in the table, so the guard reads helpers recursively and
+  nothing is exempt.
+
+The build is red when:
+- a body calls a first-party item that is not its listed next edge;
+- a listed edge is missing or reordered;
+- an effect count differs;
+- a `Drop` outside the table reaches a registered door or any pinned body.
+
+**Implicit drop glue is not an edge.** Examples are a field dropped at the end
+of `drop`, or the seat dropped at the end of `shutdown_all`'s loop. Each type
+whose `Drop` runs that way is a row of its own, or it is a `Drop` outside the
+table, which the last clause covers.
+
+**Vocabulary used here.** Waits: `thread::sleep`, `JoinHandle::join`,
+`Receiver::recv*`. File effects: `File::sync_data`, and `Write::write_fmt`
+(`writeln!`) on a `File`. Platform effects: `SetEvent`, `CloseHandle`,
+`libc::write`, `libc::close`. The last four are counted so their counts are
+pinned, although they do not wait. Every other std or foreign call
+(`Option::take`, `Mutex::lock`/`try_lock`/`into_inner`, `Condvar::notify_all`,
+`Instant::now`, atomics, `Sender::send`, `eprintln!`, the portable-pty `Child`
+methods, and the Core Foundation `signal`/`wake_up`) is a non-blocking leaf.
+Leaves are neither edges nor counted. The exception is `Child::try_wait`: it
+is counted by call site, as Codex asked, so its multiplicity is pinned.
+
+**The pinned bodies** (name · owner · the ordered first-party edges → and
+effects · with counts). Indentation shows the recursion.
+
+| exception (`Drop`) | pinned body chain | product reach | repayment · version |
+|---|---|---|---|
+| `DirWatch` (Windows) | `DirWatch::drop` (`bt-platform/src/lib.rs`): · `SetEvent` ×1 · `JoinHandle::join` ×1 → `close` ×3 (three call sites, in this order: `dir`, `change`, `stop`) <br> ↳ `close` (the module's `unsafe fn close(handle: HANDLE)`): · `CloseHandle` ×1 | a watch retired on the window thread (row 8) | B7 (D-40) · 0.4.6 |
+| `DirWatch` (macOS) | `DirWatch::drop` (`macos_watch.rs`): → `Stopper::signal` ×1 · `JoinHandle::join` ×1 <br> ↳ `Stopper::signal`: leaves only (the run-loop source's `signal`, the run loop's `wake_up`); no edges, no effects | the same | B7 (D-40) · 0.4.6 |
+| `trace_sink::Shutdown` | `Shutdown::drop`: → `flush` ×1 <br> ↳ `flush`: → `flush_sink` ×1 <br> ↳↳ `flush_sink`: → `Queue::close` ×1 (inside the poll loop's condition) · `thread::sleep` ×1 · `Receiver::recv_timeout` ×1 · `thread::sleep` ×1 · `JoinHandle::join` ×1 <br> ↳↳↳ `Queue::close`: leaves only (`try_lock`, `Option::take`); no edges, no effects | **conditional**: only `main`'s event-loop build-error return. A reachable constructor failure is not established. The normal exit flushes explicitly and leaves through `leave_process` | *The trace writer is retired through its admitted flush door, never by a drop* · 0.4.7 |
+| `AttentionPipe` (Windows) | `AttentionPipe::drop` (`attention_pipe.rs`): · `SetEvent` ×1 · `JoinHandle::join` ×1 · `CloseHandle` ×1; no edges | none in the product: static | *An endpoint is retired through an explicit door, not by its drop* · 0.4.7 |
+| `AttentionPipe` (Unix) | `AttentionPipe::drop` (`attention_pipe_unix.rs`): · `libc::write` ×1 · `JoinHandle::join` ×1 · `libc::close` ×1; no edges | none: static | the same · 0.4.7 |
+| `LaunchPipe` (Windows) | `LaunchPipe::drop` (`launch_pipe.rs`): · `SetEvent` ×1 · `JoinHandle::join` ×1 · `CloseHandle` ×1; no edges | none: static | the same · 0.4.7 |
+| `LaunchPipe` (Unix) | `LaunchPipe::drop` (`launch_pipe_unix.rs`): · `libc::write` ×1 · `JoinHandle::join` ×1 · `libc::close` ×1; no edges | none: static | the same · 0.4.7 |
+| `video::engine::Engine` | `Engine::drop` (`video/engine.rs`): → `Engine::shutdown` ×1 <br> ↳ `Engine::shutdown`: · `thread::sleep` ×1 (the 2 ms poll) · `JoinHandle::join` ×1; no edges | a seat closed on the window thread | *A video engine is shut down through an explicit door, not by its drop* · 0.4.7 |
+| `macos_player::Engine` | `Engine::drop` (`macos_player.rs`): → `Engine::shutdown` ×1 <br> ↳ `Engine::shutdown`: · `thread::sleep` ×1 · `JoinHandle::join` ×1; no edges | the same | the same · 0.4.7 |
+| `VideoSeat` | `VideoSeat::drop` (`video_seat.rs`): → `VideoSeat::shutdown` ×1 <br> ↳ `VideoSeat::shutdown`: → `Engine::shutdown` ×1 (the platform's pinned body above) | a pane closed on the window thread | the same · 0.4.7 |
+| `VideoSeats` | `VideoSeats::drop`: → `VideoSeats::shutdown_all` ×1 <br> ↳ `shutdown_all`: → `VideoSeat::shutdown` ×1 (one call site, in a loop; the seat's own drop afterwards is glue, covered by the `VideoSeat` row) | a window closed on the window thread | the same · 0.4.7 |
+| `PtySession` | `PtySession::drop` (`bt-pty`), in order: → `PtyDump::finish` ×1 → `PtySession::shutdown` ×1 <br> ↳ `PtyDump::finish`: · `Write::write_fmt` on `File` ×1 → `PtyDump::publish` ×1 <br> ↳↳ `PtyDump::publish`: · `File::sync_data` ×2 <br> ↳ `PtySession::shutdown`, in order: → `InputRing::close` ×1 · `Child::try_wait` ×1 · `Child::kill` (leaf) → `PtyError::from` ×1 (the `kill` error) → `reap_within` ×1 (with the closure: · `Child::try_wait` ×1) → `PtyError::from` ×1 (the `try_wait` error) → `OutputRing::close` ×1 → `join_within` ×1 <br> ↳↳ `InputRing::close`: → `InputRing::state` ×1 <br> ↳↳↳ `InputRing::state`: leaves only (`Mutex::lock`) <br> ↳↳ `OutputRing::close`: → `OutputRing::state` ×1 <br> ↳↳↳ `OutputRing::state`: leaves only <br> ↳↳ `reap_within`: · `thread::sleep` ×1 (plus the closure's call, counted at the closure) <br> ↳↳ `join_within`: · `JoinHandle::join` ×1 · `thread::sleep` ×1 <br> ↳↳ `PtyError::from` (generated): leaves only | on `pty-retirement`; on the caller only when that thread cannot be started | *A shell is taken apart only through `retire_within`, never by a drop on the window thread* · 0.4.7 |
+
+**Edges added over (d)4: eight first-party edges.**
+- `close` ×3, in Windows `DirWatch::drop`;
+- `Queue::close` ×1, in `flush_sink`;
+- `InputRing::state` ×1;
+- `OutputRing::state` ×1;
+- `PtyError::from` ×2, in `PtySession::shutdown`.
+
+Besides the edges, (e) makes these corrections:
+- one effect-count correction: `Child::try_wait` goes from 1 to 2 call sites;
+- one effect moved to its real body: `CloseHandle` now sits in `close`, not in
+  `DirWatch::drop`;
+- the pinned helper bodies are now listed: `close`, `Stopper::signal`,
+  `flush`, `flush_sink`, `Queue::close`, both `Engine::shutdown`,
+  `VideoSeat::shutdown`, `shutdown_all`, `PtyDump::finish`, `PtyDump::publish`,
+  `PtySession::shutdown`, both ring `close` and `state` bodies, `reap_within`,
+  `join_within` and `PtyError::from`.
+
+**The controls are green under the rule as written.** Each row above was
+checked once more against its body at `78a3699a` before this commit. Every
+first-party call in each pinned body is the listed next edge, in the listed
+order, and every vocabulary count matches. Today's complete chains are
+therefore the passing controls.
+
+**The five mutations of (d)4 stand unchanged, and each is red under the
+closed rule:**
+1. `VideoSeats::drop` → a new helper → `SessionWriter::wait_for`;
+2. a second `thread::sleep` in `video::engine::Engine::shutdown`;
+3. a non-vocabulary helper in `Engine::shutdown` that calls
+   `trace_sink::flush`;
+4. `PtySession::drop` calling `shutdown` before `finish`;
+5. a new `impl Drop for WebSeat` calling `Compositor::commit`.
+
+**Adopted.** A1e remains held until Codex confirms this row set.
+
+### (e)4 · §11, as it stands for dispatch
+
+- **A1a is dispatchable once (e) lands.** P1 (the test allocation, (d)1), P2
+  (the cookie, (d)2 and (e)1) and P3 (the door inventory, (e)2) are the
+  preconditions Codex named for A1a. The registry A1a seeds is (e)2's table
+  plus row 23.
+- **A1b and A1c** follow A1a, as (c)1 says.
+- **A1d** follows A1a. Its brief is (e)2's table.
+- **A1e waits until Codex confirms (e)3.**
+- **A2** and **A3** keep (c)1's prerequisites.
+
+### (e)5 · This revision's own architecture impact
+
+(a) Facts touched: none; this is a document.
+
+(b) Doors: none in this commit. A1d's scope gains `CompositorBirth`,
+`CompositorWindowSize`, `WebRehost` and `GpuOpen`, and `Compositor::commit_now`
+becomes private.
+
+(c) Debt: no row repaid or added by this commit. A1a adds §5.3 row 23
+(`GpuOpen`, `pending`) with a DESIGN entry recording it. That entry records a
+wait found, not a ruling that the wait may stay.
+
+(c′) None.
+
+(d) No.
