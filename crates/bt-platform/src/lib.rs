@@ -3395,6 +3395,13 @@ pub mod instance;
 /// `geteuid` and `getxattr` on Unix.
 pub mod install_evidence;
 
+/// **The effects of an update transaction** — durable writes and moves, the
+/// registry flush and the two locks on the installation home (ticket U-11;
+/// `docs/plans/design/self-update-2026-09-16.md` revision (b), §(b).2, F-6,
+/// E-15). Three arms: Windows, macOS, and a refusal by name everywhere else.
+/// Worker only: every call blocks on the disk.
+pub mod install_txn;
+
 mod web_environment;
 mod webview;
 

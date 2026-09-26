@@ -20,6 +20,9 @@ All notable changes to Folio are recorded here. The format follows
 - The update check can remember a version you chose to skip, and never offers
   that version or an older one again; turning the check off also hides a
   version it had already found. There is no Skip button yet.
+- The coming updater can write its record of an update so that it survives a
+  power cut, move files the same way, and tell a running Folio from the one
+  applying an update through a lock in the install folder. Nothing uses it yet.
 
 ### Fixed
 
