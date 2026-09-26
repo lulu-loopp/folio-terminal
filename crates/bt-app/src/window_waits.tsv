@@ -100,7 +100,7 @@ std::process::Child::wait	all	waits for a child process
 portable_pty::Child::try_wait	all	counted by call site, does not wait
 pollster::block_on	all	an executor entry: waits for a future
 wgpu::Queue::submit	all	the GPU driver
-wgpu::SurfaceTexture::present	all	the GPU driver and the compositor
+wgpu::Queue::present	all	the GPU driver and the compositor
 bt_render::WindowRenderer::present_frame_with_phases	all	a cross-crate entrance that waits inside
 bt_render::WindowRenderer::new	all	a cross-crate entrance that waits inside
 bt_render::GpuContext::open	all	a cross-crate entrance that waits inside
