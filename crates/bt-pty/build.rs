@@ -52,10 +52,10 @@ fn main() {
 /// sees half a file, and leaves a `target` that already hashes to `sha256` untouched: an
 /// `OpenConsole.exe` some test still has running cannot be replaced, and need not be.
 fn write_unless_already_there(target: &Path, contents: &[u8], sha256: &str) {
-    if let Ok(existing) = fs::read(target) {
-        if conpty_sidecar::hex(&conpty_sidecar::sha256(&existing)) == sha256 {
-            return;
-        }
+    if let Ok(existing) = fs::read(target)
+        && conpty_sidecar::hex(&conpty_sidecar::sha256(&existing)) == sha256
+    {
+        return;
     }
     let directory = target
         .parent()
