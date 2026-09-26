@@ -343,6 +343,12 @@ const SLOW_MESSAGE_MS: u64 = 20;
 #[path = "hang_watch_detail.rs"]
 mod detail;
 
+/// The window thread's waits as one registry, held equal to `bt_platform::admission::doors` and
+/// to `docs/ARCHITECTURE.md` §5.3 (A1a). Here because the stations are this module's.
+#[cfg(test)]
+#[path = "window_waits_tests.rs"]
+mod window_waits_tests;
+
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
 /// Sixteen: enough that a user who hits the fault four times in an evening
