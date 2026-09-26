@@ -638,7 +638,7 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::RuntimeClaims,
             include_str!("../../bt-platform/src/instance.rs"),
-            "claim_data_directory",
+            "try_claim_data_directory",
         ),
         (
             Remover::Data(HostPlatform::Windows, Base::Roaming, "Folio"),

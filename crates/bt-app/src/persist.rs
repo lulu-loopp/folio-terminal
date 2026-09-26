@@ -220,7 +220,28 @@ pub fn is_storage_writer() -> bool {
 /// keyed by [`bt_platform::instance::claim_name`] rather than by the path so
 /// that two spellings of one directory are one row, which is the same folding
 /// the kernel name itself is under.
+///
+/// **A refusal is remembered too** (self-update R-3, as refined by revision
+/// 2026-09-25 (b)): a process told once that it is not the writer is not made
+/// the writer later by this question, because everything it opened in between
+/// was opened as a non-writer. The one road into the table for a claim taken
+/// after the first ask is [`adopt_claim`], and it does not overwrite an answer.
 pub(crate) fn is_writer_of(directory: &Path) -> bool {
+    claim_table()
+        .entry(bt_platform::instance::claim_name(directory))
+        .or_insert_with(|| bt_platform::instance::claim_data_directory(directory))
+        .is_some()
+}
+
+/// **The claim table** — one row per claim name, holding either the claim this
+/// process took (it is the writer, and the guard lives here for the life of
+/// the process) or `None` (it asked and was refused). Written by
+/// [`is_writer_of`] on a first ask and by [`adopt_claim`]; read by nothing
+/// else.
+fn claim_table() -> std::sync::MutexGuard<
+    'static,
+    HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>,
+> {
     static CLAIMS: OnceLock<
         Mutex<HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>>,
     > = OnceLock::new();
@@ -228,9 +249,79 @@ pub(crate) fn is_writer_of(directory: &Path) -> bool {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .expect("the claim table is locked to read or take one entry and nothing else")
-        .entry(bt_platform::instance::claim_name(directory))
-        .or_insert_with(|| bt_platform::instance::claim_data_directory(directory))
-        .is_some()
+}
+
+/// **Ask for the claim on `directory` now, and remember nothing** (§C.7 of
+/// `docs/plans/design/self-update-2026-09-16.md`).
+///
+/// For a caller that waits for the claim — the updated build, started while
+/// the old one is still letting go, asks again until it is handed the claim
+/// or its deadline passes. [`is_writer_of`] cannot be that question: it
+/// remembers its first answer, so one refusal would be the answer for ever.
+/// This one goes to the platform every time and leaves the table alone; the
+/// claim it hands back is the caller's until it gives it to [`adopt_claim`].
+///
+/// The refusal says which of two things happened
+/// ([`bt_platform::instance::ClaimRefusal`]): a live holder, which is worth
+/// asking again, or a question the platform did not answer, which is not
+/// evidence that anybody holds anything.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "self-update R-3's claim API lands before its caller: the health-check                   process arrives in U-17/U-18 ((b).5)"
+    )
+)]
+pub(crate) fn try_claim(
+    directory: &Path,
+) -> Result<bt_platform::instance::DataDirectoryClaim, bt_platform::instance::ClaimRefusal> {
+    bt_platform::instance::try_claim_data_directory(directory)
+}
+
+/// **Make a claim this process already holds the answer [`is_writer_of`]
+/// gives, with no gap** (§C.7).
+///
+/// One lock of the table, one insert under
+/// [`bt_platform::instance::claim_name`] — the key `is_writer_of` asks under,
+/// so every spelling of the directory finds the row. The guard moves from the
+/// caller into the table without ever being dropped, so there is no instant at
+/// which the claim is free for another process to take, and no instant at
+/// which a caller of `is_writer_of` could be told "not the writer" and have the
+/// table remember it. Call it before anything asks `is_writer_of` of this
+/// directory.
+///
+/// **A row already there is a programming error**, because it means something
+/// asked first. A refusal already remembered stays remembered — a non-writer
+/// must not become the writer mid-run (revision (b)'s refinement of R-3) — and
+/// the adopted claim is dropped, which lets it go. Debug builds and tests stop
+/// on it; a release build keeps the earlier answer and says so in the log.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "self-update R-3's claim API lands before its caller: the health-check                   process arrives in U-17/U-18 ((b).5)"
+    )
+)]
+pub(crate) fn adopt_claim(directory: &Path, claim: bt_platform::instance::DataDirectoryClaim) {
+    let name = bt_platform::instance::claim_name(directory);
+    // The earlier answer, if there was one — decided under the lock, reported
+    // after it, so that a debug stop never leaves the table poisoned.
+    let earlier = match claim_table().entry(name.clone()) {
+        std::collections::hash_map::Entry::Vacant(row) => {
+            row.insert(Some(claim));
+            None
+        }
+        std::collections::hash_map::Entry::Occupied(row) => Some(row.get().is_some()),
+    };
+    if let Some(was_writer) = earlier {
+        eprintln!(
+            "BT_PERSIST a claim was adopted for {name} after this process had already answered              whether it writes there (writer={was_writer}); the earlier answer stands"
+        );
+    }
+    debug_assert!(
+        earlier.is_none(),
+        "adopt_claim for {name} after is_writer_of had already answered for it"
+    );
 }
 
 /// Whether this process may write the document at `path` — [`is_writer_of`]
@@ -2220,6 +2311,261 @@ mod tests {
             !is_writer_of(&directory),
             "and the answer is the one this process took, not the one the folder \
              would give it now"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same directory as `directory`, spelled with a trailing separator —
+    /// a second spelling the claim name folds to the same row.
+    fn spelled_with_a_trailing_separator(directory: &Path) -> PathBuf {
+        PathBuf::from(format!(
+            "{}{}",
+            directory.display(),
+            std::path::MAIN_SEPARATOR
+        ))
+    }
+
+    /// RED (U-5, self-update R-3) — **a claim this process took is the writer's
+    /// claim from the moment it is adopted, with no instant in between at which
+    /// anybody else could take it or anybody here be told otherwise.**
+    ///
+    /// The updated build takes the claim with `try_claim` while the old build is
+    /// letting go (`docs/plans/design/self-update-2026-09-16.md` §C.7), and then
+    /// every store it opens asks `is_writer_of`. Rev 1's `--await-exit` took the
+    /// claim outside the table, so the table's first ask was refused by the
+    /// process's own guard and it handed itself off to nobody. Here a second
+    /// claimant keeps asking for the directory from before the adoption to after
+    /// it, and never gets it; and the first `is_writer_of` after the adoption —
+    /// under either spelling — answers that this process writes it.
+    ///
+    /// MUTATION: have `adopt_claim` insert under a key other than
+    /// `claim_name(directory)`, or ask `is_writer_of` before it inserts, and
+    /// this goes red.
+    #[test]
+    fn acquired_claim_is_adopted_without_a_gap() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = appdata("adopt-without-a-gap");
+        let directory = root.join("data");
+        std::fs::create_dir_all(&directory).expect("a scratch folder");
+
+        let claim = try_claim(&directory).expect("nothing else on this machine has this folder");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let contender = {
+            let stop = Arc::clone(&stop);
+            let directory = directory.clone();
+            std::thread::spawn(move || {
+                let mut asked = 0_u32;
+                loop {
+                    asked += 1;
+                    if bt_platform::instance::claim_data_directory(&directory).is_some() {
+                        return (asked, true);
+                    }
+                    if stop.load(Ordering::Acquire) && asked > 1 {
+                        return (asked, false);
+                    }
+                    std::thread::yield_now();
+                }
+            })
+        };
+
+        adopt_claim(&directory, claim);
+        let writer = is_writer_of(&directory);
+        let writer_by_another_spelling =
+            is_writer_of(&spelled_with_a_trailing_separator(&directory));
+        stop.store(true, Ordering::Release);
+        let (asked, won) = contender.join().expect("the contender thread");
+
+        assert!(
+            !won,
+            "the claim was free for another claimant somewhere between being taken and \
+             being adopted (after {asked} asks)"
+        );
+        assert!(
+            writer,
+            "the first question after the adoption must answer that this process writes \
+             the directory"
+        );
+        assert!(
+            writer_by_another_spelling,
+            "and so must the same question asked of another spelling of it"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-5, self-update R-3 as refined by revision (b)) — **`is_writer_of`
+    /// keeps its first answer, a refusal included, whatever `try_claim` does
+    /// afterwards.**
+    ///
+    /// A process that was told it is not the writer opened everything since as a
+    /// non-writer; making it the writer mid-run would leave windows that decided
+    /// "do not write" beside ones that write. `try_claim` is the question that
+    /// does not remember, and it must not become a way to rewrite the table's
+    /// memory: the holder going away does not change the answer, and neither does
+    /// this process then taking the claim itself.
+    ///
+    /// MUTATION: let `try_claim`'s success write into the table, or let
+    /// `is_writer_of` ask the platform again, and this goes red.
+    #[test]
+    fn is_writer_of_still_remembers_a_refusal() {
+        let root = appdata("still-remembers-a-refusal");
+        let directory = root.join("data");
+        std::fs::create_dir_all(&directory).expect("a scratch folder");
+
+        let other = bt_platform::instance::claim_data_directory(&directory)
+            .expect("nothing else on this machine has this folder");
+        assert!(
+            !is_writer_of(&directory),
+            "a process refused the claim is not the writer"
+        );
+
+        drop(other);
+        assert!(
+            !is_writer_of(&directory),
+            "the holder leaving does not make this process the writer mid-run"
+        );
+
+        let taken = try_claim(&directory)
+            .expect("try_claim asks the platform now, and now the folder is free");
+        assert!(
+            !is_writer_of(&directory),
+            "and taking the claim through try_claim does not rewrite the answer either"
+        );
+
+        drop(taken);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-5, self-update R-3) — **`try_claim` asks the platform every time
+    /// and remembers nothing.**
+    ///
+    /// The waiter's loop is this function called again and again; an answer it
+    /// remembered would be the first refusal for the whole of the wait. And it
+    /// leaves the claim table alone: a refusal it was given is not a refusal
+    /// `is_writer_of` later reads.
+    ///
+    /// MUTATION: cache a refusal in `try_claim` (in the claim table or its own),
+    /// and the second or the last half goes red.
+    #[test]
+    fn try_claim_caches_nothing() {
+        let root = appdata("try-claim-caches-nothing");
+        let directory = root.join("data");
+        std::fs::create_dir_all(&directory).expect("a scratch folder");
+
+        let other = bt_platform::instance::claim_data_directory(&directory)
+            .expect("nothing else on this machine has this folder");
+        assert!(
+            matches!(
+                try_claim(&directory),
+                Err(bt_platform::instance::ClaimRefusal::Held)
+            ),
+            "a live holder is a held claim"
+        );
+
+        drop(other);
+        let taken = try_claim(&directory).expect("asked again, the platform answers again");
+        assert!(
+            matches!(
+                try_claim(&directory),
+                Err(bt_platform::instance::ClaimRefusal::Held)
+            ),
+            "and a third ask is a third answer: this call's own claim now holds it"
+        );
+
+        drop(taken);
+        assert!(
+            is_writer_of(&directory),
+            "no refusal try_claim was given was left in the table for is_writer_of to read"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-5, self-update R-3) — **adopting a claim for a directory this
+    /// process has already answered for is refused, loudly in a debug build, and
+    /// the earlier answer stands.**
+    ///
+    /// The one way a row can already be there is that something asked
+    /// `is_writer_of` first, which is the ordering `adopt_claim` exists to rule
+    /// out. (Two real claims on one directory cannot coexist, so the first
+    /// answer here is the table's own, a remembered refusal.) The claim being
+    /// adopted must not replace the row — a non-writer does not become the
+    /// writer mid-run — so it is dropped and the directory is free again.
+    ///
+    /// MUTATION: let `adopt_claim` overwrite an occupied row, or take its
+    /// `debug_assert!` out, and this goes red.
+    #[test]
+    fn adopt_claim_twice_is_refused() {
+        let root = appdata("adopt-twice");
+        let directory = root.join("data");
+        std::fs::create_dir_all(&directory).expect("a scratch folder");
+
+        let other = bt_platform::instance::claim_data_directory(&directory)
+            .expect("nothing else on this machine has this folder");
+        assert!(
+            !is_writer_of(&directory),
+            "the first answer for this directory"
+        );
+        drop(other);
+
+        let late = try_claim(&directory).expect("the folder is free again");
+        let adoption = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            adopt_claim(&directory, late)
+        }));
+        assert_eq!(
+            adoption.is_err(),
+            cfg!(debug_assertions),
+            "a second answer for one directory stops a debug build, and only a debug build"
+        );
+        assert!(
+            !is_writer_of(&directory),
+            "the earlier answer stands, and the table is still readable"
+        );
+        assert!(
+            bt_platform::instance::claim_data_directory(&directory).is_some(),
+            "and the claim that was refused a row was let go rather than kept anywhere"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-5, self-update §C.7) — **a launch by hand and the updated build's
+    /// relaunch are never both the writer.**
+    ///
+    /// Two claimants stand in for the two processes: the launch by hand takes the
+    /// directory first, so the relaunch's `try_claim` is told it is held; when
+    /// the launch by hand goes, the relaunch takes the claim and adopts it; and a
+    /// launch by hand arriving after that is refused.
+    ///
+    /// MUTATION: have `try_claim` answer from anything but the platform, or
+    /// `adopt_claim` drop the guard it is given, and one of the three halves
+    /// goes red.
+    #[test]
+    fn manual_launch_and_relaunch_have_one_writer() {
+        let root = appdata("one-writer");
+        let directory = root.join("data");
+        std::fs::create_dir_all(&directory).expect("a scratch folder");
+
+        let by_hand = bt_platform::instance::claim_data_directory(&directory)
+            .expect("nothing else on this machine has this folder");
+        assert!(
+            matches!(
+                try_claim(&directory),
+                Err(bt_platform::instance::ClaimRefusal::Held)
+            ),
+            "while the launch by hand holds the directory the relaunch is not handed it"
+        );
+
+        drop(by_hand);
+        let relaunch = try_claim(&directory).expect("the launch by hand has gone");
+        adopt_claim(&directory, relaunch);
+        assert!(is_writer_of(&directory), "the relaunch is the writer");
+        assert!(
+            bt_platform::instance::claim_data_directory(&directory).is_none(),
+            "and a launch by hand after it is refused"
         );
 
         let _ = std::fs::remove_dir_all(&root);

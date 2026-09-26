@@ -105,8 +105,13 @@ in `process::exit`; everything else is grammar for the ordinary window launch.
 could build a window, because the caller that matters most is an agent holding
 an approval open. **One instance owns the data directory**
 (`bt_platform::instance::claim_data_directory`, a named mutex or a file lock
-keyed by that directory, held for the life of the process by
-`persist::is_writer_of`); a second process hands its argv down the launch pipe
+keyed by that directory, held for the life of the process in `persist`'s claim
+table). The table has two writers: `persist::is_writer_of`, which takes the
+claim on the first ask and remembers the answer, a refusal included; and
+`persist::adopt_claim`, which puts a claim already taken with
+`persist::try_claim` (asks now, remembers nothing) into the same row before
+anything asks — the updated build's road (`docs/plans/design/self-update-2026-09-16.md`
+§C.7, R-3). A second process hands its argv down the launch pipe
 (`launch_wire::hand_over`) and leaves through `bt_platform::leave_process`.
 
 ### 2.2 The twelve kinds of child process

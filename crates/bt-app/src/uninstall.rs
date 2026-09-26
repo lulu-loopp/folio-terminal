@@ -201,7 +201,7 @@ const INVENTORY: &[Mark] = &[
         name: "Unix runtime claims",
         kind: Kind::Data,
         remover: Remover::RuntimeClaims,
-        writer: "../bt-platform/src/instance.rs:claim_data_directory",
+        writer: "../bt-platform/src/instance.rs:try_claim_data_directory",
     },
     // Temp rows apply on every platform (OtherUnix is the all-platform sentinel for Base::Temp).
     Mark {

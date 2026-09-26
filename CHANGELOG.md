@@ -11,6 +11,9 @@ All notable changes to Folio are recorded here. The format follows
 - The self-updater's recovery rules exist as tested code: what an interrupted
   update leaves on disk decides whether it is finished, rolled back or retried.
   Nothing calls them yet, and no build updates itself.
+- An updated Folio can take over the data directory from the copy it
+  replaces without a moment in which neither copy owns it. Nothing uses this
+  yet.
 
 ### Fixed
 
