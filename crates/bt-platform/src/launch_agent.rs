@@ -53,7 +53,7 @@ pub const PLIST_SUFFIX: &str = ".plist";
 /// The argument the rescue build is started with at login, before the home.
 /// `bt-app`'s `cli::UPDATE_RECOVER_FLAG` is the same word, and a test there
 /// holds the two equal.
-pub const RECOVER_FLAG: &str = "--update-recover";
+pub const RECOVER_FLAG: &str = crate::logon_hook::RECOVER_FLAG;
 
 /// A transaction's first four bytes, as the eight lowercase hex digits an
 /// entrance is named by (`<txn8>`).
@@ -237,7 +237,8 @@ pub(crate) fn arm_with<S: Surface>(
 ) -> Result<Armed, Refusal> {
     let bytes = plist(txn, rescue_exe, home)?.into_bytes();
     let path = agents.join(file_name(txn));
-    install_txn::durable_write_with(surface, &path, &bytes).map_err(Refusal::Write)?;
+    install_txn::durable_write_with(surface, &path, &bytes, install_txn::Replace::Existing)
+        .map_err(Refusal::Write)?;
     let back = read_back(surface, &path).map_err(|error| Refusal::ReadBack {
         path: path.clone(),
         error,

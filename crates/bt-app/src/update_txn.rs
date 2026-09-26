@@ -901,12 +901,14 @@ pub(crate) enum Event {
     Discarded,
     /// The quit landed and O hands the transaction to its applier (F-6).
     HandedOff { applier: Nonce },
-    /// The entrance is written, flushed and read back (F-2). The proof is
-    /// `bt_platform::logon_hook::Armed`, which only `logon_hook::arm` makes, and
-    /// only after the read-back matched — so `Armed` cannot be recorded before
-    /// the entrance is on disk (U-22). It must name this journal's
-    /// transaction ([`Refusal::EntranceForAnotherTransaction`]).
-    Armed(bt_platform::logon_hook::Armed),
+    /// The entrance is written, flushed and read back (F-2, F-3). The proof is
+    /// `bt_platform::install_txn::Armed`, one type for both platforms, which
+    /// only the two entrance doors make, and only after their read-back
+    /// matched: `logon_hook::arm` (the Windows `Run` value, U-22) and
+    /// `launch_agent::arm` (the macOS LaunchAgent plist, U-26) — so `Armed`
+    /// cannot be recorded before the entrance is on disk. It must name this
+    /// journal's transaction ([`Refusal::EntranceForAnotherTransaction`]).
+    Armed(bt_platform::install_txn::Armed),
     /// The entrance could not be made durable, or its command is too long.
     EntranceFailed,
     /// The restart is put back to `Prepared`: admission refused (W3, W5), an
@@ -1932,7 +1934,6 @@ impl Home {
         ))
     }
 
-
     /// **The locator (F-3): the macOS home of the bundle at `bundle`**, a fixed
     /// sibling `<parent>/.<BundleName>.folio-update/`, or `None` for a path
     /// that is not an `.app` with a parent.
@@ -2251,7 +2252,7 @@ mod tests {
     }
 
     /// The entrance's proof for `txn`, made through the door.
-    fn armed_for(txn: TxnId) -> bt_platform::logon_hook::Armed {
+    fn armed_for(txn: TxnId) -> bt_platform::install_txn::Armed {
         bt_platform::logon_hook::arm_in(
             &mut MemoryRegistry::default(),
             "test",
@@ -3294,6 +3295,77 @@ mod tests {
                 .map(|j| j.body.phase),
             Ok(Phase::Abandoned),
             "an entrance that could not be made abandons the transaction"
+        );
+    }
+
+    /// RED (U-26) — **the macOS entrance's proof arms the journal exactly as
+    /// the Windows one does: one proof type, bound to its transaction.**
+    ///
+    /// F-3: the LaunchAgent plist is `F_FULLFSYNC`'d (file and folder) before
+    /// the journal records `Armed`. `launch_agent::arm` answers the same
+    /// `install_txn::Armed` that `logon_hook::arm` does, so the one event
+    /// carries either and the transaction binding holds for both. The plist is
+    /// written into a temporary folder standing in for `~/Library/LaunchAgents`.
+    ///
+    /// MUTATION: in `next`, answer `Ok(Phase::Armed)` for any proof.
+    #[test]
+    fn a_launch_agent_proof_arms_the_journal_too() {
+        if bt_platform::host_platform() != HostPlatform::MacOs {
+            return;
+        }
+        let agents = std::env::temp_dir().join(format!("bt-u26-armed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents);
+        std::fs::create_dir_all(&agents).unwrap();
+        let home = Path::new("/Applications/.Folio.app.folio-update");
+        let rescue = home.join("rescue/Folio.app/Contents/MacOS/folio");
+        let arm = |id: TxnId| bt_platform::launch_agent::arm(&agents, id.bytes(), &rescue, home);
+        let journal = journal(
+            Phase::Handoff {
+                applier: nonce(0x44),
+            },
+            bundle_layout(),
+        );
+        assert_eq!(
+            journal
+                .advance(&Event::Armed(arm(txn()).unwrap()))
+                .map(|j| j.body.phase),
+            Ok(Phase::Armed)
+        );
+        assert_eq!(
+            journal
+                .advance(&Event::Armed(arm(TxnId::new([0x11; 16])).unwrap()))
+                .map(|j| j.body.phase),
+            Err(Refusal::EntranceForAnotherTransaction)
+        );
+        let _ = std::fs::remove_dir_all(&agents);
+    }
+
+    /// PIN (U-26) — **the proof has exactly two makers: the Windows entrance's
+    /// `logon_hook::arm_in` and the macOS entrance's `launch_agent::arm_with`**,
+    /// each after its read-back. `install_txn::Armed::proved` is crate-visible
+    /// in `bt-platform`, so this is what keeps a third door from minting one.
+    #[test]
+    fn only_the_two_entrance_doors_make_the_armed_proof() {
+        use bt_source::{Index, Pattern, Search, View, needle};
+        let platform = Index::of_package("bt-platform");
+        let made = platform
+            .search(&Search::new(
+                needle!(Pattern::text("Armed::proved(")),
+                View::CodeKeepingLiterals,
+            ))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(platform);
+        let mut owners: Vec<String> = made
+            .owners(platform)
+            .into_keys()
+            .map(|identity| identity.name)
+            .collect();
+        owners.sort();
+        assert_eq!(
+            owners,
+            vec![String::from("arm_in"), String::from("arm_with")],
+            "{}",
+            made.report(platform)
         );
     }
 

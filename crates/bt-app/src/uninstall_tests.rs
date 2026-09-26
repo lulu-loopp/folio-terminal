@@ -851,7 +851,7 @@ fn uninstall_entrance_row_removes_this_copys_values_and_leaves_the_rest() {
         (0xbb, another_copy.clone()),
         (0xcc, root.join("gone").join("rescue").join("folio.exe")),
     ] {
-        logon_hook::arm_in(&mut memory, "run", &[txn; 16], &program).unwrap();
+        let _armed = logon_hook::arm_in(&mut memory, "run", &[txn; 16], &program).unwrap();
     }
     memory
         .set("run", "SomeoneElse", REG_SZ, b"x\0\0\0")

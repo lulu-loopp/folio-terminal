@@ -3420,6 +3420,14 @@ pub mod pe_resource;
 /// Worker only: every call blocks on the disk.
 pub mod install_txn;
 
+/// **The update's entrance at logon** — one value, `FolioUpdate-<txn8>`, under
+/// `HKCU\…\CurrentVersion\Run`: written, flushed and read back before the
+/// journal may record `Armed` (the proof, `install_txn::Armed`, is made on
+/// Windows only there, and on macOS only by `launch_agent`), the 260-character command limit checked first, removal, and
+/// `--uninstall-cleanup`'s per-copy row (ticket U-22;
+/// `docs/plans/design/self-update-2026-09-16.md` revision (b), F-2, §(b).3,
+/// E-7). Windows is real; every other platform refuses by name.
+pub mod logon_hook;
 /// **Is a bundle the same publisher's Folio, and does Gatekeeper accept it** —
 /// the macOS identity check of the self-updater (0.4.6 ticket U-16;
 /// `docs/plans/design/self-update-2026-09-16.md` §E, C7, revision (b) F-9 and
@@ -3429,14 +3437,6 @@ pub mod install_txn;
 /// the two. Children through [`quiet_command`], bounded; worker only; refused
 /// by name off macOS.
 pub mod macos_identity;
-/// **The update's entrance at logon** — one value, `FolioUpdate-<txn8>`, under
-/// `HKCU\…\CurrentVersion\Run`: written, flushed and read back before the
-/// journal may record `Armed` (the proof [`logon_hook::Armed`] is made only
-/// there), the 260-character command limit checked first, removal, and
-/// `--uninstall-cleanup`'s per-copy row (ticket U-22;
-/// `docs/plans/design/self-update-2026-09-16.md` revision (b), F-2, §(b).3,
-/// E-7). Windows is real; every other platform refuses by name.
-pub mod logon_hook;
 
 /// **The macOS entrance of an update transaction** — a LaunchAgent plist in a
 /// folder the caller names, written through `install_txn`'s durable write,
