@@ -820,6 +820,13 @@ impl DownloadTransport {
 /// Blocks for as long as the transfer takes, up to `budget`: a worker's call,
 /// never the window thread's.
 ///
+/// **Where a stage begins, on this stack.** `NSURLSession` reports nothing
+/// between starting the task and handing over the response, and it hands the
+/// response over only once the first bytes of the body have arrived. So a
+/// wait before the response is named `connect` here, and the ceiling's
+/// refusal of an announced length comes after up to a few hundred bytes have
+/// been read into Foundation's buffer — never into the file.
+///
 /// # Errors
 ///
 /// A [`DownloadError`] whenever the file is not whole under its name.
@@ -1180,7 +1187,7 @@ mod tests {
         };
         use crate::https_download::{
             DOWNLOAD_BUDGET, DOWNLOAD_IDLE_TIMEOUT,
-            loopback::{Step, body, head, ok, serve},
+            loopback::{Step, begun, body, head, ok, serve},
         };
 
         const IDLE: Duration = Duration::from_secs(5);
@@ -1312,7 +1319,7 @@ mod tests {
             let directory = scratch("announced-over");
             let port = serve(1, |_| {
                 vec![
-                    Step::Send(head(200, "OK", &["Content-Length: 1073741824".to_owned()])),
+                    Step::Send(begun(&["Content-Length: 1073741824".to_owned()])),
                     Step::Pause(Duration::from_secs(10)),
                 ]
             });
@@ -1425,7 +1432,7 @@ mod tests {
             let directory = scratch("trickle");
             let port = serve(1, |_| {
                 vec![
-                    Step::Send(head(200, "OK", &[])),
+                    Step::Send(begun(&[])),
                     Step::Trickle(Duration::from_millis(50), Duration::from_secs(8)),
                 ]
             });

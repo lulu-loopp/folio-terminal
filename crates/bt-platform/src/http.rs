@@ -811,7 +811,7 @@ mod tests {
     };
     use crate::https_download::{
         DOWNLOAD_BUDGET, DOWNLOAD_IDLE_TIMEOUT,
-        loopback::{Step, body, head, ok, serve},
+        loopback::{Step, begun, body, head, ok, serve},
     };
 
     const IDLE: Duration = Duration::from_secs(5);
@@ -946,8 +946,9 @@ mod tests {
     /// RED (U-7) — **a `Content-Length` over the ceiling is refused at the
     /// headers, before any body is read or any file made.**
     ///
-    /// The server announces a gigabyte and then says nothing; the refusal must
-    /// not wait for the body to prove the header right.
+    /// The server announces a gigabyte, sends its first KiB and then says
+    /// nothing; the refusal must not wait for the body to prove the header
+    /// right, and not one byte of it reaches a file.
     ///
     /// MUTATION: skip `admit_length` in `download_from`, and this waits for
     /// the idle timeout and fails at the body stage instead.
@@ -956,7 +957,7 @@ mod tests {
         let directory = scratch("announced-over");
         let port = serve(1, |_| {
             vec![
-                Step::Send(head(200, "OK", &["Content-Length: 1073741824".to_owned()])),
+                Step::Send(begun(&["Content-Length: 1073741824".to_owned()])),
                 Step::Pause(Duration::from_secs(10)),
             ]
         });
@@ -1077,7 +1078,7 @@ mod tests {
         let directory = scratch("trickle");
         let port = serve(1, |_| {
             vec![
-                Step::Send(head(200, "OK", &[])),
+                Step::Send(begun(&[])),
                 Step::Trickle(Duration::from_millis(50), Duration::from_secs(8)),
             ]
         });

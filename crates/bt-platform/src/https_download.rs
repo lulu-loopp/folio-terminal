@@ -757,6 +757,23 @@ pub(crate) mod loopback {
         out.into_bytes()
     }
 
+    /// **A `200` that has begun**: its head, typed as a release asset is
+    /// (`application/octet-stream`), and the first KiB of its body, with the
+    /// connection left open by the steps that follow.
+    ///
+    /// The KiB is there for the macOS arm: `NSURLSession` does not hand a
+    /// response to its delegate until the first bytes of the body have
+    /// arrived — against this server a head followed by silence reached
+    /// `didReceiveResponse:` only after the idle timeout (observed on macOS 26,
+    /// 2026-09-26), where a real asset's body follows its head at once.
+    pub(crate) fn begun(headers: &[String]) -> Vec<u8> {
+        let mut all = vec!["Content-Type: application/octet-stream".to_owned()];
+        all.extend_from_slice(headers);
+        let mut out = head(200, "OK", &all);
+        out.extend_from_slice(&body(1_024));
+        out
+    }
+
     /// A `200` carrying `body`, with its length announced when `announce`.
     pub(crate) fn ok(body: &[u8], announce: Option<usize>) -> Vec<u8> {
         let headers: Vec<String> = announce
