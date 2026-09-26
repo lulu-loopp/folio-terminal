@@ -363,9 +363,16 @@ mod tests {
             ))),
             2
         );
+        // One winit call, inside its owner-thread door (A1d), and one road to the door.
         assert_eq!(
             in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
                 ".set_ime_cursor_area("
+            ))),
+            1
+        );
+        assert_eq!(
+            in_the_product_raw(bt_source::needle!(bt_source::Pattern::text(
+                "owner_door::set_ime_cursor_area("
             ))),
             1
         );

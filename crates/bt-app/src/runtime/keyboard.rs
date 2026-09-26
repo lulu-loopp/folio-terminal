@@ -905,12 +905,22 @@ impl Runtime<'_> {
     /// never had one.
     fn apply_ime_cursor_area(&mut self, area: ImeCursorArea, action: &'static str) {
         self.trace_ime_area(area, action);
-        hang_watch::during(hang_watch::Station::ImeCursorArea, || {
-            self.window.window.set_ime_cursor_area(
-                PhysicalPosition::new(area.x, area.y),
-                PhysicalSize::new(area.width, area.height),
-            );
-        });
+        // An owner-thread door (`doors::ImeCaretArea`, whose station the meter enters). A refusal
+        // keeps the area wanted, and the next turn tells it.
+        let window = &self.window.window;
+        let told = bt_platform::admission::admitted::<bt_platform::admission::doors::ImeCaretArea, _>(
+            |token| {
+                crate::owner_door::set_ime_cursor_area(
+                    token,
+                    window,
+                    PhysicalPosition::new(area.x, area.y).into(),
+                    PhysicalSize::new(area.width, area.height).into(),
+                );
+            },
+        );
+        if told.is_err() {
+            let _ = self.window.ime_cursor.rearm();
+        }
         let system_caret = hang_watch::during(hang_watch::Station::ImeSystemCaret, || {
             self.trace_ime_line(|| {
                 ime_outbound::caret_line("update", "cursor_area", Some((area.x, area.y)))

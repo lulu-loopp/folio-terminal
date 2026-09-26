@@ -4,9 +4,8 @@
 use crate::{
     AttentionDelivery, NoticeHost, NoticeStrip, PreviewSurface, Runtime, TaskbarFlash,
     UserInputKind, WindowRuntime, answer_attention_in, attention, attention_codex,
-    attention_copilot, attention_hooks, attention_trace, emit_attention_lines, float, hang_watch,
-    i18n, marks, native_window, next_attention_stop, notice, notify, profiles, seats, taskbar_lane,
-    toast,
+    attention_copilot, attention_hooks, attention_trace, emit_attention_lines, float, i18n, marks,
+    native_window, next_attention_stop, notice, notify, profiles, seats, taskbar_lane, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -904,9 +903,11 @@ impl Runtime<'_> {
         if restored {
             self.window.window.set_minimized(false);
         }
-        hang_watch::during(hang_watch::Station::WindowFocus, || {
-            self.window.window.focus_window()
-        });
+        // An owner-thread door (`doors::FocusWindow`, whose station the meter enters). A refusal
+        // opens the route without taking focus.
+        let _ = bt_platform::admission::admitted::<bt_platform::admission::doors::FocusWindow, _>(
+            |token| crate::owner_door::focus_window(token, &self.window.window),
+        );
         self.activate_tab(index, false)?;
         let seat = route.seat_id();
         if !self.window.tabs[index].sessions.contains_key(&seat) {

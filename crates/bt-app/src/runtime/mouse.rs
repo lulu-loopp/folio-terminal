@@ -2399,12 +2399,14 @@ impl Runtime<'_> {
             .and(self.window.web_cursor)
             .and_then(web_page_cursor)
         {
-            hang_watch::during(hang_watch::Station::WindowCursor, || {
-                self.window.window.set_cursor(cursor)
-            });
+            // An owner-thread door (`doors::SetCursor`, whose station the meter enters). A
+            // refusal leaves the cursor its shape until the next pointer event.
+            let _ = bt_platform::admission::admitted::<bt_platform::admission::doors::SetCursor, _>(
+                |token| crate::owner_door::set_cursor(token, &self.window.window, cursor.into()),
+            );
             return;
         }
-        self.window.window.set_cursor(pointer_cursor(
+        let cursor = pointer_cursor(
             self.window.drag.is_some(),
             grasp,
             divider_axis,
@@ -2413,7 +2415,11 @@ impl Runtime<'_> {
             self.preview_link_grasp() || self.terminal_link_grasp() || self.file_peek_foot_grasp(),
             self.window.command_rail_hover.is_some(),
             self.image_grasp(),
-        ));
+        );
+        // The same door, the other branch.
+        let _ = bt_platform::admission::admitted::<bt_platform::admission::doors::SetCursor, _>(
+            |token| crate::owner_door::set_cursor(token, &self.window.window, cursor.into()),
+        );
     }
 
     /// **What the auto-scroll is looking at this instant** — the run under the

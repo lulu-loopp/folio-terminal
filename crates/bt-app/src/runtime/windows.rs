@@ -17,7 +17,7 @@ use crate::{
     session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
     tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
 };
-use crate::{LeafView, TextScale};
+use crate::{LeafView, TextScale, owner_door};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{SeatId, SizePolicy, WorkAreaHint};
@@ -668,10 +668,14 @@ impl Runtime<'_> {
         let Some(title) = self.window.title.take_due(interval, now) else {
             return;
         };
+        // An owner-thread door (`doors::TitleFlush`, whose station the meter enters). A refusal
+        // keeps the title wanted, and the next turn writes it.
         let window = &self.window.window;
-        hang_watch::during(hang_watch::Station::WindowTitle, || {
-            window.set_title(&title)
-        });
+        if admitted::<doors::TitleFlush, _>(|token| owner_door::set_title(token, window, &title))
+            .is_err()
+        {
+            self.window.title.refused(title);
+        }
     }
 
     /// Put the window on the screen — the other half of
@@ -701,9 +705,11 @@ impl Runtime<'_> {
         if maximized {
             self.window.window.set_maximized(true);
         }
-        hang_watch::during(hang_watch::Station::WindowVisible, || {
-            self.window.window.set_visible(true)
-        });
+        // An owner-thread door (`doors::SetVisible`, whose station the meter enters). A refusal
+        // leaves the window hidden and takes the show road's own failure.
+        admitted::<doors::SetVisible, _>(|token| {
+            owner_door::set_visible(token, &self.window.window, true);
+        })?;
         self.window.ime_report.shown(ime_report::now_ms());
         self.window
             .ime_report
@@ -2039,8 +2045,10 @@ impl Runtime<'_> {
         // cannot hold the foreground. So the hide moves down here, where every
         // road that ends a window already meets — the ordinary close, the quit's
         // retirement, `exiting`, and the failure stop.
-        hang_watch::during(hang_watch::Station::WindowVisible, || {
-            self.window.window.set_visible(false)
+        // An owner-thread door (`doors::SetVisible`, whose station the meter enters). A refusal
+        // is a hide that had no effect: the letting go carries on.
+        let _ = admitted::<doors::SetVisible, _>(|token| {
+            owner_door::set_visible(token, &self.window.window, false);
         });
         hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
             self.destroy_ime_caret("window_teardown")

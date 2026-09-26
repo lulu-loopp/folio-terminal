@@ -342,7 +342,7 @@ fn freshness_format_counts_attempts_and_actual_dispatch_progress() {
 fn existing_hidden_callers_keep_the_same_fused_value() {
     let source = include_str!("main.rs");
     let body = source
-        .split("fn window_is_hidden(window: &Window) -> bool {")
+        .split("fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &Window) -> bool {")
         .nth(1)
         .unwrap()
         .split("\n}")
@@ -360,7 +360,7 @@ fn existing_hidden_callers_keep_the_same_fused_value() {
     ] {
         assert_eq!(minimized || cloaked, expected);
     }
-    assert!(source.contains("let hidden = window_is_hidden(window);"));
+    assert!(source.contains("window_is_hidden(token, window)"));
 }
 
 #[test]

@@ -1577,10 +1577,11 @@ impl Runtime<'_> {
     /// not written here.
     pub(crate) fn observe_window_place(&mut self) {
         let window = &self.window.window;
+        let previous = self.window.observed_place;
         let (place, taskbar) = hang_watch::during(hang_watch::Station::Place, || {
             let focused =
                 hang_watch::during(hang_watch::Station::PlaceFocus, || window.has_focus());
-            sample_window_place(window, focused)
+            sample_window_place(window, focused, previous)
         });
         let window = &mut *self.window;
         window.observed_place = place;

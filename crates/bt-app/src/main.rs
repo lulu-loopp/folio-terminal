@@ -105,6 +105,7 @@ mod menubar;
 mod mouse_trace;
 mod notice;
 mod notify;
+mod owner_door;
 mod pace;
 mod palette;
 mod palette_index;
@@ -201,6 +202,7 @@ use text_scale::{TextScale, TextStep};
 use bt_doc::Bias;
 #[cfg(test)]
 use bt_persist::WindowStateV1;
+use bt_platform::admission::{WaitToken, doors};
 use bt_pty::{
     OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PSREADLINE_PASTE_INPUT, PtyError, PtySession,
     PtySize,
@@ -26701,6 +26703,14 @@ impl TitleSlot {
         self.wanted = Some(title);
     }
 
+    /// **The title [`Self::take_due`] handed out was not written** (its door was refused): it is
+    /// wanted again, unless a newer one already is, and the throttle forgets that it was told —
+    /// but not when — so the next turn writes it.
+    fn refused(&mut self, title: String) {
+        self.written.rearm();
+        self.wanted.get_or_insert(title);
+    }
+
     /// The title to write to the OS now, if any, at `interval` (the display
     /// frame the window is on).
     fn take_due(&mut self, interval: Duration, now: Instant) -> Option<String> {
@@ -27170,7 +27180,11 @@ fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) ->
 /// [`bt_platform::cloaked_from_attribute`]'s reasoning: under-stating flashes a taskbar button
 /// nobody sees, and over-stating puts a toast in front of somebody who is looking straight at the
 /// pane it is about.
-fn window_is_hidden(window: &Window) -> bool {
+///
+/// **An owner-thread door** (`doors::PlaceHidden`, row 13's residue), minted only in
+/// [`sample_window_place`].
+fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &Window) -> bool {
+    let _ = token;
     let Ok(native) = native_window(window) else {
         return false;
     };
@@ -27197,18 +27211,25 @@ fn window_is_hidden(window: &Window) -> bool {
 /// *inside* a turn read them back from there rather than asking again about the same instant. **This is the pass
 /// that decides a delivery**, which is what the probe is priced against; nothing on the drawing path
 /// asks any of these.
+///
+/// **Each probe is an owner-thread door** (`doors::PlaceHidden`, `doors::PlaceExposure`, row 13's
+/// residue): admitted where it is asked, and a refused probe keeps the answer of `previous`, the
+/// place this window last observed.
 fn sample_window_place(
     window: &Window,
     focused: bool,
+    previous: notify::WindowPlace,
 ) -> (notify::WindowPlace, bt_platform::TaskbarReading) {
     // **Each probe under its own station** (ticket 48): two of them go to other processes —
     // the hit tests to whatever window is under each point, `SHAppBarMessage` to the shell's
     // taskbar — and a stall line should say which one waited.
-    // Spelled as `enter`/`at` rather than `during` so the fused call keeps the exact line
+    // The admission's meter enters the probe's station and puts the turn's back, the
+    // `enter`/`at` pair this replaced; the fused call keeps the line
     // `present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value` reads.
-    let leaving = hang_watch::enter(hang_watch::Station::PlaceHidden);
-    let hidden = window_is_hidden(window);
-    hang_watch::at(leaving);
+    let hidden = bt_platform::admission::admitted::<doors::PlaceHidden, _>(|token| {
+        window_is_hidden(token, window)
+    })
+    .unwrap_or(previous.hidden);
     // **The taskbar is read, not asked** (ticket 62). The shell is asked on its own lane; this
     // reads the latest answer without waiting, and — while the window is on a screen — asks the
     // lane for a fresh one when the last request is `REFRESH_INTERVAL` old. The reading travels
@@ -27226,9 +27247,10 @@ fn sample_window_place(
         // window is on no screen by definition. Either way the honest answer is that nothing of it
         // is showing, and `desktop_reach` tests the hidden bit outermost anyway.
         exposed: !hidden
-            && hang_watch::during(hang_watch::Station::PlaceExposure, || {
-                window_is_exposed(window)
-            }),
+            && bt_platform::admission::admitted::<doors::PlaceExposure, _>(|token| {
+                window_is_exposed(token, window)
+            })
+            .unwrap_or(previous.exposed),
         taskbar_is_auto_hidden: taskbar.auto_hidden,
     };
     (place, taskbar)
@@ -27244,7 +27266,11 @@ fn sample_window_place(
 /// [`bt_platform::cloaked_from_attribute`] argues for — of the two wrong answers, one leaves the
 /// reader with the marks inside a window they are looking at, and the other puts a toast on a
 /// desktop they can see.
-fn window_is_exposed(window: &Window) -> bool {
+///
+/// **An owner-thread door** (`doors::PlaceExposure`, row 13's residue), minted only in
+/// [`sample_window_place`].
+fn window_is_exposed(token: WaitToken<'_, doors::PlaceExposure>, window: &Window) -> bool {
+    let _ = token;
     let Ok(native) = native_window(window) else {
         return true;
     };
@@ -66955,7 +66981,7 @@ mod floated_page_tests {
     fn a_window_that_is_shut_leaves_the_screen_before_the_process_does() {
         let letting_go = method_body("Runtime", "let_go_of_this_window");
         assert!(
-            letting_go.contains("self.window.window.set_visible(false)"),
+            letting_go.contains("owner_door::set_visible(token, &self.window.window, false)"),
             "a shut window is left on the screen for Windows to ghost:\n{letting_go}"
         );
         let retire = method_body("Runtime", "retire_window");
@@ -67029,7 +67055,8 @@ mod floated_page_tests {
         );
         let hide = method_body("Runtime", "hide_quake_window");
         assert!(
-            hide.contains("set_visible(false)") && !hide.contains("window_shown = false"),
+            hide.contains("owner_door::set_visible(token, &self.window.window, false)")
+                && !hide.contains("window_shown = false"),
             "a summon that is sent away is closed rather than hidden, or forgets \
              that it has ever been on the glass:\n{hide}"
         );
