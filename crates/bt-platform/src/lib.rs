@@ -6156,11 +6156,28 @@ mod windows_impl {
         /// is already in the queue by then, and [`Self::take_activations`] is
         /// where it is read, on the loop's own thread.
         pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
+            Self::register_identity()?;
+            Self::without_registration(wake)
+        }
+
+        /// **Write the sender's identity** — the `DisplayName` under
+        /// `HKCU\Software\Classes\AppUserModelId\<AUMID>` that names the sender
+        /// on a toast and in Windows' notification settings (the uninstall
+        /// ledger's *Toast identity*). The one durable write [`Self::new`] makes.
+        pub fn register_identity() -> Result<(), String> {
             write_registry_string(
                 &super::notification_aumid_key(),
                 "DisplayName",
                 super::NOTIFICATION_DISPLAY_NAME,
-            )?;
+            )
+        }
+
+        /// **Open the channel without writing the identity** — for a start that
+        /// may write nothing durable yet (an update's trial, `bt-app`'s
+        /// `update_trial`, ticket U-13), which writes it later through
+        /// [`Self::register_identity`]. The identity the running install
+        /// registered before is what the toast is shown under meanwhile.
+        pub fn without_registration(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
             // SAFETY: called on the event-loop thread, which is the apartment
             // the notifier and every toast object below live in. The balance is
             // returned in `Drop`, after the interface is released.

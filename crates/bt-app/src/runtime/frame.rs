@@ -1447,6 +1447,18 @@ impl Runtime<'_> {
                     }
                     if has_text && !self.window.first_text_presented {
                         self.window.first_text_presented = true;
+                        // **An update's trial is ready at its first pane text**
+                        // (`update_trial`, F-14): its receipt goes to the storage
+                        // worker, and this thread goes on drawing. Once per
+                        // process; nothing at all outside a trial.
+                        if let Some(receipt) = crate::update_trial::receipt_due() {
+                            match self.app.session_store.write_receipt(receipt) {
+                                Some(answer) => crate::update_trial::receipt_handed(answer),
+                                None => eprintln!(
+                                    "BT_UPDATE_TRIAL no storage worker to write the receipt; this trial stays unconfirmed"
+                                ),
+                            }
+                        }
                         if self.app.trace_startup {
                             let text_visible = self.app.startup_started.elapsed();
                             self.window.first_text_visible = Some(text_visible);

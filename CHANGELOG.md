@@ -30,6 +30,11 @@ All notable changes to Folio are recorded here. The format follows
   install is unfinished: a finished one's leftovers are cleared, and a start
   made while an update is being applied waits for it. No build writes such an
   update yet, so nothing changes for anyone today.
+- A Folio started to try out an update writes nothing to your settings, your
+  data folder, your shell profiles or the registry until the update is
+  confirmed, so undoing the update leaves everything as it was; once it has
+  drawn its first text it leaves the note that confirms it. No build starts
+  such a trial yet.
 
 ### Fixed
 

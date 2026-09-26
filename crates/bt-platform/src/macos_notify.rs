@@ -397,6 +397,26 @@ pub struct Notifier {
 }
 
 impl Notifier {
+    /// [`Self::new`]: on macOS the notification centre files every message
+    /// under the bundle's own identifier, so there is no identity a start that
+    /// may write nothing durable yet (`bt-app`'s `update_trial`) could defer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn without_registration(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
+        Self::new(wake)
+    }
+
+    /// Nothing to write on macOS; see [`Self::without_registration`].
+    ///
+    /// # Errors
+    ///
+    /// Never.
+    pub fn register_identity() -> Result<(), String> {
+        Ok(())
+    }
+
     /// Claim the identity, open the channel and ask the reader, or say why not.
     ///
     /// `wake` is called from whatever thread the platform delivers a click on —

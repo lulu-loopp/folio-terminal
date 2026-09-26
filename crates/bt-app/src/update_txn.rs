@@ -1813,6 +1813,11 @@ impl Home {
     pub(crate) fn transaction(&self, txn: TxnId) -> PathBuf {
         self.root.join(txn.to_string())
     }
+
+    /// `H\<txn>\health-<nonce>`: the trial's receipt ((b).2's objects table).
+    pub(crate) fn receipt_path(&self, txn: TxnId, nonce: &Nonce) -> PathBuf {
+        self.transaction(txn).join(Receipt::file_name(nonce))
+    }
 }
 
 /// A macOS executable's bundle and its path inside it:
@@ -1828,6 +1833,77 @@ fn bundle_of(exe: &Path) -> Option<(&Path, &Path)> {
         return None;
     }
     Some((bundle, exe.strip_prefix(bundle).ok()?))
+}
+
+// ───────────────────────────── what the trial sees ─────────────────────────────
+
+/// **What the trial N reads of its own transaction while it waits to be
+/// committed** — F-7's "it releases them only when it reads `Committed` in the
+/// journal" (U-13, `update_trial`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrialSight {
+    /// Not decided yet (`Trial`, or a phase before it), or not readable by this
+    /// build: the trial keeps its writes pending and looks again.
+    Undecided,
+    /// `Committed` is durable (or the transaction retired after it): the trial's
+    /// writes may land.
+    Committed,
+    /// Decided otherwise — `RollbackIntent`, `Stuck`, `RolledBack`,
+    /// `Abandoned`, retired without a commit — or gone: the journal is absent,
+    /// or names another transaction. Nothing it held back will ever be written.
+    Ended,
+}
+
+/// The one part of the body a trial reads: the name of the phase, and the
+/// outcome of a retired transaction.
+#[derive(Deserialize)]
+struct PhaseWordOnly {
+    body: PhaseWordBody,
+}
+
+#[derive(Deserialize)]
+struct PhaseWordBody {
+    phase: PhaseWord,
+}
+
+#[derive(Deserialize)]
+struct PhaseWord {
+    phase: String,
+    #[serde(default)]
+    outcome: Option<String>,
+}
+
+/// **What the journal's bytes say about the trial of `txn`**; `None` is no
+/// journal at all.
+///
+/// The header is read by its frozen rules, and **it cannot say this on its
+/// own**: `Trial`, `Committed` and `RollbackIntent` are all class
+/// `destructive`, and a retirement after a commit and after a rollback are both
+/// `terminal` ([`PhaseKind::class`]). So the trial also reads the one word of
+/// the body that decides it — the phase's name (`"phase"`, as [`Phase`] is
+/// tagged) and a retired transaction's `outcome` — and nothing else of a body
+/// another version wrote (F-8 keeps the body the rescue build's). A word it
+/// does not know is [`TrialSight::Undecided`]: it waits rather than guess.
+pub(crate) fn trial_sight(journal: Option<&[u8]>, txn: &TxnId) -> TrialSight {
+    let Some(bytes) = journal else {
+        return TrialSight::Ended;
+    };
+    let Ok(header) = Header::parse(bytes) else {
+        return TrialSight::Undecided;
+    };
+    if header.txn != *txn {
+        return TrialSight::Ended;
+    }
+    let Ok(PhaseWordOnly { body }) = json::<PhaseWordOnly>(bytes) else {
+        return TrialSight::Undecided;
+    };
+    match (body.phase.phase.as_str(), body.phase.outcome.as_deref()) {
+        ("Committed", _) | ("Retired", Some("Committed")) => TrialSight::Committed,
+        ("RollbackIntent" | "Stuck" | "RolledBack" | "Abandoned" | "Retired", _) => {
+            TrialSight::Ended
+        }
+        _ => TrialSight::Undecided,
+    }
 }
 
 // ───────────────────────────── the ordinary start ─────────────────────────────

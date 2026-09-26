@@ -39,9 +39,11 @@
 //! be lost. And nothing is written until something is pinned — a machine where
 //! nobody has pinned anything has no such file and gets none.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use bt_persist::{PinEntryV1, PinKind, PinsV1, ReadReport, read_pins, write_pins_atomic};
+use bt_persist::{
+    PinEntryV1, PinKind, PinsV1, ReadReport, read_pins, read_pins_keeping, write_pins_atomic,
+};
 
 /// The name the pin file wears on disk, which is also what a notice about it has
 /// to say out loud.
@@ -146,14 +148,15 @@ impl PinsStore {
     /// Read `pins.json`, falling back to *an empty table* on every failure.
     pub fn open() -> Self {
         let dir = crate::persist::storage_dir();
-        let _ = std::fs::create_dir_all(&dir);
+        crate::persist::make_data_folder(&dir);
         Self::at(dir.join(PINS_FILE_NAME))
     }
 
     /// The same store over a named file, which is what makes every rule below
     /// testable without a `%APPDATA%`.
     fn at(path: PathBuf) -> Self {
-        let (file, report) = read_pins(&path);
+        let (file, report) = read_pins_keeping(&path, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &path, keep_pins);
         // §5.4 case 1 — no file — is the ordinary state of a machine where
         // nobody has pinned anything, and must not alert. Everything else must,
         // naming the file (§5.3).
@@ -211,7 +214,8 @@ impl PinsStore {
     /// force stays in force. Emptying the PINNED sections *because* the reader
     /// typed a comma wrong is the one outcome a hand-editable file must not have.
     pub fn reread(&mut self) -> PinsNews {
-        let (file, report) = read_pins(&self.path);
+        let (file, report) = read_pins_keeping(&self.path, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &self.path, keep_pins);
         if let ReadReport::FellBackToDefaults { reason, kept } = &report {
             eprintln!("BT_PERSIST {PINS_FILE_NAME} would not parse: {reason:?} kept={kept:?}");
             return PinsNews::Unreadable;
@@ -236,15 +240,33 @@ impl PinsStore {
         if changed {
             self.writes.rearm();
         }
-        if !self.writer_of_record {
-            return changed;
+        self.write_now();
+        changed
+    }
+
+    /// **An update's trial was committed: the table as it stands reaches the
+    /// disk** (`update_trial`).
+    pub fn release_trial(&mut self) {
+        self.write_now();
+    }
+
+    /// Put the table in force on disk, now — unless this process is not the
+    /// writer or an update's trial holds its writes back (`update_trial`, F-7).
+    fn write_now(&mut self) {
+        if !self.writer_of_record || crate::update_trial::defer(crate::update_trial::Writer::Pins) {
+            return;
         }
         self.writes.record(
             PINS_FILE_NAME,
             write_pins_atomic(&self.path, &self.loaded).map_err(|error| error.to_string()),
         );
-        changed
     }
+}
+
+/// `pins.json` read again with a refused file's copy kept — what an update's
+/// trial owed it (`update_trial::owe_copy`).
+fn keep_pins(path: &Path) {
+    let _ = read_pins(path);
 }
 
 /// **One list with the pinned rows lifted to the top, and nothing said twice.**

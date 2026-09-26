@@ -87,7 +87,7 @@ const INVENTORY: &[Mark] = &[
         name: "Toast identity",
         kind: Kind::PerAccount,
         remover: Remover::Toast,
-        writer: "../bt-platform/src/lib.rs:Notifier::new",
+        writer: "../bt-platform/src/lib.rs:Notifier::new;../bt-platform/src/lib.rs:Notifier::register_identity",
     },
     Mark {
         name: "Start-menu shortcut",

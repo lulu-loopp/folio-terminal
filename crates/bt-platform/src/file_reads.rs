@@ -30,11 +30,14 @@ pub enum Lane {
     /// The install marker and the package manager's receipt beside the
     /// executable, read once at start (`install_channel`, ticket U-1).
     Install,
+    /// The update journal's header and phase, read again and again by a trial's
+    /// watch until its transaction is decided (`update_trial`, ticket U-13).
+    UpdateJournal,
     Other,
 }
 
 impl Lane {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::InlineImage,
         Self::Peek,
         Self::Animation,
@@ -45,6 +48,7 @@ impl Lane {
         Self::Fonts,
         Self::Attention,
         Self::Install,
+        Self::UpdateJournal,
         Self::Other,
     ];
 
@@ -60,6 +64,7 @@ impl Lane {
             Self::Fonts => "fonts",
             Self::Attention => "attention",
             Self::Install => "install",
+            Self::UpdateJournal => "update_journal",
             Self::Other => "other",
         }
     }

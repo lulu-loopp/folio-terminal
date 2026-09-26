@@ -322,7 +322,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 219;
+const STATION_COUNT: usize = 220;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -1037,6 +1037,10 @@ pub enum Station {
     /// **A page moved to another window's tree** — `WebHost::rehost` with its commits (§5.3 row
     /// 21; door `WebRehost`).
     WebRehost = 218,
+    /// **What an update's trial held back, written once it is committed** —
+    /// `App::release_trial_writes` on `AppEvent::TrialWritesReleased`
+    /// (`update_trial`, 0.4.6 U-13).
+    TrialWritesReleased = 219,
 }
 
 impl Station {
@@ -1263,6 +1267,7 @@ impl Station {
             Self::CompositorBirth => "Compositor::new",
             Self::CompositorWindowSize => "Compositor::set_window_size",
             Self::WebRehost => "WebHost::rehost",
+            Self::TrialWritesReleased => "App::release_trial_writes",
         }
     }
 
@@ -1503,6 +1508,7 @@ impl Station {
             216 => Self::CompositorBirth,
             217 => Self::CompositorWindowSize,
             218 => Self::WebRehost,
+            219 => Self::TrialWritesReleased,
             _ => Self::Starting,
         }
     }

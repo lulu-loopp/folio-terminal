@@ -69,17 +69,37 @@ pub(crate) struct Admitted(());
 static ADMISSION: OnceLock<Held> = OnceLock::new();
 
 /// **This start's trial**: the transaction and nonce of `--update-trial`, set
-/// only when the journal confirms this start is that transaction's trial.
-static TRIAL: OnceLock<(TxnId, Nonce)> = OnceLock::new();
+/// only when the journal confirms this start is that transaction's trial, and
+/// the installation home whose journal said so.
+static TRIAL: OnceLock<Trial> = OnceLock::new();
+
+/// What [`TRIAL`] holds.
+struct Trial {
+    txn: TxnId,
+    nonce: Nonce,
+    home: Home,
+}
 
 /// **Whether this start is an update's trial, and its nonce** — the fact the
-/// trial's write gate and its receipt read (U-13).
-#[expect(
-    dead_code,
-    reason = "the trial write gate and its receipt (U-13) are its readers"
-)]
+/// trial's write gate and its receipt read (`update_trial`, U-13).
 pub(crate) fn trial() -> Option<(TxnId, Nonce)> {
-    TRIAL.get().copied()
+    TRIAL.get().map(|trial| (trial.txn, trial.nonce))
+}
+
+/// **The installation home of this start's trial**: where its journal is read
+/// and its receipt written (`update_trial`, U-13). `None` exactly when
+/// [`trial`] is.
+pub(crate) fn trial_home() -> Option<&'static Home> {
+    TRIAL.get().map(|trial| &trial.home)
+}
+
+/// **Make this test process an update's trial** — what [`pass`] records when
+/// the journal confirms `--update-trial`, for a test that runs a start's
+/// writers in a process of its own (`update_trial`'s tests). Once per process,
+/// as the real one is.
+#[cfg(test)]
+pub(crate) fn become_trial(txn: TxnId, nonce: Nonce, home: Home) -> bool {
+    TRIAL.set(Trial { txn, nonce, home }).is_ok()
 }
 
 /// **The start's effects that are not files in the home**: its one line, the
@@ -137,8 +157,8 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
             if let Some(held) = admission {
                 let _ = ADMISSION.set(held);
             }
-            if let Some(trial) = trial {
-                let _ = TRIAL.set(trial);
+            if let Some((txn, nonce)) = trial {
+                let _ = TRIAL.set(Trial { txn, nonce, home });
             }
             Admitted(())
         }

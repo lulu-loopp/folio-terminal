@@ -1642,6 +1642,12 @@ pub fn upgrade_recorded(
     if upgrade_decision(installed.as_ref(), &Build::bundled()) != Upgrade::Replace {
         return None;
     }
+    // **Not in an update's trial** (`update_trial`, F-7): the module, its
+    // stamp and the marks record are O's until the trial is committed, and the
+    // commit asks again.
+    if crate::update_trial::defer(crate::update_trial::Writer::PsReadLineUpgrade) {
+        return None;
+    }
     let from = installed
         .and_then(|installed| installed.build)
         .map(|build| build.text())?;
@@ -1865,9 +1871,26 @@ fn apply_with(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use bt_persist::PsReadLineInviteV1 as State;
+
+    /// **Stand Folio's own older PSReadLine in `documents`**, as the launch's
+    /// upgrade finds it — for a test elsewhere that runs a start's writers
+    /// (`update_trial`). `false` where this build has no PSReadLine to stand
+    /// (every platform but Windows).
+    pub(crate) fn an_older_build_stands_in(documents: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            older_build_in(documents, "2.4.6-bt.1");
+            true
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = documents;
+            false
+        }
+    }
 
     struct CountingDisk {
         root: PathBuf,

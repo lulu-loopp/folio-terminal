@@ -526,6 +526,16 @@ impl Notifier {
         Err(not_here("desktop notifications"))
     }
 
+    /// Nothing to write: this arm registers no identity.
+    pub fn register_identity() -> Result<(), String> {
+        Ok(())
+    }
+
+    /// [`Self::new`]: this arm writes no identity to defer.
+    pub fn without_registration(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
+        Self::new(wake)
+    }
+
     /// Unreachable: there is no value of this type.
     pub fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String> {
         let _ = (title, body, launch);
