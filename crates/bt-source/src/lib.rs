@@ -110,6 +110,16 @@
 //!   inverts the guard, because four other modules spell the same register
 //!   names for registers of their own.
 //!
+//! What census-1 adds (0.4.6, `docs/plans/design/ownership-census-2026-09-25.md`
+//! revision (b)2):
+//!
+//! * [`FieldCensus`] — **who writes which field of a set of structs**, over a
+//!   package's product items: proven writes, mutable access, a hub's membership
+//!   and inner mutability in separate [`Column`]s, and every site the stated
+//!   rules cannot resolve as an [`UnknownRow`] rather than a guess.
+//!   [`FieldCensus::judge`] is the diff gate against the committed files
+//!   (`crates/bt-source/tests/census.rs` runs it over `bt-app`).
+//!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
 //! only under `cfg(windows)` is enumerated on macOS too, because a guard that
@@ -118,6 +128,7 @@
 //! three-valued, and it decides [`Compilation`] and nothing else.
 
 mod cache;
+mod census;
 mod declarations;
 mod enumerate;
 mod index;
@@ -130,6 +141,10 @@ mod scope;
 mod universe;
 pub mod universes;
 
+pub use census::{
+    CensusFailure, Column, Committed, CommittedFile, Difference, FactRow, FieldCensus, SiteRow,
+    UnknownRow,
+};
 pub use declarations::{Compilation, DeclarationStep, ModuleBody, ReachedModule};
 pub use enumerate::{Enumeration, FileFacts, FileOwner, FileSetDiff, Unreached, enumerate};
 pub use index::{
