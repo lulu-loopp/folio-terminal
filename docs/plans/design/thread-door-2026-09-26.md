@@ -2575,3 +2575,108 @@ pinned callers.
 (c′) None.
 
 (d) No.
+
+---
+
+## Revision 2026-09-27 (g), A1e's check of the exception table against the code
+
+Codex's confirmation `docs/plans/design/thread-door-review-codex-2026-09-27-e.md`
+(static, at `e70c94bf`) found all twelve rows of (e)3 as amended by (f)2 matching
+their bodies, and said A1e may be dispatched from the table as written. A1e was
+built on `a0c96f53`, **after A1d merged**, and read every pinned body there again
+with the guard itself (`hang_watch::window_waits_tests::every_door_is_where_the_registry_says`).
+Two rows no longer match the table, because code changed after the review's base,
+and the table's leaf rule needs one sentence to be checkable. This revision is
+appended; where it differs from (e)3 and (f)2, it rules. The table as the guard
+holds it is the `EXCEPTIONS` and `PINNED` tables in that test file.
+
+### (g)1 · `trace_sink::Shutdown`: A1d put the admission between the drop and the flush
+
+**Checked.** A1d made `trace_sink::flush` a door (`flush(token: WaitToken<'_,
+doors::TraceFlush>)`) and `Shutdown::drop` mints it:
+`let _ = admitted::<doors::TraceFlush, _>(flush);`. The first-party edges of the
+drop are therefore `admission::admitted`, then `flush`, handed to the admission
+by value as its work. The table's `drop → flush` was right at `e70c94bf` and is
+not at `a0c96f53`.
+
+**The row, replacing (e)3's.** Under the closed rule every callee is a pinned
+body, so the admission's own body and its helpers are pinned too. None of them
+has an effect.
+
+| body | edges (→) and effects (·) |
+|---|---|
+| `Shutdown::drop` | → `admission::admitted` ×1 → `trace_sink::flush` ×1 (by value, as the admission's work) |
+| `admission::admitted` | → `role` → `Phases::contains` → `count` → `meter` → `WaitToken::fresh` → `WaitToken::fresh`; no effects |
+| `admission::role`, `count`, `meter`, `WaitToken::fresh`, `Phases::bit` | no edges, no effects |
+| `admission::Phases::contains` | → `Phases::bit`; no effects |
+| `trace_sink::flush` | → `flush_sink` ×1; no effects |
+| `flush_sink`, `Queue::close` | unchanged: `flush_sink` → `Queue::close` · `thread::sleep` ×2 · `Receiver::recv_timeout` ×1 · `JoinHandle::join` ×1 |
+
+Product reach and repayment are unchanged: only `fn main`'s event-loop build-error
+return, which says `exiting()` first; *The trace writer is retired through its
+admitted flush door, never by a drop* · 0.4.7 (D-78).
+
+### (g)2 · A thirteenth row: `http::Request` (Windows)
+
+**Checked.** `crates/bt-platform/src/http.rs` (the WinHTTP arm of `https_download`,
+0.4.6 ticket U-7, after `78a3699a`) has `impl Drop for Request`: it closes the
+request handle (`WinHttpCloseHandle`, not a vocabulary entry) and then waits, up
+to `CLOSE_WAIT` (5 s), on the download's `Condvar` for WinHTTP's closing callback
+(`Shared::locked` for the signals, then `raised.wait_timeout`). `Condvar::wait_timeout`
+is a registry vocabulary entry that waits, and the row is in no table, so the
+closed rule's last clause refuses it as the tree stands. No review read it: it
+came after every base the table was checked at.
+
+| exception | pinned body chain | product reach | repayment · version |
+|---|---|---|---|
+| `http::Request` (Windows) | `Request::drop` → `Shared::locked` ×1 · `Condvar::wait_timeout` ×1 <br> ↳ `Shared::locked`: leaves only (`Mutex::lock`, `expect`) | **none in the product yet**: `https_download` has no product caller on `a0c96f53`; the update's download will call it, on a worker (U-7's own contract) | new ticket *A download's request is closed through its own bounded door, not by its drop* · 0.4.7 (D-82) |
+
+It is bounded and would run on a worker, but the rule is that a `Drop` which
+waits is a row with a repayment, whichever thread drops it; it is not ruled to
+stay.
+
+### (g)3 · Leaves at a receiver whose type the source does not write
+
+(e)3 lists the leaves by the std or foreign item they are (`Option::take`,
+`OnceLock::get`, …). The guard resolves a call by what the source says about it:
+a receiver whose type is written — `self`, a field of it, a parameter — narrows the
+candidates to that type's methods; a receiver whose type is not written (a local, a
+static, a call's result) could be any method of that name the package can reach.
+Where a std leaf at such a receiver shares its name with a first-party method, the
+row lists the name as a leaf, and a listed leaf that is never called is red, so the
+list cannot outlive its reason. At `a0c96f53` that is three names in three bodies:
+`flush`'s `SINK.get()` (`get`), and `flush_sink`'s and `Queue::close`'s
+`Option::take` (`take`). Two further rules the guard applies, stated so the table
+can be read against it:
+
+- `PtySession::shutdown`'s two `error.into()` resolve to `PtyError::from`, which
+  `thiserror`'s `#[from]` generates; it is an edge with no body to read.
+- A call that is both a vocabulary effect and a first-party name at an untyped
+  receiver is the effect: `child.try_wait()` is `Child::try_wait` (counted), not
+  `PtySession::try_wait`.
+
+### (g)4 · The inventories the guard pins, as they are on `a0c96f53`
+
+- **The owners of §C-3** are the registry's new `# owners` section
+  (`crates/bt-app/src/window_waits.tsv`), counted from the code: `msg_send!` 19
+  in 17 owners (the note's 20, at `78a3699a`), `extern` blocks 6, `#[link]` **5**
+  (the note's 6), `vtable(` 1 (`video::engine::Machinery::take_frame`),
+  `GetProcAddress` 0, `#[macro_export]` 0. The note's "one exported macro exists
+  today" is `bt-source`'s `needle!`, which is not in the product.
+- **The `enter_callback` entries** are nineteen calls in ten (module, name)
+  pairs: (c)7's, plus U-7's four `http-download-session` delegate entries.
+- **The expected count of a door's `expect(clippy::disallowed_methods)`** is
+  zero until A2 turns the lint on (§9.1's parenthesis); A2 makes it the
+  registry's.
+- **A `Drop` outside the table** is refused when it names a vocabulary entry
+  that waits, or calls a registered door or a pinned body. §C-3's "vocabulary is
+  refused inside any `impl Drop`" is read as the entries that wait: three
+  `Drop`s outside the table (`attention_pipe`'s `OwnedHandle` and `Overlapped`,
+  `instance`'s `DataDirectoryClaim`) close a handle with `CloseHandle`, which the
+  registry lists as counted, not as a wait.
+
+### (g)5 · This revision's own architecture impact
+
+(a) None. (b) None. (c) This commit adds nothing to the ledger; A1e's docs
+commit opens D-78…D-82 for (e)3's rows without one and for (g)2, and notes D-40
+as `DirWatch`'s. (c′) None. (d) No.
