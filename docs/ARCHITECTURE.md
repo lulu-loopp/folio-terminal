@@ -36,16 +36,19 @@ door or a ruling redraws them in the same commit (`docs/architecture/PROVENANCE.
 
 Counted on 2026-09-23 at `b6ca4329`, product code only: `#[cfg(test)]` and
 `#[cfg(all(test, …))]` items, `tests/`, `src/bin/`, `*tests.rs` files and
-`build.rs` are left out. To re-count, grep the patterns in the last column and
+`build.rs` are left out. The thread rows were recounted on 2026-09-26 at
+`78a3699a` (the thread-door note, §5), and no spawn site changed up to `5effa23b`: one site more, `taskbar_lane`'s
+`taskbar-state` (ticket 62). `crates/bt-platform/src/lib.rs` holds a NUL byte, so
+ripgrep skips it as binary; search it with `grep -a`. To re-count, grep the patterns in the last column and
 drop the test items; a number that moves edits this table and the pictures.
 
 | what | count | pattern |
 |---|---|---|
-| thread-spawn sites | **45** — `bt-app` 29, `bt-platform` 12, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
-| through the thread door | **23**, every one in `bt-app` | `spawn_at_priority` |
+| thread-spawn sites | **46** — `bt-app` 30, `bt-platform` 12, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
+| through the thread door | **24**, every one in `bt-app` | `spawn_at_priority` |
 | bare spawns | **22**: in `bt-app`, `folio-web-thumb` and five unnamed (`explorer_menu` ×4, `attention_wire::payload_on_stdin`); in `bt-platform`, twelve named `Builder`s (the two endpoints and the directory watch on each platform, six video threads); in `bt-pty`, the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | as above |
 | of those, in a door process rather than the window process | **3**: `explorer_menu::remove_from_explorer_menu`, `explorer_menu::cleanup_registrations`, `attention_wire::payload_on_stdin` | — |
-| named sites / distinct names | **37 / 32**, besides the pool | the first argument, or `.name(…)` |
+| named sites / distinct names | **38 / 33**, besides the pool | the first argument, or `.name(…)` |
 | `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
 | channel constructions | **30** — 26 `mpsc::channel`, 4 `mpsc::sync_channel`; `bt-app` 24, `bt-platform` 6 — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
 | `AppEvent` variants | **29** | `enum AppEvent` in `main.rs` |
@@ -341,8 +344,8 @@ interface that hands a subsystem `&mut tabs` is a boundary.
 
 ### 5.1 The seven lanes
 
-Forty-five production thread-spawn sites exist across three crates (`bt-app`
-29, `bt-platform` 12, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1). **The thread count is not the defect; the absence of a contract
+Forty-six production thread-spawn sites exist across three crates (`bt-app`
+30, `bt-platform` 12, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1). **The thread count is not the defect; the absence of a contract
 is.** `MathWorker::spawn` starts path verification and image scaling as well as
 math and returns all three through one `MathWorkerResult` — a historical hosting
 decision wearing a subsystem's name. `Runtime::apply_psreadline` performs an
@@ -377,6 +380,49 @@ the closure, because Windows hands a new thread `Normal` whatever its creator
 stands in, and that call is the one `unsafe` boundary for thread priority.
 MMCSS is explicitly refused. `folio-web-thumb` breaks the rule with a bare
 `Builder` at inherited `Normal`, beside the loop, and nothing goes red.
+
+**Which kind of thread this is** (0.4.6 ticket A1a;
+`docs/plans/design/thread-door-2026-09-26.md`, whose revisions (b)–(e) rule over
+its earlier sections). `bt_platform::admission` owns three facts, and forbids
+`unsafe`. **A thread's role** — `Unset`, `Window`, `Worker(name)`,
+`Callback(name)` — is a thread-local written only by its entries:
+`enter_window_thread`, once, in `fn main` directly after the argument parse (the
+five argv doors above it never make a window); `enter_callback(name)` as the first
+statement of each OS-owned callback entry — the console control handler, the
+toast's `Activated` handler, Media Foundation's `EventNotify`, the `NSURLSession`
+delegate, the notification centre's delegate and completions, the Finder open's
+completion, `AVPlayer`'s end observer, and wgpu's device-lost and uncaptured-error
+callbacks — whose `CallbackScope` names a thread nobody named for the callback's
+length and gives it back, even on unwind, and leaves a thread that has a role as
+it is (AppKit and the message pump deliver most callbacks on the window thread,
+which is `Window` there); `enter_standalone_main`, once per process, for a door
+process's main thread (its callers come with A1c); and, from A1b, the thread
+door, which lends each worker a `WorkerCtx` — private fields, `!Send`, `!Sync`,
+made only where a thread becomes a worker. **Until A1b every spawned thread is
+`Unset`**, and `Unset` is never a worker and never the window. **The window
+thread's phase** — `Starting`, `Running`, `Exiting` — has four writers at pinned
+places: `enter_window_thread` (`Starting`); `loop_running` in
+`FolioApp::new_events` on `StartCause::Init`; `exiting` at the head of
+`settle_quit`'s `Write` arm, at the head of `App::finish`, after `run_app` returns
+and in `fn main`'s event-loop build error arm (from `Running` or `Starting`, so a
+loop that fails before its first turn still leaves through the exit doors); and
+`quit_abandoned` at the head of the `Abandon` arm (back from `Exiting`; from
+`Running`, where a cancelled quit or an incomplete save leaves it, nothing). A
+writer called off the window thread, or on a transition not its own, changes
+nothing and is counted. **An owner-thread wait is admitted** by
+`admission::admitted::<D, _>(|token| door(token, …))`: on a thread that is not
+`Window`, or in a phase outside the door's, it returns `Refused` without running
+the work, and counts it on the door's counter and on the process total, which
+`diagnostics::run_footer` writes as the run's last line. Otherwise the work gets
+a `WaitToken` for that door alone, which cannot be returned, stored, sent,
+copied or made anywhere else, and the call is measured by the meter
+`hang_watch::start` installs once (`hang_watch::ADMISSION_METER`): the door's
+station is entered before the work — so a call that never returns is already the
+station a hang report names — and the station, call-tree node and scope it left
+are restored after it, from a cookie the admitted frame keeps; a work that
+panics is entered and never left. The doors are the types of
+`admission::doors`, one per line of the registry (§5.3). **No door takes its
+token yet**: A1d converts them where they stand.
 
 **Results come back three ways**, and the rule for which is the last paragraph
 of this section:
@@ -598,7 +644,8 @@ happen" has one answer and a guard can hold it.
 | reading file bytes | `bt_platform::file_reads` — ten named lanes, `Lane`, `Ledger::add`, the process-wide `LEDGER` | `file_reads_doors.txt` plus a source guard |
 | constructing a child process | `bt_platform::quiet_command_named` (and `quiet_command`) — absolute path resolved by `handoff::program_on_path` | pinned as the only `Command` construction |
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace | its own module, one function per verb |
-| starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` — a name and a priority band | every call site is in `bt-app`, so the name is the thread |
+| starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` — a name and a priority band; the thread's role (§5.1) is `Unset` until the door lends it a `WorkerCtx` (0.4.6, A1b) | every call site is in `bt-app`, so the name is the thread |
+| waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; no door takes the token until A1d |
 | creating a native window outside the framework | `bt_platform::SpareParent` / `spare_parent` — the spare web controller's never-shown `WS_POPUP` parent (ticket 60); dropped only on a pumping thread, left to process exit by an orderly stop | the one `CreateWindowExW` in product code, pinned by `web_spare::spare_wiring_tests::the_spare_parent_is_the_one_window_product_code_creates` |
 | taking a native window's messages away from the framework | `bt_platform::let_the_system_translate_touch` — the touch subclass that hands `WM_TOUCH` and the three `WM_POINTER*` to `DefWindowProc` | a message table pinned by test; called once per window, from the two `create_window` sites |
 

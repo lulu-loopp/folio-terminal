@@ -19,6 +19,8 @@ All notable changes to Folio are recorded here. The format follows
 - Building Folio for Windows no longer needs Windows PowerShell: the ConPTY
   files are unpacked by the build itself, so the Windows build can be checked
   from Linux or macOS.
+- Folio now knows which of its threads is the window's, and the waits that
+  thread may make are listed in one place the architecture notes are built from.
 
 ## 0.4.5-preview — 2026-09-26
 

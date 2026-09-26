@@ -1097,7 +1097,15 @@ run on the OS hand-off lane (`bt-app::handoff_lane`), never the window thread;
 nothing else in `bt-app` names a door (`no_handoff_runs_on_the_window_thread`).
 **Named threads** come only from `bt_platform::spawn_at_priority`, which sets the
 band as the new thread's first statement and is the single `unsafe` boundary for
-it. **A new side effect gets a door.**
+it. **Which kind of thread this is** is `bt_platform::admission`'s fact: the
+window thread enters once, in `fn main` after the argument parse, and each
+OS-owned callback enters through `enter_callback` for its length; **a spawned
+thread is `Unset` until the thread door lends it a `WorkerCtx` (0.4.6, A1b)**, and
+`Unset` is never a worker and never the window. **An owner-thread wait** — a row
+of `docs/ARCHITECTURE.md` §5.3 — is admitted through `admission::admitted`, on the
+window thread and in its door type's phases, or refused and counted; the door
+types are the registry `crates/bt-app/src/window_waits.tsv`, and **no door takes
+its token until A1d**. **A new side effect gets a door.**
 **From.** `docs/BT-ENVIRONMENT.md`'s file-read self-report (the lanes, the budget,
 and the exclusions); trailing entry 2026-09-20 *clock-run disk reads — a clock run
 is a deadline or an edge, never a poll*; §7.40 item ① *every child process that
@@ -1105,7 +1113,7 @@ does not go through the pseudoconsole comes out of one silent door*; §13.18
 *M2-2/M2-4: the four verbs handed to the machine live in one module*; §1.4
 *resilience under CPU starvation* (three bands, one spawner); 2026-09-22 *a
 hand-off to the system runs on its own lane, and the window that receives it may
-take the front*.
+take the front*; 2026-09-26 *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*.
 **Overrides.** none found.
 **The gap, recorded as a fact.** The self-report declares that directory
 enumeration and metadata are **excluded from the ledger's accounting**. That is a
@@ -1119,7 +1127,16 @@ no lane, no door and no guard, and nothing rules whether it should.
 `bt_platform::spawn_at_priority`: the event and render loop above normal, the PTY
 reader normal, **every** worker below normal — files, git and its two pipe
 threads, preview, math, image scaling, the OS hand-off lane (`bt-os-handoff`),
-the machine probes and the hang watchdog.
+the machine probes and the hang watchdog. **The exceptions, which stay at
+`Normal`** (the coordinator with the owner's delegation, 2026-09-26; a thread's
+role does not decide its band): the playback engines (`folio-video-engine`, both
+platforms), first-frame extraction (`folio-video-frame`), launch and attention
+ingress (`folio-launch-endpoint`, `folio-attention-endpoint`), clipboard saves
+(`clipboard-picture`) and the three standalone-process workers. The observation
+and probe threads that start at `Normal` today — `bt-dir-watch`,
+`folio-video-prewarm`, `folio-video-canplay`, `folio-web-thumb`, the Explorer
+probe and deployment — move to the workers' band in a 0.4.7 ticket. Off Windows a
+band is requested, not enforced: the portable priority setter answers `false`.
 Multimedia scheduling is explicitly refused. **A drain turn takes one quantum,
 never "until the ring is empty"**: a fixed slice per pane, capped by the
 per-turn slice count or the turn's time budget, then back to the pump; and when
@@ -1133,7 +1150,9 @@ loop is not turning".
 starvation*; §1.5 *a hang leaves evidence of itself: a resident heartbeat and a
 watchdog*; §1.5a *liveness is "should have woken" and "does not answer", not
 "busy"*; §1.5c *trace writes leave the window thread*; §1.6 *a drain turn waits
-for the rest of a burst the kernel said was coming*.
+for the rest of a burst the kernel said was coming*; the exceptions to the
+worker band, `docs/plans/design/thread-door-2026-09-26.md` revision (c)9 and
+2026-09-26 *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*.
 **Overrides.** §1.5a explicitly supersedes §1.5's turn-counter criterion, which
 produced 200 false reports out of its first 205.
 **Open.** Which calls may be made on the window thread, the wait-budget table and
