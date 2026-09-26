@@ -159,6 +159,17 @@ observation threads' band; no band changed (RULES 53's 0.4.7 ticket). It advance
 D-2: every thread that runs Folio's code outside `bt-pty` and the resample pool
 now has a role.
 
+0.4.6 ticket A1d repaid no row and added none. It advanced D-2: every owner-thread
+door of the registry takes its token, so each of the window thread's listed waits
+happens only inside an admission — on the window thread, in its phases, measured —
+and nowhere else; no wait moved. D-33's version note: unchanged at 0.4.6 — no lane
+changed, and the lane contract's rows did not move. D-42's version note: unchanged
+at 0.4.6 — row 10 (device recovery's rebuild) is not converted, as the note's
+revision (c)3 defers it to B9. D-43 and D-44: rows 11 and 12 are admitted where they
+stand, through `bt-app::pty_door` (`spawn_shell` minted in `create_leaf_session`,
+`resize` minted in `commit_leaf_resize`) — their location is recorded, they did not
+move. D-77: row 23 is admitted through `bt-app::gpu_door::open_first_window`, where it stands.
+
 ## The ledger
 
 "§" alone means a section of `docs/ARCHITECTURE.md`. "Split prep" is
@@ -170,7 +181,7 @@ ledger's.
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
-| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid) |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid); every owner-thread door takes its token and each listed wait happens only admitted (A1d, 2026-09-26: advanced, not repaid) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
@@ -211,8 +222,8 @@ ledger's.
 | D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | 0.4.6 | open |
 | D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | 0.4.5 — presenting off the input thread is the typing-stability work | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both |
 | D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | 0.4.6 — independent of D-41 (budget note R8, 2026-09-26): no frame is admitted while recovering, so B9 does not wait for the presentation lane | open |
-| D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open |
-| D-44 | §5.3 row 12 — the synchronous `ResizePseudoConsole` round trip | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — as D-43 | open |
+| D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open — admitted where it stands through `pty_door::spawn_shell`, minted in `create_leaf_session` (A1d, 2026-09-26: its door, not its move) |
+| D-44 | §5.3 row 12 — the synchronous `ResizePseudoConsole` round trip | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — as D-43 | open — admitted where it stands through `pty_door::resize`, minted in `commit_leaf_resize`, one admission per leaf (A1d, 2026-09-26: its door, not its move) |
 | D-45 | §5.3 row 13 — `sample_window_place` resampled at three sites for one instant | §5.3 | 48 | 0.4.5 — one site is `drain_pty` | repaid (ticket 48) |
 | D-46 | §5.3 row 14 — `Window::set_title` at five sites with no throttle | §5.3 | 49 | 0.4.5 — one site is `drain_pty` | repaid (ticket 49) |
 | D-47 | §5.3 row 20 — renames, the preserving save and store writes on the window thread | §5.3 | none yet | 0.4.6 | open |
@@ -245,7 +256,7 @@ ledger's.
 | D-74 | the computation lane (`MathWorker`): admission and answers are unbounded `mpsc::channel`s, each way | A5 (Computation × a full lane answers without waiting; answers held are bounded) | none yet | 0.4.6 — with D-33 | open |
 | D-75 | the computation lane: no request identity — an answer carries only its question, so one question asked twice gives two answers nobody can tell apart | A5 (Computation × every request has its own identity) | none yet | 0.4.6 — with D-33 | open |
 | D-76 | the computation lane: the decoration thread's death is invisible while the scaling and path-verification threads hold clones of the one answer sender; the drain sees a disconnection only when all three have gone | A5 (Computation × a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
-| D-77 | §5.3 row 23 — the first window's GPU is opened with `pollster::block_on(GpuContext::open(…))` in `Runtime::create`, on the window thread, a wait no row listed | thread-door note revision (e)2; A1a | B9 (device recovery rests on deadlines and rebuilds on a worker) | 0.4.6 — moves with B9's rebuild on a worker (D-42) | open — registered as row 23 `pending`, door `admission::doors::GpuOpen`; it stays on the window thread until then (coordinator, 2026-09-26) and A1d admits it where it stands |
+| D-77 | §5.3 row 23 — the first window's GPU is opened with `pollster::block_on(GpuContext::open(…))` in `Runtime::create`, on the window thread, a wait no row listed | thread-door note revision (e)2; A1a | B9 (device recovery rests on deadlines and rebuilds on a worker) | 0.4.6 — moves with B9's rebuild on a worker (D-42) | open — registered as row 23 `pending`, door `admission::doors::GpuOpen`; it stays on the window thread until then (coordinator, 2026-09-26); admitted where it stands through `gpu_door::open_first_window` (A1d, 2026-09-26) |
 
 ---
 

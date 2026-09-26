@@ -497,8 +497,24 @@ station is entered before the work — so a call that never returns is already t
 station a hang report names — and the station, call-tree node and scope it left
 are restored after it, from a cookie the admitted frame keeps; a work that
 panics is entered and never left. The doors are the types of
-`admission::doors`, one per line of the registry (§5.3). **No door takes its
-token yet**: A1d converts them where they stand.
+`admission::doors`, one per line of the registry (§5.3). **Every door takes its
+token** (A1d): each door's function takes `WaitToken<'_, doors::X>` by value as its
+first parameter, so it cannot be called outside an admission, and the admission
+stands at the statement that made the call — the preparation around it stays
+outside. The composition's commit, birth and window-size doors, the web engine's
+controller, environment and rehost, `WindowRenderer`'s present and surface
+birth, and the font lookup by name take theirs in `bt-platform` and `bt-render`,
+on every platform arm; winit's calls go through `bt-app::owner_door` (title,
+caret area, focus, visibility, cursor); `bt-pty`'s three — a shell's birth, a
+leaf's resize, the quit's wait for retirements — through `bt-app::pty_door`,
+because `bt-pty` has no edge to `bt-platform`; the first window's GPU through
+`bt-app::gpu_door`. The commits inside an admitted batch (a tree's birth, the
+window's ground, a page's rehost and its compensation) call
+`Compositor::commit_now`, which is `pub(crate)` with seven callers. A present is
+two sibling admissions under `during(PresentSeats)`: `PresentFrame`, a declared
+batch (compose, configure, acquire, submit, present), then `CompositorCommit`.
+A refusal is handled before anything the call would change, on the road the
+door's own failure takes.
 
 **The update pass runs on the window thread in `Starting`** (0.4.6 U-12,
 `update_startup::pass`; the design's startup-recovery row). Directly after
@@ -734,7 +750,7 @@ happen" has one answer and a guard can hold it.
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace; the seven verbs are private to it and reached only through `ShellThread::hand_over`, and a `ShellThread` is entered only with the `WorkerCtx` the thread door lends (A1b), so a hand-off can happen only on a thread the door started | its own module, one function per verb; `compile_fail` doctests on `hand_over` name each verb by both spellings; `handoff_lane::no_handoff_runs_on_the_window_thread` |
 | reaching the network | `bt_platform::http` — `https_get` (one `GET` into memory: the update check) and `https_download` (one `GET` streamed to a file under a ceiling, U-7), over the operating system's own stack (WinHTTP, `NSURLSession`), `https` only, no caller headers; the download's ceiling, temporary file, deadlines and stage vocabulary are `bt_platform::https_download`'s, shared by both real arms | `update_check_transport_tests` holds the three arms to one signature per door and one set of request types |
 | starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` (one definition, in `admission`) — a `&'static` name and a priority band; the new thread is `Worker(name)` (§5.1) and its body is `FnOnce(&WorkerCtx) -> T`, lent the capability a worker-only door takes (0.4.6, A1b) | `tests::every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` finds `std::thread` spawning named in `bt-app`'s and `bt-platform`'s product code only inside the door (A1c; A1e's guard absorbs it); `admission`'s tests start their workers through it |
-| waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; no door takes the token until A1d |
+| waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; every door's function takes its token by value (A1d), and `tests::every_owner_door_takes_its_own_token_by_value` checks each signature |
 | creating a native window outside the framework | `bt_platform::SpareParent` / `spare_parent` — the spare web controller's never-shown `WS_POPUP` parent (ticket 60); dropped only on a pumping thread, left to process exit by an orderly stop | the one `CreateWindowExW` in product code, pinned by `web_spare::spare_wiring_tests::the_spare_parent_is_the_one_window_product_code_creates` |
 | taking a native window's messages away from the framework | `bt_platform::let_the_system_translate_touch` — the touch subclass that hands `WM_TOUCH` and the three `WM_POINTER*` to `DefWindowProc` | a message table pinned by test; called once per window, from the two `create_window` sites |
 

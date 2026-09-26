@@ -1188,8 +1188,9 @@ and `Unset` is never a worker and never the window. **Every thread `bt-app` and
 holds it. **An owner-thread wait** — a row
 of `docs/ARCHITECTURE.md` §5.3 — is admitted through `admission::admitted`, on the
 window thread and in its door type's phases, or refused and counted; the door
-types are the registry `crates/bt-app/src/window_waits.tsv`, and **no door takes
-its token until A1d**. **A new side effect gets a door.**
+types are the registry `crates/bt-app/src/window_waits.tsv`, and **every door
+takes its token** by value (A1d), so it is called only inside its admission, at
+the one statement the registry names. **A new side effect gets a door.**
 **From.** `docs/BT-ENVIRONMENT.md`'s file-read self-report (the lanes, the budget,
 and the exclusions); trailing entry 2026-09-20 *clock-run disk reads — a clock run
 is a deadline or an edge, never a poll*; §7.40 item ① *every child process that
