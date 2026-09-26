@@ -794,12 +794,13 @@ mod tests {
     #[test]
     fn install_channel_the_documented_marker_example_parses() {
         let documented = r#"{"v":1,"manager":"scoop","uninstall_hook":true}"#;
-        let expected = Ok(Marker {
+        let marker = Marker {
             manager: Manager::Scoop,
             uninstall_hook: true,
-        });
+        };
+        let expected = Ok(marker);
         assert_eq!(Marker::parse(documented.as_bytes()), expected);
-        assert_eq!(expected.unwrap().encode(), documented);
+        assert_eq!(marker.encode(), documented);
         assert_eq!(
             Marker::parse(format!("{documented}\r\n").as_bytes()),
             expected
