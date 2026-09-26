@@ -53,7 +53,7 @@ drop the test items; a number that moves edits this table and the pictures.
 | `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
 | channel constructions | **30** — 26 `mpsc::channel`, 4 `mpsc::sync_channel`; `bt-app` 24, `bt-platform` 6 — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
 | `AppEvent` variants | **30** (U-3 added `InstallChannelRead`, §5) | `enum AppEvent` in `main.rs` |
-| child-process construction | **one** `Command::new`, inside the door `bt_platform::quiet_command`, with **6** product callers — `attention_copilot::run_probe`, `explorer_menu::serve`, `git::git_command`, `psreadline::run_probe`, `shell_integration::run_profile_probe`, and `bt_platform`'s macOS `quiet_command_text` (two programs); besides the door, `bt-pty::PtySession::spawn`'s `spawn_command` and the one `ShellExecuteW` in `bt_platform::handoff` | `quiet_command(_named)?\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(` |
+| child-process construction | **one** `Command::new`, inside the door `bt_platform::quiet_command`, with **7** product callers — `attention_copilot::run_probe`, `explorer_menu::serve`, `git::git_command`, `psreadline::run_probe`, `shell_integration::run_profile_probe`, `update_startup`'s start of the rescue build (0.4.6 U-12), and `bt_platform`'s macOS `quiet_command_text` (two programs); besides the door, `bt-pty::PtySession::spawn`'s `spawn_command` and the one `ShellExecuteW` in `bt_platform::handoff` | `quiet_command(_named)?\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(` |
 | `Runtime` methods | **1,424** — 1,223 in the 27 `runtime/*.rs` topics, 201 still in `main.rs` (§13) | a four-space-indented `fn` in an `impl Runtime<'_>` block |
 
 ---
@@ -86,14 +86,14 @@ Consequences that are themselves rules:
 
 ## 2. Processes
 
-### 2.1 One binary, six argv doors
+### 2.1 One binary, seven argv doors
 
 The only shipped binary is `folio` (`crates/bt-app/Cargo.toml`'s `[[bin]]`,
 `crates/bt-app/src/main.rs`). `bt-record`, `bt-replay`, `bt-zoom-perf`,
 `render-info-plist`, `bt-conpty-width-probe` and `bt-repaint-oracle` are
 development tools and are not packaged.
 
-`fn main` checks six argv doors in a fixed order, each headless and each ending
+`fn main` checks seven argv doors in a fixed order, each headless and each ending
 in `process::exit`; everything else is grammar for the ordinary window launch.
 
 | door | parser | handler |
@@ -103,7 +103,24 @@ in `process::exit`; everything else is grammar for the ordinary window launch.
 | `--explorer-command` | `cli::explorer_command` | `explorer_menu::serve` |
 | `--remove-shell-integration` | `cli::remove_shell_integration` | `shell_integration::remove_shell_integration` |
 | `--remove-explorer-menu` | `cli::remove_explorer_menu` | `explorer_menu::remove_from_explorer_menu` |
+| `--update-recover [--then-launch <argument>…]`, `--update-apply` — the rescue build's, first word only | `cli::update_door` | reserved: one line from `cli::update_door_refusal`, exit 2, until the recovery door (U-22) and the apply door (U-23) arrive |
 | `--help` / `--version` / any parse fault | `cli::parse` | `report_at_the_front_door` |
+
+**The update's three frozen words** (`docs/plans/design/self-update-2026-09-16.md`
+(b).1 F-8; v1 from 0.4.6, read by builds other than the one that wrote them;
+none is in the usage block):
+
+| word | where | written by | read by |
+|---|---|---|---|
+| `--update-trial <txn> <nonce>` — exact, two values, no `=` form | the ordinary grammar: `cli::parse` → `CliRequest::update_trial`, the values kept as text | the applier, starting the new build as the trial | `update_startup::pass`, which makes it this start's trial only when the journal's header names that transaction |
+| `--update-recover` | the rescue door above | the logon entrance (U-22), and `--then-launch`'s writer | the rescue build (U-22) |
+| `--then-launch <argument>…` — after `--update-recover` only, and last; everything after it is another start's command line, verbatim | `cli::update_door` (`UpdateDoor::Recover::then_launch`); in the ordinary grammar it is an unknown flag | an ordinary start that meets a destructive transaction (`cli::recover_command_line`, from `update_startup`) | the rescue build, which starts the installed `folio.exe` with those arguments once the transaction is finished, so that start never sees the word (U-22) |
+
+**After the doors and the parse, the update pass** (`update_startup::pass`,
+0.4.6 U-12): on the window thread in `Starting`, before `persist::storage_dir`,
+settings, sidecars and `launch_wire::hand_over` (which takes the pass's
+`Admitted`), a start holds its installation's `admission` shared for its
+lifetime and reads the update journal's frozen header once (§5.1).
 
 `attention` is checked second, above the panic-log hook and above anything that
 could build a window, because the caller that matters most is an agent holding
@@ -118,7 +135,7 @@ anything asks — the updated build's road (`docs/plans/design/self-update-2026-
 §C.7, R-3). A second process hands its argv down the launch pipe
 (`launch_wire::hand_over`) and leaves through `bt_platform::leave_process`.
 
-### 2.2 The twelve kinds of child process
+### 2.2 The thirteen kinds of child process
 
 | kind | started by | note |
 |---|---|---|
@@ -128,6 +145,7 @@ anything asks — the updated build's road (`docs/plans/design/self-update-2026-
 | WebView2 browser, renderer, GPU, utility | the Edge runtime, from the one `CreateCoreWebView2EnvironmentWithOptions` (`bt_platform::webview::create_environment`), asked for by a page's `WebHost::request_environment` or, once per process on an idle turn after startup, by `bt_platform::warm_web_environment` (ticket 54) | nothing in that module blocks; that is its stated contract; at most one creation call in flight (`bt_platform::EnvironmentSlot`) |
 | `com.apple.WebKit.WebContent` | `bt_platform::macos_webview::WebHost::request_controller` | main thread only, one per seat, never pooled |
 | `folio.exe --from-explorer --cwd <folder>` | Folio's own COM server, in `explorer_menu::serve` | detached, never reaped — the one deliberately orphaned child in production |
+| the rescue build, `<H>\<txn>\rescue\folio.exe --update-recover --then-launch <argv>` (macOS: the rescue clone's executable) | `update_startup`, through `quiet_command`, when a start meets a destructive update transaction (0.4.6 U-12) | detached, never waited on: the start that started it leaves at once; inert until a build writes such a transaction |
 | `powershell.exe` — the PSReadLine probe | `psreadline::run_probe` | once per process; blocks its thread with no timeout |
 | `powershell.exe` — the `$PROFILE` probe | `shell_integration::run_profile_probe` | once per distinct program; the only probe with a deadline |
 | `cmd.exe /c "<copilot> --version"` | `attention_copilot::run_probe` | once per process, on opening the Agents page |
@@ -178,7 +196,9 @@ bt-pty          ← bt-app
 bt-app          ← (nothing; the top)
 ```
 
-`bt-corpus` and `bt-winres` are tools; `bt-source` is read by tests only
+`bt-winres` ← `bt-app` for SHA-256 alone (`bt_winres::digest`, the update pass's
+image check, 0.4.6 U-12; it is also a build dependency, which is what it is for
+everywhere else). `bt-corpus` is a tool; `bt-source` is read by tests only
 (a dev-dependency of `bt-app`, `bt-layout` and `bt-render`). `bt-app` is the only crate that may ask
 what platform it is on, and only in the files named by
 `FILES_THAT_MAY_NAME_A_PLATFORM` in `main.rs`.
@@ -371,6 +391,7 @@ does not have to find it later.
 | **the update check's state** (fact 11: its memory, file and claim) — `update-check.json` v2 (`checked_at_ms`, `latest_tag`, `seen_tag`, `skipped_tag`), this process's copy, and `update-check.lock` | `bt-app::update::OfferState`, one per process (`update::OWNER`); every change is `OfferState::transact`, one mutex held across read, change, atomic write and publication | the check's `bt-update-check` worker (the stamp, then the answer — never holding the lock across the request); the window thread's `answer_mark` (`seen_tag`); **Skip** (`OfferState::skip`: `skipped_tag` and `seen_tag`), a new writer with no caller until U-19. Readers: the gear (`gear_mark_is_lit`) and the General row, both through `should_offer`, which compares a skipped tag by precedence and reads the switch the owner is told of | durability and external transactions | 0.4.6 U-6: one owner in this process; another process on the same data directory is kept from *asking* by the claim, not from writing |
 | **the installation's transaction** — the update journal `H\journal.json`, its frozen header `{v, txn, rescue, class}`, the trial's receipt, and the member inventories | `bt-app::update_txn` (pure: `Header`, `Phase` and `next`, `JOURNAL_WRITERS` and `EFFECT_RIGHTS`, `decide`, `at_start`, `Receipt`, `Inventories`) | O (the running build and its in-app job) writes `Allocated`, `Prepared`, `Handoff` and O's `Abandoned`; only the transaction-lock holder (the rescue copy of O, as applier or recovery) writes every later phase, and `Committed` only on N's receipt while the journal says `Trial`; N writes only its receipt (`docs/plans/design/self-update-2026-09-16.md` revision (b), §(b).2) | durability and external transactions | 0.4.6 U-10: protocol only, no product caller; the journal, lock and entrance effects arrive behind their own doors in U-11, U-22 and U-26 |
 | **this build may update itself** — the eligibility half of the owner's 2026-09-25 rule (signed *and* built with the flag) | `crates/bt-app/build.rs` (`updater_flag`, deciding by `update_eligibility::decide`), read through `bt-app::update::eligible` | the build invocation only: `FOLIO_UPDATER=on` emits the cfg `folio_updater`, unset or empty emits nothing, any other value stops the build; set by `build-release.yml` on a `v*` tag or its `updater` dispatch input and by the macOS release build (`docs/RELEASING.md`), by nothing else | a compile-time constant: one writer, no runtime change | 0.4.6 U-8: read by `diagnostics::run_header` (`updater on`/`off`, checked by `smoke.ps1 -Updater` / `-ExpectSigned`); the update job (U-18) is its reader to come |
+| **this start's trial** — the transaction and nonce of `--update-trial`, when the journal's header says the start is that transaction's trial (a destructive class naming the same transaction) | `bt-app::update_startup` (`TRIAL`, read through `update_startup::trial()`) | `update_startup::pass` alone, once, at start, from the command line and the header; never changes in a run | a process fact: one writer, set once | 0.4.6 U-12: no reader yet; the trial's write gate and its receipt (U-13) are its readers to come |
 | **what this release contains** — the Windows archive's members other than `folio.exe` and `folio.msix`, each by name, SHA-256 and size, with the version, architecture, archive root, update protocol and oldest updater (`FOLIO_RELEASE_MANIFEST`, v1) | `crates/bt-app/build.rs` (`release_manifest`), from the one member list `scripts/release/archive-members.txt`; the format, `PROTOCOL` and `MIN_UPDATER` are `bt_winres::release_manifest` | the build only: for a Windows target it hashes the list's members (the ConPTY sidecar from `bt-pty`'s `links` metadata, the rest from the checkout) into an `RCDATA` resource of `folio.exe`, which the executable's signature signs; on macOS `render-info-plist` writes `PROTOCOL` and `MIN_UPDATER` as `Info.plist` keys | a compile-time constant: one writer, no runtime change | 0.4.6 U-9: read, never by running the executable, by `package.ps1` (refuses to pack a member that differs) and `smoke.ps1` (checks the packed archive); the updater's archive reader (U-14) is its reader to come |
 
 ---
@@ -424,7 +445,7 @@ its earlier sections). `bt_platform::admission` owns three facts, and forbids
 `unsafe`. **A thread's role** — `Unset`, `Window`, `Worker(name)`,
 `Callback(name)` — is a thread-local written only by its entries:
 `enter_window_thread`, once, in `fn main` directly after the argument parse (the
-five argv doors above it never make a window); `enter_callback(name)` as the first
+six argv doors above it never make a window); `enter_callback(name)` as the first
 statement of each OS-owned callback entry — the console control handler, the
 toast's `Activated` handler, Media Foundation's `EventNotify`, the `NSURLSession`
 delegate, the notification centre's delegate and completions, the Finder open's
@@ -468,6 +489,16 @@ are restored after it, from a cookie the admitted frame keeps; a work that
 panics is entered and never left. The doors are the types of
 `admission::doors`, one per line of the registry (§5.3). **No door takes its
 token yet**: A1d converts them where they stand.
+
+**The update pass runs on the window thread in `Starting`** (0.4.6 U-12,
+`update_startup::pass`; the design's startup-recovery row). Directly after
+`enter_window_thread` and before anything touches the data directory, it holds
+`H\admission` shared, reads `H\journal.json` once (`Lane::Install`) and, only when
+a journal is there, asks for `H\lock` and removes a finished transaction's
+folder and journal through `install_txn`. Every lock is one non-blocking
+attempt; the reads and removals are the start's disk work before a loop exists,
+which is §5.3 row 18's reasoning, and no `window_waits.tsv` door covers them
+(none of the start's other file work before the loop has one either).
 
 **Results come back three ways**, and the rule for which is the last paragraph
 of this section:
@@ -688,7 +719,7 @@ happen" has one answer and a guard can hold it.
 |---|---|---|
 | reading file bytes | `bt_platform::file_reads` — eleven named lanes, `Lane`, `Ledger::add`, the process-wide `LEDGER` | `file_reads_doors.txt` plus a source guard |
 | reading who owns an install folder, and the macOS install-marker attribute | `bt_platform::install_evidence` — `owner_of`, `current_account`, `attribute` (read-only: `GetNamedSecurityInfoW` and the process token on Windows, `stat`, `geteuid` and `getxattr` on Unix); the attribute's bytes are charged to `file_reads`' `Lane::Install` | its own module, one function per read; its one caller is `install_channel::read` |
-| making an update transaction durable, and the installation's two locks | `bt_platform::install_txn` (U-11) — `durable_write` (a temporary file beside the target → write → `FlushFileBuffers` / `F_FULLFSYNC` → rename over the target → the directory flushed: `FlushFileBuffers` on a handle opened with `FILE_FLAG_BACKUP_SEMANTICS`, `F_FULLFSYNC` on the directory's descriptor), `durable_move` (`MoveFileExW(MOVEFILE_WRITE_THROUGH)` / `renamex_np(RENAME_EXCL)`, never over an existing file, then both directories flushed), `flush_current_user_key` (`RegFlushKey`, Windows only), `try_hold` / `hold_within` with `Hold::Shared` (read-only open, existing file) or `Hold::Exclusive` (`LockFileEx` / `flock`, released by `Held`'s drop); three arms: Windows, macOS, and a refusal naming the door everywhere else; every failure names its `Stage`; worker only | `install_txn::tests`: the order over a recording fake of its `Surface` trait, the real arms over temporary folders, the locks across two processes |
+| making an update transaction durable, and the installation's two locks | `bt_platform::install_txn` (U-11) — `durable_write` (a temporary file beside the target → write → `FlushFileBuffers` / `F_FULLFSYNC` → rename over the target → the directory flushed: `FlushFileBuffers` on a handle opened with `FILE_FLAG_BACKUP_SEMANTICS`, `F_FULLFSYNC` on the directory's descriptor), `durable_move` (`MoveFileExW(MOVEFILE_WRITE_THROUGH)` / `renamex_np(RENAME_EXCL)`, never over an existing file, then both directories flushed), `flush_current_user_key` (`RegFlushKey`, Windows only), `durable_remove` (a file or a directory tree removed, then its directory flushed; nothing there is success — U-12), `try_hold` / `hold_within` with `Hold::Shared` (read-only open, existing file) or `Hold::Exclusive` (`LockFileEx` / `flock`, released by `Held`'s drop); three arms: Windows, macOS, and a refusal naming the door everywhere else; every failure names its `Stage`; worker only, except the start's update pass before the loop exists (`try_hold` and `durable_remove`, §5.1) | `install_txn::tests`: the order over a recording fake of its `Surface` trait, the real arms over temporary folders, the locks across two processes |
 | constructing a child process | `bt_platform::quiet_command_named` (and `quiet_command`) — absolute path resolved by `handoff::program_on_path` | pinned as the only `Command` construction |
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace; the seven verbs are private to it and reached only through `ShellThread::hand_over`, and a `ShellThread` is entered only with the `WorkerCtx` the thread door lends (A1b), so a hand-off can happen only on a thread the door started | its own module, one function per verb; `compile_fail` doctests on `hand_over` name each verb by both spellings; `handoff_lane::no_handoff_runs_on_the_window_thread` |
 | reaching the network | `bt_platform::http` — `https_get` (one `GET` into memory: the update check) and `https_download` (one `GET` streamed to a file under a ceiling, U-7), over the operating system's own stack (WinHTTP, `NSURLSession`), `https` only, no caller headers; the download's ceiling, temporary file, deadlines and stage vocabulary are `bt_platform::https_download`'s, shared by both real arms | `update_check_transport_tests` holds the three arms to one signature per door and one set of request types |

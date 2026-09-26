@@ -116,6 +116,24 @@ pub struct CliRequest {
     /// notification ever clicked on a cold machine would have been answered with
     /// one.
     pub embedding: bool,
+    /// `--update-trial <txn> <nonce>` — **this start is the trial an update
+    /// started** (`docs/plans/design/self-update-2026-09-16.md` (b).2; frozen
+    /// at v1 from 0.4.6, F-8).
+    ///
+    /// Words one program says to another, never typed by a person: the applier
+    /// starts the new build with them. The two values are kept as given; what
+    /// they are worth is `crate::update_startup`'s question, because only the
+    /// journal can say whether this start is the trial of anything.
+    pub update_trial: Option<UpdateTrialArg>,
+}
+
+/// The two values of `--update-trial`, as the command line gave them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateTrialArg {
+    /// The transaction's id, 32 lowercase hex digits when well formed.
+    pub txn: String,
+    /// The trial's nonce, 64 lowercase hex digits when well formed.
+    pub nonce: String,
 }
 
 /// **Who started this launch** — `docs/DESIGN.md` §7.59.
@@ -284,6 +302,26 @@ pub const EXPLORER_ORIGIN_FLAG: &str = "--from-explorer";
 /// today is a shell and VS Code's `terminal.external.windowsExec`.
 pub const HERE_ORIGIN_FLAG: &str = "--from-here";
 
+/// **The three argv words of an update that cross versions**, frozen at v1
+/// from 0.4.6 (`docs/plans/design/self-update-2026-09-16.md` (b).1 F-8): a
+/// build that is updated away from, or rolled back to, must still read the
+/// words another build writes. None of them is in the usage block — like
+/// [`EXPLORER_ORIGIN_FLAG`], they are said by one program to another.
+///
+/// `--update-trial <txn> <nonce>`: the applier starts the new build as the
+/// trial with these ([`CliRequest::update_trial`]).
+pub const UPDATE_TRIAL_FLAG: &str = "--update-trial";
+/// `--update-recover`: the rescue build, as recovery ([`update_door`]).
+pub const UPDATE_RECOVER_FLAG: &str = "--update-recover";
+/// `--then-launch <argument>...`: after [`UPDATE_RECOVER_FLAG`] only, and
+/// last: every argument after it is the command line of the start that handed
+/// itself to the rescue build, verbatim, which the rescue build starts the
+/// installed Folio with once the transaction is finished.
+pub const THEN_LAUNCH_FLAG: &str = "--then-launch";
+/// `--update-apply`: the rescue build, as the applier. Reserved here; its
+/// grammar arrives with its door (the Windows apply ticket).
+pub const UPDATE_APPLY_FLAG: &str = "--update-apply";
+
 /// Turn a command line into a request, or into the fault that ends the launch.
 ///
 /// The argument is everything **after** the program's own name;
@@ -386,6 +424,20 @@ where
                 if request.origin == LaunchOrigin::Plain {
                     request.origin = LaunchOrigin::Here;
                 }
+            }
+            // **Exact, two values, and no `=` form**: the applier writes this
+            // word and its two values as three arguments, and a line that is
+            // shaped otherwise was not written by it.
+            Some(flag) if flag == UPDATE_TRIAL_FLAG => {
+                if request.update_trial.is_some() {
+                    return Err(CliFault::Repeated(UPDATE_TRIAL_FLAG));
+                }
+                let txn = value_for(UPDATE_TRIAL_FLAG, flag, &arg, &mut args)?;
+                let nonce = value_for(UPDATE_TRIAL_FLAG, flag, &arg, &mut args)?;
+                request.update_trial = Some(UpdateTrialArg {
+                    txn: txn.to_string_lossy().into_owned(),
+                    nonce: nonce.to_string_lossy().into_owned(),
+                });
             }
             Some(flag) if is_flag(flag, CWD_FLAG) => {
                 if request.cwd.is_some() {
@@ -770,6 +822,78 @@ pub fn uninstall_cleanup(
     } else {
         Err(usage())
     })
+}
+
+/// **What a line that opens with an update's own door asks for.**
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateDoor {
+    /// `--update-recover [--then-launch <argument>...]`.
+    Recover {
+        /// The command line to start the installed Folio with afterwards, when
+        /// an ordinary start handed itself over; `None` when the entrance at
+        /// logon started the rescue build.
+        then_launch: Option<Vec<OsString>>,
+    },
+    /// `--update-apply`, whatever follows it.
+    Apply,
+}
+
+/// The one line `--update-recover` answers a malformed line with.
+pub const UPDATE_RECOVER_USAGE: &str = "folio --update-recover [--then-launch <argument>...]";
+
+/// **The rescue build's two doors, recognised by the first word and only the
+/// first** — [`explorer_command`]'s rule, for its reason: these processes
+/// never open a window, and a person's `folio --cwd X --update-recover` is
+/// not one of them.
+///
+/// `None` is every other launch. `--then-launch` takes the rest of the line
+/// whatever it says, `--`, flags and all: it is somebody else's command line.
+///
+/// # Errors
+/// [`UPDATE_RECOVER_USAGE`] when `--update-recover` is followed by anything
+/// but `--then-launch`.
+pub fn update_door(
+    args: impl IntoIterator<Item = OsString>,
+) -> Option<Result<UpdateDoor, &'static str>> {
+    let mut args = args.into_iter();
+    let first = args.next()?;
+    match first.to_str()? {
+        UPDATE_APPLY_FLAG => Some(Ok(UpdateDoor::Apply)),
+        UPDATE_RECOVER_FLAG => Some(match args.next() {
+            None => Ok(UpdateDoor::Recover { then_launch: None }),
+            Some(next) if next.to_str() == Some(THEN_LAUNCH_FLAG) => Ok(UpdateDoor::Recover {
+                then_launch: Some(args.collect()),
+            }),
+            Some(_) => Err(UPDATE_RECOVER_USAGE),
+        }),
+        _ => None,
+    }
+}
+
+/// **The line an ordinary start hands itself to the rescue build with**:
+/// `--update-recover --then-launch` and its own command line, verbatim — the
+/// line [`update_door`] reads back.
+#[must_use]
+pub fn recover_command_line(then_launch: &[OsString]) -> Vec<OsString> {
+    let mut line = vec![
+        OsString::from(UPDATE_RECOVER_FLAG),
+        OsString::from(THEN_LAUNCH_FLAG),
+    ];
+    line.extend_from_slice(then_launch);
+    line
+}
+
+/// What this build answers either door with **until the door exists** (the
+/// entrance and apply tickets): one line naming the word, never a window.
+#[must_use]
+pub fn update_door_refusal(door: &Result<UpdateDoor, &'static str>) -> String {
+    match door {
+        Ok(UpdateDoor::Recover { .. }) => {
+            format!("{UPDATE_RECOVER_FLAG} is not in this build yet.")
+        }
+        Ok(UpdateDoor::Apply) => format!("{UPDATE_APPLY_FLAG} is not in this build yet."),
+        Err(usage) => (*usage).to_owned(),
+    }
 }
 
 /// `--json`, spelled once.
@@ -1171,6 +1295,7 @@ mod tests {
                 new_window: false,
                 tab: false,
                 origin: LaunchOrigin::Plain,
+                update_trial: None,
             }
         );
     }
@@ -1705,6 +1830,117 @@ mod tests {
         assert_eq!(
             call(&["attention", "claude-code:Stop", "--json", "-"]).event,
             "claude-code:Stop"
+        );
+    }
+
+    fn update_trial(txn: &str, nonce: &str) -> Option<UpdateTrialArg> {
+        Some(UpdateTrialArg {
+            txn: txn.to_owned(),
+            nonce: nonce.to_owned(),
+        })
+    }
+
+    /// RED (U-12) — **`--update-trial <txn> <nonce>` is two values on an
+    /// ordinary launch, kept as given, and is refused like any other flag when
+    /// either is missing or it is given twice.**
+    ///
+    /// The frozen v1 spelling (F-8): the applier starts the trial with exactly
+    /// these three arguments. The trial is an ordinary start in every other
+    /// respect, so the rest of the line keeps its meaning.
+    ///
+    /// MUTATION: take only one value in the `UPDATE_TRIAL_FLAG` arm (the nonce
+    /// becomes the positional path).
+    #[test]
+    fn the_trial_word_takes_two_values_on_an_ordinary_launch() {
+        let txn = "7a".repeat(16);
+        let nonce = "5c".repeat(32);
+        let request = parsed(&["--update-trial", &txn, &nonce, "--cwd", "D:\\x"]);
+        assert_eq!(request.update_trial, update_trial(&txn, &nonce));
+        assert_eq!(request.cwd, Some(PathBuf::from("D:\\x")));
+        assert_eq!(request.path, None);
+        assert_eq!(parsed(&[]).update_trial, None);
+        assert_eq!(
+            refused(&["--update-trial", &txn]),
+            CliFault::MissingValue(UPDATE_TRIAL_FLAG)
+        );
+        assert_eq!(
+            refused(&["--update-trial", &txn, "--tab"]),
+            CliFault::MissingValue(UPDATE_TRIAL_FLAG)
+        );
+        assert_eq!(
+            refused(&[
+                "--update-trial",
+                &txn,
+                &nonce,
+                "--update-trial",
+                &txn,
+                &nonce
+            ]),
+            CliFault::Repeated(UPDATE_TRIAL_FLAG)
+        );
+        assert_eq!(
+            refused(&[&format!("--update-trial={txn}"), &nonce]),
+            CliFault::UnknownFlag(format!("--update-trial={txn}"))
+        );
+    }
+
+    /// RED (U-12) — **the line an ordinary start hands itself to the rescue
+    /// build with is the line the rescue door reads back, the handed command
+    /// line verbatim; and the two rescue doors open on the first word only.**
+    ///
+    /// `--then-launch` is the rescue build's to read (the recovery door, U-22):
+    /// it starts the installed Folio with those arguments once the transaction
+    /// is finished, so that Folio receives the original line and never this
+    /// word. What the ordinary start owns is writing it, and the two halves are
+    /// pinned together here. An ordinary launch that carries the word is a
+    /// line nothing writes, and is refused as an unknown flag.
+    ///
+    /// MUTATION: in `update_door`, stop the `--then-launch` arm at the first
+    /// argument that begins with `--` (the handed `--cwd` is lost).
+    #[test]
+    fn the_rescue_line_carries_the_handed_command_line_verbatim() {
+        let handed = args(&["--cwd", "D:\\x", "--", "--not-a-flag", "--then-launch"]);
+        let line = recover_command_line(&handed);
+        assert_eq!(
+            &line[..2],
+            &args(&["--update-recover", "--then-launch"])[..]
+        );
+        assert_eq!(
+            update_door(line),
+            Some(Ok(UpdateDoor::Recover {
+                then_launch: Some(handed)
+            }))
+        );
+        assert_eq!(
+            update_door(recover_command_line(&[])),
+            Some(Ok(UpdateDoor::Recover {
+                then_launch: Some(Vec::new())
+            }))
+        );
+        assert_eq!(
+            update_door(args(&["--update-recover"])),
+            Some(Ok(UpdateDoor::Recover { then_launch: None }))
+        );
+        assert_eq!(
+            update_door(args(&["--update-recover", "--cwd", "D:\\x"])),
+            Some(Err(UPDATE_RECOVER_USAGE))
+        );
+        assert_eq!(
+            update_door(args(&["--update-apply", "anything"])),
+            Some(Ok(UpdateDoor::Apply))
+        );
+        assert_eq!(update_door(args(&[])), None);
+        assert_eq!(
+            update_door(args(&["--cwd", "D:\\x", "--update-recover"])),
+            None
+        );
+        assert_eq!(
+            refused(&["--then-launch", "--cwd", "D:\\x"]),
+            CliFault::UnknownFlag("--then-launch".to_owned())
+        );
+        assert_eq!(
+            update_door_refusal(&update_door(args(&["--update-apply"])).unwrap()),
+            "--update-apply is not in this build yet."
         );
     }
 }

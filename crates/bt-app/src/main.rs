@@ -166,6 +166,7 @@ mod update;
 // `build.rs` reaches the same file by `#[path]`, and nothing of it ships.
 #[cfg(test)]
 mod update_eligibility;
+mod update_startup;
 mod update_txn;
 mod version;
 mod video_seat;
@@ -70193,6 +70194,16 @@ fn main() -> Result<()> {
         bt_platform::write_to_console(&format!("{}\n", report.line));
         std::process::exit(report.exit_code);
     }
+    // **The rescue build's two doors** (`--update-recover`, `--update-apply`;
+    // `docs/plans/design/self-update-2026-09-16.md` (b).2). Headless like the
+    // doors above, and above the admission below for a reason of their own:
+    // the rescue build is the one process that must never hold the admission
+    // shared — it takes it exclusive to move files. Reserved words today: each
+    // is answered with one line until its door arrives (U-22, U-23).
+    if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
+        bt_platform::write_std_error(format!("{}\n", cli::update_door_refusal(&door)).as_bytes());
+        std::process::exit(2);
+    }
     // **The command line, before there is anything for it to be wrong about.**
     // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook
     // and the event loop, and the reason is what a refusal costs: a syntax error
@@ -70207,9 +70218,15 @@ fn main() -> Result<()> {
     };
     // **This thread owns the window from here** (`bt_platform::admission`, ARCHITECTURE §5.1):
     // the role every owner-thread door is admitted on, in the phase `Starting` until the loop's
-    // first turn. Below the five argv doors, whose processes never have a window, and above the
+    // first turn. Below the six argv doors, whose processes never have a window, and above the
     // hand-over, which is this phase's one wait (§5.3 row 18).
     bt_platform::admission::enter_window_thread();
+    // **An update comes first** (`update_startup`, 0.4.6 U-12). The admission is
+    // taken shared here, before the data directory is resolved (which may move
+    // it), before settings, sidecars and the hand-over below; then one look at
+    // the update journal. A start the rescue build must finish leaves from
+    // inside the pass, having touched nothing of the data directory.
+    let admitted = update_startup::pass(&request);
     // **And the third doorbell, which is this program ringing its own** (§7.59).
     //
     // The claim on the data directory is R4-5's and is taken exactly where it
@@ -70238,7 +70255,8 @@ fn main() -> Result<()> {
     // line is written into a pin on a branch that never writes one.
     let storage = persist::storage_dir();
     if !persist::is_writer_of(&storage)
-        && let Some(handed) = launch_wire::hand_over(&storage, &request, say_at_the_front_door)
+        && let Some(handed) =
+            launch_wire::hand_over(&admitted, &storage, &request, say_at_the_front_door)
     {
         bt_platform::leave_process(handed);
     }

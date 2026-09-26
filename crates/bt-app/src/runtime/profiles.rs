@@ -38,6 +38,7 @@ impl Runtime<'_> {
                 new_window: request.new_window,
                 tab: request.tab,
                 origin: request.origin,
+                update_trial: None,
             },
             self.default_profile(),
             cli::machine_path_kind,

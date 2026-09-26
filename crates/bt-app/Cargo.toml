@@ -48,6 +48,12 @@ bt-render = { path = "../bt-render" }
 bt-term = { path = "../bt-term" }
 bt-transcript = { path = "../bt-transcript" }
 bt-unicode = { path = "../bt-unicode" }
+# **SHA-256, and only it** (0.4.6 U-12): a start measures its own executable
+# against the update's rescue copy with the one copy of the standard the
+# workspace has, `bt_winres::digest` — a dependency-free first-party crate
+# already this package's build dependency, so `folio.exe` gains no package.
+# `version.rs`'s tests read its `plist` and `release_manifest` through it too.
+bt-winres = { path = "../bt-winres" }
 bt-viewport = { path = "../bt-viewport" }
 # **The attention ledger** (`docs/ARCHITECTURE.md` §12.1, D-57). This crate is
 # its only dependent.
@@ -128,13 +134,6 @@ syn = { version = "2", features = ["full", "visit"] }
 # POSIX path literals are checked by an independent lexer already present in Cargo.lock.
 shlex = "=2.0.1"
 serde_json.workspace = true
-# **The version gate's third container.** `version.rs`'s test renders
-# `packaging/macos/Info.plist.in` and checks that both of the bundle's version
-# fields are the manifest's line — the same thing it already does for the PE
-# resource, which arrives through the build dependency above. Tests only: the
-# product binary has no use for a plist, and the crate is already in this
-# workspace's graph either way.
-bt-winres = { path = "../bt-winres" }
 
 # **Tests only, macOS only, and not one new package** (M2-5). The glyph
 # measurement opens winit's own window — the product's window — and needs one
