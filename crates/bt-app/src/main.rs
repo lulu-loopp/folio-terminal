@@ -162,6 +162,10 @@ mod trace;
 mod trace_sink;
 mod uninstall;
 mod update;
+// The build script's updater-flag decision, compiled here only so its tests run:
+// `build.rs` reaches the same file by `#[path]`, and nothing of it ships.
+#[cfg(test)]
+mod update_eligibility;
 mod update_txn;
 mod version;
 mod video_seat;

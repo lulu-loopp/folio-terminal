@@ -14,9 +14,20 @@
 //!
 //! **Both derive from `CARGO_PKG_VERSION`**, which is the workspace's one
 //! version line. Nothing in this file spells a version.
+//!
+//! And a third, which is not about which build this is but about what it may
+//! do: **whether it may update itself** (0.4.6 ticket U-8). `FOLIO_UPDATER=on`
+//! in the build's environment emits the cfg `folio_updater`, which
+//! `bt_app::update::eligible` reads; unset or empty emits nothing; any other
+//! value stops the build. Only the release pipeline sets it. The decision is
+//! `src/update_eligibility.rs`, reached below by `#[path]` so its tests run with
+//! the crate's.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[path = "src/update_eligibility.rs"]
+mod update_eligibility;
 
 /// What the commit is called when there is no git to ask.
 ///
@@ -54,6 +65,29 @@ fn main() {
     // also be a second executable on the machine wearing the product's face.
     if env("CARGO_CFG_TARGET_ENV") == "msvc" {
         println!("cargo:rustc-link-arg-bins={}", resource.display());
+    }
+
+    updater_flag();
+}
+
+/// **Whether this build may update itself**, from `FOLIO_UPDATER` and nothing
+/// else. See `src/update_eligibility.rs` for the one value and why it is one.
+///
+/// The cfg is declared to `check-cfg` whether or not it is set, so that the
+/// crate's `cfg!(folio_updater)` is a known name in both kinds of build. A value
+/// that is not Unicode is quoted in its lossy form: it cannot be `on`, so it is
+/// refused like any other stranger.
+fn updater_flag() {
+    use update_eligibility::{CFG, VARIABLE, decide};
+
+    println!("cargo:rerun-if-env-changed={VARIABLE}");
+    println!("cargo:rustc-check-cfg=cfg({CFG})");
+    let raw = std::env::var_os(VARIABLE);
+    let value = raw.as_ref().map(|value| value.to_string_lossy());
+    match decide(value.as_deref()) {
+        Ok(true) => println!("cargo:rustc-cfg={CFG}"),
+        Ok(false) => {}
+        Err(refusal) => panic!("{refusal}"),
     }
 }
 

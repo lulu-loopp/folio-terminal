@@ -193,11 +193,23 @@ pub fn log_path(storage: &Path) -> PathBuf {
 ///
 /// Pure, and taking the clock rather than reading it, so the shape of the line
 /// is a thing a test can state.
+///
+/// **It ends with whether this build may update itself** — `updater on` or
+/// `updater off`, [`crate::update::eligible`] (0.4.6 ticket U-8). A build fact
+/// like the banner beside it, and here rather than in the banner because the
+/// banner is `--version`'s answer, which three release scripts compare byte for
+/// byte; this line is what `smoke.ps1`'s last step already reads, and it is the
+/// line a bug report arrives with.
 #[must_use]
 pub fn run_header(now: &str, process_id: u32) -> String {
     format!(
-        "── {} — run started {now}, pid {process_id} ──",
-        crate::version::banner()
+        "── {} — run started {now}, pid {process_id}, updater {} ──",
+        crate::version::banner(),
+        if crate::update::eligible() {
+            "on"
+        } else {
+            "off"
+        }
     )
 }
 
@@ -695,6 +707,46 @@ mod tests {
         assert!(
             body(DIAGNOSTICS, "\npub fn open_run_log(").contains("append_note(&log, &run_header("),
             "the header is no longer written by the step that opens the log"
+        );
+
+        let _ = std::fs::remove_dir_all(&storage);
+    }
+
+    /// RED (U-8) — **the first line of a run's block says whether the build
+    /// that wrote it may update itself, and says it in the one of two words the
+    /// build was made with.**
+    ///
+    /// This line is the self-report `smoke.ps1` already reads from an ordinary
+    /// run, so it is where the release check asks the question without a second
+    /// launch or a second window: a release must say `updater on`, and a
+    /// development or CI build `updater off`. It is also what a bug report
+    /// arrives with, and "could this copy have updated itself" is a question
+    /// about which build it was, like the banner beside it.
+    ///
+    /// Through the real writer: the header is read back out of a log that
+    /// [`super::open_run_log`] made, not assembled here.
+    ///
+    /// MUTATION: drop `updater {}` from `run_header`'s format, or print the
+    /// words the other way round, and this goes red.
+    #[test]
+    fn the_run_header_says_whether_this_build_may_update_itself() {
+        let storage = a_reports_directory("run-header-updater");
+        let _ = super::open_run_log(&storage, "2026-09-26T01:02:03.456Z", 4244);
+        let text = std::fs::read_to_string(super::log_path(&storage)).expect("the log was made");
+        let header = text.lines().next().expect("the log is not empty");
+
+        let (said, unsaid) = if crate::update::eligible() {
+            ("updater on", "updater off")
+        } else {
+            ("updater off", "updater on")
+        };
+        assert!(
+            header.contains(&format!(", {said} ──")),
+            "diagnostics.log opens with `{header}`, which does not end by saying `{said}`"
+        );
+        assert!(
+            !header.contains(unsaid),
+            "and never the other word: `{header}`"
         );
 
         let _ = std::fs::remove_dir_all(&storage);

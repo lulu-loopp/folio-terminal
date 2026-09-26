@@ -645,6 +645,8 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **Fourteen at the merge of both (2026-09-26):** A5's two lane files joined and census-3's `attention/tests.rs` left, so the test is `the_wholly_test_files_of_bt_app_are_the_fourteen`.
 
+**A fifteenth since 2026-09-26** (0.4.6 ticket U-8): `main.rs` declares `#[cfg(test)] mod update_eligibility;` — the build script's updater-flag decision, which `build.rs` reaches by `#[path]` and the binary compiles only for its tests — which makes `update_eligibility.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_fifteen`.
+
 ---
 
 ## 7. The end measurement

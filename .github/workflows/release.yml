@@ -140,7 +140,7 @@ jobs:
 
       - name: start what was built
         shell: pwsh
-        run: ./scripts/release/smoke.ps1 -Exe target/release/folio.exe -Artifacts target/smoke -TimeoutSeconds 300
+        run: ./scripts/release/smoke.ps1 -Exe target/release/folio.exe -Artifacts target/smoke -TimeoutSeconds 300 -Updater off
 
       # **What is built here leaves as a workflow artifact and never as a release
       # asset.** A workflow artifact is a zip inside a run, downloadable by

@@ -11,6 +11,9 @@ All notable changes to Folio are recorded here. The format follows
 - The self-updater's recovery rules exist as tested code: what an interrupted
   update leaves on disk decides whether it is finished, rolled back or retried.
   Nothing calls them yet, and no build updates itself.
+- A build now records whether it may ever update itself, and only a release
+  build says yes; `diagnostics.log` names it on each run's first line
+  (`updater on` / `updater off`). Nothing uses it yet.
 
 ### Fixed
 

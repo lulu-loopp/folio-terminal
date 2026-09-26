@@ -27,7 +27,8 @@
       6. It shuts down when asked, rather than being killed.
       7. The file a bug report actually arrives as — `diagnostics.log`, written
          by an ordinary run with no trace variable set — opens with the same
-         build line `--version` printed.
+         build line `--version` printed, and says whether this build may update
+         itself (`updater on` / `updater off`), which `-Updater` holds it to.
 
     `-ExpectSigned` adds a check before all seven, over the two artefacts rather
     than over anything running: the executable's signature, and the sparse
@@ -85,6 +86,19 @@
     settled by opening it rather than by its name: an msix is a zip too, so the
     name could not settle it.
 
+.PARAMETER Updater
+    `on` or `off`: what the executable has to say about whether it may update
+    itself (`FOLIO_UPDATER`, 0.4.6 ticket U-8), read from the header of the
+    `diagnostics.log` check 7 already reads. Only a release build invocation
+    sets the flag, so a development or CI build is held to `off` and a release
+    to `on`.
+
+    **`-ExpectSigned` alone means `on`**, because a signed release is what that
+    switch is for. A signed build that is not a release — a candidate — is
+    smoked with `-ExpectSigned -Updater off`, which says so out loud. Neither
+    given, the answer is printed and not held to anything: the clean-machine
+    run starts whatever archive it was handed.
+
 .PARAMETER PackageDirectory
     The directory `package.ps1` writes the release page into. Defaults to
     `target/release-package`, which is `package.ps1 -Output`'s own default.
@@ -102,7 +116,9 @@ param(
     [switch] $ExpectSigned,
     [string] $SignerSubject,
     [string] $Msix,
-    [string] $PackageDirectory
+    [string] $PackageDirectory,
+    [ValidateSet('on', 'off')]
+    [string] $Updater
 )
 
 $ErrorActionPreference = 'Stop'
@@ -814,3 +830,25 @@ if (-not ($header.Contains($line) -and $header.Contains('run started'))) {
     throw "diagnostics.log opens with '$header'; expected the same build line --version printed"
 }
 Write-Host "diagnostics.log: $header"
+
+# ── 7, continued: whether this build may update itself ───────────────────────
+#
+# A build fact, like the line above, and read from the same header rather than
+# from `--version`: three release scripts compare `--version` byte for byte, and
+# this is the line an ordinary run already writes. The flag is set by the release
+# build invocation and nothing else, so what is required is the caller's word for
+# which of the two this artefact is — `-Updater`, or `on` under `-ExpectSigned`.
+if ($header -notmatch ', updater (on|off) ──$') {
+    throw "diagnostics.log opens with '$header'; it does not say whether this build may update itself"
+}
+$said = $Matches[1]
+$required = if ($Updater) { $Updater } elseif ($ExpectSigned) { 'on' } else { $null }
+if ($required -and $said -ne $required) {
+    throw "this build says updater $said; it was expected to say updater $required"
+}
+if ($required) {
+    Write-Host "updater: $said, as required."
+}
+else {
+    Write-Host "updater: $said (not held to either answer: no -Updater, no -ExpectSigned)."
+}

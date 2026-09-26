@@ -504,7 +504,7 @@ jobs:
 
       - name: start it
         shell: pwsh
-        run: ./scripts/release/smoke.ps1 -Exe target/debug/folio.exe -Artifacts target/smoke -TimeoutSeconds 300
+        run: ./scripts/release/smoke.ps1 -Exe target/debug/folio.exe -Artifacts target/smoke -TimeoutSeconds 300 -Updater off
 
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

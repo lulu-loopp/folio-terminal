@@ -9,6 +9,11 @@ on:
         description: Commit, tag or branch to build (resolved once at checkout)
         required: true
         type: string
+      updater:
+        description: Build with FOLIO_UPDATER=on, so the copy may update itself (a release by dispatch, or the updater-test candidate)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -30,9 +35,17 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           cache: false
+      # **Whether the build may update itself is decided here, at the build
+      # invocation, and nowhere later** (0.4.6 ticket U-8): `build.rs` compiles
+      # `FOLIO_UPDATER` into the binary, so packaging or signing cannot change
+      # it. On for a `v*` tag push and for a dispatch that asks with
+      # `updater`; empty — off — for every other run, which is every candidate.
       - name: Build the shipped profile
         shell: pwsh
+        env:
+          FOLIO_UPDATER: ${{ ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || inputs.updater) && 'on' || '' }}
         run: |
+          Write-Host "FOLIO_UPDATER='$env:FOLIO_UPDATER'"
           cargo build --release --locked -p bt-app
           if ($LASTEXITCODE -ne 0) { throw 'release build failed' }
       - name: Bill of materials from this checkout

@@ -101,6 +101,29 @@ pub const RELEASES_PATH: &str = "/repos/lulu-loopp/folio-terminal/releases";
 /// The page a press opens, which is for a person rather than for this code.
 pub const RELEASES_PAGE: &str = "https://github.com/lulu-loopp/folio-terminal/releases";
 
+/// **Whether this build may update itself** (0.4.6 ticket U-8).
+///
+/// A build fact, decided once by `build.rs` from `FOLIO_UPDATER` and carried
+/// here as the cfg `folio_updater`: true only for a build whose invocation said
+/// `FOLIO_UPDATER=on`, which the release pipeline does and nothing else does
+/// (`build-release.yml` on a `v*` tag or its `updater` dispatch input, and the
+/// macOS release build in `docs/RELEASING.md`). A `cargo build`, a CI build and
+/// every candidate answer false. See `src/update_eligibility.rs` for the one
+/// value the variable takes.
+///
+/// **Eligibility, not permission.** The owner's ruling of 2026-09-25 makes a
+/// copy's self-update need a signed running build *and* this flag; the signature
+/// is asked elsewhere, when there is an update to ask it about. And it is a
+/// capability the bytes carry rather than a claim about where they came from:
+/// a copied release binary is as eligible as the one that was downloaded.
+///
+/// Read today by the `diagnostics.log` run header, which is where `smoke.ps1`
+/// checks it; the update job (U-18) is its reader to come.
+#[must_use]
+pub const fn eligible() -> bool {
+    cfg!(folio_updater)
+}
+
 /// The `User-Agent` the request travels under, and the only thing it says.
 ///
 /// **Not empty, and the reason is not ours**: GitHub's API refuses a request
@@ -695,9 +718,41 @@ fn unix_epoch_ms() -> u64 {
 mod tests {
     use super::{
         CHECK_INTERVAL_MS, CLAIM_STALE_MS, Outcome, Releases, STATE_FILE_NAME, Version, due,
-        mark_is_lit, mark_seen, newer_than, newest_tag, run,
+        eligible, mark_is_lit, mark_seen, newer_than, newest_tag, run,
     };
     use bt_persist::UpdateCheckV1;
+
+    /// RED (U-8) — **a build without the flag is never eligible, and a build
+    /// with `FOLIO_UPDATER=on` always is.**
+    ///
+    /// Stated against the environment this very test binary was compiled in,
+    /// read here with `option_env!` independently of `build.rs`: the build script
+    /// is the real producer and [`eligible`] the real reader, and this holds the
+    /// pair to the input. An ordinary `cargo test` — CI's, and every developer's
+    /// — is the first branch, which is the half that matters: nothing but the
+    /// release invocation may make a copy that updates itself. The other branch
+    /// is what `FOLIO_UPDATER=on cargo test` checks. A build with any other value
+    /// never gets this far; `build.rs` refuses it
+    /// (`update_eligibility::tests::the_flag_accepts_only_its_exact_value`).
+    ///
+    /// MUTATION: make `eligible` answer `true`, or have `build.rs` emit the cfg
+    /// whatever `decide` says, and the first branch goes red.
+    #[test]
+    fn a_build_without_the_flag_is_never_eligible() {
+        match option_env!("FOLIO_UPDATER") {
+            None | Some("") => assert!(
+                !eligible(),
+                "this test binary was built without FOLIO_UPDATER and says it may update itself"
+            ),
+            Some(value) => {
+                assert_eq!(value, "on", "build.rs refuses every other value");
+                assert!(
+                    eligible(),
+                    "this test binary was built with FOLIO_UPDATER=on and says it may not update itself"
+                );
+            }
+        }
+    }
     use std::{
         cell::RefCell,
         path::{Path, PathBuf},
