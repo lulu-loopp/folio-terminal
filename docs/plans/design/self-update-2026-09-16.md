@@ -1895,8 +1895,14 @@ notarized third-party applications answered `source=Notarized Developer ID`;
 two of them satisfy their own designated requirement conjoined with the
 Developer ID requirement under `--strict --deep`, and the third fails `--strict`
 validity with `resource fork, Finder information, or similar detritus not
-allowed` — a Finder or resource-fork attribute on the installed copy; whether
-the install marker's attribute counts as one is E1's question. An ad-hoc bundle is `rejected` and fails the Developer
+allowed` — a Finder or resource-fork attribute on the installed copy. U-1's
+marker attribute is not such an attribute: on an ad-hoc bundle,
+`io.github.lulu-loopp.folio.install` on the bundle root, `Contents/`,
+`Contents/MacOS/`, the main executable or a resource file leaves
+`--verify --strict --deep --all-architectures` at exit 0 (and survives
+`ditto`), while `com.apple.FinderInfo` on the root or the executable is refused
+with that sentence. E1's remaining half — signing, stapling and Gatekeeper on a
+real notarized bundle — is unchanged. An ad-hoc bundle is `rejected` and fails the Developer
 ID requirement with `codesign` exit 3. E-8 itself runs on a real notarized, stapled `Folio.app`, so
 it is the owner's: a `ditto` copy assessed online, then offline with
 `--ignore-cache --no-cache` (the cache not yet warm), then with its stapled
