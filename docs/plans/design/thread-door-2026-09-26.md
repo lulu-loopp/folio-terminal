@@ -1728,3 +1728,319 @@ later tickets:
 (d) No ownership changes in this commit. Revision (c) adds one ownership
 change for A1a, beyond §13.2's: "which role does a standalone process's main
 thread have" gets an owner, `enter_standalone_main`.
+
+---
+
+## Revision 2026-09-26 (d), after the scoped Codex round
+
+Review: `docs/plans/design/thread-door-review-codex-2026-09-26-b.md` (Codex,
+scoped, at `80833cc7`), verdict **adopt with changes**. P5–P8 are met. P1–P4
+are not met, and each has exactly one change named. This revision adopts the
+four changes in substance. It is appended; where it differs from earlier
+sections and revisions, **it rules**. It was checked against the code at
+`78a3699a`, and each subsection ends adopted or refused. None is refused.
+Codex's dispatch gate stands:
+- A1a is dispatched after (d)1–(d)3;
+- A1e is dispatched after (d)4.
+
+### (d)1 · P1 — the test allocation, explicit: adopted
+
+**The change.** Every test arm whose producer is a thread started by
+`spawn_at_priority` belongs to **A1b**, because A1b is the ticket that makes
+such a thread a `Worker`. So:
+- M4g leaves A1a;
+- the worker-refusal arm of owner-side M5 moves to A1b;
+- A1d keeps the `Window` control of M5.
+
+The standalone entry is not used anywhere as a stand-in for a spawned worker.
+No test outside this table implies a producer. The table below **replaces**
+§11's, (c)1's and (c)8's test lists.
+
+| ticket | test | producer of the thread under test | kind |
+|---|---|---|---|
+| **A1a** | M4a, M4b, M4c, M4d, M4e, M4f, M4h (the token cases, each with its (c)8 control) | none (compile-time) | compile-fail pairs |
+| A1a | auto-trait probes for `WaitToken` and `CallbackScope` ((c)8 items 2–3) | none; `std::thread::scope` for the transfer cases | compile-fail pairs |
+| A1a | M4g′: `admitted` refused on a `Callback` thread | a plain `std::thread`, then `enter_callback` | executed |
+| A1a | M4g″: `admitted` refused on an `Unset` thread | a plain `std::thread` | executed |
+| A1a | M4i, every arm: (b)1's early-error sequence, (c)5's four quit-driver cases and the build-error road, and (c)8's rule that a second `enter_window_thread()` cannot reset `Running` | a plain `std::thread`, then `enter_window_thread` | executed |
+| A1a | M4i′, the `Window`/phase arms: the phase writers refused and counted on an `Unset` thread; transitions not in their rows refused on the window thread | plain threads | executed |
+| A1a | `CallbackScope` on `Unset` and on `Window`: nesting, and restoration on unwind ((c)7) | plain threads | executed |
+| A1a | the meter and `Cookie` tests of (d)2 | a window-entered plain thread | executed |
+| A1a | `enter_standalone_main`: the first call lends a `WorkerCtx` whose role is `Worker(name)`; a second call is `Refused` | the test binary's own thread, in **its own integration-test target** (`crates/bt-platform/tests/standalone_entry.rs`), because the entry is once per process | executed |
+| **A1b** | M3, M3r, M3r′ | none | compile-fail pairs |
+| A1b | auto-trait probes for `WorkerCtx` and `ShellThread` | none; scoped threads | compile-fail pairs |
+| A1b | M4g: `admitted` refused on a spawned worker, `work` not run, the counter up by exactly one | `spawn_at_priority` | executed |
+| A1b | M4i′, the worker arm: `loop_running()`, `exiting()` and `quit_abandoned()` refused and counted on a spawned worker | `spawn_at_priority` | executed |
+| A1b | owner-side M5, the **worker-refusal arm**: a `Box<dyn Fn()>` and an `fn` pointer that call `admitted` run on a spawned worker; refused, not run | `spawn_at_priority` | executed |
+| A1b | worker-side M5: `ShellThread::enter` reached through a `Box<dyn Fn(&WorkerCtx)>` and through an `fn(&WorkerCtx)` pointer inside a spawned body (executed), and each with no context in scope (compile-fail pair) | `spawn_at_priority` | executed and compile-fail |
+| A1b | `CallbackScope` on a spawned worker: non-owning, role unchanged | `spawn_at_priority` | executed |
+| A1b | the real hand-off producer control ((c)8 item 6) | `HandoffLane::spawn` | executed |
+| A1b | the three band tests, changed to `\|_ctx\|` | `spawn_at_priority` | executed |
+| **A1c** | one role witness per crate: a converted thread's body records `role()`, and the test reads `Worker("<its name>")` | the converted site's own start function | executed |
+| A1c | each converted site keeps its spawn-failure behaviour; the existing tests of each site run unchanged | the site | executed |
+| **A1d** | owner-side M5, the **`Window` control**: the same `Box` and `fn`-pointer calls on a window-entered thread are admitted and run | a plain thread, then `enter_window_thread` | executed |
+| A1d | every row's witness in (d)3's table | per row | executed |
+| A1d | every row's signature coercion ((c)8 item 9) | none | compiled |
+| **A1e** | every guard assertion of §9.1, as amended by (c)4, (c)8 item 9 and (d)4; the mutations M7a–M7d, M10–M14 and (d)4's `Drop` mutations | none (source) | source guard |
+
+**Adopted.**
+
+### (d)2 · P2 — the cookie carries the whole `Location`: adopted
+
+**Checked.**
+- `hang_watch::enter` calls `Heartbeat::enter_at`, which charges the new
+  station, enters the call-tree node and sets the scope. It returns
+  `Location::Resume { station: previous, node: parent, scope }`.
+- `station` is a `Station`, which is `#[repr(u8)]` with `STATION_COUNT` = 210.
+- `node` and `scope` are `usize` indices into `hang_watch_detail`'s ledger,
+  whose `CAPACITY` is 256. `ROOT` = `CAPACITY` = 256 is the sentinel the ledger
+  hands out when it is full. So `node` and `scope` each lie in `0..=256`, which
+  needs nine bits.
+- `resume_at(station, node, scope, now)` restores all three whatever their
+  values, `ROOT` included.
+
+(c)2's adapter stack threw away the `Location` of any call it could not push,
+which is why its 17th call misattributed its parent's remaining work.
+
+**The change.** This replaces (c)2's adapter stack, `ADMITTED_DEPTH`,
+`Cookie::OVERFLOW`, the generation counter and the mismatch counting.
+
+```rust
+// bt_platform::admission
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Cookie(u64); // an opaque payload; admission never reads it
+impl Cookie {
+    pub const fn from_raw(raw: u64) -> Self;
+    pub const fn raw(self) -> u64;
+}
+pub struct Meter {
+    pub enter: fn(DoorKey) -> Cookie,
+    pub leave: fn(DoorKey, Cookie, Instant, Instant),
+}
+```
+
+**`Cookie` is one `u64`, and a `u64` is enough.** Its layout, owned by
+`hang_watch`:
+
+| bits | field | range | why this width |
+|---|---|---|---|
+| 0–7 | `station` (the `Station` byte) | 0–209 | `#[repr(u8)]` |
+| 8–23 | `node` | 0–256 (`ROOT` = 256) | `u16`; nine bits are needed, and sixteen leave room for `CAPACITY` to grow to 65,535 |
+| 24–39 | `scope` | 0–256 | the same |
+| 40–63 | zero | — | reserved |
+
+`hang_watch` declares `const _: () = assert!(hang_watch_detail::CAPACITY < u16::MAX as usize);`,
+so a capacity that stops fitting is a compile error, not a truncation.
+`[u32; 4]` is not needed.
+
+- **`enter`** is `hang_watch`'s registered function. It calls
+  `hang_watch::enter(station_of(key))` and packs the returned
+  `Location::Resume` into the cookie. `enter` only ever returns the `Resume`
+  shape, so no tag bit is needed.
+- **`leave`** unpacks the cookie and calls
+  `resume_at(station, node, scope, now)`, which is `hang_watch::at` of the
+  saved `Location`. It does this on every normal return, **including when the
+  detail ledger was full**: a `ROOT` node or scope is restored as `ROOT`, so the
+  parent's station and position are restored exactly as `during` restores
+  them.
+- **No stack, no depth limit, no overflow sentinel.** Nesting is carried by
+  `admitted`'s own call stack, since each `admitted` frame holds its own
+  cookie. So recursive, same-door and `during_pane`-nested admissions all
+  restore the `Location` their own `enter` returned. A station byte that does
+  not decode (`Station::from_byte` is `None`) cannot come from `enter`. If one
+  appears, `leave` restores nothing and counts, and this is the only counter
+  left.
+
+**Kept from (c)2.**
+- An admitted call costs four clock reads: `enter`, `admitted`'s start and
+  end, and `resume_at`'s `now`. This is stated for A3 to measure.
+- The refusal total is written by `diagnostics::run_footer`, through
+  `fn main`'s `trace_sink::stderr_line`.
+- (b)4's unwind policy holds: no guard, and `leave` is not called on unwind,
+  so the door's station stays until a later `at`, scope restoration or turn
+  reinitialisation replaces it.
+
+**Tests (A1a), deterministic, replacing (c)2's list:**
+- a round trip of `Cookie` packing for every station byte and for `node` and
+  `scope` at 0, 255 and 256 (`ROOT`);
+- station, node and scope restored after an admitted call nested in `during`,
+  in `during_pane`, and in another admitted call of the same door;
+- restoration with the detail ledger filled to `CAPACITY` before `enter`: the
+  parent's `ROOT` node and scope come back;
+- a nesting depth of 64 restores every level;
+- a caught panic leaves the door's station current;
+- an inner call's `[start, end]` lies inside its outer call's.
+
+**Adopted.**
+
+### (d)3 · P3 — the door table at item level: adopted
+
+**Checked.** The facts behind the rows below:
+- visibility: `set_visible` is called in `put_the_window_on_the_glass`
+  (`true`), `hide_quake_window` (`false`) and `let_go_of_this_window`
+  (`false`);
+- cursor: `apply_pointer_cursor` makes two `set_cursor` calls, one in its
+  early branch and one at its tail;
+- focus: `focus_window` is called in `open_from_notification`;
+- present: `present_seats_and_commit` wraps its body in
+  `during(PresentSeats)`, calls `renderer.present_frame_with_phases` between
+  `enter(RenderCompose)` and `at(present_parent)`, and then, only after a
+  `Presented`/`PresentedWithoutText` outcome, calls
+  `compositor.set_covered_size` under `during(CompositorSize)` and
+  `compositor.commit()` under `during(CompositorCommit)`;
+- `present` and `present_frame` in `bt-render` are reached only from
+  `bt-render`'s tests and `glyph_probe` (itself used only by test targets);
+- `configure_window_surface` is private to `bt-render`, reached from
+  `WindowRenderer::from_surface` (via `WindowRenderer::new`, whose one product
+  caller is `Runtime::open_window`) and from `adopt_new_device` (row 10);
+- the other `Compositor::commit` calls are in `WebSeat::stand_parked`,
+  `WebSeat::adopt`, and the spare seat's `advance` and `retire`;
+- the web engine: `WebHost::request_controller` is called once, in
+  `WebSeat::step`, and `WebHost::request_environment` is called once, in
+  `WebSeat::start_environment`;
+- row 13's residue is `sample_window_place`'s `PlaceHidden` and
+  `PlaceExposure` probes (the taskbar probe is ticket 62's lane).
+
+**Conventions for every row.**
+- **Minting.** "Minted at" is the statement where `admitted::<doors::X, _>(|t| …)`
+  wraps the door call. The token is created by `admitted`, moved into the
+  closure, and **consumed by value** by the door function. Every door
+  signature below takes `token: WaitToken<'_, doors::X>` as its first
+  parameter (after `self`, where there is one).
+- **Winit calls.** Native calls on winit's `Window` are foreign methods, so
+  each gets a small `bt-app` door in a new module `owner_door`, wrapping the
+  one winit call.
+- **Refusal.** A `Refused` is handled at the minting statement, before
+  anything the row mutates.
+
+| door type · row | door function and exact signature | minted at (the admission boundary) | all callers of the minting function | phases | metric | on `Refused` | witness |
+|---|---|---|---|---|---|---|---|
+| `PtyBirth` · 11 | `bt-app` `pty_door::spawn_shell(token: WaitToken<'_, doors::PtyBirth>, program: OsString, args: &[OsString], environment: &[(OsString, OsString)], size: PtySize, wake: OutputWake, working_directory: Option<PathBuf>) -> Result<PtySession, PtyError>`, whose body is `PtySession::spawn_shell_in(…)` | `create_leaf_session`, at its `spawn_shell_in` statement | every caller of `create_leaf_session` (unchanged; the brief lists them by grep) | Running, Exiting | single call | returns `Err` into `create_leaf_session`'s existing spawn-failure branch | a headless leaf birth records one `PtyBirth` admission and yields a live session |
+| `PtyResize` · 12 | `pty_door::resize(token: WaitToken<'_, doors::PtyResize>, pty: &mut PtySession, size: PtySize) -> Result<(), PtyError>` | `commit_leaf_resize`, at `pty.resize(pty_size(next_grid, physical))`: after the reflow, before the reconcile, keeping the `?` | `release_due_leaf_resize` ← `Runtime::flush_pending_pty_resize` | Running, Exiting | single call **per leaf**; the flush is not admitted | mapped to the same `Err` the `?` propagates today | two leaves in one flush give two admissions; a refused resize takes the existing error road |
+| `PaneRetirementWait` · 15 | `pty_door::wait_for_retirements(token: WaitToken<'_, doors::PaneRetirementWait>, budget: Duration) -> usize` | `settle_quit`'s `QuitStep::Retire` arm | `FolioApp::settle_quit` | Exiting | single call | logs that the count is unknown; quit proceeds as on a timeout | the quit driver's `Retire` step |
+| `SessionWriteWait` · 16 | `SessionWriter::wait_for(&mut self, token: WaitToken<'_, doors::SessionWriteWait>, generation: u64) -> SessionWaitAnswer` | `SessionStore::flush_judged`, at its `self.writer.wait_for(generation)` statement | `QuitStep::Write`'s arm; `SessionStore::flush` ← `SessionStore::close` ← `App::finish` | Exiting | single call | returns the existing stalled answer (quit proceeds) | `flush_judged` through `QuitStep::Write` records one admission |
+| `SessionWriterRetire` · 16b | `SessionWriter::close(&mut self, token: WaitToken<'_, doors::SessionWriterRetire>)` | `SessionStore::close`, at `self.writer.close()` | `App::finish` | Exiting | single call (a bounded poll and a join) | the writer is left to process exit, as its budget-expired branch does | `App::finish` records one admission |
+| `TraceFlush` · 17 | `trace_sink::flush(token: WaitToken<'_, doors::TraceFlush>)` | `fn main` after `run_app`; `Shutdown::drop` (conditional, (d)4) | `fn main`; `Shutdown::drop` | Exiting | single call | queued lines are lost, as on its timeout | a window-entered test runs `exiting()` and then the admitted flush |
+| `LaunchHandOver` · 18 | `launch_wire::hand_over(token: WaitToken<'_, doors::LaunchHandOver>, directory: &Path, argv: &cli::CliRequest, say: impl Fn(&str)) -> Option<i32>` | `fn main`, at its `hand_over` call | `fn main` | Starting | single call | `None`: carry on and open a window | the existing hand-over tests on a window-entered thread |
+| `PresentFrame` · 9 | `WindowRenderer::present_frame_with_phases(&mut self, token: WaitToken<'_, doors::PresentFrame>, gpu: &mut GpuContext, seats: &[SeatFrame<'_>], trigger: FrameTrigger, phase: impl FnMut(PresentPhase)) -> Result<PresentOutcome, RenderError>`. The test-only wrappers `present_frame` and `present` take the same token and forward it | `present_seats_and_commit`, at `renderer.present_frame_with_phases(…)`. The admission **replaces** the `enter(RenderCompose)` / `at(present_parent)` pair, and the meter's `enter` pushes `RenderCompose` | `Runtime::present_seats_and_commit` ← its two callers in `runtime/frame.rs` and `runtime/preview.rs` | Running, Exiting | **declared batch, one per window per present**: composition, surface configure, acquire, submit and present for that window. The `phase` callback still moves `hang_watch` between the inner stations (`SurfaceConfigure`, `SurfaceAcquire`, `QueueSubmit`, `SwapchainPresent`, …), which stay stations, not admissions | an `anyhow` error returned through the existing `?`, the road a `RenderError` takes | a headless present records exactly one `PresentFrame` admission per window, whose interval contains every inner phase station's time |
+| `CompositorCommit` · 9 | `bt_platform::Compositor::commit(&self, token: WaitToken<'_, doors::CompositorCommit>) -> Result<(), String>` | `present_seats_and_commit`'s `committed` closure at `compositor.commit()`; `WebSeat::stand_parked`; `WebSeat::adopt`; the spare seat's `advance` and `retire` | the present road above; the web seat's parking and adoption roads; the spare controller's step and retirement | Running, Exiting | single call | present: the existing `FailedCommit` road; the web seat and the spare: the `Err` they already handle or discard | present with a commit gives two admissions per window, `PresentFrame` then `CompositorCommit`; a web page parking records one |
+| — `set_covered_size` | **not a door**: a property set on the uncommitted DirectComposition tree, which does not wait. It stays under `during(CompositorSize)` | — | — | — | — | — | — |
+| `SurfaceBirth` · 9 | `WindowRenderer::new(token: WaitToken<'_, doors::SurfaceBirth>, gpu: &mut GpuContext, target: WindowTarget, width: u32, height: u32, scale_factor: f64) -> Result<WindowRenderer, RenderError>` (reaches `configure_window_surface` through `from_surface`) | `Runtime::open_window`, at `WindowRenderer::new(…)` | `Runtime::open_window` | Running | single call | the window's existing "open the new window's surface" error | opening a second window records one admission |
+| (`adopt_new_device`'s configure) · 10 | **deferred to B9** | — | — | — | — | — | — |
+| `TitleFlush` · 14 residue | `owner_door::set_title(token: WaitToken<'_, doors::TitleFlush>, window: &Window, title: &str)` | `Runtime::flush_title`, at `window.set_title(&title)` | `Runtime::turn`; `Runtime::dress_new_window` | Running, Exiting | single call | the wanted title stays wanted and is written next turn | a changed title is written once, with one admission |
+| `ImeCaretArea` · 22 residue | `owner_door::set_ime_cursor_area(token: WaitToken<'_, doors::ImeCaretArea>, window: &Window, position: Position, size: Size)` | `Runtime::apply_ime_cursor_area`, at `self.window.window.set_ime_cursor_area(…)` | `Runtime::flush_ime_cursor_area` ← `Runtime::turn`, `Runtime::ime_input` | Running, Exiting | single call | the wanted area stays wanted and is told next turn | a moved caret is told once, with one admission |
+| `FocusWindow` · §5.2 | `owner_door::focus_window(token: WaitToken<'_, doors::FocusWindow>, window: &Window)` | `Runtime::open_from_notification`, at `self.window.window.focus_window()` | `FolioApp::route_clicked_notifications` | Running | single call | the route opens without taking focus | a clicked notification records one admission |
+| `SetVisible` · §5.2 | `owner_door::set_visible(token: WaitToken<'_, doors::SetVisible>, window: &Window, visible: bool)` | three statements: `Runtime::put_the_window_on_the_glass` (`true`); `Runtime::hide_quake_window` (`false`); `Runtime::let_go_of_this_window` (`false`) | `put_the_window_on_the_glass` ← `Runtime::show_new_window`, `Runtime::show_quake_window`; `hide_quake_window` ← `FolioApp::dismiss_quake`; `let_go_of_this_window` ← `Runtime::retire_window`, `Runtime::close_window` | `true`: Running. `false`: Running, Exiting | single call | `true`: the window stays hidden and the existing show-failure road runs. `false`: the retire or close continues, as when a hide has no effect | each of the three roads records one admission |
+| `SetCursor` · §5.2 | `owner_door::set_cursor(token: WaitToken<'_, doors::SetCursor>, window: &Window, cursor: Cursor)` | two statements in `Runtime::apply_pointer_cursor`: the early branch's `set_cursor(cursor)` and the tail's `set_cursor(pointer_cursor(…))` | `apply_pointer_cursor`, called from its many pointer roads (`mouse`, `panes`, `preview`, `peek`, `floats`, `web`, `FolioApp`), all unchanged because the boundary is inside it | Running | single call | the cursor keeps its shape until the next pointer event | each branch records one admission |
+| `WebController` · 21 | `bt_platform::WebHost::request_controller(&mut self, token: WaitToken<'_, doors::WebController>, window: NativeWindow, generation: u64) -> Result<(), String>` | `WebSeat::step`, at `self.host.request_controller(window, generation)` | `WebSeat::step`, from the pane's page road and from the spare's `SpareSeat::advance` | Running | single call | the step's existing `Err` road (the page stays coming up) | a warm or spare step records one admission |
+| `WebEnvironment` · 21 | `bt_platform::WebHost::request_environment(&mut self, token: WaitToken<'_, doors::WebEnvironment>, folder: &Path, generation: u64) -> Result<(), String>` | `WebSeat::start_environment`, at `self.host.request_environment(&folder, generation)` | `WebSeat::open`, `WebSeat::step` (two arms); the spare's `open` and `step` (two arms) | Running | single call | the existing `Err` road | `warm_web_engine` records one admission |
+| `FontFamilyLookup` · 5 residue | `bt_platform::monospace_family_named(token: WaitToken<'_, doors::FontFamilyLookup>, name: &str) -> Option<MonospaceFamily>` (all three platform arms) | `settings::monospace_family_files`, at its call | `apply_stored_terminal_font` (from `Runtime::create` and from `runtime/terminal.rs`'s font-change road), via `monospace_family_files` | Running (`Runtime::create` runs from `resumed`, which winit calls after `new_events(Init)`) | single call | `None`: the family is treated as not found, the existing answer | a stored family name at launch records one admission |
+| `PlaceHidden` · 13 residue | `main::window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &Window) -> bool` (the existing `bt-app` function, calling `bt_platform::is_window_minimized` and `is_window_cloaked`) | `sample_window_place`, at its `PlaceHidden` probe (the `enter`/`at` pair is replaced by the admission) | `Runtime::observe_window_place` | Running, Exiting | single call | the previous place is kept | one turn's head records one admission |
+| `PlaceExposure` · 13 residue | `main::window_is_exposed(token: WaitToken<'_, doors::PlaceExposure>, window: &Window) -> bool` (the existing `bt-app` function, calling `bt_platform::window_is_exposed`) | `sample_window_place`, at its `during(PlaceExposure)` | `Runtime::observe_window_place` | Running, Exiting | single call | the previous place is kept | the same |
+
+**The presentation measurement, stated.**
+- `during(PresentSeats)` stays an outer **scope station** around the whole
+  function. It is not an admission.
+- Inside it are at most two **sibling, non-overlapping** admissions:
+  `PresentFrame` (always, when the gate lets the frame through) and then
+  `CompositorCommit` (only after a presented outcome), so
+  `PresentFrame.end ≤ CompositorCommit.start`.
+- `set_covered_size` lies between them under its own station and is
+  measured by no admission.
+- A window's present therefore yields one or two admission records, and the
+  per-turn wait union of B§R-C counts both.
+
+**Deferred rows** are unchanged from (c)3: 2, 3, 4, 7, 8, 10, 19 and 20.
+
+**Adopted.**
+
+### (d)4 · P4 — a closed edge-and-effect inventory per exception: adopted
+
+**Checked** (each body read on `78a3699a`):
+- Both `video::engine::Engine::shutdown` and `macos_player::Engine::shutdown`
+  send `Shutdown`, then poll `stopped` with `std::thread::sleep(2 ms)` under
+  `SHUTDOWN_BUDGET`, then join.
+- `PtySession::drop` finishes the input dump (`PtyDump::finish`: one
+  `writeln!`, then `publish`: two `sync_data`) **before** calling `shutdown`.
+- `PtySession::shutdown`, in order:
+  1. `input.close()`;
+  2. the writer is taken (detached);
+  3. the child's `try_wait`, then `kill`, then `reap_within` (which polls with
+     `sleep`);
+  4. `output.close()`;
+  5. the master is dropped;
+  6. `join_within` (a `join` and a polling `sleep`).
+- `trace_sink::flush` calls `flush_sink`, which does, in order: a polling
+  `sleep` on `queue.close()`, `finished.recv_timeout`, a polling `sleep` on
+  `is_finished`, and a conditional `join`.
+- `VideoSeat::shutdown` is `self.engine.shutdown()`, and
+  `VideoSeats::shutdown_all` calls `VideoSeat::shutdown` per seat.
+
+**The rule, replacing (c)4 items 1–3.** For each exception, the inventory
+below is **closed**. From the `Drop` body, the guard walks the listed chain,
+resolving calls to first-party items by `bt_source` item identity. For each
+body it computes:
+- (i) the ordered list of calls that resolve to first-party items;
+- (ii) the count of each vocabulary effect, by call site in that body, not by
+  execution.
+
+The build is red when:
+- a first-party call appears that is not in the row's edge list, whatever
+  that function does — this closes Codex's counterexample of a
+  non-vocabulary helper that reaches a door;
+- a listed edge is missing or out of order;
+- any effect count differs from the row's;
+- a `Drop` that is not in the table reaches any registered door or listed
+  chain member.
+
+Calls to std and foreign items outside the vocabulary are not listed and not
+counted. The table is the whole baseline.
+
+| exception | ordered chain: first-party edges (→) and effects (·, count by call site) | product reach | repayment · version |
+|---|---|---|---|
+| `DirWatch` (Windows, `bt-platform` `lib.rs`) | `drop`: · `SetEvent` ×1 · `JoinHandle::join` ×1 · `close` ×3 | a watch retired on the window thread (row 8) | B7 (D-40) · 0.4.6 |
+| `DirWatch` (macOS) | `drop` → `Stopper::signal` ×1 (its body: no vocabulary effect, pinned at count 0) · `JoinHandle::join` ×1 | the same | B7 (D-40) · 0.4.6 |
+| `trace_sink::Shutdown` | `drop` → `flush` ×1 → `flush_sink` ×1: · `thread::sleep` ×1 (the queue-close poll) · `Receiver::recv_timeout` ×1 · `thread::sleep` ×1 (the writer poll) · `JoinHandle::join` ×1 | **conditional**: only `fn main`'s event-loop build-error return, and a reachable constructor failure is **not established** (Codex, both rounds). The normal exit flushes explicitly and leaves through `leave_process` | *The trace writer is retired through its admitted flush door, never by a drop* · 0.4.7 |
+| `AttentionPipe` (Windows) | `drop`: · `SetEvent` ×1 · `JoinHandle::join` ×1 · `CloseHandle` ×1 | none in the product: the endpoint is static | *An endpoint is retired through an explicit door, not by its drop* · 0.4.7 |
+| `AttentionPipe` (Unix) | `drop`: · `libc::write` ×1 · `JoinHandle::join` ×1 · `libc::close` ×1 | none (static) | the same · 0.4.7 |
+| `LaunchPipe` (Windows) | `drop`: · `SetEvent` ×1 · `JoinHandle::join` ×1 · `CloseHandle` ×1 | none (static) | the same · 0.4.7 |
+| `LaunchPipe` (Unix) | `drop`: · `libc::write` ×1 · `JoinHandle::join` ×1 · `libc::close` ×1 | none (static) | the same · 0.4.7 |
+| `video::engine::Engine` | `drop` → `Engine::shutdown` ×1: · `Sender::send` (not vocabulary) · `thread::sleep` ×1 (the 2 ms poll) · `JoinHandle::join` ×1 | a seat closed on the window thread | *A video engine is shut down through an explicit door, not by its drop* · 0.4.7 |
+| `macos_player::Engine` | `drop` → `Engine::shutdown` ×1: · `thread::sleep` ×1 · `JoinHandle::join` ×1 | the same | the same · 0.4.7 |
+| `VideoSeat` (`bt-app`) | `drop` → `VideoSeat::shutdown` ×1 → `Engine::shutdown` ×1 (the platform row's chain). Later drops of the engine find `thread` taken and return early; the chain is the same code | a pane closed on the window thread | the same · 0.4.7 |
+| `VideoSeats` (`bt-app`) | `drop` → `VideoSeats::shutdown_all` ×1 → `VideoSeat::shutdown` ×1 (one call site, in a loop) → `Engine::shutdown` ×1 | a window closed on the window thread | the same · 0.4.7 |
+| `PtySession` (`bt-pty`) | `drop`, in this order: → `PtyDump::finish` ×1 (inside `if let Some(dump)`): · `writeln!` to the chunks file ×1 → `PtyDump::publish` ×1: · `File::sync_data` ×2 — **then** → `PtySession::shutdown` ×1: → `InputRing::close` ×1 · `Child::try_wait` ×1 · `Child::kill` ×1 → `reap_within` ×1: · `thread::sleep` ×1 → `OutputRing::close` ×1 → `join_within` ×1: · `JoinHandle::join` ×1 · `thread::sleep` ×1 | on `pty-retirement`; on the caller only when that thread cannot be started | *A shell is taken apart only through `retire_within`, never by a drop on the window thread* · 0.4.7 |
+
+The effect vocabulary used above is the registry's (A1a): `thread::sleep`,
+`JoinHandle::join`, `Receiver::recv*`, `File::sync_*`, file writes, and the
+platform waits (`SetEvent` and `CloseHandle` are listed as effects so that
+their counts are pinned, although they do not wait). `writeln!` to a `File`
+counts as a file write.
+
+**Controls and mutations (A1e).** The controls are today's complete chains
+exactly as tabled, all green. Each mutation must turn the build red:
+1. `VideoSeats::drop` calls a new helper that calls `SessionWriter::wait_for`
+   — red: unlisted edge;
+2. a second `thread::sleep` in `video::engine::Engine::shutdown` — red: the
+   count changes;
+3. a new non-vocabulary helper added to `Engine::shutdown`'s body that calls
+   `trace_sink::flush` — red: unlisted edge (Codex's counterexample);
+4. `PtySession::drop` reordered to call `shutdown` before finishing the dump —
+   red: order;
+5. a new `impl Drop for WebSeat` that calls `Compositor::commit` — red: a
+   `Drop` outside the table reaches a registered door.
+
+**Adopted.**
+
+### (d)5 · This revision's own architecture impact
+
+(a) None. (b) None in this commit. The design adds these doors to A1d's
+scope:
+- the `owner_door` module (`set_title`, `set_ime_cursor_area`,
+  `focus_window`, `set_visible`, `set_cursor`);
+- the two place probes, `window_is_hidden` and `window_is_exposed`, taking
+  tokens;
+- `SurfaceBirth`;
+- `CompositorCommit`'s four web-seat callers.
+
+(c) None repaid or added in this commit. (c′) None. (d) No.
