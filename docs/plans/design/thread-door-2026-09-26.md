@@ -2385,3 +2385,193 @@ wait found, not a ruling that the wait may stay.
 (c′) None.
 
 (d) No.
+
+---
+
+## Revision 2026-09-26 (f), after the last Codex confirmation
+
+Review: `docs/plans/design/thread-door-review-codex-2026-09-26-d.md` (Codex,
+static, at `e8290621`). It found:
+- the P2 wording **met**;
+- P3 and P4 each one narrow change short;
+- **no new registry door**.
+
+This revision is appended, and where it differs from earlier text it rules. It
+changes two things and nothing else.
+
+### (f)1 · P3 — `commit_now`'s visibility, and a reproducible caller-search closure: adopted
+
+**Checked.**
+- `Compositor` is defined inside `mod windows_impl` in
+  `bt-platform/src/lib.rs`, while `webview` is a sibling module
+  (`mod webview;`) of the crate root.
+- A private method of `Compositor` is therefore not reachable from
+  `WebHost::rehost` or `WebHost::compensate`. (e)2's "private `commit_now`"
+  could not serve four of its six internal statements.
+
+**The contract, replacing (e)2's paragraph on `commit_now`.**
+
+```rust
+// bt-platform, mod windows_impl
+impl Compositor {
+    /// The door: the only public road to a composition commit.
+    pub fn commit(&self, token: WaitToken<'_, doors::CompositorCommit>) -> Result<(), String> {
+        let _ = token;
+        self.commit_now()
+    }
+    /// Tokenless; crate-visible so `webview` can reach it. Its callers are pinned.
+    pub(crate) fn commit_now(&self) -> Result<(), String> { /* today's `commit` body */ }
+}
+```
+
+`commit_now` is `pub(crate)`. Its callers are **exactly seven**, and A1e pins
+this list by owner and count:
+
+| # | caller (owner) | covered by |
+|---|---|---|
+| 1 | `Compositor::commit`, the forwarding call | `CompositorCommit`'s own admission |
+| 2 | `Compositor::new`, after the tree is built | `CompositorBirth` |
+| 3 | `Compositor::set_window_size`, after `place_skirt` | `CompositorWindowSize` |
+| 4 | `WebHost::rehost`, the `RehostStep::CommitSource` arm | `WebRehost` |
+| 5 | `WebHost::rehost`, the `RehostStep::CommitTarget` arm | `WebRehost` |
+| 6 | `WebHost::compensate`, `restore.target` | `WebRehost` (its only caller is `rehost`) |
+| 7 | `WebHost::compensate`, `restore.source` | `WebRehost` |
+
+- A1e's check is red on an eighth caller, a moved one, or a changed count.
+  Codex's review is the base for the list (`rg -a`: the six internal
+  statements plus the forwarding call).
+- The macOS and portable `Compositor`s get the same pair (`commit` with the
+  token, and `pub(crate) commit_now`), each with only the forwarding call as
+  its caller, since neither has internal commits today.
+
+**The caller-search closure, replacing (e)2's "The patterns" table.**
+
+This is how the table's caller cells are produced, and how to re-run them.
+For each door row, run one search for:
+- every **minting function** the row names; and
+- every **further caller level the row prints**, for example `CompositorBirth`:
+  `Compositor::new`, `spare_parent`, then `Runtime::create` ← `resumed`,
+  `Runtime::open_window` ← `open_pending_window`, and
+  `make_spare_web_controller` ← `warm_web_engine`.
+
+A level the row does not print is not claimed complete. Each search is:
+
+```
+rg -a -n --type rust '<pattern>' crates
+```
+
+- **`-a` is required**, because `crates/bt-platform/src/lib.rs` holds one NUL
+  byte and ripgrep would otherwise skip it as binary.
+- **Filters:**
+  - drop comment lines;
+  - drop lines in test code (as (e) defines it);
+  - drop test-model code, such as the `Recorded` fake seat in `web_spare.rs`'s
+    test module;
+  - drop source-needle string literals.
+- **Homonyms** are resolved by module and receiver, for example:
+  - `WebSeat::start_environment` versus the fake's;
+  - `Runtime::resize` versus `WindowRenderer::resize` and `PtySession::resize`;
+  - `SessionStore::close` versus the fifteen other `close` methods;
+  - `App::finish` versus the clipboard ports' and `PtyDump::finish`.
+
+The searches, per row:
+
+| row | searched functions (pattern ⇒ the level printed) |
+|---|---|
+| `PtyBirth` | `\bcreate_leaf_session\(` · `\bcreate_tab_state\(` |
+| `PtyResize` | `\bcommit_leaf_resize\(` · `\brelease_due_leaf_resize\(` · `\bflush_pending_pty_resize\(` |
+| `PaneRetirementWait` | `\bsettle_quit\(` (**added**) |
+| `SessionWriteWait` | `\bwait_for_landing\(` (**added**) · `\bflush_judged\(` · `\bself\.flush\(\)` in `persist.rs` · `session_store\.close\(`/`fn close\(&mut self\)` (resolve to `SessionStore`) · `app\.finish\(\)` |
+| `SessionWriterRetire` | `self\.writer\.close\(` · `app\.finish\(\)` |
+| `TraceFlush` | `trace_sink::flush\(` · `^\s*flush\(\);` in `trace_sink.rs` |
+| `LaunchHandOver` | `launch_wire::hand_over\(` |
+| `GpuOpen` | `GpuContext::open\(` · `Runtime::create\(` |
+| `PresentFrame` | `present_frame_with_phases\(` · `present_seats_and_commit\(` |
+| `CompositorCommit` | `\.commit\(\)` · `\bstand_parked\(` · `self\.adopt\(from` · `seat\.advance\(parent` · `web_spare\.advance\(`/`\bspare\.advance\(` · `web_spare\.retire\(\)`/`seat\.retire\(parent` · `make_spare_web_controller\(` · `warm_web_engine\(` |
+| `CompositorBirth` | `Compositor::new\(` · `spare_parent\(` · `Runtime::create\(` · `Runtime::open_window\(` · `make_spare_web_controller\(` · `warm_web_engine\(` |
+| `CompositorWindowSize` | `\.set_window_size\(` · `self\.resize\(`/`runtime\.resize\(` (resolve to `Runtime::resize`) |
+| `WebRehost` | `\.rehost\(` · `compensate\(` |
+| `SurfaceBirth` | `WindowRenderer::new\(` · `Runtime::open_window\(` |
+| `TitleFlush` | `\bflush_title\(` |
+| `ImeCaretArea` | `apply_ime_cursor_area\(` · `flush_ime_cursor_area\(` |
+| `FocusWindow` | `open_from_notification\(` · `route_clicked_notifications\(` |
+| `SetVisible` | `put_the_window_on_the_glass\(` · `show_new_window\(` · `show_quake_window\(` · `\bsummon_quake\(` · `hide_quake_window\(` · `dismiss_quake\(` · `let_go_of_this_window\(` · `\bretire_window\(` · `\bclose_window\(` |
+| `SetCursor` | `apply_pointer_cursor\(` |
+| `WebController` | `self\.step\(&effect` · `self\.apply\(effect` |
+| `WebEnvironment` | `start_environment\(` |
+| `FontFamilyLookup` | `monospace_family_files\(` · `apply_stored_terminal_font\(` |
+| `PlaceHidden`, `PlaceExposure` | `sample_window_place\(` · `observe_window_place\(` |
+
+**The closure was re-run for every row at `78a3699a`. It changed two rows.**
+All other rows' printed caller cells were reproduced exactly.
+
+1. **`SessionWriteWait`:** `SessionStore::flush_judged` calls
+   `wait_for_landing` at **two** statements, not one (its two branches). The
+   minting statement is inside `wait_for_landing`, so the door and the
+   admission are unchanged. The cell now reads: `wait_for_landing` ←
+   `SessionStore::flush_judged` (×2) ← …, and the witness asserts one
+   admission per `wait_for_landing` call reached.
+2. **`WebController`:** `WebSeat::apply` has **eleven** callers, not ten.
+   `WebSeat::close` (`webhost.rs`) is the eleventh. The cell now reads:
+   `step` ← `WebSeat::apply` ← `go_adopted`, `go`, `restart_engine`,
+   `reload`, `drive`, `retire_parked`, `tick`, `place`, `rehost`, `go_to`,
+   `close`.
+   - The row's phases gain `Exiting`, because `WebSeat::close` runs on the
+     way out.
+   - A close reaching `request_controller` is not the ordinary case (a
+     closing seat does not ask for a controller). But the table admits
+     whatever the minting statement can reach, so the phase set must cover
+     it, as (c)5's rule for `Exiting` requires.
+
+**Adopted.**
+
+### (f)2 · P4 — the portable engine body pinned: adopted
+
+**Checked.**
+- On a target that is neither Windows nor macOS, `video::engine::Engine` is
+  `pub use no_player::Engine` (`bt-platform/src/video_portable.rs`).
+- Its `shutdown` is `match self._never {}`: an uninhabited field, so the body
+  never runs. It has no first-party calls and no vocabulary effects.
+- The type has no `impl Drop`.
+
+**The change to (e)3's table.** Under the closed rule every callee must be a
+pinned body, so the `VideoSeat` row names **three** platform targets for
+`VideoSeat::shutdown` → `Engine::shutdown`:
+
+| platform | pinned `Engine::shutdown` body | edges · effects |
+|---|---|---|
+| Windows | `video::engine::Engine::shutdown` (`video/engine.rs`) | none · `thread::sleep` ×1, `JoinHandle::join` ×1 |
+| macOS | `macos_player::Engine::shutdown` | none · `thread::sleep` ×1, `JoinHandle::join` ×1 |
+| other (portable) | **`video::engine::no_player::Engine::shutdown`** (`video_portable.rs`), body `match self._never {}` | **none · none** |
+
+- The `VideoSeats` row follows through `VideoSeat::shutdown` with the same
+  three targets.
+- The guard resolves the target per compiled configuration.
+- It pins all three bodies, and the source guard reads all three whatever the
+  host. So every platform's today-chain is a green control under the closed
+  rule.
+- The rule and the five mutations are unchanged.
+
+**Adopted.**
+
+### (f)3 · Dispatch, as it stands
+
+- **A1a is dispatchable once (f) lands.** P1–P3 are met, and Codex found no
+  further registry door.
+- A1d's brief is (e)2's table as amended by (f)1.
+- A1e's brief is (e)3's table as amended by (f)2, with the `commit_now` caller
+  pin of (f)1.
+- Everything else in (e)4 stands.
+
+### (f)4 · This revision's own architecture impact
+
+(a) None.
+
+(b) None in this commit. `Compositor::commit_now` is `pub(crate)` with seven
+pinned callers.
+
+(c) None repaid or added by this commit.
+
+(c′) None.
+
+(d) No.
