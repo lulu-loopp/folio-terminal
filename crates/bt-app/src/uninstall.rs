@@ -38,6 +38,11 @@ enum Remover {
     Absent,
     RecoverySnapshots,
     RuntimeClaims,
+    /// macOS: every update entrance in `~/Library/LaunchAgents`, by the
+    /// entrance door's own name shape (`bt_platform::launch_agent::sweep`).
+    UpdateEntrances,
+    /// macOS: this bundle's installation home beside it (`update_txn::Home`).
+    UpdateHome,
     Data(HostPlatform, Base, &'static str),
 }
 struct Mark {
@@ -205,6 +210,22 @@ const INVENTORY: &[Mark] = &[
         remover: Remover::RecoverySnapshots,
         writer: "shell_integration.rs:replace_profile;attention_hooks.rs:Config::land",
     },
+    // The updater's two marks outside the bundle on macOS (0.4.6 U-26;
+    // self-update design revision (b), §(b).3). The Windows home and entrance
+    // are not here: the home is inside the install folder, and the `Run`
+    // value's row is U-22's.
+    Mark {
+        name: "Update entrances (LaunchAgents)",
+        kind: Kind::PerAccount,
+        remover: Remover::UpdateEntrances,
+        writer: "../bt-platform/src/launch_agent.rs:arm",
+    },
+    Mark {
+        name: "Update home beside the bundle",
+        kind: Kind::PerCopy,
+        remover: Remover::UpdateHome,
+        writer: "update_txn.rs:Home::for_bundle (made by the macOS Prepare, U-27)",
+    },
     Mark {
         name: "Unix runtime claims",
         kind: Kind::Data,
@@ -333,6 +354,10 @@ struct Scope {
     documents: Vec<PathBuf>,
     agents: [Vec<PathBuf>; 3],
     purge_roots: Vec<(&'static str, PathBuf)>,
+    /// macOS: `~/Library/LaunchAgents`, where the update entrances are.
+    launch_agents: Option<PathBuf>,
+    /// macOS: this bundle's installation home, `<parent>/.<Bundle>.folio-update`.
+    update_home: Option<PathBuf>,
     sandbox: Option<PathBuf>,
 }
 impl Scope {
@@ -438,6 +463,14 @@ impl Scope {
         } else {
             "HOME"
         })?;
+        let (launch_agents, update_home) = if platform == HostPlatform::MacOs {
+            (
+                Some(home.join("Library/LaunchAgents")),
+                crate::update_txn::Home::of(platform, &exe).map(|h| h.root().to_path_buf()),
+            )
+        } else {
+            (None, None)
+        };
         let mut agents: [Vec<PathBuf>; 3] = Default::default();
         for (index, (variable, default)) in [
             ("CLAUDE_CONFIG_DIR", ".claude"),
@@ -459,6 +492,8 @@ impl Scope {
             documents,
             agents,
             purge_roots,
+            launch_agents,
+            update_home,
             sandbox: sandbox.then(|| temp.clone()),
         })
     }
@@ -680,6 +715,12 @@ fn execute_with_claim<T>(
             Remover::Explorer | Remover::Toast | Remover::Entrance => {
                 entries.extend(system(mark.remover))
             }
+            Remover::UpdateEntrances => {
+                entries.extend(update_entrances(&label, scope.launch_agents.as_deref()));
+            }
+            Remover::UpdateHome => {
+                entries.push(update_home(&label, scope.update_home.as_deref()));
+            }
             Remover::Absent => entries.push(Entry::new(label, Fate::Absent)),
             Remover::RecoverySnapshots if purge => entries.push(Entry::new(
                 label,
@@ -713,6 +754,46 @@ fn execute_with_claim<T>(
         }
     }
     Report::new(entries).noticing(purge_notices(bt_platform::host_platform(), purge))
+}
+
+/// **The update entrances row**: every LaunchAgent plist of the entrance
+/// door's own name, removed by that door; one line per plist, or one `not
+/// present` line. Another program's agents are never looked at twice.
+fn update_entrances(label: &str, agents: Option<&Path>) -> Vec<Entry> {
+    let Some(agents) = agents else {
+        return vec![Entry::new(label, Fate::Absent)];
+    };
+    match bt_platform::launch_agent::sweep(agents) {
+        Ok(swept) if swept.is_empty() => vec![Entry::new(label, Fate::Absent)],
+        Ok(swept) => swept
+            .into_iter()
+            .map(|(path, removed)| {
+                Entry::new(
+                    format!("{label}: {}", path.display()),
+                    removed.map_or_else(|e| Fate::Refused(e.to_string()), |()| Fate::Removed),
+                )
+            })
+            .collect(),
+        Err(e) => vec![Entry::new(label, Fate::Refused(e.to_string()))],
+    }
+}
+
+/// **The update home row**: this bundle's installation home, removed whole
+/// through the update door's own durable remove (a link at its place is
+/// removed, never followed). The home is found from this bundle's path, so
+/// it is this copy's by construction.
+fn update_home(label: &str, home: Option<&Path>) -> Entry {
+    let Some(home) = home else {
+        return Entry::new(label, Fate::Absent);
+    };
+    let label = format!("{label}: {}", home.display());
+    if fs::symlink_metadata(home).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
+        return Entry::new(label, Fate::Absent);
+    }
+    match bt_platform::install_txn::durable_remove(home) {
+        Ok(()) => Entry::new(label, Fate::Removed),
+        Err(e) => Entry::new(label, Fate::Refused(e.to_string())),
+    }
 }
 
 /// What the door cannot establish on this platform, and therefore does not claim.

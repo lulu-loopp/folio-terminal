@@ -17,7 +17,8 @@
 //!   flushed (`RegFlushKey`, through `install_txn::flush_current_user_key`),
 //!   and the value is read back and compared byte for byte. Only then does the
 //!   caller hold an [`Armed`] — **the one value `bt-app`'s `update_txn` accepts
-//!   as the event `Armed`**, and one only this module makes. So the journal can
+//!   as the event `Armed`**, which on Windows only this module makes (on
+//!   macOS, only `crate::launch_agent`). So the journal can
 //!   say `Armed` only after the entrance is on disk. Any failure is a
 //!   [`Refusal`] naming its [`Stage`], and nothing else is changed; the
 //!   transaction then goes to `Abandoned`, whose retirement removes a value
@@ -93,30 +94,15 @@ pub fn command(rescue: &Path) -> OsString {
     line
 }
 
-/// **The proof that a transaction's entrance is durable**: made only by
-/// [`arm`] (and [`arm_in`]), after the write, the flush and a read-back that
-/// matched. It has no constructor anywhere else and it is not `Clone`: the
-/// event `Armed` of `bt-app`'s `update_txn` carries one, so the journal cannot
-/// record `Armed` for an entrance that is not on disk.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Armed {
-    txn: [u8; 16],
-    value: String,
-}
-
-impl Armed {
-    /// The transaction whose entrance this is.
-    #[must_use]
-    pub fn transaction(&self) -> &[u8; 16] {
-        &self.txn
-    }
-
-    /// The value that was written, [`value_name`] of [`Armed::transaction`].
-    #[must_use]
-    pub fn value_name(&self) -> &str {
-        &self.value
-    }
-}
+/// **The proof that a transaction's entrance is durable** — one type for both
+/// platforms, `install_txn::Armed`, re-exported here because this door makes
+/// it on Windows: only [`arm_in`] (after the write, the flush and a read-back
+/// that matched) and the macOS LaunchAgent door (`crate::launch_agent`)
+/// construct one. It is not `Clone`, and the event `Armed` of `bt-app`'s
+/// `update_txn` carries one, so the journal cannot record `Armed` for an
+/// entrance that is not on disk. Its [`Armed::entrance`] is the value's name,
+/// [`value_name`] of [`Armed::transaction`].
+pub use crate::install_txn::Armed;
 
 /// **The step of the entrance that failed.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,10 +280,7 @@ pub fn arm_in(
         error,
     })?;
     match registry.get(key, &name) {
-        Ok(Some((REG_SZ, stored))) if stored == data => Ok(Armed {
-            txn: *txn,
-            value: name,
-        }),
+        Ok(Some((REG_SZ, stored))) if stored == data => Ok(Armed::proved(*txn, name)),
         Ok(_) => Err(Refusal::ReadBackDiffers),
         Err(error) => Err(Refusal::Failed {
             stage: Stage::ReadBack,
@@ -788,7 +771,7 @@ mod tests {
             ]
         );
         assert_eq!(armed.transaction(), &TXN);
-        assert_eq!(armed.value_name(), "FolioUpdate-abcd0123");
+        assert_eq!(armed.entrance(), "FolioUpdate-abcd0123");
         let (kind, data) = &registry.values["FolioUpdate-abcd0123"];
         assert_eq!(*kind, REG_SZ);
         assert_eq!(
@@ -883,7 +866,7 @@ mod tests {
     fn disarm_of_an_absent_value_succeeds() {
         let mut registry = Recorder::default();
         let rescue = Path::new(r"C:\F\.folio-update\t\rescue\folio.exe");
-        arm_in(&mut registry, "k", &TXN, rescue).expect("armed");
+        let _armed = arm_in(&mut registry, "k", &TXN, rescue).expect("armed");
         registry.calls.clear();
         disarm_in(&mut registry, "k", &TXN).expect("removed");
         assert_eq!(
@@ -963,7 +946,7 @@ mod tests {
         let key = TestKey::new("round-trip");
         let rescue = Path::new(r"C:\Program Files\Folio\.folio-update\abcd\rescue\folio.exe");
         let armed = arm_in(&mut CurrentUser, &key.0, &TXN, rescue).expect("armed");
-        assert_eq!(armed.value_name(), "FolioUpdate-abcd0123");
+        assert_eq!(armed.entrance(), "FolioUpdate-abcd0123");
         let (kind, data) = CurrentUser
             .get(&key.0, "FolioUpdate-abcd0123")
             .unwrap()

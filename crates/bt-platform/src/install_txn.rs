@@ -65,6 +65,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// Each arm's real surface, for the doors built on this one's durable write.
+pub(crate) use arm::Os;
+
 /// **The step of an effect that failed.** Every failure of this door names
 /// one, so a journal that did not become durable says where it stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,7 +156,7 @@ impl std::error::Error for Failure {
 
 /// Whether a rename may take the name of a file that is already there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Replace {
+pub(crate) enum Replace {
     /// A durable write: the new journal takes the old one's name.
     Existing,
     /// A durable move or a durable create: an existing destination is a refusal.
@@ -163,7 +166,10 @@ enum Replace {
 /// **The operating system calls a durable write and a durable move are made
 /// of.** One implementation per arm (`arm::Os`), and a recording fake in the
 /// tests, so the order is a fact a test reads rather than a comment.
-trait Surface {
+/// `pub(crate)` because the LaunchAgent entrance (`crate::launch_agent`,
+/// U-26) writes its plist through the same durable write and is held to the
+/// same order by the same fake.
+pub(crate) trait Surface {
     type Handle;
     /// Create `path`, which must not exist, for writing.
     fn create_new(&mut self, path: &Path) -> io::Result<Self::Handle>;
@@ -285,7 +291,7 @@ fn temporary_beside(target: &Path) -> io::Result<PathBuf> {
     Ok(directory_of(target).join(temporary))
 }
 
-fn durable_write_with<S: Surface>(
+pub(crate) fn durable_write_with<S: Surface>(
     surface: &mut S,
     target: &Path,
     bytes: &[u8],
@@ -327,7 +333,7 @@ fn durable_move_with<S: Surface>(surface: &mut S, from: &Path, to: &Path) -> Res
     Ok(())
 }
 
-fn durable_remove_with<S: Surface>(surface: &mut S, path: &Path) -> Result<(), Failure> {
+pub(crate) fn durable_remove_with<S: Surface>(surface: &mut S, path: &Path) -> Result<(), Failure> {
     match surface.remove_entry(path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -359,6 +365,48 @@ fn flush_directory<S: Surface>(surface: &mut S, directory: &Path) -> Result<(), 
 #[cfg(windows)]
 pub fn flush_current_user_key(subkey: &str) -> Result<(), Failure> {
     arm::flush_current_user_key(subkey)
+}
+
+/// **Proof that a transaction's entrance is on the device** — the one value
+/// the journal may record `Armed` on (§(b).2: the entrance is "written and
+/// `F_FULLFSYNC`'d (file and directory) before the journal records `Armed`";
+/// F-2 says the same of the Windows `Run` value and its `RegFlushKey`).
+///
+/// **Only an entrance door of this crate makes one**, and only after its
+/// entrance was written, flushed to the device and read back equal to what was
+/// meant: the LaunchAgent plist on macOS (`crate::launch_agent::arm`, U-26)
+/// and the `Run` value on Windows (U-22). It lives here, beside the durable
+/// write both entrances stand on, so that `bt-app`'s `update_txn` asks for one
+/// type whichever platform armed.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "an entrance is armed for the journal's sake: record `Armed` with it"]
+pub struct Armed {
+    transaction: [u8; 16],
+    entrance: String,
+}
+
+impl Armed {
+    /// The proof, made by the entrance door that has just read its entrance
+    /// back.
+    pub(crate) const fn proved(transaction: [u8; 16], entrance: String) -> Self {
+        Self {
+            transaction,
+            entrance,
+        }
+    }
+
+    /// The transaction whose entrance this is.
+    #[must_use]
+    pub const fn transaction(&self) -> &[u8; 16] {
+        &self.transaction
+    }
+
+    /// The entrance's own name: the plist's file name on macOS, the `Run`
+    /// value's name on Windows.
+    #[must_use]
+    pub fn entrance(&self) -> &str {
+        &self.entrance
+    }
 }
 
 /// **The two ways the lock files are held.**
@@ -507,7 +555,7 @@ mod arm {
         }
     }
 
-    pub(super) struct Os;
+    pub(crate) struct Os;
 
     impl Surface for Os {
         type Handle = File;
@@ -668,7 +716,7 @@ mod arm {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in a path"))
     }
 
-    pub(super) struct Os;
+    pub(crate) struct Os;
 
     impl Surface for Os {
         type Handle = File;
@@ -780,7 +828,7 @@ mod arm {
         )
     }
 
-    pub(super) struct Os;
+    pub(crate) struct Os;
 
     impl Surface for Os {
         type Handle = Infallible;
@@ -827,26 +875,36 @@ mod arm {
     pub(super) fn unlock(_file: &File) {}
 }
 
+/// **The recording fake of [`Surface`]**, shared by this door's tests and by
+/// the LaunchAgent door's (`crate::launch_agent`), whose plist goes through
+/// the same durable write.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod recording {
+    use super::{Replace, Surface};
+    use std::io;
+    use std::path::{Path, PathBuf};
 
     /// One call the door made, as the recording fake saw it. A handle is named
     /// by the path it was opened on and whether it was opened as a directory.
     #[derive(Clone, Debug, PartialEq, Eq)]
-    enum Call {
+    pub(crate) enum Call {
         Create(PathBuf),
         Write(PathBuf, Vec<u8>),
-        Flush { path: PathBuf, directory: bool },
+        Flush {
+            path: PathBuf,
+            directory: bool,
+        },
         Close(PathBuf),
         OpenDirectory(PathBuf),
         Rename(PathBuf, PathBuf, Replace),
         Remove(PathBuf),
         RemoveEntry(PathBuf),
+        /// A read of a file's bytes back (the LaunchAgent's read-back, U-26).
+        Read(PathBuf),
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum Fail {
+    pub(crate) enum Fail {
         Create,
         Write,
         FlushFile,
@@ -859,7 +917,7 @@ mod tests {
         RemoveEntry,
     }
 
-    struct FakeHandle {
+    pub(crate) struct FakeHandle {
         path: PathBuf,
         directory: bool,
     }
@@ -867,13 +925,13 @@ mod tests {
     /// **The recording fake of the OS surface**: it does nothing but write
     /// down each call, and fails the one call it is told to.
     #[derive(Default)]
-    struct Recorder {
-        calls: Vec<Call>,
-        fail: Option<Fail>,
+    pub(crate) struct Recorder {
+        pub(crate) calls: Vec<Call>,
+        pub(crate) fail: Option<Fail>,
     }
 
     impl Recorder {
-        fn failing(fail: Fail) -> Self {
+        pub(crate) fn failing(fail: Fail) -> Self {
             Self {
                 calls: Vec::new(),
                 fail: Some(fail),
@@ -950,6 +1008,12 @@ mod tests {
             self.answer(Fail::RemoveEntry)
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recording::{Call, Fail, Recorder};
+    use super::*;
 
     /// Journal-shaped bytes: a header v1 as `bt-app`'s `update_txn` encodes it.
     /// Spelled out rather than encoded, because `bt-platform` sits below
