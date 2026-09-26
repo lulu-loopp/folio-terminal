@@ -130,9 +130,13 @@ fn seed(scope: &Scope, owner: &Path) {
 fn uninstall_everything_then_rerun_is_absent() {
     let (root, scope) = sandbox("all");
     seed(&scope, &scope.exe);
-    let mut registrations = [true, true];
+    let mut registrations = [true, true, true];
     let mut system = |remover| {
-        let index = if remover == Remover::Explorer { 0 } else { 1 };
+        let index = match remover {
+            Remover::Explorer => 0,
+            Remover::Toast => 1,
+            _ => 2,
+        };
         let fate = if std::mem::take(&mut registrations[index]) {
             Fate::Removed
         } else {
@@ -143,8 +147,10 @@ fn uninstall_everything_then_rerun_is_absent() {
                 Entry::new("Explorer classic (injected)", fate.clone()),
                 Entry::new("Explorer package (injected)", fate),
             ]
-        } else {
+        } else if index == 1 {
             vec![Entry::new("Toast identity (injected)", fate)]
+        } else {
+            vec![Entry::new("Update entrance (injected)", fate)]
         }
     };
     let report = execute(&scope, false, &mut system);
@@ -155,7 +161,7 @@ fn uninstall_everything_then_rerun_is_absent() {
             .iter()
             .filter(|e| e.fate == Fate::Removed)
             .count(),
-        8
+        9
     );
     println!("{}exit={}\n", report.stdout(), report.code);
     let second = execute(&scope, false, &mut system);
@@ -760,7 +766,25 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .unwrap(),
         Path::new("local/Folio")
     );
-    assert_eq!(INVENTORY.len(), 24);
+    assert_eq!(INVENTORY.len(), 25);
+    // The update entrance's writer is in `bt-platform` and is asked for by its
+    // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`
+    // is the one function that writes a `Run` value, and the row names it.
+    let entrance_writer = bt_source::Index::of_package("bt-platform")
+        .body_of(&bt_source::ItemQuery::function("arm_in"))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    assert!(
+        entrance_writer.contains(".set(key, &name, REG_SZ, &data)"),
+        "`logon_hook::arm_in` no longer writes the entrance"
+    );
+    assert!(
+        INVENTORY
+            .iter()
+            .any(|mark| mark.remover == Remover::Entrance
+                && mark.kind == Kind::PerCopy
+                && mark.writer.ends_with("logon_hook.rs:arm_in")),
+        "the update entrance has no undo"
+    );
     assert!(
         include_str!("../../bt-platform/src/macos_webview.rs")
             .contains("WKWebsiteDataStore::defaultDataStore(mtm)")
@@ -769,6 +793,105 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         include_str!("../../../packaging/macos/Info.plist.in")
             .contains("io.github.lulu-loopp.folio")
     );
+}
+
+/// RED (U-22) — **the update entrance's row removes this copy's `Run` values —
+/// the one naming its installation home and the one naming a program that is
+/// gone — leaves another copy's live entrance and every other value, and says
+/// each.**
+///
+/// §(b).3: "`--uninstall-cleanup`: a per-copy row that removes the value if it
+/// names this copy's `H` or a path that no longer exists". The row's remover is
+/// the entrance door's own (`logon_hook::clean_in`), run here over an in-memory
+/// registry; the real registry is `logon_hook`'s own test, under a key of its
+/// own. Off Windows there is no such entrance, and the row says `not present`.
+///
+/// MUTATION: in `entrance_entries`, hand `clean` the folder above the install
+/// instead of the home (another copy's entrance is then taken too).
+#[test]
+fn uninstall_entrance_row_removes_this_copys_values_and_leaves_the_rest() {
+    use bt_platform::logon_hook::{self, REG_SZ, Registry};
+    #[derive(Default)]
+    struct Memory(std::collections::BTreeMap<String, (u32, Vec<u8>)>);
+    impl Registry for Memory {
+        fn set(&mut self, _: &str, name: &str, kind: u32, data: &[u8]) -> io::Result<()> {
+            self.0.insert(name.to_owned(), (kind, data.to_vec()));
+            Ok(())
+        }
+        fn flush(&mut self, _: &str) -> io::Result<()> {
+            Ok(())
+        }
+        fn get(&mut self, _: &str, name: &str) -> io::Result<Option<(u32, Vec<u8>)>> {
+            Ok(self.0.get(name).cloned())
+        }
+        fn delete(&mut self, _: &str, name: &str) -> io::Result<bool> {
+            Ok(self.0.remove(name).is_some())
+        }
+        fn names(&mut self, _: &str) -> io::Result<Vec<String>> {
+            Ok(self.0.keys().cloned().collect())
+        }
+    }
+    let (root, scope) = sandbox("entrance");
+    let home = scope.exe.parent().unwrap().join(".folio-update");
+    let rescue = |home: &Path, txn: u8| {
+        let program = home
+            .join(format!("{txn:02x}"))
+            .join("rescue")
+            .join("folio.exe");
+        fs::create_dir_all(program.parent().unwrap()).unwrap();
+        fs::write(&program, b"rescue").unwrap();
+        program
+    };
+    let other_home = root.join("other").join(".folio-update");
+    let ours = rescue(&home, 0xaa);
+    let another_copy = rescue(&other_home, 0xbb);
+    let mut memory = Memory::default();
+    for (txn, program) in [
+        (0xaa, ours),
+        (0xbb, another_copy.clone()),
+        (0xcc, root.join("gone").join("rescue").join("folio.exe")),
+    ] {
+        logon_hook::arm_in(&mut memory, "run", &[txn; 16], &program).unwrap();
+    }
+    memory
+        .set("run", "SomeoneElse", REG_SZ, b"x\0\0\0")
+        .unwrap();
+
+    let entries = entrance_entries(HostPlatform::Windows, &scope.exe, |home| {
+        logon_hook::clean_in(&mut memory, "run", home)
+    });
+    let fates: Vec<(String, Fate)> = entries.into_iter().map(|e| (e.mark, e.fate)).collect();
+    assert_eq!(
+        fates,
+        vec![
+            (
+                "Update entrance (per-copy): FolioUpdate-aaaaaaaa".to_owned(),
+                Fate::Removed
+            ),
+            (
+                "Update entrance (per-copy): FolioUpdate-bbbbbbbb".to_owned(),
+                Fate::Left(vec![another_copy])
+            ),
+            (
+                "Update entrance (per-copy): FolioUpdate-cccccccc".to_owned(),
+                Fate::Removed
+            ),
+        ]
+    );
+    let mut left: Vec<String> = memory.0.keys().cloned().collect();
+    left.sort();
+    assert_eq!(left, vec!["FolioUpdate-bbbbbbbb", "SomeoneElse"]);
+
+    let nothing = entrance_entries(HostPlatform::Windows, &scope.exe, |home| {
+        logon_hook::clean_in(&mut Memory::default(), "run", home)
+    });
+    assert_eq!(nothing.len(), 1);
+    assert_eq!(nothing[0].fate, Fate::Absent);
+    let elsewhere = entrance_entries(HostPlatform::MacOs, &scope.exe, |_| {
+        panic!("no entrance off Windows")
+    });
+    assert_eq!(elsewhere[0].fate, Fate::Absent);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

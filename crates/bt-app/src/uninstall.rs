@@ -33,6 +33,8 @@ enum Remover {
     Agent(usize),
     Explorer,
     Toast,
+    /// The update's entrance at logon (U-22): `HKCU\...\Run\FolioUpdate-*`.
+    Entrance,
     Absent,
     RecoverySnapshots,
     RuntimeClaims,
@@ -88,6 +90,12 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::PerAccount,
         remover: Remover::Toast,
         writer: "../bt-platform/src/lib.rs:Notifier::new",
+    },
+    Mark {
+        name: "Update entrance",
+        kind: Kind::PerCopy,
+        remover: Remover::Entrance,
+        writer: "../bt-platform/src/logon_hook.rs:arm_in",
     },
     Mark {
         name: "Start-menu shortcut",
@@ -669,7 +677,9 @@ fn execute_with_claim<T>(
                     ));
                 }
             }
-            Remover::Explorer | Remover::Toast => entries.extend(system(mark.remover)),
+            Remover::Explorer | Remover::Toast | Remover::Entrance => {
+                entries.extend(system(mark.remover))
+            }
             Remover::Absent => entries.push(Entry::new(label, Fate::Absent)),
             Remover::RecoverySnapshots if purge => entries.push(Entry::new(
                 label,
@@ -860,7 +870,7 @@ fn remove_tree(path: &Path) -> io::Result<()> {
         fs::remove_file(path)
     }
 }
-fn system_remove(remover: Remover) -> Vec<Entry> {
+fn system_remove(remover: Remover, exe: &Path) -> Vec<Entry> {
     match remover {
         Remover::Explorer => crate::explorer_menu::cleanup_registrations()
             .into_iter()
@@ -885,7 +895,55 @@ fn system_remove(remover: Remover) -> Vec<Entry> {
                 Err(e) => Fate::Refused(e),
             },
         )],
+        Remover::Entrance => entrance_entries(
+            bt_platform::host_platform(),
+            exe,
+            bt_platform::logon_hook::clean,
+        ),
         _ => Vec::new(),
+    }
+}
+
+/// **The update entrance's row** (U-22; `docs/plans/design/self-update-2026-09-16.md`
+/// §(b).3): this copy's `FolioUpdate-*` values under the `Run` key — those naming
+/// its installation home `H`, or a program that no longer exists — are removed by
+/// `clean`, the entrance door's own remover; another copy's live entrance is left
+/// and said. Only Windows has this entrance (the macOS LaunchAgent is U-26's).
+fn entrance_entries(
+    platform: HostPlatform,
+    exe: &Path,
+    clean: impl FnOnce(
+        &Path,
+    ) -> Result<
+        Vec<(String, bt_platform::logon_hook::Cleaned)>,
+        bt_platform::logon_hook::Refusal,
+    >,
+) -> Vec<Entry> {
+    use bt_platform::logon_hook::Cleaned;
+    const LABEL: &str = "Update entrance (per-copy)";
+    let home = match platform {
+        HostPlatform::Windows => crate::update_txn::Home::of(platform, exe),
+        HostPlatform::MacOs | HostPlatform::OtherUnix => None,
+    };
+    let Some(home) = home else {
+        return vec![Entry::new(LABEL, Fate::Absent)];
+    };
+    match clean(home.root()) {
+        Err(refusal) => vec![Entry::new(LABEL, Fate::Refused(refusal.to_string()))],
+        Ok(cleaned) if cleaned.is_empty() => vec![Entry::new(LABEL, Fate::Absent)],
+        Ok(cleaned) => cleaned
+            .into_iter()
+            .map(|(name, fate)| {
+                Entry::new(
+                    format!("{LABEL}: {name}"),
+                    match fate {
+                        Cleaned::Removed => Fate::Removed,
+                        Cleaned::Left(program) => Fate::Left(vec![program]),
+                        Cleaned::Refused(refusal) => Fate::Refused(refusal.to_string()),
+                    },
+                )
+            })
+            .collect(),
     }
 }
 /// **`BT_UNINSTALL_ROOT` is a test instrument, and a shipped build does not read it.**
@@ -924,7 +982,7 @@ pub(crate) fn run(purge: bool) -> i32 {
             if scope.sandbox.is_some() {
                 vec![Entry::new(format!("{remover:?} (sandbox)"), Fate::Absent)]
             } else {
-                system_remove(remover)
+                system_remove(remover, &scope.exe)
             }
         }),
         Err(e) => Report::new(vec![Entry::new("Folio", Fate::Refused(e.to_string()))]),

@@ -17,9 +17,10 @@
 //!    journal is the whole of an ordinary start's cost.
 //! 3. **The frozen header only** (`update_txn::Header::parse`), and the
 //!    ordinary start's rule (`update_txn::at_start`):
-//!    - `terminal` → the entrance hook (a no-op until the entrance ticket,
-//!      U-22), then `H\<txn>`, then the journal, each removed durably through
-//!      `bt_platform::install_txn`, all under the transaction lock; continue;
+//!    - `terminal` → the entrance (on Windows its `Run` value, removed and
+//!      flushed through `bt_platform::logon_hook`, U-22), then `H\<txn>`, then
+//!      the journal, each removed durably through `bt_platform::install_txn`,
+//!      all under the transaction lock; continue;
 //!    - `destructive`, or the trial of another transaction, or no trial at all
 //!      → the rescue build is started detached with
 //!      `--update-recover --then-launch <this command line>`, and this process
@@ -90,8 +91,9 @@ pub(crate) trait World {
     fn say(&mut self, line: &str);
     /// Start `program` with `args`, detached: never waited on.
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()>;
-    /// Remove the transaction's logon entrance, if one is still there.
-    fn retire_entrance(&mut self, txn: TxnId);
+    /// Remove the transaction's logon entrance, if one is still there; a
+    /// failure is said and stops the retirement.
+    fn retire_entrance(&mut self, txn: TxnId) -> Result<(), String>;
 }
 
 /// What one start is: its own executable, its installation home, its command
@@ -269,12 +271,12 @@ fn image(program: &Path) -> Option<Digest> {
 fn retire(action: StartAction, header: &Header, home: &Home, world: &mut impl World) {
     for effect in action.effects() {
         let done = match effect {
-            Effect::RemoveEntrance => {
-                world.retire_entrance(header.txn);
-                Ok(())
+            Effect::RemoveEntrance => world.retire_entrance(header.txn),
+            Effect::DeleteTxnDir => install_txn::durable_remove(&home.transaction(header.txn))
+                .map_err(|failure| failure.to_string()),
+            Effect::DeleteJournal => {
+                install_txn::durable_remove(&home.journal()).map_err(|failure| failure.to_string())
             }
-            Effect::DeleteTxnDir => install_txn::durable_remove(&home.transaction(header.txn)),
-            Effect::DeleteJournal => install_txn::durable_remove(&home.journal()),
             other => unreachable!("a start's action has no {other:?}"),
         };
         if let Err(failure) = done {
@@ -342,11 +344,15 @@ impl World for Machine {
             .map(drop)
     }
 
-    fn retire_entrance(&mut self, _txn: TxnId) {
-        // The logon entrance (`HKCU\...\Run\FolioUpdate-<txn8>`, the macOS
-        // LaunchAgent) and its door arrive with the entrance ticket (U-22,
-        // U-26); until then no transaction has one, and there is nothing to
-        // remove.
+    fn retire_entrance(&mut self, txn: TxnId) -> Result<(), String> {
+        // Windows: the `Run` value `FolioUpdate-<txn8>`, removed and flushed by
+        // its door (U-22); a value already gone is success. The macOS
+        // LaunchAgent and its door arrive with U-26; until then no macOS
+        // transaction has an entrance, and there is nothing to remove.
+        if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
+            return Ok(());
+        }
+        bt_platform::logon_hook::disarm(txn.bytes()).map_err(|refusal| refusal.to_string())
     }
 }
 
@@ -450,8 +456,9 @@ mod tests {
                 }
             }
 
-            fn retire_entrance(&mut self, txn: TxnId) {
+            fn retire_entrance(&mut self, txn: TxnId) -> Result<(), String> {
                 self.entrances.push(txn);
+                Ok(())
             }
         }
 

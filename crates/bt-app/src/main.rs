@@ -168,6 +168,7 @@ mod update_archive;
 // `build.rs` reaches the same file by `#[path]`, and nothing of it ships.
 #[cfg(test)]
 mod update_eligibility;
+mod update_recover;
 mod update_startup;
 mod update_txn;
 mod version;
@@ -70200,10 +70201,18 @@ fn main() -> Result<()> {
     // `docs/plans/design/self-update-2026-09-16.md` (b).2). Headless like the
     // doors above, and above the admission below for a reason of their own:
     // the rescue build is the one process that must never hold the admission
-    // shared — it takes it exclusive to move files. Reserved words today: each
-    // is answered with one line until its door arrives (U-22, U-23).
+    // shared — it takes it exclusive to move files. `--update-recover` is the
+    // recovery door (`update_recover`, U-22); `--update-apply` is answered with
+    // one line until its door arrives (U-23).
     if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
-        bt_platform::write_std_error(format!("{}\n", cli::update_door_refusal(&door)).as_bytes());
+        let usage = match door {
+            Ok(cli::UpdateDoor::Recover { then_launch }) => {
+                std::process::exit(update_recover::run_here(then_launch))
+            }
+            Ok(cli::UpdateDoor::Apply) => None,
+            Err(usage) => Some(usage),
+        };
+        bt_platform::write_std_error(format!("{}\n", cli::update_door_refusal(usage)).as_bytes());
         std::process::exit(2);
     }
     // **The command line, before there is anything for it to be wrong about.**

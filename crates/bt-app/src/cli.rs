@@ -311,8 +311,10 @@ pub const HERE_ORIGIN_FLAG: &str = "--from-here";
 /// `--update-trial <txn> <nonce>`: the applier starts the new build as the
 /// trial with these ([`CliRequest::update_trial`]).
 pub const UPDATE_TRIAL_FLAG: &str = "--update-trial";
-/// `--update-recover`: the rescue build, as recovery ([`update_door`]).
-pub const UPDATE_RECOVER_FLAG: &str = "--update-recover";
+/// `--update-recover`: the rescue build, as recovery ([`update_door`]). Spelled
+/// once, by the door whose entrance at logon writes it
+/// (`bt_platform::logon_hook`, U-22).
+pub const UPDATE_RECOVER_FLAG: &str = bt_platform::logon_hook::RECOVER_FLAG;
 /// `--then-launch <argument>...`: after [`UPDATE_RECOVER_FLAG`] only, and
 /// last: every argument after it is the command line of the start that handed
 /// itself to the rescue build, verbatim, which the rescue build starts the
@@ -883,16 +885,15 @@ pub fn recover_command_line(then_launch: &[OsString]) -> Vec<OsString> {
     line
 }
 
-/// What this build answers either door with **until the door exists** (the
-/// entrance and apply tickets): one line naming the word, never a window.
+/// What this build answers `--update-apply` with **until its door exists**
+/// (the Windows apply ticket, U-23), and a malformed `--update-recover` line
+/// with: one line, never a window. `--update-recover` itself has its door
+/// (`update_recover`, U-22).
 #[must_use]
-pub fn update_door_refusal(door: &Result<UpdateDoor, &'static str>) -> String {
-    match door {
-        Ok(UpdateDoor::Recover { .. }) => {
-            format!("{UPDATE_RECOVER_FLAG} is not in this build yet.")
-        }
-        Ok(UpdateDoor::Apply) => format!("{UPDATE_APPLY_FLAG} is not in this build yet."),
-        Err(usage) => (*usage).to_owned(),
+pub fn update_door_refusal(usage: Option<&'static str>) -> String {
+    match usage {
+        None => format!("{UPDATE_APPLY_FLAG} is not in this build yet."),
+        Some(usage) => usage.to_owned(),
     }
 }
 
@@ -1939,8 +1940,12 @@ mod tests {
             CliFault::UnknownFlag("--then-launch".to_owned())
         );
         assert_eq!(
-            update_door_refusal(&update_door(args(&["--update-apply"])).unwrap()),
+            update_door_refusal(None),
             "--update-apply is not in this build yet."
+        );
+        assert_eq!(
+            update_door_refusal(Some(UPDATE_RECOVER_USAGE)),
+            UPDATE_RECOVER_USAGE
         );
     }
 }
