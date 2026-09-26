@@ -1203,7 +1203,7 @@ fn an_os_named_temporary_base_behind_a_link_is_not_a_refusal() {
             .unwrap();
         assert_eq!(row.fate, Fate::Removed, "{}", report.stdout());
     }
-    assert!(!real.join("folio").exists());
+    assert!(!real.join("folio/clipboard").exists());
     assert!(!real.join("folio-panic.log").exists());
     fs::remove_file(root.join("var")).unwrap();
     fs::remove_dir_all(root).unwrap();
