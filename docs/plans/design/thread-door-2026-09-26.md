@@ -974,3 +974,187 @@ and A1b make the ones below, which is why this note exists.
 | A1c | a thread's role (15 or 18 more threads get one) | **thread**: 15–18 more sites through the door | repays A§6's `folio-web-thumb` bypass and the five unnamed `bt-app` spawns (§12 Q1 decides three of them); no scheduling debt changes | none | no |
 | A1d | none moved; each converted door's effect stays with its owner | every owner-thread door of B§R-A: GPU present, §5.2 natives, rows 5, 11–13, 15–18 wrappers, each with its registry line | advances D-2; rows 11–12's wrappers recorded against D-43 and D-44 (their location, not their move) | `Refused` is a new outcome of each converted door; every caller that assumed "the door always runs" is listed in the brief | no |
 | A1e | none | none; the guard reads the doors | adds the `Drop` exception rows (one per type in §7 departure 4, except `DirWatch` which is D-40) | none | no |
+
+---
+
+## Revision 2026-09-26 (b), after the GLM review
+
+Review: `docs/plans/design/thread-door-review-glm-2026-09-26.md` (GLM, static,
+at `61ac2d93`), verdict **adopt with changes**. It confirms the census (46
+sites: 24 through the door, 22 bare, plus the pool) and accepts all seven §7
+departures, four of them with an obligation (P1–P4). This revision is
+appended; the text above stays as written, and **where the two differ, this
+section rules**. The coordinator ruled on each of the four; each is taken in
+order, checked against the code at `78a3699a`, and marked adopted or refused.
+None is refused.
+
+The review's method note is kept for whoever re-counts: `crates/bt-platform/src/lib.rs`
+contains a NUL byte, so ripgrep treats it as binary and silently skips it (both
+door definitions, the Windows `DirWatch` spawn and its `Drop`). The census of §5
+searched that file directly; a re-count must too.
+
+### (b)1 · P1 — the phase has no road from `Starting` to `Exiting`: adopted
+
+**Checked.** `loop_running()` fires only in `FolioApp::new_events` on
+`StartCause::Init` (§4.2). A launch whose event loop fails before its first
+callback returns from `run_app` with the phase still `Starting`. §4.2's
+`exiting()` row admits only `Running → Exiting`, so `fn main`'s call is refused
+and counted, and §4.3 then refuses rows 15–17 during that teardown — the trace
+flush and both bounded waits skipped, and a violation counted against a
+legitimate call. §4.2's own second bullet names the road. I could not show that
+winit never fails before `Init`, so the road stands.
+
+**The change.** §4.2's `exiting()` row becomes:
+
+| writer | transition | pinned call sites |
+|---|---|---|
+| `exiting()` | `Running → Exiting` **or `Starting → Exiting`**; idempotent from `Exiting` | unchanged: `settle_quit`'s `Write` arm, `App::finish`, `fn main` after `run_app` |
+
+`quit_abandoned()` still admits only `Exiting → Running`. A1e still pins the
+set of call sites, so the wider transition adds no writer.
+
+**M4i gains the early-error sequence**, as the review wrote it, as a
+fourth executed case in §9.3's M4i row (A1a):
+1. a plain thread enters `enter_window_thread()` (phase `Starting`);
+2. a `Running`-only probe door is `Refused` with `phase: Some(Starting)`;
+3. `exiting()` is accepted from `Starting` (no counter rise);
+4. an `Exiting` probe door (a row-15–17 shape) is admitted and runs.
+
+**Adopted.**
+
+### (b)2 · P2 — departure 5's "exclude" claims more than the M14 fence does: adopted, option (a)
+
+**Checked.** §9.1's fence refuses the *names* `WorkerCtx` and `WaitToken`
+inside `unsafe` blocks, `unsafe fn`s and the listed expressions. In `bt-platform`,
+the one crate where `unsafe_code` is lowered, an inference-typed fabrication
+(`let x = unsafe { std::mem::transmute(0usize) }; ShellThread::enter(&x)`) names
+neither type inside the expression; the type is inferred at `enter`'s parameter,
+outside the fence. `#![forbid(unsafe_code)]` covers `admission` only.
+
+**The change.** §7 departure 5's sentence "the only way to reach a worker-only
+door off a worker is a fabricated `WorkerCtx`, which `#![forbid(unsafe_code)]`
+and the M14 fence exclude" is replaced by:
+
+> Off a worker, a worker-only door is reachable only through a fabricated
+> `WorkerCtx`. **Named fabrication is refused**: `admission` forbids `unsafe`
+> (compiler), and M14's fence refuses `WorkerCtx`, `WaitToken` and
+> `admission::doors` named inside any `unsafe` block, `unsafe fn` or
+> `transmute`/`zeroed`/`MaybeUninit`/`read` expression. **What remains is an
+> inference-typed `transmute` inside `bt-platform`'s own `unsafe`**, whose
+> type is fixed at the door's parameter rather than written. That is
+> deliberate evasion. It is below the accident bar the guard targets, and it
+> is named here as the fence's limit, as B§R-A names the lint's.
+
+§2.4's table's `unsafe` row reads the same way. The departure itself stands:
+`expect_worker()` is still not added, and **no role read is put inside a
+worker-only door** — not even as telemetry (the review's option (b) is not
+taken). A read that no safe program can make fire has no red test, and the case
+it would report is the one this paragraph names as deliberate.
+
+**Adopted** (option (a)).
+
+### (b)3 · P3 — the `Drop` exception list is incomplete and names no shrinkers: adopted
+
+**Checked.** `impl Drop for VideoSeats` (`bt-app::video_seat`) calls
+`shutdown_all()`, which takes every seat and calls `VideoSeat::shutdown` →
+`Engine::shutdown`. That is the same drop → function → blocking-teardown shape
+as the listed `VideoSeat`, and the one-call indirection §7 departure 4 itself
+says a lexical check misses. Every other `impl Drop` the review read (`Taskbar`,
+`SystemSettingsWatch`, `ShellThread`, the pickers, `ImeSystemCaret`,
+`Apartment`) removes a subclass or releases an interface and does not block.
+
+**Why each row needs a shrinker.** As the review says, *"With a shrinker per row
+the list is a debt ledger; without one it is a permanent rule."* A shrink-only
+list with no row obliged to shrink is the list-shaped debt D-2 records against
+§5.3, in a new place.
+
+**The list, replacing §7 departure 4's.** A1e lands it as the guard's declared
+exception set. Each row carries either its repaying ticket and version, or
+"ruled to stay" in §5.3's register. A1e adds a ledger row for each row that has
+none. `structural-debt.md` held no row for any of these but `DirWatch` (D-40),
+checked on `78a3699a`.
+
+| type (crate) | what the `Drop` waits on | shrinker | version |
+|---|---|---|---|
+| `DirWatch` (`bt-platform`, Windows and macOS) | `thread.join()` on `bt-dir-watch` | **B7** — *A macOS directory watch starts and retires without the window thread waiting*: `retire(self, &WorkerCtx)` (D-40). The Windows arm is repaid by the same ticket's shared retirement door | 0.4.6 |
+| `AttentionPipe` (Windows and Unix) | `listener.join()` on `folio-attention-endpoint` | new ticket *An endpoint is retired through an explicit door, not by its drop* (new row) | 0.4.7 |
+| `LaunchPipe` (Windows and Unix) | `listener.join()` on `folio-launch-endpoint` | the same ticket (the same new row) | 0.4.7 |
+| `video::engine::Engine`, `macos_player::Engine` (`bt-platform`) | `self.shutdown()` → the engine thread's join | new ticket *A video engine is shut down through an explicit door, not by its drop* (new row) | 0.4.7 |
+| `VideoSeat`, **`VideoSeats`** (`bt-app`) | `shutdown()` / `shutdown_all()` → `Engine::shutdown` | the same ticket (it repays both layers together) | 0.4.7 |
+| `PtySession` (`bt-pty`) | `self.shutdown()` → the child's exit and the reader/writer joins | new ticket *A shell is taken apart only through `retire_within`, never by a drop on the window thread* (new row; beside D-43/D-44's session-lifecycle rows, not merged into them). Today the drop runs on `pty-retirement` except when that thread cannot be started, where `retire_within` falls back to the drop on the caller | 0.4.7 |
+
+No row is "ruled to stay": each of these waits can reach the window thread on
+some road (a window close, a seat closed, an endpoint dropped at quit), and none
+of them has a ruling that it may.
+
+**Adopted.**
+
+### (b)4 · P4 — the meter's unwind policy mis-cites `during`: adopted, `during`'s discipline
+
+**Checked.** `hang_watch::during` is `enter` → `work` → `at(parent)` with no
+guard, and the neighbouring `enter` states why: *"Not a guard type: a guard
+would run on the unwind path too, and the one thing this module must never do
+is add a `Drop` to a thread that is already in trouble."* So `during` does not
+keep its stack balanced on unwind, and §7 departure 2's parenthetical ("as
+`during` keeps its stack balanced") says the opposite of the precedent it cites.
+
+**The change.** §7 departure 2 and §4.4 step 4 are replaced:
+
+- `admitted` has **no drop guard**. `leave` is called only when `work` returns.
+  A panicking `work` unwinds straight out of `admitted`. No meter code runs on
+  the unwind path, and no first-party `Drop` is added to a thread that is
+  already failing.
+- **The stack after a panicking admitted call:** the door's station stays
+  pushed on the window thread's station stack, above whatever was there when
+  `admitted` was entered. `leave` was never called, so no per-call record is
+  kept for that call (A3's histograms skip it; the panic hook's log line is its
+  record).
+- **The consequence, stated as the intended one:** the next hang report from
+  that thread names the door as the innermost station. That is the more
+  truthful report — the last admitted call on that thread did not come back —
+  and it is what `during` already produces for a panicking `Scope`.
+- **The enter half stays.** Naming a call that never returns is what
+  `during`'s enter-before-work buys today (§7 departure 2's first reason, which
+  the review accepts).
+
+§9.3's meter test changes with it: a probe door whose `work` panics calls
+`enter` once and `leave` zero times, and the station accessor still shows the
+probe's station afterwards on that test thread.
+
+**Adopted.**
+
+### (b)5 · §12 Q1 — settled by the code, not an owner question
+
+The review answers Q1 yes, and the argument is the code's:
+`attention_wire::payload_on_stdin` reads `Lane::Attention` bytes, and the two
+explorer threads deploy and read a package through `quiet_command`. These are
+first-party effects that A2's lint must see in every process. Exempting them by
+process now would bring the exemption back as a lint exemption one ticket
+later. **Settled:** the three door-process threads
+(`explorer_menu::remove_from_explorer_menu`, `explorer_menu::cleanup_registrations`,
+`attention_wire::payload_on_stdin`) go through the door in **A1c, at
+`ThreadPriority::Normal`** (their band today). Their main threads stay `Unset`
+(§3.2). A1c therefore converts **18** bare sites. Afterwards the bare set is
+`bt-pty`'s 4 plus the resample pool, and A§0.1's bare count reads 4.
+ARCHITECTURE §6's "Whether a door process's thread owes the door is not ruled"
+is replaced in A1c's commit by the sentence above.
+
+§11's A1c row reads accordingly: prerequisite A1b only; "15 or 18" becomes 18.
+§13.2's A1c row repays A§6's `folio-web-thumb` bypass and all five unnamed
+`bt-app` spawns.
+
+### (b)6 · §12 Q2 — still the owner's, with the review's one line
+
+Q2 stands as written in §12, with one line added for the owner to rule on
+explicitly: *`folio-video-frame` would go `BelowNormal` while
+`folio-video-engine` stays `Normal`.* That is defensible, because
+`within_budget` answers one frame question at seat birth rather than feeding
+the playing loop. But it is the one row where the reason "the picture somebody
+is watching" and the proposed band point in different directions.
+
+### (b)7 · This revision's own architecture impact
+
+(a) None. (b) None. (c) No row repaid or added by this commit. A1e will add a
+ledger row for each §(b)3 row without one: the endpoints, the video engines and
+seats, and `PtySession`. (c′) None. (d) No. A1a and A1b's (d) = yes is
+unchanged (§13.2).
