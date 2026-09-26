@@ -668,6 +668,8 @@ impl Runtime<'_> {
                 // The multi-line paste card (0.4.4 ticket 02): modal by the owner's ruling of
                 // 2026-09-23, so a drop is refused under it and a composition goes nowhere.
                 || self.paste_card_seat().is_some()
+                // The update card (0.4.6 U-19): it holds the keyboard while it is up.
+                || self.update_card_is_up()
                 || self.window.settings.is_open()
                 // The restore card (0.4.5 ticket 57): it holds the keyboard while it is up, so a
                 // drop is refused under it, a composition goes nowhere and no caret blinks.
@@ -1202,6 +1204,17 @@ impl Runtime<'_> {
                 && let Some(key) = paste_card_key(&event.logical_key, self.window.modifiers, focus)
             {
                 self.press_paste_card_key(key)?;
+            }
+            return Ok(());
+        }
+        // **The update card owns the keyboard** (0.4.6 U-19), in the order it is drawn: under the
+        // paste card and over the settings dialog. `Escape` is Later (§B) — on the download's card
+        // that puts the card away and the download goes on (coordinator ruling 1). `Tab` lights
+        // and moves the ring; `Enter` and `Space` press only the verb the ring stands on, because
+        // the card rises by itself while the reader may be typing. Every other key is swallowed.
+        if self.update_card_is_up() {
+            if !event.repeat {
+                self.press_update_card_key(&event.logical_key)?;
             }
             return Ok(());
         }
@@ -1988,6 +2001,7 @@ impl Runtime<'_> {
             || self.window.first_run.is_open()
             || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
+            || self.update_card_is_up()
             || self.settings_layout().is_some()
             || self.restore_card_is_up()
             || self.window.rename.is_some()

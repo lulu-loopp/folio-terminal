@@ -295,6 +295,19 @@ impl Runtime<'_> {
                 ),
                 ModalBand::Fixed,
             )
+        } else if let Some(layout) = self.update_card_layout() {
+            // **The update card** (0.4.6 U-19), under the paste card and over the settings
+            // dialog: the General row's `Restart to update` raises it from that dialog, and it has
+            // to be seen over it. It draws no scrim (§B: it never dims the window behind it).
+            (
+                restore::update_card_build(
+                    &layout,
+                    self.window.update_card.hover(),
+                    crate::update_card::paint(self.app.update_job.state())
+                        .and_then(|paint| self.window.update_card.ring(&paint.verbs)),
+                ),
+                ModalBand::Fixed,
+            )
         } else if let Some(layout) = self.settings_layout() {
             // The hover and the readings first, then the renderer: a combo whose
             // value outgrows its 118px button is ellipsised, and only the font

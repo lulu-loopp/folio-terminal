@@ -689,6 +689,21 @@ impl Driver for Unsupported {
     }
 }
 
+/// **The transport the card's press hands the driver today** (U-19): none.
+/// The download door (`bt_platform::https_download`) is wired with the first
+/// driver that fetches (U-20); until then the only driver, [`Unsupported`],
+/// refuses without asking for a file, and this says so if anything ever did.
+pub(crate) struct NoDownloadDoor;
+
+impl Transport for NoDownloadDoor {
+    fn fetch(&self, request: &Request) -> Result<(), String> {
+        Err(format!(
+            "no download door is wired in this build ({})",
+            request.file_name
+        ))
+    }
+}
+
 // ── progress, and the stale-event rule ─────────────────────────────────────
 
 /// What a driver (or the quit barrier) reports.
@@ -881,6 +896,18 @@ impl<W: Copy + Eq> Job<W> {
                 | State::Failed(..)
         );
         self.presenter.filter(|_| drawn && !self.put_away)
+    }
+
+    /// **The General row's foot asks for the card again** (U-19: `Restart to
+    /// update` while a job waits at `Verified`), in `window` — the window the
+    /// row was pressed in. Answers whether a card is now up there.
+    pub(crate) fn reopen(&mut self, window: W) -> bool {
+        if !matches!(self.state, State::Verified(_)) {
+            return false;
+        }
+        self.presenter = Some(window);
+        self.put_away = false;
+        true
     }
 
     /// **The card moves when its window goes** (§B: "closing the presenting

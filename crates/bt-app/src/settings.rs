@@ -4309,9 +4309,13 @@ impl SettingsRow {
             // **Not a constant**, on the row above's footing: the sentence names
             // the version the releases page named, and a row that only said "a
             // newer version is out" would send the reader to the page to find
-            // out which one. See `update::row_description`, and `i18n::intern`
+            // out which one. See `update_card::row_description_in`, and `i18n::intern`
             // for where the `&'static str` a `String` becomes is argued for.
-            Self::UpdateCheck => crate::update::row_description(),
+            Self::UpdateCheck => crate::update_card::row_description_in(
+                crate::i18n::current(),
+                &values.update_row,
+                crate::update::offer().as_deref(),
+            ),
             // Mock-up 2361.
             Self::TabLayout => Text::DescTabLayout.text(),
             // Mock-up 4155. **Not a constant** since 0.4.4 ticket 06: the
@@ -5028,8 +5032,12 @@ impl SettingsRow {
     /// here" is "install it" and this picker used to end without saying so.
     /// Two pickers doing the same thing differently would be two idioms; one is
     /// an idiom.
+    ///
+    /// **The update row's verb is the update job's** (0.4.6 U-19): which of the
+    /// three it is — the releases page, `Restart to update`, `Copy` — is read
+    /// off `values`, so the picker, its focus walk and its draw ask one place.
     #[must_use]
-    pub fn menu_action(self) -> Option<&'static str> {
+    pub fn menu_action(self, values: &SettingsValues) -> Option<&'static str> {
         match self {
             Self::LightScheme | Self::DarkScheme => Some(Text::AddScheme.text()),
             Self::TerminalFont => Some(Text::InstallFonts.text()),
@@ -5038,7 +5046,7 @@ impl SettingsRow {
             // and this one hands an address to the browser and is over — which
             // is also why it wears a different mark, see
             // [`menu_action_mark`](Self::menu_action_mark).
-            Self::UpdateCheck => Some(Text::OpenReleasesPage.text()),
+            Self::UpdateCheck => Some(values.update_row.text()),
             _ => None,
         }
     }
@@ -5050,11 +5058,19 @@ impl SettingsRow {
     /// pair returned from it, because the two answer different questions and one
     /// of them has a default that is right for almost every row: a foot verb
     /// added tomorrow is far more likely to add a thing than to leave.
+    ///
+    /// The update row's two other feet wear **no mark**: `Restart to update`
+    /// raises a card in this window and `Copy` fills the clipboard — neither
+    /// adds a thing nor leaves the window (0.4.6 U-19).
     #[must_use]
-    pub fn menu_action_mark(self) -> &'static str {
+    pub fn menu_action_mark(self, values: &SettingsValues) -> &'static str {
         match self {
             // The one verb in this dialog that hands an address to the browser.
-            Self::UpdateCheck => MENU_ACTION_MARK_AWAY,
+            Self::UpdateCheck => match values.update_row {
+                crate::update_card::RowFoot::ReleasesPage => MENU_ACTION_MARK_AWAY,
+                crate::update_card::RowFoot::Restart { .. }
+                | crate::update_card::RowFoot::Copy { .. } => "",
+            },
             _ => MENU_ACTION_MARK,
         }
     }
@@ -6473,6 +6489,12 @@ pub struct SettingsValues {
     pub agent_config_refusals: [Option<&'static str>; 3],
     /// Whether the releases page is asked once a day (§7.51).
     pub update_check: bool,
+    /// **What the update row ends with, read off the update job** (0.4.6 U-19):
+    /// the releases page, `Restart to update` while a job waits at `Verified`,
+    /// or a package manager's command with `Copy` (C2). Handed in for
+    /// `agent_config_refusals`' reason: the job is the application's, and the
+    /// row reads what it already knows.
+    pub update_row: crate::update_card::RowFoot,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
     /// Where a web preview's address field sends a non-address.
@@ -6682,6 +6704,7 @@ impl SettingsValues {
             copilot_readiness: crate::attention_copilot::Readiness::Unknown,
             agent_config_refusals: [None; 3],
             update_check: true,
+            update_row: crate::update_card::RowFoot::ReleasesPage,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
             launch_opens: LaunchOpensV1::NewWindow,
@@ -7626,7 +7649,7 @@ impl SettingsPanel {
         if let (Some(menu), Some(SettingsTarget::MenuAction(row))) = (self.menu, self.focus)
             && menu == row
             && rows.contains(&row)
-            && row.menu_action().is_some()
+            && row.menu_action(content.values).is_some()
         {
             return;
         }
@@ -8163,7 +8186,8 @@ impl SettingsPanel {
                 // from the end — the wrap that takes ↓ back to the top belongs
                 // to the values, and a verb that appeared in the middle of it
                 // would be a door in the middle of a list.
-                if delta > 0 && row.menu_action().is_some() && index + 1 == row.option_count() {
+                if delta > 0 && row.menu_action(values).is_some() && index + 1 == row.option_count()
+                {
                     self.focus = Some(SettingsTarget::MenuAction(row));
                     return true;
                 }
@@ -10236,13 +10260,15 @@ pub fn update_check_requested(target: SettingsTarget) -> Option<bool> {
     }
 }
 
-/// Whether the press was this row's picker foot — `Open releases page`.
+/// Whether the press was the update row's picker foot — `Open releases page`,
+/// `Restart to update` or `Copy`, whichever [`SettingsRow::menu_action`] drew
+/// (0.4.6 U-19; the runtime answers it by the job's [`crate::update_card::RowFoot`]).
 ///
 /// Its own reader rather than a `match` at the call site, so the one place that
 /// knows which row carries which foot verb is this file, where
 /// [`SettingsRow::menu_action`] already says so.
 #[must_use]
-pub fn releases_page_requested(target: SettingsTarget) -> bool {
+pub fn update_row_foot_requested(target: SettingsTarget) -> bool {
     matches!(target, SettingsTarget::MenuAction(SettingsRow::UpdateCheck))
 }
 
@@ -11747,7 +11773,7 @@ pub fn layout_for_menus(
     let menu = active.map(|(row, combo)| {
         let font = px(COMBO_FONT_LOGICAL_PX);
         let values_count = row.option_count();
-        let action = row.menu_action();
+        let action = row.menu_action(content_of.values);
         // **A file is told from a bundled item by the folder and not by the
         // list**, because the list is a run of names and a name is all a picker
         // ever knew. `scheme_files` is what `%APPDATA%\Folio\schemes` holds this
@@ -13704,7 +13730,7 @@ pub fn build(
             // like any other item, and its `+` lights to say the press does
             // something rather than choosing something.
             if layout.menu_action == Some(index) {
-                let action = row.menu_action().unwrap_or_default();
+                let action = row.menu_action(values).unwrap_or_default();
                 let lit = hover == Some(SettingsTarget::MenuAction(row))
                     || focus == Some(SettingsTarget::MenuAction(row));
                 if lit {
@@ -13719,7 +13745,7 @@ pub fn build(
                 let mark_right = mark_left + px(TICK_WIDTH_LOGICAL_PX);
                 menu_stack.labels.push(ChromeLabel {
                     mono: false,
-                    text: row.menu_action_mark().to_owned(),
+                    text: row.menu_action_mark(values).to_owned(),
                     rect: [mark_left, item[1], mark_right, item[3]],
                     font_size_px: px(MENU_ACTION_MARK_FONT_LOGICAL_PX),
                     color: if lit {
@@ -19091,7 +19117,10 @@ mod tests {
     ///
     /// MUTATION: put the pre-2026-09-13 `DescLaunchOpens`, `DescSidebar` or
     /// `DescQuakeRestore` back, or the pre-2026-09-23 `DescOptionSendsAlt`, and
-    /// this names the row and the line count.
+    /// this names the row and the line count. And (0.4.6 U-19) spell out
+    /// `Text::UpdateRowManaged` as `{version} is available. Press Copy to put
+    /// {command} on the clipboard, then run it in a terminal to update.` and the
+    /// winget sentence names `UpdateCheck` at three lines.
     #[test]
     fn no_settings_sentence_needs_a_third_line() {
         use crate::i18n::Lang;
@@ -19155,6 +19184,17 @@ mod tests {
         for entry in CAPABILITY_SENTENCES {
             let row = SettingsRow::ProfileIntegration;
             let sentence = entry.in_lang(Lang::English);
+            let lines = count(row, sentence);
+            if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                over.push((row, lines, sentence.to_owned()));
+            }
+        }
+        // **The update row's sentences beyond today's** (0.4.6 U-19): a job
+        // waiting at `Verified`, and a copy each package manager owns, each with
+        // a tag longer than any this product has shipped. The fixture's job says
+        // neither, so the walk above never draws them.
+        for sentence in crate::update_card::every_new_row_sentence_in(Lang::English) {
+            let row = SettingsRow::UpdateCheck;
             let lines = count(row, sentence);
             if lines > SETTINGS_DESCRIPTION_MAX_LINES {
                 over.push((row, lines, sentence.to_owned()));
@@ -20072,17 +20112,17 @@ mod tests {
             "the verb is the last item and it is the only one"
         );
         assert_eq!(
-            row.menu_action(),
+            row.menu_action(&SettingsValues::sample()),
             Some(Text::AddScheme.text()),
             "and it is the verb the ruling named"
         );
         assert_eq!(
-            SettingsRow::TerminalFont.menu_action(),
+            SettingsRow::TerminalFont.menu_action(&SettingsValues::sample()),
             Some(Text::InstallFonts.text()),
             "the font picker carries the same shape with its own word"
         );
         assert_eq!(
-            SettingsRow::Theme.menu_action(),
+            SettingsRow::Theme.menu_action(&SettingsValues::sample()),
             None,
             "and a picker that is only values ends in one"
         );

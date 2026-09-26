@@ -902,7 +902,12 @@ Entries: §7.52 *an installed preview has no way to know it is out of date: one
 request, a stamp good for a day, and a gear*; the `update.rs` module doc;
 `PRIVACY.md`; trailing entry 2026-09-26 *the update check's state has one owner
 that holds one lock across every read-modify-write, and a skipped version is
-compared by precedence*.
+compared by precedence*; trailing entry 2026-09-26 *the update job is one per
+process, owned by the application*; trailing entry 2026-09-26 *the update card
+says one line per state, holds the window's keys until it is answered or put
+away, follows its window when that window closes, and the General row's foot is
+read off the update job* (U-19; the fold is the enabling tickets', U-31 / U-32,
+per the design note's (b).5 table).
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees
