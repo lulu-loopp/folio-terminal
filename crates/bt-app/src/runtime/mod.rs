@@ -33,5 +33,6 @@ mod search;
 mod tabs;
 mod terminal;
 mod tooltips;
+mod update_card;
 mod web;
 mod windows;

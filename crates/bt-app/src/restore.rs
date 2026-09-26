@@ -2935,6 +2935,443 @@ pub fn paste_card_build(
     }]
 }
 
+// ── the update card (0.4.6 U-19; design note §B, C9) ────────────────────────
+//
+// The fifth dialog on this surface and of this craft, and here for the invitation's reason: the
+// constants above, `push_button` and the `×` are this module's, and a card that copied them into
+// `update_card.rs` would drift the first time one of them moved. `update_card` decides what the
+// card says ([`crate::update_card::paint`]); this places it and draws it.
+//
+// **It does not dim** (§B: "It never dims the window behind it"), so there is no scrim quad — the
+// restore card's arrangement. That it holds the keyboard and the pointer while it is up is the
+// router's decision (`Runtime::update_card_is_up`), not this module's.
+//
+// One line per state (C9), and the download's first row is **a bar** — the first progress drawing
+// in this window: a track with the received share filled in the accent, or, when the length is
+// unknown, the whole track washed in the accent with no share at all, so it cannot be read as a
+// number.
+
+/// The bar's thickness — a hairline would not read as a quantity; a band would read as a control.
+const UPDATE_BAR_LOGICAL_PX: f32 = 4.0;
+/// How much of the accent the indeterminate bar carries over the whole track.
+const UPDATE_BAR_INDETERMINATE_ALPHA: f32 = 0.35;
+
+/// Everything the update card draws that had to be measured with a real font.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpdateCardContent {
+    /// The state's line, broken to lines that fit beside the `×`.
+    pub heading: Vec<String>,
+    pub bar: Option<crate::update_card::Bar>,
+    /// The quieter line, broken to lines that fit.
+    pub detail: Vec<String>,
+    /// The journal's folder, cut anywhere it has to be (it is one token).
+    pub folder: Vec<String>,
+    /// C9's verbs in C9's order, each with its word and that word's width.
+    pub verbs: Vec<(crate::update_card::CardVerb, &'static str, f32)>,
+    pub primary: Option<crate::update_card::CardVerb>,
+}
+
+/// **The card's words, measured** — `measure` is the caller's font, asked for a string at a size
+/// in a weight.
+#[must_use]
+pub fn update_card_content(
+    paint: &crate::update_card::Paint,
+    surface_width: f32,
+    scale: f32,
+    measure: &mut dyn FnMut(&str, f32, ChromeLabelWeight) -> f32,
+) -> UpdateCardContent {
+    let px = |value: f32| value * scale;
+    let room = content_width(surface_width, scale);
+    let beside_close = room - px(PASTE_CLOSE_GAP_LOGICAL_PX + PASTE_CLOSE_LOGICAL_PX);
+    let title = px(TITLE_FONT_LOGICAL_PX);
+    let sub = px(SUB_FONT_LOGICAL_PX);
+    let heading = paint.heading.as_deref().map_or_else(Vec::new, |heading| {
+        wrap(heading, beside_close, |text| {
+            measure(text, title, ChromeLabelWeight::SemiBold)
+        })
+    });
+    let detail = paint.detail.as_deref().map_or_else(Vec::new, |detail| {
+        wrap(detail, room, |text| {
+            measure(text, sub, ChromeLabelWeight::Regular)
+        })
+    });
+    let folder = paint.folder.as_deref().map_or_else(Vec::new, |folder| {
+        wrap_anywhere(&folder.to_string_lossy(), room, |text| {
+            measure(text, sub, ChromeLabelWeight::Regular)
+        })
+    });
+    let button = px(BUTTON_FONT_LOGICAL_PX);
+    let verbs = paint
+        .verbs
+        .iter()
+        .map(|verb| {
+            let text = verb.text();
+            (
+                *verb,
+                text,
+                measure(text, button, ChromeLabelWeight::Regular),
+            )
+        })
+        .collect();
+    UpdateCardContent {
+        heading,
+        bar: paint.bar,
+        detail,
+        folder,
+        verbs,
+        primary: paint.primary(),
+    }
+}
+
+/// Every rectangle the update card draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpdateCardLayout {
+    scale: f32,
+    frame: [f32; 4],
+    close: [f32; 4],
+    heading: Vec<(String, [f32; 4])>,
+    bar: Option<(crate::update_card::Bar, [f32; 4])>,
+    detail: Vec<(String, [f32; 4])>,
+    folder: Vec<(String, [f32; 4])>,
+    buttons: Vec<(crate::update_card::CardVerb, &'static str, [f32; 4])>,
+    primary: Option<crate::update_card::CardVerb>,
+}
+
+impl UpdateCardLayout {
+    /// Where one verb's button stands, for the tests that press it.
+    #[cfg(test)]
+    #[must_use]
+    pub fn button(&self, verb: crate::update_card::CardVerb) -> Option<[f32; 4]> {
+        self.buttons
+            .iter()
+            .find(|(drawn, _, _)| *drawn == verb)
+            .map(|(_, _, rect)| *rect)
+    }
+
+    /// The `×`'s square, for the tests that press it.
+    #[cfg(test)]
+    #[must_use]
+    pub fn close_box(&self) -> [f32; 4] {
+        self.close
+    }
+}
+
+/// Where every part of the update card lands in a window this size.
+///
+/// The family's width (`min(400px, 92%)`) and the family's padding; the first row is the heading
+/// or the bar, with the `×` at its end; the quieter lines under it; the verbs on one row at the
+/// foot, the recommended one on the right — or, in a window too narrow for that row, stacked, the
+/// recommended one on top, as the paste card stacks.
+#[must_use]
+pub fn update_card_layout(
+    content: &UpdateCardContent,
+    surface_width: f32,
+    surface_height: f32,
+    scale: f32,
+) -> UpdateCardLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let width = dialog_width(surface_width, scale);
+    let room = width - 2.0 * (border + px(DIALOG_PADDING_X_LOGICAL_PX));
+    let button_height =
+        2.0 * border + px(2.0 * BUTTON_PADDING_Y_LOGICAL_PX + BUTTON_LINE_LOGICAL_PX);
+    let button_width =
+        |text_width: f32| 2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + text_width;
+    let row_width = content
+        .verbs
+        .iter()
+        .map(|(_, _, text_width)| button_width(*text_width))
+        .sum::<f32>()
+        + px(ACTIONS_GAP_LOGICAL_PX) * content.verbs.len().saturating_sub(1) as f32;
+    let side_by_side = row_width <= room;
+    let button_rows = if side_by_side {
+        1.0
+    } else {
+        content.verbs.len() as f32
+    };
+    let first_rows = content.heading.len().max(1) as f32;
+    let quiet_lines = (content.detail.len() + content.folder.len()) as f32;
+    let quiet_block = if quiet_lines > 0.0 {
+        px(TITLE_MARGIN_BOTTOM_LOGICAL_PX) + quiet_lines * px(SUB_LINE_LOGICAL_PX)
+    } else {
+        0.0
+    };
+    let height = (2.0 * border
+        + px(DIALOG_PADDING_TOP_LOGICAL_PX)
+        + first_rows * px(TITLE_LINE_LOGICAL_PX)
+        + quiet_block
+        + px(SUB_MARGIN_BOTTOM_LOGICAL_PX)
+        + button_rows * button_height
+        + (button_rows - 1.0).max(0.0) * px(ACTIONS_GAP_LOGICAL_PX)
+        + px(DIALOG_PADDING_BOTTOM_LOGICAL_PX))
+    .round();
+
+    let left = ((surface_width - width) / 2.0).round();
+    let top = ((surface_height - height) / 2.0).round();
+    let frame = [left, top, left + width, top + height];
+    let content_left = frame[0] + border + px(DIALOG_PADDING_X_LOGICAL_PX);
+    let content_right = frame[2] - border - px(DIALOG_PADDING_X_LOGICAL_PX);
+    let mut cursor = frame[1] + border + px(DIALOG_PADDING_TOP_LOGICAL_PX);
+
+    let first_middle = cursor + px(TITLE_LINE_LOGICAL_PX) / 2.0;
+    let close = [
+        content_right - px(PASTE_CLOSE_LOGICAL_PX),
+        (first_middle - px(PASTE_CLOSE_LOGICAL_PX) / 2.0).round(),
+        content_right,
+        (first_middle + px(PASTE_CLOSE_LOGICAL_PX) / 2.0).round(),
+    ];
+    let beside_close = close[0] - px(PASTE_CLOSE_GAP_LOGICAL_PX);
+    let heading = content
+        .heading
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let line_top = cursor + index as f32 * px(TITLE_LINE_LOGICAL_PX);
+            (
+                line.clone(),
+                [
+                    content_left,
+                    line_top,
+                    beside_close,
+                    line_top + px(TITLE_LINE_LOGICAL_PX),
+                ],
+            )
+        })
+        .collect();
+    let bar = content.bar.map(|bar| {
+        let half = (px(UPDATE_BAR_LOGICAL_PX) / 2.0).max(1.0);
+        (
+            bar,
+            [
+                content_left,
+                (first_middle - half).round(),
+                beside_close,
+                (first_middle + half).round(),
+            ],
+        )
+    });
+    cursor += first_rows * px(TITLE_LINE_LOGICAL_PX);
+    if quiet_lines > 0.0 {
+        cursor += px(TITLE_MARGIN_BOTTOM_LOGICAL_PX);
+    }
+    let mut stack = |lines: &[String]| -> Vec<(String, [f32; 4])> {
+        lines
+            .iter()
+            .map(|line| {
+                let placed = (
+                    line.clone(),
+                    [
+                        content_left,
+                        cursor,
+                        content_right,
+                        cursor + px(SUB_LINE_LOGICAL_PX),
+                    ],
+                );
+                cursor += px(SUB_LINE_LOGICAL_PX);
+                placed
+            })
+            .collect()
+    };
+    let detail = stack(&content.detail);
+    let folder = stack(&content.folder);
+    cursor += px(SUB_MARGIN_BOTTOM_LOGICAL_PX);
+
+    // C9's order is the order of importance; on one row the recommended verb stands on the right,
+    // so the row is that order laid right to left from the edge.
+    let mut buttons = Vec::with_capacity(content.verbs.len());
+    if side_by_side {
+        let mut right = content_right;
+        for (verb, text, text_width) in &content.verbs {
+            let left = right - button_width(*text_width);
+            buttons.push((*verb, *text, [left, cursor, right, cursor + button_height]));
+            right = left - px(ACTIONS_GAP_LOGICAL_PX);
+        }
+    } else {
+        for (verb, text, _) in &content.verbs {
+            buttons.push((
+                *verb,
+                *text,
+                [content_left, cursor, content_right, cursor + button_height],
+            ));
+            cursor += button_height + px(ACTIONS_GAP_LOGICAL_PX);
+        }
+    }
+    UpdateCardLayout {
+        scale,
+        frame,
+        close,
+        heading,
+        bar,
+        detail,
+        folder,
+        buttons,
+        primary: content.primary,
+    }
+}
+
+/// What a point is over. **Always an answer**: the card holds the pointer while it is up, so a
+/// press beside it is still the card's and answers nothing.
+#[must_use]
+pub fn update_card_hit(layout: &UpdateCardLayout, x: f64, y: f64) -> crate::update_card::Target {
+    let (x, y) = (x as f32, y as f32);
+    if contains(layout.close, x, y) {
+        return crate::update_card::Target::Close;
+    }
+    layout
+        .buttons
+        .iter()
+        .find(|(_, _, rect)| contains(*rect, x, y))
+        .map_or(crate::update_card::Target::Panel, |(verb, _, _)| {
+            crate::update_card::Target::Verb(*verb)
+        })
+}
+
+/// The update card as one overlay layer — **no scrim**.
+#[must_use]
+pub fn update_card_build(
+    layout: &UpdateCardLayout,
+    hover: Option<crate::update_card::Target>,
+    ring: Option<crate::update_card::CardVerb>,
+) -> Vec<OverlayLayer> {
+    use crate::update_card::{Bar, Target};
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut sprites = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(FLOAT_WINDOW_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.dialog_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_shadow_inner_alpha),
+        alpha(palette.menu_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+    for (text, rect) in &layout.heading {
+        labels.push(ChromeLabel {
+            mono: false,
+            text: text.clone(),
+            rect: *rect,
+            font_size_px: px(TITLE_FONT_LOGICAL_PX),
+            color: palette.dialog_title_text,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::SemiBold,
+            tabular_numerals: false,
+            clip: Some(*rect),
+        });
+    }
+    if let Some((bar, track)) = layout.bar {
+        let round = (track[3] - track[1]) / 2.0;
+        quads.extend(rounded_overlay_fill(
+            track,
+            round,
+            palette.menu_border,
+            alpha(palette.menu_border_alpha),
+        ));
+        match bar {
+            Bar::Determinate(share) => {
+                let filled = track[0] + (track[2] - track[0]) * share.clamp(0.0, 1.0);
+                if filled > track[0] {
+                    quads.extend(rounded_overlay_fill(
+                        [track[0], track[1], filled, track[3]],
+                        round,
+                        palette.accent,
+                        1.0,
+                    ));
+                }
+            }
+            Bar::Indeterminate => quads.extend(rounded_overlay_fill(
+                track,
+                round,
+                palette.accent,
+                UPDATE_BAR_INDETERMINATE_ALPHA,
+            )),
+        }
+    }
+    for (text, rect) in layout.detail.iter().chain(&layout.folder) {
+        labels.push(ChromeLabel {
+            mono: false,
+            text: text.clone(),
+            rect: *rect,
+            font_size_px: px(SUB_FONT_LOGICAL_PX),
+            color: palette.dialog_secondary_text,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            // The megabytes change under the reader's eye: figures of one width keep the line
+            // from shuffling as they do.
+            tabular_numerals: true,
+            clip: None,
+        });
+    }
+    // The `×` — the paste card's, which is the toast's.
+    let lit = hover == Some(Target::Close);
+    if lit {
+        sprites.push(ChromeSprite::new(
+            ChromeMark::ControlPill {
+                radius_px: px(PASTE_CLOSE_RADIUS_LOGICAL_PX).round().max(1.0) as u32,
+            },
+            layout.close,
+            palette.menu_item_hover,
+        ));
+    }
+    let glyph = px(crate::seats::compact_head_glyph_logical_px(
+        ChromeMark::PaneClose,
+    ))
+    .round();
+    let (x, y) = (
+        (layout.close[0] + (layout.close[2] - layout.close[0] - glyph) / 2.0).round(),
+        (layout.close[1] + (layout.close[3] - layout.close[1] - glyph) / 2.0).round(),
+    );
+    sprites.push(ChromeSprite::new(
+        ChromeMark::PaneClose,
+        [x, y, x + glyph, y + glyph],
+        if lit {
+            palette.menu_item_text_selected
+        } else {
+            palette.menu_item_text
+        },
+    ));
+    for (verb, text, rect) in &layout.buttons {
+        push_button(
+            &mut quads,
+            &mut labels,
+            *rect,
+            text,
+            layout.primary == Some(*verb),
+            hover == Some(Target::Verb(*verb)),
+            scale,
+            border,
+            palette,
+        );
+        if ring == Some(*verb) {
+            quads.extend(crate::first_run::button_focus_ring(
+                *rect,
+                scale,
+                palette.accent,
+            ));
+        }
+    }
+    vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+        ..Default::default()
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

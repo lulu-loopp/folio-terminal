@@ -167,6 +167,9 @@ mod uninstall;
 mod update;
 // The updater's archive reader (0.4.6 ticket U-14); U-20's Prepare is its caller.
 mod update_archive;
+// The update card and the General row: what the reader sees of the update job
+// (0.4.6 ticket U-19).
+mod update_card;
 // The update job, one per process on `App` (0.4.6 ticket U-18).
 mod update_job;
 // The build script's updater-flag decision, compiled here only so its tests run:
@@ -12810,6 +12813,11 @@ struct App {
     /// the offer outlives the window it was raised in and a download belongs to
     /// the copy, not to a window of it. See [`update_job::Job`].
     update_job: update_job::Job<WindowId>,
+    /// **What the update job showed at the end of the last turn** — the card's
+    /// window and paint, and the General row's foot (U-19). Compared once a
+    /// turn by `FolioApp::settle_update_card`, which repaints only the windows
+    /// whose drawing changed; a copy of nothing the job owns.
+    update_shown: update_card::Shown<WindowId>,
 }
 
 /// **The way a message from outside every window asks for a turn.**
@@ -14792,6 +14800,11 @@ struct WindowRuntime {
     /// only state of its own. Whether it is up at all is not stored here: it is
     /// [`LeafSession::pending_paste`], read through `Runtime::paste_card_seat`.
     paste_card_hover: Option<restore::PasteCardTarget>,
+    /// **What the pointer is over on the update card, and where the keyboard's
+    /// ring stands** (0.4.6 U-19) — this window's half of the card. Whether the
+    /// card is up here is the update job's (`Job::card_window`), read through
+    /// `Runtime::update_card_is_up`.
+    update_card: update_card::Card,
     /// The first-run card, on the first window of a machine that has never run
     /// Folio (§7.56).
     ///
@@ -40662,6 +40675,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         dirty_gate: restore::DirtyGate::default(),
         psreadline_invite: psreadline::Invite::default(),
         paste_card_hover: None,
+        update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
         psreadline_size_changed: false,
         window_close_requested: false,
@@ -41992,6 +42006,7 @@ impl Runtime<'_> {
             window_ring_shown: None,
             quake: quake::Quake::default(),
             update_job: update_job::Job::default(),
+            update_shown: update_card::Shown::default(),
         };
         // **The rest of the file's windows, queued at the door.** A window that
         // held a pinned tab opens straight away, through the very same door
@@ -42848,6 +42863,8 @@ impl Runtime<'_> {
             powershell_install_pending: self.app.settings_store.loaded().powershell_install_pending,
             git_panel: self.app.settings_store.loaded().git_panel,
             update_check: self.app.settings_store.loaded().update_check,
+            // What the row ends with is the update job's to say (0.4.6 U-19).
+            update_row: update_card::row_foot(&self.app.update_job),
             key_hints: self.app.settings_store.loaded().key_hints,
             option_sends_alt: self.app.settings_store.loaded().option_sends_alt,
             // The machine's own answer, cached at the three moments it can
@@ -43474,8 +43491,8 @@ impl Runtime<'_> {
         // verb and not a choice, so it is answered here beside the choices for
         // `apply_settings_choice`'s founding reason rather than in a second
         // dispatcher of its own.
-        if settings::releases_page_requested(target) {
-            self.hand_url_to_the_browser(update::RELEASES_PAGE)?;
+        if settings::update_row_foot_requested(target) {
+            self.press_update_row_foot()?;
         }
         if let Some(enabled) = settings::key_hints_requested(target) {
             self.apply_key_hints(enabled)?;
@@ -60632,6 +60649,71 @@ impl FolioApp {
         Ok(())
     }
 
+    /// **The update card follows the job, once a turn** (0.4.6 U-19).
+    ///
+    /// Two things happen here and nowhere else. The card is handed to the next
+    /// active ordinary window when its own has closed (`Job::hand_over`, §B;
+    /// coordinator ruling 5 — never the summoned terminal). And what the job
+    /// shows is compared with what it showed at the end of the last turn: a card
+    /// that appeared, moved, changed its words or went is repainted in the
+    /// window it left and the window it is in, with that window's hover and
+    /// ring put out when its verbs changed; a change of the General row's foot
+    /// repaints every window, because any of them may have Settings open. The
+    /// job's own events (a report, a verb, a switch) need no repaint of their
+    /// own — this is the one.
+    fn settle_update_card(&mut self) -> Result<()> {
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        let open: Vec<WindowId> = app.windows_open.iter().map(|open| open.id).collect();
+        app.update_job.hand_over(&update_job::Presenters {
+            visited: &app.activated,
+            open: &open,
+            quake: app.quake.window(),
+        });
+        let now = update_card::shown(&app.update_job);
+        if now == app.update_shown {
+            return Ok(());
+        }
+        let before = std::mem::replace(&mut app.update_shown, now.clone());
+        let verbs = |shown: &update_card::Shown<WindowId>| {
+            shown
+                .card
+                .as_ref()
+                .map(|(window, paint)| (*window, paint.verbs.clone()))
+        };
+        let reset = verbs(&before) != verbs(&now);
+        if before.foot != now.foot {
+            return self.for_each_window(|runtime| {
+                if reset {
+                    runtime.window.update_card.reset();
+                }
+                if runtime.refresh_overlay() {
+                    runtime.present_chrome_change()?;
+                }
+                Ok(())
+            });
+        }
+        let windows = [
+            before.card.as_ref().map(|(window, _)| *window),
+            now.card.as_ref().map(|(window, _)| *window),
+        ];
+        let second = windows[1].filter(|id| windows[0] != Some(*id));
+        for id in [windows[0], second].into_iter().flatten() {
+            if let Some(mut runtime) = self.runtime(id)
+                && runtime.window.leaving.is_none()
+            {
+                if reset {
+                    runtime.window.update_card.reset();
+                }
+                if runtime.refresh_overlay() {
+                    runtime.present_chrome_change()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn open_pending_window(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         let plans = match self.app.as_mut() {
             Some(app) => std::mem::take(&mut app.pending_new_windows),
@@ -62590,6 +62672,7 @@ impl FolioApp {
         }
         if let Err(error) = self
             .settle_window_ring()
+            .and_then(|()| self.settle_update_card())
             .and_then(|()| self.settle_application_change())
             .and_then(|()| self.settle_restore_answer())
             // **F2 — before the window door and after everything that could have
@@ -73227,6 +73310,7 @@ mod edit_menu_clipboard_tests {
             "self.window.first_run.is_open()",
             "self.window.psreadline_invite.is_open()",
             "self.paste_card_seat().is_some()",
+            "self.update_card_is_up()",
             "self.settings_layout().is_some()",
             "self.restore_card_is_up()",
             "self.window.rename.is_some()",

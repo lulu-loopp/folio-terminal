@@ -796,13 +796,6 @@ impl OfferState {
     ///
     /// The write's. A Skip that did not reach the disk is not in [`Self::known`]
     /// either, so nothing reports it as kept.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Skip's writer lands before its button: U-19 draws the card that calls it ((b).5)"
-        )
-    )]
     pub fn skip(&self, tag: &str) -> Result<(), bt_persist::WriteError> {
         self.transact(|state| {
             let higher = match (
@@ -961,6 +954,27 @@ pub fn job_evidence() -> Option<(UpdateCheckV1, bool)> {
     OWNER.get().and_then(OfferState::job_evidence)
 }
 
+/// **The tag this process's check offers**, if any — [`OfferState::offer`] of
+/// the owner, for the General row's sentences (U-19).
+#[must_use]
+pub fn offer() -> Option<String> {
+    OWNER
+        .get()
+        .and_then(|owner| owner.offer(crate::version::VERSION))
+}
+
+/// **Skip, pressed on the update card** (U-19): [`OfferState::skip`] of this
+/// process's owner — the card hands the job's `Effect::RecordSkip` here and
+/// writes nothing itself.
+///
+/// # Errors
+///
+/// The write's; `Ok` when no owner was opened (a test process), where there is
+/// no file to write.
+pub fn skip(tag: &str) -> Result<(), bt_persist::WriteError> {
+    OWNER.get().map_or(Ok(()), |owner| owner.skip(tag))
+}
+
 /// The reader turned the switch on or off (Settings > General > Update check).
 ///
 /// Off suppresses the cached offer from the next frame. On does not start a
@@ -977,13 +991,11 @@ pub fn set_enabled(enabled: bool) {
 /// `context_menu::row_description`'s footing: what the row says depends on a
 /// fact about the world, and the module that owns the fact is the one that
 /// should be asked. The base sentence is a table entry like every other row's;
-/// only the one that names a version is composed.
-#[must_use]
-pub fn row_description() -> &'static str {
-    row_description_in(crate::i18n::current())
-}
-
-/// The same in a named language — the entry point for a test that reads both
+/// only the one that names a version is composed. Since 0.4.6 U-19 it is the
+/// sentence of the row whose foot is the releases page; the update card's
+/// module chooses among the row's sentences (`update_card::row_description_in`).
+///
+/// In a named language — the entry point for a test that reads both
 /// columns.
 #[must_use]
 pub fn row_description_in(lang: crate::i18n::Lang) -> &'static str {
@@ -1800,20 +1812,23 @@ mod tests {
             bt_platform::HostPlatform::MacOs,
             bt_platform::HostPlatform::OtherUnix,
         ] {
+            // A job with nothing to say leaves the row's foot the releases
+            // page (0.4.6 U-19: the foot is read off the job).
+            let values = crate::settings::SettingsValues::sample();
             assert_eq!(
-                crate::settings::SettingsRow::UpdateCheck.menu_action(),
+                crate::settings::SettingsRow::UpdateCheck.menu_action(&values),
                 Some(crate::i18n::Text::OpenReleasesPage.text()),
                 "{platform:?}"
             );
             // The mark that says the press leaves this window, rather than the
             // `+` every other foot verb wears.
             assert_eq!(
-                crate::settings::SettingsRow::UpdateCheck.menu_action_mark(),
+                crate::settings::SettingsRow::UpdateCheck.menu_action_mark(&values),
                 "↗",
                 "{platform:?}"
             );
             assert!(
-                crate::settings::releases_page_requested(
+                crate::settings::update_row_foot_requested(
                     crate::settings::SettingsTarget::MenuAction(
                         crate::settings::SettingsRow::UpdateCheck
                     )

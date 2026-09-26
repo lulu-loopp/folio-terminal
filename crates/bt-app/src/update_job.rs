@@ -57,7 +57,7 @@
     not(test),
     expect(
         dead_code,
-        reason = "the card's verbs and the drivers land after the job: U-19 presses, U-20/U-27 drive, U-21 quits ((b).5)"
+        reason = "the drivers land after the card: U-20/U-27 drive and report, U-21 quits ((b).5)"
     )
 )]
 
@@ -596,14 +596,15 @@ pub(crate) const TABLE: [(Kind, Verb, Handling); 45] = {
         (K::Available, V::Press, Prepares),
         (K::Available, V::Cancel, Refused(NotOnThisCard)),
         (K::Available, V::Restart, Refused(NotOnThisCard)),
-        // Cancel.
-        (K::Downloading, V::Later, Refused(NotOnThisCard)),
+        // Cancel. Escape and the close box (Later) put the card away and the
+        // download goes on (coordinator ruling 1, 2026-09-26, U-19).
+        (K::Downloading, V::Later, Moves(K::Downloading)),
         (K::Downloading, V::Skip, Refused(NotOnThisCard)),
         (K::Downloading, V::Press, Refused(NotOnThisCard)),
         (K::Downloading, V::Cancel, Moves(K::Idle)),
         (K::Downloading, V::Restart, Refused(NotOnThisCard)),
-        // Still the download's card: Cancel.
-        (K::Staged, V::Later, Refused(NotOnThisCard)),
+        // Still the download's card: Cancel; Later puts it away, as above.
+        (K::Staged, V::Later, Moves(K::Staged)),
         (K::Staged, V::Skip, Refused(NotOnThisCard)),
         (K::Staged, V::Press, Refused(NotOnThisCard)),
         (K::Staged, V::Cancel, Moves(K::Idle)),
@@ -685,6 +686,21 @@ pub(crate) struct Unsupported;
 impl Driver for Unsupported {
     fn prepare(&self, _: &Offer, _: &dyn Transport, _: &Poster) -> Result<(), Refused> {
         Err(Refused::Unsupported)
+    }
+}
+
+/// **The transport the card's press hands the driver today** (U-19): none.
+/// The download door (`bt_platform::https_download`) is wired with the first
+/// driver that fetches (U-20); until then the only driver, [`Unsupported`],
+/// refuses without asking for a file, and this says so if anything ever did.
+pub(crate) struct NoDownloadDoor;
+
+impl Transport for NoDownloadDoor {
+    fn fetch(&self, request: &Request) -> Result<(), String> {
+        Err(format!(
+            "no download door is wired in this build ({})",
+            request.file_name
+        ))
     }
 }
 
@@ -798,8 +814,14 @@ pub(crate) struct Job<W> {
     state: State,
     /// Whether `Available` has been entered this launch (at most once).
     offered_this_launch: bool,
-    /// The window the card is raised in.
+    /// The window the card is raised in. Kept while the card is put away, so
+    /// the card comes back where it went (coordinator ruling 1, U-19).
     presenter: Option<W>,
+    /// **The reader put the card away and the job went on** — Later (Escape,
+    /// the close box) on the download's card or on a verified one. The card
+    /// is not drawn until the download ends (`Verified` or `Failed`, once) or
+    /// the General row's foot asks for it again ([`Self::reopen`]).
+    put_away: bool,
     /// The last decision, for U-19's row.
     answer: Option<Result<Eligible, NotEligible>>,
     /// Whether the decision has been written to `diagnostics.log`.
@@ -825,11 +847,12 @@ impl<W: Copy + Eq> Job<W> {
 
     /// A job whose gate is `offers`; the product's is [`Self::offers_enabled`].
     #[must_use]
-    fn with_offers(offers: bool) -> Self {
+    pub(crate) fn with_offers(offers: bool) -> Self {
         Self {
             state: State::Pending(Pending::AwaitingBoth),
             offered_this_launch: false,
             presenter: None,
+            put_away: false,
             answer: None,
             said: false,
             offers,
@@ -853,6 +876,67 @@ impl<W: Copy + Eq> Job<W> {
     #[must_use]
     pub(crate) const fn answer(&self) -> Option<&Result<Eligible, NotEligible>> {
         self.answer.as_ref()
+    }
+
+    /// **The window the card is drawn in now**, or `None` when no card is up
+    /// (U-19).
+    ///
+    /// A card is up in the states C9 draws one for — `Available`, the
+    /// download's two (`Downloading`, `Staged`), `Verified` and `Failed` — in
+    /// the presenting window, unless the reader put it away. `Quitting` has
+    /// the quit's own card and `Committing` none.
+    #[must_use]
+    pub(crate) fn card_window(&self) -> Option<W> {
+        let drawn = matches!(
+            self.state,
+            State::Available(_)
+                | State::Downloading(..)
+                | State::Staged(_)
+                | State::Verified(_)
+                | State::Failed(..)
+        );
+        self.presenter.filter(|_| drawn && !self.put_away)
+    }
+
+    /// **The General row's foot asks for the card again** (U-19: `Restart to
+    /// update` while a job waits at `Verified`), in `window` — the window the
+    /// row was pressed in. Answers whether a card is now up there.
+    pub(crate) fn reopen(&mut self, window: W) -> bool {
+        if !matches!(self.state, State::Verified(_)) {
+            return false;
+        }
+        self.presenter = Some(window);
+        self.put_away = false;
+        true
+    }
+
+    /// **The card moves when its window goes** (§B: "closing the presenting
+    /// window re-presents on the next active window"; coordinator ruling 5,
+    /// U-19) — the card's one way of choosing a new presenter.
+    ///
+    /// A job holding an offer whose presenter is no longer among
+    /// `presenters.open` takes the most recently active ordinary window
+    /// ([`crate::most_recently_active_window`]; never the summoned terminal),
+    /// or none while no ordinary window is open — and the next call, when one
+    /// opens, seats it there. A card that was put away stays put away: the
+    /// window moves, the reader's answer does not. Answers whether the
+    /// presenter changed.
+    pub(crate) fn hand_over(&mut self, presenters: &Presenters<'_, W>) -> bool {
+        if self.state.offer().is_none()
+            || self
+                .presenter
+                .is_some_and(|window| presenters.open.contains(&window))
+        {
+            return false;
+        }
+        let next = crate::most_recently_active_window(
+            presenters.visited,
+            presenters.open,
+            presenters.quake,
+        );
+        let moved = next != self.presenter;
+        self.presenter = next;
+        moved
     }
 
     /// **Consider an offer** on what has been gathered — the handler of
@@ -910,6 +994,7 @@ impl<W: Copy + Eq> Job<W> {
         ) {
             self.state = State::Idle;
             self.presenter = None;
+            self.put_away = false;
         }
     }
 
@@ -952,6 +1037,13 @@ impl<W: Copy + Eq> Job<W> {
             }
             (state, _) => (state, Applied::Stale),
         };
+        // **The download's end is said once** (coordinator ruling 1): a card
+        // put away while the job downloaded or verified comes back, in the
+        // window it was put away in, when the job reaches `Verified` or
+        // `Failed` — and only on that move, so no state raises it twice.
+        if applied == Applied::Moved && matches!(next, State::Verified(_) | State::Failed(..)) {
+            self.put_away = false;
+        }
         self.state = next;
         applied
     }
@@ -993,7 +1085,7 @@ impl<W: Copy + Eq> Job<W> {
             (state @ State::Available(_), Verb::Cancel | Verb::Restart)
             | (
                 state @ (State::Downloading(..) | State::Staged(_)),
-                Verb::Later | Verb::Skip | Verb::Press | Verb::Restart,
+                Verb::Skip | Verb::Press | Verb::Restart,
             )
             | (state @ State::Verified(_), Verb::Skip | Verb::Press | Verb::Cancel)
             | (
@@ -1003,7 +1095,17 @@ impl<W: Copy + Eq> Job<W> {
             (State::Downloading(..) | State::Staged(_), Verb::Cancel) => {
                 (State::Idle, Ok(Effect::None))
             }
-            (state @ State::Verified(_), Verb::Later) => (state, Ok(Effect::None)),
+            // **Later on a card whose work goes on puts the card away** and
+            // moves nothing (§B for `Verified`; coordinator ruling 1 for the
+            // download's card): the row's foot is the way back to a verified
+            // job, and a download's end raises the card again, once.
+            (
+                state @ (State::Downloading(..) | State::Staged(_) | State::Verified(_)),
+                Verb::Later,
+            ) => {
+                self.put_away = true;
+                (state, Ok(Effect::None))
+            }
             (State::Verified(offer), Verb::Restart) => (State::Quitting(offer), Ok(Effect::None)),
             (state @ State::Quitting(_), _) => (state, Err(Refusal::TheQuitAnswers)),
             (state @ State::Committing(_), _) => (state, Err(Refusal::Exiting)),
@@ -1011,6 +1113,7 @@ impl<W: Copy + Eq> Job<W> {
         };
         if matches!(next, State::Idle) {
             self.presenter = None;
+            self.put_away = false;
         }
         self.state = next;
         outcome
@@ -1869,5 +1972,177 @@ mod tests {
             Station::UpdateJobProgress.label(),
             "update_job::Job::drain_progress"
         );
+    }
+
+    /// RED (U-19) — **Escape on the download's card hides the card and the
+    /// download goes on.**
+    ///
+    /// Coordinator ruling 1 (2026-09-26): "Escape / close box on
+    /// `Downloading` and `Staged` hides the card; the download goes on."
+    /// Later is `Moves(same)` there: the job keeps its state, its offer and
+    /// its presenter, its reports still move it, and no card is drawn.
+    ///
+    /// MUTATION: make **Later** on the download's card cancel it in
+    /// `Job::answer_verb` (`(State::Downloading(..) | State::Staged(_),
+    /// Verb::Later) => (State::Idle, …)`) and the job is gone.
+    #[test]
+    fn escape_during_download_hides_the_card_and_keeps_the_job() {
+        let mut job = available("v0.4.7");
+        let driver = Starting::default();
+        job.answer_verb(Verb::Press, &driver, &Recording::default())
+            .expect("the press is taken");
+        let post = driver.0.borrow_mut().take().expect("a poster");
+        assert_eq!(job.card_window(), Some(1), "the download's card is up");
+        assert_eq!(
+            job.answer_verb(Verb::Later, &Unsupported, &Recording::default()),
+            Ok(Effect::None)
+        );
+        assert!(
+            matches!(job.state(), State::Downloading(..)),
+            "the download goes on: {:?}",
+            job.state()
+        );
+        assert_eq!(job.card_window(), None, "the card is hidden");
+        assert_eq!(job.presenter(), Some(1), "and keeps its window");
+        let bytes = Bytes {
+            received: 5,
+            total: Some(10),
+        };
+        post.post(Step::Received(bytes));
+        assert_eq!(job.drain_progress(), 0, "its reports still move it");
+        assert!(matches!(job.state(), State::Downloading(_, got) if *got == bytes));
+        assert_eq!(job.card_window(), None, "progress does not raise the card");
+        post.post(Step::Staged);
+        job.drain_progress();
+        assert!(matches!(job.state(), State::Staged(_)));
+        assert_eq!(job.card_window(), None);
+        assert_eq!(
+            job.answer_verb(Verb::Later, &Unsupported, &Recording::default()),
+            Ok(Effect::None),
+            "Later on the staged card is the same"
+        );
+        assert!(matches!(job.state(), State::Staged(_)));
+    }
+
+    /// RED (U-19) — **a card hidden during the download comes back once,
+    /// in its window, when the job reaches `Verified` or `Failed`.**
+    ///
+    /// Coordinator ruling 1: "the card is re-presented **once**, in the
+    /// presenting window, when the job reaches `Verified` or `Failed`. No
+    /// second card for the same state." Later on the re-presented verified
+    /// card puts it away for good; the row's foot is the way back.
+    ///
+    /// MUTATION: drop the `put_away = false` on a move to `Verified` or
+    /// `Failed` in `Job::apply` and the download's end is never said.
+    #[test]
+    fn the_card_is_re_presented_once_at_verified() {
+        let mut job = available("v0.4.7");
+        let driver = Starting::default();
+        job.answer_verb(Verb::Press, &driver, &Recording::default())
+            .expect("the press is taken");
+        let post = driver.0.borrow_mut().take().expect("a poster");
+        job.answer_verb(Verb::Later, &Unsupported, &Recording::default())
+            .expect("Later hides the download's card");
+        post.post(Step::Staged);
+        job.drain_progress();
+        assert_eq!(job.card_window(), None, "staged is not the end");
+        post.post(Step::Verified);
+        job.drain_progress();
+        assert!(matches!(job.state(), State::Verified(_)));
+        assert_eq!(job.card_window(), Some(1), "re-presented, in its window");
+        job.answer_verb(Verb::Later, &Unsupported, &Recording::default())
+            .expect("Later on the verified card");
+        assert!(matches!(job.state(), State::Verified(_)), "the job is kept");
+        assert_eq!(job.card_window(), None);
+        post.post(Step::Verified);
+        assert_eq!(job.drain_progress(), 1, "a second Verified is stale");
+        assert_eq!(job.card_window(), None, "no second card for the same state");
+
+        // And a download that fails after its card was hidden says so.
+        let mut failing = available("v0.4.7");
+        let driver = Starting::default();
+        failing
+            .answer_verb(Verb::Press, &driver, &Recording::default())
+            .expect("the press is taken");
+        let post = driver.0.borrow_mut().take().expect("a poster");
+        failing
+            .answer_verb(Verb::Later, &Unsupported, &Recording::default())
+            .expect("Later hides the download's card");
+        post.post(Step::Stopped);
+        failing.drain_progress();
+        assert!(matches!(failing.state(), State::Failed(..)));
+        assert_eq!(failing.card_window(), Some(1), "the failure is said");
+    }
+
+    /// RED (U-19) — **when the presenting window closes, the card moves to
+    /// the next active ordinary window — never the summoned terminal.**
+    ///
+    /// §B: "Closing the presenting window does not cancel a job that other
+    /// windows can still be told about; it re-presents on the next active
+    /// window"; coordinator ruling 5: the job keeps `presenter`, and
+    /// [`Job::hand_over`] is the one method that moves it. Two ordinary
+    /// windows and a summoned terminal that was visited after both: the card
+    /// goes to the ordinary one. With no ordinary window left the card waits,
+    /// and the next ordinary window to open takes it. A card the reader put
+    /// away stays put away when it moves.
+    ///
+    /// MUTATION: pass `None` for `presenters.quake` in `Job::hand_over` and
+    /// the card lands in the summoned terminal, 9.
+    #[test]
+    fn a_closed_presenter_hands_the_card_to_the_next_ordinary_window() {
+        let mut job = job();
+        job.consider(
+            gathered("v0.4.7", None, Some(Channel::Ours)),
+            &Presenters {
+                visited: &[2, 9, 1],
+                open: &[1, 2, 9],
+                quake: Some(9),
+            },
+            || txn(1),
+        );
+        assert_eq!(job.card_window(), Some(1));
+        let one_gone = Presenters {
+            visited: &[2, 9],
+            open: &[2, 9],
+            quake: Some(9),
+        };
+        assert!(job.hand_over(&one_gone), "window 1 closed");
+        assert_eq!(job.card_window(), Some(2), "not the summoned terminal");
+        assert!(!job.hand_over(&one_gone), "a presenter still open stays");
+        let only_summoned = Presenters {
+            visited: &[9],
+            open: &[9],
+            quake: Some(9),
+        };
+        assert!(job.hand_over(&only_summoned), "window 2 closed");
+        assert_eq!(
+            job.card_window(),
+            None,
+            "no ordinary window: the card waits"
+        );
+        assert!(
+            matches!(job.state(), State::Available(_)),
+            "the job is kept"
+        );
+        assert!(job.hand_over(&Presenters {
+            visited: &[9],
+            open: &[9, 3],
+            quake: Some(9),
+        }));
+        assert_eq!(job.card_window(), Some(3), "a new window takes it");
+
+        // A hidden card moves hidden.
+        let driver = Starting::default();
+        job.answer_verb(Verb::Press, &driver, &Recording::default())
+            .expect("the press is taken");
+        job.answer_verb(Verb::Later, &Unsupported, &Recording::default())
+            .expect("Later hides the download's card");
+        assert!(job.hand_over(&one_gone), "window 3 closed");
+        assert_eq!(job.presenter(), Some(2));
+        assert_eq!(job.card_window(), None, "still put away");
+        // And an idle job has no card to move.
+        let mut idle = self::job();
+        assert!(!idle.hand_over(&one_gone));
+        assert_eq!(idle.presenter(), None);
     }
 }

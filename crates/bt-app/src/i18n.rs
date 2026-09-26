@@ -2869,6 +2869,49 @@ pub enum Text {
     MenuBringAllToFront,
     /// Help's one row, which opens the page a reader is sent to.
     MenuFolioHelp,
+
+    // ── the update card and the General row (0.4.6 U-19, C9 and C2) ──
+    //
+    // English in both columns until opus46 writes the Chinese: every entry
+    // below is on `CHINESE_PENDING`.
+    /// The update card's first verb on an offer (C9): the press downloads; the restart is asked for again at `Verified`.
+    UpdateCardUpdate,
+    /// The update card's Later, on an offer and on a verified job. Escape and the close box say the same.
+    UpdateCardLater,
+    /// The update card's Skip: this version is not offered again.
+    UpdateCardSkip,
+    /// The download's one verb.
+    UpdateCardCancel,
+    /// A verified job's verb: the ordinary quit runs, then the new version starts.
+    UpdateCardRestart,
+    /// A failed card's verb: the releases page.
+    UpdateCardReleases,
+    /// The card after a rollback that failed: the journal's folder.
+    UpdateCardShowFolder,
+    /// A failed card's other verb.
+    UpdateCardClose,
+    /// The verified card's one line (C9).
+    UpdateCardReady,
+    /// Beside the determinate bar: received and total, in megabytes.
+    UpdateCardProgress,
+    /// After the reason, when the job stopped before anything installed moved.
+    UpdateCardNothingChanged,
+    /// After the reason, when the flip was rolled back.
+    UpdateCardRestored,
+    /// After the reason, when the rollback did not finish; the journal's folder follows.
+    UpdateCardIncomplete,
+    /// The reason a press fails while no driver exists (`update_job::Failure::Unsupported`).
+    UpdateFailedUnsupported,
+    /// The reason a driver that stopped gives (`update_job::Failure::Stopped`); U-20 names finer ones.
+    UpdateFailedStopped,
+    /// The General row's picker foot while a job waits at `Verified`: the card again.
+    UpdateRowRestart,
+    /// The General row's picker foot on a copy a package manager updates: the manager's command, to the clipboard.
+    UpdateRowCopy,
+    /// The General row's sentence while a job waits at `Verified`.
+    UpdateRowReady,
+    /// The General row's sentence on a copy a package manager updates (C2).
+    UpdateRowManaged,
 }
 
 impl Text {
@@ -5420,6 +5463,47 @@ impl Text {
             Self::MenuZoomWindow => pick(lang, "Zoom", "缩放"),
             Self::MenuBringAllToFront => pick(lang, "Bring All to Front", "前置全部窗口"),
             Self::MenuFolioHelp => pick(lang, "Folio Help", "Folio 帮助"),
+            Self::UpdateCardUpdate => pick(lang, "Update", "Update"),
+            Self::UpdateCardLater => pick(lang, "Later", "Later"),
+            Self::UpdateCardSkip => pick(lang, "Skip", "Skip"),
+            Self::UpdateCardCancel => pick(lang, "Cancel", "Cancel"),
+            Self::UpdateCardRestart => pick(lang, "Restart", "Restart"),
+            Self::UpdateCardReleases => pick(lang, "Releases", "Releases"),
+            Self::UpdateCardShowFolder => pick(lang, "Show folder", "Show folder"),
+            Self::UpdateCardClose => pick(lang, "Close", "Close"),
+            Self::UpdateCardReady => pick(
+                lang,
+                "Ready. Running programs will close.",
+                "Ready. Running programs will close.",
+            ),
+            Self::UpdateCardProgress => {
+                pick(lang, "{received} / {total} MB", "{received} / {total} MB")
+            }
+            Self::UpdateCardNothingChanged => pick(lang, "Nothing changed.", "Nothing changed."),
+            Self::UpdateCardRestored => pick(
+                lang,
+                "Previous version restored.",
+                "Previous version restored.",
+            ),
+            Self::UpdateCardIncomplete => pick(lang, "Update incomplete.", "Update incomplete."),
+            Self::UpdateFailedUnsupported => pick(
+                lang,
+                "Folio cannot update itself here.",
+                "Folio cannot update itself here.",
+            ),
+            Self::UpdateFailedStopped => pick(lang, "Download stopped.", "Download stopped."),
+            Self::UpdateRowRestart => pick(lang, "Restart to update", "Restart to update"),
+            Self::UpdateRowCopy => pick(lang, "Copy", "Copy"),
+            Self::UpdateRowReady => pick(
+                lang,
+                "{version} is ready. Restart to update closes running programs.",
+                "{version} is ready. Restart to update closes running programs.",
+            ),
+            Self::UpdateRowManaged => pick(
+                lang,
+                "{version} is available: {command}",
+                "{version} is available: {command}",
+            ),
         }
     }
 
@@ -5435,7 +5519,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 770] = [
+    pub const ALL: [Self; 789] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6191,6 +6275,25 @@ impl Text {
         Self::MenuZoomWindow,
         Self::MenuBringAllToFront,
         Self::MenuFolioHelp,
+        Self::UpdateCardUpdate,
+        Self::UpdateCardLater,
+        Self::UpdateCardSkip,
+        Self::UpdateCardCancel,
+        Self::UpdateCardRestart,
+        Self::UpdateCardReleases,
+        Self::UpdateCardShowFolder,
+        Self::UpdateCardClose,
+        Self::UpdateCardReady,
+        Self::UpdateCardProgress,
+        Self::UpdateCardNothingChanged,
+        Self::UpdateCardRestored,
+        Self::UpdateCardIncomplete,
+        Self::UpdateFailedUnsupported,
+        Self::UpdateFailedStopped,
+        Self::UpdateRowRestart,
+        Self::UpdateRowCopy,
+        Self::UpdateRowReady,
+        Self::UpdateRowManaged,
         Self::ShellProfileEncoding,
         Self::ShellMarksVersion,
         Self::ShellMarksPath,
@@ -6357,7 +6460,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 8] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 46] = [
         // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
         (Self::ShortcutTextLarger, HostPlatform::Windows),
         (Self::ShortcutTextLarger, HostPlatform::MacOs),
@@ -6367,6 +6470,45 @@ impl Text {
         (Self::ShortcutTextActualSize, HostPlatform::MacOs),
         (Self::ShortcutScopeTerminal, HostPlatform::Windows),
         (Self::ShortcutScopeTerminal, HostPlatform::MacOs),
+        // 0.4.6 U-19: the update card and the General row, both columns.
+        (Self::UpdateCardUpdate, HostPlatform::Windows),
+        (Self::UpdateCardUpdate, HostPlatform::MacOs),
+        (Self::UpdateCardLater, HostPlatform::Windows),
+        (Self::UpdateCardLater, HostPlatform::MacOs),
+        (Self::UpdateCardSkip, HostPlatform::Windows),
+        (Self::UpdateCardSkip, HostPlatform::MacOs),
+        (Self::UpdateCardCancel, HostPlatform::Windows),
+        (Self::UpdateCardCancel, HostPlatform::MacOs),
+        (Self::UpdateCardRestart, HostPlatform::Windows),
+        (Self::UpdateCardRestart, HostPlatform::MacOs),
+        (Self::UpdateCardReleases, HostPlatform::Windows),
+        (Self::UpdateCardReleases, HostPlatform::MacOs),
+        (Self::UpdateCardShowFolder, HostPlatform::Windows),
+        (Self::UpdateCardShowFolder, HostPlatform::MacOs),
+        (Self::UpdateCardClose, HostPlatform::Windows),
+        (Self::UpdateCardClose, HostPlatform::MacOs),
+        (Self::UpdateCardReady, HostPlatform::Windows),
+        (Self::UpdateCardReady, HostPlatform::MacOs),
+        (Self::UpdateCardProgress, HostPlatform::Windows),
+        (Self::UpdateCardProgress, HostPlatform::MacOs),
+        (Self::UpdateCardNothingChanged, HostPlatform::Windows),
+        (Self::UpdateCardNothingChanged, HostPlatform::MacOs),
+        (Self::UpdateCardRestored, HostPlatform::Windows),
+        (Self::UpdateCardRestored, HostPlatform::MacOs),
+        (Self::UpdateCardIncomplete, HostPlatform::Windows),
+        (Self::UpdateCardIncomplete, HostPlatform::MacOs),
+        (Self::UpdateFailedUnsupported, HostPlatform::Windows),
+        (Self::UpdateFailedUnsupported, HostPlatform::MacOs),
+        (Self::UpdateFailedStopped, HostPlatform::Windows),
+        (Self::UpdateFailedStopped, HostPlatform::MacOs),
+        (Self::UpdateRowRestart, HostPlatform::Windows),
+        (Self::UpdateRowRestart, HostPlatform::MacOs),
+        (Self::UpdateRowCopy, HostPlatform::Windows),
+        (Self::UpdateRowCopy, HostPlatform::MacOs),
+        (Self::UpdateRowReady, HostPlatform::Windows),
+        (Self::UpdateRowReady, HostPlatform::MacOs),
+        (Self::UpdateRowManaged, HostPlatform::Windows),
+        (Self::UpdateRowManaged, HostPlatform::MacOs),
     ];
 }
 
@@ -6593,6 +6735,37 @@ pub fn update_row_available_in(lang: Lang, version: &str) -> String {
         }
         Lang::Chinese => format!("{version} 已发布。点击「打开发布页」可在浏览器中查看。"),
     }
+}
+
+/// **The update row's sentence while a job waits at `Verified`** (0.4.6 U-19),
+/// filled from [`Text::UpdateRowReady`] so the missing Chinese stays on the
+/// pending list.
+#[must_use]
+pub fn update_row_ready_in(lang: Lang, version: &str) -> String {
+    Text::UpdateRowReady
+        .in_lang(lang)
+        .replace("{version}", version)
+}
+
+/// **The update row's sentence on a copy a package manager updates** (0.4.6
+/// U-19, C2): the version and the manager's own command, which the row's
+/// `Copy` puts on the clipboard.
+#[must_use]
+pub fn update_row_managed_in(lang: Lang, version: &str, command: &str) -> String {
+    Text::UpdateRowManaged
+        .in_lang(lang)
+        .replace("{version}", version)
+        .replace("{command}", command)
+}
+
+/// **The line beside the update card's determinate bar** — `12 / 41 MB`
+/// (0.4.6 U-19, C9).
+#[must_use]
+pub fn update_card_progress(received: &str, total: &str) -> String {
+    Text::UpdateCardProgress
+        .text()
+        .replace("{received}", received)
+        .replace("{total}", total)
 }
 
 /// **The `Cards` row's sentence**, with the chord the shortcut table holds for

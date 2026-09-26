@@ -1743,6 +1743,17 @@ impl Runtime<'_> {
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }
+        // The update card, in the order it is drawn (0.4.6 U-19): it takes the pointer outright,
+        // beside its box as well as on it, and draws no scrim.
+        if let Some(layout) = self.update_card_layout() {
+            let over = Some(restore::update_card_hit(&layout, position.x, position.y));
+            if self.window.update_card.set_hover(over) && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
+        }
         if settings::geometry::pointer_moved(self, position.x, position.y)? {
             return Ok(());
         }
@@ -4102,6 +4113,17 @@ impl Runtime<'_> {
             if state == ElementState::Pressed && button == MouseButton::Left {
                 let target = restore::paste_card_hit(&layout, position.x, position.y);
                 self.press_paste_card(target)?;
+            }
+            return Ok(());
+        }
+        // The update card, in the order it is drawn (0.4.6 U-19). Every press is swallowed, beside
+        // the card as well as on it; a press on its face answers nothing and the `×` is Later.
+        if let (Some(layout), Some(position)) =
+            (self.update_card_layout(), self.window.pointer_position)
+        {
+            if state == ElementState::Pressed && button == MouseButton::Left {
+                let target = restore::update_card_hit(&layout, position.x, position.y);
+                self.press_update_card(target)?;
             }
             return Ok(());
         }
