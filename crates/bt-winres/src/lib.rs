@@ -49,6 +49,14 @@
 /// same job on both platforms.
 pub mod plist;
 
+/// **SHA-256**, the one digest the workspace's build scripts compute. See the
+/// module.
+pub mod digest;
+
+/// **What this release contains**: the manifest `folio.exe` carries of its own
+/// archive (0.4.6 ticket U-9). See the module.
+pub mod release_manifest;
+
 use std::fmt;
 
 /// `RT_ICON` — one image out of an `.ico`.
@@ -57,6 +65,9 @@ const RT_ICON: u16 = 3;
 const RT_GROUP_ICON: u16 = 14;
 /// `RT_VERSION` — the `VS_VERSIONINFO` block.
 const RT_VERSION: u16 = 16;
+/// `RT_RCDATA` — bytes the program reads for itself, which Windows does not
+/// interpret.
+const RT_RCDATA: u16 = 10;
 
 /// US English. The language every record here is filed under.
 ///
@@ -83,6 +94,8 @@ const MEMORY_ICON: u16 = 0x1010;
 const MEMORY_ICON_GROUP: u16 = 0x1030;
 /// `MOVEABLE | PURE`, for a version block.
 const MEMORY_VERSION: u16 = 0x0030;
+/// `MOVEABLE | PURE`, which is what `rc.exe` gives an `RCDATA` block too.
+const MEMORY_RCDATA: u16 = 0x0030;
 
 /// Why the caller's input could not be turned into resources.
 ///
@@ -419,6 +432,53 @@ impl ResourceFile {
     /// Add the `VS_VERSIONINFO` block, under the id Windows looks it up by.
     pub fn add_version_info(&mut self, version: &VersionInfo) {
         self.push_record(RT_VERSION, 1, MEMORY_VERSION, &version.to_bytes());
+    }
+
+    /// Add `data` as an `RT_RCDATA` resource **named** `name` rather than
+    /// numbered — the one record here whose name is a string, because a reader
+    /// that asks `FindResourceW` for it by a word cannot mistake it for another
+    /// build's number. Filed language-neutral: the bytes are not text in any
+    /// language, and a neutral record is the one `FindResourceW` finds first
+    /// whatever the reading thread's language is.
+    ///
+    /// `name` is upper-case ASCII, which is how Windows stores a string
+    /// resource name (it upper-cases the name it is asked for before looking).
+    ///
+    /// # Panics
+    ///
+    /// When `name` is not upper-case ASCII letters, digits and `_`: it is a
+    /// constant of this workspace's, and a lower-case one would be a name no
+    /// lookup finds.
+    pub fn add_named_rcdata(&mut self, name: &str, data: &[u8]) {
+        assert!(
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'),
+            "a string resource name is upper-case ASCII: {name}"
+        );
+        let mut names = Vec::new();
+        names.extend_from_slice(&0xFFFFu16.to_le_bytes()); // type is an ordinal
+        names.extend_from_slice(&RT_RCDATA.to_le_bytes());
+        push_utf16z(&mut names, name);
+        // The fields after the two names begin on a four-byte boundary; the
+        // header opened with eight bytes of sizes, so the names are padded
+        // from there.
+        while !(8 + names.len()).is_multiple_of(4) {
+            names.push(0);
+        }
+        let header_size = u32::try_from(8 + names.len() + 16).unwrap_or(u32::MAX);
+        let length = u32::try_from(data.len()).unwrap_or(u32::MAX);
+        self.bytes.extend_from_slice(&length.to_le_bytes());
+        self.bytes.extend_from_slice(&header_size.to_le_bytes());
+        self.bytes.extend_from_slice(&names);
+        self.bytes.extend_from_slice(&0u32.to_le_bytes()); // data version
+        self.bytes.extend_from_slice(&MEMORY_RCDATA.to_le_bytes());
+        self.bytes.extend_from_slice(&0u16.to_le_bytes()); // LANG_NEUTRAL
+        self.bytes.extend_from_slice(&0u32.to_le_bytes()); // version
+        self.bytes.extend_from_slice(&0u32.to_le_bytes()); // characteristics
+        self.bytes.extend_from_slice(data);
+        pad_to_dword(&mut self.bytes);
     }
 
     /// The file.
@@ -767,6 +827,74 @@ mod tests {
                 "{bad} is not a version this can pack"
             );
         }
+    }
+
+    /// RED (U-9) — **a named `RCDATA` record reads back under its name, with
+    /// its bytes whole, and the records after it stay where a linker looks.**
+    ///
+    /// The release manifest travels in `folio.exe` as `RT_RCDATA` named
+    /// `FOLIO_RELEASE_MANIFEST`, and it is the one record in the file whose name
+    /// is a string: the header is then longer than 32 bytes, its length depends
+    /// on the name, and the fields after the name start on a four-byte
+    /// boundary. Walked here the way `cvtres` walks it — header size from the
+    /// header, data from its size, round up — so a header size that disagreed
+    /// with the padding, or data that did not start where the header says,
+    /// would land the next record's walk in the middle of this one.
+    ///
+    /// MUTATION: drop the padding loop after the name and the header size no
+    /// longer ends on a four-byte boundary; the walk then reads the version
+    /// record's sizes out of this record's data.
+    #[test]
+    fn a_named_rcdata_record_reads_back_under_its_name() {
+        let mut file = ResourceFile::new();
+        let data = b"folio-release-manifest 1\nodd length".to_vec();
+        file.add_named_rcdata("FOLIO_RELEASE_MANIFEST", &data);
+        file.add_version_info(&VersionInfo {
+            file_version: FileVersion([0, 4, 6, 0]),
+            product_version: FileVersion([0, 4, 6, 0]),
+            strings: Vec::new(),
+        });
+        let bytes = file.finish();
+
+        let mut found = Vec::new();
+        let mut at = 32; // past the null record
+        while at < bytes.len() {
+            let data_size = read_u32(&bytes, at) as usize;
+            let header_size = read_u32(&bytes, at + 4) as usize;
+            assert_eq!(header_size % 4, 0, "a header ends on a four-byte boundary");
+            assert_eq!(read_u16(&bytes, at + 8), 0xFFFF, "type is an ordinal");
+            let type_id = read_u16(&bytes, at + 10);
+            let name = if read_u16(&bytes, at + 12) == 0xFFFF {
+                format!("#{}", read_u16(&bytes, at + 14))
+            } else {
+                let units: Vec<u16> = bytes[at + 12..at + header_size - 16]
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .take_while(|&unit| unit != 0)
+                    .collect();
+                String::from_utf16(&units).expect("a UTF-16 name")
+            };
+            let language = read_u16(&bytes, at + header_size - 10);
+            let start = at + header_size;
+            found.push((
+                type_id,
+                name,
+                language,
+                bytes[start..start + data_size].to_vec(),
+            ));
+            at = (start + data_size).next_multiple_of(4);
+        }
+
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0].0, 10, "RT_RCDATA");
+        assert_eq!(found[0].1, "FOLIO_RELEASE_MANIFEST");
+        assert_eq!(found[0].2, 0, "language-neutral");
+        assert_eq!(found[0].3, data, "the bytes, whole");
+        assert_eq!(
+            (found[1].0, found[1].1.as_str()),
+            (16, "#1"),
+            "the version record is found where it begins"
+        );
     }
 
     /// PIN — **bytes that are not an icon are refused, and never read past.**

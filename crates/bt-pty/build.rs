@@ -3,6 +3,10 @@
 //!
 //! The target and not the host: the unpacking is Rust (`src/conpty_sidecar.rs`), so a cross build
 //! of `x86_64-pc-windows-msvc` from Linux or macOS writes the same files a Windows machine does.
+//!
+//! And it says where it wrote them. `Cargo.toml`'s `links = "conpty"` lets each
+//! `cargo:<key>=<path>` printed below reach `bt-app`'s build script as `DEP_CONPTY_<KEY>`, which
+//! hashes the two files into the release manifest `folio.exe` carries (0.4.6 ticket U-9).
 
 use std::{env, fs, path::Path, process};
 
@@ -45,6 +49,9 @@ fn main() {
                 write_unless_already_there(&directory.join(relative), contents, file.sha256);
             }
         }
+    }
+    for (key, path) in conpty_sidecar::exported(profile_dir) {
+        println!("cargo:{key}={}", path.display());
     }
 }
 
